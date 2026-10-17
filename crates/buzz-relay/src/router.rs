@@ -19,6 +19,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::{HttpMakeClassifier, TraceLayer};
 
+use crate::access::{AuthMethod, AuthResult};
 use crate::api;
 use crate::audio;
 use crate::connection::handle_connection;
@@ -174,6 +175,7 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
 /// In Off mode the middleware is fully transparent; in Shadow it only records.
 async fn nip_fi_assertion_guard(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
@@ -185,8 +187,15 @@ async fn nip_fi_assertion_guard(
 
     // DenyProtected: unconditional 503 regardless of assertion presence.
     // (`admit_nip_fi_http_on_state` also does this; the guard is the backstop.)
+    // Refusals here end the request before any handler, so the guard logs
+    // them; shadow mode refuses nothing and logs nothing.
     if mode.denies_unconditionally() {
-        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+        let denial = http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+        slot.method(AuthMethod::NipFi);
+        slot.finish(AuthResult::Denied(
+            crate::access::AuthReason::AuthorizationUnavailable,
+        ));
+        return denial;
     }
 
     let verdict = nip_fi_guard_steps(&state, request.headers());
@@ -194,12 +203,34 @@ async fn nip_fi_assertion_guard(
     // order, ahead of any handler step.
     if mode.observes_only() {
         let headers = request.headers().clone();
+        let verdict = verdict.map_err(|(would_deny, _)| would_deny);
         return crate::nip_fi_shadow::observe_guard(&state, &headers, verdict, next.run(request))
             .await;
     }
     match verdict {
         Ok(()) => next.run(request).await,
-        Err((_, class)) => http_denial(class),
+        Err(((_, class), result)) => {
+            let denial = http_denial(class);
+            slot.method(AuthMethod::NipFi);
+            slot.finish(guard_result(&request, result));
+            denial
+        }
+    }
+}
+
+/// A git request with no credentials at all is git's normal first step,
+/// asking for the challenge, so it is logged as `challenged`, not a failure.
+fn guard_result(request: &Request<Body>, result: AuthResult) -> AuthResult {
+    let bare = !request
+        .headers()
+        .contains_key(axum::http::header::AUTHORIZATION);
+    match result {
+        AuthResult::Failed("assertion_missing")
+            if bare && request.uri().path().starts_with("/git/") =>
+        {
+            AuthResult::Challenged
+        }
+        other => other,
     }
 }
 
@@ -213,10 +244,16 @@ async fn nip_fi_assertion_guard(
 fn nip_fi_guard_steps(
     state: &AppState,
     headers: &axum::http::HeaderMap,
-) -> Result<(), crate::nip_fi_shadow::WouldDeny> {
+) -> Result<(), (crate::nip_fi_shadow::WouldDeny, AuthResult)> {
     let community =
-        crate::nip_fi_core::resolve_community(headers, &state.config.nip_fi.communities)
-            .map_err(|class| (crate::nip_fi_shadow::Stage::Community, class))?;
+        crate::nip_fi_core::resolve_community(headers, &state.config.nip_fi.communities).map_err(
+            |class| {
+                (
+                    (crate::nip_fi_shadow::Stage::Community, class),
+                    AuthResult::Failed("community_unresolved"),
+                )
+            },
+        )?;
     crate::nip_fi_core::evaluate_attached_assertion(
         headers,
         community,
@@ -225,8 +262,11 @@ fn nip_fi_guard_steps(
     .map(drop)
     .map_err(|rejection| {
         (
-            crate::nip_fi_shadow::Stage::Assertion,
-            rejection.denial_class(),
+            (
+                crate::nip_fi_shadow::Stage::Assertion,
+                rejection.denial_class(),
+            ),
+            rejection.auth_result(),
         )
     })
 }
@@ -478,6 +518,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             nip_fi_assertion_guard,
         ))
         .layer(middleware::from_fn(track_metrics))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::access::http_access_log,
+        ))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
 }
@@ -493,6 +537,23 @@ fn make_http_span(request: &Request<Body>) -> tracing::Span {
         otel.kind = "server",
         http.request.method = %request.method(),
     )
+}
+
+/// Whether the SPA fallback answers `req` with a document or static file
+/// (whatever the status), under the same host and config conditions it
+/// serves them. Only meaningful for a request that matched no route.
+pub(crate) fn is_document_request(state: &AppState, req: &Request<Body>) -> bool {
+    let path = req.uri().path();
+    if api::admin::is_admin_host(state, req.headers()) {
+        let admin_bundle = state
+            .config
+            .admin
+            .as_ref()
+            .is_some_and(|config| config.web_dir.is_some());
+        return admin_bundle && (is_admin_static_path(path) || is_admin_spa_path(path));
+    }
+    state.config.web_dir.is_some()
+        && (path.starts_with("/assets/") || should_serve_spa(path, state.config.serve_git_web_gui))
 }
 
 fn is_admin_spa_path(path: &str) -> bool {
@@ -579,6 +640,7 @@ pub fn build_health_router(state: Arc<AppState>) -> Router {
 /// Content-negotiated: NIP-11 JSON for plain HTTP, WebSocket upgrade otherwise.
 async fn nip11_or_ws_handler(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     req: axum::extract::Request,
 ) -> impl IntoResponse {
@@ -667,7 +729,7 @@ async fn nip11_or_ws_handler(
             let mode = state.config.nip_fi.mode;
             let verifier = state.nip_fi_verifier.as_deref();
             let communities = &state.config.nip_fi.communities;
-            match check_nip_fi_at_upgrade(Root, &headers, communities, verifier, mode)
+            match check_nip_fi_at_upgrade(&slot, Root, &headers, communities, verifier, mode)
                 .into_assertions()
             {
                 Ok((assertion, shadow)) => (true, assertion, shadow),
@@ -755,7 +817,7 @@ async fn nip11_or_ws_handler(
                 let mode = state.config.nip_fi.mode;
                 let verifier = state.nip_fi_verifier.as_deref();
                 let communities = &state.config.nip_fi.communities;
-                match check_nip_fi_at_upgrade(Root, &headers, communities, verifier, mode)
+                match check_nip_fi_at_upgrade(&slot, Root, &headers, communities, verifier, mode)
                     .into_assertions()
                 {
                     Ok(assertions) => assertions,

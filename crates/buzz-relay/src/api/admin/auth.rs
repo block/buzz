@@ -14,7 +14,7 @@
 //! Every request carries `Authorization: Nostr <base64 event>`. After
 //! verifying the signature, timestamp, `u` tag, method tag, and (for
 //! body-bearing mutations) the `payload` sha256 tag, the authenticated pubkey
-//! is resolved to an [`AdminPrincipal`] via [`resolve_admin_principal`].
+//! is resolved to an [`AdminPrincipal`] via [`lookup_admin_principal`].
 //!
 //! ## Principal resolution — union with fallback B
 //!
@@ -38,6 +38,7 @@
 //! [`AdminAccess::operator`] refuse with 403; an anonymous caller is never given
 //! a principal.
 
+use crate::access::{auth_error_code, AccessSlot, AuthMethod, AuthResult};
 use axum::http::{header, HeaderMap, Method, Uri};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -204,6 +205,7 @@ fn method_has_body(method: &str) -> bool {
 /// authentication or authorization failed.
 pub async fn authorize(
     state: &AppState,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     path_and_query: &str,
     method: &str,
@@ -215,42 +217,112 @@ pub async fn authorize(
         .as_ref()
         .ok_or_else(ApiError::not_found)?;
 
-    // Credential check first: an unauthenticated caller learns nothing about
-    // which Host or Origin the deployment expects.
-    let (access, nip98_event_id) = match &config.auth {
-        AdminAuth::Disabled => (AdminAccess::NetworkTrusted, None),
+    let full_path = format!("{ADMIN_API_PREFIX}{path_and_query}");
+    authorize_at(state, slot, headers, config, &full_path, method, raw_body).await
+}
+
+/// The admin decision, recorded on `slot`. With auth disabled the request
+/// is network-trusted: it carries no key, and only the Host and Origin
+/// checks can refuse it.
+async fn authorize_at(
+    state: &AppState,
+    slot: &AccessSlot,
+    headers: &HeaderMap,
+    config: &AdminConfig,
+    full_path: &str,
+    method: &str,
+    raw_body: Option<&[u8]>,
+) -> Result<AdminAccess, ApiError> {
+    let decided = match config.auth {
         AdminAuth::Nip98 => {
-            let full_path = format!("{ADMIN_API_PREFIX}{path_and_query}");
-            let (pubkey_bytes, event_id) =
-                authorize_nip98(config, headers, &full_path, method, raw_body).await?;
-            // Resolve the roster grant BEFORE claiming the replay ID: an
-            // unrostered-but-validly-signing key (e.g. any WARP-admitted laptop)
-            // must not be able to consume replay slots at request rate. Only a
-            // request that clears authorization claims its event ID.
-            let principal = resolve_admin_principal(state, pubkey_bytes).await?;
-            (AdminAccess::Staff(principal), Some(event_id))
+            slot.method(AuthMethod::Nip98);
+            authorize_staff(state, slot, headers, config, full_path, method, raw_body).await
+        }
+        AdminAuth::Disabled => {
+            slot.method(AuthMethod::NetworkTrusted);
+            check_admin_origin(state, headers, config).map(|()| AdminAccess::NetworkTrusted)
         }
     };
+    slot.finish(match &decided {
+        Ok(_) => AuthResult::Success,
+        Err((_, result)) => *result,
+    });
+    decided.map_err(|(e, _)| e)
+}
 
+/// An admin auth refusal and its access-log result.
+type AdminRefusal = (ApiError, AuthResult);
+
+/// The NIP-98 admin decision. Records the key on `slot` once the signature
+/// verifies; the caller records the decision.
+async fn authorize_staff(
+    state: &AppState,
+    slot: &AccessSlot,
+    headers: &HeaderMap,
+    config: &AdminConfig,
+    full_path: &str,
+    method: &str,
+    raw_body: Option<&[u8]>,
+) -> Result<AdminAccess, AdminRefusal> {
+    // Credential check first: an unauthenticated caller learns nothing about
+    // which Host or Origin the deployment expects.
+    let (pubkey_bytes, event_id) = authorize_nip98(config, headers, full_path, method, raw_body)
+        .await
+        .map_err(|(e, code)| (e, AuthResult::Failed(code)))?;
+    if let Ok(pubkey) = nostr::PublicKey::from_slice(&pubkey_bytes) {
+        slot.attempt(AuthMethod::Nip98, Some(pubkey), true);
+    }
+    // Resolve the roster grant BEFORE claiming the replay ID: an
+    // unrostered-but-validly-signing key (e.g. any WARP-admitted laptop)
+    // must not be able to consume replay slots at request rate. Only a
+    // request that clears authorization claims its event ID.
+    let principal = match lookup_admin_principal(state, pubkey_bytes).await {
+        Ok(Some(principal)) => principal,
+        Ok(None) => {
+            return Err((
+                ApiError::forbidden(),
+                AuthResult::Denied(crate::access::AuthReason::NotStaff),
+            ))
+        }
+        Err(e) => {
+            return Err((
+                e,
+                AuthResult::Denied(crate::access::AuthReason::RosterUnavailable),
+            ))
+        }
+    };
+    check_admin_origin(state, headers, config)?;
+
+    // Claim the NIP-98 replay ID only after Host and Origin validation succeed,
+    // so a request rejected by either check does not burn the event ID — the
+    // caller can retry with the corrected header without a new signature.
+    claim_nip98_replay(state, &event_id).await?;
+    Ok(AdminAccess::Staff(principal))
+}
+
+/// The admin Host and Origin checks.
+fn check_admin_origin(
+    state: &AppState,
+    headers: &HeaderMap,
+    config: &AdminConfig,
+) -> Result<(), AdminRefusal> {
     if !is_admin_host(state, headers) {
-        return Err(ApiError::forbidden());
+        return Err((
+            ApiError::forbidden(),
+            AuthResult::Denied(crate::access::AuthReason::AdminHostMismatch),
+        ));
     }
     if headers.get(header::ORIGIN).is_some_and(|origin| {
         origin
             .to_str()
             .map_or(true, |origin| !origin_matches_host(origin, &config.host))
     }) {
-        return Err(ApiError::forbidden());
+        return Err((
+            ApiError::forbidden(),
+            AuthResult::Denied(crate::access::AuthReason::OriginMismatch),
+        ));
     }
-
-    // Claim the NIP-98 replay ID only after Host and Origin validation succeed,
-    // so a request rejected by either check does not burn the event ID — the
-    // caller can retry with the corrected header without a new signature.
-    if let Some(event_id) = nip98_event_id {
-        claim_nip98_replay(state, &event_id).await?;
-    }
-
-    Ok(access)
+    Ok(())
 }
 
 /// [`authorize`] for a bodyless read, bound to the request's real method and
@@ -258,11 +330,20 @@ pub async fn authorize(
 /// `"GET"` would reject a correctly signed `HEAD`.
 pub async fn authorize_read(
     state: &AppState,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &Method,
     uri: &Uri,
 ) -> Result<AdminAccess, ApiError> {
-    authorize(state, headers, request_target(uri), method.as_str(), None).await
+    authorize(
+        state,
+        slot,
+        headers,
+        request_target(uri),
+        method.as_str(),
+        None,
+    )
+    .await
 }
 
 /// [`authorize`] for a mutation, bound to the request's real method and full
@@ -271,6 +352,7 @@ pub async fn authorize_read(
 /// contract: the buffered body bytes, or `None` only for a bodyless `DELETE`.
 pub async fn authorize_write(
     state: &AppState,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &Method,
     uri: &Uri,
@@ -278,6 +360,7 @@ pub async fn authorize_write(
 ) -> Result<AdminAccess, ApiError> {
     authorize(
         state,
+        slot,
         headers,
         request_target(uri),
         method.as_str(),
@@ -298,21 +381,12 @@ fn request_target(uri: &Uri) -> &str {
 /// 1. Operator/Config if pubkey ∈ RELAY_OPERATOR_PUBKEYS
 /// 2. Operator/OwnerFallback if pubkey == RELAY_OWNER_PUBKEY AND RELAY_OPERATOR_PUBKEYS is empty
 /// 3. role from relay_operators DB row
-/// 4. None → 403
+/// 4. None → not staff (403)
 ///
 /// A DB moderator row for a config-backed Operator is ignored (never demotes
 /// the config grant).
-pub async fn resolve_admin_principal(
-    state: &AppState,
-    pubkey: [u8; 32],
-) -> Result<AdminPrincipal, ApiError> {
-    lookup_admin_principal(state, pubkey)
-        .await?
-        .ok_or_else(ApiError::forbidden)
-}
-
-/// Effective staff grant for `pubkey`, same precedence as
-/// [`resolve_admin_principal`]. `Ok(None)` means "not staff"; a roster lookup
+///
+/// `Ok(None)` means "not staff"; a roster lookup
 /// failure is an `Err`, so callers fail closed instead of treating it as
 /// "not staff".
 pub async fn lookup_admin_principal(
@@ -434,13 +508,13 @@ async fn authorize_nip98(
     path: &str,
     method: &str,
     raw_body: Option<&[u8]>,
-) -> Result<([u8; 32], nostr::EventId), ApiError> {
-    let unauth = ApiError::unauthorized;
+) -> Result<([u8; 32], nostr::EventId), (ApiError, &'static str)> {
+    let unauth = || (ApiError::unauthorized(), "nip98_invalid");
 
     // 1. Extract exactly one Authorization: Nostr header.
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     let (Some(value), None) = (values.next(), values.next()) else {
-        return Err(unauth());
+        return Err((ApiError::unauthorized(), "nip98_missing"));
     };
     let auth_str = value
         .to_str()
@@ -478,8 +552,8 @@ async fn authorize_nip98(
     // 5. Verify signature, timestamp, u-tag, method-tag, and payload hash.
     //    For GET/HEAD (no body), body is None so payload tag is optional.
     //    For mutations, body bytes are provided so the payload hash is verified.
-    let pubkey =
-        buzz_auth::verify_nip98_event(&event_json, &url, method, raw_body).map_err(|_| unauth())?;
+    let pubkey = buzz_auth::verify_nip98_event(&event_json, &url, method, raw_body)
+        .map_err(|e| (ApiError::unauthorized(), auth_error_code(&e)))?;
 
     Ok((
         pubkey.to_bytes(),
@@ -489,9 +563,12 @@ async fn authorize_nip98(
 
 /// Atomically claim a verified NIP-98 event ID against the deployment-scoped
 /// replay guard. Called only after [`authorize_nip98`] verified the event and
-/// [`resolve_admin_principal`] confirmed a roster grant, so an unrostered
+/// [`lookup_admin_principal`] confirmed a roster grant, so an unrostered
 /// signer never consumes a slot. Redis failure fails closed.
-async fn claim_nip98_replay(state: &AppState, event_id: &nostr::EventId) -> Result<(), ApiError> {
+async fn claim_nip98_replay(
+    state: &AppState,
+    event_id: &nostr::EventId,
+) -> Result<(), AdminRefusal> {
     let unauth = ApiError::unauthorized;
     match state
         .nip98_replay
@@ -503,14 +580,17 @@ async fn claim_nip98_replay(state: &AppState, event_id: &nostr::EventId) -> Resu
         .await
     {
         Ok(true) => Ok(()),
-        Ok(false) => Err(unauth()),
+        Ok(false) => Err((unauth(), AuthResult::Failed("nip98_replay"))),
         Err(err) => {
             tracing::warn!(
                 scope = ADMIN_REPLAY_SCOPE,
                 error = %err,
                 "admin NIP-98 replay guard failed; rejecting request fail-closed"
             );
-            Err(unauth())
+            Err((
+                unauth(),
+                AuthResult::Denied(crate::access::AuthReason::ReplayCheckUnavailable),
+            ))
         }
     }
 }
@@ -542,8 +622,8 @@ fn origin_matches_host(origin: &str, host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_api_origin, canonical_url, host_matches, method_has_body, nostr_credential,
-        origin_matches_host,
+        admin_api_origin, authorize, canonical_url, header, host_matches, method_has_body,
+        nostr_credential, origin_matches_host, ADMIN_API_PREFIX, BASE64,
     };
 
     #[test]
@@ -770,6 +850,139 @@ mod tests {
             // DELETE handlers pass None for raw_body, so payload tag is not
             // required. The payload check is raw_body.is_some(), not method_has_body.
             let _ = m; // acknowledged
+        }
+    }
+
+    // A rostered admin request dropped while its replay check is in flight
+    // still writes one `aborted` line. The real NIP-98, roster and Host
+    // checks pass first; the replay guard never answers.
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_request_dropped_during_replay_logs_one_aborted_line() {
+        use base64::Engine as _;
+        let keys = nostr::Keys::generate();
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut config = (*state.config).clone();
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example.com".into(),
+            auth: crate::config::AdminAuth::Nip98,
+            web_dir: None,
+        });
+        config.relay_operator_pubkeys = vec![keys.public_key().to_hex()];
+        state.config = std::sync::Arc::new(config);
+        let replay = std::sync::Arc::new(crate::access::tests::StallingReplayGuard::default());
+        state.nip98_replay = replay.clone();
+        let url = format!("https://admin.example.com{ADMIN_API_PREFIX}/users");
+        let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+            .tags([
+                nostr::Tag::parse(["u", url.as_str()]).unwrap(),
+                nostr::Tag::parse(["method", "GET"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::HOST, "admin.example.com".parse().unwrap());
+        let credential = BASE64.encode(serde_json::to_string(&event).unwrap());
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Nostr {credential}").parse().unwrap(),
+        );
+
+        let slot = crate::access::AccessSlot::default();
+        let (guard, out) = crate::access::tests::capture_scoped();
+        tokio::select! {
+            _ = authorize(&state, &slot, &headers, "/users", "GET", None) => {
+                panic!("the replay check must stall");
+            }
+            () = replay.arrived.notified() => {}
+        }
+        slot.abandon(&format!("{ADMIN_API_PREFIX}/users"));
+        drop(guard);
+        crate::access::tests::assert_one_aborted_line(&out, &keys.public_key());
+    }
+
+    // A refused admin request logs exactly one access line with a fixed code,
+    // and the query string never reaches it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_refusal_logs_one_auth_line() {
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut config = (*state.config).clone();
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example.com".into(),
+            auth: crate::config::AdminAuth::Nip98,
+            web_dir: None,
+        });
+        state.config = std::sync::Arc::new(config);
+        let slot = crate::access::AccessSlot::default();
+        let (guard, out) = crate::access::tests::capture_scoped();
+        let refused = crate::api::admin::auth::authorize(
+            &state,
+            &slot,
+            &axum::http::HeaderMap::new(),
+            "/users?q=secret",
+            "GET",
+            None,
+        )
+        .await;
+        slot.emit("/api/admin/users", 401);
+        drop(guard);
+        assert!(refused.is_err());
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "failed");
+        assert_eq!(lines[0]["reason"], "nip98_missing");
+        assert!(!out.raw().contains("secret"));
+    }
+
+    // With admin auth disabled, the network-trusted admission and the
+    // Host/Origin refusal each record their outcome on the request's line.
+    #[tokio::test(flavor = "current_thread")]
+    async fn disabled_admin_records_admission_and_refusal() {
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut config = (*state.config).clone();
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example.com".into(),
+            auth: crate::config::AdminAuth::Disabled,
+            web_dir: None,
+        });
+        state.config = std::sync::Arc::new(config);
+        let cases = [
+            ("admin.example.com", None, "success", None),
+            (
+                "tenant.example.com",
+                None,
+                "denied",
+                Some("admin_host_mismatch"),
+            ),
+            (
+                "admin.example.com",
+                Some("https://evil.example"),
+                "denied",
+                Some("origin_mismatch"),
+            ),
+        ];
+        for (host, origin, outcome, reason) in cases {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(header::HOST, host.parse().unwrap());
+            if let Some(origin) = origin {
+                headers.insert(header::ORIGIN, origin.parse().unwrap());
+            }
+            let slot = crate::access::AccessSlot::default();
+            let (guard, out) = crate::access::tests::capture_scoped();
+            let decided = authorize(&state, &slot, &headers, "/users", "GET", None).await;
+            slot.emit("/api/admin/users", if decided.is_ok() { 200 } else { 403 });
+            drop(guard);
+            assert_eq!(decided.is_ok(), outcome == "success", "{host} {origin:?}");
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let line = &lines[0];
+            assert_eq!(line["method"], "network_trusted", "{line}");
+            assert_eq!(line["outcome"], outcome, "{line}");
+            assert_eq!(
+                line.get("reason").and_then(|r| r.as_str()),
+                reason,
+                "{line}"
+            );
+            assert!(line.get("pubkey").is_none(), "{line}");
         }
     }
 }

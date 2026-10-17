@@ -209,7 +209,8 @@ async fn publish_moderation_profile(
     let (stored, was_inserted) = state
         .db
         .replace_addressable_event(tenant.community(), &event, None)
-        .await?;
+        .await
+        .map_err(|e| anyhow::anyhow!("moderation notice write failed: {}", e.kind()))?;
     if was_inserted {
         let kind_u32 = event_kind_u32(&stored.event);
         dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await;

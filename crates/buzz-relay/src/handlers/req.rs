@@ -61,6 +61,7 @@ pub async fn handle_req(
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
+    let mut access = crate::access::ReadLog::req(&conn, &sub_id, &filters);
     let (conn_id, pubkey_bytes, token_channel_ids) = {
         match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => {
@@ -70,6 +71,7 @@ pub async fn handle_req(
                         &sub_id,
                         "restricted: insufficient scope",
                     ));
+                    access.deny("insufficient_scope");
                     return;
                 }
 
@@ -81,6 +83,7 @@ pub async fn handle_req(
                         &sub_id,
                         "error: too many subscriptions",
                     ));
+                    access.deny("too_many_subscriptions");
                     return;
                 }
 
@@ -94,6 +97,7 @@ pub async fn handle_req(
                     &sub_id,
                     "auth-required: not authenticated",
                 ));
+                access.deny("auth_required");
                 return;
             }
         }
@@ -107,6 +111,7 @@ pub async fn handle_req(
                 &sub_id,
                 "restricted: too many explicit channels",
             ));
+            access.deny("too_many_channels");
             return;
         }
     };
@@ -122,8 +127,9 @@ pub async fn handle_req(
         {
             Ok(ids) => ids,
             Err(e) => {
-                warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
+                warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to get accessible channels");
                 conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                access.error("database_error");
                 return;
             }
         }
@@ -145,8 +151,9 @@ pub async fn handle_req(
     {
         Ok(ids) => ids,
         Err(e) => {
-            warn!(conn_id = %conn_id, "Failed to get readable system channels: {e}");
+            warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to get readable system channels");
             conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            access.error("database_error");
             return;
         }
     };
@@ -184,8 +191,13 @@ pub async fn handle_req(
         {
             Ok(confirmed) => confirmed,
             Err(e) => {
-                warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
+                warn!(
+                    conn_id = %conn_id,
+                    error_kind = %e.kind(),
+                    "Channel membership confirmation failed"
+                );
                 conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                access.error("database_error");
                 return;
             }
         };
@@ -203,8 +215,9 @@ pub async fn handle_req(
         )
         .await
         {
-            warn!(conn_id = %conn_id, "Failed to classify repaired channels: {e}");
+            warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to classify repaired channels");
             conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            access.error("database_error");
             return;
         }
     }
@@ -233,6 +246,7 @@ pub async fn handle_req(
             &sub_id,
             "restricted: not a channel member",
         ));
+        access.deny("not_channel_member");
         return;
     }
 
@@ -255,6 +269,7 @@ pub async fn handle_req(
                     &sub_id,
                     "restricted: authorization denied",
                 ));
+                access.deny("session_expired");
                 return;
             }
         };
@@ -266,6 +281,7 @@ pub async fn handle_req(
                 authorized_requested_channels.as_deref().unwrap_or_default(),
                 &conn,
                 &state,
+                &mut access,
             ),
         )
         .await;
@@ -287,6 +303,7 @@ pub async fn handle_req(
                 &sub_id,
                 "restricted: p-gated events require #p matching your pubkey",
             ));
+            access.deny("p_gated");
             return;
         }
         if !engram_filters_authorized(&filters, &authed_pubkey_hex) {
@@ -294,6 +311,7 @@ pub async fn handle_req(
                 &sub_id,
                 "restricted: agent-engram reads require authors=[self] or #p=[self]",
             ));
+            access.deny("engram_gated");
             return;
         }
         if !author_only_filters_authorized(&filters, &authed_pubkey_hex) {
@@ -301,6 +319,7 @@ pub async fn handle_req(
                 &sub_id,
                 "restricted: author-only kinds require authors=[self]",
             ));
+            access.deny("author_only");
             return;
         }
     }
@@ -316,6 +335,7 @@ pub async fn handle_req(
                 &sub_id,
                 "error: mixed search and non-search filters not supported",
             ));
+            access.deny("mixed_search");
             return;
         }
         // IMPORTANT 6: acquire a REQ effect permit before the search query and
@@ -331,6 +351,7 @@ pub async fn handle_req(
                     &sub_id,
                     "restricted: authorization denied",
                 ));
+                access.deny("session_expired");
                 return;
             }
         };
@@ -352,6 +373,7 @@ pub async fn handle_req(
                 &conn,
                 &state,
                 trace_state.as_ref(),
+                &mut access,
             )
             .await;
         };
@@ -380,6 +402,7 @@ pub async fn handle_req(
                 &sub_id,
                 "restricted: authorization denied",
             ));
+            access.deny("session_expired");
             return;
         }
     };
@@ -403,6 +426,7 @@ pub async fn handle_req(
     // releases the permit without sending another EVENT or EOSE. It returns
     // whether a statement timeout ended it: retirement then runs after the
     // race, because a dropped retirement would leak its unreleased topics.
+    let access = &mut access;
     let history = async {
         #[cfg(test)]
         crate::nip_fi_test_hooks::before_req_history(conn.tenant.community()).await;
@@ -488,10 +512,17 @@ pub async fn handle_req(
             let events = match filter_events {
                 Ok(evs) => evs,
                 Err(e) => {
-                    warn!(conn_id = %conn_id, sub_id = %sub_id, "Historical query failed: {e}");
+                    warn!(
+                        conn_id = %conn_id,
+                        sub_id = %sub_id,
+                        error_kind = %e.kind(),
+                        "Historical query failed"
+                    );
                     if e.is_statement_cancelled() {
+                        access.error("query_timed_out");
                         return true;
                     }
+                    access.error("database_error");
                     conn.send(RelayMessage::eose(&sub_id));
                     return false;
                 }
@@ -524,7 +555,8 @@ pub async fn handle_req(
                     Err(e) => {
                         warn!(
                             conn_id = %conn_id, sub_id = %sub_id,
-                            "conformance row-community lookup failed: {e}"
+                            error_kind = %e.kind(),
+                            "conformance row-community lookup failed"
                         );
                         std::collections::HashMap::new()
                     }
@@ -572,6 +604,7 @@ pub async fn handle_req(
                 if !conn.send(msg) {
                     return false;
                 }
+                access.queued_one();
                 total_sent += 1;
                 if total_sent.is_multiple_of(100) {
                     tokio::task::yield_now().await;
@@ -580,6 +613,7 @@ pub async fn handle_req(
         }
 
         conn.send(RelayMessage::eose(&sub_id));
+        access.served();
 
         debug!(
             conn_id = %conn_id,
@@ -770,6 +804,7 @@ async fn handle_search_req(
     conn: &ConnectionState,
     state: &AppState,
     trace_state: Option<&crate::conformance::AbstractState>,
+    access: &mut crate::access::ReadLog,
 ) {
     // `None` means "no accessible channels and no global access" → EOSE,
     // exactly as the legacy string-filter helper short-circuited. A filter
@@ -778,10 +813,12 @@ async fn handle_search_req(
         && readable_system.is_empty()
     {
         conn.send(RelayMessage::eose(sub_id));
+        access.served();
         return;
     }
 
     let mut seen_ids: HashSet<nostr::EventId> = HashSet::new();
+    let mut failure = None;
 
     for filter in filters {
         let search_text = match &filter.search {
@@ -877,8 +914,14 @@ async fn handle_search_req(
 
             let search_result = match state.search.search(&search_query).await {
                 Ok(r) => r,
-                Err(e) => {
-                    warn!(sub_id = %sub_id, "NIP-50 search failed: {e}");
+                Err(buzz_search::SearchError::Db(e)) => {
+                    // Fixed kind only: the error must never carry query text.
+                    warn!(
+                        sub_id = %sub_id,
+                        error_kind = %buzz_db::error::sqlx_error_kind(&e),
+                        "NIP-50 search failed"
+                    );
+                    failure = Some("search_failed");
                     break;
                 }
             };
@@ -901,12 +944,18 @@ async fn handle_search_req(
                     Ok(evs) => evs,
                     Err(e) if e.is_statement_cancelled() => {
                         // CLOSED (not EOSE) keeps partial results from reading as complete.
-                        warn!(sub_id = %sub_id, "NIP-50 batch fetch timed out: {e}");
+                        warn!(sub_id = %sub_id, "NIP-50 batch fetch timed out");
+                        access.error("query_timed_out");
                         close_timed_out_subscription(sub_id, owner, conn, state).await;
                         return;
                     }
                     Err(e) => {
-                        warn!(sub_id = %sub_id, "NIP-50 batch fetch failed: {e}");
+                        warn!(
+                            sub_id = %sub_id,
+                            error_kind = %e.kind(),
+                            "NIP-50 batch fetch failed"
+                        );
+                        failure = Some("database_error");
                         break;
                     }
                 };
@@ -937,7 +986,8 @@ async fn handle_search_req(
                             Err(e) => {
                                 warn!(
                                     sub_id = %sub_id,
-                                    "conformance row-community lookup failed: {e}"
+                                    error_kind = %e.kind(),
+                                    "conformance row-community lookup failed"
                                 );
                                 std::collections::HashMap::new()
                             }
@@ -987,6 +1037,7 @@ async fn handle_search_req(
                     if !conn.send(RelayMessage::event(sub_id, &stored.event)) {
                         return;
                     }
+                    access.queued_one();
                     emitted += 1;
                 }
             }
@@ -998,6 +1049,10 @@ async fn handle_search_req(
     }
 
     conn.send(RelayMessage::eose(sub_id));
+    match failure {
+        Some(reason) => access.error(reason),
+        None => access.served(),
+    }
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1416,12 +1471,14 @@ async fn handle_huddle_liveness_req(
     parent_channel_ids: &[uuid::Uuid],
     conn: &ConnectionState,
     state: &AppState,
+    access: &mut crate::access::ReadLog,
 ) {
     if parent_channel_ids.is_empty() {
         conn.send(RelayMessage::closed(
             sub_id,
             "restricted: huddle liveness requires an authorized #h channel",
         ));
+        access.deny("not_channel_member");
         return;
     }
 
@@ -1437,8 +1494,12 @@ async fn handle_huddle_liveness_req(
     {
         Ok(links) => links,
         Err(error) => {
-            warn!("Huddle liveness linkage batch failed: {error}");
+            warn!(
+                error_kind = %error.kind(),
+                "Huddle liveness linkage batch failed"
+            );
             conn.send(RelayMessage::closed(sub_id, "error: database error"));
+            access.error("database_error");
             return;
         }
     };
@@ -1457,6 +1518,7 @@ async fn handle_huddle_liveness_req(
                 Err(error) => {
                     warn!(session_id = %session_id, "Huddle liveness lease lookup failed: {error}");
                     conn.send(RelayMessage::closed(sub_id, "error: liveness unavailable"));
+                    access.error("liveness_unavailable");
                     return;
                 }
             }
@@ -1495,15 +1557,18 @@ async fn handle_huddle_liveness_req(
             Err(error) => {
                 warn!(session_id = %session_id, "Huddle liveness signing failed: {error}");
                 conn.send(RelayMessage::closed(sub_id, "error: signing failed"));
+                access.error("signing_failed");
                 return;
             }
         };
         if !conn.send(RelayMessage::event(sub_id, &event)) {
             return;
         }
+        access.queued_one();
     }
 
     conn.send(RelayMessage::eose(sub_id));
+    access.served();
 }
 
 /// Claim `sub_id` for a live REQ under the lifecycle lock: record a fresh
@@ -1891,6 +1956,7 @@ mod tests {
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let cancel = tokio_util::sync::CancellationToken::new();
         let conn = ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: uuid::Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("addr"),
@@ -2266,6 +2332,7 @@ mod tests {
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let cancel = tokio_util::sync::CancellationToken::new();
         let conn = Arc::new(ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: uuid::Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("addr"),
@@ -2326,6 +2393,7 @@ mod tests {
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let cancel = tokio_util::sync::CancellationToken::new();
         let conn = Arc::new(ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: uuid::Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "t.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("addr"),
@@ -3478,6 +3546,7 @@ mod tests {
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3607,6 +3676,7 @@ mod tests {
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3744,6 +3814,7 @@ mod tests {
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3887,6 +3958,7 @@ mod tests {
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
         let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),

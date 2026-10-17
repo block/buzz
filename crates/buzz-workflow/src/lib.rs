@@ -276,7 +276,7 @@ impl WorkflowEngine {
                 }
             }
             Err((e, progress)) => {
-                tracing::error!(run_id = %run_id, "Workflow run failed: {e}");
+                tracing::error!(run_id = %run_id, error = %e.log_text(), "Workflow run failed");
                 let mut full_trace = prefix;
                 full_trace.extend(progress.trace);
                 let trace_json = serde_json::Value::Array(full_trace);
@@ -920,7 +920,8 @@ async fn should_fire_workflow(
             Err(e) => {
                 tracing::warn!(
                     workflow_id = %workflow_id,
-                    "Trigger filter error: {e} — skipping workflow"
+                    error_kind = e.code(),
+                    "Trigger filter error — skipping workflow"
                 );
                 return false;
             }
@@ -2085,6 +2086,131 @@ steps:
             owner_runs.len(),
             1,
             "channel owner's call_webhook workflow fires"
+        );
+    }
+
+    /// Condition errors quote the message they evaluated. The trigger-filter
+    /// WARN, the step-condition WARN and the run-failure ERROR log a fixed
+    /// code; the run keeps the full diagnostic for its owner.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn condition_errors_log_a_fixed_code_without_message_text() {
+        #[derive(Clone, Default)]
+        struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &member).await;
+        let mut workflow_ids = Vec::new();
+        for (name, trigger, steps) in [
+            (
+                "filter-error",
+                serde_json::json!({"on": "message_posted", "filter": "trigger_text > 5"}),
+                serde_json::json!([{"id": "s1", "action": "send_message", "text": "hi"}]),
+            ),
+            (
+                "step-error",
+                serde_json::json!({"on": "message_posted"}),
+                serde_json::json!([{
+                    "id": "guarded", "if": "trigger_text > 5",
+                    "action": "send_message", "text": "hi",
+                }]),
+            ),
+        ] {
+            let def = serde_json::json!({
+                "name": name, "trigger": trigger, "steps": steps, "enabled": true,
+            })
+            .to_string();
+            let hash = [workflow_ids.len() as u8; 32];
+            let id = db
+                .create_workflow(community, Some(channel_id), &member, name, &def, &hash)
+                .await
+                .expect("create workflow");
+            workflow_ids.push(id);
+        }
+        let (filter_wf, step_wf) = (workflow_ids[0], workflow_ids[1]);
+
+        let marker = format!("wf-marker-{}", Uuid::new_v4().simple());
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), &marker)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign");
+        let event = buzz_core::StoredEvent::new(event, Some(channel_id));
+
+        let out = Captured::default();
+        let writer = out.clone();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .json()
+                .flatten_event(true)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.clone())
+                .finish(),
+        );
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        engine.on_event(community, &event).await.expect("on_event");
+        let run = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let runs = db
+                    .list_workflow_runs(community, step_wf, 10)
+                    .await
+                    .expect("list runs");
+                if let Some(run) = runs.into_iter().find(|r| r.status == RunStatus::Failed) {
+                    break run;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the step-condition run must fail");
+        let filter_runs = db
+            .list_workflow_runs(community, filter_wf, 10)
+            .await
+            .expect("list filter runs");
+        assert!(
+            filter_runs.is_empty(),
+            "a failed filter must skip the workflow"
+        );
+
+        let raw = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let line = |message: &str| {
+            lines
+                .iter()
+                .find(|l| l["message"] == message)
+                .unwrap_or_else(|| panic!("no {message:?} line in {raw}"))
+        };
+        assert_eq!(
+            line("Trigger filter error — skipping workflow")["error_kind"],
+            "condition_evaluation_failed"
+        );
+        assert_eq!(
+            line("Condition error")["error_kind"],
+            "condition_evaluation_failed"
+        );
+        assert_eq!(
+            line("Workflow run failed")["error"],
+            "condition_evaluation_failed"
+        );
+        assert!(!raw.contains(&marker), "marker leaked: {raw}");
+        assert!(
+            run.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains(&marker)),
+            "the stored run error keeps the diagnostic: {:?}",
+            run.error_message
         );
     }
 }

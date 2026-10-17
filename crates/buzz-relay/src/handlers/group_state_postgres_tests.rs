@@ -620,6 +620,7 @@ pub(crate) fn test_conn(
     let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(4);
     let cancel = tokio_util::sync::CancellationToken::new();
     let conn = Arc::new(crate::connection::ConnectionState {
+        refusal_budget: Default::default(),
         conn_id: Uuid::new_v4(),
         tenant: tenant.clone(),
         remote_addr: "127.0.0.1:1234".parse().expect("addr"),

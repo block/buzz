@@ -32,7 +32,7 @@ pub enum ConfigError {
 /// # Role resolution (nip98 mode only)
 ///
 /// In `nip98` mode the authenticated pubkey is resolved to an
-/// `AdminPrincipal` at request time via [`crate::api::admin::auth::resolve_admin_principal`]:
+/// `AdminPrincipal` at request time via [`crate::api::admin::auth::lookup_admin_principal`]:
 /// - `Operator/Config` if pubkey ∈ `RELAY_OPERATOR_PUBKEYS`
 /// - `Operator/OwnerFallback` if pubkey == `RELAY_OWNER_PUBKEY` **and**
 ///   `RELAY_OPERATOR_PUBKEYS` is empty (evaluated from config, never runtime rows)

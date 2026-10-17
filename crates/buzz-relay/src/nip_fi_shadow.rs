@@ -314,6 +314,7 @@ mod tests {
             metrics::with_local_recorder(&recorder, || {
                 super::observe_strict_proof(&state, &headers, "bridge", || {
                     crate::api::bridge::verify_bridge_auth_with_options(
+                        &crate::access::AccessSlot::default(),
                         &headers,
                         "POST",
                         url,

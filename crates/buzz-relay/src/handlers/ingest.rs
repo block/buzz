@@ -3140,7 +3140,7 @@ async fn ingest_event_inner(
                     &labels,
                 )
                 .await
-                .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+                .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?;
 
             if !was_created {
                 return Ok(IngestResult {
@@ -3332,7 +3332,7 @@ async fn ingest_event_inner(
                 emoji,
             )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
         {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
                 return Err(IngestError::Rejected(format!(
@@ -3388,7 +3388,6 @@ async fn ingest_event_inner(
         )
         .await;
 
-        info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -3420,7 +3419,7 @@ async fn ingest_event_inner(
             .db
             .replace_addressable_event(tenant.community(), &event, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
@@ -3435,7 +3434,7 @@ async fn ingest_event_inner(
             .db
             .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
     } else if let Some(spec) = canvas_revision_spec.as_ref() {
         // Canvas write carrying an optimistic-concurrency precondition. Plain
         // canvas writes (no `expected-revision` tag) fall through to the generic
@@ -3452,7 +3451,7 @@ async fn ingest_event_inner(
             .db
             .insert_canvas_head_checked(tenant.community(), &event, channel, precondition)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?;
         match status {
             buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
                 return Err(IngestError::CanvasConflict(
@@ -3502,7 +3501,9 @@ async fn ingest_event_inner(
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
                     }
-                    other => IngestError::Internal(format!("error: database error: {other}")),
+                    other => {
+                        IngestError::Internal(format!("error: database error: {}", other.kind()))
+                    }
                 });
             }
         }
@@ -3583,8 +3584,6 @@ async fn ingest_event_inner(
         threaded_visibility.clone(),
     )
     .await;
-
-    info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 
     Ok(IngestResult {
         event_id: event_id_hex,
@@ -7238,7 +7237,7 @@ mod postgres_tests {
             .expect("ban owner");
 
         for keys in [&owner, &agent] {
-            let (status, body) = crate::api::relay_members::enforce_relay_membership(
+            let refusal = crate::api::relay_members::enforce_relay_membership(
                 &state,
                 tenant.community(),
                 keys.public_key().as_bytes(),
@@ -7247,6 +7246,8 @@ mod postgres_tests {
             )
             .await
             .expect_err("banned principal (or its agent) must be refused");
+            assert_eq!(refusal.reason, crate::access::AuthReason::Banned);
+            let (status, body) = refusal.response;
             assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
             assert_eq!(
                 body.0["error"],

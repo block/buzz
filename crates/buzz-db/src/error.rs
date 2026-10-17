@@ -115,6 +115,44 @@ impl DbError {
 /// Convenience alias for `Result<T, DbError>`.
 pub type Result<T> = std::result::Result<T, DbError>;
 
+/// A fixed description of a driver error for log lines. Postgres primary
+/// messages can repeat a bound value (`invalid input syntax for type uuid:
+/// "<value>"`), so only the SQLSTATE code is kept.
+pub fn sqlx_error_kind(e: &sqlx::Error) -> String {
+    let kind = match e {
+        sqlx::Error::Database(db) => {
+            return format!("database:{}", db.code().as_deref().unwrap_or("unknown"))
+        }
+        sqlx::Error::RowNotFound => "row_not_found",
+        sqlx::Error::PoolTimedOut => "pool_timed_out",
+        sqlx::Error::PoolClosed => "pool_closed",
+        sqlx::Error::Io(_) => "io",
+        sqlx::Error::Tls(_) => "tls",
+        sqlx::Error::Protocol(_) => "protocol",
+        sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => "decode",
+        sqlx::Error::Encode(_) => "encode",
+        _ => "other",
+    };
+    kind.to_owned()
+}
+
+impl DbError {
+    /// A fixed description of this error for log lines: never the
+    /// message, which can repeat bound values.
+    pub fn kind(&self) -> String {
+        use DbError as E;
+        let kind = match self {
+            E::Sqlx(e) => return sqlx_error_kind(e),
+            E::Serde(_) => "serde",
+            E::InvalidData(_) => "invalid_data",
+            E::NotFound(_) | E::ChannelNotFound(_) | E::MemberNotFound(_) => "not_found",
+            E::AccessDenied(_) => "access_denied",
+            _ => "other",
+        };
+        kind.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::DbError;

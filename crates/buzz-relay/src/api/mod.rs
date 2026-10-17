@@ -41,11 +41,13 @@ pub(crate) fn db_read_error(
     context: &str,
     e: &buzz_db::DbError,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // Only the error kind: DB error text can repeat a bound value.
+    let kind = e.kind();
     if e.is_statement_cancelled() {
-        tracing::warn!("{context}: {e}");
+        tracing::warn!(error_kind = %kind, "{context}");
         return api_error(StatusCode::SERVICE_UNAVAILABLE, QUERY_TIMED_OUT);
     }
-    internal_error(&format!("{context}: {e}"))
+    internal_error(&format!("{context}: {kind}"))
 }
 
 #[allow(dead_code)]
@@ -86,6 +88,8 @@ pub mod relay_members {
     };
     use buzz_core::{tenant::CommunityId, TenantContext};
     use tracing::{debug, info};
+
+    use crate::access::AuthReason;
 
     use crate::state::AppState;
 
@@ -247,7 +251,7 @@ pub mod relay_members {
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
+    ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
         enforce_membership(
             state,
             community,
@@ -269,7 +273,7 @@ pub mod relay_members {
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
+    ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
         enforce_membership(
             state,
             community,
@@ -281,6 +285,40 @@ pub mod relay_members {
         .await
     }
 
+    /// A refusal from [`enforce_relay_membership`]: the HTTP error response,
+    /// and the access-log reason, decided where the refusal is made.
+    #[derive(Debug)]
+    pub struct MembershipRefusal {
+        pub(crate) reason: crate::access::AuthReason,
+        pub(crate) response: (StatusCode, Json<serde_json::Value>),
+    }
+
+    impl MembershipRefusal {
+        fn new(
+            reason: crate::access::AuthReason,
+            response: (StatusCode, Json<serde_json::Value>),
+        ) -> Self {
+            Self { reason, response }
+        }
+
+        /// The access-log result for this refusal.
+        pub(crate) fn auth_result(&self) -> crate::access::AuthResult {
+            crate::access::AuthResult::Denied(self.reason)
+        }
+    }
+
+    impl From<MembershipRefusal> for (StatusCode, Json<serde_json::Value>) {
+        fn from(refusal: MembershipRefusal) -> Self {
+            refusal.response
+        }
+    }
+
+    impl axum::response::IntoResponse for MembershipRefusal {
+        fn into_response(self) -> axum::response::Response {
+            self.response.into_response()
+        }
+    }
+
     async fn enforce_membership(
         state: &AppState,
         community: CommunityId,
@@ -288,7 +326,7 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
         cached_ban: bool,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
+    ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
         match check_relay_membership(
             state,
             community,
@@ -322,16 +360,22 @@ pub mod relay_members {
                 .await?;
                 Ok(Some(owner))
             }
-            Ok(MembershipDecision::Denied) => Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "relay_membership_required",
-                    "message": "You must be a relay member to access this relay"
-                })),
+            Ok(MembershipDecision::Denied) => Err(MembershipRefusal::new(
+                AuthReason::NotRelayMember,
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "relay_membership_required",
+                        "message": "You must be a relay member to access this relay"
+                    })),
+                ),
             )),
             Err(e) => {
                 tracing::error!("relay membership check errored: {e}");
-                Err(super::internal_error(&e))
+                Err(MembershipRefusal::new(
+                    AuthReason::MembershipUnavailable,
+                    super::internal_error(&e),
+                ))
             }
         }
     }
@@ -346,9 +390,12 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
         cached: bool,
-    ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    ) -> Result<(), MembershipRefusal> {
         let Ok(pubkey) = nostr::PublicKey::from_slice(pubkey_bytes) else {
-            return Err(super::internal_error("invalid pubkey for ban check"));
+            return Err(MembershipRefusal::new(
+                AuthReason::MembershipUnavailable,
+                super::internal_error("invalid pubkey for ban check"),
+            ));
         };
         match crate::handlers::auth::community_ban_outcome(
             state,
@@ -361,13 +408,19 @@ pub mod relay_members {
         .await
         {
             crate::handlers::auth::BanOutcome::Clear => Ok(()),
-            crate::handlers::auth::BanOutcome::Banned => Err(super::api_error(
-                StatusCode::FORBIDDEN,
-                "blocked: you are banned from this community",
+            crate::handlers::auth::BanOutcome::Banned => Err(MembershipRefusal::new(
+                AuthReason::Banned,
+                super::api_error(
+                    StatusCode::FORBIDDEN,
+                    "blocked: you are banned from this community",
+                ),
             )),
-            crate::handlers::auth::BanOutcome::DbError => Err(super::api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "error: internal error checking restriction state",
+            crate::handlers::auth::BanOutcome::DbError => Err(MembershipRefusal::new(
+                AuthReason::BanCheckUnavailable,
+                super::api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "error: internal error checking restriction state",
+                ),
             )),
         }
     }

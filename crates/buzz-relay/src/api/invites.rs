@@ -24,6 +24,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::access::AccessSlot;
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
 use crate::nip_fi_http::admit_nip_fi_http_on_state;
 use buzz_core::invite::{
@@ -230,8 +231,9 @@ pub async fn accept_policy(
 /// signature + replay for `path`.
 async fn authenticate(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     headers: &HeaderMap,
-    path: &str,
+    path: &'static str,
     body: &[u8],
 ) -> Result<(buzz_core::TenantContext, nostr::PublicKey), (StatusCode, Json<Value>)> {
     let raw_host = headers
@@ -252,8 +254,16 @@ async fn authenticate(
         pubkey,
         event_id_bytes,
         ..
-    } = bridge::verify_nip98_exempt_invite_claim(headers, "POST", &url, Some(body))?;
-    bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
+    } = bridge::verify_nip98_exempt_invite_claim(slot, headers, "POST", &url, Some(body))?;
+    // Claiming an invite is how a non-member joins: replay is the last
+    // admission step, so it decides the request.
+    slot.attempt(crate::access::AuthMethod::Nip98, Some(pubkey), true);
+    slot.in_community(tenant.community());
+    slot.gate(
+        bridge::check_nip98_replay(state, &tenant, event_id_bytes).await,
+        bridge::ReplayRejection::auth_result,
+    )?;
+    slot.finish(crate::access::AuthResult::Success);
 
     Ok((tenant, pubkey))
 }
@@ -277,17 +287,19 @@ fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
 /// tenant host.
 pub async fn mint_invite(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     // NIP-FI gate wraps the entire handler so the denial is emitted as exact
     // text/plain bytes. [FI-TRACE-AUTHORITY-UNIFORM]
-    mint_invite_checked(state, headers, body).await
+    mint_invite_checked(state, slot, headers, body).await
 }
 
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn mint_invite_checked(
     state: Arc<AppState>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
@@ -309,7 +321,9 @@ async fn mint_invite_checked(
     let admission = match admit_nip_fi_http_on_state(
         &state,
         &headers,
+        &slot,
         bridge::make_nip98_closure_for_admission(
+            slot.clone(),
             headers.clone(),
             "POST",
             url,
@@ -321,29 +335,33 @@ async fn mint_invite_checked(
         Ok(a) => a,
         Err(resp) => return resp,
     };
-    let pubkey = *admission.proven_pubkey();
-    let (event_id_bytes, signed_created_at) = admission.into_extra();
+    let mut caller = bridge::ProvenCaller::new(admission, &tenant);
+    let pubkey = caller.pubkey;
 
     // Replay detection runs after NIP-98+assertion admission (both proofs verified).
-    if let Err(e) = bridge::check_nip98_replay(&state, &tenant, event_id_bytes).await {
+    if let Err(e) = caller.replay(&state, &tenant).await {
         return e.into_response();
     }
 
     // Membership and community ban, same step as the other NIP-98 routes.
-    if let Err(e) = super::relay_members::enforce_relay_membership(
+    let membership = super::relay_members::enforce_relay_membership(
         &state,
         tenant.community(),
         pubkey.as_bytes(),
         super::relay_members::extract_auth_tag_header(&headers),
-        signed_created_at,
+        caller.signed_at,
     )
-    .await
-    {
+    .await;
+    if let Err(e) = caller.admit_member(membership) {
         return e.into_response();
     }
 
+    // The request's access line carries the minted invite.
     match mint_invite_inner(&state, body, tenant, pubkey).await {
-        Ok(json) => json.into_response(),
+        Ok((json, minted)) => {
+            slot.detail(minted);
+            json.into_response()
+        }
         Err(e) => e.into_response(),
     }
 }
@@ -353,7 +371,7 @@ async fn mint_invite_inner(
     body: axum::body::Bytes,
     tenant: buzz_core::TenantContext,
     pubkey: nostr::PublicKey,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+) -> Result<(Json<Value>, crate::access::Detail), (StatusCode, Json<Value>)> {
     // Authz mirrors kind:9030 (add member): owner or admin only.
     let sender_hex = pubkey.to_hex();
     let member = state
@@ -397,25 +415,25 @@ async fn mint_invite_inner(
         "http"
     };
 
-    tracing::info!(
-        community = %tenant.community(),
-        minted_by = %sender_hex,
-        invite_id = %invite.invite_id,
-        expires_at = %invite.expires_at,
-        max_uses = ?invite.max_uses,
-        "relay invite minted"
-    );
+    let minted = crate::access::Detail::InviteMinted {
+        invite_id: invite.invite_id,
+        expires_at: invite.expires_at.timestamp(),
+        max_uses: invite.max_uses,
+    };
 
     // expires_at as unix seconds for the response contract.
     let expires_at_unix = invite.expires_at.timestamp() as u64;
 
-    Ok(Json(serde_json::json!({
-        "code": invite.code,
-        "expires_at": expires_at_unix,
-        "max_uses": invite.max_uses,
-        "uses_remaining": invite.uses_remaining,
-        "url": format!("{scheme}://{}/invite/{}", tenant.host(), invite.code),
-    })))
+    Ok((
+        Json(serde_json::json!({
+            "code": invite.code,
+            "expires_at": expires_at_unix,
+            "max_uses": invite.max_uses,
+            "uses_remaining": invite.uses_remaining,
+            "url": format!("{scheme}://{}/invite/{}", tenant.host(), invite.code),
+        })),
+        minted,
+    ))
 }
 
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
@@ -426,19 +444,36 @@ async fn mint_invite_inner(
 /// code is never fallen back to v1 verification.
 pub async fn claim_invite(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites/claim", &body).await?;
+    let (tenant, pubkey) =
+        authenticate(&state, &slot, &headers, "/api/invites/claim", &body).await?;
+    // The request's access line carries whether the claim joined.
+    let claimed = claim_invite_authed(&state, tenant, pubkey, &body).await;
+    if let Ok(Json(json)) = &claimed {
+        slot.detail(crate::access::Detail::InviteClaimed {
+            joined: json["status"] == "joined",
+        });
+    }
+    claimed
+}
 
-    if claim_rate_limited(&state, tenant.community(), &pubkey) {
+async fn claim_invite_authed(
+    state: &Arc<AppState>,
+    tenant: buzz_core::TenantContext,
+    pubkey: nostr::PublicKey,
+    body: &[u8],
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if claim_rate_limited(state, tenant.community(), &pubkey) {
         return Err(api_error(
             StatusCode::TOO_MANY_REQUESTS,
             "too many invite claim attempts, slow down",
         ));
     }
 
-    let request: ClaimInviteRequest = serde_json::from_slice(&body)
+    let request: ClaimInviteRequest = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid claim JSON: {e}")))?;
 
     let claimer_hex = pubkey.to_hex();
@@ -481,18 +516,13 @@ pub async fn claim_invite(
 
         return match outcome {
             buzz_db::relay_invite::ClaimOutcome::Joined { .. } => {
-                tracing::info!(
-                    community = %tenant.community(),
-                    member = %claimer_hex,
-                    "relay member added via v2 invite"
-                );
                 // NIP-43 side effects only on Joined, never on other outcomes.
-                if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
+                if let Err(e) = publish_nip43_member_added(&tenant, state, &claimer_hex).await {
                     tracing::warn!(
                         "failed to publish NIP-43 member-added delta after v2 claim: {e}"
                     );
                 }
-                if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
+                if let Err(e) = publish_nip43_membership_list(&tenant, state).await {
                     tracing::warn!("failed to publish NIP-43 membership list after v2 claim: {e}");
                 }
                 Ok(Json(serde_json::json!({
@@ -559,15 +589,10 @@ pub async fn claim_invite(
         .map_err(|e| internal_error(&format!("invite claim insert: {e}")))?;
 
     if was_inserted {
-        tracing::info!(
-            community = %tenant.community(),
-            member = %claimer_hex,
-            "relay member added via invite"
-        );
-        if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
+        if let Err(e) = publish_nip43_member_added(&tenant, state, &claimer_hex).await {
             tracing::warn!("failed to publish NIP-43 member-added delta after claim: {e}");
         }
-        if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
+        if let Err(e) = publish_nip43_membership_list(&tenant, state).await {
             tracing::warn!("failed to publish NIP-43 membership list after claim: {e}");
         }
     }
@@ -1167,6 +1192,68 @@ mod postgres_tests {
             )
             .await,
             list_count
+        );
+    }
+
+    /// A mint and a claim each write one access line carrying what they
+    /// did, and the invite code reaches no log.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn mint_and_claim_write_one_line_each_without_the_code() {
+        let host = format!("invites-{}.example", Uuid::new_v4().simple());
+        let (owner, joiner) = (Keys::generate(), Keys::generate());
+        let state = invite_test_state(&host).await.expect("local Postgres");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let code = mint_code(
+            state.clone(),
+            &host,
+            &owner,
+            serde_json::json!({ "max_uses": 3 }),
+        )
+        .await;
+        let mint = out.lines();
+        assert_eq!(mint.len(), 1, "{mint:?}");
+        assert_eq!(mint[0]["route"], "/api/invites", "{}", mint[0]);
+        assert_eq!(mint[0]["status"], 200, "{}", mint[0]);
+        assert_eq!(mint[0]["max_uses"], 3, "{}", mint[0]);
+        assert!(mint[0]["invite_id"].is_string(), "{}", mint[0]);
+        assert!(mint[0]["expires_at"].is_i64(), "{}", mint[0]);
+
+        let response = post_json(
+            state,
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code }).to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let lines = out.lines();
+        assert_eq!(lines.len(), 2, "one line per request: {lines:?}");
+        assert_eq!(lines[1]["route"], "/api/invites/claim", "{}", lines[1]);
+        assert_eq!(lines[1]["joined"], true, "{}", lines[1]);
+        assert_eq!(
+            lines[1]["pubkey"],
+            joiner.public_key().to_hex(),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            !out.raw().contains(&code),
+            "invite code logged: {}",
+            out.raw()
         );
     }
 
