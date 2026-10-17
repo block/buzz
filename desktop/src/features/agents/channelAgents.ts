@@ -93,6 +93,12 @@ export type CreateChannelManagedAgentInput = {
   respondTo?: RespondToMode;
   /** Hex pubkeys for allowlist mode. */
   respondToAllowlist?: string[];
+  /**
+   * Instance args to persist when cloning a pinned local harness. Empty (the
+   * default) lets spawn resolve definition args live — same as
+   * `instanceInputForDefinition`.
+   */
+  agentArgs?: string[];
   /** Skip reuse logic and always create a fresh agent instance. */
   forceNewInstance?: boolean;
   /** Detached start hook forwarded to the channel attach — see
@@ -399,9 +405,9 @@ export async function provisionChannelManagedAgent(
     acpCommand: "buzz-acp",
     agentCommand: input.runtime.command,
     harnessOverride: input.harnessOverride ?? false,
-    // Do NOT seed agentArgs from runtime.defaultArgs (see instanceInputForDefinition.ts
-    // for the rationale — empty args let spawn resolve definition args live).
-    agentArgs: [],
+    // Empty args (default) let spawn resolve definition args live. A team
+    // clone of a pinned local instance may pass the source agent's args.
+    agentArgs: input.agentArgs ?? [],
     mcpCommand: input.runtime.mcpCommand ?? "",
     personaId: input.personaId ?? undefined,
     teamId: input.teamId ?? undefined,
