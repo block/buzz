@@ -4699,6 +4699,7 @@ function appendMentionTags(
     }
     seen.add(lower);
     tags.push(["p", lower]);
+    tags.push(["mention", lower]);
   }
 }
 
