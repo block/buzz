@@ -913,16 +913,27 @@ class PairingNotifier extends Notifier<PairingState> {
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     final wsUrl = uri.replace(scheme: scheme).toString();
 
+    // connect() reports handshake and auth failures via onDisconnected and
+    // then returns. Pairing must not store credentials when that happens (#8043).
+    Object? failure;
     final socket = _validationSocketFactory(
       wsUrl: wsUrl,
       nsec: nsec,
       onMessage: (_) {},
       onConnected: () {},
-      onDisconnected: (_) {},
+      onDisconnected: (error) {
+        failure ??= error ?? Exception('Could not connect to relay');
+      },
     );
     _validationSocket = socket;
     try {
       await socket.connect().timeout(const Duration(seconds: 8));
+      if (failure != null) {
+        throw failure!;
+      }
+      if (socket.state != SocketState.connected) {
+        throw Exception('Could not connect to relay');
+      }
     } finally {
       if (identical(_validationSocket, socket)) _validationSocket = null;
       await socket.disconnect();
