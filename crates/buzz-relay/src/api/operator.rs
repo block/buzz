@@ -971,12 +971,14 @@ pub struct CommunityNipFiBindingQuery {
 /// - 404 means no community row has this host.
 pub async fn community_nip_fi_binding(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<CommunityNipFiBindingQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "GET",
         "/operator/communities/nip-fi-binding",
