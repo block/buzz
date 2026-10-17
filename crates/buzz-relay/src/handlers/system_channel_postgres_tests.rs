@@ -175,7 +175,7 @@ fn bridge_count(body: Option<Value>) -> u64 {
     })
 }
 
-fn sorted(mut ids: Vec<String>) -> Vec<String> {
+fn sorted<T: Ord>(mut ids: Vec<T>) -> Vec<T> {
     ids.sort();
     ids
 }
@@ -429,16 +429,61 @@ async fn named_channels_missing_from_the_cache_are_confirmed_together() {
 }
 
 /// Adding a member to a system channel sends no kind:44100 notification,
-/// which an existing client would show as a new channel. An ordinary
-/// channel still sends one, so the check is not vacuous.
-/// Mutation: drop the system check in `emit_membership_notification` → RED.
+/// which an existing client would show as a new channel. It sends the
+/// ephemeral kind:24100 instead, and removal sends kind:24101, so a running
+/// client that knows system channels learns of the change. Neither is stored.
+/// An ordinary channel still sends a stored 44100, so the check is not vacuous.
+/// Mutation: drop the system check in `emit_membership_notification` → RED
+/// (the system channel gets a 44100); map the system kinds back to 44100/44101
+/// → RED (no 24100/24101 frames).
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
-async fn system_channels_send_no_membership_notifications() {
+async fn system_channels_send_only_ephemeral_membership_notifications() {
+    use buzz_core::kind::{
+        KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+        KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION, KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION,
+    };
     let f = fixture().await;
     let owner = Keys::generate();
     let member = Keys::generate();
     let member_hex = member.public_key().to_hex();
+
+    // The member's live global notice subscription.
+    let conn_id = Uuid::new_v4();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    f.state.conn_manager.register(
+        conn_id,
+        tx,
+        tokio::sync::mpsc::channel(4).0,
+        tokio::sync::mpsc::channel(1).0,
+        None,
+        tokio_util::sync::CancellationToken::new(),
+        f.tenant.community(),
+        Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        Arc::new(tokio::sync::Mutex::new(Default::default())),
+        3,
+        crate::state::CommunityConnectionControl::new(tokio_util::sync::CancellationToken::new()),
+    );
+    f.state
+        .conn_manager
+        .set_authenticated_pubkey(conn_id, member.public_key().to_bytes().to_vec());
+    let notices: nostr::Filter = serde_json::from_value(json!({
+        "kinds": [
+            KIND_MEMBER_ADDED_NOTIFICATION,
+            KIND_MEMBER_REMOVED_NOTIFICATION,
+            KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION,
+            KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION,
+        ],
+        "#p": [member_hex],
+    }))
+    .expect("filter");
+    f.state.sub_registry.register_scoped(
+        f.tenant.community(),
+        conn_id,
+        "notices".into(),
+        vec![notices],
+        None,
+    );
 
     let system = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
     let ordinary = create_channel(&f.state, &f.tenant, &owner, &[]).await;
@@ -452,36 +497,121 @@ async fn system_channels_send_no_membership_notifications() {
         )
         .await;
     }
-    // Notifications are written after the reply; give the task a moment.
-    let mut notified = Vec::new();
-    for _ in 0..50 {
-        notified = f
-            .state
-            .db
-            .query_events(&EventQuery {
-                kinds: Some(vec![buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32]),
-                p_tag_hex: Some(member_hex.clone()),
-                ..EventQuery::for_community(f.tenant.community())
-            })
+    publish(
+        &f,
+        &owner,
+        9001,
+        "",
+        &[&["h", &system.to_string()], &["p", &member_hex]],
+    )
+    .await;
+
+    // Notifications are sent after the reply; collect the three frames.
+    let mut received = Vec::new();
+    while received.len() < 3 {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
-            .expect("query notifications")
-            .into_iter()
-            .map(|stored| {
-                stored
-                    .event
-                    .tags
-                    .iter()
-                    .find(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
-                    .and_then(|tag| tag.as_slice().get(1).cloned())
-                    .expect("h tag")
-            })
-            .collect::<Vec<_>>();
-        if !notified.is_empty() {
-            break;
+            .unwrap_or_else(|_| panic!("notices so far: {received:?}"))
+            .expect("connection open");
+        let axum::extract::ws::Message::Text(text) = frame else {
+            continue;
+        };
+        let message: Value = serde_json::from_str(&text).expect("relay frame");
+        if message[0] != "EVENT" {
+            continue;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let event: nostr::Event = serde_json::from_value(message[2].clone()).expect("event");
+        assert_eq!(
+            event.pubkey,
+            f.state.relay_keypair.public_key(),
+            "relay-signed"
+        );
+        let h = event
+            .tags
+            .iter()
+            .find(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+            .and_then(|tag| tag.as_slice().get(1).cloned())
+            .expect("h tag");
+        received.push((event.kind.as_u16() as u32, h));
     }
-    assert_eq!(sorted(notified), vec![ordinary.to_string()]);
+    assert_eq!(
+        sorted(received),
+        sorted(vec![
+            (KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION, system.to_string()),
+            (KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION, system.to_string()),
+            (KIND_MEMBER_ADDED_NOTIFICATION, ordinary.to_string()),
+        ])
+    );
+
+    // Only the ordinary channel's notice is stored.
+    let stored = f
+        .state
+        .db
+        .query_events(&EventQuery {
+            kinds: Some(
+                [
+                    KIND_MEMBER_ADDED_NOTIFICATION,
+                    KIND_MEMBER_REMOVED_NOTIFICATION,
+                    KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION,
+                    KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION,
+                ]
+                .map(|kind| kind as i32)
+                .to_vec(),
+            ),
+            p_tag_hex: Some(member_hex.clone()),
+            ..EventQuery::for_community(f.tenant.community())
+        })
+        .await
+        .expect("query notifications")
+        .into_iter()
+        .map(|stored| stored.event.kind.as_u16() as u32)
+        .collect::<Vec<_>>();
+    assert_eq!(stored, [KIND_MEMBER_ADDED_NOTIFICATION]);
+}
+
+/// Clients cannot submit the system-channel membership notices: only the
+/// relay signs them. They are ephemeral, so the WebSocket path checks them
+/// before ingest, and ingest checks them for every other path.
+/// Mutation: drop either `is_membership_notification` check → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn clients_cannot_submit_system_membership_notifications() {
+    let f = fixture().await;
+    let sender = Keys::generate();
+    let victim = Keys::generate().public_key().to_hex();
+    for kind in [
+        buzz_core::kind::KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION,
+        buzz_core::kind::KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION,
+    ] {
+        let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+            .tags([Tag::parse(["p", &victim]).unwrap()])
+            .sign_with_keys(&sender)
+            .expect("sign");
+        let id = event.id.to_hex();
+        let Err(error) = ingest_event(&f.state, &f.tenant, event.clone(), http_auth(&sender)).await
+        else {
+            panic!("ingest must refuse kind:{kind}");
+        };
+        assert!(
+            format!("{error:?}").contains("relay-signed only"),
+            "{error:?}"
+        );
+
+        let (conn, mut rx) = test_conn(&f.tenant, &sender);
+        crate::handlers::event::handle_event(event, conn, f.state.clone()).await;
+        let frame = rx.try_recv().expect("OK frame");
+        let axum::extract::ws::Message::Text(text) = frame else {
+            panic!("text frame");
+        };
+        let message: Value = serde_json::from_str(&text).expect("frame");
+        assert_eq!(message[0], "OK");
+        assert_eq!(message[1], id);
+        assert_eq!(message[2], false, "{text}");
+        assert!(
+            message[3].as_str().unwrap().contains("relay-signed only"),
+            "{text}"
+        );
+    }
 }
 
 /// A group-state filter with `#t:["system"]` or any `#P` finds the system

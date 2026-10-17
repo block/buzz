@@ -11,7 +11,8 @@ use buzz_core::kind::{
     KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
     KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
-    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
+    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION,
+    KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -1036,8 +1037,10 @@ pub fn emit_live_thread_summary(
 
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).
 ///
-/// kind:44100 = member added, kind:44101 = member removed. System channels
-/// emit none.
+/// kind:44100 = member added, kind:44101 = member removed. A system channel
+/// sends the ephemeral kind:24100/24101 instead (NIP-CL): clients that do not
+/// know system channels would show a channel named by 44100, and they never
+/// subscribe to the new kinds.
 /// The p tag addresses the target pubkey; the h tag carries the channel UUID as metadata.
 /// Stored with channel_id = None so global subscribers receive it via slow-path fan-out.
 pub async fn emit_membership_notification(
@@ -1048,16 +1051,11 @@ pub async fn emit_membership_notification(
     actor_pubkey: &[u8],
     notification_kind: u32,
 ) -> anyhow::Result<()> {
-    // A system channel is left out of clients' channel lists, so it sends no
-    // membership notifications: a client that receives one would show it.
-    if !state
+    let system = !state
         .db
         .system_channel_ids_among(tenant.community(), &[channel_id])
         .await?
-        .is_empty()
-    {
-        return Ok(());
-    }
+        .is_empty();
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
     let channel_id_str = channel_id.to_string();
@@ -1076,6 +1074,7 @@ pub async fn emit_membership_notification(
             ))
         }
     };
+    let notification_kind = system_membership_kind(notification_kind, system);
 
     let content = serde_json::json!({
         "type": event_type,
@@ -1089,14 +1088,20 @@ pub async fn emit_membership_notification(
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 
-    // Store with channel_id = None → globally scoped, reachable by global subscribers.
-    let (stored, was_inserted) = state
-        .db
-        .insert_event(tenant.community(), &event, None)
-        .await?;
-    if !was_inserted {
-        return Ok(());
-    }
+    // Store with channel_id = None → globally scoped, reachable by global
+    // subscribers. The system kinds are ephemeral: fan out, never store.
+    let stored = if system {
+        StoredEvent::new(event, None)
+    } else {
+        let (stored, was_inserted) = state
+            .db
+            .insert_event(tenant.community(), &event, None)
+            .await?;
+        if !was_inserted {
+            return Ok(());
+        }
+        stored
+    };
 
     // Fan-out only — skip search indexing and workflow evaluation. Publish through
     // Redis before local fan-out so agents connected to other relay pods receive
@@ -1132,6 +1137,16 @@ pub async fn emit_membership_notification(
         "membership notification emitted"
     );
     Ok(())
+}
+
+/// The notification kind to send: a system channel uses the ephemeral NIP-CL
+/// pair so clients unaware of system channels never see it.
+fn system_membership_kind(kind: u32, system: bool) -> u32 {
+    match (kind, system) {
+        (KIND_MEMBER_ADDED_NOTIFICATION, true) => KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION,
+        (KIND_MEMBER_REMOVED_NOTIFICATION, true) => KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION,
+        (kind, _) => kind,
+    }
 }
 
 /// Sign, store (replacing previous), and fan-out a single addressable discovery event.

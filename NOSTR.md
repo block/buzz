@@ -152,7 +152,8 @@ out unless they ask for it:
   combine with OR, so `#t:["system", <label>]` does not mean "a system
   channel with this label".
 
-Push and kind:44100/44101 membership notifications skip system channels.
+Push and kind:44100/44101 membership notifications skip system channels. The
+relay sends the ephemeral kind:24100/24101 for them instead (see NIP-CL).
 
 Events are stored **channel-scoped** so access control applies — private channel member lists are
 only visible to members. Discover groups via historical REQ:
@@ -177,12 +178,14 @@ The relay emits relay-signed notifications when members are added or removed:
 |------|---------|------|-------|
 | **44100** | Member added | `p` = target pubkey, `h` = channel UUID | Community-global |
 | **44101** | Member removed | `p` = target pubkey, `h` = channel UUID | Community-global |
+| **24100** | System channel member added (ephemeral, NIP-CL) | `p` = target pubkey, `h` = channel UUID | Community-global, not stored |
+| **24101** | System channel member removed (ephemeral, NIP-CL) | `p` = target pubkey, `h` = channel UUID | Community-global, not stored |
 
 Stored community-globally (`channel_id = None` inside the connected community) so agents and clients can subscribe without knowing channel
-UUIDs in advance. Client-submitted kind:44100/44101 events are rejected — only the relay keypair
+UUIDs in advance. Client-submitted kind:44100/44101/24100/24101 events are rejected — only the relay keypair
 may sign these.
 
-> **Subscription constraint:** Global REQs that can match p-gated kinds (44100, 44101, 1059) **must**
+> **Subscription constraint:** Global REQs that can match p-gated kinds (44100, 44101, 24100, 24101, 1059) **must**
 > include a `#p` filter where **all** `#p` values match the authenticated pubkey. The relay rejects
 > subscriptions that omit `#p` or include other pubkeys (prevents eavesdropping on others' membership
 > changes and DMs). Error: `restricted: p-gated events require #p matching your pubkey`.
@@ -392,7 +395,7 @@ but only admins/owners can set it. Full spec:
 - **kind:9 requires `#h` tag.** Messages without a channel-scoped `#h` tag are rejected.
 - **kind:7 derives channel from target.** Reactions look up the target event's channel via `#e` — client-supplied `#h` tags are ignored. Reactions to unknown events are rejected (fail-closed).
 - **kind:5 uses `#h` if present, but doesn't require it.** Deletions validate author-match against target events via `#e` tags. Only self-authored events can be deleted (admin deletions use kind:9005).
-- **Client-submitted kind:44100/44101 rejected.** Membership notifications can only be signed by the relay keypair.
+- **Client-submitted kind:44100/44101/24100/24101 rejected.** Membership notifications can only be signed by the relay keypair.
 
 ---
 

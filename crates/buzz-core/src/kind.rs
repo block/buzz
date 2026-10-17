@@ -192,6 +192,8 @@ pub const P_GATED_KINDS: &[u32] = &[
     KIND_AGENT_OBSERVER_FRAME,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION,
+    KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION,
     KIND_GIFT_WRAP,
     KIND_DM_VISIBILITY,
     // NIP-AM: agent turn metrics are encrypted to the owner and must not be
@@ -504,6 +506,15 @@ pub const KIND_TYPING_INDICATOR: u32 = 20002;
 pub const KIND_AGENT_PRESENCE: u32 = 20003;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
+/// Ephemeral, relay-signed: the target pubkey was added to a system channel
+/// (NIP-CL). Same tags and content as [`KIND_MEMBER_ADDED_NOTIFICATION`]:
+/// p-tag = target, h-tag = channel UUID. A separate kind, so clients that do
+/// not know system channels never act on it. Never stored: a client that
+/// reconnects rereads its system channels.
+pub const KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION: u32 = 24100;
+/// Ephemeral, relay-signed: the target pubkey was removed from a system
+/// channel. See [`KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION`].
+pub const KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION: u32 = 24101;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
 pub const KIND_HUDDLE_REACTION: u32 = 24810;
@@ -770,6 +781,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_JOB_ERROR,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION,
+    KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION,
     KIND_AGENT_TURN_METRIC,
     KIND_WORKFLOW_DEF,
     KIND_LONG_FORM,
@@ -817,6 +830,18 @@ pub const ALL_KINDS: &[u32] = &[
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).
 pub const fn is_ephemeral(kind: u32) -> bool {
     kind >= EPHEMERAL_KIND_MIN && kind <= EPHEMERAL_KIND_MAX
+}
+
+/// Returns `true` for membership notifications, which only the relay signs.
+/// Clients must not submit them.
+pub const fn is_membership_notification(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_MEMBER_ADDED_NOTIFICATION
+            | KIND_MEMBER_REMOVED_NOTIFICATION
+            | KIND_SYSTEM_MEMBER_ADDED_NOTIFICATION
+            | KIND_SYSTEM_MEMBER_REMOVED_NOTIFICATION
+    )
 }
 
 /// Returns `true` if `kind` is replaceable (NIP-01: kinds 0, 3, 41, 10000–19999).
