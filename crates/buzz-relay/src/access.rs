@@ -1689,8 +1689,10 @@ pub(crate) mod tests {
             axum::http::StatusCode::OK,
             axum::http::StatusCode::NOT_FOUND,
         ] {
-            let lines = layer_lines(state.clone(), status, get_req("/channels/general")).await;
-            assert!(lines.is_empty(), "{status}: {lines:?}");
+            for path in ["/assets/app.js", "/invite/INVITECODE123"] {
+                let lines = layer_lines(state.clone(), status, get_req(path)).await;
+                assert!(lines.is_empty(), "{path} {status}: {lines:?}");
+            }
         }
     }
 

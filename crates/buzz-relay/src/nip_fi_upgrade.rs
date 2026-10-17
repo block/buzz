@@ -471,18 +471,21 @@ mod tests {
     #[test]
     fn deny_protected_logs_one_denied_auth_line() {
         let headers = host_headers();
+        let slot = crate::access::AccessSlot::default();
         let (_, out) = crate::access::tests::capture(|| {
             check_nip_fi_at_upgrade(
-                &crate::access::AccessSlot::default(),
+                &slot,
                 ROOT,
                 &headers,
                 &communities(),
                 None,
                 buzz_auth::NipFiMode::DenyProtected,
-            )
+            );
+            slot.emit("/", 503);
         });
         let lines = out.lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["event"], "http");
         assert_eq!(lines[0]["outcome"], "denied");
         assert_eq!(lines[0]["reason"], "authorization_unavailable");
     }
