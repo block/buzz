@@ -3114,3 +3114,45 @@ test("agents library search and status chips narrow the cards", async ({
   await expect(ralph).toBeVisible();
   await expect(reviewer).toBeVisible();
 });
+
+test("agents library toolbar fits a very narrow page column", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "custom:narrow",
+        displayName: "Narrow",
+        isActive: true,
+        systemPrompt: "Fits in tight spaces.",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const toolbar = page.getByTestId("agents-library-toolbar");
+  const search = page.getByTestId("agents-library-search-input");
+  await expect(search).toBeVisible();
+
+  // An open profile panel can squeeze the page column below the search box's
+  // natural width. The box must shrink with the column instead of running
+  // under whatever sits to its right.
+  await page.getByTestId("agents-page-content").evaluate((element) => {
+    (element as HTMLElement).style.width = "180px";
+  });
+  await expect
+    .poll(() =>
+      toolbar.evaluate((element) => element.scrollWidth <= element.clientWidth),
+    )
+    .toBe(true);
+  const toolbarBox = await toolbar.boundingBox();
+  const searchBox = await search.boundingBox();
+  expect(toolbarBox).not.toBeNull();
+  expect(searchBox).not.toBeNull();
+  if (toolbarBox && searchBox) {
+    expect(searchBox.x + searchBox.width).toBeLessThanOrEqual(
+      toolbarBox.x + toolbarBox.width + 1,
+    );
+  }
+});

@@ -45,7 +45,7 @@ export function AgentLibraryToolbar({
       className="flex flex-wrap items-center gap-2"
       data-testid="agents-library-toolbar"
     >
-      <div className="relative min-w-56 flex-1 [@container(min-width:40rem)]:max-w-sm">
+      <div className="relative min-w-0 flex-1 basis-56 [@container(min-width:40rem)]:max-w-sm">
         <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           aria-label="Search agents"
