@@ -13,6 +13,9 @@ import '../hosted/hosted_environment.dart';
 /// A parsed deep link supported by the app.
 sealed class BuzzDeepLink {
   const BuzzDeepLink();
+
+  /// Community addressed by entry links; other actions have no relay target.
+  String? get relayUrl => null;
 }
 
 /// A parsed relay invite link.
@@ -22,6 +25,7 @@ sealed class BuzzDeepLink {
 /// handoff from the web landing page.
 class InviteDeepLink extends BuzzDeepLink {
   /// Relay URL normalized to the websocket scheme used by the app.
+  @override
   final String relayUrl;
 
   /// Invite code from the link.
@@ -363,13 +367,13 @@ class NostrBindDeepLink extends BuzzDeepLink {
     : fields = Map.unmodifiable(fields);
   String get challengeId => fields['challenge_id']!;
   String get nonce => fields['nonce']!;
-  String get verificationCode => fields['verification_code']!;
   DateTime get expiresAt => DateTime.parse(fields['expires_at']!);
   @override
   String toString() => 'NostrBindDeepLink(redacted)';
 }
 
 class AddCommunityDeepLink extends BuzzDeepLink {
+  @override
   final String relayUrl;
   final String name;
   const AddCommunityDeepLink({required this.relayUrl, required this.name});

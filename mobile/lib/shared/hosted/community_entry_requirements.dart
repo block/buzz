@@ -16,13 +16,15 @@ abstract final class CommunityEntryRequirements {
     }
   }
 
-  static Future<void> verify(Community community) async {
+  static Future<void> verify(
+    Community community,
+    BuilderlabAccountClient account,
+  ) async {
     final uri = Uri.parse(community.relayUrl);
     if (!HostedEnvironment.isReservedHost(uri.host)) return;
     if (!HostedEnvironment.supportsRelay(uri)) throw AccountFailure.denied;
-    final account = BuilderlabAccountClient();
-    try {
-      final session = await account.restore();
+    {
+      final session = account.account ?? await account.restore();
       if (session == null) throw AccountFailure.signedOut;
       final nsec = community.nsec;
       if (nsec == null) throw AccountIdentityFailure.absent;
@@ -34,8 +36,6 @@ abstract final class CommunityEntryRequirements {
         subject: session.subject,
         pubkey: pubkey,
       );
-    } finally {
-      account.dispose();
     }
   }
 

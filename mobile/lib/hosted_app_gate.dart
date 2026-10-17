@@ -5,226 +5,17 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'features/channels/deep_link_dispatcher.dart';
-import 'features/invites/invite_join_provider.dart';
-import 'features/profile/profile_provider.dart';
-import 'shared/relay/relay_provider.dart';
 import 'features/onboarding/hosted_connect_page.dart';
 import 'features/onboarding/self_hosted_entry_sheet.dart';
 import 'shared/auth/auth.dart';
-import 'shared/community/paired_community_landing.dart';
 import 'shared/theme/grid.dart';
 import 'shared/deeplink/deep_link.dart';
-import 'shared/hosted/account_identity_store.dart';
-import 'shared/hosted/browser_auth.dart';
-import 'shared/hosted/builderlab_account.dart';
-import 'shared/hosted/hosted_admission.dart';
 import 'shared/hosted/hosted_community_connection.dart';
 import 'shared/hosted/hosted_flow.dart';
-import 'shared/hosted/hosted_identity_service.dart';
-import 'shared/hosted/device_identity_source.dart';
 import 'shared/hosted/hosted_environment.dart';
+import 'features/onboarding/hosted_reconnect_banner.dart';
 
-// Set by a community-entry surface while it owns setup presentation.
-final hostedInlineEntryProvider = NotifierProvider<HostedInlineEntry, bool>(
-  HostedInlineEntry.new,
-);
-
-class HostedInlineEntry extends Notifier<bool> {
-  @override
-  bool build() => false;
-
-  void setActive(bool active) {
-    if (ref.mounted) state = active;
-  }
-}
-
-/// Signals a completed local admission to the currently mounted Add route.
-final communityEntryCompletionProvider =
-    NotifierProvider<CommunityEntryCompletion, int>(
-      CommunityEntryCompletion.new,
-    );
-
-class CommunityEntryCompletion extends Notifier<int> {
-  @override
-  int build() => 0;
-
-  void complete() {
-    if (ref.mounted) state++;
-  }
-}
-
-final hostedFlowProvider = Provider<HostedFlow>((ref) => createHostedFlow(ref));
-
-/// Shared orchestration with injectable browser and relay network boundaries.
-HostedFlow createHostedFlow(
-  Ref ref, {
-  BrowserAuth? browserAuth,
-  Future<void> Function(Community)? probe,
-}) {
-  final account = BuilderlabAccountClient();
-  final browser = browserAuth ?? BrowserAuth();
-  final store = AccountIdentityStore();
-  late final HostedFlow flow;
-  final admission = HostedAdmission(
-    account: account,
-    store: store,
-    confirmPolicy: (policy) => flow.confirmJoinPolicy(policy),
-    probe: probe,
-  );
-  flow = HostedFlow(
-    account: account,
-    browser: browser,
-    store: store,
-    identity: HostedIdentityService(
-      account: account,
-      store: store,
-      deviceIdentities: DeviceIdentitySource(),
-    ),
-    enterCommunity: (link, subject, pubkey, isCurrent) async {
-      await connectHostedCommunity(
-        link: link,
-        subject: subject,
-        pubkey: pubkey,
-        isCurrent: () => isCurrent() && account.account?.subject == subject,
-        storage: ref.read(communityStorageProvider),
-        admission: admission,
-        persist: (community, current) => ref
-            .read(authProvider.notifier)
-            .authenticateWithCommunity(
-              flow.pairedSensitiveActionPolicy == null
-                  ? community
-                  : community.copyWith(
-                      sensitiveActionPolicy: flow.pairedSensitiveActionPolicy,
-                    ),
-              shouldContinue: current,
-              activate:
-                  community.starterSetupIncomplete ||
-                  flow.addedCommunityCount == 0,
-            ),
-        recoverStarterChannels: (community, current) =>
-            finishHostedStarterSetup(ref, community, current),
-      );
-      if (flow.addedCommunityCount == 0 && isCurrent()) {
-        await offerHostedProfile(
-          ref,
-          flow,
-          link,
-          pubkey,
-          () => isCurrent() && account.account?.subject == subject,
-        );
-      }
-    },
-  );
-  void onCompleted() {
-    if (flow.accountOnly && flow.stage == HostedFlowStage.complete) {
-      ref.read(communityGridLandingProvider.notifier).request();
-    }
-  }
-
-  flow.addListener(onCompleted);
-  ref.onDispose(() {
-    flow.removeListener(onCompleted);
-    flow.dispose();
-    browser.dispose();
-    account.dispose();
-    admission.dispose();
-  });
-  return flow;
-}
-
-/// Optional and scoped to the first activated community. A failed read is not
-/// proof that no profile exists; leave it to Settings in that case.
-Future<void> offerHostedProfile(
-  Ref ref,
-  HostedFlow flow,
-  BuzzDeepLink link,
-  String pubkey,
-  bool Function() isCurrent,
-) async {
-  final relay = switch (link) {
-    InviteDeepLink(:final relayUrl) => relayUrl,
-    AddCommunityDeepLink(:final relayUrl) => relayUrl,
-    _ => null,
-  };
-  if (relay == null || !ref.mounted || !isCurrent()) return;
-  final active = await ref.read(activeCommunityProvider.future);
-  bool current() {
-    if (!ref.mounted || !isCurrent()) return false;
-    final now = ref.read(activeCommunityProvider).asData?.value;
-    return now != null &&
-        now.id == active?.id &&
-        now.pubkey == pubkey &&
-        relayIdentity(now.relayUrl) == relayIdentity(relay);
-  }
-
-  if (!current()) return;
-  // Keep the provider hydrated throughout the optional sheet.
-  final subscription = ref.listen(profileProvider, (_, _) {});
-  try {
-    try {
-      final profile = await ref.read(profileProvider.future);
-      if (profile != null || !current()) return;
-    } catch (_) {
-      return;
-    }
-    await flow.requestProfile((name) async {
-      if (!current()) throw AccountFailure.unavailable;
-      await ref.read(profileProvider.notifier).updateDisplayName(name);
-    });
-  } finally {
-    subscription.close();
-  }
-}
-
-/// Completes the existing scoped invite recovery only after activation. The
-/// pending flag remains durable on failure, cancellation or a community switch.
-Future<void> finishHostedStarterSetup(
-  Ref ref,
-  Community community,
-  bool Function() isCurrent,
-) async {
-  void checkCurrent() {
-    if (!ref.mounted || !isCurrent()) throw AccountFailure.unavailable;
-  }
-
-  bool matches(Community? candidate) =>
-      candidate?.id == community.id &&
-      candidate?.relayUrl == community.relayUrl &&
-      candidate?.pubkey == community.pubkey &&
-      candidate?.nsec == community.nsec;
-
-  checkCurrent();
-  final active = await ref.read(activeCommunityProvider.future);
-  checkCurrent();
-  if (!matches(active)) throw AccountFailure.unavailable;
-  final config = RelayConfig(baseUrl: community.relayUrl, nsec: community.nsec);
-  await ref
-      .read(inviteJoinRecoveryProvider)(
-        InviteJoinRecoveryScope(
-          relayHttpOrigin: config.baseUrl,
-          nsec: config.nsec,
-        ),
-      )
-      .ensureStarterChannels();
-  checkCurrent();
-  await ref.read(communityTransitionProvider).runExclusive(() async {
-    checkCurrent();
-    final storage = ref.read(communityStorageProvider);
-    final saved = (await storage.loadAll())
-        .where((item) => item.id == community.id)
-        .firstOrNull;
-    final activeId = await storage.loadActiveId();
-    checkCurrent();
-    if (!matches(saved) || activeId != community.id) {
-      throw AccountFailure.unavailable;
-    }
-    await storage.save(saved!.copyWith(starterSetupIncomplete: false));
-    await syncStoredCommunitySnapshot(ref);
-    ref.invalidate(communityListProvider);
-    ref.invalidate(activeCommunityProvider);
-    ref.invalidate(authProvider);
-  });
-}
+import 'shared/hosted/hosted_flow_provider.dart';
 
 /// Composition seam shared by signed-in and signed-out application states.
 class HostedAppGate extends HookConsumerWidget {
@@ -271,11 +62,7 @@ class HostedAppGate extends HookConsumerWidget {
     return DeepLinkDispatcher(
       dispatchMessageLinks: authenticated && !visible,
       onboardingHandler: (routeContext, link) async {
-        final relay = switch (link) {
-          InviteDeepLink(:final relayUrl) => relayUrl,
-          AddCommunityDeepLink(:final relayUrl) => relayUrl,
-          _ => null,
-        };
+        final relay = link.relayUrl;
         if (relay != null) {
           final host = Uri.parse(relay).host.toLowerCase();
           final reserved = HostedEnvironment.isReservedHost(host);
@@ -289,8 +76,7 @@ class HostedAppGate extends HookConsumerWidget {
               )
               .firstOrNull;
           if (existing != null &&
-              !(existing.starterSetupIncomplete &&
-                  HostedEnvironment.isReservedHost(Uri.parse(relay).host))) {
+              !(existing.starterSetupIncomplete && reserved)) {
             await ref
                 .read(communityListProvider.notifier)
                 .switchCommunity(existing.id);
@@ -333,12 +119,6 @@ class HostedAppGate extends HookConsumerWidget {
             return true;
           }
         }
-        if (link is InviteDeepLink) {
-          final host = Uri.parse(link.relayUrl).host;
-          // Reserved hosted domains must never fall into legacy key generation.
-          final reserved = HostedEnvironment.isReservedHost(host);
-          if (!reserved) return false;
-        }
         await flow.start(link);
         return true;
       },
@@ -346,6 +126,7 @@ class HostedAppGate extends HookConsumerWidget {
         fit: StackFit.expand,
         children: [
           child,
+          if (authenticated && !visible) HostedReconnectBanner(flow: flow),
           if (flow.stage == HostedFlowStage.signIn &&
               authenticated &&
               !inlineEntry)
@@ -365,7 +146,9 @@ class HostedAppGate extends HookConsumerWidget {
                       ),
                       TextButton(
                         onPressed: flow.leave,
-                        child: const Text('Leave setup'),
+                        child: Text(
+                          flow.reconnecting ? 'Cancel sign-in' : 'Leave setup',
+                        ),
                       ),
                     ],
                   ),

@@ -1,4 +1,4 @@
-import '../../shared/deeplink/deep_link.dart';
+import 'deep_link.dart';
 
 /// Converts user-entered community addresses or invites to validated app links.
 /// Other deep-link actions are deliberately excluded from this input.

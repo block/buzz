@@ -1,5 +1,6 @@
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/features/invites/invite_join_provider.dart';
-import 'package:buzz/hosted_app_gate.dart';
+import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
@@ -67,6 +68,7 @@ void main() {
     recover = () async {};
     admission = HostedAdmission(
       account: f.account,
+      relayAuth: HostedRelayAuth(f.account, enabled: false),
       store: f.store,
       probe: (community) async {
         probed.add(community);

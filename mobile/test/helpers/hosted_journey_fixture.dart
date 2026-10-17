@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/services.dart';
 
@@ -7,6 +8,7 @@ import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/hosted_app_gate.dart';
+import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
@@ -14,6 +16,9 @@ import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/relay/relay_session.dart';
+import 'package:buzz/shared/relay/relay_socket.dart';
 import 'package:buzz/shared/hosted/self_hosted_entry.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:flutter/material.dart';
@@ -49,6 +54,14 @@ class HostedJourneyFixture {
   int policyFailures = 0;
   int browserStarts = 0;
   int secondRelayFailures = 0;
+  DateTime assertionNow = DateTime.now();
+  bool relayAuthEnabled = false;
+  bool expiredSession = false;
+  bool denyAssertion = false;
+  bool refuseUpgrade = false;
+  String subject = 'journey-owner';
+  Future<void> Function()? beforeAssertionReturn;
+  final socketHeaders = <Map<String, String>>[];
   bool offerProfile = true;
   bool profileUnavailable = false;
   bool rejectList = false;
@@ -100,13 +113,49 @@ class HostedJourneyFixture {
     final path = request.url.path;
     Object result;
     if (path.endsWith('/exchange')) {
+      expiredSession = false;
       result = {
         'session_credential': 'synthetic-session',
         'expires_at': expiry,
       };
     } else if (path.endsWith('/me')) {
-      result = {'subject': 'journey-owner', 'expires_at': expiry};
+      if (expiredSession) return http.Response('{}', 401);
+      result = {'subject': subject, 'expires_at': expiry};
+    } else if (path.endsWith('/identity/assertions')) {
+      await beforeAssertionReturn?.call();
+      if (expiredSession) return http.Response('{}', 401);
+      if (denyAssertion) return http.Response('{}', 403);
+      final body = jsonDecode(request.body) as Map;
+      if (bound != null && body['nostr_pubkey'] != bound) {
+        return http.Response('{}', 403);
+      }
+      bound ??= body['nostr_pubkey'] as String;
+      result = {
+        'assertion': 'synthetic-assertion',
+        'nostr_pubkey': bound,
+        'expires_at':
+            assertionNow
+                .add(const Duration(minutes: 5))
+                .millisecondsSinceEpoch ~/
+            1000,
+      };
+    } else if (path == '/auth-transport') {
+      return http.Response(
+        '',
+        302,
+        headers: {'location': 'https://outside.example'},
+      );
+    } else if (path == '/query' || path == '/profiles/search') {
+      if (relayAuthEnabled) {
+        expect(
+          request.headers['Nostr-Federated-Identity'],
+          'Bearer synthetic-assertion',
+        );
+        expect(request.headers.containsKey('X-BB-Session-Credential'), isFalse);
+      }
+      result = <Object>[];
     } else if (path.endsWith('/current')) {
+      if (expiredSession) return http.Response('{}', 401);
       result = {
         'identity': bound == null ? null : {'pubkey_hex': bound},
       };
@@ -248,6 +297,36 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
+          if (relayAuthEnabled) ...[
+            hostedRelayAuthProvider.overrideWith((ref) {
+              final auth = HostedRelayAuth(
+                ref.watch(builderlabAccountProvider),
+                enabled: true,
+                now: () => assertionNow,
+              );
+              ref.onDispose(auth.dispose);
+              return auth;
+            }),
+            relaySessionProvider.overrideWith(
+              () => RelaySessionNotifier(
+                socketFactory:
+                    ({
+                      required wsUrl,
+                      required nsec,
+                      required onMessage,
+                      required onConnected,
+                      required onDisconnected,
+                    }) => _RelaySocket(
+                      this,
+                      wsUrl: wsUrl,
+                      nsec: nsec,
+                      onMessage: onMessage,
+                      onConnected: onConnected,
+                      onDisconnected: onDisconnected,
+                    ),
+              ),
+            ),
+          ],
           communitySnapshotWriterProvider.overrideWithValue((_) async {}),
           channelsProvider.overrideWith(_NoChannels.new),
           profileProvider.overrideWith(() => _Profile(this)),
@@ -408,4 +487,29 @@ class _Browser extends BrowserAuth {
       );
   @override
   Future<void> initialize() async {}
+}
+
+class _RelaySocket extends RelaySocket {
+  _RelaySocket(
+    this.fixture, {
+    required super.wsUrl,
+    required super.nsec,
+    required super.onMessage,
+    required super.onConnected,
+    required super.onDisconnected,
+  }) : _connected = onConnected,
+       _disconnected = onDisconnected;
+  final HostedJourneyFixture fixture;
+  final void Function() _connected;
+  final void Function(Object?) _disconnected;
+  @override
+  Future<void> connect() async {
+    fixture.socketHeaders.add(Map.of(headers));
+    expect(headers['Nostr-Federated-Identity'], 'Bearer synthetic-assertion');
+    if (fixture.refuseUpgrade) {
+      _disconnected(const WebSocketException('refused', 403));
+    } else {
+      _connected();
+    }
+  }
 }

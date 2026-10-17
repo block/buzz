@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:buzz/features/profile/profile_provider.dart';
-import 'package:buzz/hosted_app_gate.dart';
+import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';

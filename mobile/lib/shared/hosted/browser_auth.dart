@@ -1,3 +1,4 @@
+import '../storage/serial_queue.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -50,7 +51,7 @@ class BrowserAuth {
   Stream<BrowserAuthCode> get codes => _codes.stream;
   Stream<BrowserAuthFailure> get failures => _failures.stream;
   StreamSubscription<Uri>? _links;
-  Future<void> _settled = Future.value();
+  final _queue = SerialQueue();
   bool _disposed = false;
   bool _initialized = false;
   int _generation = 0;
@@ -58,11 +59,10 @@ class BrowserAuth {
   String? _consumedCallbackHash;
 
   Future<T> _serial<T>(Future<T> Function() task) {
-    final result = _settled.then((_) {
+    final result = _queue.run(() {
       if (_disposed) throw BrowserAuthFailure.cancelled;
       return task();
     });
-    _settled = result.then<void>((_) {}, onError: (Object _) {});
     return result;
   }
 

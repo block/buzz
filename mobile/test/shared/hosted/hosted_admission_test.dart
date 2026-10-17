@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -32,6 +33,7 @@ void main() {
     claims = [];
     admission = HostedAdmission(
       account: account,
+      relayAuth: HostedRelayAuth(account, enabled: false),
       store: store,
       probe: (_) async {},
       client: MockClient((request) async {
@@ -114,6 +116,7 @@ void main() {
       admission.dispose();
       admission = HostedAdmission(
         account: account,
+        relayAuth: HostedRelayAuth(account, enabled: false),
         store: store,
         probe: (_) async {},
         client: MockClient((request) async {
@@ -153,6 +156,7 @@ void main() {
     var current = true;
     final delayed = HostedAdmission(
       account: account,
+      relayAuth: HostedRelayAuth(account, enabled: false),
       store: store,
       probe: (_) {
         started.complete();
@@ -180,6 +184,7 @@ void main() {
     delayed.dispose();
     final rejected = HostedAdmission(
       account: account,
+      relayAuth: HostedRelayAuth(account, enabled: false),
       store: store,
       probe: (_) async {
         throw AccountFailure.denied;

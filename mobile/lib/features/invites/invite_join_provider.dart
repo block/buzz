@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/community_entry_requirements.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/deeplink/deep_link.dart';
@@ -12,7 +13,7 @@ import '../../shared/relay/relay_session.dart';
 import '../../shared/relay/relay_validation.dart';
 
 final inviteJoinHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = ref.watch(hostedHttpClientFactoryProvider)();
   ref.onDispose(client.close);
   return client;
 });

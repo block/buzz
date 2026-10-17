@@ -1,3 +1,4 @@
+import '../storage/serial_queue.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -86,12 +87,11 @@ class AccountIdentityStore {
 
   static final storageKey =
       'buzz_account_identity_${HostedEnvironment.origin.host.replaceAll('.', '_')}_v1';
-  static Future<void> _tail = Future<void>.value();
+  static final _queue = SerialQueue();
   final FlutterSecureStorage _storage;
 
   Future<T> _serialized<T>(Future<T> Function() operation) {
-    final result = _tail.then((_) => operation());
-    _tail = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    final result = _queue.run(() => operation());
     return result;
   }
 
@@ -206,6 +206,22 @@ class AccountIdentityStore {
   /// Validate a candidate without exposing signing material to the UI.
   static String publicKeyForNsec(String nsec) => _keys(nsec).public;
 
+  /// Rejects invalid secp256k1 scalars before constructing a signing key.
+  static nostr.Keys keysForHex(String hex) {
+    if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hex)) {
+      throw AccountIdentityFailure.invalidKey;
+    }
+    final scalar = BigInt.parse(hex, radix: 16);
+    final order = BigInt.parse(
+      'fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141',
+      radix: 16,
+    );
+    if (scalar <= BigInt.zero || scalar >= order) {
+      throw AccountIdentityFailure.invalidKey;
+    }
+    return nostr.Keys(hex);
+  }
+
   static nostr.Keys _keys(String nsec) {
     try {
       final decoded = nostr.Nip19.decode(payload: nsec);
@@ -213,15 +229,7 @@ class AccountIdentityStore {
           !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(decoded.data)) {
         throw AccountIdentityFailure.invalidKey;
       }
-      final scalar = BigInt.parse(decoded.data, radix: 16);
-      final order = BigInt.parse(
-        'fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141',
-        radix: 16,
-      );
-      if (scalar <= BigInt.zero || scalar >= order) {
-        throw AccountIdentityFailure.invalidKey;
-      }
-      return nostr.Keys(decoded.data);
+      return keysForHex(decoded.data);
     } catch (_) {
       throw AccountIdentityFailure.invalidKey;
     }

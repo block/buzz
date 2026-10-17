@@ -1,3 +1,4 @@
+import '../storage/serial_queue.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -34,13 +35,12 @@ class HostedBackupService {
   final AccountIdentityStore identity;
   final HpkeBackup _hpke;
   final FlutterSecureStorage _storage;
-  static Future<void> _tail = Future<void>.value();
+  static final _queue = SerialQueue();
   static String pendingKey(String subject, String pubkey) =>
       'buzz_backup_pending_v2_${sha256.convert(utf8.encode(jsonEncode([HostedEnvironment.origin.origin, subject, pubkey])))}';
 
   Future<void> backup({bool Function()? isCurrent}) {
-    final result = _tail.then((_) => _backup(isCurrent: isCurrent));
-    _tail = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    final result = _queue.run(() => _backup(isCurrent: isCurrent));
     return result;
   }
 

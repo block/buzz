@@ -8,7 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
-import '../../hosted_app_gate.dart';
+import '../../shared/hosted/hosted_flow_provider.dart';
 import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/community/paired_community_landing.dart';
 import '../../shared/crypto/ecdh.dart';
@@ -768,18 +768,8 @@ class PairingNotifier extends Notifier<PairingState> {
       if (!current()) return;
       await ref
           .read(authProvider.notifier)
-          .authenticateWithCommunity(
-            community,
-            shouldContinue: () =>
-                pairingGeneration == _pairingGeneration &&
-                state.status == PairingStatus.storing &&
-                !_sendIdentityToSource,
-          );
-      if (pairingGeneration != _pairingGeneration ||
-          state.status != PairingStatus.storing ||
-          _sendIdentityToSource) {
-        return;
-      }
+          .authenticateWithCommunity(community, shouldContinue: current);
+      if (!current()) return;
 
       // A validated transfer is not successful admission until storage succeeds.
       _sendComplete(true);

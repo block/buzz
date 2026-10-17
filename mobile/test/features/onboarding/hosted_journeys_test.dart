@@ -5,6 +5,11 @@ import 'dart:convert';
 import 'package:buzz/features/onboarding/hosted_profile_setup.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/relay/relay_session.dart';
+import 'package:buzz/shared/relay/relay_provider.dart';
+import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -33,6 +38,170 @@ void main() {
       );
     });
   }
+
+  journey(
+    'saved community signs in again without changing identity or onboarding',
+    (tester, f) async {
+      f.relayAuthEnabled = true;
+      await f.initialize(signedIn: false);
+      final community = Community.create(
+        name: 'One',
+        relayUrl: 'wss://one.communities.buzz.xyz',
+        pubkey: f.keys.public,
+        nsec: f.keys.nsec,
+      );
+      await f.storage.save(community);
+      await f.storage.saveActiveId(community.id);
+      await f.mount(tester, openEntry: false);
+      final session = f.container.read(relaySessionProvider.notifier);
+      await f.settle(tester);
+      expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
+      expect(f.socketHeaders, isEmpty);
+
+      final browser = Completer<void>();
+      f.beforeBrowserReturn = () => browser.future;
+      await f.tap(tester, 'Sign in');
+      await f.tap(tester, 'Cancel sign-in');
+      browser.complete();
+      await f.settle(tester);
+      expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
+      expect(f.socketHeaders, isEmpty);
+
+      f.beforeBrowserReturn = null;
+      await f.tap(tester, 'Sign in');
+      await f.settle(tester);
+      expect(f.socketHeaders, isNotEmpty);
+      expect(find.text('Sign in to Builderlab to reconnect'), findsNothing);
+      await session.queryRelay(const []);
+      expect(f.sent('/query'), hasLength(1));
+      final proofRequest = f.sent('/identity/assertions').single;
+      expect(
+        proofRequest.headers['X-BB-Session-Credential'],
+        'synthetic-session',
+      );
+      final proof =
+          jsonDecode(
+                utf8.decode(
+                  base64Decode(
+                    proofRequest.headers['Authorization']!.substring(6),
+                  ),
+                ),
+              )
+              as Map;
+      expect(proof['pubkey'], f.keys.public);
+      expect(
+        proof['tags'],
+        contains(equals(['u', proofRequest.url.toString()])),
+      );
+
+      // Production media transport attaches only to its captured community,
+      // refuses redirects, and renews an expired assertion without browser UI.
+      final media = f.container.read(mediaHttpClientProvider);
+      for (final origin in [
+        'https://one.communities.buzz.xyz',
+        'https://outside.example',
+      ]) {
+        await media.get(Uri.parse('$origin/auth-transport'));
+        final request = f.requests.last;
+        expect(
+          request.headers['Nostr-Federated-Identity'],
+          origin.contains('communities.buzz.xyz')
+              ? 'Bearer synthetic-assertion'
+              : isNull,
+        );
+        if (origin.contains('communities.buzz.xyz')) {
+          expect(request.followRedirects, isFalse);
+        }
+      }
+      final logins = f.browserStarts;
+      final issued = f.sent('/identity/assertions').length;
+      f.assertionNow = f.assertionNow.add(const Duration(minutes: 6));
+      await session.queryRelay(const []);
+      expect(f.sent('/identity/assertions'), hasLength(issued + 1));
+      expect(f.browserStarts, logins);
+
+      f.expiredSession = true;
+      f.container.read(hostedRelayAuthProvider).invalidate();
+      await expectLater(
+        session.queryRelay(const []),
+        throwsA(AccountFailure.signedOut),
+      );
+      await f.settle(tester);
+      expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
+      f.denyAssertion = true;
+      f.subject = 'wrong-owner';
+      await f.tap(tester, 'Sign in');
+      await f.settle(tester);
+      expect(
+        find.text(
+          'This account cannot reconnect to this community with its saved key.',
+        ),
+        findsOneWidget,
+      );
+      f.denyAssertion = false;
+      f.subject = 'journey-owner';
+      await f.tap(tester, 'Use a different account');
+      await f.settle(tester);
+      expect(
+        f.container.read(builderlabAccountProvider).account!.subject,
+        'journey-owner',
+      );
+      expect(find.text('Use a different account'), findsNothing);
+      expect((await f.storage.loadAll()).single.nsec, community.nsec);
+      // A legacy account can link the existing saved key on first issuance.
+      f.bound = null;
+      f.container.read(hostedRelayAuthProvider).invalidate();
+      await session.reconnect();
+      await f.settle(tester);
+      expect(f.bound, f.keys.public);
+      expect(
+        find.text(
+          'This account cannot reconnect to this community with its saved key.',
+        ),
+        findsNothing,
+      );
+      expect((await f.storage.loadAll()).single.nsec, community.nsec);
+      expect(await f.storage.loadActiveId(), community.id);
+      expect((await f.store.read())!.pubkey, f.keys.public);
+      for (final path in ['/status', '/enrollment', '/communities/joined']) {
+        expect(
+          f.sent(path),
+          isEmpty,
+          reason: 'Reconnect must not run onboarding',
+        );
+      }
+      // The issuer can succeed while the relay refuses the upgrade. One
+      // renewal is allowed, then stop; a user retry can recover later.
+      f.refuseUpgrade = true;
+      final attempts = f.socketHeaders.length;
+      await session.reconnect();
+      await f.settle(tester);
+      expect(f.socketHeaders.length, attempts + 2);
+      expect(
+        f.container.read(relaySessionProvider).status,
+        SessionStatus.disconnected,
+      );
+      expect(find.text('Use a different account'), findsOneWidget);
+      f.refuseUpgrade = false;
+      await session.reconnect();
+      await f.settle(tester);
+
+      // A timed-out query cannot dispatch later when a slow issuer completes.
+      final stalled = Completer<void>();
+      f.beforeAssertionReturn = () => stalled.future;
+      f.container.read(hostedRelayAuthProvider).invalidate();
+      final queries = f.sent('/query').length;
+      await expectLater(
+        session.queryRelay(const [], timeout: const Duration(milliseconds: 20)),
+        throwsA(isA<TimeoutException>()),
+      );
+      stalled.complete();
+      await f.settle(tester);
+      expect(f.sent('/query'), hasLength(queries));
+      f.beforeAssertionReturn = null;
+      expect(f.container.read(relayConfigProvider).nsec, community.nsec);
+    },
+  );
 
   journey(
     'fresh account signs in, backs up, accepts invite and retries starters before home',

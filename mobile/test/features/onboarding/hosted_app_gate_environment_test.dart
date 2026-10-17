@@ -1,5 +1,6 @@
 import 'package:buzz/features/channels/deep_link_dispatcher.dart';
 import 'package:buzz/hosted_app_gate.dart';
+import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';

@@ -40,16 +40,11 @@ class HostedIdentityService {
   final DeviceIdentitySource deviceIdentities;
   final BuilderlabAccountClient account;
   final AccountIdentityStore store;
-  Future<void> _tail = Future<void>.value();
 
   Future<HostedIdentityResult> resolve({
     bool Function()? isCurrent,
     String? selectedPubkey,
-  }) {
-    final result = _tail.then((_) => _resolve(isCurrent, selectedPubkey));
-    _tail = result.then<void>((_) {}, onError: (_) {});
-    return result;
-  }
+  }) => _resolve(isCurrent, selectedPubkey);
 
   Future<HostedIdentityResult> _resolve(
     bool Function()? isCurrent,
@@ -195,15 +190,7 @@ class HostedIdentityService {
         final hex = bytes
             .map((b) => b.toRadixString(16).padLeft(2, '0'))
             .join();
-        final scalar = BigInt.parse(hex, radix: 16);
-        final order = BigInt.parse(
-          'fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141',
-          radix: 16,
-        );
-        if (scalar <= BigInt.zero || scalar >= order) {
-          throw const FormatException();
-        }
-        final keys = nostr.Keys(hex);
+        final keys = AccountIdentityStore.keysForHex(hex);
         if (keys.public != _pubkey(backup['nostr_pubkey'])) {
           throw const FormatException();
         }

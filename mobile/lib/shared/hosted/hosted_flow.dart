@@ -1,3 +1,4 @@
+import '../storage/serial_queue.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -73,7 +74,6 @@ class HostedFlow extends ChangeNotifier {
     required this.store,
     required this.identity,
     required this.enterCommunity,
-    this.hpke,
     Future<bool> Function(Uri)? openWeb,
   }) : _openWeb =
            openWeb ??
@@ -83,7 +83,6 @@ class HostedFlow extends ChangeNotifier {
   final AccountIdentityStore store;
   final HostedIdentityService identity;
   final HostedCommunityAdmission enterCommunity;
-  final HpkeBackup? hpke;
   bool get canRetry =>
       problem == null ||
       problem == HostedFlowProblem.retry ||
@@ -110,7 +109,7 @@ class HostedFlow extends ChangeNotifier {
       communities.isNotEmpty;
   String? addingCommunityName;
   int get addedCommunityCount => _addedRelays.length;
-  Future<void> _tail = Future.value();
+  final _queue = SerialQueue();
   StreamSubscription<BrowserAuthCode>? _codes;
   StreamSubscription<BrowserAuthFailure>? _failures;
   bool _disposed = false;
@@ -188,6 +187,8 @@ class HostedFlow extends ChangeNotifier {
     if (consent != null && !consent.isCompleted) consent.complete(false);
   }
 
+  bool reconnecting = false;
+
   Future<void>? _initialization;
   Future<void> initialize() => _initialization ??= _initialize();
 
@@ -196,37 +197,31 @@ class HostedFlow extends ChangeNotifier {
     _codes = browser.codes.listen((code) {
       final generation = _generation;
       _enqueue(() async {
-        if (code.intent['type'] == 'account') {
-          accountOnly = true;
+        reconnecting = code.intent['type'] == 'reconnect';
+        accountOnly = reconnecting || code.intent['type'] == 'account';
+        if (accountOnly) {
           _target = null;
-          _set(HostedFlowStage.working);
-          await account.exchange(code: code.code, verifier: code.verifier);
-          if (_disposed || generation != _generation) return;
-          await _continue(generation);
-          return;
+        } else {
+          _restorePairing(code.intent);
+          _target = _decode(code.intent);
+          if (_target == null) throw BrowserAuthFailure.restartLogin;
         }
-        accountOnly = false;
-        _restorePairing(code.intent);
-        final target = _decode(code.intent);
-        if (target == null) throw BrowserAuthFailure.restartLogin;
-        _target = target;
         _set(HostedFlowStage.working);
         await account.exchange(code: code.code, verifier: code.verifier);
-        if (generation == _generation) await _continue(generation);
+        if (_disposed || generation != _generation) return;
+        if (reconnecting) {
+          await browser.clearIntent();
+          if (_disposed || generation != _generation) return;
+          _set(HostedFlowStage.complete);
+          reconnecting = false;
+        } else {
+          await _continue(generation);
+        }
       });
     });
     _failures = browser.failures.listen((failure) {
       if (_disposed) return;
-      if (accountOnly) {
-        if (stage != HostedFlowStage.signIn) return;
-        if (failure == BrowserAuthFailure.cancelled) {
-          unawaited(leave());
-        } else {
-          _set(HostedFlowStage.blocked, HostedFlowProblem.retry);
-        }
-        return;
-      }
-      if (_target == null) {
+      if (!accountOnly && _target == null) {
         if (_generation == 0) {
           _set(HostedFlowStage.blocked, HostedFlowProblem.retry);
         }
@@ -247,7 +242,11 @@ class HostedFlow extends ChangeNotifier {
         final retained = await browser.retainedIntent();
         if (_disposed || generation != _generation) return;
         if (retained != null && _target == null) {
-          if (retained['type'] == 'account') {
+          if (retained['type'] == 'reconnect') {
+            reconnecting = true;
+            accountOnly = true;
+            _set(HostedFlowStage.idle);
+          } else if (retained['type'] == 'account') {
             accountOnly = true;
             _set(HostedFlowStage.idle);
           } else {
@@ -262,6 +261,22 @@ class HostedFlow extends ChangeNotifier {
     });
   }
 
+  /// Reauthenticate an existing community without enrollment, backup or discovery.
+  Future<void> reconnectAccount({bool changeAccount = false}) async {
+    await initialize();
+    final generation = _nextGeneration();
+    reconnecting = true;
+    accountOnly = true;
+    _target = null;
+    _set(HostedFlowStage.signIn);
+    await _enqueue(() async {
+      if (_disposed || generation != _generation) return;
+      if (changeAccount) await account.clearLocalSession();
+      if (_disposed || generation != _generation) return;
+      await browser.start({'type': 'reconnect'});
+    });
+  }
+
   /// Explicit Connect completes identity setup and discovers joined communities.
   /// Passive startup restore only checks the saved session.
   Future<void> signInAccount({bool openBrowser = true}) {
@@ -272,6 +287,7 @@ class HostedFlow extends ChangeNotifier {
     }
     final generation = openBrowser ? _nextGeneration() : _generation;
     if (openBrowser) {
+      reconnecting = false;
       accountOnly = true;
       _clearCommunityBatch();
       _set(HostedFlowStage.working);
@@ -358,6 +374,7 @@ class HostedFlow extends ChangeNotifier {
       throw ArgumentError('Unsupported hosted target');
     }
     final generation = _nextGeneration();
+    reconnecting = false;
     accountOnly = false;
     _clearCommunityBatch();
     _target = target;
@@ -369,18 +386,23 @@ class HostedFlow extends ChangeNotifier {
       // remote work so restart can reconcile using the same saved identity.
       await browser.retainIntent(_intent(target));
       if (_disposed || generation != _generation) return;
-      final restored = await account.restore();
-      if (generation != _generation) return;
-      if (restored == null) {
-        _set(HostedFlowStage.signIn);
-        await browser.start(_intent(target));
-      } else {
-        await _continue(generation);
-      }
+      await _resume(generation, _intent(target));
     });
   }
 
+  Future<void> _resume(int generation, Map<String, String> intent) async {
+    final restored = await account.restore();
+    if (_disposed || generation != _generation) return;
+    if (restored == null) {
+      _set(HostedFlowStage.signIn);
+      await browser.start(intent);
+    } else {
+      await _continue(generation);
+    }
+  }
+
   Future<void> retry() async {
+    if (reconnecting) return reconnectAccount();
     final target = _target;
     if (target == null && !accountOnly) return;
     final generation = _nextGeneration();
@@ -391,16 +413,7 @@ class HostedFlow extends ChangeNotifier {
         await start(target, resumePairing: _pairedPubkey != null);
       } else {
         _set(HostedFlowStage.working);
-        await _enqueue(() async {
-          final restored = await account.restore();
-          if (_disposed || generation != _generation) return;
-          if (restored == null) {
-            _set(HostedFlowStage.signIn);
-            await browser.start({'type': 'account'});
-          } else {
-            await _continue(generation);
-          }
-        });
+        await _enqueue(() => _resume(generation, {'type': 'account'}));
       }
     } catch (_) {
       if (!_disposed && generation == _generation) {
@@ -433,7 +446,7 @@ class HostedFlow extends ChangeNotifier {
       _batchSubject = session.subject;
     }
     var resolved = await identity.resolve(
-      isCurrent: () => !_disposed && generation == _generation,
+      isCurrent: _isCurrent(generation),
       selectedPubkey: selectedPubkey,
     );
     if (_pairedPubkey != null && resolved.pubkey != _pairedPubkey) {
@@ -483,21 +496,18 @@ class HostedFlow extends ChangeNotifier {
             expectedPubkey: resolved.pubkey!,
             withKeys: store.withKeys,
             verify: _verifyBinding,
-            isCurrent: () => !_disposed && generation == _generation,
+            isCurrent: _isCurrent(generation),
           );
         } else if (resolved.state == HostedIdentityState.needsBackup) {
           await HostedBackupService(
             account,
             store,
-            hpke: hpke,
-          ).backup(isCurrent: () => !_disposed && generation == _generation);
+          ).backup(isCurrent: _isCurrent(generation));
         } else {
           break;
         }
         if (_disposed || generation != _generation) return;
-        resolved = await identity.resolve(
-          isCurrent: () => !_disposed && generation == _generation,
-        );
+        resolved = await identity.resolve(isCurrent: _isCurrent(generation));
       }
     }
     if (generation != _generation || _disposed) return;
@@ -520,7 +530,7 @@ class HostedFlow extends ChangeNotifier {
         expectedPubkey: pubkey,
         withKeys: store.withKeys,
         verify: _verifyBinding,
-        isCurrent: () => !_disposed && generation == _generation,
+        isCurrent: _isCurrent(generation),
       );
       if (generation != _generation || _disposed) return;
       if (!await _openWeb(returnTo)) throw BrowserAuthFailure.unavailable;
@@ -543,18 +553,14 @@ class HostedFlow extends ChangeNotifier {
       return;
     }
     final destination = target is HostedCreateCommunity
-        ? await target.provision(
-            account,
-            pubkey,
-            () => !_disposed && generation == _generation,
-          )
+        ? await target.provision(account, pubkey, _isCurrent(generation))
         : target;
     if (_disposed || generation != _generation) return;
     await enterCommunity(
       destination,
       session.subject,
       pubkey,
-      () => !_disposed && generation == _generation,
+      _isCurrent(generation),
     );
     if (generation != _generation || _disposed) return;
     await browser.clearIntent();
@@ -667,11 +673,7 @@ class HostedFlow extends ChangeNotifier {
   }
 
   bool _acceptTarget(BuzzDeepLink target) {
-    final relay = switch (target) {
-      InviteDeepLink(:final relayUrl) => relayUrl,
-      AddCommunityDeepLink(:final relayUrl) => relayUrl,
-      _ => null,
-    };
+    final relay = target.relayUrl;
     if (relay != null && !HostedEnvironment.supportsRelay(Uri.parse(relay))) {
       _set(HostedFlowStage.blocked, HostedFlowProblem.unsupportedEnvironment);
       return false;
@@ -705,9 +707,12 @@ class HostedFlow extends ChangeNotifier {
     return bound['pubkey_hex'] as String;
   }
 
+  bool Function() _isCurrent(int generation) =>
+      () => !_disposed && generation == _generation;
+
   Future<void> _enqueue(Future<void> Function() operation) {
     final generation = _generation;
-    final result = _tail.then((_) async {
+    final result = _queue.run(() async {
       if (_disposed || generation != _generation) return;
       try {
         await operation();
@@ -717,7 +722,6 @@ class HostedFlow extends ChangeNotifier {
         }
       }
     });
-    _tail = result;
     return result;
   }
 
@@ -775,12 +779,11 @@ class HostedFlow extends ChangeNotifier {
 
   Future<void> leave({bool noCommunities = false}) async {
     _nextGeneration();
-    _cancelPolicy();
-    _cancelProfile();
     final generation = _generation;
     _target = null;
     _pairedPubkey = null;
     pairedSensitiveActionPolicy = null;
+    reconnecting = false;
     accountOnly = false;
     _clearCommunityBatch();
     noCommunitiesToAdd = noCommunities;

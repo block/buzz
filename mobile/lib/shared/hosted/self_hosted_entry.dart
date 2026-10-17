@@ -1,3 +1,4 @@
+import '../storage/serial_queue.dart';
 import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -27,7 +28,7 @@ class SelfHostedEntry {
   final DeviceIdentitySource identities;
   final AccountIdentityStore _accountStore;
   final Future<void> Function(Community) _probe;
-  static Future<void> _tail = Future.value();
+  static final _queue = SerialQueue();
 
   /// Saved keys available for explicit reuse, including a hosted account that
   /// has not joined any community yet. This performs no account network calls.
@@ -50,7 +51,7 @@ class SelfHostedEntry {
     bool create = false,
     required bool Function() isCurrent,
   }) {
-    final result = _tail.then((_) async {
+    final result = _queue.run(() async {
       CommunityEntryRequirements.requireSelfHosted(relay);
       final uri = Uri.parse(relay);
       if (uri.scheme != 'wss' ||
@@ -118,7 +119,6 @@ class SelfHostedEntry {
       check();
       return community;
     });
-    _tail = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
     return result;
   }
 

@@ -1,6 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../hosted/hosted_relay_auth.dart';
 import '../community/community_provider.dart';
 import 'relay_client.dart';
 
@@ -131,7 +132,10 @@ final myPubkeyProvider = Provider<String?>((ref) {
 /// through the relay WebSocket session.
 final relayClientProvider = Provider<RelayClient>((ref) {
   final config = ref.watch(relayConfigProvider);
-  final client = RelayClient(baseUrl: config.baseUrl);
+  final client = RelayClient(
+    baseUrl: config.baseUrl,
+    httpClient: ref.watch(hostedHttpClientFactoryProvider)(),
+  );
   ref.onDispose(client.dispose);
   return client;
 });

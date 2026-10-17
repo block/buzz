@@ -12,6 +12,8 @@ import 'community_entry_requirements.dart';
 import 'hosted_environment.dart';
 import 'hosted_communities.dart';
 import 'hosted_join_policy.dart';
+import 'hosted_relay_auth.dart';
+import '../relay/relay_provider.dart';
 
 /// Builds a community only after scoped backup evidence and current binding.
 /// The caller persists it through the existing community transition owner.
@@ -20,16 +22,18 @@ class HostedAdmission {
     required this.account,
     required this.store,
     http.Client? client,
+    required this.relayAuth,
     Future<bool> Function(HostedJoinPolicy)? confirmPolicy,
     Future<void> Function(Community)? probe,
   }) : _confirmPolicy = confirmPolicy ?? ((_) async => false),
        _http = client ?? http.Client(),
-       _probe = probe ?? _authenticateRelay;
+       _probe = probe;
+  final HostedRelayAuth relayAuth;
   final BuilderlabAccountClient account;
   final AccountIdentityStore store;
   final http.Client _http;
   final Future<bool> Function(HostedJoinPolicy) _confirmPolicy;
-  final Future<void> Function(Community) _probe;
+  final Future<void> Function(Community)? _probe;
 
   Future<Community> prepare(
     BuzzDeepLink link,
@@ -45,11 +49,7 @@ class HostedAdmission {
     }
 
     checkCurrent();
-    final relay = switch (link) {
-      InviteDeepLink(:final relayUrl) => relayUrl,
-      AddCommunityDeepLink(:final relayUrl) => relayUrl,
-      _ => throw AccountFailure.invalidResponse,
-    };
+    final relay = link.relayUrl ?? (throw AccountFailure.invalidResponse);
     final uri = Uri.parse(relay);
     if (uri.scheme != 'wss' ||
         uri.userInfo.isNotEmpty ||
@@ -84,21 +84,24 @@ class HostedAdmission {
           'policy_receipt': ?receipt,
         });
         final url = uri.replace(scheme: 'https', path: '/api/invites/claim');
-        final header = await store.withKeys(
-          (keys) async => buildNip98AuthHeader(
-            method: 'POST',
-            url: url.toString(),
-            bodyBytes: utf8.encode(body),
-            nsec: keys.nsec,
-          ),
+        final headers = await store.withKeys(
+          (keys) async => {
+            ...await relayAuth.headers(
+              RelayConfig(baseUrl: relay, nsec: keys.nsec),
+            ),
+            'Authorization': buildNip98AuthHeader(
+              method: 'POST',
+              url: url.toString(),
+              bodyBytes: utf8.encode(body),
+              nsec: keys.nsec,
+            ),
+            'Content-Type': 'application/json',
+          },
         );
         checkCurrent();
         final request = http.Request('POST', url)
           ..followRedirects = false
-          ..headers.addAll({
-            'Authorization': header,
-            'Content-Type': 'application/json',
-          })
+          ..headers.addAll(headers)
           ..body = body;
         final response = await _http
             .send(request)
@@ -141,12 +144,12 @@ class HostedAdmission {
       );
     });
     checkCurrent();
-    await _probe(community);
+    await (_probe ?? _authenticateRelay)(community);
     checkCurrent();
     return community;
   }
 
-  static Future<void> _authenticateRelay(Community community) async {
+  Future<void> _authenticateRelay(Community community) async {
     final socket = RelaySocket(
       wsUrl: community.relayUrl,
       nsec: community.nsec,
@@ -155,6 +158,9 @@ class HostedAdmission {
       onDisconnected: (_) {},
     );
     try {
+      socket.headers = await relayAuth.headers(
+        RelayConfig(baseUrl: community.relayUrl, nsec: community.nsec),
+      );
       await socket.connect().timeout(const Duration(seconds: 30));
       if (socket.state != SocketState.connected) throw AccountFailure.denied;
     } finally {

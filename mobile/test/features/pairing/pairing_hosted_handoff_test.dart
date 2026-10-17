@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:buzz/features/pairing/pairing_provider.dart';
-import 'package:buzz/hosted_app_gate.dart';
+import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';

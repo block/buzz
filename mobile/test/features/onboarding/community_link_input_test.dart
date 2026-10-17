@@ -1,4 +1,4 @@
-import 'package:buzz/features/onboarding/community_link_input.dart';
+import 'package:buzz/shared/deeplink/community_link_input.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:flutter_test/flutter_test.dart';
 

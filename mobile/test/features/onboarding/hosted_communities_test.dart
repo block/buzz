@@ -1,5 +1,6 @@
 import 'package:buzz/features/onboarding/hosted_connect_page.dart';
 import 'package:buzz/hosted_app_gate.dart';
+import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';

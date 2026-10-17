@@ -1,3 +1,4 @@
+import '../hosted/hosted_relay_auth.dart';
 import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:math';
@@ -254,7 +255,10 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   /// Add a community. If one with the same relay URL already exists, update
   /// its credentials instead. Returns the effective community ID.
   Future<String> addCommunity(Community community) async {
-    await CommunityEntryRequirements.verify(community);
+    await CommunityEntryRequirements.verify(
+      community,
+      ref.read(builderlabAccountProvider),
+    );
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? [];
 

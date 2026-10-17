@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/browser_auth.dart';
@@ -63,6 +64,7 @@ void main() {
       final requests = <http.Request>[];
       final admission = HostedAdmission(
         account: account,
+        relayAuth: HostedRelayAuth(account, enabled: false),
         store: store,
         probe: (_) async {},
         client: MockClient((request) async {

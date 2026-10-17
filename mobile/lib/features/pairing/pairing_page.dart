@@ -1,5 +1,5 @@
 import 'dart:async';
-import '../../hosted_app_gate.dart';
+import '../../shared/hosted/hosted_flow_provider.dart';
 import '../../shared/hosted/hosted_flow.dart';
 import '../../shared/hosted/hosted_community_creation.dart';
 import '../../shared/hosted/hosted_environment.dart';
@@ -18,7 +18,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/error_haptic.dart';
 import '../../shared/deeplink/deep_link.dart';
-import '../onboarding/community_link_input.dart';
+import '../../shared/deeplink/community_link_input.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/community/community.dart';
 import '../../shared/community/community_loading_surface.dart';

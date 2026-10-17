@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
@@ -41,6 +42,7 @@ void main() {
         var probes = 0;
         final admission = HostedAdmission(
           account: f.account,
+          relayAuth: HostedRelayAuth(f.account, enabled: false),
           store: f.store,
           probe: (_) async {
             probes++;

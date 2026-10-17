@@ -1,3 +1,4 @@
+import '../hosted/hosted_relay_auth.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -64,7 +65,10 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
   }) {
     return ref.read(communityTransitionProvider).runExclusive(() async {
       if (shouldContinue != null && !shouldContinue()) return;
-      await CommunityEntryRequirements.verify(community);
+      await CommunityEntryRequirements.verify(
+        community,
+        ref.read(builderlabAccountProvider),
+      );
       if (shouldContinue != null && !shouldContinue()) return;
       if (activate) await ref.read(communityTransitionProvider).run();
       if (shouldContinue != null && !shouldContinue()) return;

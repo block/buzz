@@ -33,11 +33,7 @@ Future<void> connectHostedCommunity({
   required Future<void> Function(Community, bool Function())
   recoverStarterChannels,
 }) async {
-  final relay = switch (link) {
-    InviteDeepLink(:final relayUrl) => relayUrl,
-    AddCommunityDeepLink(:final relayUrl) => relayUrl,
-    _ => throw AccountFailure.invalidResponse,
-  };
+  final relay = link.relayUrl ?? (throw AccountFailure.invalidResponse);
   final communities = await storage.loadAll();
   final existing = communities
       .where((item) => relayIdentity(item.relayUrl) == relayIdentity(relay))

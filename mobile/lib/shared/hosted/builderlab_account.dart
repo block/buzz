@@ -1,3 +1,4 @@
+import '../storage/serial_queue.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -9,6 +10,8 @@ import 'package:http/http.dart' as http;
 import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
+import '../relay/relay_session.dart';
+import 'account_identity_store.dart';
 
 /// Errors contain no response bodies, credentials, or recovered private keys.
 /// Only [AccountFailure.signedOut] means "no session"; every other failure
@@ -68,7 +71,7 @@ class BuilderlabAccountClient {
   final FlutterSecureStorage _storage;
   String? _credential;
   BuilderlabAccount? _account;
-  Future<void> _tail = Future<void>.value();
+  final _queue = SerialQueue();
   bool _disposed = false;
 
   BuilderlabAccount? get account => _account;
@@ -76,11 +79,10 @@ class BuilderlabAccountClient {
   /// Runs operations one at a time in call order, so a callback exchange that
   /// arrives during startup restore waits instead of failing.
   Future<T> _serial<T>(Future<T> Function() operation) {
-    final result = _tail.then((_) {
+    final result = _queue.run(() {
       if (_disposed) throw AccountFailure.unavailable;
       return operation();
     });
-    _tail = result.then<void>((_) {}, onError: (_) {});
     return result;
   }
 
@@ -214,7 +216,14 @@ class BuilderlabAccountClient {
   /// Authenticated JSON POST to a Buzz account route on the fixed origin. The
   /// credential never leaves this client. A 401 clears the stored session only
   /// when the session check also rejects it; otherwise it is [AccountFailure.denied].
-  Future<Map<String, dynamic>> post(String path, Map<String, dynamic> body) {
+  Future<Map<String, dynamic>> post(String path, Map<String, dynamic> body) =>
+      _post(path, body);
+
+  Future<Map<String, dynamic>> _post(
+    String path,
+    Map<String, dynamic> body, {
+    String? signingKey,
+  }) {
     if (!RegExp(r'^/v1/buzz(/[a-z0-9_-]+)+$').hasMatch(path)) {
       throw ArgumentError.value(path, 'path', 'not a /v1/buzz/ route');
     }
@@ -222,7 +231,12 @@ class BuilderlabAccountClient {
       final credential = _credential;
       if (credential == null) throw AccountFailure.signedOut;
       try {
-        return await _request(path, credential: credential, body: body);
+        return await _request(
+          path,
+          credential: credential,
+          body: body,
+          signingKey: signingKey,
+        );
       } on AccountFailure catch (failure) {
         if (failure == AccountFailure.denied &&
             _account?.needsAccountSetup == true) {
@@ -242,6 +256,14 @@ class BuilderlabAccountClient {
     });
   }
 
+  /// Proves the saved key. The issuer may establish its first account binding;
+  /// conflicting or retired bindings are refused atomically by the backend.
+  Future<Map<String, dynamic>> relayAssertion(String relay, String nsec) =>
+      _post('/v1/buzz/identity/assertions', {
+        'relay_url': relay,
+        'nostr_pubkey': AccountIdentityStore.publicKeyForNsec(nsec),
+      }, signingKey: nsec);
+
   Future<void> clearLocalSession() => _serial(_clear);
   Future<void> _clear() async {
     _credential = null;
@@ -257,6 +279,7 @@ class BuilderlabAccountClient {
     String path, {
     String? credential,
     Map<String, dynamic>? body,
+    String? signingKey,
   }) async {
     try {
       final request =
@@ -273,6 +296,14 @@ class BuilderlabAccountClient {
         request.headers['Content-Type'] = 'application/json';
         request.headers['Origin'] = origin.toString();
         request.body = jsonEncode(body);
+        if (signingKey != null) {
+          request.headers['Authorization'] = buildNip98AuthHeader(
+            method: 'POST',
+            url: request.url.toString(),
+            bodyBytes: request.bodyBytes,
+            nsec: signingKey,
+          );
+        }
       }
       final response = await _http
           .send(request)
