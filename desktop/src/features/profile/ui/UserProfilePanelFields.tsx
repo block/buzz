@@ -10,6 +10,7 @@ import {
   UserRound,
 } from "lucide-react";
 import * as React from "react";
+import { displayedManagedAgentStatus } from "@/features/agents/lib/managedAgentControlActions";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { canonicalNpub, truncateNpub } from "@/shared/lib/pubkey";
 import {
@@ -327,7 +328,10 @@ export function buildOwnerFields({
 
   if (managedAgent) {
     fields.push({
-      displayValue: managedAgent.status
+      displayValue: displayedManagedAgentStatus(
+        managedAgent.status,
+        presenceStatus,
+      )
         .replace(/_/g, " ")
         .replace(/\b\w/g, (char: string) => char.toUpperCase()),
       displayNode: (
