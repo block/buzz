@@ -1,3 +1,9 @@
+[graph]
+# buzz-mesh-smoke is a test-only hardware smoke-test crate; nothing from it ships.
+# It is the only root-workspace crate depending on mesh-llm, whose zip/zbus
+# advisories have no usable upstream fix for our pinned version.
+exclude = ["buzz-mesh-smoke"]
+
 [advisories]
 ignore = [
     # instant 0.1.13 — unmaintained crate. Transitive dep: nostr → instant.
