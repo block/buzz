@@ -192,6 +192,8 @@ pub(super) async fn handle_relay_admin_event(
     //
     // This gate wraps execution rather than opening it so no future early
     // return inside the command body can precede it.
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_command_ban_check(tenant.community()).await;
     let restriction = state
         .db
         .moderation_restriction_state(tenant.community(), &event.pubkey.to_bytes())
@@ -1213,8 +1215,8 @@ mod postgres_tests {
 
         let error = result.expect_err("the audit failure is reported");
         assert!(
-            error.contains("audit"),
-            "reports the audit failure: {error}"
+            matches!(&error, crate::handlers::ingest::IngestError::Rejected(m) if m.contains("audit")),
+            "reports the audit failure: {error:?}"
         );
         assert!(
             state
@@ -1276,7 +1278,7 @@ mod postgres_tests {
                 &tenant, &state, &event,
             )
             .await
-            .unwrap_or_else(|e| panic!("kind {} must apply: {e}", event.kind.as_u16()));
+            .unwrap_or_else(|e| panic!("kind {} must apply: {e:?}", event.kind.as_u16()));
             assert_eq!(
                 state.restriction_cache.get(&key),
                 None,

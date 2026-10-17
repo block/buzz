@@ -199,6 +199,16 @@ make_hook!(audio_membership_check_hook, before_membership_check);
 // immediately before the relay membership lookup. Closing the pool here makes
 // that lookup fail with the tenant already bound.
 make_hook!(git_membership_hook, before_git_membership);
+// `before_http_ban_recheck`: fires in `buzz_v1` and Git settings after the
+// shared membership check passes, immediately before the fresh ban reread.
+// A ban or closed pool here makes only the reread refuse.
+make_hook!(http_ban_recheck_hook, before_http_ban_recheck);
+// `before_write_ban_check`: fires in ingest's write-restriction gates (plain
+// and cached) immediately before the restriction read.
+// `before_command_ban_check`: fires in the moderation and relay-admin command
+// handlers immediately before their own ban reread, after the write gate.
+make_hook!(write_ban_check_hook, before_write_ban_check);
+make_hook!(command_ban_check_hook, before_command_ban_check);
 make_hook!(audio_membership_lock_hook, before_membership_lock);
 make_hook!(audio_participant_commit_hook, before_participant_commit);
 // `before_audio_refusal_frames`: fires in `audio/handler.rs` once a NIP-42

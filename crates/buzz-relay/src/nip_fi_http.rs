@@ -255,6 +255,12 @@ impl<X> NipFiAdmission<X> {
         self.assertion.as_ref()
     }
 
+    /// The owner named by a verified agent assertion (Enforce only). It
+    /// takes the place of a NIP-OA owner in the relay-membership step.
+    pub(crate) fn token_owner(&self) -> Option<PublicKey> {
+        self.assertion.as_ref().and_then(VerifiedAssertion::owner)
+    }
+
     /// Caller-supplied side-data from the NIP-98 extraction closure.
     #[allow(dead_code)]
     pub(crate) fn extra(&self) -> &X {
