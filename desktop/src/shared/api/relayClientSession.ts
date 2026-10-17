@@ -9,8 +9,6 @@ import {
   KIND_STREAM_MESSAGE,
   KIND_TYPING_INDICATOR,
   KIND_USER_STATUS,
-  CHANNEL_EVENT_KINDS,
-  KIND_CHANNEL_THREAD_SUMMARY,
 } from "@/shared/constants/kinds";
 import {
   getTextPayload,
@@ -26,6 +24,7 @@ import {
   buildChannelAuxDeletionFilter,
   buildChannelFilter,
   buildChannelHistoryFilter,
+  buildChannelLiveFilter,
   buildGlobalStreamFilter,
 } from "@/shared/api/relayChannelFilters";
 import {
@@ -333,23 +332,15 @@ export class RelayClient {
     return this.subscribe(buildChannelFilter(channelId, 50), onEvent);
   }
 
-  /** Subscribe to channel rows and aux starting now, with no history replay. */
+  /** Subscribe to channel rows and aux, with one callback per dispatched batch. */
   async subscribeToChannelLive(
     channelId: string,
     onEvent: (event: RelayEvent) => void,
+    onFlush?: () => void,
   ) {
-    // 39005 rides only this window-store subscription — CHANNEL_EVENT_KINDS'
-    // other consumers (unread tracking, cache merges) must never see
-    // summary overlays.
-    return this.subscribe(
-      {
-        kinds: [...CHANNEL_EVENT_KINDS, KIND_CHANNEL_THREAD_SUMMARY],
-        "#h": [channelId],
-        limit: 1000,
-        since: Math.floor(Date.now() / 1_000),
-      },
-      onEvent,
-    );
+    return this.subscribe(buildChannelLiveFilter(channelId), onEvent, {
+      onFlush,
+    });
   }
 
   /**
@@ -421,21 +412,18 @@ export class RelayClient {
     readinessTimeoutMs?: number,
     signal?: AbortSignal,
   ) {
-    return this.subscribe(filter, onEvent, onReady, readinessTimeoutMs, signal);
+    return this.subscribe(filter, onEvent, {
+      onReady,
+      readinessTimeoutMs,
+      signal,
+    });
   }
   /** Prioritize an interactive live consumer without changing its replay filter or pacing. */
   async subscribeInteractive(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
   ) {
-    return this.subscribe(
-      filter,
-      onEvent,
-      undefined,
-      undefined,
-      undefined,
-      "interactive",
-    );
+    return this.subscribe(filter, onEvent, { priority: "interactive" });
   }
 
   async preconnect() {
@@ -618,10 +606,19 @@ export class RelayClient {
   private async subscribe(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
-    onReady?: (readiness: LiveSubscriptionReadiness) => void,
-    readinessTimeoutMs = 250,
-    signal?: AbortSignal,
-    priority?: "interactive",
+    {
+      onReady,
+      readinessTimeoutMs = 250,
+      signal,
+      priority,
+      onFlush,
+    }: {
+      onReady?: (readiness: LiveSubscriptionReadiness) => void;
+      readinessTimeoutMs?: number;
+      signal?: AbortSignal;
+      priority?: "interactive";
+      onFlush?: () => void;
+    } = {},
   ) {
     const epoch = this.sessionEpoch;
     const sessionSignal = this.liveSessionAbort.signal;
@@ -640,6 +637,7 @@ export class RelayClient {
       filter,
       priority,
       onEvent,
+      onFlush,
       onRemoved,
     };
     const dispose = async () => {
@@ -934,6 +932,8 @@ export class RelayClient {
             "Failed to restore relay subscription after CLOSED.",
           ),
         closeSubscription: (subId) => this.closeSubscription(subId),
+        requestRepair: getChannelReconnectRepairEvents,
+        connectionGeneration: () => this.connectionGeneration,
       });
       if (!this.subscriptions.has(rest[0])) this.liveReqDrain.cancel(rest[0]);
       this.channelAccessRevocations.notify(subscription, rest[1]);

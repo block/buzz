@@ -326,19 +326,19 @@ export function useChannelSubscription(channel: Channel | null) {
   });
 
   const appendMessage = useEffectEvent((event: RelayEvent) => {
-    if (!channelId) return;
+    if (!channelId) return false;
     if (event.kind === KIND_CHANNEL_THREAD_SUMMARY) {
       // Relay-pushed live badge recount — window-store overlay only, never a
       // timeline row (mirrors the page path, where 39005 is metadata).
       const parsed = parseLiveThreadSummary(event);
-      if (!parsed) return;
+      if (!parsed) return false;
       const windowKey = channelWindowKey(channelId);
       const current =
         queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
         emptyChannelWindowStore();
       const next = mergeLiveThreadSummary(current, parsed.rootId, parsed.live);
       if (next !== current) queryClient.setQueryData(windowKey, next);
-      return;
+      return false;
     }
     const isTimelineRow = CHANNEL_TIMELINE_KINDS.has(event.kind);
     const threadReference = isTimelineRow
@@ -352,9 +352,9 @@ export function useChannelSubscription(channel: Channel | null) {
           (current = []) => mergeMessages(current, event),
         );
       }
-      if (!isBroadcastReply(event.tags)) return;
+      if (!isBroadcastReply(event.tags)) return false;
     }
-    if (!isTimelineRow && !CHANNEL_AUX_KINDS.has(event.kind)) return;
+    if (!isTimelineRow && !CHANNEL_AUX_KINDS.has(event.kind)) return false;
     if (!isTimelineRow) {
       queryClient.setQueriesData<RelayEvent[]>(
         { queryKey: ["thread-replies", channelId] },
@@ -369,7 +369,6 @@ export function useChannelSubscription(channel: Channel | null) {
     const next = mergeLiveChannelWindowEvent(current, event, isTimelineRow);
     if (next !== current) {
       queryClient.setQueryData(windowKey, next);
-      projectChannelWindowMessages(queryClient, channelId);
     }
 
     if (event.kind === KIND_SYSTEM_MESSAGE) {
@@ -391,6 +390,7 @@ export function useChannelSubscription(channel: Channel | null) {
         // Non-JSON system message — ignore.
       }
     }
+    return next !== current;
   });
 
   // Notify the relay client which channel is currently visible so its live
@@ -411,6 +411,8 @@ export function useChannelSubscription(channel: Channel | null) {
 
     let isDisposed = false;
     let cleanup: (() => Promise<void>) | undefined;
+    // Project once per dispatched batch, not once per event (replay is up to `limit` rows).
+    let shouldProjectOnFlush = false;
     const disposeReconnectListener = relayClient.subscribeToReconnects(() => {
       void refreshNewestWindow().catch((error) => {
         if (!isDisposed) {
@@ -423,7 +425,7 @@ export function useChannelSubscription(channel: Channel | null) {
       });
     });
 
-    // The live subscription starts at "now", so it cannot close the gap
+    // The live subscription replays only its newest rows, so it cannot close the gap
     // between the last page snapshot and subscription establishment. Always
     // refresh once subscription setup settles — on success because freshness
     // alone is not proof that no relay events landed in that interval, and on
@@ -443,11 +445,20 @@ export function useChannelSubscription(channel: Channel | null) {
       });
     };
     relayClient
-      .subscribeToChannelLive(channelId, (event) => {
-        if (!isDisposed) {
-          appendMessage(event);
-        }
-      })
+      .subscribeToChannelLive(
+        channelId,
+        (event) => {
+          if (!isDisposed) {
+            shouldProjectOnFlush = appendMessage(event) || shouldProjectOnFlush;
+          }
+        },
+        () => {
+          if (!isDisposed && shouldProjectOnFlush) {
+            projectChannelWindowMessages(queryClient, channelId);
+          }
+          shouldProjectOnFlush = false;
+        },
+      )
       .then(
         (dispose) => {
           if (isDisposed) {
@@ -470,7 +481,7 @@ export function useChannelSubscription(channel: Channel | null) {
         void cleanup();
       }
     };
-  }, [channelId, channelType]);
+  }, [channelId, channelType, queryClient]);
 }
 
 export function useSendMessageMutation(
