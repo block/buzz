@@ -85,10 +85,21 @@ bool isSameDay(int a, int b) {
 /// avatars, and sticky headers. Resolve each timestamp only once. Create a new
 /// instance on each build so a timezone change cannot leave stale cached days.
 class TimelineCalendarDays {
+  /// Creates a calendar cache using local-time conversion.
+  TimelineCalendarDays() : _toLocalDate = _localDate;
+
+  /// Creates a cache with an observable conversion for regression tests.
+  @visibleForTesting
+  TimelineCalendarDays.withConverter(this._toLocalDate);
+
+  final DateTime Function(int) _toLocalDate;
   final _days = <int, (int, int, int)>{};
 
+  static DateTime _localDate(int unixSeconds) =>
+      DateTime.fromMillisecondsSinceEpoch(unixSeconds * 1000);
+
   (int, int, int) _day(int unixSeconds) => _days.putIfAbsent(unixSeconds, () {
-    final date = DateTime.fromMillisecondsSinceEpoch(unixSeconds * 1000);
+    final date = _toLocalDate(unixSeconds);
     return (date.year, date.month, date.day);
   });
 

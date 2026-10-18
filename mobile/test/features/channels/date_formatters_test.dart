@@ -5,6 +5,29 @@ import 'package:buzz/features/channels/date_formatters.dart';
 int _ts(DateTime local) => local.millisecondsSinceEpoch ~/ 1000;
 
 void main() {
+  test('timeline converts each timestamp only once per cache', () {
+    final conversions = <int, int>{};
+    DateTime convert(int timestamp) {
+      conversions.update(timestamp, (count) => count + 1, ifAbsent: () => 1);
+      return DateTime.fromMillisecondsSinceEpoch(timestamp * 1000);
+    }
+
+    final first = _ts(DateTime(2026, 10, 18, 10));
+    final second = _ts(DateTime(2026, 10, 18, 11));
+    final nextDay = _ts(DateTime(2026, 10, 19));
+    final days = TimelineCalendarDays.withConverter(convert);
+    for (var repeat = 0; repeat < 3; repeat++) {
+      expect(days.isSameDay(first, second), isTrue);
+      expect(days.isSameDay(second, nextDay), isFalse);
+      expect(days.isSameDay(first, first), isTrue);
+    }
+    expect(conversions, {first: 1, second: 1, nextDay: 1});
+
+    final nextBuild = TimelineCalendarDays.withConverter(convert);
+    expect(nextBuild.isSameDay(first, second), isTrue);
+    expect(conversions, {first: 2, second: 2, nextDay: 1});
+  });
+
   test('timeline calendar grouping matches uncached local-day comparisons', () {
     final days = TimelineCalendarDays();
     final timestamps = [
