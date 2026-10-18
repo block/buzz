@@ -101,6 +101,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       }
 
       final uri = Uri.parse(url);
+      final headers = await auth.headersForAsync(url);
       final http.Response response;
       try {
         final abort = Completer<void>();
@@ -110,7 +111,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
             'GET',
             uri,
             abortTrigger: abort.future,
-          )..headers.addAll(auth.headersFor(url));
+          )..headers.addAll(headers);
           response = await http.Response.fromStream(await client.send(request));
         } finally {
           deadline.cancel();

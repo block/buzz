@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -37,6 +39,7 @@ class MediaGetAuthService {
 
   Map<String, String>? _cachedHeaders;
   DateTime? _refreshAt;
+  Future<void> _signingTail = Future<void>.value();
 
   MediaGetAuthService({
     required String baseUrl,
@@ -53,6 +56,35 @@ class MediaGetAuthService {
     final relayUri = Uri.tryParse(_baseUrl);
     if (uri == null || relayUri == null) return false;
     return _isRelayMediaUrl(uri, relayUri);
+  }
+
+  /// Mints fetch-time auth without doing cryptography on the UI isolate.
+  ///
+  /// Image loading starts during layout. Serialize signing per auth scope so a
+  /// viewport full of uncached images does not spawn an isolate per row at once.
+  /// Timestamp each proof when its queued job starts, not when it was enqueued.
+  Future<Map<String, String>> headersForAsync(String url) {
+    final nsec = _nsec;
+    if (nsec == null || nsec.isEmpty || !isRelayMediaUrl(url)) {
+      return Future.value(const {});
+    }
+    final released = Completer<void>();
+    final result = _signingTail.then((_) async {
+      try {
+        return await compute(_mediaHeadersInBackground, (
+          baseUrl: _baseUrl,
+          nsec: nsec,
+          url: url,
+          now: _now(),
+        ), debugLabel: 'media-get-auth');
+      } finally {
+        // A failed worker must propagate to its fetch without blocking later
+        // requests in the queue.
+        released.complete();
+      }
+    });
+    _signingTail = released.future;
+    return result;
   }
 
   Map<String, String> headersFor(String url) {
@@ -131,6 +163,14 @@ class MediaGetAuthService {
     );
   }
 }
+
+Map<String, String> _mediaHeadersInBackground(
+  ({String baseUrl, String nsec, String url, DateTime now}) request,
+) => MediaGetAuthService(
+  baseUrl: request.baseUrl,
+  nsec: request.nsec,
+  now: () => request.now,
+).headersFor(request.url);
 
 final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
   final config = ref.watch(relayConfigProvider);

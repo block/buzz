@@ -1,5 +1,5 @@
-import 'dart:convert';
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
@@ -70,6 +70,83 @@ void main() {
     });
   });
 
+  group('background media auth', () {
+    test(
+      'mints fresh valid server-scoped proofs for concurrent requests',
+      () async {
+        final keys = nostr.Keys.generate();
+        final signedAt = DateTime.utc(2026, 10, 17, 12);
+        final auth = _auth(nsec: keys.nsec, now: () => signedAt);
+        final headers = await Future.wait([
+          auth.headersForAsync(_mediaUrl),
+          auth.headersForAsync(_mediaUrl),
+        ]);
+        final events = headers.map((header) {
+          final encoded = header['Authorization']!.substring('Nostr '.length);
+          return nostr.Event.fromJson(
+            utf8.decode(base64Url.decode(base64Url.normalize(encoded))),
+          );
+        }).toList();
+        expect(events[0].sig, isNot(events[1].sig));
+        for (final event in events) {
+          expect(event.isValid(), isTrue);
+          expect(event.pubkey, keys.public);
+          expect(event.kind, 24242);
+          expect(event.tags, contains(equals(['t', 'get'])));
+          expect(event.tags, contains(equals(['server', 'relay.example.com'])));
+          final expiration = int.parse(
+            event.tags.singleWhere((tag) => tag.first == 'expiration')[1],
+          );
+          expect(expiration, signedAt.millisecondsSinceEpoch ~/ 1000 + 60);
+        }
+      },
+    );
+
+    test('keeps the signing identity separate across auth scopes', () async {
+      final first = nostr.Keys.generate();
+      final second = nostr.Keys.generate();
+      for (final keys in [first, second]) {
+        final header = await _auth(nsec: keys.nsec).headersForAsync(_mediaUrl);
+        final encoded = header['Authorization']!.substring('Nostr '.length);
+        final event = nostr.Event.fromJson(
+          utf8.decode(base64Url.decode(base64Url.normalize(encoded))),
+        );
+        expect(event.pubkey, keys.public);
+      }
+    });
+
+    test('does not expose auth to other origins or invalid paths', () async {
+      final auth = _auth(nsec: nostr.Keys.generate().nsec);
+      for (final url in [
+        'https://elsewhere.com/media/a.png',
+        '$_relayBase/media-evil/a.png',
+        'ftp://relay.example.com/media/a.png',
+      ]) {
+        expect(await auth.headersForAsync(url), isEmpty);
+      }
+      expect(await _auth().headersForAsync(_mediaUrl), isEmpty);
+      expect(await _auth(nsec: 'invalid').headersForAsync(_mediaUrl), isEmpty);
+    });
+
+    test(
+      'a failed queued job propagates without poisoning later jobs',
+      () async {
+        var calls = 0;
+        final auth = _auth(
+          nsec: nostr.Keys.generate().nsec,
+          now: () {
+            if (calls++ == 0) throw StateError('clock unavailable');
+            return DateTime.now();
+          },
+        );
+        final failed = auth.headersForAsync(_mediaUrl);
+        final next = auth.headersForAsync(_mediaUrl);
+        await expectLater(failed, throwsStateError);
+        expect(await next, isNotEmpty);
+      },
+    );
+  });
+
   group('MediaImageProvider cache identity', () {
     test('equal url + same auth service => equal keys', () {
       final auth = _auth(nsec: nostr.Keys.generate().nsec);
@@ -111,6 +188,34 @@ void main() {
   });
 
   group('MediaImageProvider fetching', () {
+    test(
+      'waits for asynchronous auth before fetching, without synchronous signing',
+      () async {
+        var fetches = 0;
+        final auth = _DeferredMediaAuth();
+        final client = http_testing.MockClient((request) async {
+          fetches++;
+          expect(request.headers['Authorization'], 'Nostr deferred');
+          return http.Response.bytes(_pngBytes, 200);
+        });
+        addTearDown(client.close);
+        final provider = MediaImageProvider(
+          url: _mediaUrl,
+          auth: auth,
+          client: client,
+        );
+        final loaded = expectLater(
+          _wait(provider.resolve(ImageConfiguration.empty)),
+          completes,
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(fetches, 0);
+        auth.headers.complete({'Authorization': 'Nostr deferred'});
+        await loaded;
+        expect(fetches, 1);
+      },
+    );
+
     test('resolves one fetch for repeated resolves of the same key', () async {
       var fetches = 0;
       final client = http_testing.MockClient((request) async {
@@ -241,4 +346,14 @@ Future<Object?> _waitError(ImageStream stream) async {
   } catch (e) {
     return e;
   }
+}
+
+class _DeferredMediaAuth extends MediaGetAuthService {
+  _DeferredMediaAuth() : super(baseUrl: _relayBase, nsec: null);
+  final headers = Completer<Map<String, String>>();
+  @override
+  Future<Map<String, String>> headersForAsync(String url) => headers.future;
+  @override
+  Map<String, String> headersFor(String url) =>
+      throw StateError('Image layout must not sign synchronously');
 }
