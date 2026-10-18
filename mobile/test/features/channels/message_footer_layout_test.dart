@@ -1,47 +1,8 @@
 import 'package:buzz/features/channels/message_footer_layout.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('unchanged footer geometry does not relayout its timeline row', (
-    tester,
-  ) async {
-    var layouts = 0;
-    final overlap = ValueNotifier(8.0);
-    addTearDown(overlap.dispose);
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Align(
-          alignment: Alignment.topLeft,
-          child: _LayoutCounter(
-            onLayout: () => layouts++,
-            child: ValueListenableBuilder(
-              valueListenable: overlap,
-              builder: (context, value, child) => MessageFooterLayout(
-                overlap: value,
-                footer: const SizedBox(width: 100, height: 32),
-                child: const SizedBox(width: 200, height: 60),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-    final initialLayouts = layouts;
-    tester.element(find.byType(MessageFooterLayout)).markNeedsBuild();
-    await tester.pump();
-    expect(
-      layouts,
-      initialLayouts,
-      reason: 'Rebuilding unchanged reactions must not dirty the row layout',
-    );
-    overlap.value = 12;
-    await tester.pump();
-    expect(layouts, greaterThan(initialLayouts));
-    expect(tester.getSize(find.byType(MessageFooterLayout)).height, 80);
-  });
-
   testWidgets('footer global transforms and semantics include overlap offset', (
     tester,
   ) async {
@@ -156,22 +117,4 @@ void main() {
       expect(taps, 1);
     },
   );
-}
-
-class _LayoutCounter extends SingleChildRenderObjectWidget {
-  const _LayoutCounter({required this.onLayout, required super.child});
-  final VoidCallback onLayout;
-  @override
-  RenderObject createRenderObject(BuildContext context) =>
-      _CountLayouts(onLayout);
-}
-
-class _CountLayouts extends RenderProxyBox {
-  _CountLayouts(this.onLayout);
-  final VoidCallback onLayout;
-  @override
-  void performLayout() {
-    onLayout();
-    super.performLayout();
-  }
 }

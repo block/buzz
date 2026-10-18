@@ -54,7 +54,9 @@ class _FooterLayout extends MultiChildRenderObjectWidget {
     BuildContext context,
     covariant RenderBox renderObject,
   ) {
-    (renderObject as _RenderMessageFooter).overlap = overlap;
+    (renderObject as _RenderMessageFooter)
+      ..overlap = overlap
+      ..markNeedsLayout();
   }
 }
 
@@ -68,15 +70,9 @@ class _RenderMessageFooter extends RenderBox
           RenderBox,
           ContainerBoxParentData<RenderBox>
         > {
-  _RenderMessageFooter(this._overlap);
+  _RenderMessageFooter(this.overlap);
 
-  double _overlap;
-  double get overlap => _overlap;
-  set overlap(double value) {
-    if (_overlap == value) return;
-    _overlap = value;
-    markNeedsLayout();
-  }
+  double overlap;
 
   @override
   void setupParentData(RenderBox child) {

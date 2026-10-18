@@ -56,7 +56,6 @@ class _MessageList extends HookConsumerWidget {
       localMessageSendAnimationProvider(channelId),
     );
     final displayEntries = groupMembershipTimelineEntries(entries);
-    final calendarDays = TimelineCalendarDays();
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final stickyDayTimestamp = useValueNotifier<int?>(null);
@@ -126,7 +125,7 @@ class _MessageList extends HookConsumerWidget {
           : null;
       final startsDay =
           previousMessage == null ||
-          !calendarDays.isSameDay(previousMessage.createdAt, message.createdAt);
+          !isSameDay(previousMessage.createdAt, message.createdAt);
       final reversedIndex = displayEntries.length - 1 - chronologicalIndex;
       if (startsDay) {
         currentDayTimestamp = message.createdAt;
@@ -915,10 +914,7 @@ class _MessageList extends HookConsumerWidget {
                 final prevMessage = prevEntry?.message;
                 final showDayDivider =
                     prevMessage == null ||
-                    !calendarDays.isSameDay(
-                      prevMessage.createdAt,
-                      message.createdAt,
-                    );
+                    !isSameDay(prevMessage.createdAt, message.createdAt);
 
                 final showAuthor =
                     !message.isSystem &&
@@ -939,10 +935,7 @@ class _MessageList extends HookConsumerWidget {
                     nextMessage == null ||
                     nextMessage.isSystem ||
                     nextMessage.hasAttachments ||
-                    !calendarDays.isSameDay(
-                      message.createdAt,
-                      nextMessage.createdAt,
-                    ) ||
+                    !isSameDay(message.createdAt, nextMessage.createdAt) ||
                     nextMessage.pubkey.toLowerCase() !=
                         message.pubkey.toLowerCase() ||
                     nextMessage.createdAt - message.createdAt > 300;
