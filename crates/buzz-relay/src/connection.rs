@@ -3446,57 +3446,58 @@ mod terminal_close_delivery_tests {
         socket
     }
 
-    /// Reads until EOF, returning how long the server took to end the socket.
-    async fn time_to_eof(socket: &mut tokio::net::TcpStream) -> std::time::Duration {
+    /// Generous watchdog for a socket the server must end on its own.
+    const EOF_WATCHDOG: Duration = Duration::from_secs(10);
+
+    /// Reads until EOF and returns the time elapsed since `started`.
+    async fn time_to_eof(
+        socket: &mut tokio::net::TcpStream,
+        started: std::time::Instant,
+    ) -> Duration {
         use tokio::io::AsyncReadExt as _;
 
-        let started = std::time::Instant::now();
         let mut buf = [0u8; 64];
-        loop {
-            let n = tokio::time::timeout(std::time::Duration::from_secs(3), socket.read(&mut buf))
-                .await
-                .expect("server must end the socket within 3s")
-                .expect("read");
-            if n == 0 {
-                return started.elapsed();
-            }
-        }
+        tokio::time::timeout(EOF_WATCHDOG, async {
+            while socket.read(&mut buf).await.expect("read") != 0 {}
+        })
+        .await
+        .expect("server must end the socket on its own");
+        started.elapsed()
     }
 
     /// Dropping TCP before the peer finishes the close handshake (including
     /// in-flight peer frames) can make a client lose the NOTICE and Close
     /// (seen live as `1006`). This raw client never replies: the server must
-    /// hold the socket open after its Close, with the connection already
-    /// deregistered, and still end it within its bounded wait.
+    /// hold the socket for its full bounded wait, which starts only after
+    /// connect, so timing from before connect makes the lower bound
+    /// independent of scheduler delay. The wait runs after cleanup, so the
+    /// connection is already deregistered once the socket ends.
     #[tokio::test]
     async fn server_holds_socket_for_client_close_reply() {
-        use tokio::io::AsyncReadExt as _;
-
         let (address, _, state, conn_id) = serve(expired_assertion(), true).await;
+        let started = std::time::Instant::now();
         let mut socket = raw_client_after_server_close(address).await;
 
-        let mut buf = [0u8; 1];
-        let after_close =
-            tokio::time::timeout(std::time::Duration::from_millis(300), socket.read(&mut buf))
-                .await;
+        let elapsed = time_to_eof(&mut socket, started).await;
         assert!(
-            after_close.is_err(),
-            "server must wait for the client's Close reply, got {after_close:?}"
+            elapsed >= WS_TERMINAL_FLUSH_TIMEOUT,
+            "server must wait for the client's Close reply, ended after {elapsed:?}"
         );
         assert!(
             state.conn_manager.community_for_conn(conn_id).is_none(),
             "connection must be deregistered before waiting on the peer"
         );
-        time_to_eof(&mut socket).await;
     }
 
-    /// A client that answers Close lets the server finish promptly, well
-    /// under the bounded wait.
+    /// A client that answers Close lets the server finish before the bounded
+    /// wait could expire: a server ignoring the reply needs at least
+    /// `WS_TERMINAL_FLUSH_TIMEOUT` from connect.
     #[tokio::test]
     async fn server_finishes_promptly_when_client_answers_close() {
         use tokio::io::AsyncWriteExt as _;
 
         let (address, _, state, conn_id) = serve(expired_assertion(), true).await;
+        let started = std::time::Instant::now();
         let mut socket = raw_client_after_server_close(address).await;
 
         // Masked Close, code 1000: payload [0x03, 0xe8] XOR a zero mask.
@@ -3504,10 +3505,10 @@ mod terminal_close_delivery_tests {
             .write_all(&[0x88, 0x82, 0, 0, 0, 0, 0x03, 0xe8])
             .await
             .expect("send Close reply");
-        let elapsed = time_to_eof(&mut socket).await;
+        let elapsed = time_to_eof(&mut socket, started).await;
         assert!(
-            elapsed < std::time::Duration::from_millis(500),
-            "server must finish promptly after the client's Close, took {elapsed:?}"
+            elapsed < WS_TERMINAL_FLUSH_TIMEOUT,
+            "server must finish on the client's Close, not the timeout; took {elapsed:?}"
         );
         assert!(state.conn_manager.community_for_conn(conn_id).is_none());
     }
