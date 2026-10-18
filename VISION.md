@@ -130,7 +130,7 @@ Approval gates are partially built: the schema, REST endpoints, MCP tool, and UI
 
 ## Home Feed & Notifications
 
-Zero is the default for optional notification activity. Mobile community push is an intentional exception: new communities and records without a saved preference default to on for already-eligible notifications. Saved opt-outs remain off. Push still requires a configured gateway and a push-capable relay, and the OS controls notification display permission. This default does not enable additional activity types.
+Zero is the default. You opt in to noise, not out.
 
 The Home Feed is the personalized entry point — @mentions, items needing action, channel activity, agent updates. Fan-out-on-read, assembled at query time. Agents read the same feed via MCP.
 
