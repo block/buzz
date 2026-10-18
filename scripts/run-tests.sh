@@ -340,6 +340,9 @@ run_unit_tests() {
     connection::tests::expiry_notice_queued_on_ctrl_before_cancel
     connection::tests::f3_root_outer_wrapper_delivers_denial_on_bootstrap_cancellation
     connection::tests::f3_root_pre_built_expired_gate_terminates_connection
+    connection::terminal_close_delivery_tests::key_pairing_mismatch_closes_with_1008_on_real_socket
+    connection::terminal_close_delivery_tests::session_expiry_denial_closes_with_1008_on_real_socket
+    connection::terminal_close_delivery_tests::server_holds_socket_for_client_close_reply
     handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated
     handlers::auth::tests::fi_ban_check_error_emits_terminal_authorization_unavailable
     handlers::auth::tests::fi_root_authorization_denied_rows_emit_identical_frames

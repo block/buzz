@@ -3418,18 +3418,37 @@ mod terminal_close_delivery_tests {
             .await
             .expect("send upgrade");
 
-        // Server frames are unmasked; 0x88 is a final Close frame header.
-        let mut received = Vec::new();
-        let mut buf = [0u8; 4096];
-        while !received.contains(&0x88) {
-            let n = tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf))
-                .await
-                .expect("server Close must arrive")
-                .expect("read");
-            assert_ne!(n, 0, "socket ended before the server sent Close");
-            received.extend_from_slice(&buf[..n]);
+        // Walk whole frames (server frames are unmasked) until a Close opcode,
+        // so a 0x88 byte inside a payload or length cannot end the wait early.
+        let mut read_exact = async |len: usize| {
+            let mut bytes = vec![0u8; len];
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                socket.read_exact(&mut bytes),
+            )
+            .await
+            .expect("server frames must arrive")
+            .expect("socket ended before the server sent Close");
+            bytes
+        };
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            response.extend(read_exact(1).await);
+        }
+        loop {
+            let header = read_exact(2).await;
+            let payload_len = match header[1] & 0x7f {
+                126 => u64::from(u16::from_be_bytes(read_exact(2).await.try_into().unwrap())),
+                127 => u64::from_be_bytes(read_exact(8).await.try_into().unwrap()),
+                len => u64::from(len),
+            };
+            read_exact(usize::try_from(payload_len).expect("frame length")).await;
+            if header[0] & 0x0f == 0x8 {
+                break;
+            }
         }
 
+        let mut buf = [0u8; 1];
         let after_close =
             tokio::time::timeout(std::time::Duration::from_millis(300), socket.read(&mut buf))
                 .await;
