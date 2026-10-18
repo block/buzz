@@ -27,8 +27,10 @@ case "${1:-}:${2:-}" in
       *) exit 2 ;;
     esac
     ;;
-  api:repos/block/buzz/git/ref/heads/main|api:repos/block/buzz/git/ref/heads/mobile-v1.2) printf '%s\n' "$GH_TARGET_SHA" ;;
-  api:repos/block/buzz/commits/*) printf '%s\n' "$GH_TARGET_SHA" ;;
+  api:repos/block/buzz/git/ref/heads/main) printf '%s\n' "$GH_TARGET_SHA" ;;
+  api:repos/block/buzz/git/ref/heads/mobile-v1.2) printf '%s\n' "$GH_STABLE_SHA" ;;
+  api:repos/block/buzz/git/ref/heads/*) printf '%s\n' "$GH_MISMATCH_SHA" ;;
+  api:repos/block/buzz/commits/*) printf '%s\n' "${2##*/}" ;;
   api:--paginate)
     [[ "$3" == "repos/block/buzz/git/matching-refs/tags/mobile-v1.2.3-rc." ]]
     printf '%s' "${GH_EXISTING_REFS:-}"
@@ -72,6 +74,8 @@ export PATH="$bin:$PATH"
 export GH_CALLS="$tmp/calls"
 export GITHUB_REPOSITORY=block/buzz
 export GH_TARGET_SHA=1111111111111111111111111111111111111111
+export GH_STABLE_SHA=4444444444444444444444444444444444444444
+export GH_MISMATCH_SHA=5555555555555555555555555555555555555555
 export GH_TAG_OBJECT_SHA=2222222222222222222222222222222222222222
 
 "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main
@@ -154,11 +158,32 @@ if GITHUB_REPOSITORY=attacker/buzz "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/
   exit 1
 fi
 
-"$publisher" 1.2.3 1 "$GH_TARGET_SHA" mobile-v1.2
+GH_ANNOTATED_TARGET_SHA="$GH_STABLE_SHA" "$publisher" 1.2.3 1 "$GH_STABLE_SHA" mobile-v1.2
 for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary ''; do
-  if "$publisher" 1.2.3 1 "$GH_TARGET_SHA" "$source" >/dev/null 2>&1; then
+  if GH_ANNOTATED_TARGET_SHA="$GH_MISMATCH_SHA" "$publisher" 1.2.3 1 "$GH_MISMATCH_SHA" "$source" >/dev/null 2>&1; then
     echo "publisher accepted mismatched source '$source'" >&2
     exit 1
   fi
 done
+# Exercise the checked-in workflow command with its actual source input binding.
+python3 - "$repo_root/.github/workflows/mobile-release-candidate.yml" "$tmp" <<'PYWORKFLOW'
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+workflow = Path(sys.argv[1]).read_text()
+step = workflow.split("      - name: Publish annotated candidate tag\n", 1)[1]
+assert re.search(r"^          SOURCE_BRANCH: \$\{\{ inputs\.source_branch \}\}$", step, re.M), "source input is not bound to SOURCE_BRANCH"
+command = re.search(r"^        run: (.+)$", step, re.M).group(1)
+root = Path(sys.argv[2]) / "workflow"
+(root / "scripts").mkdir(parents=True)
+stub = root / "scripts/publish-mobile-release-candidate.sh"
+stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n')
+stub.chmod(0o755)
+env = dict(os.environ, MOBILE_VERSION="1.2.3", CANDIDATE_NUMBER="1", TARGET_SHA="4" * 40, SOURCE_BRANCH="mobile-v1.2")
+actual = subprocess.check_output(["bash", "-eu", "-c", command], cwd=root, env=env, text=True).splitlines()
+assert actual == ["1.2.3", "1", "4" * 40, "mobile-v1.2"], actual
+PYWORKFLOW
+
 echo "mobile release candidate publisher contract passed"

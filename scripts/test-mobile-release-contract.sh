@@ -52,8 +52,8 @@ case "${1:-}:${2:-}" in
       esac
       shift
     done
-    [[ -n "$version" && -n "$number" && -n "$sha" && -n "$source_branch" ]]
-    [[ "$(git --git-dir="$GH_REMOTE" rev-parse "refs/heads/$source_branch")" == "$sha" ]]
+    [[ -n "$version" && -n "$number" && -n "$sha" && -n "$source_branch" ]] || exit 1
+    [[ "$(git --git-dir="$GH_REMOTE" rev-parse "refs/heads/$source_branch")" == "$sha" ]] || exit 1
     printf '%s\t%s\t%s\n' "$version" "$number" "$sha" >> "$GH_WORKFLOW_CAPTURE"
     if [[ "${GH_WORKFLOW_NO_URL:-}" == "1" ]]; then
       exit 0
@@ -161,6 +161,13 @@ stable_sha="$(git -C "$work" rev-parse HEAD)"
 git -C "$work" switch -q main
 run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2
 [[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.4-rc.1^{commit}')" == "$stable_sha" ]]
+# Existing mismatched refs must be rejected by the guard, not missing-ref errors.
+for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary; do
+  git -C "$work" switch -q -c "$source"
+  git -C "$work" commit -q --allow-empty -m "$source"
+  git -C "$work" push -q origin "$source"
+done
+git -C "$work" switch -q main
 for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary ''; do
   if run_release "$operator" candidate 1.2.4 --source-branch "$source" >/dev/null 2>&1; then
     fail "accepted mismatched source '$source'"
