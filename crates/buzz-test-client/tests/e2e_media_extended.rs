@@ -98,6 +98,55 @@ async fn upload_to_path(
         .expect("upload request")
 }
 
+/// Status of an authenticated Blossom read of `url` by `keys`.
+async fn read_status(client: &Client, keys: &Keys, method: reqwest::Method, url: &str) -> u16 {
+    let sha256 = url
+        .rsplit('/')
+        .next()
+        .and_then(|file| file.split('.').next())
+        .expect("media url ends in {sha256}.{ext}");
+    client
+        .request(method, url)
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_get_auth(keys, sha256)),
+        )
+        .send()
+        .await
+        .expect("read request")
+        .status()
+        .as_u16()
+}
+
+/// Create a stream channel owned by `keys` via a signed kind:9007; returns its id.
+async fn create_channel(
+    client: &Client,
+    keys: &Keys,
+    name_prefix: &str,
+    visibility: &str,
+) -> String {
+    let channel_id = uuid::Uuid::new_v4().to_string();
+    let create_event = EventBuilder::new(Kind::from(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["name", &format!("{name_prefix}-{channel_id}")]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", visibility]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap();
+    let create_resp = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&create_event).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert!(create_resp.status().is_success(), "channel creation failed");
+    channel_id
+}
+
 fn tiny_jpeg() -> Vec<u8> {
     vec![
         0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00,
@@ -631,31 +680,9 @@ async fn test_ws_valid_imeta() {
     use buzz_test_client::BuzzTestClient;
 
     let keys = Keys::generate();
-    let pubkey_hex = keys.public_key().to_hex();
     let http = http_client();
 
-    // Create channel via signed kind:9007 event
-    let channel_uuid = uuid::Uuid::new_v4();
-    let channel_name = format!("ws-imeta-test-{}", channel_uuid);
-    let create_event = EventBuilder::new(Kind::from(9007), "")
-        .tags(vec![
-            Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
-            Tag::parse(["name", &channel_name]).unwrap(),
-            Tag::parse(["channel_type", "stream"]).unwrap(),
-            Tag::parse(["visibility", "open"]).unwrap(),
-        ])
-        .sign_with_keys(&keys)
-        .unwrap();
-    let create_resp = http
-        .post(format!("{}/events", relay_http_url()))
-        .header("X-Pubkey", &pubkey_hex)
-        .header("Content-Type", "application/json")
-        .body(serde_json::to_string(&create_event).unwrap())
-        .send()
-        .await
-        .unwrap();
-    assert!(create_resp.status().is_success(), "channel creation failed");
-    let channel_id = channel_uuid.to_string();
+    let channel_id = create_channel(&http, &keys, "ws-imeta-test", "open").await;
     println!("Channel: {channel_id}");
 
     // Upload a JPEG to get a valid sha256
@@ -702,30 +729,9 @@ async fn test_ws_invalid_imeta_external_url() {
     use buzz_test_client::BuzzTestClient;
 
     let keys = Keys::generate();
-    let pubkey_hex = keys.public_key().to_hex();
     let http = http_client();
 
-    let channel_uuid = uuid::Uuid::new_v4();
-    let channel_name = format!("ws-imeta-bad-{}", channel_uuid);
-    let create_event = EventBuilder::new(Kind::from(9007), "")
-        .tags(vec![
-            Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
-            Tag::parse(["name", &channel_name]).unwrap(),
-            Tag::parse(["channel_type", "stream"]).unwrap(),
-            Tag::parse(["visibility", "open"]).unwrap(),
-        ])
-        .sign_with_keys(&keys)
-        .unwrap();
-    let create_resp = http
-        .post(format!("{}/events", relay_http_url()))
-        .header("X-Pubkey", &pubkey_hex)
-        .header("Content-Type", "application/json")
-        .body(serde_json::to_string(&create_event).unwrap())
-        .send()
-        .await
-        .unwrap();
-    assert!(create_resp.status().is_success(), "channel creation failed");
-    let channel_id = channel_uuid.to_string();
+    let channel_id = create_channel(&http, &keys, "ws-imeta-bad", "open").await;
 
     let sha = "a".repeat(64);
     let mut client = BuzzTestClient::connect(&relay_ws_url(), &keys)
@@ -768,30 +774,9 @@ async fn test_ws_invalid_imeta_missing_fields() {
     use buzz_test_client::BuzzTestClient;
 
     let keys = Keys::generate();
-    let pubkey_hex = keys.public_key().to_hex();
     let http = http_client();
 
-    let channel_uuid = uuid::Uuid::new_v4();
-    let channel_name = format!("ws-imeta-miss-{}", channel_uuid);
-    let create_event = EventBuilder::new(Kind::from(9007), "")
-        .tags(vec![
-            Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
-            Tag::parse(["name", &channel_name]).unwrap(),
-            Tag::parse(["channel_type", "stream"]).unwrap(),
-            Tag::parse(["visibility", "open"]).unwrap(),
-        ])
-        .sign_with_keys(&keys)
-        .unwrap();
-    let create_resp = http
-        .post(format!("{}/events", relay_http_url()))
-        .header("X-Pubkey", &pubkey_hex)
-        .header("Content-Type", "application/json")
-        .body(serde_json::to_string(&create_event).unwrap())
-        .send()
-        .await
-        .unwrap();
-    assert!(create_resp.status().is_success(), "channel creation failed");
-    let channel_id = channel_uuid.to_string();
+    let channel_id = create_channel(&http, &keys, "ws-imeta-miss", "open").await;
 
     let sha = "b".repeat(64);
     let mut client = BuzzTestClient::connect(&relay_ws_url(), &keys)
@@ -816,4 +801,62 @@ async fn test_ws_invalid_imeta_missing_fields() {
     println!("✅ WS incomplete imeta rejected: {:?}", ok.message);
 
     client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_private_channel_attachment_unreadable_to_non_members() {
+    use buzz_test_client::BuzzTestClient;
+    use reqwest::Method;
+
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let http = http_client();
+    let channel_id = create_channel(&http, &owner, "private-media", "private").await;
+
+    let body = uuid::Uuid::new_v4().as_bytes().repeat(8);
+    let resp = upload(&http, &owner, &body).await;
+    assert_eq!(resp.status(), 200);
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    let url = desc["url"].as_str().expect("descriptor url");
+
+    assert_eq!(
+        read_status(&http, &outsider, Method::GET, url).await,
+        200,
+        "a blob not yet attached anywhere stays community-readable"
+    );
+
+    let mut client = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    let event = EventBuilder::new(Kind::from(9), "private attachment")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse([
+                "imeta",
+                &format!("url {url}"),
+                &format!("m {}", desc["type"].as_str().unwrap()),
+                &format!("x {}", desc["sha256"].as_str().unwrap()),
+                &format!("size {}", desc["size"]),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ok = client.send_event(event).await.unwrap();
+    assert!(ok.accepted, "attachment rejected: {:?}", ok.message);
+    client.disconnect().await.unwrap();
+
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(
+            read_status(&http, &outsider, method.clone(), url).await,
+            404,
+            "{method} by a non-member must not reveal a private-channel attachment"
+        );
+        assert_eq!(
+            read_status(&http, &owner, method.clone(), url).await,
+            200,
+            "{method} by a channel member must still succeed"
+        );
+    }
 }

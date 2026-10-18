@@ -2621,10 +2621,6 @@ mod media_blossom {
     /// the bytes: it is the metadata/descriptor/upload-auth/quota/audit layer plus
     /// the per-tenant read binding. B's private upload metadata and errors must not
     /// be observable from A even when the underlying blob is shared.
-    ///
-    /// Known limitation, deferred: relay membership plus knowledge of a hash is
-    /// sufficient to read a blob. Read auth binds host and tenant, not the channel
-    /// ACL of the message the blob was attached to.
     #[tokio::test]
     #[ignore]
     async fn media_metadata_boundary_holds_while_blob_bytes_shared() {
