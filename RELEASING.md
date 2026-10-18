@@ -1,7 +1,8 @@
 # Releasing Buzz
 
 Buzz has three independent release lanes. Desktop and relay use release PRs.
-Mobile uses immutable release-candidate tags cut directly from remote `main`:
+Mobile uses immutable release-candidate tags cut from remote `main` by default,
+with an optional stable source branch:
 
 | Lane | Entry point | Artifact |
 |------|-------------|----------|
@@ -38,7 +39,8 @@ scripts/mobile-release.sh candidate 0.5.0
 Desktop uses an immutable generated candidate PR; relay continues using its
 metadata PR. Mobile does not. Each `mobile-vX.Y.Z-rc.N` tag is an immutable
 candidate and the artifact of record.
-There is no mobile release branch, stable mobile tag alias, finalization step,
+Optional stable branches use `mobile-vMAJOR.MINOR`. There is no
+stable mobile tag alias, finalization step,
 or mobile GitHub Release.
 
 ---
@@ -153,10 +155,40 @@ RC tags. For example, iOS can ship `mobile-v0.5.0-rc.2` while Android ships
 There is intentionally no single selected or final candidate for the marketing
 version.
 
-The simplification trades away a separate stabilization line. Unrelated commits
-that reach `main` become part of every later candidate, and there is no retained
-hotfix branch or branch-ancestry history. Add a dedicated hotfix flow later if a
-release actually needs isolation from `main`.
+### Optional stable release branches
+
+For a release that needs isolation from ongoing development, create a branch
+such as `mobile-v0.25` from an explicitly selected, verified source commit.
+Publish candidates from its current remote tip:
+
+```bash
+scripts/mobile-release.sh candidate 0.25.0 --source-branch mobile-v0.25
+```
+
+The branch must match the marketing version's major and minor components:
+`mobile-v0.25` accepts 0.25.x, but rejects 0.26.x and 1.25.x. Without the option,
+the source remains `main`. Both the operator and publisher validate the source;
+a missing branch or changed tip fails rather than falling back to `main`.
+The GitHub workflow itself continues to run from reviewed `main`. The private
+pipeline still builds only the resulting immutable candidate tag.
+
+For the October 2026 stabilization period, all distributed mobile builds,
+including Company Portal dogfood builds, must come from `mobile-v0.25` until
+after the conference. Do not upload builds from `main` or a later minor version
+that would displace the stable dogfood build. The branch starts from
+`mobile-v0.24.0-rc.2`, the source of uploaded iOS 0.24.0 (7).
+
+Ask the release owner at each fix landing whether to cherry-pick it to the
+stable branch. Backport only explicitly approved fixes, preserve source commit
+provenance, and validate the resulting source. Never merge `main` wholesale.
+Remote agents and App Clip are post-conference work. There is no preselected
+fix list and no requirement to create a stable branch for every minor release.
+
+The initial 0.25.0 candidate uses an empty commit above that baseline to verify
+that the existing pipeline builds a commit outside `main`. Verify identical
+source trees, absence of that commit from remote `main`, and the exact tag,
+commit, marketing version and build number in the uploaded artifacts. Upload
+and external TestFlight review do not establish production App Store approval.
 
 `mobile/pubspec.yaml` keeps `0.0.0+1` only as a valid, visibly non-release
 fallback for local development and validation builds. Release jobs always
@@ -343,18 +375,19 @@ Commit or stash your changes before running the release recipe.
 ### New commits land after publishing a mobile candidate
 
 Run `scripts/mobile-release.sh candidate <version>` again after the intended
-fix reaches remote `main`. It publishes a new immutable RC tag at the new exact
+fix reaches the intended remote source branch. Use the same `--source-branch`
+option for a stable release. The command publishes a new immutable RC tag at the new exact
 remote commit. Continue referring to each tested or shipped platform artifact by
 its own exact tag.
 
-### `scripts/mobile-release.sh candidate` fails because `main` moved during publication
+### `scripts/mobile-release.sh candidate` fails because the source branch moved during publication
 
 The App-backed workflow may already have published the requested immutable RC
-at the prior `main` tip before the operator command detects the race. Do not
-move or delete that tag, and do not treat it as the candidate for current
-`main`. Inspect the run URL from the command output, then rerun
+at the prior source branch tip before the operator command detects the race. Do not
+move or delete that tag, and do not treat it as the candidate for the current
+source branch. Inspect the run URL from the command output, then rerun
 `scripts/mobile-release.sh candidate <version>` to publish the next RC from the
-new current `main` tip.
+new current source branch tip, preserving the source-branch option.
 
 ### A mobile candidate command selects the wrong RC number
 

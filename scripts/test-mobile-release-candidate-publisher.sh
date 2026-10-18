@@ -27,7 +27,7 @@ case "${1:-}:${2:-}" in
       *) exit 2 ;;
     esac
     ;;
-  api:repos/block/buzz/git/ref/heads/main) printf '%s\n' "$GH_TARGET_SHA" ;;
+  api:repos/block/buzz/git/ref/heads/main|api:repos/block/buzz/git/ref/heads/mobile-v1.2) printf '%s\n' "$GH_TARGET_SHA" ;;
   api:repos/block/buzz/commits/*) printf '%s\n' "$GH_TARGET_SHA" ;;
   api:--paginate)
     [[ "$3" == "repos/block/buzz/git/matching-refs/tags/mobile-v1.2.3-rc." ]]
@@ -74,7 +74,7 @@ export GITHUB_REPOSITORY=block/buzz
 export GH_TARGET_SHA=1111111111111111111111111111111111111111
 export GH_TAG_OBJECT_SHA=2222222222222222222222222222222222222222
 
-"$publisher" 1.2.3 1 "$GH_TARGET_SHA"
+"$publisher" 1.2.3 1 "$GH_TARGET_SHA" main
 grep -Fq -- '-f tag=mobile-v1.2.3-rc.1' "$GH_CALLS"
 grep -Fq -- '-f message=Buzz Mobile 1.2.3 release candidate 1' "$GH_CALLS"
 grep -Fq -- "-f object=$GH_TARGET_SHA" "$GH_CALLS"
@@ -82,76 +82,83 @@ grep -Fq -- '-f type=commit' "$GH_CALLS"
 grep -Fq -- '-f ref=refs/tags/mobile-v1.2.3-rc.1' "$GH_CALLS"
 grep -Fq -- "-f sha=$GH_TAG_OBJECT_SHA" "$GH_CALLS"
 
-if GH_CURRENT_USER_CAN_BYPASS=never "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if GH_CURRENT_USER_CAN_BYPASS=never "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted an App token without an always bypass" >&2
   exit 1
 fi
-if GH_CURRENT_USER_CAN_BYPASS='' "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if GH_CURRENT_USER_CAN_BYPASS='' "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted a ruleset response without an effective bypass" >&2
   exit 1
 fi
-if GH_TAG_RULESET_STATE=disabled "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if GH_TAG_RULESET_STATE=disabled "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted disabled tag protection" >&2
   exit 1
 fi
-if GH_TAG_RULE_TYPES=creation "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if GH_TAG_RULE_TYPES=creation "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted incomplete tag protection" >&2
   exit 1
 fi
-if GH_TAG_INCLUDES=refs/tags/v\* "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if GH_TAG_INCLUDES=refs/tags/v\* "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted a tag ruleset that excludes mobile candidates" >&2
   exit 1
 fi
-if GH_TAG_EXCLUDES=refs/tags/mobile-v0.0.0 "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if GH_TAG_EXCLUDES=refs/tags/mobile-v0.0.0 "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted tag ruleset exclusions" >&2
   exit 1
 fi
 if GH_TARGET_SHA=3333333333333333333333333333333333333333 \
-    "$publisher" 1.2.3 1 1111111111111111111111111111111111111111 >/dev/null 2>&1; then
+    "$publisher" 1.2.3 1 1111111111111111111111111111111111111111 main >/dev/null 2>&1; then
   echo "publisher accepted a moved main branch" >&2
   exit 1
 fi
 if GH_EXISTING_REFS=$'refs/tags/mobile-v1.2.3-rc.1\n' \
-    "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+    "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted a stale candidate number" >&2
   exit 1
 fi
-if GH_PUBLISHED_REF_TYPE=commit "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if GH_PUBLISHED_REF_TYPE=commit "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted a lightweight published tag" >&2
   exit 1
 fi
 if GH_PUBLISHED_REF_SHA=3333333333333333333333333333333333333333 \
-    "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+    "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted the wrong annotated tag object" >&2
   exit 1
 fi
-if GH_ANNOTATED_TARGET_TYPE=tag "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if GH_ANNOTATED_TARGET_TYPE=tag "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted a nested annotated tag" >&2
   exit 1
 fi
 if GH_ANNOTATED_TARGET_SHA=3333333333333333333333333333333333333333 \
-    "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+    "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted an annotated tag on the wrong commit" >&2
   exit 1
 fi
-if "$publisher" 01.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if "$publisher" 01.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted a marketing version with a leading zero" >&2
   exit 1
 fi
-if "$publisher" 1.2.3 01 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if "$publisher" 1.2.3 01 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted a candidate number with a leading zero" >&2
   exit 1
 fi
 if GH_EXISTING_REFS=$'refs/tags/mobile-v1.2.3-rc.1\nrefs/tags/mobile-v1.2.3-rc.7\nrefs/tags/mobile-v1.2.3-rc.08\nrefs/tags/mobile-v1.2.4-rc.99\n' \
-    "$publisher" 1.2.3 8 "$GH_TARGET_SHA" >/dev/null; then
+    "$publisher" 1.2.3 8 "$GH_TARGET_SHA" main >/dev/null; then
   :
 else
   echo "publisher did not sequence from the highest exact candidate" >&2
   exit 1
 fi
-if GITHUB_REPOSITORY=attacker/buzz "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
+if GITHUB_REPOSITORY=attacker/buzz "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/dev/null 2>&1; then
   echo "publisher accepted the wrong repository" >&2
   exit 1
 fi
 
+"$publisher" 1.2.3 1 "$GH_TARGET_SHA" mobile-v1.2
+for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary ''; do
+  if "$publisher" 1.2.3 1 "$GH_TARGET_SHA" "$source" >/dev/null 2>&1; then
+    echo "publisher accepted mismatched source '$source'" >&2
+    exit 1
+  fi
+done
 echo "mobile release candidate publisher contract passed"
