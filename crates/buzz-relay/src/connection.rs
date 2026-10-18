@@ -3489,9 +3489,10 @@ mod terminal_close_delivery_tests {
         );
     }
 
-    /// A client that answers Close lets the server finish before the bounded
-    /// wait could expire: a server ignoring the reply needs at least
-    /// `WS_TERMINAL_FLUSH_TIMEOUT` from connect.
+    /// The client withholds its Close reply until the connection has
+    /// deregistered, so cleanup must run before the bounded peer wait: a
+    /// server that cleans up after the wait, or ignores the reply, needs at
+    /// least `WS_TERMINAL_FLUSH_TIMEOUT` from connect.
     #[tokio::test]
     async fn server_finishes_promptly_when_client_answers_close() {
         use tokio::io::AsyncWriteExt as _;
@@ -3500,6 +3501,13 @@ mod terminal_close_delivery_tests {
         let started = std::time::Instant::now();
         let mut socket = raw_client_after_server_close(address).await;
 
+        tokio::time::timeout(EOF_WATCHDOG, async {
+            while state.conn_manager.community_for_conn(conn_id).is_some() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("connection must deregister before the client replies");
         // Masked Close, code 1000: payload [0x03, 0xe8] XOR a zero mask.
         socket
             .write_all(&[0x88, 0x82, 0, 0, 0, 0, 0x03, 0xe8])
@@ -3510,6 +3518,5 @@ mod terminal_close_delivery_tests {
             elapsed < WS_TERMINAL_FLUSH_TIMEOUT,
             "server must finish on the client's Close, not the timeout; took {elapsed:?}"
         );
-        assert!(state.conn_manager.community_for_conn(conn_id).is_none());
     }
 }
