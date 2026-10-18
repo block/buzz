@@ -145,6 +145,7 @@ class _ThreadMessageList extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
+    final calendarDays = TimelineCalendarDays();
     final headLink = useMemoized(LayerLink.new);
     final loadingHeadLink = useMemoized(LayerLink.new);
     final headScrollPosition = useRef<ScrollPosition?>(null);
@@ -238,7 +239,7 @@ class _ThreadMessageList extends HookWidget {
                             ? replies[chronologicalIndex - 1]
                             : null;
                         final previousMessage = previousReply ?? head;
-                        final showDayDivider = !isSameDay(
+                        final showDayDivider = !calendarDays.isSameDay(
                           previousMessage.createdAt,
                           reply.createdAt,
                         );
@@ -259,7 +260,10 @@ class _ThreadMessageList extends HookWidget {
                             reply.hasAttachments ||
                             nextReply?.hasAttachments == true ||
                             nextReply == null ||
-                            !isSameDay(reply.createdAt, nextReply.createdAt) ||
+                            !calendarDays.isSameDay(
+                              reply.createdAt,
+                              nextReply.createdAt,
+                            ) ||
                             nextReply.pubkey.toLowerCase() !=
                                 reply.pubkey.toLowerCase() ||
                             nextReply.createdAt - reply.createdAt > 300;

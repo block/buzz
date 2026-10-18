@@ -79,6 +79,23 @@ bool isSameDay(int a, int b) {
   return dtA.year == dtB.year && dtA.month == dtB.month && dtA.day == dtB.day;
 }
 
+/// Reuses local calendar components while building one timeline.
+///
+/// Adjacent rows compare the same timestamps for dividers, author grouping,
+/// avatars, and sticky headers. Resolve each timestamp only once. Create a new
+/// instance on each build so a timezone change cannot leave stale cached days.
+class TimelineCalendarDays {
+  final _days = <int, (int, int, int)>{};
+
+  (int, int, int) _day(int unixSeconds) => _days.putIfAbsent(unixSeconds, () {
+    final date = DateTime.fromMillisecondsSinceEpoch(unixSeconds * 1000);
+    return (date.year, date.month, date.day);
+  });
+
+  /// Whether two timestamps fall on the same local calendar day.
+  bool isSameDay(int a, int b) => _day(a) == _day(b);
+}
+
 /// Returns a compact relative time string like "just now", "5m ago", "3h ago",
 /// "2d ago", or a short date for older timestamps.
 String relativeTime(int unixSeconds) {
