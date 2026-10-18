@@ -39,6 +39,9 @@ class MediaGetAuthService {
 
   Map<String, String>? _cachedHeaders;
   DateTime? _refreshAt;
+  // Includes the running job. Bound retained work during rapid history scrolls.
+  static const _maxPendingSignatures = 64;
+  int _pendingSignatures = 0;
   Future<void> _signingTail = Future<void>.value();
 
   MediaGetAuthService({
@@ -62,12 +65,18 @@ class MediaGetAuthService {
   ///
   /// Image loading starts during layout. Serialize signing per auth scope so a
   /// viewport full of uncached images does not spawn an isolate per row at once.
-  /// Timestamp each proof when its queued job starts, not when it was enqueued.
+  /// At most 64 requests may be outstanding. Excess requests fail explicitly
+  /// without spawning or retaining work; image failures are evicted so a later
+  /// resolution can retry. Timestamp proofs when their queued jobs start.
   Future<Map<String, String>> headersForAsync(String url) {
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty || !isRelayMediaUrl(url)) {
       return Future.value(const {});
     }
+    if (_pendingSignatures >= _maxPendingSignatures) {
+      return Future.error(StateError('Media authentication queue is full'));
+    }
+    _pendingSignatures++;
     final released = Completer<void>();
     final result = _signingTail.then((_) async {
       try {
@@ -80,6 +89,7 @@ class MediaGetAuthService {
       } finally {
         // A failed worker must propagate to its fetch without blocking later
         // requests in the queue.
+        _pendingSignatures--;
         released.complete();
       }
     });

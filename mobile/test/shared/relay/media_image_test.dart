@@ -102,6 +102,30 @@ void main() {
       },
     );
 
+    test('bounds queued signing and admits requests after it drains', () async {
+      final auth = _auth(nsec: nostr.Keys.generate().nsec);
+      // Enqueue in one turn, before a worker can finish. Record every failure
+      // immediately so overflow futures cannot become unhandled errors.
+      final requests = List.generate(
+        80,
+        (_) => auth
+            .headersForAsync(_mediaUrl)
+            .then<Object>(
+              (headers) => headers,
+              onError: (Object error) => error,
+            ),
+      );
+      final results = await Future.wait(requests);
+      expect(results.whereType<Map<String, String>>(), hasLength(64));
+      final rejected = results.whereType<StateError>().toList();
+      expect(rejected, hasLength(16));
+      expect(
+        rejected.map((error) => error.message),
+        everyElement('Media authentication queue is full'),
+      );
+      expect(await auth.headersForAsync(_mediaUrl), isNotEmpty);
+    });
+
     test('keeps the signing identity separate across auth scopes', () async {
       final first = nostr.Keys.generate();
       final second = nostr.Keys.generate();
