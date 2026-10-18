@@ -17,6 +17,11 @@ cat > "$bin/gh" <<'GH'
 set -euo pipefail
 case "${1:-}:${2:-}" in
   --version:*) printf 'gh version %s (test)\n' "${GH_VERSION:-2.94.0}" ;;
+  api:repos/block/buzz/rulesets/19321162)
+    [[ "${GH_BRANCH_POLICY_FAIL:-}" != 1 ]] || exit 1
+    policy='{"target":"branch","enforcement":"active","current_user_can_bypass":"never","conditions":{"ref_name":{"include":["refs/heads/mobile-v*"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true,"require_last_push_approval":true,"required_review_thread_resolution":true}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"Mobile"},{"context":"DCO Check"}]}}]}'
+    printf '%s\n' "${GH_BRANCH_POLICY:-$policy}" | jq -r "$4"
+    ;;
   api:repos/block/buzz/rulesets/14378754)
     case "$*" in
       *'.enforcement'*) printf '%s\n' "${GH_TAG_RULESET_STATE:-active}" ;;
@@ -159,6 +164,13 @@ git -C "$work" commit -q --allow-empty -m stable-only
 git -C "$work" push -q origin mobile-v1.2
 stable_sha="$(git -C "$work" rev-parse HEAD)"
 git -C "$work" switch -q main
+if GH_BRANCH_POLICY_FAIL=1 run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2 > "$tmp/policy-error" 2>&1; then
+  fail "operator accepted unavailable stable-branch policy"
+fi
+grep -Fq 'Could not verify mobile stable-branch protection' "$tmp/policy-error"
+if GH_BRANCH_POLICY='{}' run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2 > "$tmp/policy-error" 2>&1; then
+  fail "operator accepted missing stable-branch policy"
+fi
 run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2
 [[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.4-rc.1^{commit}')" == "$stable_sha" ]]
 # Existing mismatched refs must be rejected by the guard, not missing-ref errors.

@@ -17,6 +17,11 @@ record() {
 }
 
 case "${1:-}:${2:-}" in
+  api:repos/block/buzz/rulesets/19321162)
+    [[ "${GH_BRANCH_POLICY_FAIL:-}" != 1 ]] || exit 1
+    policy='{"target":"branch","enforcement":"active","current_user_can_bypass":"never","conditions":{"ref_name":{"include":["refs/heads/mobile-v*"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true,"require_last_push_approval":true,"required_review_thread_resolution":true}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"Mobile"},{"context":"DCO Check"}]}}]}'
+    printf '%s\n' "${GH_BRANCH_POLICY:-$policy}" | jq -r "$4"
+    ;;
   api:repos/block/buzz/rulesets/14378754)
     case "$*" in
       *'.enforcement'*) printf '%s\n' "${GH_TAG_RULESET_STATE:-active}" ;;
@@ -165,6 +170,43 @@ for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary ''; do
     exit 1
   fi
 done
+# Mutate actual policy JSON so these tests exercise the production jq predicate.
+python3 - "$publisher" <<'PYPOLICY'
+import copy, json, os, subprocess, sys
+policy = {'target': 'branch', 'enforcement': 'active', 'current_user_can_bypass': 'never', 'conditions': {'ref_name': {'include': ['refs/heads/mobile-v*'], 'exclude': []}}, 'bypass_actors': [], 'rules': [{'type': 'deletion'}, {'type': 'non_fast_forward'}, {'type': 'pull_request', 'parameters': {'required_approving_review_count': 1, 'dismiss_stale_reviews_on_push': True, 'require_last_push_approval': True, 'required_review_thread_resolution': True}}, {'type': 'required_status_checks', 'parameters': {'strict_required_status_checks_policy': True, 'required_status_checks': [{'context': 'Mobile'}, {'context': 'DCO Check'}]}}]}
+mutations = {
+    "disabled": lambda p: p.update(enforcement="disabled"),
+    "wrong target": lambda p: p.update(target="tag"),
+    "wrong scope": lambda p: p["conditions"]["ref_name"].update(include=["refs/heads/mobile-release/*"]),
+    "excluded branch": lambda p: p["conditions"]["ref_name"].update(exclude=["refs/heads/mobile-v1.2"]),
+    "caller bypass": lambda p: p.update(current_user_can_bypass="always"),
+    "other bypass": lambda p: p.update(bypass_actors=[{"actor_id":1}]),
+    "no deletion guard": lambda p: p["rules"].pop(0),
+    "no force guard": lambda p: p["rules"].pop(1),
+    "no review": lambda p: p["rules"].pop(2),
+    "no checks": lambda p: p["rules"].pop(3),
+    "no approvals": lambda p: p["rules"][2]["parameters"].update(required_approving_review_count=0),
+    "stale approvals": lambda p: p["rules"][2]["parameters"].update(dismiss_stale_reviews_on_push=False),
+    "self approval": lambda p: p["rules"][2]["parameters"].update(require_last_push_approval=False),
+    "open threads": lambda p: p["rules"][2]["parameters"].update(required_review_thread_resolution=False),
+    "non-strict checks": lambda p: p["rules"][3]["parameters"].update(strict_required_status_checks_policy=False),
+    "missing mobile": lambda p: p["rules"][3]["parameters"]["required_status_checks"].pop(0),
+    "missing DCO": lambda p: p["rules"][3]["parameters"]["required_status_checks"].pop(1),
+}
+for name, mutate in mutations.items():
+    value = copy.deepcopy(policy)
+    mutate(value)
+    env = dict(os.environ, GH_BRANCH_POLICY=json.dumps(value), GH_ANNOTATED_TARGET_SHA=os.environ["GH_STABLE_SHA"])
+    before = open(env["GH_CALLS"]).read()
+    result = subprocess.run([sys.argv[1], "1.2.3", "1", env["GH_STABLE_SHA"], "mobile-v1.2"], env=env, capture_output=True, text=True)
+    assert result.returncode != 0 and "must enforce review" in result.stderr, (name, result.stderr)
+    assert open(env["GH_CALLS"]).read() == before, name
+PYPOLICY
+if GH_BRANCH_POLICY_FAIL=1 "$publisher" 1.2.3 1 "$GH_STABLE_SHA" mobile-v1.2 >/dev/null 2>&1; then
+  echo "publisher accepted unavailable branch policy" >&2
+  exit 1
+fi
+
 # Exercise the checked-in workflow command with its actual source input binding.
 python3 - "$repo_root/.github/workflows/mobile-release-candidate.yml" "$tmp" <<'PYWORKFLOW'
 import os

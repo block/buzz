@@ -178,11 +178,16 @@ after the conference. Do not upload builds from `main` or a later minor version
 that would displace the stable dogfood build. The branch starts from
 `mobile-v0.24.0-rc.2`, the source of uploaded iOS 0.24.0 (7).
 
-Fix PRs must target `main` and land there first, not target a stable release
-branch directly. At each fix landing, ask the release owner whether to
-cherry-pick the merged commit to the stable branch. Cherry-pick only explicitly
-approved fixes, preserve the original commit provenance, and validate the
-resulting stable source. Never merge `main` wholesale.
+General fix PRs must target `main` and land there first. At each fix landing,
+ask the release owner whether to
+backport the merged commit to the stable branch. For each explicitly approved
+fix, cherry-pick with `-x --signoff` onto a backport branch and open a backport-only
+PR targeting the stable branch. Require review and passing checks before merging
+that PR. Preserve the original commit provenance and validate the resulting
+stable source. A correction for a regression introduced by an earlier backport
+may target the stable branch directly; identify the faulty backport and keep the
+correction scoped to that regression. The same review and checks apply.
+Never merge `main` wholesale.
 Remote agents and App Clip are post-conference work. There is no preselected
 fix list and no requirement to create a stable branch for every minor release.
 
@@ -351,8 +356,15 @@ Mobile candidate publication requires workflow-dispatch access and the existing
 release App because strict tag protection denies direct human creation. The App
 must be installed on `block/buzz`, have Contents write and Metadata read, and
 retain an `always` bypass on the immutable `mobile-v*` tag rules. It does not
-require GitHub Releases permissions, repository Administration permission, or a
-mobile release-branch ruleset. The publisher validates the App token's effective
+require GitHub Releases permissions or repository Administration permission.
+Stable sources additionally require active branch ruleset `19321162` covering
+`refs/heads/mobile-v*`, with no exclusions or bypass actors, deletion and
+force-push prevention, at least one approval, stale-approval dismissal, last-push
+approval, resolved review threads, and strict required `Mobile` and `DCO Check`
+checks. An administrator must configure and audit the empty bypass list; GitHub
+hides that list from non-admin tokens. Both operator and publisher verify the
+public policy and their effective lack of branch bypass on every publication.
+The publisher validates the App token's effective
 `current_user_can_bypass` value rather than reading the ruleset's hidden bypass
 actor list.
 

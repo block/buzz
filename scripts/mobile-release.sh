@@ -123,6 +123,7 @@ case "$command" in
     require_clean_tree
     require_canonical_repository || exit 1
     require_gh_minimum_version
+    require_mobile_release_branch_ruleset "$MOBILE_RELEASE_SOURCE_BRANCH" || exit 1
 
     local_head_sha="$(git rev-parse --verify 'HEAD^{commit}')" || fail "HEAD is not a commit"
     source_sha="$(remote_source_commit_sha)" || fail "origin/$MOBILE_RELEASE_SOURCE_BRANCH does not exist"

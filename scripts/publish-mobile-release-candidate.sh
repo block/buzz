@@ -27,6 +27,7 @@ repo="${GITHUB_REPOSITORY:-}"
 require_mobile_release_source "$version" "$MOBILE_RELEASE_SOURCE_BRANCH" || exit 1
 command -v gh >/dev/null 2>&1 || fail "gh is required"
 require_release_tag_ruleset || exit 1
+require_mobile_release_branch_ruleset "$MOBILE_RELEASE_SOURCE_BRANCH" || exit 1
 
 source_sha="$(gh api "repos/$repo/git/ref/heads/$MOBILE_RELEASE_SOURCE_BRANCH" --jq .object.sha)" || \
   fail "could not resolve $repo $MOBILE_RELEASE_SOURCE_BRANCH"
