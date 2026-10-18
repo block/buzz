@@ -89,6 +89,8 @@ pub(crate) async fn close_if_owner(
 /// detached REQ task can register after this runs.
 pub(crate) async fn release_connection_subscriptions(conn: &ConnectionState, state: &AppState) {
     debug_assert!(conn.cancel.is_cancelled());
+    #[cfg(test)]
+    test_seam::pause_at(&test_seam::CLEANUP_PAUSE).await;
     let mut subs = conn.subscriptions.lock().await;
     subs.clear();
     for removed in state.sub_registry.remove_connection(conn.conn_id) {
@@ -116,7 +118,8 @@ pub(crate) async fn release_scope_topics(
 /// Test-only pause points, scoped to one task so parallel tests don't
 /// interfere: `PAUSE` inside `close_if_owner` between teardown and the
 /// terminal frame, `RELEASE_PAUSE` inside `retire_locked` between the
-/// registry removal and the topic release.
+/// registry removal and the topic release, `CLEANUP_PAUSE` at the start of
+/// `release_connection_subscriptions`.
 #[cfg(test)]
 pub(crate) mod test_seam {
     use std::sync::Arc;
@@ -131,6 +134,7 @@ pub(crate) mod test_seam {
     tokio::task_local! {
         pub(crate) static PAUSE: Arc<Pause>;
         pub(crate) static RELEASE_PAUSE: Arc<Pause>;
+        pub(crate) static CLEANUP_PAUSE: Arc<Pause>;
     }
 
     pub(super) async fn pause_at(point: &'static tokio::task::LocalKey<Arc<Pause>>) {

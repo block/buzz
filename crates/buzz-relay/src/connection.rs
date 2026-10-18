@@ -756,21 +756,25 @@ async fn handle_active_connection(
     }
     let _ = auth_cancel_task.await;
 
-    crate::handlers::close::release_connection_subscriptions(&conn, &state).await;
-    state.conn_manager.deregister(conn.conn_id);
-    if let Some(auth_ctx) = authenticated {
-        if !state.conn_manager.has_admitted_connection(
-            conn.tenant.community(),
-            auth_ctx.pubkey.to_bytes().as_slice(),
-        ) {
-            let _ = state
-                .pubsub
-                .clear_presence(&conn.tenant, &auth_ctx.pubkey)
-                .await;
+    // Release application state and wait on the peer concurrently: cleanup
+    // never waits on the client, and a stalled Redis cannot hold the socket
+    // open past the bounded peer wait.
+    let cleanup = async {
+        crate::handlers::close::release_connection_subscriptions(&conn, &state).await;
+        state.conn_manager.deregister(conn.conn_id);
+        if let Some(auth_ctx) = authenticated {
+            if !state.conn_manager.has_admitted_connection(
+                conn.tenant.community(),
+                auth_ctx.pubkey.to_bytes().as_slice(),
+            ) {
+                let _ = state
+                    .pubsub
+                    .clear_presence(&conn.tenant, &auth_ctx.pubkey)
+                    .await;
+            }
         }
-    }
-    // Application state is released above; only the transport waits on the peer.
-    await_client_close(ws_recv).await;
+    };
+    tokio::join!(cleanup, await_client_close(ws_recv));
     metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection closed");
 
@@ -3254,6 +3258,16 @@ mod terminal_close_delivery_tests {
         assertion: VerifiedAssertion,
         prefire_expiry: bool,
     ) -> (std::net::SocketAddr, RelayUrl, Arc<AppState>, Uuid) {
+        serve_with_cleanup_pause(assertion, prefire_expiry, None).await
+    }
+
+    /// Like `serve`, but runs the handler inside `cleanup_pause` so a test
+    /// can stall the connection's final subscription cleanup.
+    async fn serve_with_cleanup_pause(
+        assertion: VerifiedAssertion,
+        prefire_expiry: bool,
+        cleanup_pause: Option<Arc<crate::handlers::close::test_seam::Pause>>,
+    ) -> (std::net::SocketAddr, RelayUrl, Arc<AppState>, Uuid) {
         let state = crate::state::tests::test_state().await;
         let served_state = Arc::clone(&state);
         let conn_id = Uuid::new_v4();
@@ -3268,8 +3282,12 @@ mod terminal_close_delivery_tests {
         let app = Router::new().route(
             "/",
             get(move |ws: WebSocketUpgrade| {
-                let (state, tenant, assertion) =
-                    (Arc::clone(&state), tenant.clone(), assertion.clone());
+                let (state, tenant, assertion, cleanup_pause) = (
+                    Arc::clone(&state),
+                    tenant.clone(),
+                    assertion.clone(),
+                    cleanup_pause.clone(),
+                );
                 async move {
                     ws.on_upgrade(move |socket| async move {
                         let cancel = CancellationToken::new();
@@ -3288,7 +3306,7 @@ mod terminal_close_delivery_tests {
                             );
                             (gate, tx, rx, Some(expiry))
                         });
-                        handle_active_connection(
+                        let handler = handle_active_connection(
                             socket,
                             state,
                             "127.0.0.1:1234".parse().expect("client address"),
@@ -3298,8 +3316,15 @@ mod terminal_close_delivery_tests {
                             Some(assertion),
                             chrono::Utc::now(),
                             pre_built,
-                        )
-                        .await;
+                        );
+                        match cleanup_pause {
+                            Some(pause) => {
+                                crate::handlers::close::test_seam::CLEANUP_PAUSE
+                                    .scope(pause, handler)
+                                    .await;
+                            }
+                            None => handler.await,
+                        }
                     })
                 }
             }),
@@ -3470,7 +3495,7 @@ mod terminal_close_delivery_tests {
     /// (seen live as `1006`). This raw client never replies: the server must
     /// hold the socket for its full bounded wait, which starts only after
     /// connect, so timing from before connect makes the lower bound
-    /// independent of scheduler delay. The wait runs after cleanup, so the
+    /// independent of scheduler delay. Cleanup runs alongside the wait, so the
     /// connection is already deregistered once the socket ends.
     #[tokio::test]
     async fn server_holds_socket_for_client_close_reply() {
@@ -3490,8 +3515,8 @@ mod terminal_close_delivery_tests {
     }
 
     /// The client withholds its Close reply until the connection has
-    /// deregistered, so cleanup must run before the bounded peer wait: a
-    /// server that cleans up after the wait, or ignores the reply, needs at
+    /// deregistered, so cleanup must not wait on the peer: a server that
+    /// cleans up after the wait, or ignores the reply, needs at
     /// least `WS_TERMINAL_FLUSH_TIMEOUT` from connect.
     #[tokio::test]
     async fn server_finishes_promptly_when_client_answers_close() {
@@ -3518,5 +3543,21 @@ mod terminal_close_delivery_tests {
             elapsed < WS_TERMINAL_FLUSH_TIMEOUT,
             "server must finish on the client's Close, not the timeout; took {elapsed:?}"
         );
+    }
+
+    /// Final cleanup can block on Redis with no deadline (the pool has no
+    /// wait timeout). The peer wait runs alongside it, so a stalled cleanup
+    /// still lets the socket end once the bounded wait expires.
+    #[tokio::test]
+    async fn stalled_cleanup_does_not_hold_socket_open() {
+        let pause = Arc::new(crate::handlers::close::test_seam::Pause::default());
+        let (address, _, _, _) =
+            serve_with_cleanup_pause(expired_assertion(), true, Some(Arc::clone(&pause))).await;
+        let started = std::time::Instant::now();
+        let mut socket = raw_client_after_server_close(address).await;
+
+        pause.reached.notified().await;
+        let elapsed = time_to_eof(&mut socket, started).await;
+        assert!(elapsed >= WS_TERMINAL_FLUSH_TIMEOUT);
     }
 }
