@@ -219,6 +219,8 @@ pub struct AcpClient {
     goose_usage: UsageTracker,
     /// Per-turn prompt-response usage and Claude's optional cumulative cost.
     standard_usage: StandardUsageTracker,
+    /// Tool calls / skill invocations seen this turn (NIP-AM `tools`/`skills`).
+    tool_counts: crate::tool_counts::ToolCallCounter,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
     /// Ask Claude Code for summarized thinking on `session/new`. Opus omits
@@ -632,6 +634,7 @@ impl AcpClient {
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
+            tool_counts: Default::default(),
             standard_adapter,
             claude_thinking_summaries,
         })
@@ -872,6 +875,7 @@ impl AcpClient {
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
         self.standard_usage.begin_turn(session_id);
+        self.tool_counts.begin_turn();
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -969,7 +973,11 @@ impl AcpClient {
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
-        goose_usage.or(standard_usage)
+        let (tools, skills) = self.tool_counts.take();
+        let mut usage = goose_usage.or(standard_usage)?;
+        usage.tools = tools;
+        usage.skills = skills;
+        Some(usage)
     }
 
     /// Notify the usage tracker that buzz-acp just spawned a new session.
@@ -1840,6 +1848,7 @@ impl AcpClient {
                 false
             }
             "tool_call" => {
+                self.tool_counts.observe(update);
                 let title = update
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -1852,6 +1861,7 @@ impl AcpClient {
                 true
             }
             "tool_call_update" => {
+                self.tool_counts.observe(update);
                 let tool_id = update
                     .get("toolCallId")
                     .and_then(|v| v.as_str())
@@ -4987,6 +4997,44 @@ sleep 1"#,
         assert!(usage.delta_reliable);
         assert_eq!(usage.turn_input_tokens, Some(800));
         assert_eq!(usage.turn_output_tokens, Some(250));
+    }
+
+    fn tool_update(update: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"jsonrpc":"2.0","method":"session/update",
+            "params":{"sessionId":"s1","update":update}})
+    }
+
+    #[tokio::test]
+    async fn tool_and_skill_counts_flow_through_session_update_and_reset_per_turn() {
+        use serde_json::json;
+        let mut client = spawn_inert_client().await;
+        client.goose_usage.begin_turn("s1");
+        client.tool_counts.begin_turn();
+        for u in [
+            json!({"sessionUpdate":"tool_call","toolCallId":"a","title":"Read src/x.rs","kind":"read",
+                "_meta":{"claudeCode":{"toolName":"Read"}}}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"a","status":"completed"}),
+            json!({"sessionUpdate":"tool_call","toolCallId":"b","title":"load_skill","kind":"other"}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"b","rawInput":{"name":"git"}}),
+            json!({"sessionUpdate":"tool_call","toolCallId":"c","title":"load_skill","kind":"other",
+                "rawInput":{"name":"git/refs/a.md"}}),
+        ] {
+            client.handle_session_update(&tool_update(u));
+        }
+        client.handle_goose_usage_update(&goose_usage_update_msg("s1", 10, 5, None));
+        let usage = client.take_turn_usage().expect("usage");
+        assert_eq!(
+            usage.tools.unwrap(),
+            [("Read".into(), 1), ("load_skill".into(), 2)].into()
+        );
+        assert_eq!(usage.skills.unwrap(), [("git".into(), 1)].into());
+
+        // Next turn starts clean: counts never leak.
+        client.goose_usage.begin_turn("s1");
+        client.tool_counts.begin_turn();
+        client.handle_goose_usage_update(&goose_usage_update_msg("s1", 20, 9, None));
+        let usage = client.take_turn_usage().expect("usage");
+        assert!(usage.tools.is_none() && usage.skills.is_none());
     }
 
     #[tokio::test]

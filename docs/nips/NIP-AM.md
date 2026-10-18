@@ -124,7 +124,14 @@ The `content` field decrypts to a UTF-8 JSON object:
     "cacheClass": "ephemeral"                    // cache-write class; omit when not applicable
   },
 
-  "stopReason": "end_turn"               // optional
+  "stopReason": "end_turn",              // optional
+
+  // Tool calls and skill invocations during this turn, as name -> count.
+  // Both OPTIONAL; omitted (not empty) when no tool calls were observed.
+  // At most 64 distinct names, each at most 128 bytes; publishers fold any
+  // overflow into the key "_other". Consumers MUST ignore them if absent.
+  "tools":  { "Read": 3, "shell": 1 },
+  "skills": { "git": 1 }
 }
 ```
 

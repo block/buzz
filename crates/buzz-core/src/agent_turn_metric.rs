@@ -6,6 +6,8 @@
 //!
 //! See `docs/nips/NIP-AM.md` for the full specification.
 
+use std::collections::BTreeMap;
+
 use nostr::{Event, Keys, PublicKey};
 use serde::{Deserialize, Serialize};
 
@@ -157,7 +159,24 @@ pub struct AgentTurnMetricPayload {
     /// treat omission as "price unknown".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pricing_identity: Option<PricingIdentity>,
+
+    /// Tool calls made this turn, keyed by tool name. Omitted when no tool
+    /// calls were observed. At most [`MAX_TURN_METRIC_NAMES`] entries, each
+    /// name at most [`MAX_TURN_METRIC_NAME_BYTES`] bytes; overflow is folded
+    /// into `"_other"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<BTreeMap<String, u32>>,
+
+    /// Skill invocations this turn, keyed by skill name. Same bounds and
+    /// omission rules as `tools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<BTreeMap<String, u32>>,
 }
+
+/// Maximum distinct entries in `tools` / `skills`.
+pub const MAX_TURN_METRIC_NAMES: usize = 64;
+/// Maximum byte length of a `tools` / `skills` key.
+pub const MAX_TURN_METRIC_NAME_BYTES: usize = 128;
 
 fn default_delta_reliable() -> bool {
     true
@@ -179,6 +198,18 @@ impl AgentTurnMetricPayload {
                 }
             }
             Ok(())
+        }
+        for (field, map) in [("tools", &self.tools), ("skills", &self.skills)] {
+            if let Some(m) = map {
+                if m.len() > MAX_TURN_METRIC_NAMES
+                    || m.keys()
+                        .any(|k| k.is_empty() || k.len() > MAX_TURN_METRIC_NAME_BYTES)
+                {
+                    return Err(ObserverPayloadError::InvalidPayload(format!(
+                        "{field} exceeds {MAX_TURN_METRIC_NAMES} entries or has an empty/over-{MAX_TURN_METRIC_NAME_BYTES}-byte name"
+                    )));
+                }
+            }
         }
         if let Some(t) = &self.turn {
             check_cost(t.cost_usd, "turn.costUsd")?;
@@ -256,6 +287,8 @@ mod tests {
             delta_reliable: true,
             stop_reason: Some(StopReason::EndTurn),
             pricing_identity: None,
+            tools: None,
+            skills: None,
         }
     }
 
@@ -312,6 +345,38 @@ mod tests {
             payload.delta_reliable,
             "deltaReliable should default to true"
         );
+    }
+
+    #[test]
+    fn tools_and_skills_optional_bounded_and_backward_compatible() {
+        let old: AgentTurnMetricPayload =
+            serde_json::from_str(r#"{"harness":"goose","timestamp":"t"}"#).unwrap();
+        assert!(old.tools.is_none() && old.skills.is_none());
+        assert!(!serde_json::to_string(&old).unwrap().contains("tools"));
+
+        let mut p = sample_payload();
+        p.tools = Some(BTreeMap::from([("Read".to_string(), 2)]));
+        p.skills = Some(BTreeMap::from([("git".to_string(), 1)]));
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains(r#""tools":{"Read":2}"#));
+        assert_eq!(
+            serde_json::from_str::<AgentTurnMetricPayload>(&json).unwrap(),
+            p
+        );
+        assert!(p.validate().is_ok());
+
+        p.skills = Some(
+            (0..=MAX_TURN_METRIC_NAMES)
+                .map(|i| (i.to_string(), 1))
+                .collect(),
+        );
+        assert!(p.validate().is_err());
+        p.skills = None;
+        p.tools = Some(BTreeMap::from([(
+            "x".repeat(MAX_TURN_METRIC_NAME_BYTES + 1),
+            1,
+        )]));
+        assert!(p.validate().is_err());
     }
 
     #[test]
@@ -402,6 +467,8 @@ mod tests {
             delta_reliable: true,
             stop_reason: None,
             pricing_identity: None,
+            tools: None,
+            skills: None,
         }
     }
 
@@ -426,6 +493,8 @@ mod tests {
             delta_reliable: true,
             stop_reason: None,
             pricing_identity: None,
+            tools: None,
+            skills: None,
         }
     }
 

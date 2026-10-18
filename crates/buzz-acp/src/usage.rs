@@ -242,6 +242,10 @@ pub struct TurnUsage {
     /// `None` when the publisher omitted it (unrecognised endpoint, mixed
     /// identities, old harness). Per-turn only — not session-cumulative.
     pub pricing_identity: Option<buzz_core::agent_turn_metric::PricingIdentity>,
+    /// Tool calls by name for this turn; filled by `AcpClient::take_turn_usage`.
+    pub tools: Option<std::collections::BTreeMap<String, u32>>,
+    /// Skill invocations by name for this turn; filled like `tools`.
+    pub skills: Option<std::collections::BTreeMap<String, u32>>,
 }
 
 /// Per-turn usage carried by a standard ACP `session/prompt` response.
@@ -392,6 +396,8 @@ impl StandardUsageTracker {
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            tools: None,
+            skills: None,
         })
     }
 }
@@ -749,6 +755,8 @@ impl UsageTracker {
                 // The folded identity is written in take() — use a placeholder
                 // here and replace it before returning the record.
                 pricing_identity: None,
+                tools: None,
+                skills: None,
             });
         } else if self.in_flight_session.is_none() {
             // Not in-flight at all: advance the committed baseline so the next
@@ -1989,6 +1997,8 @@ mod tests {
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            tools: None,
+            skills: None,
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
@@ -2030,6 +2040,8 @@ mod tests {
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
+            tools: None,
+            skills: None,
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
