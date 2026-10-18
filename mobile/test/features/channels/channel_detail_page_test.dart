@@ -4548,12 +4548,22 @@ void main() {
     });
 
     for (final gesture in ['status bar', 'scroll']) {
-      testWidgets(
-        'Me history uses selected provider for $gesture',
-        (tester) async {
-          final notifier = _FakeMessagesNotifier(
+      testWidgets('Me history uses selected provider for $gesture', (
+        tester,
+      ) async {
+        final notifier = _FakeMessagesNotifier(
+          [
+            for (var i = 50; i < 250; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ],
+          olderPages: [
             [
-              for (var i = 50; i < 250; i++)
+              for (var i = 0; i < 50; i++)
                 _textMsg(
                   id: 'msg$i',
                   pubkey: 'alice',
@@ -4561,64 +4571,52 @@ void main() {
                   createdAt: 1000 + i,
                 ),
             ],
-            olderPages: [
-              [
-                for (var i = 0; i < 50; i++)
-                  _textMsg(
-                    id: 'msg$i',
-                    pubkey: 'alice',
-                    content: 'Message $i',
-                    createdAt: 1000 + i,
-                  ),
-              ],
-            ],
-          );
-          await tester.pumpWidget(
-            _buildTestable(
-              messages: const [],
-              messagesNotifier: notifier,
-              personalChat: true,
-              disableAnimations: true,
+          ],
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: notifier,
+            personalChat: true,
+            disableAnimations: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+        if (gesture == 'status bar') {
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            'flutter/status_bar',
+            const JSONMethodCodec().encodeMethodCall(
+              const MethodCall('handleScrollToTop'),
             ),
+            (_) {},
           );
           await tester.pumpAndSettle();
-          if (gesture == 'status bar') {
-            await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-              'flutter/status_bar',
-              const JSONMethodCodec().encodeMethodCall(
-                const MethodCall('handleScrollToTop'),
-              ),
-              (_) {},
-            );
-            await tester.pumpAndSettle();
-          } else {
-            final list = tester.widget<ScrollablePositionedList>(
-              find.byType(ScrollablePositionedList),
-            );
-            list.itemScrollController!.jumpTo(index: 195);
-            await tester.pumpAndSettle();
-            await tester.drag(
-              find.byType(ScrollablePositionedList),
-              const Offset(0, 350),
-            );
-            await tester.pumpAndSettle();
-          }
-          expect(notifier.fetchOlderCalls, greaterThan(0));
-          if (gesture == 'status bar') {
-            expect(findRichText('Message 0'), findsOneWidget);
-          } else {
-            // Scroll pagination extends the visible provider, even if the user
-            // has not scrolled through every newly loaded row yet.
-            expect(
-              ProviderScope.containerOf(
-                tester.element(find.byType(ChannelDetailPage)),
-              ).read(meMessagesProvider(_channelId)).requireValue.first.id,
-              'msg0',
-            );
-          }
-        },
-        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-      );
+        } else {
+          final list = tester.widget<ScrollablePositionedList>(
+            find.byType(ScrollablePositionedList),
+          );
+          list.itemScrollController!.jumpTo(index: 195);
+          await tester.pumpAndSettle();
+          await tester.drag(
+            find.byType(ScrollablePositionedList),
+            const Offset(0, 350),
+          );
+          await tester.pumpAndSettle();
+        }
+        expect(notifier.fetchOlderCalls, greaterThan(0));
+        if (gesture == 'status bar') {
+          expect(findRichText('Message 0'), findsOneWidget);
+        } else {
+          // Scroll pagination extends the visible provider, even if the user
+          // has not scrolled through every newly loaded row yet.
+          expect(
+            ProviderScope.containerOf(
+              tester.element(find.byType(ChannelDetailPage)),
+            ).read(meMessagesProvider(_channelId)).requireValue.first.id,
+            'msg0',
+          );
+        }
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     }
 
     for (final personal in [false, true]) {

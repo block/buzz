@@ -263,7 +263,7 @@ class _ComposeBarLayout extends HookWidget {
           opacity: animation,
           child: SizeTransition(
             sizeFactor: animation,
-            axisAlignment: 1,
+            alignment: Alignment.bottomCenter,
             child: child,
           ),
         ),

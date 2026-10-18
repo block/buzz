@@ -60,58 +60,56 @@ void bubbleLayoutTests() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'status bar pagination is capped and later taps continue',
-    (tester) async {
-      final notifier = _FakeMessagesNotifier(
-        [
-          for (var index = 0; index < 30; index++)
+  testWidgets('status bar pagination is capped and later taps continue', (
+    tester,
+  ) async {
+    final notifier = _FakeMessagesNotifier(
+      [
+        for (var index = 0; index < 30; index++)
+          _textMsg(
+            id: 'recent-$index',
+            pubkey: 'alice',
+            content: 'Recent $index',
+            createdAt: 3000 + index,
+          ),
+      ],
+      olderPages: [
+        for (var index = 1; index <= 10; index++)
+          [
             _textMsg(
-              id: 'recent-$index',
+              id: 'page-$index',
               pubkey: 'alice',
-              content: 'Recent $index',
-              createdAt: 3000 + index,
+              content: 'Older page $index',
+              createdAt: 3000 - index * 100,
             ),
-        ],
-        olderPages: [
-          for (var index = 1; index <= 10; index++)
-            [
-              _textMsg(
-                id: 'page-$index',
-                pubkey: 'alice',
-                content: 'Older page $index',
-                createdAt: 3000 - index * 100,
-              ),
-            ],
-        ],
-      );
-      await tester.pumpWidget(
-        _buildTestable(messages: const [], messagesNotifier: notifier),
+          ],
+      ],
+    );
+    await tester.pumpWidget(
+      _buildTestable(messages: const [], messagesNotifier: notifier),
+    );
+    await tester.pumpAndSettle();
+    expect(notifier.fetchOlderCalls, 0);
+    for (final expected in [3, 6, 9, 10]) {
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        'flutter/status_bar',
+        const JSONMethodCodec().encodeMethodCall(
+          const MethodCall('handleScrollToTop'),
+        ),
+        (_) {},
       );
       await tester.pumpAndSettle();
-      expect(notifier.fetchOlderCalls, 0);
-      for (final expected in [3, 6, 9, 10]) {
-        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-          'flutter/status_bar',
-          const JSONMethodCodec().encodeMethodCall(
-            const MethodCall('handleScrollToTop'),
-          ),
-          (_) {},
-        );
-        await tester.pumpAndSettle();
-        expect(notifier.fetchOlderCalls, expected);
-        expect(find.text('Older page $expected').hitTestable(), findsOneWidget);
-        await tester.pumpAndSettle();
-        expect(
-          notifier.fetchOlderCalls,
-          expected,
-          reason: 'landing must not bypass the gesture cap',
-        );
-      }
-      expect(notifier.reachedOldest, isTrue);
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-  );
+      expect(notifier.fetchOlderCalls, expected);
+      expect(find.text('Older page $expected').hitTestable(), findsOneWidget);
+      await tester.pumpAndSettle();
+      expect(
+        notifier.fetchOlderCalls,
+        expected,
+        reason: 'landing must not bypass the gesture cap',
+      );
+    }
+    expect(notifier.reachedOldest, isTrue);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets(
     'grouped removal quick reactions remove reactions on later events',
@@ -426,68 +424,66 @@ void bubbleLayoutTests() {
   );
 
   for (final thread in [false, true]) {
-    testWidgets(
-      'status bar tap reaches oldest content, thread=$thread',
-      (tester) async {
-        final events = [
+    testWidgets('status bar tap reaches oldest content, thread=$thread', (
+      tester,
+    ) async {
+      final events = [
+        _textMsg(
+          id: threadIdTopDashRoot,
+          pubkey: 'bob',
+          content: 'Oldest content',
+          createdAt: 900,
+        ),
+        for (var index = 0; index < 60; index++)
           _textMsg(
-            id: threadIdTopDashRoot,
-            pubkey: 'bob',
-            content: 'Oldest content',
-            createdAt: 900,
+            id: 'top-$index',
+            pubkey: 'alice',
+            content: 'Message $index',
+            createdAt: 1000 + index,
+            extraTags: thread
+                ? const [
+                    ['e', threadIdTopDashRoot, '', 'reply'],
+                  ]
+                : const [],
           ),
-          for (var index = 0; index < 60; index++)
-            _textMsg(
-              id: 'top-$index',
-              pubkey: 'alice',
-              content: 'Message $index',
-              createdAt: 1000 + index,
-              extraTags: thread
-                  ? const [
-                      ['e', threadIdTopDashRoot, '', 'reply'],
-                    ]
-                  : const [],
-            ),
-        ];
-        final messages = formatTimeline(events);
-        await tester.pumpWidget(
-          _buildTestable(
-            messages: events,
-            home: thread
-                ? ThreadDetailPage(
-                    threadHead: messages.firstWhere(
-                      (m) => m.id == threadIdTopDashRoot,
-                    ),
-                    allMessages: messages,
-                    channelId: _channelId,
-                    currentPubkey: 'me',
-                    isMember: true,
-                    isArchived: false,
-                  )
-                : null,
-          ),
-        );
-        await tester.pumpAndSettle();
-        final list = tester.widget<ScrollablePositionedList>(
-          find.byKey(
-            ValueKey(thread ? 'thread-message-list' : 'channel-message-list'),
-          ),
-        );
-        list.itemScrollController!.jumpTo(index: thread ? 55 : 0);
-        await tester.pumpAndSettle();
-        expect(find.text('Oldest content').hitTestable(), findsNothing);
-        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-          'flutter/status_bar',
-          const JSONMethodCodec().encodeMethodCall(
-            const MethodCall('handleScrollToTop'),
-          ),
-          (_) {},
-        );
-        await tester.pumpAndSettle();
-        expect(find.text('Oldest content').hitTestable(), findsOneWidget);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-    );
+      ];
+      final messages = formatTimeline(events);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: events,
+          home: thread
+              ? ThreadDetailPage(
+                  threadHead: messages.firstWhere(
+                    (m) => m.id == threadIdTopDashRoot,
+                  ),
+                  allMessages: messages,
+                  channelId: _channelId,
+                  currentPubkey: 'me',
+                  isMember: true,
+                  isArchived: false,
+                )
+              : null,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final list = tester.widget<ScrollablePositionedList>(
+        find.byKey(
+          ValueKey(thread ? 'thread-message-list' : 'channel-message-list'),
+        ),
+      );
+      list.itemScrollController!.jumpTo(index: thread ? 55 : 0);
+      await tester.pumpAndSettle();
+      expect(find.text('Oldest content').hitTestable(), findsNothing);
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        'flutter/status_bar',
+        const JSONMethodCodec().encodeMethodCall(
+          const MethodCall('handleScrollToTop'),
+        ),
+        (_) {},
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Oldest content').hitTestable(), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
   }
 
   testWidgets('newest short message keeps the same group gap', (tester) async {

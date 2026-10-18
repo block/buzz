@@ -5,6 +5,7 @@ version: 0.0.0+1
 
 environment:
   sdk: ^3.11.4
+  flutter: ">=3.47.7"
 
 dependencies:
   flutter:
@@ -49,6 +50,7 @@ dependencies:
   local_auth: ^3.0.2
 
 dev_dependencies:
+  leak_tracker: ^11.0.2
   shared_preferences_platform_interface: ^2.4.2
   flutter_test:
     sdk: flutter
@@ -65,6 +67,8 @@ dev_dependencies:
   video_player_platform_interface: ^6.6.0
 
 flutter:
+  config:
+    enable-swift-package-manager: false
   uses-material-design: true
   shaders:
     - shaders/onboarding_wordmark.frag
