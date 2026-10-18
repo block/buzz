@@ -19,6 +19,8 @@ String _newPushLeaseInstallationId() {
 enum SensitiveActionPolicy { enabled, disabledByUser }
 
 class Community {
+  static const _defaultPushNotificationsEnabled = true;
+
   final String id;
   final String name;
   final String relayUrl;
@@ -45,7 +47,7 @@ class Community {
     this.pubkey,
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
-    this.pushNotificationsEnabled = true,
+    this.pushNotificationsEnabled = _defaultPushNotificationsEnabled,
     this.pushSubscriptionState = const BuzzPushLeaseSubscriptionState.desired(),
     this.pushLeaseInstallationId,
     this.starterSetupIncomplete = false,
@@ -129,10 +131,9 @@ class Community {
         'Push lease installation id must be 16 random bytes encoded as lowercase hex',
       );
     }
-    // Preserve every saved opt-out, including values written by older clients.
-    // Only records without a preference adopt the new-community default.
     final pushNotificationsEnabled =
-        json['pushNotificationsEnabled'] as bool? ?? true;
+        json['pushNotificationsEnabled'] as bool? ??
+        _defaultPushNotificationsEnabled;
     var pushSubscriptionState = json['pushSubscriptionState'] == null
         ? const BuzzPushLeaseSubscriptionState.desired()
         : BuzzPushLeaseSubscriptionState.fromJson(
