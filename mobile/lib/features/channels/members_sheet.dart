@@ -98,6 +98,7 @@ class MembersSheet extends HookConsumerWidget {
         child: membersAsync.when(
           data: (_) => CustomScrollView(
             key: const ValueKey('members-sheet-list'),
+            semanticChildCount: allMembers.length,
             shrinkWrap: true,
             slivers: [
               const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
@@ -126,6 +127,7 @@ class MembersSheet extends HookConsumerWidget {
               if (bots.isNotEmpty)
                 _MemberSection(
                   label: 'Agents · ${bots.length}',
+                  semanticIndexOffset: people.length,
                   itemCount: bots.length,
                   itemBuilder: (context, index) {
                     final bot = bots[index];

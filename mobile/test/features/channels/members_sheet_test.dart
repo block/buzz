@@ -133,6 +133,21 @@ void main() {
     await _pump(tester, _roster(2, 1), onTap: (key) => selected = key);
     expect(find.text('People · 2'), findsOneWidget);
     expect(find.text('Agents · 1'), findsOneWidget);
+    final agentIndex = tester.widget<IndexedSemantics>(
+      find.ancestor(
+        of: find.text('Agent 2'),
+        matching: find.byType(IndexedSemantics),
+      ),
+    );
+    expect(agentIndex.index, 2);
+    expect(
+      tester
+          .widget<CustomScrollView>(
+            find.byKey(const ValueKey('members-sheet-list')),
+          )
+          .semanticChildCount,
+      3,
+    );
     expect(find.text('You'), findsOneWidget);
     expect(find.bySemanticsLabel(RegExp('Person 1')), findsWidgets);
     await tester.tap(find.text('Person 1'));
