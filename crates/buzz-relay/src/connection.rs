@@ -729,7 +729,7 @@ async fn handle_active_connection(
         };
         auth_cancel_conn.finish_pending_auth_on_cancel(outcome);
     });
-    recv_loop(
+    let ws_recv = recv_loop(
         ws_recv,
         Arc::clone(&conn),
         Arc::clone(&state),
@@ -749,6 +749,7 @@ async fn handle_active_connection(
     let authenticated = auth_lifecycle.finish(close_outcome);
 
     let _ = send_task.await;
+    await_client_close(ws_recv).await;
     let _ = heartbeat_task.await;
     let _ = auth_timeout_task.await;
     if let Some(task) = nip_fi_expiry_task {
@@ -875,27 +876,18 @@ async fn flush_terminal_frames<S>(
     let deadline = tokio::time::Instant::now() + WS_TERMINAL_FLUSH_TIMEOUT;
     // 1. Drain FI terminal channel first — denial frame must precede the close.
     while let Ok(terminal_msg) = terminal_ctrl_rx.try_recv() {
-        if !matches!(
-            tokio::time::timeout_at(deadline, sink.send(terminal_msg)).await,
-            Ok(Ok(()))
-        ) {
+        if !send_terminal_frame(sink, terminal_msg, deadline, "terminal").await {
             return;
         }
     }
     // 2. Drain ordinary control frames (ban reason, etc.).
     if let Some(ctrl_msg) = first_ctrl {
-        if !matches!(
-            tokio::time::timeout_at(deadline, sink.send(ctrl_msg)).await,
-            Ok(Ok(()))
-        ) {
+        if !send_terminal_frame(sink, ctrl_msg, deadline, "control").await {
             return;
         }
     }
     while let Ok(ctrl_msg) = ctrl_rx.try_recv() {
-        if !matches!(
-            tokio::time::timeout_at(deadline, sink.send(ctrl_msg)).await,
-            Ok(Ok(()))
-        ) {
+        if !send_terminal_frame(sink, ctrl_msg, deadline, "control").await {
             return;
         }
     }
@@ -903,7 +895,31 @@ async fn flush_terminal_frames<S>(
     let close = disconnect_reason
         .borrow()
         .map_or(WsMessage::Close(None), |reason| reason.close_message());
-    let _ = tokio::time::timeout_at(deadline, sink.send(close)).await;
+    send_terminal_frame(sink, close, deadline, "close").await;
+}
+
+/// One deadline-bounded terminal write. Failures stay best-effort but are
+/// logged, so an undelivered denial or Close is diagnosable.
+async fn send_terminal_frame<S>(
+    sink: &mut S,
+    frame: WsMessage,
+    deadline: tokio::time::Instant,
+    frame_kind: &'static str,
+) -> bool
+where
+    S: Sink<WsMessage> + Unpin,
+{
+    match tokio::time::timeout_at(deadline, sink.send(frame)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => {
+            debug!(frame_kind, "terminal frame send failed");
+            false
+        }
+        Err(_) => {
+            debug!(frame_kind, "terminal frame send timed out");
+            false
+        }
+    }
 }
 
 /// Writes a WebSocket exit path's frames before a writer task owns the socket.
@@ -919,10 +935,7 @@ pub(crate) async fn send_exit_frames_bounded<S>(
 {
     let deadline = tokio::time::Instant::now() + WS_TERMINAL_FLUSH_TIMEOUT;
     for frame in frames {
-        if !matches!(
-            tokio::time::timeout_at(deadline, sink.send(frame)).await,
-            Ok(Ok(()))
-        ) {
+        if !send_terminal_frame(sink, frame, deadline, "exit").await {
             return;
         }
     }
@@ -1108,7 +1121,7 @@ async fn recv_loop(
     state: Arc<AppState>,
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
-) {
+) -> futures_util::stream::SplitStream<WebSocket> {
     loop {
         tokio::select! {
             msg = ws_recv.next() => {
@@ -1180,6 +1193,26 @@ async fn recv_loop(
             }
             _ = cancel.cancelled() => break,
         }
+    }
+    ws_recv
+}
+
+/// Holds the read half open until the client answers our Close (or the stream
+/// ends), bounded by `WS_TERMINAL_FLUSH_TIMEOUT`. Dropping the socket right
+/// after writing Close lets the client's echoed Close hit a closed socket; the
+/// peer's TCP stack answers with RST, which can discard the unread NOTICE and
+/// Close on the client side and surface as `1006`.
+async fn await_client_close(mut ws_recv: futures_util::stream::SplitStream<WebSocket>) {
+    let drained = tokio::time::timeout(WS_TERMINAL_FLUSH_TIMEOUT, async {
+        while let Some(Ok(msg)) = ws_recv.next().await {
+            if matches!(msg, WsMessage::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+    if drained.is_err() {
+        debug!("client did not answer Close before the terminal deadline");
     }
 }
 
@@ -3196,5 +3229,213 @@ pub(crate) mod tests {
 
         server.abort();
         let _ = server.await;
+    }
+}
+
+/// Close-code delivery of NIP-FI authorization denials over a real WebSocket.
+/// The mock-sink writer tests prove frame order; these prove what a client
+/// actually reads off the wire.
+#[cfg(test)]
+mod terminal_close_delivery_tests {
+    use super::*;
+    use axum::{extract::ws::WebSocketUpgrade, routing::get, Router};
+    use buzz_auth::VerifiedAssertion;
+    use nostr::{EventBuilder, Keys, RelayUrl};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::{protocol::frame::coding::CloseCode, Message};
+
+    type Client = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    /// Serves `handle_active_connection` for one assertion. `prefire_expiry`
+    /// arms an already-expired session gate, as `handle_connection` does.
+    async fn serve(
+        assertion: VerifiedAssertion,
+        prefire_expiry: bool,
+    ) -> (std::net::SocketAddr, RelayUrl) {
+        let state = crate::state::tests::test_state().await;
+        let tenant = TenantContext::resolved(
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            "test.local".to_owned(),
+        );
+        let relay_url =
+            crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant)
+                .parse()
+                .expect("expected NIP-42 relay URL");
+        let app = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let (state, tenant, assertion) =
+                    (Arc::clone(&state), tenant.clone(), assertion.clone());
+                async move {
+                    ws.on_upgrade(move |socket| async move {
+                        let cancel = CancellationToken::new();
+                        let control = CommunityConnectionControl::new(cancel.clone());
+                        let pre_built = prefire_expiry.then(|| {
+                            let deadline = chrono::Utc::now() - chrono::Duration::seconds(1);
+                            let (tx, rx) = mpsc::channel::<WsMessage>(1);
+                            let gate =
+                                crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel);
+                            let expiry = crate::nip_fi_session::spawn_nip_fi_expiry_task(
+                                deadline,
+                                Arc::clone(&gate),
+                                control.clone(),
+                                tx.clone(),
+                                crate::nip_fi_session::NipFiWsRoute::Root,
+                            );
+                            (gate, tx, rx, Some(expiry))
+                        });
+                        handle_active_connection(
+                            socket,
+                            state,
+                            "127.0.0.1:1234".parse().expect("client address"),
+                            tenant,
+                            Uuid::new_v4(),
+                            control,
+                            Some(assertion),
+                            chrono::Utc::now(),
+                            pre_built,
+                        )
+                        .await;
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        (address, relay_url)
+    }
+
+    async fn connect(address: std::net::SocketAddr) -> Client {
+        tokio_tungstenite::connect_async(format!("ws://{address}/"))
+            .await
+            .expect("connect")
+            .0
+    }
+
+    fn expired_assertion() -> VerifiedAssertion {
+        let deadline = chrono::Utc::now() - chrono::Duration::seconds(1);
+        VerifiedAssertion::for_test(Some(Keys::generate().public_key()), vec![deadline])
+    }
+
+    /// Reads until the stream ends. Returns the text frames and the close
+    /// frame, or the error that ended the stream without one.
+    async fn read_to_close(client: &mut Client) -> (Vec<String>, Result<(u16, String), String>) {
+        let mut texts = Vec::new();
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+                .await
+                .expect("socket must terminate");
+            match frame {
+                Some(Ok(Message::Text(text))) => texts.push(text.to_string()),
+                Some(Ok(Message::Close(Some(close)))) => {
+                    return (texts, Ok((u16::from(close.code), close.reason.to_string())))
+                }
+                Some(Ok(Message::Close(None))) => return (texts, Err("close without code".into())),
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return (texts, Err(error.to_string())),
+                None => return (texts, Err("stream ended without close".into())),
+            }
+        }
+    }
+
+    fn assert_denied_with_1008(texts: &[String], close: Result<(u16, String), String>) {
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("restricted: authorization denied")),
+            "denial NOTICE must arrive, got {texts:?}"
+        );
+        assert_eq!(
+            close,
+            Ok((
+                u16::from(CloseCode::Policy),
+                "authorization denied".to_owned()
+            )),
+            "denial must end with close 1008"
+        );
+    }
+
+    #[tokio::test]
+    async fn key_pairing_mismatch_closes_with_1008_on_real_socket() {
+        let asserted = Keys::generate();
+        let assertion = VerifiedAssertion::for_test(
+            Some(asserted.public_key()),
+            vec![chrono::Utc::now() + chrono::Duration::hours(1)],
+        );
+        let (address, relay_url) = serve(assertion, false).await;
+        let mut client = connect(address).await;
+
+        let Some(Ok(Message::Text(challenge))) = client.next().await else {
+            panic!("expected AUTH challenge")
+        };
+        let challenge: serde_json::Value =
+            serde_json::from_str(&challenge).expect("challenge json");
+        let auth = EventBuilder::auth(challenge[1].as_str().expect("challenge"), relay_url)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign AUTH");
+        client
+            .send(Message::Text(
+                serde_json::json!(["AUTH", auth]).to_string().into(),
+            ))
+            .await
+            .expect("send AUTH");
+
+        let (texts, close) = read_to_close(&mut client).await;
+        assert_denied_with_1008(&texts, close);
+    }
+
+    #[tokio::test]
+    async fn session_expiry_denial_closes_with_1008_on_real_socket() {
+        let (address, _) = serve(expired_assertion(), true).await;
+        let mut client = connect(address).await;
+
+        let (texts, close) = read_to_close(&mut client).await;
+        assert_denied_with_1008(&texts, close);
+    }
+
+    /// A server that drops TCP straight after writing Close races the
+    /// client's Close reply into a closed socket; the resulting RST can wipe
+    /// the unread NOTICE and Close on the client (seen live as `1006`). The
+    /// raw client never replies, so the server must still hold the socket
+    /// open after its Close instead of sending EOF.
+    #[tokio::test]
+    async fn server_holds_socket_for_client_close_reply() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (address, _) = serve(expired_assertion(), true).await;
+        let mut socket = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        socket
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: test.local\r\nUpgrade: websocket\r\n\
+                  Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                  Sec-WebSocket-Version: 13\r\n\r\n",
+            )
+            .await
+            .expect("send upgrade");
+
+        // Server frames are unmasked; 0x88 is a final Close frame header.
+        let mut received = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !received.contains(&0x88) {
+            let n = tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf))
+                .await
+                .expect("server Close must arrive")
+                .expect("read");
+            assert_ne!(n, 0, "socket ended before the server sent Close");
+            received.extend_from_slice(&buf[..n]);
+        }
+
+        let after_close =
+            tokio::time::timeout(std::time::Duration::from_millis(300), socket.read(&mut buf))
+                .await;
+        assert!(
+            after_close.is_err(),
+            "server must wait for the client's Close reply, got {after_close:?}"
+        );
     }
 }
