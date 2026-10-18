@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:intl/intl.dart';
 
 // Re-export shortPubkey so existing callers continue to compile.
@@ -106,6 +107,12 @@ class TimelineCalendarDays {
   /// Whether two timestamps fall on the same local calendar day.
   bool isSameDay(int a, int b) => _day(a) == _day(b);
 }
+
+/// Creates a fresh calendar cache for each timeline build.
+final timelineCalendarDaysFactoryProvider =
+    Provider<TimelineCalendarDays Function()>(
+      (ref) => TimelineCalendarDays.new,
+    );
 
 /// Returns a compact relative time string like "just now", "5m ago", "3h ago",
 /// "2d ago", or a short date for older timestamps.

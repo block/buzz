@@ -1,6 +1,6 @@
 part of '../thread_detail_page.dart';
 
-class _ThreadMessageList extends HookWidget {
+class _ThreadMessageList extends HookConsumerWidget {
   final double headHeight;
   final ValueChanged<double> onHeadHeightChanged;
   final LaidOutViewport viewport;
@@ -144,8 +144,8 @@ class _ThreadMessageList extends HookWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final calendarDays = TimelineCalendarDays();
+  Widget build(BuildContext context, WidgetRef ref) {
+    final calendarDays = ref.watch(timelineCalendarDaysFactoryProvider)();
     final headLink = useMemoized(LayerLink.new);
     final loadingHeadLink = useMemoized(LayerLink.new);
     final headScrollPosition = useRef<ScrollPosition?>(null);
@@ -308,7 +308,7 @@ class _ThreadMessageList extends HookWidget {
                                     startsDay: showDayDivider,
                                     endsDay:
                                         nextReply != null &&
-                                        !isSameDay(
+                                        !calendarDays.isSameDay(
                                           reply.createdAt,
                                           nextReply.createdAt,
                                         ),

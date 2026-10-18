@@ -56,7 +56,7 @@ class _MessageList extends HookConsumerWidget {
       localMessageSendAnimationProvider(channelId),
     );
     final displayEntries = groupMembershipTimelineEntries(entries);
-    final calendarDays = TimelineCalendarDays();
+    final calendarDays = ref.watch(timelineCalendarDaysFactoryProvider)();
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final stickyDayTimestamp = useValueNotifier<int?>(null);
@@ -976,7 +976,7 @@ class _MessageList extends HookConsumerWidget {
                             startsDay: showDayDivider,
                             endsDay:
                                 nextMessage != null &&
-                                !isSameDay(
+                                !calendarDays.isSameDay(
                                   message.createdAt,
                                   nextMessage.createdAt,
                                 ),
@@ -997,7 +997,7 @@ class _MessageList extends HookConsumerWidget {
                             startsDay: showDayDivider,
                             endsDay:
                                 nextMessage != null &&
-                                !isSameDay(
+                                !calendarDays.isSameDay(
                                   message.createdAt,
                                   nextMessage.createdAt,
                                 ),
