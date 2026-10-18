@@ -76,6 +76,15 @@ void timelineCalendarBuilderTests() {
       expect(padding.padding.resolve(TextDirection.ltr).bottom, 0);
     }
 
+    // Observe one settled channel rebuild, excluding initial hydration builds.
+    conversions.clear();
+    tester.element(find.byType(ChannelDetailPage)).markNeedsBuild();
+    await tester.pump();
+    final channelCaches = conversions
+        .where((counts) => counts.isNotEmpty)
+        .toList();
+    expect(channelCaches, hasLength(1));
+    expect(channelCaches.single.keys, containsAll([1000, 1060, 1120]));
     expectEndSpacing('message-row-$threadIdThreadDashRoot');
     expectEndSpacing('system-message-row-calendar-system');
     final head = formatTimeline([root]).single;
