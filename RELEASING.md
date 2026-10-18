@@ -178,9 +178,11 @@ after the conference. Do not upload builds from `main` or a later minor version
 that would displace the stable dogfood build. The branch starts from
 `mobile-v0.24.0-rc.2`, the source of uploaded iOS 0.24.0 (7).
 
-Ask the release owner at each fix landing whether to cherry-pick it to the
-stable branch. Backport only explicitly approved fixes, preserve source commit
-provenance, and validate the resulting source. Never merge `main` wholesale.
+Fix PRs must target `main` and land there first, not target a stable release
+branch directly. At each fix landing, ask the release owner whether to
+cherry-pick the merged commit to the stable branch. Cherry-pick only explicitly
+approved fixes, preserve the original commit provenance, and validate the
+resulting stable source. Never merge `main` wholesale.
 Remote agents and App Clip are post-conference work. There is no preselected
 fix list and no requirement to create a stable branch for every minor release.
 
