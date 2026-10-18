@@ -49,6 +49,7 @@ void main() {
       WidgetHelpers.testable(
         overrides: [
           relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          relaySessionProvider.overrideWith(_SettingsRelaySession.new),
           authProvider.overrideWith(_AuthNotifier.new),
           pairingProvider.overrideWith(
             () => _PairingNotifier(Future<bool>.value(true)),
@@ -141,6 +142,7 @@ void main() {
       WidgetHelpers.testable(
         overrides: [
           relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          relaySessionProvider.overrideWith(_SettingsRelaySession.new),
           authProvider.overrideWith(_AuthNotifier.new),
           pairingProvider.overrideWith(() => pairing),
           savedPrefsProvider.overrideWithValue(prefs),
@@ -178,6 +180,7 @@ void main() {
       WidgetHelpers.testable(
         overrides: [
           relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          relaySessionProvider.overrideWith(_SettingsRelaySession.new),
           authProvider.overrideWith(_AuthNotifier.new),
           pairingProvider.overrideWith(() => pairing),
           savedPrefsProvider.overrideWithValue(prefs),
@@ -217,6 +220,7 @@ void main() {
       WidgetHelpers.testable(
         overrides: [
           relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          relaySessionProvider.overrideWith(_SettingsRelaySession.new),
           authProvider.overrideWith(_AuthNotifier.new),
           pairingProvider.overrideWith(() => pairing),
           savedPrefsProvider.overrideWithValue(prefs),
@@ -259,6 +263,7 @@ void main() {
       WidgetHelpers.testable(
         overrides: [
           relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          relaySessionProvider.overrideWith(_SettingsRelaySession.new),
           authProvider.overrideWith(_AuthNotifier.new),
           pairingProvider.overrideWith(() => pairing),
           savedPrefsProvider.overrideWithValue(prefs),
@@ -302,6 +307,7 @@ void main() {
       WidgetHelpers.testable(
         overrides: [
           relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+          relaySessionProvider.overrideWith(_SettingsRelaySession.new),
           authProvider.overrideWith(_AuthNotifier.new),
           pairingProvider.overrideWith(() => pairing),
           savedPrefsProvider.overrideWithValue(prefs),
@@ -366,4 +372,11 @@ class _PairingNotifier extends PairingNotifier {
   void reset() {
     resetCalls++;
   }
+}
+
+// Settings tests exercise identity controls, without opening a real relay socket.
+class _SettingsRelaySession extends RelaySessionNotifier {
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.disconnected);
 }
