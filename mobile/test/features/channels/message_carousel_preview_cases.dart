@@ -105,70 +105,68 @@ void carouselPreviewTests() {
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
 
-  testWidgets(
-    'outgoing gallery starts at the right and mirrors its spacing',
-    (tester) async {
-      final messenger = tester.binding.defaultBinaryMessenger;
-      final channels = <MethodChannel>[];
-      final configs = <Map<Object?, Object?>>[];
-      messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
-        call,
-      ) async {
-        if (call.method == 'create') {
-          final id = (call.arguments as Map)['id'];
-          final channel = MethodChannel('buzz/ios_media_carousel/$id');
-          channels.add(channel);
-          messenger.setMockMethodCallHandler(channel, (call) async {
-            if (call.method == 'configure') {
-              configs.add(Map<Object?, Object?>.from(call.arguments as Map));
-            }
-            return null;
-          });
-        }
-        return null;
-      });
-      addTearDown(() {
-        messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
-        for (final channel in channels) {
-          messenger.setMockMethodCallHandler(channel, null);
-        }
-      });
-      final counts = <Rect>[];
-      final widths = <double>[];
-      for (final own in [false, true]) {
-        await tester.pumpWidget(
-          _testable(
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 50),
-              child: MessageContent(
-                key: ValueKey(own),
-                ownMessage: own,
-                bubble: true,
-                mediaCarouselTrailingOverflow: Grid.gutter,
-                content:
-                    '![one](https://example.com/mirror-one.png)\n![two](https://example.com/mirror-two.png)',
-              ),
+  testWidgets('outgoing gallery starts at the right and mirrors its spacing', (
+    tester,
+  ) async {
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final channels = <MethodChannel>[];
+    final configs = <Map<Object?, Object?>>[];
+    messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+      call,
+    ) async {
+      if (call.method == 'create') {
+        final id = (call.arguments as Map)['id'];
+        final channel = MethodChannel('buzz/ios_media_carousel/$id');
+        channels.add(channel);
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'configure') {
+            configs.add(Map<Object?, Object?>.from(call.arguments as Map));
+          }
+          return null;
+        });
+      }
+      return null;
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
+      for (final channel in channels) {
+        messenger.setMockMethodCallHandler(channel, null);
+      }
+    });
+    final counts = <Rect>[];
+    final widths = <double>[];
+    for (final own in [false, true]) {
+      await tester.pumpWidget(
+        _testable(
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 50),
+            child: MessageContent(
+              key: ValueKey(own),
+              ownMessage: own,
+              bubble: true,
+              mediaCarouselTrailingOverflow: Grid.gutter,
+              content:
+                  '![one](https://example.com/mirror-one.png)\n![two](https://example.com/mirror-two.png)',
             ),
           ),
-        );
-        await tester.pumpAndSettle();
-        counts.add(
-          tester.getRect(
-            find.byKey(const ValueKey('message-media-carousel-count')),
-          ),
-        );
-        widths.add(
-          tester
-              .getSize(find.byKey(const ValueKey('message-media-carousel')))
-              .width,
-        );
-        expect(configs.last['rtl'], own);
-      }
-      expect(widths[0], widths[1]);
-      expect(counts[0].left, closeTo(800 - counts[1].right, 0.1));
-      await tester.pumpWidget(const SizedBox());
-      expect(tester.takeException(), isNull);
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-  );
+        ),
+      );
+      await tester.pumpAndSettle();
+      counts.add(
+        tester.getRect(
+          find.byKey(const ValueKey('message-media-carousel-count')),
+        ),
+      );
+      widths.add(
+        tester
+            .getSize(find.byKey(const ValueKey('message-media-carousel')))
+            .width,
+      );
+      expect(configs.last['rtl'], own);
+    }
+    expect(widths[0], widths[1]);
+    expect(counts[0].left, closeTo(800 - counts[1].right, 0.1));
+    await tester.pumpWidget(const SizedBox());
+    expect(tester.takeException(), isNull);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 }
