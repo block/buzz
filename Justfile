@@ -581,6 +581,7 @@ test-unit:
                 + test(=connection::terminal_close_delivery_tests::server_holds_socket_for_client_close_reply)
                 + test(=connection::terminal_close_delivery_tests::server_finishes_promptly_when_client_answers_close)
                 + test(=connection::terminal_close_delivery_tests::stalled_cleanup_does_not_hold_socket_open)
+                + test(=connection::terminal_close_delivery_tests::bootstrap_drain_holds_socket_for_client_close_reply)
                 + test(=handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated)
                 + test(=handlers::auth::tests::fi_ban_check_error_emits_terminal_authorization_unavailable)
                 + test(=handlers::auth::tests::fi_root_authorization_denied_rows_emit_identical_frames)

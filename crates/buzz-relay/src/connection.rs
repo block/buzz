@@ -417,6 +417,11 @@ pub(crate) async fn handle_connection(
     let rx_for_run = Arc::clone(&rx_shared);
     let rx_for_drain = Arc::clone(&rx_shared);
 
+    // The drain path parks the read half here so the bounded wait for the
+    // client's Close runs after the registry entry is released.
+    let unread_shared = Arc::new(Mutex::new(None));
+    let unread_for_drain = Arc::clone(&unread_shared);
+
     run_registered_community_connection(
         &registry,
         conn_id,
@@ -459,7 +464,7 @@ pub(crate) async fn handle_connection(
             let socket = socket_for_drain.lock().await.take();
             let mut pre_terminal_ctrl_rx = rx_for_drain.lock().await.take();
             if let Some(socket) = socket {
-                let (mut ws_send, _ws_recv) = socket.split();
+                let (mut ws_send, ws_recv) = socket.split();
                 // Terminal channel has capacity 1; if the expiry task fired, it holds
                 // exactly one denial frame here. Deliver it before closing.
                 if let Some(ref mut rx) = pre_terminal_ctrl_rx {
@@ -488,10 +493,15 @@ pub(crate) async fn handle_connection(
                     futures_util::SinkExt::close(&mut ws_send),
                 )
                 .await;
+                *unread_for_drain.lock().await = Some(ws_recv);
             }
         },
     )
     .await;
+    let unread = unread_shared.lock().await.take();
+    if let Some(ws_recv) = unread {
+        await_client_close(ws_recv).await;
+    }
 }
 
 // `handle_active_connection` inherits the connection handler's natural parameter
@@ -1206,7 +1216,7 @@ async fn recv_loop(
 /// ends), bounded by `WS_TERMINAL_FLUSH_TIMEOUT`. Dropping TCP before the peer
 /// finishes the close handshake (including in-flight peer frames) can make the
 /// client lose the unread NOTICE and Close and report an abnormal `1006`.
-async fn await_client_close(mut ws_recv: futures_util::stream::SplitStream<WebSocket>) {
+pub(crate) async fn await_client_close(mut ws_recv: futures_util::stream::SplitStream<WebSocket>) {
     let drained = tokio::time::timeout(WS_TERMINAL_FLUSH_TIMEOUT, async {
         while let Some(Ok(msg)) = ws_recv.next().await {
             if matches!(msg, WsMessage::Close(_)) {
@@ -3240,7 +3250,7 @@ pub(crate) mod tests {
 /// The mock-sink writer tests prove frame order; these prove what a client
 /// actually reads off the wire.
 #[cfg(test)]
-mod terminal_close_delivery_tests {
+pub(crate) mod terminal_close_delivery_tests {
     use super::*;
     use axum::{extract::ws::WebSocketUpgrade, routing::get, Router};
     use buzz_auth::VerifiedAssertion;
@@ -3426,7 +3436,9 @@ mod terminal_close_delivery_tests {
     /// Upgrades a raw TCP client and reads whole frames (server frames are
     /// unmasked) through the server's Close, so a 0x88 byte inside a payload
     /// or length cannot end the wait early.
-    async fn raw_client_after_server_close(address: std::net::SocketAddr) -> tokio::net::TcpStream {
+    pub(crate) async fn raw_client_after_server_close(
+        address: std::net::SocketAddr,
+    ) -> tokio::net::TcpStream {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let mut socket = tokio::net::TcpStream::connect(address)
@@ -3475,7 +3487,7 @@ mod terminal_close_delivery_tests {
     const EOF_WATCHDOG: Duration = Duration::from_secs(10);
 
     /// Reads until EOF and returns the time elapsed since `started`.
-    async fn time_to_eof(
+    pub(crate) async fn time_to_eof(
         socket: &mut tokio::net::TcpStream,
         started: std::time::Instant,
     ) -> Duration {
@@ -3561,5 +3573,48 @@ mod terminal_close_delivery_tests {
             .expect("cleanup never reached the pause point");
         let elapsed = time_to_eof(&mut socket, started).await;
         assert!(elapsed >= WS_TERMINAL_FLUSH_TIMEOUT);
+    }
+
+    /// A socket refused during bootstrap (here an expired session) gets the
+    /// denial and Close from the `on_not_run` drain. The raw client never
+    /// replies, so the server must hold the socket for its bounded wait
+    /// instead of dropping it with client input possibly unread.
+    #[tokio::test]
+    async fn bootstrap_drain_holds_socket_for_client_close_reply() {
+        let state = crate::state::tests::test_state().await;
+        let tenant = TenantContext::resolved(
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            "test.local".to_owned(),
+        );
+        let app = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let (state, tenant) = (Arc::clone(&state), tenant.clone());
+                async move {
+                    ws.on_upgrade(move |socket| {
+                        handle_connection(
+                            socket,
+                            state,
+                            "127.0.0.1:1234".parse().expect("client address"),
+                            tenant,
+                            Some(expired_assertion()),
+                            None,
+                            chrono::Utc::now(),
+                        )
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+        let started = std::time::Instant::now();
+        let mut socket = raw_client_after_server_close(address).await;
+        let elapsed = time_to_eof(&mut socket, started).await;
+        assert!(
+            elapsed >= WS_TERMINAL_FLUSH_TIMEOUT,
+            "bootstrap drain must wait for the client's Close reply, ended after {elapsed:?}"
+        );
     }
 }

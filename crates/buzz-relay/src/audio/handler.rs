@@ -283,6 +283,11 @@ pub(crate) async fn handle_audio_connection(
     let rx_for_run = Arc::clone(&rx_shared);
     let rx_for_drain = Arc::clone(&rx_shared);
 
+    // The drain path parks the read half here so the bounded wait for the
+    // client's Close runs after the registry entry is released.
+    let unread_shared = Arc::new(tokio::sync::Mutex::new(None));
+    let unread_for_drain = Arc::clone(&unread_shared);
+
     run_registered_community_connection(
         &registry,
         Uuid::new_v4(),
@@ -321,7 +326,7 @@ pub(crate) async fn handle_audio_connection(
             let socket = socket_for_drain.lock().await.take();
             let mut pre_terminal_ctrl_rx = rx_for_drain.lock().await.take();
             if let Some(socket) = socket {
-                let (mut ws_send, _ws_recv) = socket.split();
+                let (mut ws_send, ws_recv) = socket.split();
                 if let Some(ref mut rx) = pre_terminal_ctrl_rx {
                     while let Ok(msg) = rx.try_recv() {
                         let _ = tokio::time::timeout(
@@ -346,10 +351,15 @@ pub(crate) async fn handle_audio_connection(
                     futures_util::SinkExt::close(&mut ws_send),
                 )
                 .await;
+                *unread_for_drain.lock().await = Some(ws_recv);
             }
         },
     )
     .await;
+    let unread = unread_shared.lock().await.take();
+    if let Some(ws_recv) = unread {
+        crate::connection::await_client_close(ws_recv).await;
+    }
 }
 
 /// Mid-admission cancellation fence for the audio route: if `$cancel` fired,
@@ -427,6 +437,9 @@ pub(crate) fn audio_post_auth_register(
     control.set_proven_identity(pubkey_bytes, nip_fi_issuer);
 }
 
+/// Runs the audio session, then holds the read half for the client's Close
+/// reply, bounded by `WS_TERMINAL_FLUSH_TIMEOUT`. The wait starts only after
+/// every exit path, early or not, has finished its cleanup.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_active_audio_connection(
     socket: WebSocket,
@@ -441,12 +454,39 @@ pub(crate) async fn handle_active_audio_connection(
     // `None` is used by test call sites that bypass the outer wrapper.
     pre_built: Option<PreBuiltNipFiBundle>,
 ) {
+    let (ws_send, mut ws_recv) = socket.split();
+    run_active_audio_connection(
+        ws_send,
+        &mut ws_recv,
+        state,
+        tenant,
+        channel_id,
+        control,
+        nip_fi_assertion,
+        connection_time,
+        pre_built,
+    )
+    .await;
+    crate::connection::await_client_close(ws_recv).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_active_audio_connection(
+    mut ws_send: futures_util::stream::SplitSink<WebSocket, WsMessage>,
+    ws_recv: &mut futures_util::stream::SplitStream<WebSocket>,
+    state: Arc<AppState>,
+    tenant: TenantContext,
+    channel_id: Uuid,
+    control: CommunityConnectionControl,
+    nip_fi_assertion: Option<VerifiedAssertion>,
+    connection_time: chrono::DateTime<chrono::Utc>,
+    pre_built: Option<PreBuiltNipFiBundle>,
+) {
     let cancel = control.cancellation_token();
     let disconnect_reason = control.disconnect_reason();
     // connection_time is threaded in from the HTTP handler (captured immediately
     // before on_upgrade) so the session partition is rooted at the true upgrade
     // instant, not the post-community-active-check instant. [FI-TRACE-LEASE-BOUND]
-    let (mut ws_send, mut ws_recv) = socket.split();
 
     // P2 / Fix 3: Arm the NIP-FI session gate and expiry task.
     //
@@ -2215,7 +2255,7 @@ fn remote_rejection_ws_error(reason: &crate::audio::join::RegisterRejection) -> 
 /// clarifies at this single call site.
 #[allow(clippy::too_many_arguments)]
 async fn recv_loop(
-    mut ws_recv: futures_util::stream::SplitStream<WebSocket>,
+    ws_recv: &mut futures_util::stream::SplitStream<WebSocket>,
     room: Arc<crate::audio::room::Room>,
     peer_id: Uuid,
     protocol_version: u8,
@@ -14567,5 +14607,100 @@ mod tests {
              Mutation oracle: remove the timeout wrapper → send_frame awaited directly → \
              future never resolves → test hangs → RED"
         );
+    }
+
+    /// Real-socket proof that each audio exit path holds the socket for the
+    /// client's Close reply. The raw client never replies, so a server that
+    /// drops the socket right after its Close ends it before the bounded wait.
+    mod terminal_close_delivery {
+        use super::*;
+        use crate::connection::terminal_close_delivery_tests::{
+            raw_client_after_server_close, time_to_eof,
+        };
+        use crate::connection::WS_TERMINAL_FLUSH_TIMEOUT;
+
+        fn expired_assertion() -> VerifiedAssertion {
+            let deadline = chrono::Utc::now() - chrono::Duration::seconds(1);
+            VerifiedAssertion::for_test(Some(nostr::Keys::generate().public_key()), vec![deadline])
+        }
+
+        fn tenant() -> TenantContext {
+            TenantContext::resolved(
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                "test.local".to_owned(),
+            )
+        }
+
+        async fn assert_holds_for_close_reply(app: Router) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let address = listener.local_addr().expect("listener address");
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+            let started = std::time::Instant::now();
+            let mut socket = raw_client_after_server_close(address).await;
+            let elapsed = time_to_eof(&mut socket, started).await;
+            assert!(
+                elapsed >= WS_TERMINAL_FLUSH_TIMEOUT,
+                "server must wait for the client's Close reply, ended after {elapsed:?}"
+            );
+        }
+
+        /// Expired session refused during bootstrap: the `on_not_run` drain.
+        #[tokio::test]
+        async fn bootstrap_drain_holds_socket_for_client_close_reply() {
+            let state = audio_test_state().await;
+            let app = Router::new().route(
+                "/",
+                get(move |ws: WebSocketUpgrade| {
+                    let state = Arc::clone(&state);
+                    let permit = Arc::new(tokio::sync::Semaphore::new(1))
+                        .try_acquire_owned()
+                        .expect("permit");
+                    async move {
+                        ws.on_upgrade(move |socket| {
+                            handle_audio_connection(
+                                socket,
+                                state,
+                                tenant(),
+                                Uuid::new_v4(),
+                                permit,
+                                Some(expired_assertion()),
+                                None,
+                                chrono::Utc::now(),
+                            )
+                        })
+                    }
+                }),
+            );
+            assert_holds_for_close_reply(app).await;
+        }
+
+        /// Expired session inside the active handler: an early admission exit.
+        #[tokio::test]
+        async fn active_handler_exit_holds_socket_for_client_close_reply() {
+            let state = audio_test_state().await;
+            let app = Router::new().route(
+                "/",
+                get(move |ws: WebSocketUpgrade| {
+                    let state = Arc::clone(&state);
+                    async move {
+                        ws.on_upgrade(move |socket| {
+                            let cancel = CancellationToken::new();
+                            handle_active_audio_connection(
+                                socket,
+                                state,
+                                tenant(),
+                                Uuid::new_v4(),
+                                CommunityConnectionControl::new(cancel),
+                                Some(expired_assertion()),
+                                chrono::Utc::now(),
+                                None,
+                            )
+                        })
+                    }
+                }),
+            );
+            assert_holds_for_close_reply(app).await;
+        }
     }
 }
