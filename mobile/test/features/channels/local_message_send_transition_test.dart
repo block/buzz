@@ -64,6 +64,43 @@ void main() {
       isFalse,
     );
   });
+  testWidgets('loaded history has no send animation or row layout', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_testable(animate: false));
+    final history = find.byType(LocalMessageSendTransition);
+    expect(
+      find.descendant(of: history, matching: find.byType(AnimatedBuilder)),
+      findsNothing,
+    );
+    expect(find.byType(LocalSendRow), findsNothing);
+    expect(tester.getSize(history).height, 80);
+    expect(
+      tester.getSize(find.byKey(const ValueKey('avatar'))),
+      const Size(40, 40),
+    );
+  });
+
+  testWidgets('enabling motion does not replay a settled entrance', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_testable(animate: true, reduceMotion: true));
+    final avatar = tester.element(find.byKey(const ValueKey('avatar')));
+    await tester.pumpWidget(_testable(animate: true, reduceMotion: false));
+    expect(tester.element(find.byKey(const ValueKey('avatar'))), same(avatar));
+    expect(tester.getSize(find.byType(LocalMessageSendTransition)).height, 80);
+    expect(find.byType(LocalSendRow), findsNothing);
+  });
+
+  testWidgets('expiring a send claim retains message state', (tester) async {
+    await tester.pumpWidget(_testable());
+    await tester.pumpAndSettle();
+    final avatar = tester.element(find.byKey(const ValueKey('avatar')));
+    await tester.pumpWidget(_testable(animate: false));
+    expect(tester.element(find.byKey(const ValueKey('avatar'))), same(avatar));
+    expect(tester.getSize(find.byType(LocalMessageSendTransition)).height, 80);
+  });
+
   testWidgets('history moves up while the avatar remains anchored', (
     tester,
   ) async {
@@ -85,7 +122,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(tester.getSize(find.byType(LocalSendRow)).height, 80);
+    expect(tester.getSize(find.byType(LocalMessageSendTransition)).height, 80);
     expect(tester.getRect(find.byKey(const ValueKey('avatar'))), avatar);
     expect(
       tester.getTopLeft(find.byKey(const ValueKey('history'))).dy,
@@ -130,7 +167,10 @@ void main() {
       await tester.pumpWidget(
         _testable(animate: reduced, reduceMotion: reduced),
       );
-      expect(tester.getSize(find.byType(LocalSendRow)).height, 80);
+      expect(
+        tester.getSize(find.byType(LocalMessageSendTransition)).height,
+        80,
+      );
       expect(
         tester
             .widget<LocalSendProgress>(find.byType(LocalSendProgress))
@@ -138,7 +178,10 @@ void main() {
         1,
       );
       await tester.pump(const Duration(milliseconds: 100));
-      expect(tester.getSize(find.byType(LocalSendRow)).height, 80);
+      expect(
+        tester.getSize(find.byType(LocalMessageSendTransition)).height,
+        80,
+      );
     });
   }
 }
