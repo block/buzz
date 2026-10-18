@@ -283,10 +283,7 @@ pub async fn update_managed_agent(
         let mut access_restart_relays = Vec::new();
         if access_policy_changed && record.backend == crate::managed_agents::BackendKind::Local {
             access_restart_relays =
-                crate::managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey)
-                    .into_iter()
-                    .map(|key| key.relay_url)
-                    .collect();
+                crate::managed_agents::managed_agent_runtime_dial_urls(&runtimes, &record.pubkey);
             if access_restart_relays.is_empty() && record.runtime_pid.is_some() {
                 access_restart_relays.push(crate::relay::effective_agent_relay_url(
                     &record.relay_url,

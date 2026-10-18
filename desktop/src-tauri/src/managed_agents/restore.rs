@@ -410,7 +410,10 @@ fn spawn_and_register_restored_agents<R: tauri::Runtime>(
                                                 spawn_agent_child(
                                                     app,
                                                     record,
-                                                    &key.relay_url,
+                                                    super::runtime::SpawnRelay {
+                                                        key: &key,
+                                                        dial_url: &relay_url,
+                                                    },
                                                     admitted,
                                                     true,
                                                     owner_hex_ref,
@@ -489,15 +492,18 @@ fn spawn_and_register_restored_agents<R: tauri::Runtime>(
                 record.last_stopped_at = None;
                 record.last_exit_code = None;
                 record.last_error = None;
+                // Capture the URL this spawn actually dialed before moving the
+                // process into the runtime map. Profile reconciliation must
+                // query/publish on that same tenant — not the canonical
+                // pair-key spelling (`localhost` and `127.0.0.1` are distinct
+                // communities at the relay) and not a workspace re-read at
+                // execution time.
+                let spawn_relay = process.dial_relay_url.clone();
                 runtimes.insert(
                     key.clone(),
                     super::ManagedAgentPairRuntime::starting(*process),
                 );
-                // Carry the spawn key's relay into profile reconciliation so
-                // the background task queries/publishes on the relay this
-                // spawn was actually keyed to — not whatever workspace is
-                // active when the task eventually executes.
-                successfully_spawned.push((pubkey, key.relay_url.clone()));
+                successfully_spawned.push((pubkey, spawn_relay));
             }
             SpawnOutcome::Failed(error) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
@@ -530,7 +536,7 @@ fn spawn_and_register_restored_agents<R: tauri::Runtime>(
                         private_key_nsec: record.private_key_nsec.clone(),
                         name: record.name.clone(),
                         relay_url: record.relay_url.clone(),
-                        // Pin the relay this spawn was keyed to (see the
+                        // Pin the relay this spawn dialed (see the
                         // successfully_spawned push above) so the deferred
                         // task cannot resolve a post-switch workspace.
                         target_relay_url: Some(spawn_relay.clone()),
