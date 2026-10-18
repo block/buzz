@@ -588,14 +588,20 @@ class _SectionOptionsButton extends StatelessWidget {
   final VoidCallback onPressed;
 
   @override
-  Widget build(BuildContext context) => Tooltip(
-    message: tooltip,
-    child: SizedBox.square(
-      dimension: 40,
-      child: InkWell(
-        onTap: onPressed,
-        borderRadius: BorderRadius.circular(Radii.full),
-        child: Align(alignment: Alignment.centerRight, child: icon),
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: tooltip,
+    onTap: onPressed,
+    excludeSemantics: true,
+    child: Tooltip(
+      message: tooltip,
+      child: SizedBox.square(
+        dimension: 40,
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(Radii.full),
+          child: Align(alignment: Alignment.centerRight, child: icon),
+        ),
       ),
     ),
   );
