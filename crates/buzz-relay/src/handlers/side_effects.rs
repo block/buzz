@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use nostr::{Event, EventBuilder, Kind, Tag};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use buzz_core::kind::{
@@ -2174,8 +2174,8 @@ async fn handle_create_group(
 
     // Creator becomes owner — evict any stale negative membership lookup.
     state.invalidate_membership(tenant, channel.id, &actor_bytes);
-    // Open channels appear in everyone's accessible set; private channels only
-    // affect the creator (the sole initial member).
+    // Open channels appear in everyone's accessible set; a private channel only
+    // affects its initial members, whose entries the invalidations here drop.
     if visibility == buzz_db::channel::ChannelVisibility::Open {
         state.invalidate_all_accessible_channels(tenant);
     }
@@ -2210,7 +2210,8 @@ async fn handle_create_group(
     }
 
     // Ingest added these in the create's transaction; announce them as a
-    // kind:9000 would.
+    // kind:9000 would. A failed announcement for one member must not cost the
+    // rest theirs: a resend writes nothing, so nothing would retry them.
     let members = if members_added {
         initial_members(event)?
     } else {
@@ -2218,7 +2219,7 @@ async fn handle_create_group(
     };
     for member in members {
         state.invalidate_membership(tenant, channel.id, &member);
-        emit_system_message(
+        if let Err(e) = emit_system_message(
             tenant,
             state,
             channel.id,
@@ -2229,7 +2230,10 @@ async fn handle_create_group(
             }),
             chrono::Utc::now(),
         )
-        .await?;
+        .await
+        {
+            error!(channel = %channel.id, error = %e, "member_joined system message failed");
+        }
         if let Err(e) = emit_membership_notification(
             tenant,
             state,
