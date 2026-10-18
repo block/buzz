@@ -196,15 +196,11 @@ class _SystemMessageRow extends HookConsumerWidget {
                     alignment: isHuddle
                         ? Alignment.centerLeft
                         : Alignment.center,
-                    child: Container(
+                    child: Padding(
                       key: ValueKey('activity-card-${message.id}'),
                       padding: const EdgeInsets.symmetric(
                         horizontal: Grid.twelve,
                         vertical: Grid.xxs,
-                      ),
-                      decoration: BoxDecoration(
-                        color: context.colors.onSurface.withValues(alpha: 0.06),
-                        borderRadius: BorderRadius.circular(Radii.container),
                       ),
                       child: IntrinsicWidth(
                         child: groupedMembership != null
