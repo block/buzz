@@ -98,6 +98,7 @@ part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
 part 'channel_detail_page_test/bubble_tests.dart';
+part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
 part 'channel_detail_page_test/retention_tests.dart';
 
@@ -568,6 +569,7 @@ void main() {
   presenceTests();
   actionRowTests();
   bubbleLayoutTests();
+  swipeReplyTests();
   reviewAvatarTests();
   channelRetentionTests();
   setUp(() async {

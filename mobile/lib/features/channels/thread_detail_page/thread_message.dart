@@ -41,6 +41,7 @@ class _ThreadMessage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
+    final swipeContentKey = useMemoized(GlobalKey.new, const []);
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
     final pk = message.pubkey.toLowerCase();
     final ownMessage = currentPubkey?.toLowerCase() == pk;
@@ -133,7 +134,7 @@ class _ThreadMessage extends HookConsumerWidget {
             alpha: _landingHighlightOpacity * highlightProgress,
           );
 
-    return NotificationListener<MessageGalleryScrollNotification>(
+    final content = NotificationListener<MessageGalleryScrollNotification>(
       onNotification: (notification) {
         mediaOffset.value = notification.offset;
         return true;
@@ -310,6 +311,7 @@ class _ThreadMessage extends HookConsumerWidget {
                                         ),
                                       ),
                                     MessageContent(
+                                      key: swipeContentKey,
                                       content: message.content,
                                       bubble: true,
                                       hasReactions:
@@ -433,6 +435,16 @@ class _ThreadMessage extends HookConsumerWidget {
           ),
         ),
       ),
+    );
+    return MessageSwipeReply(
+      contentKey: swipeContentKey,
+      message: message,
+      allMessages: allMessages,
+      channelId: channelId,
+      currentPubkey: currentPubkey,
+      isMember: isMember,
+      isArchived: isArchived,
+      child: content,
     );
   }
 }

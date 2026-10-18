@@ -1,3 +1,4 @@
+import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
