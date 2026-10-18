@@ -579,6 +579,7 @@ test-unit:
                 + test(=connection::terminal_close_delivery_tests::key_pairing_mismatch_closes_with_1008_on_real_socket)
                 + test(=connection::terminal_close_delivery_tests::session_expiry_denial_closes_with_1008_on_real_socket)
                 + test(=connection::terminal_close_delivery_tests::server_holds_socket_for_client_close_reply)
+                + test(=connection::terminal_close_delivery_tests::server_finishes_promptly_when_client_answers_close)
                 + test(=handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated)
                 + test(=handlers::auth::tests::fi_ban_check_error_emits_terminal_authorization_unavailable)
                 + test(=handlers::auth::tests::fi_root_authorization_denied_rows_emit_identical_frames)

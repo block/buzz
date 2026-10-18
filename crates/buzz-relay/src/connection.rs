@@ -749,7 +749,6 @@ async fn handle_active_connection(
     let authenticated = auth_lifecycle.finish(close_outcome);
 
     let _ = send_task.await;
-    await_client_close(ws_recv).await;
     let _ = heartbeat_task.await;
     let _ = auth_timeout_task.await;
     if let Some(task) = nip_fi_expiry_task {
@@ -770,6 +769,8 @@ async fn handle_active_connection(
                 .await;
         }
     }
+    // Application state is released above; only the transport waits on the peer.
+    await_client_close(ws_recv).await;
     metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection closed");
 
@@ -1198,10 +1199,9 @@ async fn recv_loop(
 }
 
 /// Holds the read half open until the client answers our Close (or the stream
-/// ends), bounded by `WS_TERMINAL_FLUSH_TIMEOUT`. Dropping the socket right
-/// after writing Close lets the client's echoed Close hit a closed socket; the
-/// peer's TCP stack answers with RST, which can discard the unread NOTICE and
-/// Close on the client side and surface as `1006`.
+/// ends), bounded by `WS_TERMINAL_FLUSH_TIMEOUT`. Dropping TCP before the peer
+/// finishes the close handshake (including in-flight peer frames) can make the
+/// client lose the unread NOTICE and Close and report an abnormal `1006`.
 async fn await_client_close(mut ws_recv: futures_util::stream::SplitStream<WebSocket>) {
     let drained = tokio::time::timeout(WS_TERMINAL_FLUSH_TIMEOUT, async {
         while let Some(Ok(msg)) = ws_recv.next().await {
@@ -3253,8 +3253,10 @@ mod terminal_close_delivery_tests {
     async fn serve(
         assertion: VerifiedAssertion,
         prefire_expiry: bool,
-    ) -> (std::net::SocketAddr, RelayUrl) {
+    ) -> (std::net::SocketAddr, RelayUrl, Arc<AppState>, Uuid) {
         let state = crate::state::tests::test_state().await;
+        let served_state = Arc::clone(&state);
+        let conn_id = Uuid::new_v4();
         let tenant = TenantContext::resolved(
             buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
             "test.local".to_owned(),
@@ -3291,7 +3293,7 @@ mod terminal_close_delivery_tests {
                             state,
                             "127.0.0.1:1234".parse().expect("client address"),
                             tenant,
-                            Uuid::new_v4(),
+                            conn_id,
                             control,
                             Some(assertion),
                             chrono::Utc::now(),
@@ -3305,7 +3307,7 @@ mod terminal_close_delivery_tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let address = listener.local_addr().expect("listener address");
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
-        (address, relay_url)
+        (address, relay_url, served_state, conn_id)
     }
 
     async fn connect(address: std::net::SocketAddr) -> Client {
@@ -3365,7 +3367,7 @@ mod terminal_close_delivery_tests {
             Some(asserted.public_key()),
             vec![chrono::Utc::now() + chrono::Duration::hours(1)],
         );
-        let (address, relay_url) = serve(assertion, false).await;
+        let (address, relay_url, _, _) = serve(assertion, false).await;
         let mut client = connect(address).await;
 
         let Some(Ok(Message::Text(challenge))) = client.next().await else {
@@ -3389,23 +3391,19 @@ mod terminal_close_delivery_tests {
 
     #[tokio::test]
     async fn session_expiry_denial_closes_with_1008_on_real_socket() {
-        let (address, _) = serve(expired_assertion(), true).await;
+        let (address, _, _, _) = serve(expired_assertion(), true).await;
         let mut client = connect(address).await;
 
         let (texts, close) = read_to_close(&mut client).await;
         assert_denied_with_1008(&texts, close);
     }
 
-    /// A server that drops TCP straight after writing Close races the
-    /// client's Close reply into a closed socket; the resulting RST can wipe
-    /// the unread NOTICE and Close on the client (seen live as `1006`). The
-    /// raw client never replies, so the server must still hold the socket
-    /// open after its Close instead of sending EOF.
-    #[tokio::test]
-    async fn server_holds_socket_for_client_close_reply() {
+    /// Upgrades a raw TCP client and reads whole frames (server frames are
+    /// unmasked) through the server's Close, so a 0x88 byte inside a payload
+    /// or length cannot end the wait early.
+    async fn raw_client_after_server_close(address: std::net::SocketAddr) -> tokio::net::TcpStream {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let (address, _) = serve(expired_assertion(), true).await;
         let mut socket = tokio::net::TcpStream::connect(address)
             .await
             .expect("connect");
@@ -3418,8 +3416,6 @@ mod terminal_close_delivery_tests {
             .await
             .expect("send upgrade");
 
-        // Walk whole frames (server frames are unmasked) until a Close opcode,
-        // so a 0x88 byte inside a payload or length cannot end the wait early.
         let mut read_exact = async |len: usize| {
             let mut bytes = vec![0u8; len];
             tokio::time::timeout(
@@ -3447,6 +3443,37 @@ mod terminal_close_delivery_tests {
                 break;
             }
         }
+        socket
+    }
+
+    /// Reads until EOF, returning how long the server took to end the socket.
+    async fn time_to_eof(socket: &mut tokio::net::TcpStream) -> std::time::Duration {
+        use tokio::io::AsyncReadExt as _;
+
+        let started = std::time::Instant::now();
+        let mut buf = [0u8; 64];
+        loop {
+            let n = tokio::time::timeout(std::time::Duration::from_secs(3), socket.read(&mut buf))
+                .await
+                .expect("server must end the socket within 3s")
+                .expect("read");
+            if n == 0 {
+                return started.elapsed();
+            }
+        }
+    }
+
+    /// Dropping TCP before the peer finishes the close handshake (including
+    /// in-flight peer frames) can make a client lose the NOTICE and Close
+    /// (seen live as `1006`). This raw client never replies: the server must
+    /// hold the socket open after its Close, with the connection already
+    /// deregistered, and still end it within its bounded wait.
+    #[tokio::test]
+    async fn server_holds_socket_for_client_close_reply() {
+        use tokio::io::AsyncReadExt as _;
+
+        let (address, _, state, conn_id) = serve(expired_assertion(), true).await;
+        let mut socket = raw_client_after_server_close(address).await;
 
         let mut buf = [0u8; 1];
         let after_close =
@@ -3456,5 +3483,32 @@ mod terminal_close_delivery_tests {
             after_close.is_err(),
             "server must wait for the client's Close reply, got {after_close:?}"
         );
+        assert!(
+            state.conn_manager.community_for_conn(conn_id).is_none(),
+            "connection must be deregistered before waiting on the peer"
+        );
+        time_to_eof(&mut socket).await;
+    }
+
+    /// A client that answers Close lets the server finish promptly, well
+    /// under the bounded wait.
+    #[tokio::test]
+    async fn server_finishes_promptly_when_client_answers_close() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (address, _, state, conn_id) = serve(expired_assertion(), true).await;
+        let mut socket = raw_client_after_server_close(address).await;
+
+        // Masked Close, code 1000: payload [0x03, 0xe8] XOR a zero mask.
+        socket
+            .write_all(&[0x88, 0x82, 0, 0, 0, 0, 0x03, 0xe8])
+            .await
+            .expect("send Close reply");
+        let elapsed = time_to_eof(&mut socket).await;
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "server must finish promptly after the client's Close, took {elapsed:?}"
+        );
+        assert!(state.conn_manager.community_for_conn(conn_id).is_none());
     }
 }
