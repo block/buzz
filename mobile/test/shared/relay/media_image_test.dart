@@ -126,6 +126,24 @@ void main() {
       expect(await auth.headersForAsync(_mediaUrl), isNotEmpty);
     });
 
+    test('retry bursts retain the 64-job admission limit', () async {
+      final auth = _auth(nsec: nostr.Keys.generate().nsec);
+      final requests = List.generate(
+        160,
+        (_) => auth
+            .headersForAsyncWithRetry(_mediaUrl)
+            .then<Object>(
+              (headers) => headers,
+              onError: (Object error) => error,
+            ),
+      );
+      final results = await Future.wait(requests);
+      // 64 initial admissions, then 64 retry admissions; the remaining
+      // consumers fail their second admission instead of growing the queue.
+      expect(results.whereType<Map<String, String>>(), hasLength(128));
+      expect(results.whereType<MediaAuthQueueFull>(), hasLength(32));
+    });
+
     test('keeps the signing identity separate across auth scopes', () async {
       final first = nostr.Keys.generate();
       final second = nostr.Keys.generate();

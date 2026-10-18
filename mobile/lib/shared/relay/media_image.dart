@@ -101,7 +101,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       }
 
       final uri = Uri.parse(url);
-      final headers = await auth.headersForAsync(url);
+      final headers = await auth.headersForAsyncWithRetry(url);
       final http.Response response;
       try {
         final abort = Completer<void>();

@@ -33,7 +33,7 @@ final videoPreviewFrameLoaderProvider = Provider<VideoPreviewFrameLoader>((
   return (url) async {
     final Map<String, String> headers;
     try {
-      headers = await auth.headersForAsync(url);
+      headers = await auth.headersForAsyncWithRetry(url);
     } catch (_) {
       // Queue rejection or a failed signing worker leaves this preview
       // unavailable. Do not attempt an unauthenticated video request.

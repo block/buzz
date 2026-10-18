@@ -18,6 +18,16 @@ const _mediaGetAuthLifetimeSeconds = 60;
 /// mints a fresh token (mint-per-request pattern for NIP-FI compliance).
 const _mediaGetAuthRefreshMarginSeconds = 60;
 
+/// Queue saturation with a shared signal for the already-admitted work to drain.
+class MediaAuthQueueFull extends StateError {
+  /// Completes when the queue snapshot that rejected this request has drained.
+  final Future<void> drained;
+
+  /// Retains only the existing queue tail, not another signing job.
+  MediaAuthQueueFull(this.drained)
+    : super('Media authentication queue is full');
+}
+
 /// Builds BUD-01 Blossom `t=get` auth headers for relay-host media URLs.
 ///
 /// Returns an empty map for non-relay URLs or when no signing key is available,
@@ -66,15 +76,16 @@ class MediaGetAuthService {
   /// Image loading starts during layout. Serialize signing per auth scope so a
   /// viewport full of uncached images does not spawn an isolate per row at once.
   /// At most 64 requests may be outstanding. Excess requests fail explicitly
-  /// without spawning or retaining work; image failures are evicted so a later
-  /// resolution can retry. Timestamp proofs when their queued jobs start.
+  /// without spawning or retaining a signing job. Consumers can use
+  /// [headersForAsyncWithRetry] for one retry after the queue drains.
+  /// Timestamp proofs when their queued jobs start.
   Future<Map<String, String>> headersForAsync(String url) {
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty || !isRelayMediaUrl(url)) {
       return Future.value(const {});
     }
     if (_pendingSignatures >= _maxPendingSignatures) {
-      return Future.error(StateError('Media authentication queue is full'));
+      return Future.error(MediaAuthQueueFull(_signingTail));
     }
     _pendingSignatures++;
     final released = Completer<void>();
@@ -95,6 +106,19 @@ class MediaGetAuthService {
     });
     _signingTail = released.future;
     return result;
+  }
+
+  /// Keeps an in-flight consumer pending through one queue-saturation retry.
+  ///
+  /// Waits for the existing queue snapshot, then competes for normal admission.
+  /// A second rejection propagates; no retry loop or extra signing queue exists.
+  Future<Map<String, String>> headersForAsyncWithRetry(String url) async {
+    try {
+      return await headersForAsync(url);
+    } on MediaAuthQueueFull catch (error) {
+      await error.drained;
+      return headersForAsync(url);
+    }
   }
 
   Map<String, String> headersFor(String url) {
