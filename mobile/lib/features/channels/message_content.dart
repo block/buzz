@@ -101,6 +101,9 @@ class MessageContent extends HookConsumerWidget {
   /// Distinguishes messages authored by the signed-in identity.
   final bool ownMessage;
 
+  /// Lets an adjacent day divider own spacing after the final text segment.
+  final bool trimTrailingSpacing;
+
   /// Marks the final message in a sender run for rounded corners and dots.
   final bool bubbleEnd;
 
@@ -171,6 +174,7 @@ class MessageContent extends HookConsumerWidget {
     required this.content,
     this.bubble = false,
     this.ownMessage = false,
+    this.trimTrailingSpacing = false,
     this.bubbleEnd = true,
     this.bubbleStart = true,
     this.hasReactions = false,
@@ -395,7 +399,9 @@ class MessageContent extends HookConsumerWidget {
         : const <({String text, bool attachment})>[];
     final markdown = bubble
         ? Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: ownMessage
+                ? CrossAxisAlignment.end
+                : CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
               for (final (index, segment) in segments.indexed)
@@ -413,7 +419,14 @@ class MessageContent extends HookConsumerWidget {
                 else
                   Padding(
                     key: ValueKey('message-text-bubble-$index'),
-                    padding: const EdgeInsets.only(bottom: Grid.quarter),
+                    padding: EdgeInsets.only(
+                      bottom:
+                          trimTrailingSpacing &&
+                              trailingGallery == null &&
+                              index == segments.length - 1
+                          ? 0
+                          : Grid.quarter,
+                    ),
                     child: LocalSendBubbleSurface(
                       color: ownMessage
                           ? chatColors.outgoing
@@ -479,7 +492,9 @@ class MessageContent extends HookConsumerWidget {
     if (trailingGallery == null) return markdown;
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: ownMessage
+          ? CrossAxisAlignment.end
+          : CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         if (trailingGallery.content.trim().isNotEmpty) markdown,
@@ -493,6 +508,7 @@ class MessageContent extends HookConsumerWidget {
               trailingGallery.items.map((item) => item.url).join('\u0000'),
             ),
             items: trailingGallery.items,
+            mirrored: ownMessage,
             leadingOverflow: mediaCarouselLeadingOverflow,
             trailingOverflow: mediaCarouselTrailingOverflow,
             onReply: onMediaReply,

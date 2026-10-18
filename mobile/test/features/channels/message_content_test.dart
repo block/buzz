@@ -37,6 +37,7 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
 part 'message_content_bubble_cases.dart';
+part 'message_carousel_preview_cases.dart';
 
 Widget _testable(
   Widget child, {
@@ -379,6 +380,7 @@ class _TestChannelsNotifier extends ChannelsNotifier {
 }
 
 void main() {
+  carouselPreviewTests();
   bubbleContentTests();
   test('wide voice-note waveforms distribute bars across their full width', () {
     const width = 320.0;

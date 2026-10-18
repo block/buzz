@@ -5679,7 +5679,7 @@ void main() {
     for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
       for (final multiline in [false, true]) {
         testWidgets(
-          'group avatar stays fixed throughout a local send: $platform, multiline=$multiline',
+          'outgoing group stays avatar-free throughout a local send: $platform, multiline=$multiline',
           (tester) async {
             final previousPlatform = debugDefaultTargetPlatformOverride;
             debugDefaultTargetPlatformOverride = platform;
@@ -5710,7 +5710,7 @@ void main() {
                 of: find.byKey(ValueKey('message-row-$id')),
                 matching: find.byType(AvatarImage),
               );
-              final before = tester.getRect(avatar('first'));
+              expect(avatar('first'), findsNothing);
               final container = ProviderScope.containerOf(
                 tester.element(find.byType(ChannelDetailPage)),
               );
@@ -5730,19 +5730,19 @@ void main() {
               ]);
               for (var frame = 0; frame < 32; frame++) {
                 await tester.pump(const Duration(milliseconds: 16));
-                final visibleAvatar = avatar('second').evaluate().isNotEmpty
-                    ? avatar('second')
-                    : avatar('first');
-                expect(visibleAvatar, findsOneWidget);
-                final current = tester.getRect(visibleAvatar);
                 expect(
-                  current.top,
-                  closeTo(before.top, 1),
-                  reason: 'avatar frame $frame',
+                  avatar('first'),
+                  findsNothing,
+                  reason: 'first avatar frame $frame',
+                );
+                expect(
+                  avatar('second'),
+                  findsNothing,
+                  reason: 'second avatar frame $frame',
                 );
               }
               await tester.pumpAndSettle();
-              expect(avatar('second'), findsOneWidget);
+              expect(avatar('second'), findsNothing);
             } finally {
               debugDefaultTargetPlatformOverride = previousPlatform;
             }
@@ -6507,6 +6507,51 @@ void main() {
         );
       },
     );
+
+    testWidgets('own ended huddle reclaims avatar space and aligns reactions', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          signingPubkey: 'alice',
+          messages: [
+            _huddleMsg(id: 'own-huddle', kind: EventKind.huddleStarted),
+            _huddleMsg(
+              id: 'own-ending',
+              kind: EventKind.huddleEnded,
+              createdAt: 1500,
+            ),
+            _reaction(id: 'own-huddle-reaction', targetId: 'own-huddle'),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final card = tester.getRect(
+        find.byKey(const ValueKey('huddle-card-own-huddle')),
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('huddle-activity-own-huddle')),
+          matching: find.byType(AvatarImage),
+        ),
+        findsNothing,
+      );
+      expect(find.text('Huddle ended'), findsOneWidget);
+      expect(
+        card.right,
+        closeTo(
+          tester
+              .getRect(find.byKey(const ValueKey('huddle-activity-own-huddle')))
+              .right,
+          0.01,
+        ),
+      );
+      final tray = tester.getRect(
+        find.byKey(const ValueKey('combined-reaction-tray')),
+      );
+      expect(tray.right, lessThan(card.right));
+      expect(tray.right, greaterThan(card.center.dx));
+    });
 
     testWidgets('renders a compact huddle activity row', (tester) async {
       await tester.pumpWidget(

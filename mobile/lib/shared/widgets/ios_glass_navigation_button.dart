@@ -258,7 +258,7 @@ class IosGlassNavigationButton extends HookWidget {
                             },
                             size: icon == IosGlassNavigationIcon.shutter
                                 ? controlSize * 0.72
-                                : 22,
+                                : 24,
                             color: icon == IosGlassNavigationIcon.colorSwatch
                                 ? swatchColor
                                 : effectiveForeground,

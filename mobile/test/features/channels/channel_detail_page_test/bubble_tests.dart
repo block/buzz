@@ -1,6 +1,222 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  for (final author in ['self', 'alice']) {
+    testWidgets('date divider owns equal space around $author messages', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(390, 1100);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _buildTestable(
+          signingPubkey: 'self',
+          messages: [
+            _textMsg(
+              id: 'before-day',
+              pubkey: author,
+              content: 'Before',
+              createdAt: 1000,
+            ),
+            _textMsg(
+              id: 'after-day',
+              pubkey: author,
+              content: 'After',
+              createdAt: 87400,
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final before = tester.getRect(
+        find
+            .descendant(
+              of: find.byKey(const ValueKey('message-row-before-day')),
+              matching: find.byType(LocalSendBubbleSurface),
+            )
+            .first,
+      );
+      final divider = tester.getRect(
+        find.byKey(const ValueKey('channel-day-divider-opacity-87400')),
+      );
+      final after = tester.getRect(
+        find.byKey(const ValueKey('message-author-after-day')),
+      );
+      expect(
+        divider.top - before.bottom,
+        closeTo(after.top - divider.bottom, 1),
+      );
+      expect(divider.top - before.bottom, closeTo(Grid.gutter, 1));
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final personalChat in [false, true]) {
+    for (final scale in [1.0, 2.0]) {
+      testWidgets(
+        'viewer bubbles align right: personal=$personalChat scale=$scale',
+        (tester) async {
+          tester.view.physicalSize = const Size(390, 1100);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          await tester.pumpWidget(
+            _buildTestable(
+              signingPubkey: 'self',
+              personalChat: personalChat,
+              textScaler: TextScaler.linear(scale),
+              users: const {
+                'self': UserProfile(pubkey: 'self', displayName: 'Me'),
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              },
+              messages: [
+                _textMsg(
+                  id: 'incoming',
+                  pubkey: 'alice',
+                  content: 'Hello',
+                  createdAt: 1000,
+                ),
+                _textMsg(
+                  id: 'outgoing',
+                  pubkey: 'self',
+                  content: 'Hi',
+                  createdAt: 1001,
+                ),
+                _reaction(
+                  id: 'reaction-in',
+                  targetId: 'incoming',
+                  pubkey: 'self',
+                ),
+                _reaction(
+                  id: 'reaction-out',
+                  targetId: 'outgoing',
+                  pubkey: 'alice',
+                ),
+              ],
+            ),
+          );
+          await tester.pumpAndSettle();
+          Rect bounds(String id, Finder child) => tester.getRect(
+            find
+                .descendant(
+                  of: find.byKey(ValueKey('message-row-$id')),
+                  matching: child,
+                )
+                .first,
+          );
+          final incoming = bounds(
+            'incoming',
+            find.byType(LocalSendBubbleSurface),
+          );
+          final outgoing = bounds(
+            'outgoing',
+            find.byType(LocalSendBubbleSurface),
+          );
+          expect(outgoing.center.dx, greaterThan(incoming.center.dx));
+          expect(
+            bounds(
+              'outgoing',
+              find.byKey(const ValueKey('message-author-outgoing')),
+            ).right,
+            lessThan(
+              bounds(
+                'outgoing',
+                find.byKey(const ValueKey('message-timestamp-outgoing')),
+              ).left,
+            ),
+          );
+          expect(
+            bounds(
+              'incoming',
+              find.byKey(const ValueKey('message-author-incoming')),
+            ).right,
+            lessThan(
+              bounds(
+                'incoming',
+                find.byKey(const ValueKey('message-timestamp-incoming')),
+              ).left,
+            ),
+          );
+
+          expect(outgoing.right, greaterThan(300));
+          expect(incoming.left, lessThan(90));
+          final incomingAvatar = bounds(
+            'incoming',
+            find.byType(MessageMediaAvatar),
+          );
+          expect(incomingAvatar.right, lessThan(incoming.left));
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('message-row-outgoing')),
+              matching: find.byType(MessageMediaAvatar),
+            ),
+            findsNothing,
+          );
+          expect(
+            outgoing.right,
+            closeTo(
+              tester
+                  .getRect(find.byKey(const ValueKey('message-row-outgoing')))
+                  .right,
+              0.01,
+            ),
+          );
+          final incomingReaction = bounds(
+            'incoming',
+            find.byKey(const ValueKey('combined-reaction-tray')),
+          );
+          final outgoingReaction = bounds(
+            'outgoing',
+            find.byKey(const ValueKey('combined-reaction-tray')),
+          );
+          expect(
+            outgoingReaction.center.dx,
+            greaterThan(incomingReaction.center.dx),
+          );
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  testWidgets('thread replies reclaim the outgoing avatar gutter', (
+    tester,
+  ) async {
+    final root = _textMsg(id: threadIdRoot, pubkey: 'alice', content: 'Root');
+    final reply = _textMsg(
+      id: threadIdR1,
+      pubkey: 'self',
+      content: 'My reply',
+      createdAt: 1100,
+      extraTags: const [
+        ['e', threadIdRoot, '', 'reply'],
+      ],
+    );
+    await tester.pumpWidget(
+      _buildTestable(
+        signingPubkey: 'self',
+        messages: [root, reply],
+        threadReplies: {
+          threadIdRoot: [reply],
+        },
+        initialThreadRootId: threadIdRoot,
+      ),
+    );
+    await tester.pumpAndSettle();
+    final row = find.byKey(const ValueKey('thread-message-row-$threadIdR1'));
+    final bubble = tester.getRect(
+      find
+          .descendant(of: row, matching: find.byType(LocalSendBubbleSurface))
+          .first,
+    );
+    expect(
+      find.descendant(of: row, matching: find.byType(MessageMediaAvatar)),
+      findsNothing,
+    );
+    expect(bubble.right, closeTo(tester.getRect(row).right, 0.01));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('large activity members build and fetch only visible rows', (
     tester,
   ) async {

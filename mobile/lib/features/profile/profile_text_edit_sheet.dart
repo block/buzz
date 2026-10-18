@@ -96,7 +96,7 @@ class ProfileTextEditSheet extends HookWidget {
                   borderRadius: BorderRadius.circular(Radii.dialog),
                 ),
               ),
-              icon: const Icon(BuzzIcons.x, size: 22),
+              icon: const Icon(BuzzIcons.x, size: 24),
             ),
           );
 
