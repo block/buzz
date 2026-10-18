@@ -1,6 +1,7 @@
 part of '../thread_detail_page.dart';
 
-class _ThreadMessageList extends HookConsumerWidget {
+class _ThreadMessageList extends HookWidget {
+  final TimelineCalendarDays calendarDays;
   final double headHeight;
   final ValueChanged<double> onHeadHeightChanged;
   final LaidOutViewport viewport;
@@ -30,6 +31,7 @@ class _ThreadMessageList extends HookConsumerWidget {
   final Map<String, List<TimelineMessage>> childrenByParent;
 
   const _ThreadMessageList({
+    required this.calendarDays,
     required this.headHeight,
     required this.onHeadHeightChanged,
     required this.viewport,
@@ -144,8 +146,7 @@ class _ThreadMessageList extends HookConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final calendarDays = ref.watch(timelineCalendarDaysFactoryProvider)();
+  Widget build(BuildContext context) {
     final headLink = useMemoized(LayerLink.new);
     final loadingHeadLink = useMemoized(LayerLink.new);
     final headScrollPosition = useRef<ScrollPosition?>(null);

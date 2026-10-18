@@ -100,6 +100,75 @@ void timelineCalendarBuilderTests() {
     }
   });
 
+  testWidgets('thread sticky index and visible rows share all conversions', (
+    tester,
+  ) async {
+    final conversions = <Map<int, int>>[];
+    final root = _textMsg(
+      id: threadIdThreadDashRoot,
+      pubkey: 'alice',
+      content: 'Root',
+      createdAt: 1000,
+    );
+    final replies = [
+      for (var i = 1; i <= 60; i++)
+        _textMsg(
+          id: 'calendar-long-$i',
+          pubkey: 'bob',
+          content: 'Reply $i',
+          createdAt: 1000 + i * 60,
+          extraTags: const [
+            ['e', threadIdThreadDashRoot, '', 'reply'],
+          ],
+        ),
+    ];
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [root],
+        threadReplies: {threadIdThreadDashRoot: replies},
+        calendarDaysFactory: () {
+          final counts = <int, int>{};
+          conversions.add(counts);
+          return TimelineCalendarDays.withConverter((timestamp) {
+            counts.update(timestamp, (count) => count + 1, ifAbsent: () => 1);
+            return DateTime.fromMillisecondsSinceEpoch(timestamp * 1000);
+          });
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+    // Discard channel caches before mounting the thread.
+    conversions.clear();
+    final head = formatTimeline([root]).single;
+    Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ThreadDetailPage(
+          threadHead: head,
+          allMessages: [head],
+          channelId: _channelId,
+          currentPubkey: 'self',
+          isMember: true,
+          isArchived: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final threadCaches = conversions
+        .where((counts) => counts.containsKey(replies.last.createdAt))
+        .toList();
+    expect(threadCaches, isNotEmpty);
+    for (final counts in threadCaches) {
+      expect(
+        counts.keys,
+        containsAll([
+          root.createdAt,
+          ...replies.map((reply) => reply.createdAt),
+        ]),
+      );
+      expect(counts.values, everyElement(1));
+    }
+  });
+
   testWidgets('thread shows day dividers when replies cross days', (
     tester,
   ) async {

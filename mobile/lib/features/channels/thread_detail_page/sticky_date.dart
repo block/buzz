@@ -22,6 +22,7 @@ class _ThreadStickyDateIndex {
   final int messageCount;
 
   _ThreadStickyDateIndex({
+    required TimelineCalendarDays calendarDays,
     required TimelineMessage head,
     required List<TimelineMessage> replies,
   }) : messageCount = replies.length + 1 {
@@ -32,7 +33,10 @@ class _ThreadStickyDateIndex {
       final message = messages[index];
       final startsDay =
           index == 0 ||
-          !isSameDay(messages[index - 1].createdAt, message.createdAt);
+          !calendarDays.isSameDay(
+            messages[index - 1].createdAt,
+            message.createdAt,
+          );
       if (startsDay) {
         activeDayTimestamp = message.createdAt;
         activeDayStartIndex = index;
