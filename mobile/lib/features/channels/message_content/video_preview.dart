@@ -30,8 +30,17 @@ final videoPreviewFrameLoaderProvider = Provider<VideoPreviewFrameLoader>((
   ref,
 ) {
   final auth = ref.watch(mediaGetAuthServiceProvider);
-  return (url) async =>
-      _loadVideoPreviewFrame(url, headers: await auth.headersForAsync(url));
+  return (url) async {
+    final Map<String, String> headers;
+    try {
+      headers = await auth.headersForAsync(url);
+    } catch (_) {
+      // Queue rejection or a failed signing worker leaves this preview
+      // unavailable. Do not attempt an unauthenticated video request.
+      return null;
+    }
+    return _loadVideoPreviewFrame(url, headers: headers);
+  };
 });
 
 class _MessageVideoPreview extends HookConsumerWidget {
