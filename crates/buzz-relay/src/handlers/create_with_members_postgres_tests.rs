@@ -170,7 +170,8 @@ async fn create_respects_the_members_add_policy() {
 /// Resending a create whose OK was lost is accepted; a different create for
 /// the same UUID, even from its creator, is refused before its side effects,
 /// so it can neither add nor announce anyone.
-/// Mutations: refuse every existing UUID → resend not accepted → RED; let the
+/// Mutations: refuse every existing UUID → resend not accepted → RED; check the
+/// members' policies before recognizing a stored resend → RED; let the
 /// creator's changed create through → stranger announced → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
@@ -191,7 +192,7 @@ async fn resending_a_create_confirms_it() {
         .expect("create");
     assert!(first.accepted, "{}", first.message);
     let before = roles(&state, &tenant, channel_id).await;
-    let resent = ingest(&state, &tenant, create, &creator)
+    let resent = ingest(&state, &tenant, create.clone(), &creator)
         .await
         .expect("resend");
     assert!(resent.accepted, "{}", resent.message);
@@ -208,6 +209,27 @@ async fn resending_a_create_confirms_it() {
         assert!(!changed.accepted);
         assert_eq!(changed.message, "duplicate: channel already exists");
     }
+
+    // The agent closing its adds after the create doesn't refuse the resend.
+    let agent_bytes = agent.public_key().to_bytes().to_vec();
+    state
+        .db
+        .ensure_user(tenant.community(), &agent_bytes)
+        .await
+        .expect("agent user");
+    state
+        .db
+        .set_channel_add_policy(tenant.community(), &agent_bytes, "nobody")
+        .await
+        .expect("policy");
+    let resent_after_policy = ingest(&state, &tenant, create, &creator)
+        .await
+        .expect("resend after policy change");
+    assert!(
+        resent_after_policy.accepted,
+        "{}",
+        resent_after_policy.message
+    );
 
     assert_eq!(roles(&state, &tenant, channel_id).await, before);
     let notices = state

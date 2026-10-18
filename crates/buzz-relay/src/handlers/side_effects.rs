@@ -543,8 +543,20 @@ pub async fn validate_admin_event(
     // CREATE_GROUP doesn't need an existing channel — skip h-tag extraction.
     // Its initial members get the third-party add check a kind:9000 would.
     if kind == 9007 {
+        let members = initial_members(event)?;
+        // Ingest confirms a resend of a stored create without writing anything,
+        // so a policy changed since then must not refuse it.
+        if members.is_empty()
+            || state
+                .db
+                .get_event_by_id_for_event_write(tenant.community(), event.id.as_bytes())
+                .await?
+                .is_some()
+        {
+            return Ok(());
+        }
         let actor_bytes = event.pubkey.to_bytes().to_vec();
-        for member in initial_members(event)? {
+        for member in members {
             if let Some((policy, owner)) = state
                 .db
                 .get_agent_channel_policy(tenant.community(), &member)
