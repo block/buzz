@@ -438,8 +438,9 @@ pub(crate) fn audio_post_auth_register(
 }
 
 /// Runs the audio session, then holds the read half for the client's Close
-/// reply, bounded by `WS_TERMINAL_FLUSH_TIMEOUT`. The wait starts only after
-/// every exit path, early or not, has finished its cleanup.
+/// reply, bounded by `WS_TERMINAL_FLUSH_TIMEOUT`. An exit whose cleanup
+/// follows its terminal frames hands the socket off first through
+/// [`close_in_background`], so that cleanup never holds the socket open.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_active_audio_connection(
     socket: WebSocket,
@@ -454,7 +455,8 @@ pub(crate) async fn handle_active_audio_connection(
     // `None` is used by test call sites that bypass the outer wrapper.
     pre_built: Option<PreBuiltNipFiBundle>,
 ) {
-    let (ws_send, mut ws_recv) = socket.split();
+    let (ws_send, ws_recv) = socket.split();
+    let mut ws_recv = Some(ws_recv);
     run_active_audio_connection(
         ws_send,
         &mut ws_recv,
@@ -467,13 +469,32 @@ pub(crate) async fn handle_active_audio_connection(
         pre_built,
     )
     .await;
-    crate::connection::await_client_close(ws_recv).await;
+    if let Some(ws_recv) = ws_recv {
+        crate::connection::await_client_close(ws_recv).await;
+    }
+}
+
+/// Hands the socket to a task that waits, bounded, for the client's Close
+/// reply and then drops it. Called once the terminal frames are sent and
+/// before cleanup that may block on Postgres, Redis or a remote owner, so
+/// that cleanup never holds the socket open. Pass the write half when the
+/// caller still owns it: either half alone keeps the socket open.
+fn close_in_background(
+    ws_recv: &mut Option<futures_util::stream::SplitStream<WebSocket>>,
+    ws_send: Option<futures_util::stream::SplitSink<WebSocket, WsMessage>>,
+) {
+    if let Some(ws_recv) = ws_recv.take() {
+        tokio::spawn(async move {
+            crate::connection::await_client_close(ws_recv).await;
+            drop(ws_send);
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_active_audio_connection(
     mut ws_send: futures_util::stream::SplitSink<WebSocket, WsMessage>,
-    ws_recv: &mut futures_util::stream::SplitStream<WebSocket>,
+    ws_recv: &mut Option<futures_util::stream::SplitStream<WebSocket>>,
     state: Arc<AppState>,
     tenant: TenantContext,
     channel_id: Uuid,
@@ -579,6 +600,7 @@ async fn run_active_audio_connection(
             return;
         },
         result = tokio::time::timeout(AUTH_TIMEOUT, async {
+            let ws_recv = ws_recv.as_mut().expect("read half is held until the session ends");
             while let Some(Ok(msg)) = ws_recv.next().await {
                 if let WsMessage::Text(text) = msg {
                     if text.len() > MAX_TEXT_FRAME_BYTES {
@@ -1094,6 +1116,7 @@ async fn run_active_audio_connection(
                 )],
             )
             .await;
+            close_in_background(ws_recv, Some(ws_send));
             // I1 residual: release lease with an awaited call, not a detached task.
             if let Some((lease, directory)) = staged_lease {
                 if let Err(e) = directory.release(&lease).await {
@@ -1150,6 +1173,7 @@ async fn run_active_audio_connection(
                 .into(),
             )])
             .await;
+        close_in_background(ws_recv, Some(ws_send));
         if let Some((lease, directory)) = staged_lease {
             // I1 residual: release lease with an awaited call, not a detached task.
             if let Err(e) = directory.release(&lease).await {
@@ -1216,6 +1240,7 @@ async fn run_active_audio_connection(
                     )],
                 )
                 .await;
+                close_in_background(ws_recv, Some(ws_send));
                 // I3 residual: await expiry task before resource teardown.
                 cancel.cancel();
                 if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1242,6 +1267,7 @@ async fn run_active_audio_connection(
                     )],
                 )
                 .await;
+                close_in_background(ws_recv, Some(ws_send));
                 // I3 residual: await expiry task before resource teardown.
                 cancel.cancel();
                 if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1326,6 +1352,7 @@ async fn run_active_audio_connection(
                 shadow_attempt.refused();
                 warn!(channel_id = %channel_id, "audio room participant capacity reached");
                 crate::connection::send_exit_frames_bounded(&mut ws_send, [WsMessage::Text(serde_json::json!({"type":"error","code":"room_full","message":"room participant capacity reached"}).to_string().into())]).await;
+                close_in_background(ws_recv, Some(ws_send));
                 // IMPORTANT 3: cancel + await expiry task before guard release.
                 cancel.cancel();
                 if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1338,6 +1365,7 @@ async fn run_active_audio_connection(
                 shadow_attempt.refused();
                 debug!(channel_id = %channel_id, "room ended before admission");
                 crate::connection::send_exit_frames_bounded(&mut ws_send, [WsMessage::Text(serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}).to_string().into())]).await;
+                close_in_background(ws_recv, Some(ws_send));
                 // IMPORTANT 3: cancel + await expiry task before guard release.
                 cancel.cancel();
                 if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1354,6 +1382,7 @@ async fn run_active_audio_connection(
                 "message": format!("this huddle is using audio protocol v{pinned}; your client requested v{requested}"),
                 "pinned_version": pinned, "requested_version": requested,
             }).to_string().into())]).await;
+                close_in_background(ws_recv, Some(ws_send));
                 // IMPORTANT 3: cancel + await expiry task before guard release.
                 cancel.cancel();
                 if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1655,6 +1684,7 @@ async fn run_active_audio_connection(
                         .map_or(WsMessage::Close(None), |reason| reason.close_message());
                     let _ = tokio::time::timeout_at(deadline, ws_send.send(close)).await;
                 }
+                close_in_background(ws_recv, Some(ws_send));
                 if let (Some(session), Some(ref mut stream)) = (
                     guard.take_remote_session().as_ref(),
                     guard.take_remote_stream().as_mut(),
@@ -2051,7 +2081,9 @@ async fn run_active_audio_connection(
     };
 
     recv_loop(
-        ws_recv,
+        ws_recv
+            .as_mut()
+            .expect("read half is held until the session ends"),
         Arc::clone(&room),
         peer_id,
         requested_version,
@@ -2064,6 +2096,11 @@ async fn run_active_audio_connection(
 
     cancel.cancel();
     let _ = send_task.await;
+    // The writer has sent the Close and released the write half. Nothing
+    // below may hold the socket open, including the Postgres and Redis writes.
+    close_in_background(ws_recv, None);
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_audio_teardown_cleanup(tenant.community()).await;
     let _ = heartbeat_task.await;
     let _ = forward_task.await;
     // The reader task owns the owner control stream; joining it here guarantees
@@ -9936,6 +9973,140 @@ mod tests {
 
             server.abort();
             let _ = server.await;
+        }
+
+        /// After an established session's writer sends its Close, the
+        /// teardown that follows writes to Postgres and Redis, which can stall
+        /// with no deadline. The socket must still end within the bounded wait
+        /// for the client's Close reply. This client never replies and the
+        /// teardown never finishes.
+        ///
+        /// Mutation: move `close_in_background(ws_recv, None)` to after the
+        /// teardown → the socket stays open while the teardown is held →
+        /// `time_to_eof` hits its watchdog and panics.
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        #[tokio::test]
+        async fn stalled_teardown_does_not_hold_established_socket_open() {
+            use crate::connection::terminal_close_delivery_tests::time_to_eof;
+            use crate::connection::WS_TERMINAL_FLUSH_TIMEOUT;
+            use buzz_auth::VerifiedAssertion;
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let pool = state.db.pool().clone();
+            let (tenant, channel_id, key) = seed_audio_fixture(&pool).await;
+            let community = tenant.community();
+            let assertion = VerifiedAssertion::for_test(
+                Some(key.public_key()),
+                vec![Utc::now() + Duration::hours(1)],
+            );
+            let relay_url = format!("ws://{}", tenant.host());
+            let conn_cancel = CancellationToken::new();
+
+            let (fanout_rx, fanout_release) =
+                crate::nip_fi_test_hooks::audio_participant_fanout_hook::arm(community);
+            let (teardown_rx, teardown_release) =
+                crate::nip_fi_test_hooks::audio_teardown_cleanup_hook::arm(community);
+
+            let app = axum::Router::new().route(
+                "/",
+                axum::routing::get({
+                    let conn_cancel = conn_cancel.clone();
+                    move |ws: axum::extract::ws::WebSocketUpgrade| {
+                        let (state, tenant, assertion) =
+                            (Arc::clone(&state), tenant.clone(), assertion.clone());
+                        let control =
+                            crate::state::CommunityConnectionControl::new(conn_cancel.clone());
+                        async move {
+                            ws.on_upgrade(move |socket| {
+                                handle_active_audio_connection(
+                                    socket,
+                                    state,
+                                    tenant,
+                                    channel_id,
+                                    control,
+                                    Some(assertion),
+                                    Utc::now(),
+                                    None,
+                                )
+                            })
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test listener");
+            let addr = listener.local_addr().expect("test listener addr");
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("connect client");
+            let challenge =
+                match tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+                    .await
+                    .expect("challenge timeout")
+                    .expect("challenge msg")
+                    .expect("challenge ws msg")
+                {
+                    tokio_tungstenite::tungstenite::Message::Text(t) => {
+                        serde_json::from_str::<serde_json::Value>(&t).expect("challenge JSON")
+                            ["challenge"]
+                            .as_str()
+                            .expect("challenge field")
+                            .to_string()
+                    }
+                    other => panic!("expected text challenge; got {other:?}"),
+                };
+            let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+                .tag(nostr::Tag::parse(["relay", &relay_url]).unwrap())
+                .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(&key)
+                .unwrap();
+            let auth_msg = serde_json::json!({
+                "type": "auth",
+                "event": auth_event,
+                "parent_channel_id": null,
+                "protocol_version": 1,
+            })
+            .to_string();
+            client
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    auth_msg.into(),
+                ))
+                .await
+                .expect("send auth msg");
+
+            tokio::time::timeout(std::time::Duration::from_secs(10), fanout_rx)
+                .await
+                .expect("handler must commit the join within 10s")
+                .expect("fanout channel closed");
+            fanout_release.notify_one();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+            // From here the client only reads raw bytes, so it never answers
+            // the server's Close.
+            let tokio_tungstenite::MaybeTlsStream::Plain(socket) = client.get_mut() else {
+                panic!("plain TCP client");
+            };
+            let started = std::time::Instant::now();
+            conn_cancel.cancel();
+            tokio::time::timeout(std::time::Duration::from_secs(5), teardown_rx)
+                .await
+                .expect("teardown must reach the stall point")
+                .expect("teardown hook dropped");
+            let elapsed = time_to_eof(socket, started).await;
+            assert!(
+                elapsed >= WS_TERMINAL_FLUSH_TIMEOUT,
+                "server must wait for the client's Close reply, ended after {elapsed:?}"
+            );
+
+            teardown_release.notify_one();
+            server.abort();
         }
 
         // ── F1: generation fencing witness ────────────────────────────────────────
