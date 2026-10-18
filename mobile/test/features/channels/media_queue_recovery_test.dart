@@ -61,6 +61,36 @@ class _VideoPlatform extends VideoPlayerPlatform {
 }
 
 void main() {
+  test('bounds retry waiters before signing capacity drains', () async {
+    final auth = _SaturatedAuth(alwaysReject: true);
+    var rejected = 0;
+    final requests = List.generate(
+      80,
+      (_) => auth
+          .headersForAsyncWithRetry('https://example.com/media/a')
+          .then<Object>(
+            (headers) => headers,
+            onError: (Object error) {
+              rejected++;
+              return error;
+            },
+          ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(auth.calls, 80);
+    expect(rejected, 16);
+    auth.drained.complete();
+    await Future.wait(requests);
+    expect(auth.calls, 144);
+    expect(rejected, 80);
+    // Retry permits are released even when the second admission fails.
+    await expectLater(
+      auth.headersForAsyncWithRetry('https://example.com/media/a'),
+      throwsA(isA<MediaAuthQueueFull>()),
+    );
+    expect(auth.calls, 146);
+  });
+
   test('retries saturation only once', () async {
     final auth = _SaturatedAuth(alwaysReject: true);
     final result = auth.headersForAsyncWithRetry('https://example.com/media/a');

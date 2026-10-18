@@ -52,6 +52,8 @@ class MediaGetAuthService {
   // Includes the running job. Bound retained work during rapid history scrolls.
   static const _maxPendingSignatures = 64;
   int _pendingSignatures = 0;
+  static const _maxPendingRetries = 64;
+  int _pendingRetries = 0;
   Future<void> _signingTail = Future<void>.value();
 
   MediaGetAuthService({
@@ -111,13 +113,20 @@ class MediaGetAuthService {
   /// Keeps an in-flight consumer pending through one queue-saturation retry.
   ///
   /// Waits for the existing queue snapshot, then competes for normal admission.
-  /// A second rejection propagates; no retry loop or extra signing queue exists.
+  /// At most 64 consumers may wait or retry in addition to the 64 signing jobs.
+  /// Excess waiters and second rejections fail without a retry loop.
   Future<Map<String, String>> headersForAsyncWithRetry(String url) async {
     try {
       return await headersForAsync(url);
     } on MediaAuthQueueFull catch (error) {
-      await error.drained;
-      return headersForAsync(url);
+      if (_pendingRetries >= _maxPendingRetries) rethrow;
+      _pendingRetries++;
+      try {
+        await error.drained;
+        return await headersForAsync(url);
+      } finally {
+        _pendingRetries--;
+      }
     }
   }
 
