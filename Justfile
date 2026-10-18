@@ -45,6 +45,16 @@ bootstrap:
     fi
     ./scripts/ensure-local-relay-key.sh .env
 
+# Verify the Linux system libraries the desktop app links against. No-op on
+# macOS/Windows; prints the missing pkg-config modules and the install command.
+linux-deps-check:
+    ./scripts/check-linux-desktop-deps.sh --check
+
+# Install the Linux system libraries the desktop app links against
+# (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE).
+linux-deps:
+    ./scripts/check-linux-desktop-deps.sh --install
+
 # Start Docker services, run migrations, install desktop deps
 setup: bootstrap
     ./scripts/dev-setup.sh
@@ -166,7 +176,7 @@ fix-all: fmt desktop-tauri-fmt desktop-fix web-fix mobile-fix
 
 # Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time)
 # Sidecar binary list must stay in sync with desktop-release-build below.
-_ensure-sidecar-stubs:
+_ensure-sidecar-stubs: linux-deps-check
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
@@ -397,6 +407,7 @@ test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
     ./scripts/test-ensure-local-relay-key.sh
+    ./scripts/test-check-linux-desktop-deps.sh
     # Shared Huddle transport, codec, and loopback authentication regressions.
     cargo test -p buzz-audio-client
     if command -v cargo-nextest &>/dev/null; then

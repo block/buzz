@@ -106,29 +106,36 @@ versions in the table above.
 #### Linux: Tauri system libraries
 
 Hermit pins language toolchains, not system libraries. On Linux, the desktop
-app's Rust crates link against GTK and WebKitGTK, so `just ci` (and any
-`just desktop-tauri-*` recipe) needs these installed system-wide first. On
-Debian/Ubuntu:
+app's Rust crates link against GTK and WebKitGTK, so `just dev` (and any
+`just desktop-tauri-*` recipe) needs these installed system-wide first.
+
+```bash
+just linux-deps          # install them (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE)
+just linux-deps-check    # verify only; prints the exact command if anything is missing
+```
+
+The check also runs automatically before every Tauri desktop build, check, and
+test recipe, so a missing library fails immediately with the missing pkg-config
+modules and the install command, instead of hundreds of crates into the build
+with:
+
+```
+The system library `gdk-pixbuf-2.0` required by crate `gdk-pixbuf-sys` was not found.
+```
+
+On Debian/Ubuntu the install is equivalent to:
 
 ```bash
 sudo apt-get install -y --no-install-recommends \
   build-essential curl file libasound2-dev libayatana-appindicator3-dev \
   libgtk-3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
-  patchelf wget
+  patchelf pkg-config wget
 ```
 
-This is the same list CI installs (see `.github/workflows/ci.yml`), so matching
-it locally keeps your results comparable to CI. Other distributions ship these
-under different package names — see the
-[Tauri prerequisites](https://tauri.app/start/prerequisites/) for the
-equivalents.
-
-Without them, `just ci` fails partway through `just check` with a pkg-config
-error such as:
-
-```
-The system library `gdk-pixbuf-2.0` required by crate `gdk-pixbuf-sys` was not found.
-```
+This is the same list CI installs (see `.github/workflows/_ci-desktop.yml`), so
+matching it locally keeps your results comparable to CI. Unsupported
+distributions can follow the
+[Tauri prerequisites](https://tauri.app/start/prerequisites/) for equivalents.
 
 If you're only touching the relay, CLI, or other server-side crates, you can
 skip this and run the narrower recipes instead — `just fmt-check`, `just
