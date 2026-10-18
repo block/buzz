@@ -634,6 +634,24 @@ async fn refresh_loop_runs_every_interval_and_retries_failures_sooner() {
     assert_eq!(loads_after(RETRY_FIRST).await, 2, "failure retried sooner");
     store.fail_loads.store(false, Ordering::SeqCst);
     assert_eq!(loads_after(RETRY_FIRST * 2).await, 3, "backed off, then ok");
+    // The successful load's map build runs on a real blocking thread the
+    // paused clock cannot see. Wait for its publication (bounded in real
+    // time) before moving the clock, or the next advance passes the
+    // refresh's timeout and fails it.
+    let succeeded_at = REFRESH_INTERVAL + RETRY_FIRST * 3;
+    let waited = std::time::Instant::now();
+    while resolver
+        .published
+        .load()
+        .as_ref()
+        .is_none_or(|published| published.loaded_at < succeeded_at)
+    {
+        assert!(
+            waited.elapsed() < Duration::from_secs(30),
+            "never published"
+        );
+        tokio::task::yield_now().await;
+    }
     assert_eq!(loads_after(REFRESH_INTERVAL - secs(0.1)).await, 3);
     assert_eq!(loads_after(secs(0.1)).await, 4, "back on the interval");
     cancel.cancel();
