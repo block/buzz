@@ -182,6 +182,7 @@ fn file_and_stdin_run_one_fresh_equipped_session_without_service() {
         for proc in spawned {
             assert_eq!(proc["key"], KEY);
             assert_eq!(proc["relay"], "ws://127.0.0.1:1");
+            assert_eq!(proc["outputFormat"], "agent");
             assert_dead(proc["pid"].as_u64().unwrap() as u32);
             assert!(!std::path::Path::new(proc["gitKeyfile"].as_str().unwrap()).exists());
         }
