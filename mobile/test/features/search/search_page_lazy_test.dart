@@ -74,6 +74,58 @@ void main() {
     },
   );
 
+  testWidgets(
+    'long message previews bound text without parsing partial markdown',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final state = SearchState(
+        query: 'result',
+        messageResults: [
+          SearchHit(
+            eventId: 'long',
+            content:
+                '${'x' * 511}😀${'**[long](https://example.com)**' * 4000}',
+            kind: 9,
+            pubkey: 'author-pubkey',
+            createdAt: 1,
+            score: 1,
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+            recentSearchesProvider.overrideWith(
+              () => _FakeRecentSearchesNotifier(const []),
+            ),
+            profileProvider.overrideWith(() => _FakeProfileNotifier()),
+            channelsProvider.overrideWith(() => _FakeChannelsNotifier()),
+            userCacheProvider.overrideWith(
+              () => _FakeUserCacheNotifier(
+                const UserProfile(pubkey: 'author-pubkey'),
+              ),
+            ),
+            knownAgentPubkeysProvider.overrideWith((ref) => const {}),
+            agentDirectoryDisplayNamesProvider.overrideWith((ref) => const {}),
+          ],
+          child: const SearchPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(MessageContent), findsNothing);
+      final preview = tester.widget<Text>(
+        find.byKey(const ValueKey('search-message-body-long')),
+      );
+      expect(preview.data, '${'x' * 511}…');
+      expect(preview.maxLines, 2);
+      expect(preview.overflow, TextOverflow.ellipsis);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   for (final category in ['Channels', 'People']) {
     testWidgets('$category results are lazy and reachable after filtering', (
       tester,
