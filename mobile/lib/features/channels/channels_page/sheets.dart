@@ -535,12 +535,14 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
       ),
       child: SafeArea(
         top: false,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              GestureDetector(
+        // The sheet bounds this viewport even with the keyboard visible.
+        // Keep rows as slivers so search and chip updates do not lay out the
+        // entire directory. The field still scrolls with long chip selections.
+        child: CustomScrollView(
+          shrinkWrap: true,
+          slivers: [
+            SliverToBoxAdapter(
+              child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
                 onTap: isSubmitting.value ? null : queryFocusNode.requestFocus,
                 child: SizedBox(
@@ -664,24 +666,27 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                   ),
                 ),
               ),
-              const SizedBox(height: Grid.xs),
-              Builder(
-                key: const Key('new-dm-results'),
-                builder: (context) {
-                  if (selectedUsers.value.length >= 8) {
-                    return const SizedBox(
+            ),
+            const SliverToBoxAdapter(child: SizedBox(height: Grid.xs)),
+            Builder(
+              key: const Key('new-dm-results'),
+              builder: (context) {
+                if (selectedUsers.value.length >= 8) {
+                  return const SliverToBoxAdapter(
+                    child: SizedBox(
                       height: 96,
                       child: Center(
                         child: Text(
                           'DMs support up to nine people, including you.',
                         ),
                       ),
-                    );
-                  }
-                  if (directoryAsync.isLoading &&
-                          directoryAsync.asData == null ||
-                      isSearchTransitionPending) {
-                    return const SizedBox(
+                    ),
+                  );
+                }
+                if (directoryAsync.isLoading && directoryAsync.asData == null ||
+                    isSearchTransitionPending) {
+                  return const SliverToBoxAdapter(
+                    child: SizedBox(
                       height: 280,
                       child: Center(
                         child: BuzzLoadingIndicator(
@@ -689,10 +694,12 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                           semanticLabel: 'Loading people',
                         ),
                       ),
-                    );
-                  }
-                  if (directoryAsync.hasError) {
-                    return SizedBox(
+                    ),
+                  );
+                }
+                if (directoryAsync.hasError) {
+                  return SliverToBoxAdapter(
+                    child: SizedBox(
                       height: 280,
                       child: Center(
                         child: Column(
@@ -719,10 +726,12 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                           ],
                         ),
                       ),
-                    );
-                  }
-                  if (availableResults.isEmpty) {
-                    return SizedBox(
+                    ),
+                  );
+                }
+                if (availableResults.isEmpty) {
+                  return SliverToBoxAdapter(
+                    child: SizedBox(
                       height: 280,
                       child: Center(
                         child: Text(
@@ -731,78 +740,78 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                               : 'No matching users.',
                         ),
                       ),
-                    );
-                  }
-                  return ListView.builder(
-                    physics: const NeverScrollableScrollPhysics(),
-                    shrinkWrap: true,
-                    itemCount: availableResults.length,
-                    itemBuilder: (context, index) {
-                      final user = availableResults[index];
-                      return AppListCardItem(
-                        index: index,
-                        itemCount: availableResults.length,
-                        dividerIndent: Grid.xs + 40 + Grid.xs,
-                        child: ListTile(
-                          key: Key('new-dm-person-${user.pubkey}'),
-                          leading: AvatarImage(
-                            imageUrl: user.avatarUrl,
-                            radius: 20,
-                            backgroundColor: context.controlSurface,
-                            fallback: Text(
-                              user.initial,
-                              style: context.textTheme.labelLarge?.copyWith(
-                                color: context.colors.onPrimaryContainer,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            isAgent: user.isAgent,
-                          ),
-                          title: Text(
-                            names.labelFor(user.pubkey),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            user.secondaryLabel,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: Icon(
-                            BuzzIcons.plus,
-                            size: 18,
-                            color: context.colors.onSurfaceVariant,
-                          ),
-                          onTap: isSubmitting.value
-                              ? null
-                              : () {
-                                  selectedUsers.value = [
-                                    ...selectedUsers.value,
-                                    user,
-                                  ];
-                                  queryController.clear();
-                                  query.value = '';
-                                  debouncedQuery.value = '';
-                                  submitError.value = null;
-                                  queryFocusNode.requestFocus();
-                                },
-                        ),
-                      );
-                    },
+                    ),
                   );
-                },
-              ),
-              if (submitError.value case final error?) ...[
-                const SizedBox(height: Grid.xxs),
-                Text(
+                }
+                return SliverList.builder(
+                  itemCount: availableResults.length,
+                  itemBuilder: (context, index) {
+                    final user = availableResults[index];
+                    return AppListCardItem(
+                      index: index,
+                      itemCount: availableResults.length,
+                      dividerIndent: Grid.xs + 40 + Grid.xs,
+                      child: ListTile(
+                        key: Key('new-dm-person-${user.pubkey}'),
+                        leading: AvatarImage(
+                          imageUrl: user.avatarUrl,
+                          radius: 20,
+                          backgroundColor: context.controlSurface,
+                          fallback: Text(
+                            user.initial,
+                            style: context.textTheme.labelLarge?.copyWith(
+                              color: context.colors.onPrimaryContainer,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          isAgent: user.isAgent,
+                        ),
+                        title: Text(
+                          names.labelFor(user.pubkey),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          user.secondaryLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: Icon(
+                          BuzzIcons.plus,
+                          size: 18,
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                        onTap: isSubmitting.value
+                            ? null
+                            : () {
+                                selectedUsers.value = [
+                                  ...selectedUsers.value,
+                                  user,
+                                ];
+                                queryController.clear();
+                                query.value = '';
+                                debouncedQuery.value = '';
+                                submitError.value = null;
+                                queryFocusNode.requestFocus();
+                              },
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+            if (submitError.value case final error?) ...[
+              const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
+              SliverToBoxAdapter(
+                child: Text(
                   error,
                   style: context.textTheme.bodySmall?.copyWith(
                     color: context.colors.error,
                   ),
                 ),
-              ],
+              ),
             ],
-          ),
+          ],
         ),
       ),
     );
