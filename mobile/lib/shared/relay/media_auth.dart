@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -110,23 +111,36 @@ class MediaGetAuthService {
     return result;
   }
 
-  /// Keeps an in-flight consumer pending through one queue-saturation retry.
+  /// Keeps a consumer pending through one saturation or worker-startup retry.
   ///
   /// Waits for the existing queue snapshot, then competes for normal admission.
   /// At most 64 consumers may wait or retry in addition to the 64 signing jobs.
-  /// Excess waiters and second rejections fail without a retry loop.
+  /// Excess waiters and second failures are terminal. Only isolate spawn failures
+  /// are retried: signing/configuration errors and ambiguous remote runtime
+  /// errors are not evidence of a transient worker-startup failure.
   Future<Map<String, String>> headersForAsyncWithRetry(String url) async {
     try {
       return await headersForAsync(url);
     } on MediaAuthQueueFull catch (error) {
-      if (_pendingRetries >= _maxPendingRetries) rethrow;
-      _pendingRetries++;
-      try {
-        await error.drained;
-        return await headersForAsync(url);
-      } finally {
-        _pendingRetries--;
-      }
+      return _retryAfter(url, error.drained);
+    } on IsolateSpawnException {
+      return _retryAfter(url, _signingTail);
+    }
+  }
+
+  Future<Map<String, String>> _retryAfter(
+    String url,
+    Future<void> drained,
+  ) async {
+    if (_pendingRetries >= _maxPendingRetries) {
+      throw MediaAuthQueueFull(drained);
+    }
+    _pendingRetries++;
+    try {
+      await drained;
+      return await headersForAsync(url);
+    } finally {
+      _pendingRetries--;
     }
   }
 

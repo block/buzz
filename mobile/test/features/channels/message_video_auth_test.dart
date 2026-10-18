@@ -48,7 +48,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(auth.requests, [url]);
+      expect(
+        auth.requests,
+        failure.value is IsolateSpawnException ? [url, url] : [url],
+      );
       expect(find.text('Video attachment'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
