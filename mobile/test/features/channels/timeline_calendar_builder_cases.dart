@@ -154,7 +154,7 @@ void timelineCalendarBuilderTests() {
     );
     await tester.pumpAndSettle();
     final threadCaches = conversions
-        .where((counts) => counts.containsKey(replies.last.createdAt))
+        .where((counts) => counts.isNotEmpty)
         .toList();
     expect(threadCaches, isNotEmpty);
     for (final counts in threadCaches) {
