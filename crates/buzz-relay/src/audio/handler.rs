@@ -456,7 +456,10 @@ pub(crate) async fn handle_active_audio_connection(
     pre_built: Option<PreBuiltNipFiBundle>,
 ) {
     let (ws_send, ws_recv) = socket.split();
-    let mut ws_recv = Some(ws_recv);
+    let mut ws_recv = AudioReadHalf {
+        recv: Some(ws_recv),
+        drain: None,
+    };
     run_active_audio_connection(
         ws_send,
         &mut ws_recv,
@@ -469,32 +472,46 @@ pub(crate) async fn handle_active_audio_connection(
         pre_built,
     )
     .await;
-    if let Some(ws_recv) = ws_recv {
+    // Returning releases the caller's connection permit, so the socket must
+    // have ended first: wait on the read half here, or on the background
+    // close an exit handed it to.
+    if let Some(ws_recv) = ws_recv.recv {
         crate::connection::await_client_close(ws_recv).await;
     }
+    if let Some(drain) = ws_recv.drain {
+        let _ = drain.await;
+    }
+}
+
+/// The audio session's read half, or the background close it was handed to.
+struct AudioReadHalf {
+    recv: Option<futures_util::stream::SplitStream<WebSocket>>,
+    drain: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Hands the socket to a task that waits, bounded, for the client's Close
 /// reply and then drops it. Called once the terminal frames are sent and
 /// before cleanup that may block on Postgres, Redis or a remote owner, so
 /// that cleanup never holds the socket open. Pass the write half when the
-/// caller still owns it: either half alone keeps the socket open.
+/// caller still owns it: either half alone keeps the socket open. The task
+/// handle is kept so the wrapper holds the connection permit until the
+/// socket ends.
 fn close_in_background(
-    ws_recv: &mut Option<futures_util::stream::SplitStream<WebSocket>>,
+    ws_recv: &mut AudioReadHalf,
     ws_send: Option<futures_util::stream::SplitSink<WebSocket, WsMessage>>,
 ) {
-    if let Some(ws_recv) = ws_recv.take() {
-        tokio::spawn(async move {
-            crate::connection::await_client_close(ws_recv).await;
+    if let Some(recv) = ws_recv.recv.take() {
+        ws_recv.drain = Some(tokio::spawn(async move {
+            crate::connection::await_client_close(recv).await;
             drop(ws_send);
-        });
+        }));
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_active_audio_connection(
     mut ws_send: futures_util::stream::SplitSink<WebSocket, WsMessage>,
-    ws_recv: &mut Option<futures_util::stream::SplitStream<WebSocket>>,
+    ws_recv: &mut AudioReadHalf,
     state: Arc<AppState>,
     tenant: TenantContext,
     channel_id: Uuid,
@@ -600,7 +617,7 @@ async fn run_active_audio_connection(
             return;
         },
         result = tokio::time::timeout(AUTH_TIMEOUT, async {
-            let ws_recv = ws_recv.as_mut().expect("read half is held until the session ends");
+            let ws_recv = ws_recv.recv.as_mut().expect("read half is held until the session ends");
             while let Some(Ok(msg)) = ws_recv.next().await {
                 if let WsMessage::Text(text) = msg {
                     if text.len() > MAX_TEXT_FRAME_BYTES {
@@ -2082,6 +2099,7 @@ async fn run_active_audio_connection(
 
     recv_loop(
         ws_recv
+            .recv
             .as_mut()
             .expect("read half is held until the session ends"),
         Arc::clone(&room),
@@ -9975,6 +9993,51 @@ mod tests {
             let _ = server.await;
         }
 
+        /// Answers the server's NIP-42 challenge with an audio `auth` message.
+        async fn send_audio_auth(
+            client: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            key: &nostr::Keys,
+            relay_url: &str,
+            protocol_version: u8,
+        ) {
+            let challenge =
+                match tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+                    .await
+                    .expect("challenge timeout")
+                    .expect("challenge msg")
+                    .expect("challenge ws msg")
+                {
+                    tokio_tungstenite::tungstenite::Message::Text(t) => {
+                        serde_json::from_str::<serde_json::Value>(&t).expect("challenge JSON")
+                            ["challenge"]
+                            .as_str()
+                            .expect("challenge field")
+                            .to_string()
+                    }
+                    other => panic!("expected text challenge; got {other:?}"),
+                };
+            let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+                .tag(nostr::Tag::parse(["relay", relay_url]).unwrap())
+                .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(key)
+                .unwrap();
+            let auth_msg = serde_json::json!({
+                "type": "auth",
+                "event": auth_event,
+                "parent_channel_id": null,
+                "protocol_version": protocol_version,
+            })
+            .to_string();
+            client
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    auth_msg.into(),
+                ))
+                .await
+                .expect("send auth msg");
+        }
+
         /// After an established session's writer sends its Close, the
         /// teardown that follows writes to Postgres and Redis, which can stall
         /// with no deadline. The socket must still end within the bounded wait
@@ -10046,40 +10109,7 @@ mod tests {
             let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
                 .await
                 .expect("connect client");
-            let challenge =
-                match tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
-                    .await
-                    .expect("challenge timeout")
-                    .expect("challenge msg")
-                    .expect("challenge ws msg")
-                {
-                    tokio_tungstenite::tungstenite::Message::Text(t) => {
-                        serde_json::from_str::<serde_json::Value>(&t).expect("challenge JSON")
-                            ["challenge"]
-                            .as_str()
-                            .expect("challenge field")
-                            .to_string()
-                    }
-                    other => panic!("expected text challenge; got {other:?}"),
-                };
-            let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
-                .tag(nostr::Tag::parse(["relay", &relay_url]).unwrap())
-                .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
-                .sign_with_keys(&key)
-                .unwrap();
-            let auth_msg = serde_json::json!({
-                "type": "auth",
-                "event": auth_event,
-                "parent_channel_id": null,
-                "protocol_version": 1,
-            })
-            .to_string();
-            client
-                .send(tokio_tungstenite::tungstenite::Message::Text(
-                    auth_msg.into(),
-                ))
-                .await
-                .expect("send auth msg");
+            send_audio_auth(&mut client, &key, &relay_url, 1).await;
 
             tokio::time::timeout(std::time::Duration::from_secs(10), fanout_rx)
                 .await
@@ -10099,13 +10129,128 @@ mod tests {
                 .await
                 .expect("teardown must reach the stall point")
                 .expect("teardown hook dropped");
+            // The hook runs just after the hand-off, so the socket must end
+            // within the bounded wait measured from here.
+            let handed_off = std::time::Instant::now();
             let elapsed = time_to_eof(socket, started).await;
             assert!(
                 elapsed >= WS_TERMINAL_FLUSH_TIMEOUT,
                 "server must wait for the client's Close reply, ended after {elapsed:?}"
             );
+            let since_hand_off = handed_off.elapsed();
+            assert!(
+                since_hand_off <= WS_TERMINAL_FLUSH_TIMEOUT + std::time::Duration::from_millis(500),
+                "socket must end within the bounded wait after the hand-off, took {since_hand_off:?}"
+            );
 
             teardown_release.notify_one();
+            server.abort();
+        }
+
+        /// A fast refusal hands the socket to a background close and returns.
+        /// The connection permit must stay held until that socket ends, or a
+        /// client that never answers the Close lets open audio sockets exceed
+        /// `BUZZ_MAX_CONNECTIONS`.
+        ///
+        /// Mutation: stop the wrapper from joining the background close → the
+        /// permit is released while the socket is still open → the
+        /// `available_permits() == 0` assertion fails.
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        #[tokio::test]
+        async fn background_close_holds_connection_permit_until_socket_ends() {
+            use crate::connection::terminal_close_delivery_tests::time_to_eof;
+            use buzz_auth::VerifiedAssertion;
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+            use tokio::io::AsyncReadExt as _;
+
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let pool = state.db.pool().clone();
+            let (tenant, channel_id, key) = seed_audio_fixture(&pool).await;
+            let assertion = VerifiedAssertion::for_test(
+                Some(key.public_key()),
+                vec![Utc::now() + Duration::hours(1)],
+            );
+            let relay_url = format!("ws://{}", tenant.host());
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+
+            let app = axum::Router::new().route(
+                "/",
+                axum::routing::get({
+                    let semaphore = Arc::clone(&semaphore);
+                    move |ws: axum::extract::ws::WebSocketUpgrade| {
+                        let (state, tenant, assertion) =
+                            (Arc::clone(&state), tenant.clone(), assertion.clone());
+                        let permit = Arc::clone(&semaphore)
+                            .try_acquire_owned()
+                            .expect("one connection permit");
+                        async move {
+                            ws.on_upgrade(move |socket| {
+                                handle_audio_connection(
+                                    socket,
+                                    state,
+                                    tenant,
+                                    channel_id,
+                                    permit,
+                                    Some(assertion),
+                                    None,
+                                    Utc::now(),
+                                )
+                            })
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test listener");
+            let addr = listener.local_addr().expect("test listener addr");
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("connect client");
+            send_audio_auth(&mut client, &key, &relay_url, u8::MAX).await;
+
+            // From here the client only reads raw bytes, so it never answers
+            // the server's Close.
+            let tokio_tungstenite::MaybeTlsStream::Plain(socket) = client.get_mut() else {
+                panic!("plain TCP client");
+            };
+            let mut received = Vec::new();
+            let mut buf = [0u8; 512];
+            while !received
+                .windows(b"unsupported_version".len())
+                .any(|w| w == b"unsupported_version")
+            {
+                let n =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf))
+                        .await
+                        .expect("refusal must arrive")
+                        .expect("read");
+                assert_ne!(n, 0, "socket ended before the refusal");
+                received.extend_from_slice(&buf[..n]);
+            }
+            let started = std::time::Instant::now();
+            // The refusal has no staged lease, so its cleanup returns at once.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(
+                semaphore.available_permits(),
+                0,
+                "permit must stay held while the refused socket is open"
+            );
+
+            time_to_eof(socket, started).await;
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while semaphore.available_permits() == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("permit must be released once the socket ends");
+
             server.abort();
         }
 
