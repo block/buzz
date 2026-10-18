@@ -540,8 +540,19 @@ pub async fn validate_admin_event(
     event: &Event,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    // CREATE_GROUP doesn't need an existing channel — skip h-tag extraction
+    // CREATE_GROUP doesn't need an existing channel — skip h-tag extraction.
+    // Its initial members get the third-party add check a kind:9000 would.
     if kind == 9007 {
+        let actor_bytes = event.pubkey.to_bytes().to_vec();
+        for member in initial_members(event)? {
+            if let Some((policy, owner)) = state
+                .db
+                .get_agent_channel_policy(tenant.community(), &member)
+                .await?
+            {
+                channel_authz::decide_channel_add_policy(&policy, owner.as_deref(), &actor_bytes)?;
+            }
+        }
         return Ok(());
     }
 
@@ -2093,13 +2104,14 @@ async fn handle_create_group(
     // inaccessible, so the counter correctly records a new creation. For the
     // no-h-tag path, ingest never creates the channel, so this is the sole
     // increment.
-    let channel = if let Some(client_uuid) = extract_h_tag_channel(event) {
+    // `members_added`: ingest's create also added the event's `p` tags.
+    let (channel, members_added) = if let Some(client_uuid) = extract_h_tag_channel(event) {
         match state
             .db
             .get_channel_for_event_write(tenant.community(), client_uuid)
             .await
         {
-            Ok(ch) => ch,
+            Ok(ch) => (ch, true),
             Err(_) => {
                 // Channel not found — shouldn't happen (ingest_event pre-created it),
                 // but fall back to creation to stay resilient.
@@ -2122,7 +2134,7 @@ async fn handle_create_group(
                     "type" => channel_type.to_string()
                 )
                 .increment(1);
-                ch
+                (ch, false)
             }
         }
     } else {
@@ -2145,7 +2157,7 @@ async fn handle_create_group(
             "type" => channel_type.to_string()
         )
         .increment(1);
-        ch
+        (ch, false)
     };
 
     // Creator becomes owner — evict any stale negative membership lookup.
@@ -2183,6 +2195,41 @@ async fn handle_create_group(
     .await
     {
         warn!(channel = %channel.id, error = %e, "membership notification emission failed");
+    }
+
+    // Ingest added these in the create's transaction; announce them as a
+    // kind:9000 would.
+    let members = if members_added {
+        initial_members(event)?
+    } else {
+        Vec::new()
+    };
+    for member in members {
+        state.invalidate_membership(tenant, channel.id, &member);
+        emit_system_message(
+            tenant,
+            state,
+            channel.id,
+            serde_json::json!({
+                "type": "member_joined",
+                "actor": actor_hex,
+                "target": hex::encode(&member),
+            }),
+            chrono::Utc::now(),
+        )
+        .await?;
+        if let Err(e) = emit_membership_notification(
+            tenant,
+            state,
+            channel.id,
+            &member,
+            &actor_bytes,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+        )
+        .await
+        {
+            warn!(channel = %channel.id, error = %e, "membership notification emission failed");
+        }
     }
 
     info!(channel_id = %channel.id, name = %name, "NIP-29 CREATE_GROUP processed");
@@ -2651,6 +2698,38 @@ async fn handle_standard_deletion_event(
     }
 
     Ok(())
+}
+
+/// Most members a kind:9007 may add besides its creator.
+pub(crate) const MAX_INITIAL_MEMBERS: usize = 32;
+
+/// The members a kind:9007 adds besides its creator: its `p` tags, deduplicated.
+/// They need the client-chosen channel UUID (`h`), so a retry of the same
+/// create names the same channel.
+pub(crate) fn initial_members(event: &Event) -> anyhow::Result<Vec<Vec<u8>>> {
+    let creator = event.pubkey.to_bytes();
+    let mut members: Vec<Vec<u8>> = Vec::new();
+    for tag in event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "p")
+    {
+        let member = tag
+            .content()
+            .and_then(|value| hex::decode(value).ok())
+            .filter(|bytes| bytes.len() == 32)
+            .ok_or_else(|| anyhow::anyhow!("p tag must be a 32-byte hex pubkey"))?;
+        if member != creator && !members.contains(&member) {
+            members.push(member);
+        }
+    }
+    if members.len() > MAX_INITIAL_MEMBERS {
+        anyhow::bail!("a channel may start with at most {MAX_INITIAL_MEMBERS} members");
+    }
+    if !members.is_empty() && extract_h_tag_channel(event).is_none() {
+        anyhow::bail!("initial members need an h tag");
+    }
+    Ok(members)
 }
 
 /// Extract channel UUID from `h` tag (NIP-29 group ID).
@@ -3995,6 +4074,57 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn create_with(creator: &nostr::Keys, tags: Vec<Vec<String>>) -> Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(9007), "")
+            .tags(
+                tags.into_iter()
+                    .map(|tag| nostr::Tag::parse(tag).expect("tag")),
+            )
+            .sign_with_keys(creator)
+            .expect("sign")
+    }
+
+    fn tag(name: &str, value: &str) -> Vec<String> {
+        vec![name.to_string(), value.to_string()]
+    }
+
+    #[test]
+    fn initial_members_dedupes_and_leaves_out_the_creator() {
+        let (creator, agent) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let h = tag("h", &Uuid::new_v4().to_string());
+        let event = create_with(
+            &creator,
+            vec![
+                h,
+                tag("p", &agent.public_key().to_hex()),
+                tag("p", &agent.public_key().to_hex()),
+                tag("p", &creator.public_key().to_hex()),
+            ],
+        );
+        assert_eq!(
+            initial_members(&event).expect("members"),
+            vec![agent.public_key().to_bytes().to_vec()]
+        );
+    }
+
+    #[test]
+    fn initial_members_rejects_bad_pubkeys_too_many_members_and_no_h_tag() {
+        let creator = nostr::Keys::generate();
+        let h = tag("h", &Uuid::new_v4().to_string());
+        let bad = create_with(&creator, vec![h.clone(), tag("p", "not-hex")]);
+        assert!(initial_members(&bad).is_err());
+
+        let mut crowd = vec![h];
+        for _ in 0..=MAX_INITIAL_MEMBERS {
+            crowd.push(tag("p", &nostr::Keys::generate().public_key().to_hex()));
+        }
+        assert!(initial_members(&create_with(&creator, crowd)).is_err());
+
+        let member = nostr::Keys::generate().public_key().to_hex();
+        let headless = create_with(&creator, vec![tag("p", &member)]);
+        assert!(initial_members(&headless).is_err());
+    }
 
     #[test]
     fn nip43_progress_logs_every_interval_inside_the_startup_sweep_only() {

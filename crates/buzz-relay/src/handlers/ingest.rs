@@ -3126,6 +3126,8 @@ async fn ingest_event_inner(
             let ttl_seconds = super::resolve_ttl(&event, state.config.ephemeral_ttl_override);
 
             let actor_bytes = event.pubkey.to_bytes().to_vec();
+            let members = super::side_effects::initial_members(&event)
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
             let (_, was_created) = state
                 .db
                 .create_labeled_channel_with_id(
@@ -3138,15 +3140,29 @@ async fn ingest_event_inner(
                     &actor_bytes,
                     ttl_seconds,
                     &labels,
+                    &members,
                 )
                 .await
                 .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
 
             if !was_created {
+                // Resending a create whose OK was lost confirms it. Anything
+                // else for an existing UUID is refused before storage, so it
+                // never runs the create's side effects again.
+                let resent = state
+                    .db
+                    .get_event_by_id_for_event_write(tenant.community(), event.id.as_bytes())
+                    .await
+                    .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+                    .is_some();
                 return Ok(IngestResult {
                     event_id: event_id_hex,
-                    accepted: false,
-                    message: "duplicate: channel already exists".into(),
+                    accepted: resent,
+                    message: if resent {
+                        "duplicate:".into()
+                    } else {
+                        "duplicate: channel already exists".into()
+                    },
                 });
             }
             pre_created_channel = Some(client_uuid);

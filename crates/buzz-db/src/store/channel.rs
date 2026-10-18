@@ -200,6 +200,40 @@ pub async fn create_channel_with_id(
     ttl_seconds: Option<i32>,
     labels: &[String],
 ) -> Result<(ChannelRecord, bool)> {
+    create_channel_with_members(
+        pool,
+        community_id,
+        channel_id,
+        name,
+        channel_type,
+        visibility,
+        description,
+        created_by,
+        ttl_seconds,
+        labels,
+        &[],
+    )
+    .await
+}
+
+/// [`create_channel_with_id`], also adding `members` (32-byte pubkeys) as
+/// ordinary members invited by the creator, in the transaction that creates the
+/// channel. The caller has authorized each addition. Nothing is added when the
+/// channel already exists.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_channel_with_members(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    name: &str,
+    channel_type: ChannelType,
+    visibility: ChannelVisibility,
+    description: Option<&str>,
+    created_by: &[u8],
+    ttl_seconds: Option<i32>,
+    labels: &[String],
+    members: &[Vec<u8>],
+) -> Result<(ChannelRecord, bool)> {
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
             "pubkey must be 32 bytes, got {}",
@@ -266,6 +300,31 @@ pub async fn create_channel_with_id(
         .bind(created_by)
         .execute(tx.conn())
         .await?;
+
+        for member in members
+            .iter()
+            .filter(|member| member.as_slice() != created_by)
+        {
+            if member.len() != 32 {
+                return Err(DbError::InvalidData(format!(
+                    "pubkey must be 32 bytes, got {}",
+                    member.len()
+                )));
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+                VALUES ($1, $2, $3, 'member', $4)
+                ON CONFLICT (community_id, channel_id, pubkey) DO NOTHING
+                "#,
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .bind(member)
+            .bind(created_by)
+            .execute(tx.conn())
+            .await?;
+        }
     }
 
     let row = sqlx::query(
@@ -958,7 +1017,8 @@ impl Db {
     /// Creates a channel with a client-supplied UUID and an initial label set.
     ///
     /// The same as [`Db::create_channel_with_id`], plus `labels`, which the
-    /// caller has validated with `buzz_core::channel::parse_channel_labels`.
+    /// caller has validated with `buzz_core::channel::parse_channel_labels`,
+    /// and initial `members` (see [`create_channel_with_members`]).
     #[allow(clippy::too_many_arguments)]
     #[datastore_span(name = "create_labeled_channel_with_id", system = "postgresql")]
     pub async fn create_labeled_channel_with_id(
@@ -972,8 +1032,9 @@ impl Db {
         created_by: &[u8],
         ttl_seconds: Option<i32>,
         labels: &[String],
+        members: &[Vec<u8>],
     ) -> Result<(ChannelRecord, bool)> {
-        create_channel_with_id(
+        create_channel_with_members(
             &self.pool,
             community_id,
             channel_id,
@@ -984,6 +1045,7 @@ impl Db {
             created_by,
             ttl_seconds,
             labels,
+            members,
         )
         .await
     }
