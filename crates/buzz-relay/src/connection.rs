@@ -3556,7 +3556,9 @@ mod terminal_close_delivery_tests {
         let started = std::time::Instant::now();
         let mut socket = raw_client_after_server_close(address).await;
 
-        pause.reached.notified().await;
+        tokio::time::timeout(EOF_WATCHDOG, pause.reached.notified())
+            .await
+            .expect("cleanup never reached the pause point");
         let elapsed = time_to_eof(&mut socket, started).await;
         assert!(elapsed >= WS_TERMINAL_FLUSH_TIMEOUT);
     }
