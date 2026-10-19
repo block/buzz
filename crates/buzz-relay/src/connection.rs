@@ -3713,8 +3713,15 @@ pub(crate) mod terminal_close_delivery_tests {
             Some(Keys::generate().public_key()),
             vec![chrono::Utc::now() + chrono::Duration::hours(1)],
         );
-        let (address, _, state, conn_id) =
-            serve_with_cleanup_pause(assertion, true, None, Some(effect_tx), Some(subs_tx)).await;
+        let pause = Arc::new(crate::handlers::close::test_seam::Pause::default());
+        let (address, _, state, conn_id) = serve_with_cleanup_pause(
+            assertion,
+            true,
+            Some(Arc::clone(&pause)),
+            Some(effect_tx),
+            Some(subs_tx),
+        )
+        .await;
         // Masked text frame, zero mask: ["CLOSE","s"].
         let close = br#"["CLOSE","s"]"#;
         let mut frame = vec![
@@ -3746,6 +3753,14 @@ pub(crate) mod terminal_close_delivery_tests {
 
         let lock = Arc::clone(tokio::sync::OwnedMutexGuard::mutex(&subscriptions));
         drop(subscriptions);
+        tokio::time::timeout(EOF_WATCHDOG, pause.reached.notified())
+            .await
+            .expect("cleanup never reached subscription release");
+        assert!(
+            !lock.lock().await.contains_key("s"),
+            "the handed-off CLOSE must finish retiring before cleanup starts"
+        );
+        pause.resume.notify_one();
         tokio::time::timeout(EOF_WATCHDOG, async {
             while state.conn_manager.community_for_conn(conn_id).is_some() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
