@@ -689,8 +689,11 @@ pub struct DbConfig {
     /// writer connections (env `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`). `0` disables.
     pub idle_txn_timeout_ms: u64,
     /// Session `statement_timeout` in milliseconds for writer connections
-    /// (env `BUZZ_DB_STATEMENT_TIMEOUT_MS`). `0` disables it and is the
-    /// default because migrations and backfills may legitimately run long.
+    /// (env `BUZZ_DB_STATEMENT_TIMEOUT_MS`). Defaults to
+    /// [`DEFAULT_STATEMENT_TIMEOUT_MS`]. Every writer session is bounded:
+    /// `0` or a value above [`MAX_STATEMENT_TIMEOUT_MS`] installs the maximum
+    /// (see [`Self::effective_statement_timeout_ms`]). Migration and
+    /// schema-destruction sessions lift it on their own detached connection.
     pub statement_timeout_ms: u64,
     /// Whether every new writer-pool connection defaults all transactions to
     /// read-only. Intended for operator audit commands, never the relay pool.
@@ -716,7 +719,7 @@ impl Default for DbConfig {
             usage_metrics_replica_max_age_ms: 30_000,
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             idle_txn_timeout_ms: DEFAULT_IDLE_TXN_TIMEOUT_MS,
-            statement_timeout_ms: 0,
+            statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
             default_transaction_read_only: false,
         }
     }
@@ -728,10 +731,31 @@ pub const DEFAULT_LOCK_TIMEOUT_MS: u64 = 5_000;
 /// Default writer `idle_in_transaction_session_timeout` in milliseconds.
 pub const DEFAULT_IDLE_TXN_TIMEOUT_MS: u64 = 60_000;
 
+/// Default writer session `statement_timeout` in milliseconds (2 minutes).
+/// Generic event reads tighten it further to
+/// [`crate::event::READ_STATEMENT_TIMEOUT`] per statement.
+pub const DEFAULT_STATEMENT_TIMEOUT_MS: u64 = 120_000;
+
+/// Upper bound on any writer session `statement_timeout`, in milliseconds
+/// (5 minutes). Configuration cannot disable or exceed it.
+pub const MAX_STATEMENT_TIMEOUT_MS: u64 = 300_000;
+
 impl DbConfig {
+    /// The writer session `statement_timeout` actually installed: the
+    /// configured value, with `0` (disabled) and anything above
+    /// [`MAX_STATEMENT_TIMEOUT_MS`] clamped to the maximum.
+    pub fn effective_statement_timeout_ms(&self) -> u64 {
+        match self.statement_timeout_ms {
+            0 => MAX_STATEMENT_TIMEOUT_MS,
+            ms => ms.min(MAX_STATEMENT_TIMEOUT_MS),
+        }
+    }
+
     /// Overlay writer session timeouts from the shared `BUZZ_DB_*_TIMEOUT_MS`
     /// environment variables. Missing or invalid values retain the existing
-    /// configuration; explicit zeroes pass through to disable a timeout.
+    /// configuration; explicit zeroes pass through to disable the lock and
+    /// idle timeouts, while the statement timeout is still clamped at connect
+    /// time (see [`Self::effective_statement_timeout_ms`]).
     ///
     /// This belongs in `buzz-db` so relay, admin, deletion, and audit writers
     /// share one policy. The separately deployed push gateway owns its own
@@ -810,7 +834,7 @@ impl Db {
         let push_enabled = config.push_enabled;
         let lock_timeout_ms = config.lock_timeout_ms;
         let idle_txn_timeout_ms = config.idle_txn_timeout_ms;
-        let statement_timeout_ms = config.statement_timeout_ms;
+        let statement_timeout_ms = config.effective_statement_timeout_ms();
         let default_transaction_read_only = config.default_transaction_read_only;
         let options = PgPoolOptions::new()
             .max_connections(config.max_connections)
@@ -845,7 +869,8 @@ impl Db {
                     // cancel the holder. `idle_in_transaction_session_timeout`
                     // reaps only holders idling inside an open transaction,
                     // while actively executing holders are bounded only by
-                    // `statement_timeout` (off by default). Bare values are
+                    // `statement_timeout` (always on; see
+                    // `effective_statement_timeout_ms`). Bare values are
                     // milliseconds. Migration/schema-destruction connections
                     // reset lock and statement timeouts before their intentional
                     // long wait (see `with_exclusive_schema_destruction_lock`).
@@ -950,6 +975,11 @@ impl Db {
     /// No floor guard or writer-isolation assertion: replica sessions are
     /// read-only, so the commit-time trigger from migration 0021 never fires
     /// here and the write fence that depends on READ COMMITTED is never reached.
+    ///
+    /// Every replica session's `statement_timeout` is lowered to the
+    /// event-read deadline ([`crate::event::READ_STATEMENT_TIMEOUT`]) unless
+    /// the server/role default is already tighter, so no replica read is
+    /// unbounded; per-call `SET LOCAL` caps still apply on top.
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
@@ -957,6 +987,16 @@ impl Db {
             .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query(crate::event::TIGHTEN_STATEMENT_TIMEOUT_SQL)
+                        .bind(crate::event::READ_STATEMENT_TIMEOUT)
+                        .bind(false)
+                        .execute(&mut *conn)
+                        .await
+                        .map(|_| ())
+                })
+            })
             .connect_lazy(url)?)
     }
 

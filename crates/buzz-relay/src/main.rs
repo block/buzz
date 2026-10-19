@@ -3181,7 +3181,10 @@ mod tests {
         .expect("read effective audit writer GUCs");
         assert_eq!(lock, "500ms");
         assert_eq!(idle, "1min");
-        assert_eq!(statement, "0");
+        assert_eq!(
+            statement, "5min",
+            "a disabled statement timeout installs the maximum"
+        );
         let push: String = sqlx::query_scalar("SELECT current_setting('buzz.push_enabled')")
             .fetch_one(&pool)
             .await

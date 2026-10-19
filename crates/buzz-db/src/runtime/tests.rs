@@ -2950,11 +2950,13 @@ async fn writer_pool_metrics_stop_after_session_timeout_setup_failure() {
         max_connections: 1,
         min_connections: 1,
         acquire_timeout_secs: 1,
-        statement_timeout_ms: u64::MAX,
+        // The statement timeout is clamped before install; the lock timeout
+        // is passed through, so it can still drive the setup failure.
+        lock_timeout_ms: u64::MAX,
         ..DbConfig::default()
     })
     .await
-    .expect_err("Postgres must reject an out-of-range statement timeout");
+    .expect_err("Postgres must reject an out-of-range lock timeout");
     assert!(
         error.to_string().contains("pool timed out")
             || error.to_string().contains("invalid value for parameter")
@@ -3039,11 +3041,83 @@ fn session_timeout_env_overlay_zero_passthrough_and_invalid_fallback() {
         }
     }
 
-    let defaults = (DEFAULT_LOCK_TIMEOUT_MS, DEFAULT_IDLE_TXN_TIMEOUT_MS, 0);
+    let defaults = (
+        DEFAULT_LOCK_TIMEOUT_MS,
+        DEFAULT_IDLE_TXN_TIMEOUT_MS,
+        DEFAULT_STATEMENT_TIMEOUT_MS,
+    );
     assert_eq!(unset, defaults, "unset env must keep the defaults");
     assert_eq!(overridden, (2000, 30000, 10000));
-    assert_eq!(zero, (0, 0, 0), "explicit 0 must disable each timeout");
+    // The overlay passes an explicit 0 through; the writer constructor then
+    // installs the maximum statement timeout for it (see
+    // `writer_statement_timeout_is_always_bounded`).
+    assert_eq!(zero, (0, 0, 0), "explicit 0 must pass through the overlay");
     assert_eq!(junk, defaults, "junk env must keep the defaults");
+}
+
+/// No writer session is unbounded: `0` and values above the maximum clamp to
+/// [`MAX_STATEMENT_TIMEOUT_MS`]; in-range values pass through unchanged.
+#[test]
+fn writer_statement_timeout_is_always_bounded() {
+    let effective = |statement_timeout_ms| {
+        DbConfig {
+            statement_timeout_ms,
+            ..DbConfig::default()
+        }
+        .effective_statement_timeout_ms()
+    };
+    assert_eq!(
+        DbConfig::default().effective_statement_timeout_ms(),
+        120_000
+    );
+    assert_eq!(effective(0), MAX_STATEMENT_TIMEOUT_MS);
+    assert_eq!(
+        effective(MAX_STATEMENT_TIMEOUT_MS + 1),
+        MAX_STATEMENT_TIMEOUT_MS
+    );
+    assert_eq!(effective(u64::MAX), MAX_STATEMENT_TIMEOUT_MS);
+    assert_eq!(effective(30_000), 30_000);
+    assert_eq!(MAX_STATEMENT_TIMEOUT_MS, 300_000);
+}
+
+/// Through the production constructors, every writer session carries the
+/// clamped statement timeout and every replica session the 20 s read
+/// deadline. Mutation oracles: dropping the clamp leaves `0`/`10min` on the
+/// writer; dropping the reader `after_connect` leaves the server default (`0`).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn session_statement_timeouts_bound_writer_and_reader_sessions() {
+    let url = crate::test_support::database_url();
+    for (configured, writer_expected) in [
+        (DEFAULT_STATEMENT_TIMEOUT_MS, "2min"),
+        (0, "5min"),
+        (600_000, "5min"),
+        (45_000, "45s"),
+    ] {
+        let db = Db::new(&DbConfig {
+            database_url: url.clone(),
+            read_database_url: Some(url.clone()),
+            max_connections: 1,
+            min_connections: 0,
+            statement_timeout_ms: configured,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect Db with reader");
+        let writer: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&db.pool)
+            .await
+            .expect("writer timeout");
+        assert_eq!(writer, writer_expected, "writer, configured {configured}");
+        let reader_pool = db.read_pool.clone().expect("reader configured");
+        let reader: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&reader_pool)
+            .await
+            .expect("reader timeout");
+        assert_eq!(reader, crate::event::READ_STATEMENT_TIMEOUT, "reader");
+        db.pool.close().await;
+        reader_pool.close().await;
+    }
 }
 
 /// The production writer constructor installs all three timeout GUCs, bounds
@@ -3081,7 +3155,10 @@ async fn session_timeouts_install_through_db_new_and_bound_lock_waits() {
     .expect("read effective GUCs");
     assert_eq!(lock, "500ms");
     assert_eq!(idle, "1min");
-    assert_eq!(statement, "0");
+    assert_eq!(
+        statement, "5min",
+        "a disabled statement timeout installs the maximum"
+    );
 
     let mut holder = db.pool.acquire().await.expect("holder connection");
     sqlx::raw_sql("BEGIN; LOCK TABLE events IN ACCESS EXCLUSIVE MODE")

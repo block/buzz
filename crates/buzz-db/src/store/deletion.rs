@@ -2242,6 +2242,13 @@ impl DeletionStore {
     pub async fn purge_postgres(&self, token: &LeaseToken) -> Result<BTreeMap<String, u64>> {
         let generation = require_fence_generation(token)?;
         let mut tx = self.pool.begin().await?;
+        // Each scoped purge is one whole-community DELETE, which can outrun
+        // the 2-minute writer default on a large tenant. Raise this
+        // transaction to the writer ceiling — still bounded, never disabled.
+        sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+            .bind(crate::runtime::MAX_STATEMENT_TIMEOUT_MS.to_string())
+            .execute(&mut *tx)
+            .await?;
         // Revalidate the exact catalog inside the purge transaction under the
         // shared schema/destruction lock. Migrations hold the exclusive
         // counterpart for their entire run, so no migration can commit a new
