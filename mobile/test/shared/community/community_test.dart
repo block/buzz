@@ -59,7 +59,8 @@ void main() {
         'id': 'one',
         'name': 'Buzz',
         'relayUrl': 'https://relay.test',
-        'pushNotificationsEnabled': enabled,
+        'pushNotificationsEnabledV2': enabled,
+        'pushNotificationsEnabled': !enabled,
         'addedAt': '2026-08-05T00:00:00.000Z',
       });
       expect(community.pushNotificationsEnabled, enabled);
@@ -77,6 +78,19 @@ void main() {
       );
     });
   }
+
+  test('previous preference values are intentionally not preserved', () {
+    for (final previous in [false, true]) {
+      final saved = Community.create(
+        name: 'Team',
+        relayUrl: 'https://relay.test',
+      ).toJson()..remove('pushNotificationsEnabledV2');
+      saved['pushNotificationsEnabled'] = previous;
+      final community = Community.fromJson(saved);
+      expect(community.pushNotificationsEnabled, isTrue);
+      expect(community.toJson(), isNot(contains('pushNotificationsEnabled')));
+    }
+  });
 
   test('malformed stored push lease address id is rejected', () {
     expect(

@@ -37,7 +37,13 @@ void main() {
       ..addFont(rootBundle.load('assets/fonts/InterVariable.ttf'));
     await fonts.load();
   });
-  for (final outcome in ['accepted', 'failed', 'pending', 'scaled']) {
+  for (final outcome in [
+    'accepted',
+    'failed',
+    'pending',
+    'scaled',
+    'unset preference',
+  ]) {
     testWidgets('off then on remains usable with $outcome cleanup', (
       tester,
     ) async {
@@ -61,7 +67,8 @@ void main() {
       );
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
-      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final secure = FakeSecureStorage();
+      final storage = CommunityStorage(secure: secure);
       final subscriptions = [
         BuzzPushSubscription(
           filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
@@ -110,7 +117,13 @@ void main() {
               desired: subscriptions,
             ).withAccepted(subscriptions: subscriptions, generation: 7),
           );
-      await storage.save(community);
+      if (outcome == 'unset preference') {
+        final saved = community.toJson()..remove('pushNotificationsEnabledV2');
+        saved['pushNotificationsEnabled'] = false;
+        secure['buzz_communities'] = jsonEncode([saved]);
+      } else {
+        await storage.save(community);
+      }
       await storage.saveActiveId(community.id);
 
       final cleanup = Completer<void>();
@@ -236,6 +249,15 @@ void main() {
         reason: 'failed cleanup must not defeat the retry backoff',
       );
       expect(discoveries, 2);
+      session.setStatus(SessionStatus.disconnected);
+      await tester.pumpAndSettle();
+      session.setStatus(SessionStatus.connected);
+      await tester.pumpAndSettle();
+      expect(
+        session.leases.where((lease) => lease['active'] == true),
+        hasLength(1),
+      );
+      expect(discoveries, 3);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
       final offSwitch = tester.widget<Switch>(find.byType(Switch));
       expect(offSwitch.value, isFalse);
@@ -273,7 +295,7 @@ void main() {
         isTrue,
         reason: 'a delayed old tombstone cannot supersede the new active lease',
       );
-      expect(discoveries, 3);
+      expect(discoveries, 4);
       // A real reconnect must still discover capability again.
       (container.read(relaySessionProvider.notifier) as _Connected).setStatus(
         SessionStatus.disconnected,
@@ -284,7 +306,7 @@ void main() {
         SessionStatus.connected,
       );
       await tester.pumpAndSettle();
-      expect(discoveries, 4);
+      expect(discoveries, 5);
       expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
