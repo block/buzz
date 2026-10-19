@@ -576,6 +576,16 @@ async fn upload_blob_result(
         auth.tenant.host(),
     );
 
+    state
+        .db
+        .record_media_uploader(
+            auth.tenant.community(),
+            &descriptor.sha256,
+            auth.auth_event.pubkey.as_bytes(),
+        )
+        .await
+        .map_err(|_| MediaError::Internal)?;
+
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
         "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4" => {
