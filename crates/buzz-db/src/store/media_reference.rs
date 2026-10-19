@@ -1,8 +1,8 @@
-//! Where each media blob is shared, recorded with the events that reference it.
+//! Where each media blob is shared, and media read authorization from it.
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
-use sqlx::{PgConnection, Row};
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use crate::{error::Result, Db};
@@ -10,17 +10,20 @@ use buzz_core::CommunityId;
 
 /// SQL predicate: whether the reader `$3` may read the blob `b.sha256` in community `$1`.
 ///
-/// Everyone may when the blob is shared with the whole community or into no
-/// channel; otherwise only readers of a channel it is shared into, open or one
-/// they actively belong to. Shares are never withdrawn.
+/// Everyone may when the blob is shared with the whole community, and readers
+/// of a channel it is shared into (open, or one they actively belong to). A
+/// blob not yet shared into any channel is readable only by its uploader.
+/// Shares are never withdrawn.
 macro_rules! readable_sql {
     () => {
         "( \
     EXISTS (SELECT 1 FROM media_shares s \
                WHERE s.community_id = $1 AND s.sha256 = b.sha256 AND s.channel_id IS NULL) \
-    OR NOT EXISTS (SELECT 1 FROM media_shares s \
-                   WHERE s.community_id = $1 AND s.sha256 = b.sha256 \
-                     AND s.channel_id IS NOT NULL) \
+    OR (NOT EXISTS (SELECT 1 FROM media_shares s \
+                    WHERE s.community_id = $1 AND s.sha256 = b.sha256 \
+                      AND s.channel_id IS NOT NULL) \
+        AND EXISTS (SELECT 1 FROM media_uploaders u \
+                    WHERE u.community_id = $1 AND u.sha256 = b.sha256 AND u.pubkey = $3)) \
     OR EXISTS (SELECT 1 FROM media_shares s \
                JOIN channels c ON c.community_id = $1 AND c.id = s.channel_id \
                WHERE s.community_id = $1 AND s.sha256 = b.sha256 AND c.deleted_at IS NULL \
@@ -61,7 +64,43 @@ pub(crate) async fn record_media_shares(
     Ok(())
 }
 
+/// Whether `reader` may read the blob `sha256`; see `readable_sql`.
+pub async fn can_read_blob(
+    pool: &PgPool,
+    community_id: CommunityId,
+    sha256: &str,
+    reader: &[u8],
+) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let readable = sqlx::query_scalar(concat!(
+        "SELECT ",
+        readable_sql!(),
+        " FROM (SELECT $2::text AS sha256) b"
+    ))
+    .bind(community_id.as_uuid())
+    .bind(sha256)
+    .bind(reader)
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(readable)
+}
+
 impl Db {
+    /// Whether `reader` may read the blob; see [`can_read_blob`].
+    #[datastore_span(name = "can_read_blob", system = "postgresql")]
+    pub async fn can_read_blob(
+        &self,
+        community_id: CommunityId,
+        sha256: &str,
+        reader: &[u8],
+    ) -> Result<bool> {
+        can_read_blob(&self.pool, community_id, sha256, reader).await
+    }
+
     /// Record the shares of every event already stored in an active community,
     /// deleted events included, `batch_size` events per transaction; returns the
     /// number of shares added.

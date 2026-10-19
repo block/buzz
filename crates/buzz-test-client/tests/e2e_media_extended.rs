@@ -821,9 +821,14 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
     let url = desc["url"].as_str().expect("descriptor url");
 
     assert_eq!(
-        read_status(&http, &outsider, Method::GET, url).await,
+        read_status(&http, &owner, Method::GET, url).await,
         200,
-        "a blob not yet attached anywhere stays community-readable"
+        "an uploader can preview an unposted upload"
+    );
+    assert_eq!(
+        read_status(&http, &outsider, Method::GET, url).await,
+        404,
+        "an unposted upload is readable only by its uploader"
     );
 
     let imeta = imeta_for(&desc);
