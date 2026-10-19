@@ -90,6 +90,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "events",
     "git_repo_names",
     "join_policy_acceptances",
+    "media_uploaders",
     "moderation_actions",
     "moderation_reports",
     "parameterized_event_watermarks",
@@ -156,6 +157,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "audit_log",
     "community_bans",
     "community_nip_fi_issuers",
+    "media_uploaders",
     "pubkey_allowlist",
     "relay_members",
     "users",
@@ -4423,6 +4425,7 @@ DROP TRIGGER IF EXISTS community_write_fence_event_mentions ON event_mentions;
 DROP TRIGGER IF EXISTS community_write_fence_events ON events;
 DROP TRIGGER IF EXISTS community_write_fence_git_repo_names ON git_repo_names;
 DROP TRIGGER IF EXISTS community_write_fence_join_policy_acceptances ON join_policy_acceptances;
+DROP TRIGGER IF EXISTS community_write_fence_media_uploaders ON media_uploaders;
 DROP TRIGGER IF EXISTS community_write_fence_moderation_actions ON moderation_actions;
 DROP TRIGGER IF EXISTS community_write_fence_moderation_reports ON moderation_reports;
 DROP TRIGGER IF EXISTS community_write_fence_parameterized_event_watermarks ON parameterized_event_watermarks;
