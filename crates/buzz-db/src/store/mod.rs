@@ -34,7 +34,7 @@ pub mod feed;
 pub mod git_repo;
 /// Media read authorization from where a blob is referenced.
 pub mod media_reference;
-/// Who has uploaded each blob, as proof of possession for media reads.
+/// Who has uploaded each blob, as proof of possession for sharing it.
 pub mod media_uploader;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;

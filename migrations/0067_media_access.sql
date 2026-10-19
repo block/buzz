@@ -1,8 +1,8 @@
 -- Channel-scoped media access: who may read each blob.
 --
 -- media_uploaders: who has uploaded each blob. Uploading the exact bytes
--- proves possession, so an uploader can always read a blob even when the same
--- bytes are also shared somewhere they cannot read.
+-- proves possession, so an uploader may share a blob into their own channels
+-- even when the same bytes are also shared somewhere they cannot read.
 CREATE TABLE media_uploaders (
     community_id UUID NOT NULL REFERENCES communities(id),
     sha256       TEXT NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),

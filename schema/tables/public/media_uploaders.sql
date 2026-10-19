@@ -1,6 +1,6 @@
 -- ── Media uploaders ───────────────────────────────────────────────────────────
 -- Who has uploaded each blob in a community. Uploading the exact bytes proves
--- possession, so channel-scoped media reads can always admit an uploader.
+-- possession, so an uploader may share a blob into their own channels.
 
 CREATE TABLE media_uploaders (
     community_id UUID NOT NULL REFERENCES communities(id),

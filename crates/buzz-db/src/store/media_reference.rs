@@ -9,16 +9,13 @@ use buzz_core::CommunityId;
 
 /// SQL predicate: whether the reader `$3` may read the blob `b.sha256` in community `$1`.
 ///
-/// The uploader may (uploading the exact bytes proves possession), as may
-/// everyone when the blob is shared with the whole community or into no
+/// Everyone may when the blob is shared with the whole community or into no
 /// channel; otherwise only readers of a channel it is shared into, open or one
 /// they actively belong to. Shares are never withdrawn.
 macro_rules! readable_sql {
     () => {
         "( \
-    EXISTS (SELECT 1 FROM media_uploaders u \
-            WHERE u.community_id = $1 AND u.sha256 = b.sha256 AND u.pubkey = $3) \
-    OR EXISTS (SELECT 1 FROM media_shares s \
+    EXISTS (SELECT 1 FROM media_shares s \
                WHERE s.community_id = $1 AND s.sha256 = b.sha256 AND s.channel_id IS NULL) \
     OR NOT EXISTS (SELECT 1 FROM media_shares s \
                    WHERE s.community_id = $1 AND s.sha256 = b.sha256 \
@@ -34,9 +31,10 @@ macro_rules! readable_sql {
 }
 
 /// Share into `channel_id` (or with the whole community when `None`) each blob
-/// in `sha256s` that `author` can read. A blob the author cannot read is left
-/// unshared, so a reference built from a leaked hash shows it to no one new.
-/// Called with the transaction that stores the referencing event.
+/// in `sha256s` that `author` can read or has uploaded (uploading the exact
+/// bytes proves possession). Any other blob is left unshared, so a reference
+/// built from a leaked hash shows it to no one new. Called with the
+/// transaction that stores the referencing event.
 pub(crate) async fn record_media_shares(
     conn: &mut PgConnection,
     community_id: CommunityId,
@@ -47,7 +45,9 @@ pub(crate) async fn record_media_shares(
     sqlx::query(concat!(
         "INSERT INTO media_shares (community_id, sha256, channel_id) \
          SELECT $1, b.sha256, $4 FROM (SELECT DISTINCT unnest($2::text[]) AS sha256) b \
-         WHERE ",
+         WHERE EXISTS (SELECT 1 FROM media_uploaders u \
+                       WHERE u.community_id = $1 AND u.sha256 = b.sha256 AND u.pubkey = $3) \
+            OR ",
         readable_sql!(),
         " ON CONFLICT DO NOTHING"
     ))

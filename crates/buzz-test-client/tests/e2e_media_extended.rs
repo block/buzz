@@ -852,18 +852,26 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
         );
     }
 
+    let outsider_channel = create_channel(&http, &outsider, "outsider-media", "open").await;
     let mut outsider_client = BuzzTestClient::connect(&relay_ws_url(), &outsider)
         .await
         .unwrap();
-    let reshare = EventBuilder::new(Kind::TextNote, "reshare by hash")
-        .tags(vec![imeta])
-        .sign_with_keys(&outsider)
-        .unwrap();
-    let ok = outsider_client.send_event(reshare).await.unwrap();
-    assert!(ok.accepted, "reshare rejected: {:?}", ok.message);
-    outsider_client.disconnect().await.unwrap();
+    let mut post_in_outsider_channel = async |content: &str| {
+        let event = EventBuilder::new(Kind::from(9), content)
+            .tags(vec![
+                Tag::parse(["h", &outsider_channel]).unwrap(),
+                imeta.clone(),
+            ])
+            .sign_with_keys(&outsider)
+            .unwrap();
+        let ok = outsider_client.send_event(event).await.unwrap();
+        assert!(ok.accepted, "post rejected: {:?}", ok.message);
+    };
+    let viewer = Keys::generate();
+
+    post_in_outsider_channel("reshare by hash").await;
     assert_eq!(
-        read_status(&http, &outsider, Method::GET, url).await,
+        read_status(&http, &viewer, Method::GET, url).await,
         404,
         "referencing a known hash must not share the blob"
     );
@@ -871,9 +879,16 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
     assert_eq!(upload(&http, &outsider, &body).await.status(), 200);
     assert_eq!(
         read_status(&http, &outsider, Method::GET, url).await,
-        200,
-        "uploading the same bytes proves possession"
+        404,
+        "uploading grants no read access until the blob is shared"
     );
+    post_in_outsider_channel("my own copy").await;
+    assert_eq!(
+        read_status(&http, &viewer, Method::GET, url).await,
+        200,
+        "uploading the same bytes lets the uploader share it into their channel"
+    );
+    outsider_client.disconnect().await.unwrap();
 }
 
 /// NIP-92 `imeta` tag attaching the blob an upload `desc` describes.

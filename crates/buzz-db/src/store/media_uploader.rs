@@ -1,4 +1,4 @@
-//! Who has uploaded each blob, as proof of possession for media reads.
+//! Who has uploaded each blob, as proof of possession for sharing it.
 
 use buzz_datastore_tracing::datastore_span;
 
