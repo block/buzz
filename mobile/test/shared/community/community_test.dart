@@ -59,7 +59,7 @@ void main() {
         'id': 'one',
         'name': 'Buzz',
         'relayUrl': 'https://relay.test',
-        'pushNotificationsEnabled': enabled,
+        'pushNotificationsEnabledV2': enabled,
         'addedAt': '2026-08-05T00:00:00.000Z',
       });
       expect(community.pushNotificationsEnabled, enabled);
