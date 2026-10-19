@@ -4,7 +4,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, Keys, Tag};
 use serde_json::{json, Value};
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::debug;
 
@@ -28,6 +28,7 @@ pub struct NostrWsConnection {
     buffer: VecDeque<RelayMessage>,
     pending_challenge: Option<String>,
     relay_url: String,
+    last_frame_at: Instant,
 }
 
 impl NostrWsConnection {
@@ -61,6 +62,7 @@ impl NostrWsConnection {
             buffer: VecDeque::new(),
             pending_challenge: None,
             relay_url: url.to_string(),
+            last_frame_at: Instant::now(),
         })
     }
 
@@ -111,6 +113,18 @@ impl NostrWsConnection {
         self.recv_one(timeout_dur).await
     }
 
+    /// When the last WebSocket frame of any kind arrived from the relay,
+    /// control frames included, or when the connection opened if none has.
+    ///
+    /// Pings are answered inside [`Self::next_event`] and never returned, so
+    /// a caller watching for a stalled socket reads liveness here: the
+    /// relay's heartbeat ping proves the socket is alive as surely as a
+    /// message does. Frames are read only while a call is waiting on the
+    /// socket.
+    pub fn last_frame_at(&self) -> Instant {
+        self.last_frame_at
+    }
+
     /// Closes the WebSocket connection gracefully.
     pub async fn disconnect(mut self) -> Result<(), WsClientError> {
         self.ws.close(None).await?;
@@ -136,6 +150,7 @@ impl NostrWsConnection {
                 .map_err(|_| WsClientError::Timeout)?
                 .ok_or(WsClientError::ConnectionClosed)?
                 .map_err(WsClientError::WebSocket)?;
+            self.last_frame_at = Instant::now();
 
             match raw {
                 Message::Text(text) => {
@@ -189,6 +204,7 @@ impl NostrWsConnection {
                 .map_err(|_| WsClientError::NoAuthChallenge)?
                 .ok_or(WsClientError::ConnectionClosed)?
                 .map_err(WsClientError::WebSocket)?;
+            self.last_frame_at = Instant::now();
 
             match raw {
                 Message::Text(text) => {
@@ -246,6 +262,7 @@ impl NostrWsConnection {
                 .map_err(|_| WsClientError::Timeout)?
                 .ok_or(WsClientError::ConnectionClosed)?
                 .map_err(WsClientError::WebSocket)?;
+            self.last_frame_at = Instant::now();
 
             match raw {
                 Message::Text(text) => {
@@ -296,6 +313,9 @@ pub async fn publish_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::accept_async;
 
     #[test]
     fn auth_challenge_timeout_meets_floor() {
@@ -310,5 +330,42 @@ mod tests {
     #[test]
     fn publish_ok_timeout_meets_floor() {
         const { assert!(PUBLISH_OK_TIMEOUT_SECS >= 30) };
+    }
+
+    /// A relay that pings once and then stays silent: the ping alone must
+    /// count as a frame, though `next_event` returns nothing for it.
+    #[tokio::test]
+    async fn a_ping_alone_advances_last_frame_at() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (ponged_tx, ponged_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+        let relay = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            ws.send(Message::Ping(b"beat".to_vec().into()))
+                .await
+                .unwrap();
+            while let Some(Ok(frame)) = ws.next().await {
+                if let Message::Pong(data) = frame {
+                    let _ = ponged_tx.send(data.to_vec());
+                    break;
+                }
+            }
+            // Keep the socket open and silent until the client is done.
+            let _ = done_rx.await;
+        });
+
+        let mut conn = NostrWsConnection::connect(&url).await.unwrap();
+        let opened = conn.last_frame_at();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let next = conn.next_event(Duration::from_millis(500)).await;
+        assert!(matches!(next, Err(WsClientError::Timeout)), "{next:?}");
+        assert!(conn.last_frame_at() > opened);
+        assert_eq!(ponged_rx.await.unwrap(), b"beat");
+
+        let _ = done_tx.send(());
+        relay.await.unwrap();
     }
 }

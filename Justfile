@@ -418,6 +418,8 @@ test-unit:
         cargo test -p buzz-auth --doc
         cargo nextest run -p buzz-voice --lib
         cargo nextest run -p buzz-cli
+        # buzz-ws-client loopback tests: infra-free, on a local socket.
+        cargo nextest run -p buzz-ws-client --lib
         # buzz-sdk builder/validation unit tests: pure event-builder and input
         # validation (e.g. the canvas writer-discipline/skew guard and the
         # canvas_write_survived predicate), no infra. `--lib` runs all unit

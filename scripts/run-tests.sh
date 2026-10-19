@@ -104,6 +104,9 @@ run_unit_tests() {
   run_test_step "buzz-cli tests" \
     cargo test -p buzz-cli -- --nocapture
 
+  run_test_step "buzz-ws-client tests" \
+    cargo test -p buzz-ws-client --lib -- --nocapture
+
   # buzz-sdk builder/validation unit tests: pure event-builder and input
   # validation, no infra. Mirrors the nextest path in `just test-unit` — the
   # two lists must stay in step. `--lib` matches the nextest invocation and
