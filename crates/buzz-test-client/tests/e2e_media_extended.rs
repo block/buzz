@@ -845,7 +845,6 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
         .unwrap();
     let ok = client.send_event(event).await.unwrap();
     assert!(ok.accepted, "attachment rejected: {:?}", ok.message);
-    client.disconnect().await.unwrap();
 
     for method in [Method::GET, Method::HEAD] {
         assert_eq!(
@@ -859,4 +858,19 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
             "{method} by a channel member must still succeed"
         );
     }
+
+    let profile = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({ "picture": url }).to_string(),
+    )
+    .sign_with_keys(&owner)
+    .unwrap();
+    let ok = client.send_event(profile).await.unwrap();
+    assert!(ok.accepted, "profile rejected: {:?}", ok.message);
+    client.disconnect().await.unwrap();
+    assert_eq!(
+        read_status(&http, &outsider, Method::GET, url).await,
+        200,
+        "an avatar stays community-readable even when also attached privately"
+    );
 }
