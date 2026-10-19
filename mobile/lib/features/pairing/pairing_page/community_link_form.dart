@@ -32,7 +32,7 @@ class _CommunityLinkForm extends HookConsumerWidget {
         flow != null && ownsFlow && !flow.accountOnly && flow.problem != null;
 
     void submit() {
-      if (busy || (failed && flow?.canRetry != true)) return;
+      if (busy || (failed && !flow.canRetry)) return;
       final create = onCreate;
       if (create != null) {
         final name = controller.text.trim().toLowerCase();
@@ -90,7 +90,7 @@ class _CommunityLinkForm extends HookConsumerWidget {
             hintStyle: TextStyle(color: context._onboardingMutedInk),
             errorText:
                 error.value ??
-                (failed ? hostedFlowProblemMessage(flow?.problem) : null),
+                (failed ? hostedFlowProblemMessage(flow.problem) : null),
             filled: true,
             fillColor: context._onboardingInputSurface,
             enabledBorder: context._inputBorder,
@@ -100,14 +100,14 @@ class _CommunityLinkForm extends HookConsumerWidget {
           ),
           onChanged: (_) {
             error.value = null;
-            if (failed) unawaited(flow?.leave());
+            if (failed) unawaited(flow.leave());
           },
           onSubmitted: (_) => submit(),
         ),
         const SizedBox(height: Grid.xs),
         FilledButton(
           style: context._onboardingGlassButtonStyle,
-          onPressed: busy || (failed && flow?.canRetry != true) ? null : submit,
+          onPressed: busy || (failed && !flow.canRetry) ? null : submit,
           child: Text(busy ? 'Connecting…' : 'Continue'),
         ),
         const SizedBox(height: Grid.xxs),
