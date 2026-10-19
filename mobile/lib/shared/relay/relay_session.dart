@@ -243,6 +243,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           url: url,
           bodyBytes: bodyBytes,
           nsec: config.nsec,
+          pubkey: ref.read(myPubkeyProvider),
         ),
         'Content-Type': 'application/json',
       },
