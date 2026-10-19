@@ -619,7 +619,7 @@ void main() {
   );
 
   test(
-    'community switch after directory success discards a late failure',
+    'community switch during a directory refresh discards a late failure',
     () async {
       final session = _FakeRelaySession(
         memberships: const [],
@@ -630,8 +630,8 @@ void main() {
 
       expect(await container.read(channelsProvider.future), isEmpty);
 
-      // The directory query succeeds, then the refresh parks on the member-count
-      // query and fails there after the switch. A retired failure must not
+      // The directory refresh parks on the member-count query and fails there
+      // after the switch. A retired failure must not
       // overwrite the new scope's list or push it into an error state.
       session.memberships = [_membership(_channelA, myPk)];
       session.pauseNextMemberCountQuery();
@@ -671,7 +671,7 @@ void main() {
   );
 
   test(
-    'identity switch after directory success discards the late refresh',
+    'identity switch during a directory refresh discards the late refresh',
     () async {
       final session = _FakeRelaySession(
         memberships: const [],
@@ -682,7 +682,7 @@ void main() {
 
       expect(await container.read(channelsProvider.future), isEmpty);
 
-      // Directory success, then the refresh parks on the hidden-DM query while
+      // The directory refresh parks on the hidden-DM query while
       // the signing identity changes and the new identity finishes its rebuild.
       session.pauseNextHiddenDmQuery();
       final staleRefresh = container
@@ -710,7 +710,7 @@ void main() {
   );
 
   test(
-    'identity switch after directory success discards a late failure',
+    'identity switch during a directory refresh discards a late failure',
     () async {
       final session = _FakeRelaySession(
         memberships: const [],
@@ -754,20 +754,33 @@ void main() {
     final container = _buildContainer(session: session);
     addTearDown(container.dispose);
 
+    // Park three of the four reads. Any of them waiting on another would leave
+    // that one unsent.
+    final metadataGate = session.metadataGate = Completer<void>();
     session.pauseNextHiddenDmQuery();
+    session.pauseNextMemberCountQuery();
     final load = container.read(channelsProvider.future);
-    await session.nextHiddenDmQueryStarted;
     await _settle();
 
-    // The hidden-DM read is still parked, so anything sent after it would be
-    // missing here.
+    // The membership list's own kind:39002 read has no `#d` tag.
     final sentKinds = {
       for (final filter in session.historyFilters)
-        if (filter.tags['#p'] == null) ...filter.kinds,
+        if (!filter.kinds.contains(39002) || filter.tags['#d'] != null)
+          ...filter.kinds,
     };
-    expect(sentKinds, containsAll([39000, 39002, EventKind.huddleStarted]));
+    expect(
+      sentKinds,
+      containsAll([
+        39000,
+        39002,
+        EventKind.dmVisibility,
+        EventKind.huddleStarted,
+      ]),
+    );
 
+    metadataGate.complete();
     session.resumePausedHiddenDmQuery();
+    session.resumePausedMemberCountQuery();
     expect((await load).map((channel) => channel.id), [_channelA]);
   });
 
@@ -2691,6 +2704,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
   int metadataPageRequestCount = 0;
 
   final List<NostrFilter> historyFilters = [];
+
+  /// While set, member metadata reads wait for it to complete.
+  Completer<void>? metadataGate;
   final List<List<NostrFilter>> queryBatches = [];
   Object? messageBatchError;
   Object? latestBatchError;
@@ -2975,6 +2991,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
       if (ids == null) {
         throw StateError('Directory queries must use the HTTP query bridge');
       }
+      await metadataGate?.future;
       // Member metadata query — return only matching `d` tags.
       return metadata.where((e) => ids.contains(e.getTagValue('d'))).toList();
     }
