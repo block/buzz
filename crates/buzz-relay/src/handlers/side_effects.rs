@@ -3409,22 +3409,19 @@ pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyh
 
 /// Spawn the background NIP-43 snapshot reconciler.
 ///
-/// The first sweep starts as soon as the task runs, then repeats every
-/// `every`. Startup never waits on it: the snapshots live in the shared
-/// database, so a new replica has nothing of its own to repair before it
-/// serves.
+/// The first sweep starts as soon as the task runs; each later sweep starts
+/// `every` after the previous one finishes. Startup never waits on it: the
+/// snapshots live in the shared database, so a new replica has nothing of its
+/// own to repair before it serves.
 pub fn spawn_nip43_membership_reconciler(
     state: Arc<AppState>,
     every: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // `interval`'s first tick completes immediately. A sweep can outlast
-        // `every`, so `Delay` keeps a full interval between sweeps instead of
-        // bursting the missed ticks back to back.
-        let mut interval = tokio::time::interval(every);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Sweep first, then sleep: the first sweep starts immediately and
+        // every later one waits a full `every` after the previous sweep ends,
+        // even when a sweep outlasts `every`.
         loop {
-            interval.tick().await;
             match reconcile_nip43_membership_snapshots(&state).await {
                 Ok(repaired) if repaired > 0 => {
                     info!(count = repaired, "NIP-43 membership snapshots repaired")
@@ -3434,6 +3431,7 @@ pub fn spawn_nip43_membership_reconciler(
                     warn!(%error, "periodic NIP-43 membership snapshot reconciliation failed")
                 }
             }
+            tokio::time::sleep(every).await;
         }
     })
 }
