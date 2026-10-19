@@ -4,6 +4,10 @@
 <dict>
 	<key>aps-environment</key>
 	<string>$(BUZZ_IOS_PUSH_ENVIRONMENT)</string>
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:$(BUZZ_INVITE_LINK_HOST)</string>
+	</array>
 	<key>com.apple.developer.devicecheck.appattest-environment</key>
 	<string>$(BUZZ_APP_ATTEST_ENVIRONMENT)</string>
 	<key>com.apple.developer.declared-age-range</key>
