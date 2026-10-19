@@ -553,6 +553,9 @@ void main() {
         'my-community.example',
       );
       await f.tap(tester, 'Continue');
+      // Choices loaded successfully; enumeration breaks before selection.
+      // The account-scoped key remains directly readable throughout admission.
+      f.identityStorage.failEnumeration = true;
       await f.tap(tester, 'Saved identity');
       final saved = (await f.storage.loadAll()).single;
       expect(saved.relayUrl, 'wss://my-community.example');
@@ -560,6 +563,7 @@ void main() {
       expect(await f.storage.loadActiveId(), saved.id);
       expect(f.probes, hasLength(1));
       expect(f.sent('/claim'), isEmpty);
+      f.identityStorage.failEnumeration = false;
       expect(
         (await const FlutterSecureStorage().readAll()).keys.where(
           (key) => key.startsWith('buzz_pending_self_hosted_'),
