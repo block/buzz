@@ -17,6 +17,9 @@ void main() {
       fakeAsync((async) {
         final relay = FakeRelay();
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        // Live subscriptions start at the wall-clock second they open, which
+        // can pass `now` before they do. Date later messages after any of them.
+        final later = now + 60;
         NostrEvent message(String text, int createdAt) => relay.sign(
           kind: EventKind.streamMessage,
           content: text,
@@ -53,7 +56,7 @@ void main() {
           reason: 'no fallback to websocket history',
         );
 
-        relay.deliver(message('from a teammate', now));
+        relay.deliver(message('from a teammate', later));
         settle();
         expect(timeline(), contains('from a teammate'));
 
@@ -97,11 +100,11 @@ void main() {
         // After a network drop the session reconnects, recovers what it missed
         // and follows the channel again, without duplicating known rows.
         relay.drop();
-        relay.seed([message('while offline', now)]);
+        relay.seed([message('while offline', later)]);
         async.elapse(const Duration(seconds: 2));
         expect(relay.sockets, hasLength(2));
         expect(timeline(), contains('while offline'));
-        relay.deliver(message('after reconnect', now));
+        relay.deliver(message('after reconnect', later));
         settle();
         expect(timeline(), contains('after reconnect'));
         expect(timeline().where((text) => text == 'hello'), hasLength(1));
