@@ -709,7 +709,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 68);
+        assert_eq!(migrations.len(), 67);
         assert_eq!(migrations[64].version, 65);
         let retire_ttl = strip_sql_comments(migrations[64].sql.as_str());
         for statement in [
@@ -747,15 +747,12 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE TABLE community_nip_fi_issuers"));
         assert_eq!(migrations[66].version, 67);
-        assert!(migrations[66]
-            .sql
-            .as_str()
-            .contains("CREATE TABLE media_uploaders"));
-        assert_eq!(migrations[67].version, 68);
-        assert!(migrations[67]
-            .sql
-            .as_str()
-            .contains("CREATE TABLE media_shares"));
+        for table in ["media_uploaders", "media_shares"] {
+            assert!(migrations[66]
+                .sql
+                .as_str()
+                .contains(&format!("CREATE TABLE {table}")));
+        }
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -2327,24 +2324,18 @@ mod postgres_tests {
             .as_str()
             .contains("attach_community_write_fence('community_nip_fi_issuers')"));
         expected_fences.insert("community_nip_fi_issuers".to_owned());
-        // 0067 fences the media uploaders table.
-        assert!(MIGRATOR
+        // 0067 fences the media access tables.
+        let media_access = MIGRATOR
             .iter()
             .find(|m| m.version == 67)
-            .expect("media uploaders migration")
-            .sql
-            .as_str()
-            .contains("attach_community_write_fence('media_uploaders')"));
-        expected_fences.insert("media_uploaders".to_owned());
-        // 0068 fences the media shares table.
-        assert!(MIGRATOR
-            .iter()
-            .find(|m| m.version == 68)
-            .expect("media shares migration")
-            .sql
-            .as_str()
-            .contains("attach_community_write_fence('media_shares')"));
-        expected_fences.insert("media_shares".to_owned());
+            .expect("media access migration");
+        for table in ["media_uploaders", "media_shares"] {
+            assert!(media_access
+                .sql
+                .as_str()
+                .contains(&format!("attach_community_write_fence('{table}')")));
+            expected_fences.insert(table.to_owned());
+        }
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
