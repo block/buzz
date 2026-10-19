@@ -3550,7 +3550,6 @@ pub(crate) mod terminal_close_delivery_tests {
         while !response.ends_with(b"\r\n\r\n") {
             response.extend(read_exact(1).await);
         }
-        drop(read_exact);
         socket.write_all(frames).await.expect("send frames");
         let mut read_exact = async |len: usize| {
             let mut bytes = vec![0u8; len];
