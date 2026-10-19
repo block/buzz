@@ -959,3 +959,53 @@ async fn test_private_attachment_cannot_hide_an_avatar() {
         "a private attachment must not hide a current avatar"
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_agent_avatar_uploaded_by_owner_is_readable_to_other_members() {
+    use buzz_sdk::nip_oa;
+    use buzz_test_client::BuzzTestClient;
+    use reqwest::Method;
+
+    let (owner, agent, viewer) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let http = http_client();
+    let owner_client = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    let mut image = tiny_gif();
+    image[13..19].copy_from_slice(&uuid::Uuid::new_v4().as_bytes()[..6]);
+    let response = upload(&http, &owner, &image).await;
+    assert_eq!(response.status(), 200);
+    let descriptor: serde_json::Value = response.json().await.unwrap();
+    let url = descriptor["url"].as_str().unwrap();
+    assert_eq!(read_status(&http, &viewer, Method::GET, url).await, 404);
+
+    let tag = nip_oa::compute_auth_tag(&owner, &agent.public_key(), "kind=0").unwrap();
+    let tag = nip_oa::parse_auth_tag(&tag).unwrap();
+    let mut agent_client = BuzzTestClient::connect_unauthenticated(&relay_ws_url())
+        .await
+        .unwrap();
+    agent_client
+        .authenticate_with_nip_oa(&agent, &tag)
+        .await
+        .unwrap();
+    let profile = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"picture": url}).to_string(),
+    )
+    .sign_with_keys(&agent)
+    .unwrap();
+    let result = agent_client.send_event(profile).await.unwrap();
+    assert!(
+        result.accepted,
+        "agent profile rejected: {}",
+        result.message
+    );
+    for reader in [&agent, &viewer] {
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(read_status(&http, reader, method, url).await, 200);
+        }
+    }
+    agent_client.disconnect().await.unwrap();
+    owner_client.disconnect().await.unwrap();
+}
