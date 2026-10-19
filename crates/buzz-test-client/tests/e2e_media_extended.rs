@@ -1,7 +1,7 @@
 //! Extended media upload integration tests — auth edge cases, content validation,
 //! multi-format uploads, WebSocket imeta validation.
 //!
-//! Run: cargo test -p buzz-test-client --test e2e_media_extended -- --ignored --nocapture
+//! Run: cargo test -p buzz-test-client --test e2e_media_extended -- --ignored --nocapture --test-threads=1
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
@@ -460,7 +460,7 @@ async fn test_auth_server_tag_correct() {
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
             Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
-            Tag::parse(["server", "localhost:3000"]).unwrap(),
+            Tag::parse(["server", &relay_server_authority()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -687,9 +687,9 @@ async fn test_ws_valid_imeta() {
 
     // Upload a JPEG to get a valid sha256
     let jpeg = tiny_jpeg();
-    let sha256 = hex::encode(Sha256::digest(&jpeg));
     let resp = upload(&http, &keys, &jpeg).await;
     assert_eq!(resp.status(), 200);
+    let descriptor: serde_json::Value = resp.json().await.unwrap();
 
     // Connect via WebSocket
     let mut client = BuzzTestClient::connect(&relay_ws_url(), &keys)
@@ -700,14 +700,7 @@ async fn test_ws_valid_imeta() {
     let event = EventBuilder::new(Kind::from(9), "image via ws")
         .tags(vec![
             Tag::parse(["h", &channel_id]).unwrap(),
-            Tag::parse([
-                "imeta",
-                &format!("url http://localhost:3000/media/{sha256}.jpg"),
-                "m image/jpeg",
-                &format!("x {sha256}"),
-                "size 347",
-            ])
-            .unwrap(),
+            imeta_for(&descriptor),
         ])
         .sign_with_keys(&keys)
         .unwrap();
