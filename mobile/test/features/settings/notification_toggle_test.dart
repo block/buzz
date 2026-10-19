@@ -119,6 +119,7 @@ void main() {
           );
       if (outcome == 'unset preference') {
         final saved = community.toJson()..remove('pushNotificationsEnabledV2');
+        saved['pushNotificationsEnabled'] = false;
         secure['buzz_communities'] = jsonEncode([saved]);
       } else {
         await storage.save(community);
