@@ -1207,9 +1207,11 @@ pub async fn get_members_bulk(
 /// Includes channels where the pubkey is an active member AND all open channels.
 /// Open channels must be included in REQ filter resolution.
 ///
-/// System channels are left out of both halves: this is the implicit scope of
-/// queries that do not name a channel. A query that names a system channel,
-/// or opts in to them, adds them from [`get_readable_system_channel_ids`].
+/// Only legacy channel types are in either half
+/// ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]): this is the implicit scope
+/// of queries that do not name a channel, so system channels and any type
+/// added later stay out. A query that names a system channel, or opts in to
+/// them, adds them from [`get_readable_system_channel_ids`].
 pub async fn get_accessible_channel_ids(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1220,24 +1222,28 @@ pub async fn get_accessible_channel_ids(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    let rows = sqlx::query(
+    let sql = format!(
         r#"
         SELECT cm.channel_id
         FROM channel_members cm
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
-          AND c.channel_type <> 'system'
+          AND {member_types}
         UNION
         SELECT id AS channel_id
         FROM channels
         WHERE community_id = $1 AND visibility = 'open' AND deleted_at IS NULL
-          AND channel_type <> 'system'
+          AND {open_types}
         "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(pubkey)
-    .fetch_all(&mut *connection)
-    .await?;
+        member_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
+        open_types = crate::store::channel::legacy_channel_type_sql("channel_type"),
+    );
+    // Built only from the constant type list.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(community_id.as_uuid())
+        .bind(pubkey)
+        .fetch_all(&mut *connection)
+        .await?;
 
     rows.into_iter()
         .map(|r| {
@@ -1559,8 +1565,9 @@ pub async fn get_accessible_channels(
         WHERE c.community_id = $1 AND c.deleted_at IS NULL
           {membership_clause}
           AND (c.channel_type != 'dm' OR cm.hidden_at IS NULL)
-          AND c.channel_type <> 'system'
-    "#
+          AND {legacy_types}
+    "#,
+        legacy_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
     );
 
     let sql = if visibility_filter.is_some() {

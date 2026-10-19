@@ -426,6 +426,20 @@ async fn insert_channel_rows(
     Ok(was_created)
 }
 
+/// SQL that is true when `column` holds a legacy channel type
+/// ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]): `<column> IN ('stream', …)`.
+///
+/// A query that a client did not ask to widen uses this, not
+/// `<> 'system'`, so a channel type added later stays hidden (NIP-CL).
+pub(crate) fn legacy_channel_type_sql(column: &str) -> String {
+    let types = buzz_core::channel::LEGACY_CHANNEL_TYPES
+        .iter()
+        .map(|channel_type| format!("'{channel_type}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{column} IN ({types})")
+}
+
 /// Fetches a channel record by `(community_id, id)`. Returns `ChannelNotFound` if missing or deleted.
 pub async fn get_channel(
     pool: &PgPool,

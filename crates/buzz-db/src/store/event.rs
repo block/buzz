@@ -928,9 +928,8 @@ fn push_tag_value_filters(
 /// cannot take page slots. Skipped when the query's kinds cannot match a
 /// notice.
 fn push_notice_visibility(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
-    use buzz_core::filter::{
-        LEGACY_NOTICE_CHANNEL_TYPES, MEMBERSHIP_NOTICE_KINDS, NOTICE_CHANNEL_TYPE_TAG,
-    };
+    use buzz_core::channel::LEGACY_CHANNEL_TYPES;
+    use buzz_core::filter::{MEMBERSHIP_NOTICE_KINDS, NOTICE_CHANNEL_TYPE_TAG};
     if let Some(kinds) = q.kinds.as_deref() {
         if !kinds
             .iter()
@@ -941,14 +940,14 @@ fn push_notice_visibility(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &st
     }
     let visible: Vec<String> = match &q.notice_channel_types {
         Some(types) => types.clone(),
-        None => LEGACY_NOTICE_CHANNEL_TYPES
+        None => LEGACY_CHANNEL_TYPES
             .iter()
             .map(|t| (*t).to_owned())
             .collect(),
     };
     let untagged_visible = visible
         .iter()
-        .any(|t| LEGACY_NOTICE_CHANNEL_TYPES.contains(&t.as_str()));
+        .any(|t| LEGACY_CHANNEL_TYPES.contains(&t.as_str()));
     let [added, removed] = MEMBERSHIP_NOTICE_KINDS;
     qb.push(format!(
         " AND ({col_prefix}kind NOT IN ({added}, {removed}) OR "

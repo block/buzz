@@ -46,7 +46,9 @@ impl Db {
             .collect();
         // The explicit kind lets the community/kind index exclude chat before
         // the join, even for an unfiltered current-state page.
-        qb.push("WHERE e.community_id=").push_bind(community.as_uuid()).push(" AND e.kind=45010 AND e.deleted_at IS NULL AND EXISTS (SELECT 1 FROM channels c WHERE c.community_id=e.community_id AND c.id=e.channel_id AND c.deleted_at IS NULL AND (c.channel_type<>'system' OR c.id=ANY(")
+        qb.push("WHERE e.community_id=").push_bind(community.as_uuid()).push(" AND e.kind=45010 AND e.deleted_at IS NULL AND EXISTS (SELECT 1 FROM channels c WHERE c.community_id=e.community_id AND c.id=e.channel_id AND c.deleted_at IS NULL AND (")
+            .push(crate::store::channel::legacy_channel_type_sql("c.channel_type"))
+            .push(" OR c.id=ANY(")
             .push_bind(named_channels)
             .push(")) AND (c.visibility='open' OR EXISTS (SELECT 1 FROM channel_members m WHERE m.community_id=c.community_id AND m.channel_id=c.id AND m.pubkey=")
             .push_bind(reader.to_vec()).push(" AND m.removed_at IS NULL)))");

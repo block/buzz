@@ -4,6 +4,7 @@
 
 use nostr::Filter;
 
+use crate::channel::LEGACY_CHANNEL_TYPES;
 use crate::event::StoredEvent;
 
 /// Returns `true` if the event matches any of the provided NIP-01 filters.
@@ -43,21 +44,14 @@ pub const MEMBERSHIP_NOTICE_KINDS: [u32; 2] = [
 /// The tag name that carries a membership notice's channel type.
 pub const NOTICE_CHANNEL_TYPE_TAG: &str = "t";
 
-/// The channel types that clients knew before NIP-CL typed membership
-/// notices. A filter without `#t` sees notices only about these types, and a
-/// notice without a type tag (stored before NIP-CL) counts as all of them.
-///
-/// Frozen. Do not add a type here: a type added later stays hidden from every
-/// client that does not name it in `#t`.
-pub const LEGACY_NOTICE_CHANNEL_TYPES: [&str; 4] = ["stream", "forum", "dm", "workflow"];
-
 /// Whether `event` is a membership notice (kind 44100/44101).
 pub fn is_membership_notice(event: &nostr::Event) -> bool {
     MEMBERSHIP_NOTICE_KINDS.contains(&crate::kind::event_kind_u32(event))
 }
 
 /// The channel types whose membership notices `filter` may see: its `#t`
-/// values, or [`LEGACY_NOTICE_CHANNEL_TYPES`] when it has no `#t`.
+/// values, or [`LEGACY_CHANNEL_TYPES`] when it has no `#t`. A notice without
+/// a type tag (stored before NIP-CL) counts as every legacy type.
 ///
 /// This is the one rule for notice visibility (NIP-CL). [`filters_match`]
 /// applies it, and `EventQuery::notice_channel_types` applies it in SQL.
@@ -76,7 +70,7 @@ pub fn notice_channel_types(filter: &Filter) -> Option<Vec<String>> {
 pub fn notice_visible(visible: Option<&[String]>, event: &nostr::Event) -> bool {
     let is_visible = |channel_type: &str| match visible {
         Some(types) => types.iter().any(|t| t == channel_type),
-        None => LEGACY_NOTICE_CHANNEL_TYPES.contains(&channel_type),
+        None => LEGACY_CHANNEL_TYPES.contains(&channel_type),
     };
     let mut tagged = false;
     for tag in event.tags.iter() {
@@ -92,7 +86,7 @@ pub fn notice_visible(visible: Option<&[String]>, event: &nostr::Event) -> bool 
             return true;
         }
     }
-    !tagged && LEGACY_NOTICE_CHANNEL_TYPES.iter().any(|t| is_visible(t))
+    !tagged && LEGACY_CHANNEL_TYPES.iter().any(|t| is_visible(t))
 }
 
 fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {

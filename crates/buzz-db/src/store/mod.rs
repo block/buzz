@@ -82,4 +82,7 @@ mod artifact_query;
 mod artifact_postgres_tests;
 
 #[cfg(test)]
+mod legacy_channel_types_postgres_tests;
+
+#[cfg(test)]
 mod admission_postgres_tests;

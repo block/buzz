@@ -142,7 +142,9 @@ can read. It is an ordinary channel in every other way, but queries leave it
 out unless they ask for it:
 
 - A filter that does not name it, for example a REQ with no `#h`, a COUNT,
-  a NIP-50 search, or kind:39002 `#p:[me]`, does not return it.
+  a NIP-50 search, or kind:39002 `#p:[me]`, does not return it. Such a
+  filter returns only the legacy channel types (`stream`, `forum`, `dm`,
+  `workflow`), so a channel type added later is also left out.
 - A filter that names it with `#h`, or with `#d` on kinds 39000–39003, reads
   it under the ordinary rules: the reader is a member, or it is open.
 - A filter on kinds 39000–39003 with `#t:["system"]` or any `#P` also
