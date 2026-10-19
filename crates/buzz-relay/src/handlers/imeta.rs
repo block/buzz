@@ -361,12 +361,22 @@ fn is_well_formed_mime(mime: &str) -> bool {
         && !mime.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// Hashes of every blob `event` attaches, as `buzz_db::store::media_reference`
-/// counts them: imeta `x` and `image-x`, and link-preview image and favicon.
-pub fn attached_blob_hashes(event: &nostr::Event) -> std::collections::BTreeSet<String> {
+/// Hashes of every blob `event` references, as `buzz_db::store::media_reference`
+/// counts them: imeta `x` and `image-x`, link-preview image and favicon, and any
+/// standalone 64-hex token in a profile's content or an emoji set or list's tags.
+pub fn referenced_blob_hashes(event: &nostr::Event) -> Vec<String> {
+    use buzz_core::kind::{KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_PROFILE};
+    let kind = u32::from(event.kind.as_u16());
+    let public_reference = kind == KIND_EMOJI_SET || kind == KIND_EMOJI_LIST;
     let mut hashes = std::collections::BTreeSet::new();
+    if kind == KIND_PROFILE {
+        hashes.extend(hex64_tokens(&event.content));
+    }
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
+        if public_reference {
+            hashes.extend(parts.iter().flat_map(|part| hex64_tokens(part)));
+        }
         match parts.first().map(String::as_str) {
             Some("imeta") => hashes.extend(parts.iter().skip(1).filter_map(|part| {
                 let (key, value) = part.split_once(' ')?;
@@ -378,8 +388,17 @@ pub fn attached_blob_hashes(event: &nostr::Event) -> std::collections::BTreeSet<
             _ => {}
         }
     }
-    hashes.retain(|hash| is_sha256_hex(hash));
     hashes
+        .into_iter()
+        .filter(|hash| is_sha256_hex(hash))
+        .collect()
+}
+
+/// Maximal runs of exactly 64 lowercase hex characters in `text`.
+fn hex64_tokens(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !matches!(c, '0'..='9' | 'a'..='f'))
+        .filter(|token| token.len() == 64)
+        .map(str::to_owned)
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -631,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn attached_blob_hashes_reads_only_attachment_positions() {
+    fn referenced_blob_hashes_reads_only_attachment_positions() {
         let poster = "c".repeat(64);
         let preview_image = "d".repeat(64);
         let mut preview = vec!["link-preview".to_owned(); 11];
@@ -647,11 +666,34 @@ mod tests {
             .sign_with_keys(&nostr::Keys::generate())
             .unwrap();
         assert_eq!(
-            attached_blob_hashes(&event),
-            [HASH.to_owned(), poster, preview_image]
-                .into_iter()
-                .collect()
+            referenced_blob_hashes(&event),
+            vec![HASH.to_owned(), poster, preview_image]
         );
+    }
+
+    #[test]
+    fn referenced_blob_hashes_covers_avatars_and_emoji() {
+        let avatar = "c".repeat(64);
+        let emoji = "d".repeat(64);
+        let keys = nostr::Keys::generate();
+        let profile = nostr::EventBuilder::new(
+            nostr::Kind::Metadata,
+            format!(r#"{{"picture":"https://relay.example/media/{avatar}.jpg"}}"#),
+        )
+        .sign_with_keys(&keys)
+        .unwrap();
+        assert_eq!(referenced_blob_hashes(&profile), vec![avatar]);
+
+        let emoji_set = nostr::EventBuilder::new(nostr::Kind::from(30030), "")
+            .tags([nostr::Tag::parse([
+                "emoji",
+                "party",
+                &format!("https://relay.example/media/{emoji}.png"),
+            ])
+            .unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_eq!(referenced_blob_hashes(&emoji_set), vec![emoji]);
     }
 
     #[test]

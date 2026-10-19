@@ -826,14 +826,7 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
         "a blob not yet attached anywhere stays community-readable"
     );
 
-    let imeta = Tag::parse([
-        "imeta",
-        &format!("url {url}"),
-        &format!("m {}", desc["type"].as_str().unwrap()),
-        &format!("x {}", desc["sha256"].as_str().unwrap()),
-        &format!("size {}", desc["size"]),
-    ])
-    .unwrap();
+    let imeta = imeta_for(&desc);
 
     let mut owner_client = BuzzTestClient::connect(&relay_ws_url(), &owner)
         .await
@@ -879,5 +872,69 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
         read_status(&http, &outsider, Method::GET, url).await,
         200,
         "uploading the same bytes proves possession"
+    );
+}
+
+/// NIP-92 `imeta` tag attaching the blob an upload `desc` describes.
+fn imeta_for(desc: &serde_json::Value) -> Tag {
+    Tag::parse([
+        "imeta",
+        &format!("url {}", desc["url"].as_str().unwrap()),
+        &format!("m {}", desc["type"].as_str().unwrap()),
+        &format!("x {}", desc["sha256"].as_str().unwrap()),
+        &format!("size {}", desc["size"]),
+    ])
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_private_attachment_cannot_hide_an_avatar() {
+    use buzz_test_client::BuzzTestClient;
+    use reqwest::Method;
+
+    let owner = Keys::generate();
+    let griefer = Keys::generate();
+    let viewer = Keys::generate();
+    let http = http_client();
+
+    let body = uuid::Uuid::new_v4().as_bytes().repeat(8);
+    let resp = upload(&http, &owner, &body).await;
+    assert_eq!(resp.status(), 200);
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    let url = desc["url"].as_str().expect("descriptor url");
+
+    let mut owner_client = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    let profile = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({ "picture": url }).to_string(),
+    )
+    .sign_with_keys(&owner)
+    .unwrap();
+    let ok = owner_client.send_event(profile).await.unwrap();
+    assert!(ok.accepted, "profile rejected: {:?}", ok.message);
+    owner_client.disconnect().await.unwrap();
+
+    let channel_id = create_channel(&http, &griefer, "hide-avatar", "private").await;
+    let mut griefer_client = BuzzTestClient::connect(&relay_ws_url(), &griefer)
+        .await
+        .unwrap();
+    let event = EventBuilder::new(Kind::from(9), "attach someone's avatar")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            imeta_for(&desc),
+        ])
+        .sign_with_keys(&griefer)
+        .unwrap();
+    let ok = griefer_client.send_event(event).await.unwrap();
+    assert!(ok.accepted, "attachment rejected: {:?}", ok.message);
+    griefer_client.disconnect().await.unwrap();
+
+    assert_eq!(
+        read_status(&http, &viewer, Method::GET, url).await,
+        200,
+        "a private attachment must not hide a current avatar"
     );
 }

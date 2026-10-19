@@ -2554,19 +2554,20 @@ async fn ingest_event_inner(
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
 
-    // An attachment widens who can read its blob, so only an author who can
-    // already read the blob may attach it. Also before every kind branch.
-    for sha256 in super::imeta::attached_blob_hashes(&event) {
-        let readable = state
+    // A media reference changes who can read its blob, so only an author who can
+    // already read every referenced blob may publish it. Also before every kind
+    // branch, and one query however many blobs the event names.
+    let referenced = super::imeta::referenced_blob_hashes(&event);
+    if !referenced.is_empty()
+        && !state
             .db
-            .can_read_blob(tenant.community(), &sha256, event.pubkey.as_bytes())
+            .can_read_blobs(tenant.community(), &referenced, event.pubkey.as_bytes())
             .await
-            .map_err(|e| IngestError::Internal(format!("error: checking attachment: {e}")))?;
-        if !readable {
-            return Err(IngestError::Rejected(
-                "invalid: attached media is not readable by the author".into(),
-            ));
-        }
+            .map_err(|e| IngestError::Internal(format!("error: checking media: {e}")))?
+    {
+        return Err(IngestError::Rejected(
+            "invalid: referenced media is not readable by the author".into(),
+        ));
     }
 
     // Command kinds are routed AFTER signature verification, timestamp check,
