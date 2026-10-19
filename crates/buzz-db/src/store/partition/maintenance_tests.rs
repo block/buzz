@@ -1306,4 +1306,86 @@ mod postgres_tests {
             .any(|(name, ..)| name == "events_p_future_next"));
         assert_ne!(after, before, "delivery_log still advances");
     }
+
+    /// Audits taken in a freshly migrated database before and after its first passes.
+    struct FreshInstallPasses {
+        migrated: PartitionAudit,
+        create_only: PartitionAudit,
+        advanced: PartitionAudit,
+        repeated: PartitionAudit,
+    }
+
+    /// Runs every migration in a dedicated database, then the passes a relay
+    /// would run at `fixed_now()`. The database is dropped before returning.
+    async fn fresh_install_passes() -> Result<FreshInstallPasses> {
+        let base_url = crate::test_support::database_url();
+        let admin = PgPool::connect(&base_url)
+            .await
+            .expect("connect admin database");
+        let database = format!("buzz_partition_fresh_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
+            .execute(&admin)
+            .await
+            .expect("create fresh-install database");
+        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
+        let passes = async {
+            let pool = PgPool::connect(&format!("{base_prefix}/{database}")).await?;
+            let result = async {
+                crate::migration::run_migrations(&pool).await?;
+                let now = fixed_now();
+                Ok(FreshInstallPasses {
+                    migrated: audit_partition_catalog_at(
+                        &pool,
+                        PARTITION_MANAGER_MONTHS_AHEAD,
+                        now,
+                    )
+                    .await?,
+                    create_only: maintain_partitions_at(
+                        &pool,
+                        PARTITION_MANAGER_MONTHS_AHEAD,
+                        CREATE_ONLY,
+                        now,
+                    )
+                    .await?,
+                    advanced: maintain(&pool).await?,
+                    repeated: maintain(&pool).await?,
+                })
+            }
+            .await;
+            pool.close().await;
+            result
+        }
+        .await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {database} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop fresh-install database");
+        passes
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fresh_install_catch_all_advances_on_the_first_pass() {
+        let passes = fresh_install_passes().await.expect("fresh-install passes");
+
+        // The migrations end every managed table in an empty catch-all that
+        // already serves months, and creation alone cannot replace it.
+        for audit in [&passes.migrated, &passes.create_only] {
+            assert_eq!(audit.tables.len(), PARTITIONED_TABLES.len());
+            assert!(audit.awaits_catch_all_advance(), "{audit:?}");
+            for table in &audit.tables {
+                assert!(table.awaits_catch_all_advance(), "{}", table.table);
+            }
+        }
+
+        assert_advanced(&passes.advanced);
+        assert!(!passes.advanced.awaits_catch_all_advance());
+        assert!(passes.advanced.serving_safe());
+        for table in &passes.advanced.tables {
+            assert!(!table.degraded(), "{}: {table:?}", table.table);
+        }
+        assert_eq!(passes.repeated, passes.advanced);
+    }
 }
