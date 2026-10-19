@@ -3412,7 +3412,9 @@ pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyh
 /// The first sweep starts as soon as the task runs; each later sweep starts
 /// `every` after the previous one finishes. Startup never waits on it: the
 /// snapshots live in the shared database, so a new replica has nothing of its
-/// own to repair before it serves.
+/// own to repair before it serves. Trade-off: on a single-replica deployment, a
+/// missing or stale kind:13534 snapshot is served until this replica's first
+/// sweep reaches that community.
 pub fn spawn_nip43_membership_reconciler(
     state: Arc<AppState>,
     every: std::time::Duration,
