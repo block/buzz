@@ -36,6 +36,7 @@ import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
 import 'channel_typing_indicator.dart';
 import 'thread_replies_provider.dart';
+import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
 import 'composer_dock_size_reporter.dart';
@@ -899,17 +900,14 @@ class ThreadDetailPage extends HookConsumerWidget {
       return null;
     }, [settledImeBottomInset.value]);
 
-    // Channel names for message content rendering.
-    final channelsAsync = ref.watch(channelsProvider);
-    final channel = channelsAsync.value
-        ?.where((candidate) => candidate.id == channelId)
-        .firstOrNull;
-    final channelNamesMap = <String, String>{};
-    channelsAsync.whenData((channels) {
-      for (final ch in channels) {
-        channelNamesMap[ch.name.toLowerCase()] = ch.id;
-      }
-    });
+    final channel = ref.watch(
+      channelsProvider.select(
+        (channels) => channels.value
+            ?.where((candidate) => candidate.id == channelId)
+            .firstOrNull,
+      ),
+    );
+    final channelNamesMap = ref.watch(channelIdsByNameProvider);
 
     return FrostedScaffold(
       foreground: threadViewportVisible

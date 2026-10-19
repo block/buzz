@@ -3639,6 +3639,55 @@ void main() {
       );
     });
 
+    testWidgets('activity in another channel does not rebuild the open chat', (
+      tester,
+    ) async {
+      final otherChannel = Channel(
+        id: _otherChannelId,
+        name: 'random',
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'abc123',
+        createdAt: DateTime(2025),
+        memberCount: 5,
+        isMember: true,
+      );
+      final channelsNotifier = _FakeChannelsNotifier([
+        _testChannel,
+        otherChannel,
+      ]);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            for (var i = 0; i < 5; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: 'Message $i, see #random',
+                createdAt: 1000 + i,
+              ),
+          ],
+          channelsNotifier: channelsNotifier,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(MessageContent), findsWidgets);
+
+      final rebuilt = <Widget>[];
+      debugOnRebuildDirtyWidget = (element, _) => rebuilt.add(element.widget);
+      addTearDown(() => debugOnRebuildDirtyWidget = null);
+
+      // A live event elsewhere republishes the whole list.
+      channelsNotifier.setChannels([
+        _testChannel,
+        otherChannel.copyWith(lastMessageAt: DateTime.utc(2026)),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(rebuilt.whereType<MessageContent>(), isEmpty);
+    });
+
     testWidgets('clears the composer inset when membership is revoked', (
       tester,
     ) async {

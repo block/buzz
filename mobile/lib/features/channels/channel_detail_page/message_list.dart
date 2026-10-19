@@ -810,14 +810,7 @@ class _MessageList extends HookConsumerWidget {
     }
     if (entries.isEmpty) return const _EmptyMessages();
 
-    // Build channel names map once for all message bubbles.
-    final channelsAsync = ref.watch(channelsProvider);
-    final channelNamesMap = <String, String>{};
-    channelsAsync.whenData((channels) {
-      for (final ch in channels) {
-        channelNamesMap[ch.name.toLowerCase()] = ch.id;
-      }
-    });
+    final channelNamesMap = ref.watch(channelIdsByNameProvider);
 
     return Stack(
       children: [
