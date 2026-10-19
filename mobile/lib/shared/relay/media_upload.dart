@@ -218,8 +218,13 @@ class BlobDescriptor {
     if (thumb != null) 'thumb $thumb',
     if (duration != null) 'duration $duration',
     if (image != null) 'image $image',
+    if (_posterHash case final hash?) 'image-x $hash',
     if (filename != null) 'filename $filename',
   ];
+
+  /// Names the poster by hash so the relay can scope who may read it.
+  String? get _posterHash =>
+      RegExp(r'/media/([0-9a-f]{64})\.').firstMatch(image ?? '')?.group(1);
 
   String toMarkdownImage() {
     final label = (filename ?? 'file').replaceAllMapped(

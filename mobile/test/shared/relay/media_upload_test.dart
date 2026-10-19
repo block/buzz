@@ -1222,6 +1222,22 @@ void main() {
     });
   });
 
+  group('toImetaTag', () {
+    test('names a video poster by hash', () {
+      final poster = 'c' * 64;
+      final descriptor = BlobDescriptor(
+        url: 'https://relay.example/media/${'a' * 64}.mp4',
+        sha256: 'a' * 64,
+        size: 3,
+        type: 'video/mp4',
+        uploaded: 1,
+        image: 'https://relay.example/media/$poster.jpg',
+      );
+
+      expect(descriptor.toImetaTag(), contains('image-x $poster'));
+    });
+  });
+
   group('uploadVoiceNote', () {
     test('keeps ordinary audio attachments on inline audio markdown', () {
       const descriptor = BlobDescriptor(

@@ -181,6 +181,22 @@ test("buildImetaTags keeps media filenames in imeta", () => {
   );
 });
 
+test("buildImetaTags names a video poster by hash", () => {
+  const poster = "c".repeat(64);
+  const [tag] = buildImetaTags([
+    {
+      url: `https://b/media/${"a".repeat(64)}.mp4`,
+      type: "video/mp4",
+      sha256: "a".repeat(64),
+      size: 10,
+      uploaded: 1,
+      image: `https://b/media/${poster}.jpg`,
+    },
+  ]);
+  assert.ok(tag.includes(`image https://b/media/${poster}.jpg`));
+  assert.ok(tag.includes(`image-x ${poster}`));
+});
+
 test("formatImetaMediaLine: video mime → ![video] line (regardless of URL suffix)", () => {
   assert.equal(
     formatImetaMediaLine({ url: "https://cdn/blob/xyz", type: "video/mp4" }),

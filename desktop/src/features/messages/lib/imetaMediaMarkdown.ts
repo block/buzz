@@ -102,8 +102,17 @@ export function buildImetaTags(
       ...(d.thumb ? [`thumb ${d.thumb}`] : []),
       ...(d.duration != null ? [`duration ${d.duration}`] : []),
       ...(d.image ? [`image ${d.image}`] : []),
+      ...posterHashEntry(d.image),
       ...(d.filename ? [`filename ${d.filename}`] : []),
     ]);
+}
+
+const MEDIA_HASH_RE = /\/media\/([0-9a-f]{64})\./;
+
+/** `image-x <sha256>` names the poster by hash so the relay can scope its reads. */
+function posterHashEntry(image: string | undefined): string[] {
+  const hash = image?.match(MEDIA_HASH_RE)?.[1];
+  return hash ? [`image-x ${hash}`] : [];
 }
 
 const MEDIA_LINE_RE =
