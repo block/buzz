@@ -362,6 +362,12 @@ pub(crate) async fn handle_connection(
     nip_fi_shadow: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
     connection_time: chrono::DateTime<chrono::Utc>,
 ) {
+    // Held through bootstrap, the active handler and any refusal drain, so a
+    // socket counts against `BUZZ_MAX_CONNECTIONS` for as long as it is open.
+    let Ok(_permit) = state.conn_semaphore.clone().try_acquire_owned() else {
+        warn!("Connection limit reached, rejecting {addr}");
+        return;
+    };
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
 
@@ -527,13 +533,6 @@ async fn handle_active_connection(
     // connection_time is threaded in from the HTTP handler (captured immediately
     // before on_upgrade) so the session partition is rooted at the true upgrade
     // instant, not the post-community-active-check instant. [FI-TRACE-LEASE-BOUND]
-    let permit = match state.conn_semaphore.clone().try_acquire_owned() {
-        Ok(p) => p,
-        Err(_) => {
-            warn!("Connection limit reached, rejecting {addr}");
-            return;
-        }
-    };
 
     let challenge = generate_challenge();
 
@@ -759,17 +758,18 @@ async fn handle_active_connection(
     let authenticated = auth_lifecycle.finish(close_outcome);
 
     let _ = send_task.await;
-    let _ = heartbeat_task.await;
-    let _ = auth_timeout_task.await;
-    if let Some(task) = nip_fi_expiry_task {
-        let _ = task.await;
-    }
-    let _ = auth_cancel_task.await;
 
-    // Release application state and wait on the peer concurrently: cleanup
-    // never waits on the client, and a stalled Redis cannot hold the socket
+    // The writer is done, so the server's Close (if any) is sent. Wait on the
+    // peer alongside the remaining joins and cleanup: the expiry barrier and
+    // Redis can block without a deadline, and neither may hold the socket
     // open past the bounded peer wait.
     let cleanup = async {
+        let _ = heartbeat_task.await;
+        let _ = auth_timeout_task.await;
+        if let Some(task) = nip_fi_expiry_task {
+            let _ = task.await;
+        }
+        let _ = auth_cancel_task.await;
         crate::handlers::close::release_connection_subscriptions(&conn, &state).await;
         state.conn_manager.deregister(conn.conn_id);
         if let Some(auth_ctx) = authenticated {
@@ -787,8 +787,6 @@ async fn handle_active_connection(
     tokio::join!(cleanup, await_client_close(ws_recv));
     metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection closed");
-
-    drop(permit);
 }
 
 /// Send WebSocket messages in priority order: control frames before data frames.
@@ -3268,16 +3266,21 @@ pub(crate) mod terminal_close_delivery_tests {
         assertion: VerifiedAssertion,
         prefire_expiry: bool,
     ) -> (std::net::SocketAddr, RelayUrl, Arc<AppState>, Uuid) {
-        serve_with_cleanup_pause(assertion, prefire_expiry, None).await
+        serve_with_cleanup_pause(assertion, prefire_expiry, None, None).await
     }
 
     /// Like `serve`, but runs the handler inside `cleanup_pause` so a test
-    /// can stall the connection's final subscription cleanup.
+    /// can stall the connection's final subscription cleanup. With
+    /// `effect_hold`, the session instead expires shortly after upgrade and
+    /// the test receives a session effect permit taken before the deadline,
+    /// so the expiry task stalls at its quiescence barrier.
     async fn serve_with_cleanup_pause(
         assertion: VerifiedAssertion,
         prefire_expiry: bool,
         cleanup_pause: Option<Arc<crate::handlers::close::test_seam::Pause>>,
+        effect_hold: Option<tokio::sync::oneshot::Sender<crate::nip_fi_gate::SessionEffectPermit>>,
     ) -> (std::net::SocketAddr, RelayUrl, Arc<AppState>, Uuid) {
+        let effect_hold = Arc::new(std::sync::Mutex::new(effect_hold));
         let state = crate::state::tests::test_state().await;
         let served_state = Arc::clone(&state);
         let conn_id = Uuid::new_v4();
@@ -3298,12 +3301,18 @@ pub(crate) mod terminal_close_delivery_tests {
                     assertion.clone(),
                     cleanup_pause.clone(),
                 );
+                let effect_hold = effect_hold.lock().expect("effect hold").take();
                 async move {
                     ws.on_upgrade(move |socket| async move {
                         let cancel = CancellationToken::new();
                         let control = CommunityConnectionControl::new(cancel.clone());
+                        let offset = if effect_hold.is_some() {
+                            chrono::Duration::milliseconds(300)
+                        } else {
+                            chrono::Duration::seconds(-1)
+                        };
                         let pre_built = prefire_expiry.then(|| {
-                            let deadline = chrono::Utc::now() - chrono::Duration::seconds(1);
+                            let deadline = chrono::Utc::now() + offset;
                             let (tx, rx) = mpsc::channel::<WsMessage>(1);
                             let gate =
                                 crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel);
@@ -3316,6 +3325,10 @@ pub(crate) mod terminal_close_delivery_tests {
                             );
                             (gate, tx, rx, Some(expiry))
                         });
+                        if let (Some(hold), Some((gate, ..))) = (effect_hold, &pre_built) {
+                            let permit = gate.acquire_effect().await.expect("effect permit");
+                            let _ = hold.send(permit);
+                        }
                         let handler = handle_active_connection(
                             socket,
                             state,
@@ -3564,7 +3577,8 @@ pub(crate) mod terminal_close_delivery_tests {
     async fn stalled_cleanup_does_not_hold_socket_open() {
         let pause = Arc::new(crate::handlers::close::test_seam::Pause::default());
         let (address, _, _, _) =
-            serve_with_cleanup_pause(expired_assertion(), true, Some(Arc::clone(&pause))).await;
+            serve_with_cleanup_pause(expired_assertion(), true, Some(Arc::clone(&pause)), None)
+                .await;
         let started = std::time::Instant::now();
         let mut socket = raw_client_after_server_close(address).await;
 
@@ -3579,9 +3593,36 @@ pub(crate) mod terminal_close_delivery_tests {
     /// denial and Close from the `on_not_run` drain. The raw client never
     /// replies, so the server must hold the socket for its bounded wait
     /// instead of dropping it with client input possibly unread.
+    /// An established session's expiry task stalls at its quiescence barrier
+    /// while a handler holds an effect permit (e.g. an ephemeral EVENT blocked
+    /// on Redis). The writer has already sent the Close, so the socket must
+    /// still end within the bounded peer wait, not when the permit drops.
     #[tokio::test]
-    async fn bootstrap_drain_holds_socket_for_client_close_reply() {
-        let state = crate::state::tests::test_state().await;
+    async fn stalled_expiry_barrier_does_not_hold_socket_open() {
+        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel();
+        let assertion = VerifiedAssertion::for_test(
+            Some(Keys::generate().public_key()),
+            vec![chrono::Utc::now() + chrono::Duration::hours(1)],
+        );
+        let (address, _, _, _) =
+            serve_with_cleanup_pause(assertion, true, None, Some(hold_tx)).await;
+        let mut socket = raw_client_after_server_close(address).await;
+        let _effect = hold_rx
+            .await
+            .expect("effect permit taken before the deadline");
+
+        let elapsed = time_to_eof(&mut socket, std::time::Instant::now()).await;
+        assert!(
+            elapsed < WS_TERMINAL_FLUSH_TIMEOUT + Duration::from_millis(500),
+            "a stalled expiry barrier must not hold the socket open, ended after {elapsed:?}"
+        );
+    }
+
+    /// Serves the real outer `handle_connection` with `state`.
+    fn serve_outer(
+        state: Arc<AppState>,
+        assertion: Option<VerifiedAssertion>,
+    ) -> impl std::future::Future<Output = std::net::SocketAddr> {
         let tenant = TenantContext::resolved(
             buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
             "test.local".to_owned(),
@@ -3589,7 +3630,8 @@ pub(crate) mod terminal_close_delivery_tests {
         let app = Router::new().route(
             "/",
             get(move |ws: WebSocketUpgrade| {
-                let (state, tenant) = (Arc::clone(&state), tenant.clone());
+                let (state, tenant, assertion) =
+                    (Arc::clone(&state), tenant.clone(), assertion.clone());
                 async move {
                     ws.on_upgrade(move |socket| {
                         handle_connection(
@@ -3597,7 +3639,7 @@ pub(crate) mod terminal_close_delivery_tests {
                             state,
                             "127.0.0.1:1234".parse().expect("client address"),
                             tenant,
-                            Some(expired_assertion()),
+                            assertion,
                             None,
                             chrono::Utc::now(),
                         )
@@ -3605,9 +3647,31 @@ pub(crate) mod terminal_close_delivery_tests {
                 }
             }),
         );
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let address = listener.local_addr().expect("listener address");
-        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        async move {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let address = listener.local_addr().expect("listener address");
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+            address
+        }
+    }
+
+    /// Leaves exactly one free slot in the connection budget.
+    async fn one_slot(state: &AppState) -> tokio::sync::OwnedSemaphorePermit {
+        let others = u32::try_from(state.conn_semaphore.available_permits() - 1).expect("permits");
+        Arc::clone(&state.conn_semaphore)
+            .acquire_many_owned(others)
+            .await
+            .expect("reserve other slots")
+    }
+
+    /// A socket refused during bootstrap (here an expired session) gets the
+    /// denial and Close from the `on_not_run` drain. The raw client never
+    /// replies, so the server must hold the socket for its bounded wait
+    /// instead of dropping it with client input possibly unread.
+    #[tokio::test]
+    async fn bootstrap_drain_holds_socket_for_client_close_reply() {
+        let state = crate::state::tests::test_state().await;
+        let address = serve_outer(state, Some(expired_assertion())).await;
 
         let started = std::time::Instant::now();
         let mut socket = raw_client_after_server_close(address).await;
@@ -3615,6 +3679,68 @@ pub(crate) mod terminal_close_delivery_tests {
         assert!(
             elapsed >= WS_TERMINAL_FLUSH_TIMEOUT,
             "bootstrap drain must wait for the client's Close reply, ended after {elapsed:?}"
+        );
+    }
+
+    /// A socket refused during bootstrap keeps its connection slot until the
+    /// socket ends, including the bounded wait for a Close reply that never
+    /// comes, so refusals cannot open sockets beyond `BUZZ_MAX_CONNECTIONS`.
+    #[tokio::test]
+    async fn refused_bootstrap_holds_connection_slot_until_socket_ends() {
+        let state = crate::state::tests::test_state().await;
+        let _others = one_slot(&state).await;
+        let address = serve_outer(Arc::clone(&state), Some(expired_assertion())).await;
+
+        let mut socket = raw_client_after_server_close(address).await;
+        assert_eq!(
+            state.conn_semaphore.available_permits(),
+            0,
+            "the refused socket must hold its slot while open"
+        );
+        time_to_eof(&mut socket, std::time::Instant::now()).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.conn_semaphore.available_permits() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the slot must be released once the socket ends");
+    }
+
+    /// The community check runs inside the connection budget: while it
+    /// stalls on the database, the socket already holds its slot even though
+    /// the active handler (which sends the AUTH challenge) has not started.
+    #[tokio::test]
+    async fn stalled_bootstrap_holds_connection_slot() {
+        let fake_database = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind database");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(60))
+            .connect_lazy(&format!(
+                "postgres://buzz@{}/buzz",
+                fake_database.local_addr().expect("database address")
+            ))
+            .expect("lazy pool");
+        let state = crate::state::tests::test_state_with_database_pool(pool).await;
+        let _others = one_slot(&state).await;
+        let address = serve_outer(Arc::clone(&state), None).await;
+
+        let mut client = connect(address).await;
+        let _stalled_check = tokio::time::timeout(Duration::from_secs(5), fake_database.accept())
+            .await
+            .expect("the community check must reach the database")
+            .expect("accept database connection");
+        assert_eq!(
+            state.conn_semaphore.available_permits(),
+            0,
+            "a socket in bootstrap must hold its slot"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), client.next())
+                .await
+                .is_err(),
+            "the active handler must not have started"
         );
     }
 }
