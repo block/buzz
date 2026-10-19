@@ -96,22 +96,42 @@ void main() {
     },
   );
 
-  test('hosted pairing never replaces occupied account key', () async {
-    if (!HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) return;
-    final f = HostedCommunitiesFixture();
-    await f.initialize();
-    addTearDown(f.dispose);
-    final container = ProviderContainer(
-      overrides: [hostedFlowProvider.overrideWithValue(f.flow)],
-    );
-    addTearDown(container.dispose);
-    await container
-        .read(pairingProvider.notifier)
-        .pair(_payload(nostr.Keys('2'.padLeft(64, '0'))));
-    expect(container.read(pairingProvider).status, PairingStatus.error);
-    expect((await f.store.read())?.pubkey, f.keys.public);
-    expect(f.admitted, isEmpty);
-  });
+  test(
+    'hosted pairing retains transfer but blocks conflicting account admission',
+    () async {
+      if (!HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) {
+        return;
+      }
+      final f = HostedCommunitiesFixture();
+      await f.initialize();
+      addTearDown(f.dispose);
+      final container = ProviderContainer(
+        overrides: [hostedFlowProvider.overrideWithValue(f.flow)],
+      );
+      addTearDown(container.dispose);
+      final transferred = nostr.Keys('2'.padLeft(64, '0'));
+      final settled = Completer<void>();
+      f.flow.addListener(() {
+        if ((f.flow.stage == HostedFlowStage.blocked ||
+                f.flow.stage == HostedFlowStage.complete) &&
+            !settled.isCompleted) {
+          settled.complete();
+        }
+      });
+      await container
+          .read(pairingProvider.notifier)
+          .pair(_payload(transferred));
+      await settled.future.timeout(const Duration(seconds: 2));
+      expect(f.flow.stage, HostedFlowStage.blocked);
+      expect(f.flow.problem, HostedFlowProblem.identityMismatch);
+      expect(
+        (await f.store.forPairing(transferred.public).read())?.pubkey,
+        transferred.public,
+      );
+      expect((await f.store.read())?.pubkey, f.keys.public);
+      expect(f.admitted, isEmpty);
+    },
+  );
 }
 
 String _payload(nostr.Keys keys) => base64Url.encode(
