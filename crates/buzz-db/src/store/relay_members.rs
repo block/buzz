@@ -1391,13 +1391,7 @@ impl Db {
 
         let was_inserted = insert_result.rows_affected() > 0;
         if was_inserted {
-            crate::store::event_follow_up::after_admitted_insert(
-                &mut tx,
-                event.id.as_bytes().as_slice(),
-                kind_i32,
-                None,
-            )
-            .await?;
+            crate::store::event_follow_up::after_admitted_insert(&mut tx, &event, None).await?;
             tx.commit().await?;
         } else {
             tx.rollback().await?;

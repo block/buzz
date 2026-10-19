@@ -32,6 +32,10 @@ mod event_follow_up_postgres_tests;
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
+/// Where each media blob is shared, recorded with the events that reference it.
+pub mod media_reference;
+/// Who has uploaded each blob, as proof of possession for sharing it.
+pub mod media_uploader;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
 /// Deployment-global operator-listener mention registrations and delivery queues.
