@@ -140,6 +140,7 @@ class _JoinableChannelTile extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final description = channel.displayDescription;
     final isJoining = useState(false);
     final actionError = useState<String?>(null);
 
@@ -164,13 +165,9 @@ class _JoinableChannelTile extends HookConsumerWidget {
           key: Key('browse-channel-${channel.id}'),
           leading: Icon(channelIcon(channel)),
           title: Text(channel.name),
-          subtitle: channel.description.trim().isEmpty
+          subtitle: description.isEmpty
               ? null
-              : Text(
-                  channel.description,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
+              : Text(description, maxLines: 2, overflow: TextOverflow.ellipsis),
           trailing: FilledButton.tonal(
             key: Key('browse-channel-join-${channel.id}'),
             onPressed: isJoining.value ? null : () => unawaited(join()),

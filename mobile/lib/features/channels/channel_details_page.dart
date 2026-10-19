@@ -635,7 +635,7 @@ class _ChannelDetailsHero extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final description = channel.description.trim();
+    final description = channel.displayDescription;
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         Grid.gutter,
