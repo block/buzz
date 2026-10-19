@@ -948,7 +948,17 @@ mod tests {
         until_offset_secs: i64,
         overrides: serde_json::Value,
     ) -> String {
-        let now = now_ts();
+        mint_cmd_jwt_at(target, Utc::now(), until_offset_secs, overrides)
+    }
+
+    /// Mint a command JWT using the supplied instant for all time claims.
+    fn mint_cmd_jwt_at(
+        target: &nostr::PublicKey,
+        now: DateTime<Utc>,
+        until_offset_secs: i64,
+        overrides: serde_json::Value,
+    ) -> String {
+        let now = now.timestamp();
         let mut claims = serde_json::json!({
             "iss": ISS,
             "aud": AUD,
@@ -1225,14 +1235,14 @@ mod tests {
         let target = target_key();
         let now = Utc::now();
         for until_offset in [3600, 30 + 3600, 1] {
-            let token = mint_cmd_jwt(&target, until_offset, serde_json::json!({}));
+            let token = mint_cmd_jwt_at(&target, now, until_offset, serde_json::json!({}));
             assert_eq!(
                 cv.verify_at(&token, METHOD, PATH, &target, now).map(|_| ()),
                 Ok(()),
                 "until = now + {until_offset}s must fit the ceiling"
             );
         }
-        let token = mint_cmd_jwt(&target, 30 + 3600 + 1, serde_json::json!({}));
+        let token = mint_cmd_jwt_at(&target, now, 30 + 3600 + 1, serde_json::json!({}));
         assert_eq!(
             cv.verify_at(&token, METHOD, PATH, &target, now).map(|_| ()),
             Err(CommandError::UntilExceedsCeiling),
