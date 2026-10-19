@@ -2557,7 +2557,7 @@ async fn ingest_event_inner(
     // A media reference changes who can read its blob, so only an author who can
     // already read every referenced blob may publish it. Also before every kind
     // branch, and one query however many blobs the event names.
-    let referenced = super::imeta::referenced_blob_hashes(&event);
+    let referenced = buzz_core::media::referenced_blob_hashes(&event);
     if !referenced.is_empty()
         && !state
             .db
