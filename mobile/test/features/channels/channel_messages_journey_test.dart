@@ -17,9 +17,6 @@ void main() {
       fakeAsync((async) {
         final relay = FakeRelay();
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        // Live subscriptions start at the wall-clock second they open, which
-        // can pass `now` before they do. Date later messages after any of them.
-        final later = now + 60;
         NostrEvent message(String text, int createdAt) => relay.sign(
           kind: EventKind.streamMessage,
           content: text,
@@ -42,6 +39,21 @@ void main() {
         Set<String> pending() =>
             container.read(pendingLocalMessagesProvider(_channel)).keys.toSet();
         void settle() => async.elapse(const Duration(milliseconds: 50));
+        // The live subscription starts at the second it opens, so live
+        // messages are dated from the filter it actually installed.
+        int liveSince() =>
+            relay.reqs
+                    .expand((req) => req.skip(2).cast<Map<String, dynamic>>())
+                    .lastWhere(
+                      (filter) =>
+                          (filter['kinds'] as List).contains(
+                            EventKind.streamMessage,
+                          ) &&
+                          ((filter['#h'] as List?)?.contains(_channel) ??
+                              false) &&
+                          filter['since'] != null,
+                    )['since']
+                as int;
 
         settle();
         expect(
@@ -56,9 +68,12 @@ void main() {
           reason: 'no fallback to websocket history',
         );
 
-        relay.deliver(message('from a teammate', later));
+        final since = liveSince();
+        relay.deliver(message('from a teammate', since));
+        relay.deliver(message('from before the subscription', since - 1));
         settle();
         expect(timeline(), contains('from a teammate'));
+        expect(timeline(), isNot(contains('from before the subscription')));
 
         // Pending until OK, settled by OK alone, one row after the echo.
         final ok = relay.holdOk();
@@ -100,11 +115,11 @@ void main() {
         // After a network drop the session reconnects, recovers what it missed
         // and follows the channel again, without duplicating known rows.
         relay.drop();
-        relay.seed([message('while offline', later)]);
+        relay.seed([message('while offline', since)]);
         async.elapse(const Duration(seconds: 2));
         expect(relay.sockets, hasLength(2));
         expect(timeline(), contains('while offline'));
-        relay.deliver(message('after reconnect', later));
+        relay.deliver(message('after reconnect', liveSince()));
         settle();
         expect(timeline(), contains('after reconnect'));
         expect(timeline().where((text) => text == 'hello'), hasLength(1));
