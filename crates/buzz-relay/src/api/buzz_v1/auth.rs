@@ -110,6 +110,7 @@ pub(super) async fn authorize(
             body.is_some(),
         ),
     )
+    .await
     .map_err(|response| {
         if state.config.nip_fi.mode.restricts() {
             // Preserve the shared NIP-FI wire contract, not just its status.

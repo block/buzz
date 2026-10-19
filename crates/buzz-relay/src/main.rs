@@ -856,6 +856,36 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             ));
         }
     }
+    // NIP-FI database community source. The startup load runs before any
+    // listener binds, so the pod can never report ready without a snapshot;
+    // a failed load fails startup and the orchestrator retries.
+    if config.nip_fi.builds_resolver() {
+        let step = StepTimer::start(StartupStep::NipFiSnapshotLoad);
+        // `Config::from_env` refuses the database source without it.
+        let policy = config
+            .nip_fi_provision_binding
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("NIP-FI: no provisioning binding policy"))?;
+        let registry = config
+            .nip_fi
+            .registry
+            .all_policies()
+            .map(|p| p.issuer().to_owned())
+            .collect();
+        let resolver = Arc::new(buzz_relay::nip_fi_resolver::DatabaseResolver::new(
+            Arc::new(app_state.db.clone()),
+            policy,
+            registry,
+            config.nip_fi_resolver_bounds.clone(),
+        ));
+        resolver
+            .refresh()
+            .await
+            .map_err(|e| anyhow::anyhow!("NIP-FI: startup binding snapshot load failed: {e:?}"))?;
+        step.finish();
+        info!("NIP-FI: binding snapshot loaded");
+        app_state.nip_fi_resolver = Some(resolver);
+    }
     let state = Arc::new(app_state);
     let has_startup_partition_audit = startup_partition_audit.is_some();
     if let Some(audit) = startup_partition_audit {
@@ -912,6 +942,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // The refresh task is owned: a `CancellationToken` + `JoinHandle` let the
     // process cancel it cleanly on shutdown instead of leaking the task.
     let jwks_refresh_cancel = CancellationToken::new();
+    // The binding refresh loop stops with the JWKS loop on shutdown.
+    if let Some(resolver) = state.nip_fi_resolver.clone() {
+        tokio::spawn(resolver.run_refresh_loop(jwks_refresh_cancel.child_token()));
+    }
     let jwks_refresh_handle = if let Some(jwks_source) = state.nip_fi_jwks_source.clone() {
         let jwks_configs = state.config.nip_fi.jwks_configs.clone();
         info!(
@@ -2053,23 +2087,31 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 ///    grace, this backstops the whole drain and force-exits the process if
 ///    exceeded. It bounds everything after the grace, not the grace itself.
 ///
-/// A single WebSocket can therefore stay open, from SIGTERM, for up to:
+/// Each socket's teardown after the grace runs in stages, each with its own
+/// budget:
 ///
-/// ```text
-///   5s grace  +  up to 20s jitter  +  up to 5s close-frame ack  =  30s
-///   (fixed)      (MAX_DRAIN_JITTER_MS)  (RESTART_CLOSE_ACK_TIMEOUT)
-/// ```
+/// - up to 20s jitter before the relay sends its restart Close
+///   ([`buzz_relay::config::MAX_DRAIN_JITTER_MS`]);
+/// - up to 5s for the writer to acknowledge sending that Close
+///   (`RESTART_CLOSE_ACK_TIMEOUT` in `state.rs`). If the acknowledgement
+///   times out, the connection is cancelled and its teardown can spend a
+///   separate 1s flushing the terminal frame (`WS_TERMINAL_FLUSH_TIMEOUT` in
+///   `connection.rs`);
+/// - up to 1s waiting for the client's Close reply (the same constant). This
+///   wait starts only once the reader has returned and the writer has joined.
 ///
-/// The 5s grace runs before the 30s hard-drain clock starts, so the jitter
-/// (capped at [`buzz_relay::config::MAX_DRAIN_JITTER_MS`] = 20s) plus the
-/// per-connection close-frame ack wait (`RESTART_CLOSE_ACK_TIMEOUT` = 5s in
-/// `state.rs`) sum to 25s and stay inside the 30s hard drain. Total worst
-/// case from SIGTERM to forced exit is 5s + 30s = 35s. Both fit inside the
-/// chart's `terminationGracePeriodSeconds: 60` (`deploy/charts/buzz/values.yaml`),
-/// which leaves headroom but assumes no `preStop` hook adds further delay.
-/// With jitter off (`BUZZ_DRAIN_JITTER_MS=0`, the default) sockets close
-/// all-at-once right after the grace, so the per-socket delay collapses to
-/// roughly the 5s grace plus the ack wait.
+/// These are stage budgets, not a guaranteed per-socket total: after a
+/// successful acknowledgement nothing cancels the reader, so a silent peer
+/// does not go straight into the peer wait. The 30s hard drain is what bounds
+/// every socket. The configured process shutdown budget, from SIGTERM to
+/// forced exit, is 5s + 30s = 35s, which fits within the chart's
+/// `terminationGracePeriodSeconds: 60` (`deploy/charts/buzz/values.yaml`).
+/// That leaves headroom but assumes no `preStop` hook adds further delay.
+/// With jitter off (`BUZZ_DRAIN_JITTER_MS=0`, the default), `drain_all()`
+/// queues every restart Close right after the grace and cancels the
+/// connections immediately, without waiting for any acknowledgement. The
+/// terminal-flush and peer-wait budgets then apply only to sockets whose
+/// teardown reaches those stages.
 const GRACEFUL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn serve(

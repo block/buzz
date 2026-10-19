@@ -463,7 +463,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
             asserted_key,
             capabilities,
             deadlines,
-            policy.id(),
+            policy.id_for_community(community.expected_aud()),
             self.transport_contract_id,
             RevalidationDependencies::new(
                 header.kid,

@@ -175,7 +175,7 @@ fn bridge_count(body: Option<Value>) -> u64 {
     })
 }
 
-fn sorted(mut ids: Vec<String>) -> Vec<String> {
+fn sorted<T: Ord>(mut ids: Vec<T>) -> Vec<T> {
     ids.sort();
     ids
 }
@@ -428,17 +428,77 @@ async fn named_channels_missing_from_the_cache_are_confirmed_together() {
     assert!(readable_system.is_empty());
 }
 
-/// Adding a member to a system channel sends no kind:44100 notification,
-/// which an existing client would show as a new channel. An ordinary
-/// channel still sends one, so the check is not vacuous.
-/// Mutation: drop the system check in `emit_membership_notification` → RED.
+/// Every membership notice is a stored kind:44100/44101 tagged with its
+/// channel type (`["t","stream"]`, `["t","system"]`). A filter sees a notice
+/// only when it knows the type: a filter without `#t` (every client today)
+/// sees the legacy types, and a filter with `#t` sees the types it names. One
+/// filter can name all types. This holds on every path: live fan-out, REQ
+/// history, COUNT, and the HTTP bridge. An untagged notice stored before the
+/// tag existed counts as a legacy type.
+/// Mutation: drop the type tag in `emit_membership_notification` → RED;
+/// drop the `notice_visible` check in `filters_match` → RED (live and
+/// post-filtered reads show the system notice); drop the untagged clause in
+/// `push_notice_visibility` → RED (the legacy notice disappears).
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
-async fn system_channels_send_no_membership_notifications() {
+async fn membership_notices_reach_only_filters_that_know_their_type() {
+    use buzz_core::kind::{KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION};
     let f = fixture().await;
     let owner = Keys::generate();
     let member = Keys::generate();
     let member_hex = member.public_key().to_hex();
+    let kinds = [
+        KIND_MEMBER_ADDED_NOTIFICATION,
+        KIND_MEMBER_REMOVED_NOTIFICATION,
+    ];
+    let old = json!({"kinds": kinds, "#p": [member_hex]});
+    let asks = json!({"kinds": kinds, "#p": [member_hex], "#t": ["system"]});
+    let all = json!({
+        "kinds": kinds,
+        "#p": [member_hex],
+        "#t": ["stream", "forum", "dm", "workflow", "system"],
+    });
+
+    // The member's live global subscriptions: one as clients send today, one
+    // that asks for system notices, and one that names every type. An outsider also holds a subscription
+    // that asks. It is registered directly, as if some filter (for example a
+    // kindless `ids` lookup) had been admitted, so only the fan-out gate can
+    // keep the notices from it.
+    let register = |reader: &Keys, subs: &[(&str, &Value)]| {
+        let conn_id = Uuid::new_v4();
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        f.state.conn_manager.register(
+            conn_id,
+            tx,
+            tokio::sync::mpsc::channel(4).0,
+            tokio::sync::mpsc::channel(1).0,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            f.tenant.community(),
+            Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            Arc::new(tokio::sync::Mutex::new(Default::default())),
+            3,
+            crate::state::CommunityConnectionControl::new(
+                tokio_util::sync::CancellationToken::new(),
+            ),
+        );
+        f.state
+            .conn_manager
+            .set_authenticated_pubkey(conn_id, reader.public_key().to_bytes().to_vec());
+        for (sub, filter) in subs {
+            f.state.sub_registry.register_scoped(
+                f.tenant.community(),
+                conn_id,
+                (*sub).into(),
+                vec![serde_json::from_value((*filter).clone()).expect("filter")],
+                None,
+            );
+        }
+        rx
+    };
+    let mut rx = register(&member, &[("old", &old), ("asks", &asks), ("all", &all)]);
+    let outsider = Keys::generate();
+    let mut outsider_rx = register(&outsider, &[("outsider", &json!({"#t": ["system"]}))]);
 
     let system = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
     let ordinary = create_channel(&f.state, &f.tenant, &owner, &[]).await;
@@ -452,36 +512,309 @@ async fn system_channels_send_no_membership_notifications() {
         )
         .await;
     }
-    // Notifications are written after the reply; give the task a moment.
-    let mut notified = Vec::new();
-    for _ in 0..50 {
-        notified = f
-            .state
-            .db
-            .query_events(&EventQuery {
-                kinds: Some(vec![buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32]),
-                p_tag_hex: Some(member_hex.clone()),
-                ..EventQuery::for_community(f.tenant.community())
-            })
+    publish(
+        &f,
+        &owner,
+        9001,
+        "",
+        &[&["h", &system.to_string()], &["p", &member_hex]],
+    )
+    .await;
+
+    // Notifications are sent after the reply; collect the six frames.
+    let mut live = Vec::new();
+    let mut ids = std::collections::HashMap::new();
+    while live.len() < 6 {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
-            .expect("query notifications")
-            .into_iter()
-            .map(|stored| {
-                stored
-                    .event
-                    .tags
-                    .iter()
-                    .find(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
-                    .and_then(|tag| tag.as_slice().get(1).cloned())
-                    .expect("h tag")
-            })
-            .collect::<Vec<_>>();
-        if !notified.is_empty() {
+            .unwrap_or_else(|_| panic!("notices so far: {live:?}"))
+            .expect("connection open");
+        let axum::extract::ws::Message::Text(text) = frame else {
+            continue;
+        };
+        let message: Value = serde_json::from_str(&text).expect("relay frame");
+        if message[0] != "EVENT" {
+            continue;
+        }
+        let event: nostr::Event = serde_json::from_value(message[2].clone()).expect("event");
+        assert_eq!(
+            event.pubkey,
+            f.state.relay_keypair.public_key(),
+            "relay-signed"
+        );
+        let h = event
+            .tags
+            .iter()
+            .find(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+            .and_then(|tag| tag.as_slice().get(1).cloned())
+            .expect("h tag");
+        let channel_type = event
+            .tags
+            .iter()
+            .find(|tag| tag.as_slice().first().map(String::as_str) == Some("t"))
+            .and_then(|tag| tag.as_slice().get(1).cloned());
+        let expected_type = if h == system.to_string() {
+            "system"
+        } else {
+            "stream"
+        };
+        assert_eq!(channel_type.as_deref(), Some(expected_type), "type tag");
+        let kind = u32::from(event.kind.as_u16());
+        ids.insert((kind, h.clone()), event.id.to_hex());
+        live.push((message[1].as_str().expect("sub id").to_owned(), kind, h));
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .is_err(),
+        "no seventh notice"
+    );
+    assert_eq!(
+        sorted(live),
+        sorted(vec![
+            (
+                "asks".into(),
+                KIND_MEMBER_ADDED_NOTIFICATION,
+                system.to_string()
+            ),
+            (
+                "asks".into(),
+                KIND_MEMBER_REMOVED_NOTIFICATION,
+                system.to_string()
+            ),
+            (
+                "old".into(),
+                KIND_MEMBER_ADDED_NOTIFICATION,
+                ordinary.to_string()
+            ),
+            (
+                "all".into(),
+                KIND_MEMBER_ADDED_NOTIFICATION,
+                system.to_string()
+            ),
+            (
+                "all".into(),
+                KIND_MEMBER_REMOVED_NOTIFICATION,
+                system.to_string()
+            ),
+            (
+                "all".into(),
+                KIND_MEMBER_ADDED_NOTIFICATION,
+                ordinary.to_string()
+            ),
+        ])
+    );
+    let ordinary_added = ids[&(KIND_MEMBER_ADDED_NOTIFICATION, ordinary.to_string())].clone();
+    let system_notices = sorted(vec![
+        ids[&(KIND_MEMBER_ADDED_NOTIFICATION, system.to_string())].clone(),
+        ids[&(KIND_MEMBER_REMOVED_NOTIFICATION, system.to_string())].clone(),
+    ]);
+
+    // History: the system notices are stored, and only the asking filter
+    // reads them.
+    assert_eq!(
+        req(&f, &member, old.clone()).await,
+        std::slice::from_ref(&ordinary_added)
+    );
+    assert_eq!(count(&f, &member, old.clone()).await, 1);
+    assert_eq!(
+        bridge_ids(bridge(&f, &member, "/query", json!([old])).await),
+        std::slice::from_ref(&ordinary_added)
+    );
+    assert_eq!(
+        bridge_count(bridge(&f, &member, "/count", json!([old])).await),
+        1
+    );
+    assert_eq!(sorted(req(&f, &member, asks.clone()).await), system_notices);
+    assert_eq!(count(&f, &member, asks.clone()).await, 2);
+    assert_eq!(
+        sorted(bridge_ids(
+            bridge(&f, &member, "/query", json!([asks])).await
+        )),
+        system_notices
+    );
+    // Replay with `since` works for the asking filter.
+    let mut since = asks.clone();
+    since["since"] = json!(0);
+    assert_eq!(sorted(req(&f, &member, since).await), system_notices);
+    // One filter that names every type reads all three notices.
+    let every_notice = {
+        let mut ids = system_notices.clone();
+        ids.push(ordinary_added.clone());
+        sorted(ids)
+    };
+    assert_eq!(sorted(req(&f, &member, all.clone()).await), every_notice);
+    assert_eq!(count(&f, &member, all.clone()).await, 3);
+    assert_eq!(
+        sorted(bridge_ids(
+            bridge(&f, &member, "/query", json!([all])).await
+        )),
+        every_notice
+    );
+
+    // A notice stored before notices had a type tag counts as a legacy type:
+    // filters without `#t`, and filters that name a legacy type, read it.
+    let legacy_channel = Uuid::new_v4().to_string();
+    let legacy = nostr::EventBuilder::new(
+        nostr::Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16),
+        "",
+    )
+    .tags([
+        nostr::Tag::parse(["p", &member_hex]).unwrap(),
+        nostr::Tag::parse(["h", &legacy_channel]).unwrap(),
+    ])
+    .sign_with_keys(&f.state.relay_keypair)
+    .expect("sign");
+    f.state
+        .db
+        .insert_event(f.tenant.community(), &legacy, None)
+        .await
+        .expect("store legacy notice");
+    let legacy_id = legacy.id.to_hex();
+    let with_legacy = |ids: &[String]| {
+        let mut ids = ids.to_vec();
+        ids.push(legacy_id.clone());
+        sorted(ids)
+    };
+    assert_eq!(
+        sorted(req(&f, &member, old.clone()).await),
+        with_legacy(std::slice::from_ref(&ordinary_added))
+    );
+    assert_eq!(count(&f, &member, old.clone()).await, 2);
+    assert_eq!(
+        sorted(req(&f, &member, all.clone()).await),
+        with_legacy(&every_notice)
+    );
+    assert_eq!(count(&f, &member, all.clone()).await, 4);
+    assert_eq!(sorted(req(&f, &member, asks.clone()).await), system_notices);
+
+    // Knowing a notice's id is not authorization: only its target reads,
+    // counts or receives it, with or without `kinds`.
+    // Mutation: drop 44100/44101 from RESULT_GATED_KINDS → RED.
+    assert!(
+        outsider_rx.try_recv().is_err(),
+        "live fan-out reached a non-target"
+    );
+    let by_id = |with_kinds: bool| {
+        let mut filter = json!({"ids": system_notices, "#t": ["system"]});
+        if with_kinds {
+            filter["kinds"] = json!(kinds);
+        }
+        filter
+    };
+    for with_kinds in [true, false] {
+        let filter = by_id(with_kinds);
+        assert!(
+            req(&f, &outsider, filter.clone()).await.is_empty(),
+            "{filter}"
+        );
+        assert_eq!(count(&f, &outsider, filter.clone()).await, 0, "{filter}");
+        assert!(
+            bridge_ids(bridge(&f, &outsider, "/query", json!([filter])).await).is_empty(),
+            "{filter}"
+        );
+        assert_eq!(
+            bridge_count(bridge(&f, &outsider, "/count", json!([filter])).await),
+            0,
+            "{filter}"
+        );
+    }
+    // The target's own kindless id lookup still works.
+    assert_eq!(sorted(req(&f, &member, by_id(false)).await), system_notices);
+}
+
+/// The database returns only legacy-type notices unless the query names
+/// other types, so a read path that builds its own `EventQuery` and forgets
+/// the rule still hides system notices.
+/// Mutation: drop `push_notice_visibility` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn the_database_returns_only_legacy_type_notices_by_default() {
+    use buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION;
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let member_hex = member.public_key().to_hex();
+    let system = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    let ordinary = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+    for channel in [system, ordinary] {
+        publish(
+            &f,
+            &owner,
+            9000,
+            "",
+            &[&["h", &channel.to_string()], &["p", &member_hex]],
+        )
+        .await;
+    }
+    // Kindless, but global only: the notices are the only global events
+    // that mention the member.
+    let base = EventQuery {
+        p_tag_hex: Some(member_hex.clone()),
+        global_only: true,
+        ..EventQuery::for_community(f.tenant.community())
+    };
+    let channels_of = |events: Vec<buzz_core::StoredEvent>| {
+        sorted(
+            events
+                .into_iter()
+                .map(|stored| {
+                    stored
+                        .event
+                        .tags
+                        .iter()
+                        .find(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+                        .and_then(|tag| tag.as_slice().get(1).cloned())
+                        .expect("h tag")
+                })
+                .collect(),
+        )
+    };
+    // Notifications are written after the reply; wait for both.
+    let mut all = Vec::new();
+    for _ in 0..50 {
+        all = channels_of(
+            f.state
+                .db
+                .query_events(&EventQuery {
+                    notice_channel_types: Some(vec!["stream".into(), "system".into()]),
+                    ..base.clone()
+                })
+                .await
+                .expect("query"),
+        );
+        if all.len() == 2 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert_eq!(sorted(notified), vec![ordinary.to_string()]);
+    assert_eq!(all, sorted(vec![system.to_string(), ordinary.to_string()]));
+
+    for query in [
+        base.clone(),
+        EventQuery {
+            kinds: Some(vec![KIND_MEMBER_ADDED_NOTIFICATION as i32]),
+            ..base.clone()
+        },
+    ] {
+        assert_eq!(
+            channels_of(f.state.db.query_events(&query).await.expect("query")),
+            [ordinary.to_string()]
+        );
+        assert_eq!(f.state.db.count_events(&query).await.expect("count"), 1);
+    }
+    let only_system = EventQuery {
+        notice_channel_types: Some(vec!["system".into()]),
+        ..base.clone()
+    };
+    assert_eq!(
+        channels_of(f.state.db.query_events(&only_system).await.expect("query")),
+        [system.to_string()]
+    );
+    assert_eq!(
+        f.state.db.count_events(&only_system).await.expect("count"),
+        1
+    );
 }
 
 /// A group-state filter with `#t:["system"]` or any `#P` finds the system

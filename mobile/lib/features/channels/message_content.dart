@@ -30,7 +30,7 @@ import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/emoji/emoji_only.dart';
-import 'channels_provider.dart';
+import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
@@ -224,11 +224,7 @@ class MessageContent extends HookConsumerWidget {
     };
     final resolvedChannelNames = channelNames.isNotEmpty
         ? channelNames
-        : <String, String>{
-            for (final channel
-                in ref.watch(channelsProvider).asData?.value ?? const [])
-              channel.name.toLowerCase(): channel.id,
-          };
+        : ref.watch(channelIdsByNameProvider);
     final channelHandler = useRef(onChannelTap)..value = onChannelTap;
     final resolvedChannelTap = useMemoized(
       () => (String channelId) {

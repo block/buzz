@@ -35,6 +35,21 @@ case "${1:-}:${2:-}" in
   api:repos/block/buzz/git/ref/heads/main) printf '%s\n' "$GH_TARGET_SHA" ;;
   api:repos/block/buzz/git/ref/heads/mobile-v1.2) printf '%s\n' "$GH_STABLE_SHA" ;;
   api:repos/block/buzz/git/ref/heads/*) printf '%s\n' "$GH_MISMATCH_SHA" ;;
+  api:repos/block/buzz/compare/*)
+    [[ "${GH_COMPARE_FAIL:-}" != 1 ]] || exit 1
+    pair="${2##*/}"
+    base="${pair%%...*}"; tip="${pair##*...}"
+    if [[ -n "${GH_EXPECT_COMPARE:-}" ]]; then
+      [[ "$pair" == "$GH_EXPECT_COMPARE" ]] || exit 1
+    fi
+    if [[ -n "${GH_COMPARE_BASE_SHA:-}" ]]; then
+      printf '%s\n' "$GH_COMPARE_BASE_SHA"
+    elif [[ "$base" == "$tip" ]]; then
+      printf '%s\n' "$base"
+    else
+      printf '%s\n' 9999999999999999999999999999999999999999
+    fi
+    ;;
   api:repos/block/buzz/commits/*) printf '%s\n' "${2##*/}" ;;
   api:--paginate)
     [[ "$3" == "repos/block/buzz/git/matching-refs/tags/mobile-v1.2.3-rc." ]]
@@ -116,8 +131,9 @@ if GH_TAG_EXCLUDES=refs/tags/mobile-v0.0.0 "$publisher" 1.2.3 1 "$GH_TARGET_SHA"
   exit 1
 fi
 if GH_TARGET_SHA=3333333333333333333333333333333333333333 \
+    GH_ANNOTATED_TARGET_SHA=1111111111111111111111111111111111111111 \
     "$publisher" 1.2.3 1 1111111111111111111111111111111111111111 main >/dev/null 2>&1; then
-  echo "publisher accepted a moved main branch" >&2
+  echo "publisher accepted a commit outside main history" >&2
   exit 1
 fi
 if GH_EXISTING_REFS=$'refs/tags/mobile-v1.2.3-rc.1\n' \
@@ -164,6 +180,25 @@ if GITHUB_REPOSITORY=attacker/buzz "$publisher" 1.2.3 1 "$GH_TARGET_SHA" main >/
 fi
 
 GH_ANNOTATED_TARGET_SHA="$GH_STABLE_SHA" "$publisher" 1.2.3 1 "$GH_STABLE_SHA" mobile-v1.2
+# Old commits are accepted only when the immutable compare proves ancestry.
+old_sha=6666666666666666666666666666666666666666
+for source in main mobile-v1.2; do
+  tip="$GH_TARGET_SHA"
+  [[ "$source" != mobile-v1.2 ]] || tip="$GH_STABLE_SHA"
+  GH_COMPARE_BASE_SHA="$old_sha" GH_EXPECT_COMPARE="$old_sha...$tip" GH_ANNOTATED_TARGET_SHA="$old_sha" \
+    "$publisher" 1.2.3 1 "$old_sha" "$source"
+  before_calls="$(wc -l < "$GH_CALLS")"
+  for mode in unrelated unavailable; do
+    if GH_COMPARE_FAIL="$([[ "$mode" == unavailable ]] && echo 1 || echo 0)" \
+      GH_COMPARE_BASE_SHA="$GH_MISMATCH_SHA" GH_ANNOTATED_TARGET_SHA="$old_sha" \
+      "$publisher" 1.2.3 1 "$old_sha" "$source" >/dev/null 2>&1; then
+      echo "publisher accepted $mode ancestry for $source" >&2
+      exit 1
+    fi
+  done
+  [[ "$(wc -l < "$GH_CALLS")" == "$before_calls" ]]
+done
+
 for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary ''; do
   if GH_ANNOTATED_TARGET_SHA="$GH_MISMATCH_SHA" "$publisher" 1.2.3 1 "$GH_MISMATCH_SHA" "$source" >/dev/null 2>&1; then
     echo "publisher accepted mismatched source '$source'" >&2

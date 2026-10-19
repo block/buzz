@@ -186,9 +186,52 @@ a system channel stays an ordinary NIP-29 group.
 The relay decides this for each filter. A filter that names a system channel
 does not add it to another filter in the same request.
 
-The relay MUST NOT send push notifications or kind:44100/44101 membership
-notifications for system channels. A client that received one would show the
-channel.
+The relay MUST NOT send push notifications for system channels.
+
+### Membership notices carry the channel type
+
+Every kind:44100 (added) and kind:44101 (removed) notice has one more tag,
+`["t", <channel_type>]`, for example `["t", "stream"]` or `["t", "system"]`.
+The relay sets it from the channel type when it sends the notice. A channel's
+type does not change. The relay stores the notice like any other 44100/44101.
+
+A client sees a notice only if it knows the notice's channel type. Old
+clients do not know types added later, such as `system`, and would show the
+channel from such a notice. So the relay MUST apply this rule:
+
+- **A filter with `#t`** matches a notice only when the notice's type is one
+  of the `#t` values.
+- **A filter without `#t`** matches a notice only when its type is one of the
+  **legacy types**: `stream`, `forum`, `dm`, `workflow`. This list is fixed.
+  A type added later is never on it, so old clients never see its notices.
+- **A notice without a `t` tag** was stored before this rule. Every such
+  notice is about a legacy type, so the relay treats it as all of them: it
+  matches a filter without `#t`, and a filter whose `#t` has a legacy type.
+  On these two kinds, this replaces the plain NIP-01 `#t` match.
+
+The rule applies on every path: REQ history, live delivery, COUNT, and any
+relay-specific query API. Existing clients do not send `#t` on these kinds,
+so they see no change.
+
+A client that knows every current type sends one filter:
+
+```json
+{"kinds": [44100, 44101], "#p": ["<me>"], "#t": ["stream", "forum", "dm", "workflow", "system"]}
+```
+
+When Buzz adds a type, a client adds its value to `#t` when it supports that
+type.
+
+The `#p` rule for 44100/44101 still applies: it must be the reader's own
+pubkey. An `ids` filter does not lift it: the relay returns, counts or
+delivers a 44100/44101 only to the pubkey in its `p` tag, even to a reader
+who knows the event id.
+
+Because the notices are stored, a client that reconnects can set `since` to
+the newest notice it has seen. One subscription then returns the notices it
+missed and the new ones, so no change falls between a read and a
+subscription. A notice is a hint: the channel's group-state events decide
+membership.
 
 ### Asking for system channels
 

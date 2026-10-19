@@ -58,8 +58,7 @@ jobs:
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
 
   # Mobile lanes run in parallel; the required check reads the combined
-  # matrix result. `flutter test` shards split tests, not files, so every test
-  # shard still compiles the whole suite.
+  # matrix result. Test shards split files, so each compiles only its own.
   mobile:
     name: Mobile (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -134,7 +133,22 @@ jobs:
         run: cd mobile && flutter analyze
       - name: Test
         if: matrix.lane == 'test'
-        run: cd mobile && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example --total-shards=3 --shard-index=${{ matrix.shard }}
+        run: /bin/bash scripts/mobile-test-shard.sh ${{ matrix.shard }} 3 --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+      - name: Test configured authentication domains
+        if: matrix.lane == 'checks'
+        run: >-
+          cd mobile && flutter test
+          --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+          --dart-define=BUZZ_AUTH_DOMAINS=buzz.xyz,builderlab.xyz,builderlabstaging.xyz
+          test/shared/auth/community_entry_requirements_test.dart
+          test/features/invites/invite_join_provider_test.dart
+          test/features/onboarding/onboarding_entry_routes_test.dart
+          test/shared/hosted/hosted_environment_test.dart
+          test/shared/hosted/self_hosted_entry_test.dart
+          test/features/onboarding/hosted_app_gate_environment_test.dart
+          test/features/onboarding/hosted_journeys_test.dart
+          test/features/onboarding/hosted_communities_test.dart
+          test/features/pairing/pairing_hosted_handoff_test.dart
       - name: Test mobile without push configuration
         if: matrix.lane == 'checks'
         run: cd mobile && flutter test test/shared/push/push_unconfigured_build_test.dart
@@ -150,9 +164,20 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle*', 'mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/pubspec.lock') }}
           restore-keys: gradle-${{ runner.os }}-
+      # SDK component and plugin downloads intermittently fail on hosted
+      # runners; retry once only for those, so real build failures still fail.
       - name: Build Android debug APK
         if: matrix.lane == 'android'
-        run: just mobile-build-android
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/android-build.log"
+          if ! just mobile-build-android 2>&1 | tee "$log"; then
+            grep -qE 'InstallFailedException|Could not (resolve|GET|download)' "$log"
+            just mobile-build-android
+          fi
+      - name: Test Android JVM units
+        if: matrix.lane == 'android'
+        run: cd mobile/android && ./gradlew :app:testDebugUnitTest --console=plain
       - name: Save Gradle cache
         if: matrix.lane == 'android' && github.event_name == 'push'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -183,36 +208,43 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Install Flutter dependencies
         run: cd mobile && flutter pub get
-      - name: Build
-        if: matrix.lane == 'native'
-        run: swift build --package-path mobile/ios/BuzzPushKit
-      - name: Build release
-        if: matrix.lane == 'native'
-        run: swift build -c release --package-path mobile/ios/BuzzPushKit
+      # `swift test` builds BuzzPushKit; the Release lane covers its release build.
       - name: Test
         if: matrix.lane == 'native'
         run: swift test --package-path mobile/ios/BuzzPushKit
       - name: Test native pagination geometry
         if: matrix.lane == 'native'
         run: /bin/bash scripts/test-mobile-pagination.sh
-      - name: Build complete iOS simulator app
+      - name: Generate iOS build configuration
         if: matrix.lane == 'native'
-        run: cd mobile && flutter build ios --simulator --debug --no-pub
-      - name: Test native controls and push navigation bridge
+        run: cd mobile && flutter build ios --simulator --debug --no-pub --config-only
+      # Build the complete simulator app and RunnerTests once, in the
+      # background, while the simulator boots and runs the native-control
+      # scripts. The build also guards Apple Silicon simulator linking (#7646).
+      - name: Test native controls and Runner unit tests
         if: matrix.lane == 'native'
         run: |
-          device=$(xcrun simctl create "Pagination accessibility" "iPhone 16")
+          device=$(xcrun simctl create "Native tests" "iPhone 16")
           trap 'xcrun simctl shutdown "$device"; xcrun simctl delete "$device"' EXIT
+          xcode=(xcodebuild -workspace mobile/ios/Runner.xcworkspace -scheme Runner
+            -configuration Debug -destination "platform=iOS Simulator,id=$device"
+            CODE_SIGNING_ALLOWED=NO)
+          build_log="$RUNNER_TEMP/runner-build.log"
+          "${xcode[@]}" build-for-testing > "$build_log" 2>&1 &
+          build=$!
           xcrun simctl boot "$device"
           xcrun simctl bootstatus "$device" -b
           /bin/bash scripts/test-mobile-pagination-accessibility.sh "$device"
           /bin/bash scripts/test-mobile-carousel.sh "$device"
           /bin/bash scripts/test-mobile-member-picker.sh "$device"
-          xcodebuild -workspace mobile/ios/Runner.xcworkspace -scheme Runner \
-            -configuration Debug -destination "platform=iOS Simulator,id=$device" \
-            -parallel-testing-enabled NO \
-            -only-testing:RunnerTests/BuzzPushNavigationBridgeTests \
-            CODE_SIGNING_ALLOWED=NO test
+          /bin/bash scripts/test-mobile-me-agent-accessibility.sh "$device"
+          if ! wait "$build"; then
+            cat "$build_log"
+            exit 1
+          fi
+          tail -n 5 "$build_log"
+          "${xcode[@]}" -parallel-testing-enabled NO -only-testing:RunnerTests \
+            test-without-building
       - name: Build complete unsigned iOS release
         if: matrix.lane == 'release'
         run: |

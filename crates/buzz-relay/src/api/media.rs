@@ -338,7 +338,8 @@ pub(crate) async fn upload_blob(
         let strict = BlossomStrictness::Strict;
         buzz_media::auth::verify_blossom_auth_event(&event, Some(&tenant_host), strict)
             .map_err(drop)
-    });
+    })
+    .await;
     let headers_clone = headers.clone();
     let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
         let auth_event = extract_blossom_auth(&headers_clone).map_err(|e| e.into_response())?;
@@ -348,7 +349,9 @@ pub(crate) async fn upload_blob(
             .map_err(|e| e.into_response())?;
         let pubkey = auth_event.pubkey;
         Ok(Nip98Proof::new(pubkey, auth_event))
-    }) {
+    })
+    .await
+    {
         Ok(a) => a,
         Err(resp) => return resp,
     };
@@ -853,12 +856,15 @@ pub(crate) async fn get_blob(
             BlossomStrictness::Strict,
         )
         .map(drop)
-    });
+    })
+    .await;
     let proof_sha256 = sha256.clone();
     let admission = match admit_nip_fi_http_on_state(&state, &req_headers, move || {
         extract_blossom_read_proof(&headers_clone, &proof_sha256, &tenant_host, strictness)
             .map_err(|e| e.into_response())
-    }) {
+    })
+    .await
+    {
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };
@@ -1155,12 +1161,15 @@ pub(crate) async fn head_blob(
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "blossom", || {
         extract_blossom_read_proof(&headers, &sha256, &tenant_host, BlossomStrictness::Strict)
             .map(drop)
-    });
+    })
+    .await;
     let proof_sha256 = sha256.clone();
     let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
         extract_blossom_read_proof(&headers_clone, &proof_sha256, &tenant_host, strictness)
             .map_err(|e| e.into_response())
-    }) {
+    })
+    .await
+    {
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };

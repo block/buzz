@@ -4839,6 +4839,29 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         .expect("contender reached community row lock");
     }
 
+    async fn wait_for_community_lock_waiters(db: &Db, community: CommunityId, waiters: i64) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let queued: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_locks \
+                     WHERE locktype = 'advisory' AND objsubid = 1 AND NOT granted \
+                       AND ((classid::bigint << 32) | objid::bigint) \
+                           = community_deletion_lock_key($1)",
+                )
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("inspect community lock queue");
+                if queued >= waiters {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("contenders queued on community lock");
+    }
+
     async fn membership_roles(db: &Db, community: CommunityId) -> Vec<(String, String)> {
         sqlx::query_as(
             "SELECT pubkey, role FROM relay_members WHERE community_id = $1 ORDER BY pubkey",
@@ -6784,7 +6807,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
                 .abort(request.id, "operator", "race recovery")
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Postgres grants queued advisory locks in arrival order, so abort must
+        // be queued before fence is spawned for the outcome to be deterministic.
+        wait_for_community_lock_waiters(&db, request.community_id, 1).await;
         assert!(
             !aborting.is_finished(),
             "abort must wait for the community lock"
@@ -6792,7 +6817,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let forward_store = store.clone();
         let lease = claim.lease.clone();
         let forwarding = tokio::spawn(async move { forward_store.fence(&lease).await });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_for_community_lock_waiters(&db, request.community_id, 2).await;
         assert!(
             !forwarding.is_finished(),
             "fence must queue on the same lock"

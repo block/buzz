@@ -2,7 +2,15 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-String channelStarsKey(String pubkey) => 'buzz.channel-stars.v1:$pubkey';
+import '../../../shared/theme/community_theme_preference.dart';
+
+/// Channel ids belong to one community, so the cache is keyed by relay as
+/// well as identity. One identity can be paired with several communities.
+String channelStarsKey(String pubkey, String relayUrl) =>
+    'buzz.channel-stars.v1:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
+
+/// The earlier key, shared by every community of the identity.
+String legacyChannelStarsKey(String pubkey) => 'buzz.channel-stars.v1:$pubkey';
 
 class ChannelStarEntry {
   final bool starred;
@@ -65,8 +73,11 @@ class ChannelStarsStorage {
 
   ChannelStarsStorage(this._prefs);
 
-  ChannelStarStore read(String pubkey) {
-    final raw = _prefs.getString(channelStarsKey(pubkey));
+  ChannelStarStore read(String pubkey, String relayUrl) {
+    // The shared entry may hold another community's channels, and the relay
+    // copy is authoritative, so drop it rather than let one community claim it.
+    _prefs.remove(legacyChannelStarsKey(pubkey));
+    final raw = _prefs.getString(channelStarsKey(pubkey, relayUrl));
     if (raw == null || raw.isEmpty) {
       return const ChannelStarStore();
     }
@@ -85,6 +96,9 @@ class ChannelStarsStorage {
     }
   }
 
-  Future<bool> write(String pubkey, ChannelStarStore store) =>
-      _prefs.setString(channelStarsKey(pubkey), jsonEncode(store.toJson()));
+  Future<bool> write(String pubkey, String relayUrl, ChannelStarStore store) =>
+      _prefs.setString(
+        channelStarsKey(pubkey, relayUrl),
+        jsonEncode(store.toJson()),
+      );
 }

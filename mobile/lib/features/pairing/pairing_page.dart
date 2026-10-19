@@ -1,4 +1,9 @@
 import 'dart:async';
+import '../../shared/hosted/hosted_flow_provider.dart';
+import '../../shared/hosted/hosted_flow.dart';
+import '../../shared/hosted/hosted_community_creation.dart';
+import '../../shared/hosted/hosted_environment.dart';
+import '../../shared/hosted/hosted_flow_problem_message.dart';
 import 'dart:math' show sqrt2;
 import 'dart:ui' show ImageFilter;
 
@@ -12,6 +17,9 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/error_haptic.dart';
+import '../../shared/deeplink/deep_link.dart';
+import '../../shared/deeplink/community_link_input.dart';
+import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/community/community.dart';
 import '../../shared/community/community_loading_surface.dart';
 import '../../shared/theme/theme.dart';
@@ -25,6 +33,7 @@ part 'pairing_page/onboarding_background.dart';
 part 'pairing_page/onboarding_colors.dart';
 part 'pairing_page/onboarding_glass_button.dart';
 part 'pairing_page/pairing_welcome_view.dart';
+part 'pairing_page/community_link_form.dart';
 part 'pairing_page/sas_verification_view.dart';
 part 'pairing_page/pairing_code_entry.dart';
 part 'pairing_page/pairing_error_shake.dart';
@@ -34,11 +43,37 @@ class PairingPage extends HookConsumerWidget {
   /// (user is already authenticated with at least one community).
   final bool addingCommunity;
   final bool identityRecoveryOnly;
+  final VoidCallback? onAlreadyUseBuzz;
+  final VoidCallback? onWelcomeBack;
+  final bool connectionLanding;
+  final bool existingUser;
+  final bool enteringCommunityLink;
+  final bool creatingCommunity;
+  final ValueChanged<String>? onSubmitCommunity;
+  final VoidCallback? onCommunityLink;
+  final VoidCallback? onCreateCommunity;
+  final VoidCallback? onBuilderlab;
+  final String? accountStatus;
+  final Widget? setupContent;
+  final String builderlabLabel;
 
   const PairingPage({
     super.key,
     this.addingCommunity = false,
     this.identityRecoveryOnly = false,
+    this.onAlreadyUseBuzz,
+    this.onWelcomeBack,
+    this.connectionLanding = false,
+    this.existingUser = false,
+    this.enteringCommunityLink = false,
+    this.creatingCommunity = false,
+    this.onSubmitCommunity,
+    this.onCommunityLink,
+    this.onCreateCommunity,
+    this.onBuilderlab,
+    this.accountStatus,
+    this.setupContent,
+    this.builderlabLabel = 'Connect to Builderlab',
   });
 
   @override
@@ -71,6 +106,14 @@ class PairingPage extends HookConsumerWidget {
 
     Future<void> handleScannerResult(String? code) async {
       if (code != null && context.mounted) {
+        if (connectionLanding && !existingUser) {
+          final uri = Uri.tryParse(code.trim());
+          final link = uri == null ? null : parseBuzzDeepLink(uri);
+          if (link is InviteDeepLink || link is AddCommunityDeepLink) {
+            ref.read(pendingDeepLinkProvider.notifier).open(uri!);
+            return;
+          }
+        }
         if (identityRecoveryOnly &&
             Uri.tryParse(code)?.queryParameters['mode'] != 'recover') {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -222,6 +265,23 @@ class PairingPage extends HookConsumerWidget {
                 appBar: pairingAppBar,
                 body: SafeArea(
                   child: _PairingWelcomeView(
+                    onAlreadyUseBuzz: onAlreadyUseBuzz,
+                    onWelcomeBack: onWelcomeBack,
+                    connectionLanding: connectionLanding,
+                    existingUser: existingUser,
+                    enteringCommunityLink: enteringCommunityLink,
+                    creatingCommunity: creatingCommunity,
+                    onSubmitCommunity: onSubmitCommunity,
+                    onCommunityLink: onCommunityLink,
+                    onCreateCommunity: onCreateCommunity,
+                    onOpenCommunity: (uri) {
+                      FocusManager.instance.primaryFocus?.unfocus();
+                      ref.read(pendingDeepLinkProvider.notifier).open(uri);
+                    },
+                    onBuilderlab: onBuilderlab,
+                    accountStatus: accountStatus,
+                    setupContent: setupContent,
+                    builderlabLabel: builderlabLabel,
                     codeController: codeController,
                     isBusy: isBusy,
                     pairingCodeExpanded: pairingCodeExpanded.value,

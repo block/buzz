@@ -138,6 +138,21 @@ void main() {
         appBar.nativeActions!
             .singleWhere((action) => action.label == 'Settings')
             .onPressed!();
+        // Mid-transition, Home's native bars still composite beneath Settings;
+        // the presence pill must stay drawn by Flutter until the route settles.
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(
+          find.byKey(const ValueKey('settings-presence-menu')),
+          findsNothing,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('settings-presence-target')),
+            matching: find.text('Offline'),
+          ),
+          findsOneWidget,
+        );
       } else {
         await tester.tap(find.byType(ProfileAvatar));
       }

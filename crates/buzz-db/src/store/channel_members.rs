@@ -1283,8 +1283,29 @@ pub async fn get_readable_system_channel_ids(
         .collect()
 }
 
+/// The type of channel `channel_id`, deleted or not, or `None` when no such
+/// channel exists. Membership notices carry it as their `t` tag (NIP-CL).
+pub async fn channel_type_of(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Option<String>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    Ok(sqlx::query_scalar(
+        "SELECT channel_type::text FROM channels WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(&mut *connection)
+    .await?)
+}
+
 /// The IDs in `channel_ids` that name system channels, deleted or not.
-/// Push matching and membership notifications use it to skip them.
+/// Push matching uses it to skip them.
 pub async fn system_channel_ids_among(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1947,6 +1968,17 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
         get_readable_system_channel_ids(&self.pool, community_id, pubkey).await
+    }
+
+    /// The type of channel `channel_id`, deleted or not, or `None` when no
+    /// such channel exists.
+    #[datastore_span(name = "channel_type_of", system = "postgresql")]
+    pub async fn channel_type_of(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Option<String>> {
+        channel_type_of(&self.pool, community_id, channel_id).await
     }
 
     /// The IDs in `channel_ids` that name system channels, deleted or not.

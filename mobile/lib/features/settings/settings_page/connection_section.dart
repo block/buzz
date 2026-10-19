@@ -20,6 +20,23 @@ class _ConnectionSection extends ConsumerWidget {
       verticalPadding: Grid.twelve,
       children: [
         AppListRow(
+          title: 'Export private key',
+          subtitle: 'Save an nsec backup of this community identity',
+          trailing: const _RowChevron(),
+          onTap: () => showNsecExportSheet(
+            context,
+            community: community,
+            isCurrent: () {
+              if (!context.mounted) return false;
+              final current = ref.read(authProvider).value?.community;
+              return current?.id == community.id &&
+                  current?.nsec == community.nsec &&
+                  current?.sensitiveActionPolicy ==
+                      community.sensitiveActionPolicy;
+            },
+          ),
+        ),
+        AppListRow(
           title: 'Send identity to desktop',
           subtitle: 'Scan a recovery code shown by Buzz Desktop',
           trailing: const _RowChevron(),

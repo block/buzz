@@ -416,14 +416,6 @@ void main() {
     },
   );
 
-  // Transport: request sink must be closed before send().
-  //
-  // Real-IO loopback probes (TestWidgetsFlutterBinding intercepts HttpClient
-  // within this suite) live in video_viewer_transport_test.dart, which uses
-  // plain test() without TestWidgetsFlutterBinding.  The fake drain probe
-  // below covers the same contract without the binding conflict.
-  //
-  //
   // Red-with-old-code: before the fix the `localController` was created but
   // only published to `controller.value` after a successful initialize()+play().
   // On error the outer `catch (loadError)` ran without ever calling
