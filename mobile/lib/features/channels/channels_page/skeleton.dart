@@ -83,6 +83,17 @@ class _ChannelSkeletonSection extends StatelessWidget {
             ),
             child: Row(
               children: [
+                const SizedBox(
+                  width: _kChannelLeadingWidth,
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: SkeletonBar(
+                      width: _kChannelIconSize,
+                      height: _kChannelIconSize,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: _kChannelLabelGap),
                 SkeletonBar(
                   key: Key('channels-skeleton-row-label-$index'),
                   width: widths[index],

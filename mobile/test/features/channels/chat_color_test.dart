@@ -2,6 +2,7 @@ import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -37,7 +38,7 @@ void main() {
           )
           .toList();
       expect(bubbles[0].color, theme.extension<ChatColors>()!.outgoing);
-      expect(bubbles[1].color, theme.colorScheme.secondaryContainer);
+      expect(bubbles[1].color, receivedMessageSurface(brightness));
       final text = tester
           .widgetList<RichText>(find.byType(RichText))
           .firstWhere((text) => text.text.toPlainText() == 'My message');
@@ -57,6 +58,96 @@ void main() {
       inspect(text.text, null);
       expect(colors, [Colors.white]);
     });
+  }
+
+  for (final brightness in Brightness.values) {
+    for (final choice in chatColorChoices) {
+      testWidgets('markdown stays readable on ${choice.name} in $brightness', (
+        tester,
+      ) async {
+        final theme = mobileAppearanceTheme(brightness, choice.wireValue);
+        final ink = theme.extension<ChatColors>()!.foreground;
+        expect(
+          ink,
+          chatForegroundForScheme(
+            theme.colorScheme,
+            chatColorIndex(choice.wireValue),
+          ),
+        );
+        final expectedLink = ink;
+        await tester.pumpWidget(
+          ProviderScope(
+            child: MaterialApp(
+              theme: theme,
+              home: const AppMarkdownTheme(
+                child: Scaffold(
+                  body: SingleChildScrollView(
+                    child: MessageContent(
+                      content:
+                          '# Heading\n\n[Link](https://example.com) and `code`\n\n'
+                          '> Quote\n\n| Header |\n| --- |\n| Cell |',
+                      bubble: true,
+                      ownMessage: true,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final markdown = find.byType(GptMarkdown);
+        final context = tester.element(markdown);
+        final data = GptMarkdownTheme.of(context);
+        expect(data.h1?.color, ink);
+        expect(data.linkColor, expectedLink);
+        expect(data.inlineCode.color, ink);
+        expect(data.inlineCode.backgroundColor, ink.withValues(alpha: 0.18));
+        expect(Theme.of(context).colorScheme.primary, expectedLink);
+        final sheet = tester.widget<GptMarkdown>(markdown).styleSheet!;
+        expect(sheet.blockQuote?.barColor, ink);
+        expect(sheet.table?.headerTextStyle?.color, ink);
+        // Inline code keeps the white ink on a translucent chip over the accent.
+        final codes = <CodeTextSpan>[];
+        for (final rich in tester.widgetList<RichText>(
+          find.byWidgetPredicate((widget) => widget is RichText),
+        )) {
+          rich.text.visitChildren((span) {
+            if (span is CodeTextSpan && span.text == 'code') codes.add(span);
+            return true;
+          });
+        }
+        for (final label in ['Heading', 'Quote', 'Header', 'Cell']) {
+          final renderedColors = <Color?>[];
+          void inspect(InlineSpan span, TextStyle? inherited) {
+            final effective = inherited?.merge(span.style) ?? span.style;
+            if (span is TextSpan) {
+              if (span.text?.trim() == label) {
+                renderedColors.add(effective?.color);
+              }
+              for (final child in span.children ?? const <InlineSpan>[]) {
+                inspect(child, effective);
+              }
+            }
+          }
+
+          for (final rich in tester.widgetList<RichText>(
+            find.byWidgetPredicate((widget) => widget is RichText),
+          )) {
+            inspect(rich.text, null);
+          }
+          expect(renderedColors, isNotEmpty, reason: label);
+          expect(renderedColors, everyElement(ink), reason: label);
+        }
+        expect(codes, hasLength(1));
+        expect(codes.single.style?.color, ink);
+        expect(
+          codes.single.codeStyle.backgroundColor,
+          ink.withValues(alpha: 0.18),
+        );
+        expect(tester.takeException(), isNull);
+      });
+    }
   }
 
   testWidgets('System follows platform brightness with the same chat choice', (

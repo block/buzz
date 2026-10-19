@@ -238,6 +238,7 @@ Widget _buildTestable({
   ProfileNotifier? profileNotifier,
   String? signingPubkey,
   bool darkTheme = false,
+  String? chatColor,
   bool personalChat = false,
   required List<NostrEvent> messages,
   PresenceCacheNotifier? presenceCache,
@@ -465,7 +466,14 @@ Widget _buildTestable({
     ],
     child: MaterialApp(
       navigatorKey: navigatorKey,
-      theme: darkTheme ? AppTheme.dark() : AppTheme.light(),
+      theme: chatColor != null
+          ? mobileAppearanceTheme(
+              darkTheme ? Brightness.dark : Brightness.light,
+              chatColor,
+            )
+          : darkTheme
+          ? AppTheme.dark()
+          : AppTheme.light(),
       builder: (context, child) => MediaQuery(
         data: MediaQuery.of(context).copyWith(
           textScaler: textScaler,

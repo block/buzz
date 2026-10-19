@@ -4,13 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'accent_colors.dart';
+import 'chat_colors.dart';
 import 'theme_catalog.dart';
 import 'theme_provider.dart' show effectiveTheme, schemeForAppearanceMode;
 
 const communityThemeDTag = 'community-theme';
 const defaultCommunityTheme = CommunityThemePreference(
   theme: 'buzz',
-  accent: '#3b82f6',
+  accent: 'chartreuse',
   followSystem: true,
 );
 
@@ -32,7 +33,10 @@ class CommunityThemePreference {
         json['theme'] is! String ||
         findTheme(json['theme'] as String) == null ||
         json['accent'] is! String ||
-        accentIndexForWireValue(json['accent'] as String) == null ||
+        (accentIndexForWireValue(json['accent'] as String) == null &&
+            !chatColorChoices.any(
+              (color) => color.wireValue == json['accent'],
+            )) ||
         json['followSystem'] is! bool) {
       throw const FormatException('Invalid community theme preference');
     }
@@ -157,7 +161,9 @@ class CommunityThemeStorage {
     };
     return CommunityThemePreference(
       theme: resolvedTheme,
-      accent: legacyAccentWireValue(legacyAccent),
+      accent: legacyAccent == null
+          ? defaultCommunityTheme.accent
+          : legacyAccentWireValue(legacyAccent),
       followSystem: mode == ThemeMode.system,
     );
   }

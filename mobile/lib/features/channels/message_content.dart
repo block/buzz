@@ -200,12 +200,9 @@ class MessageContent extends HookConsumerWidget {
     final markdownTheme = GptMarkdownTheme.of(context);
     final chatColors = ChatColors.of(context);
     final ownTextColor = chatColors.foreground;
-    // Desktop uses blue links on neutral bubbles and the bubble ink on colors.
-    final linkColor = ownMessage && ownTextColor == Colors.white
-        ? ownTextColor
-        : context.colors.brightness == Brightness.dark
-        ? const Color(0xFF83C4FF)
-        : const Color(0xFF0B5FA8);
+    // Own-bubble links share the bubble ink; markdown marks them by underline.
+    final linkColor = ownMessage ? ownTextColor : context.colors.tertiary;
+    final bubbleInk = ownMessage ? ownTextColor : context.colors.onSurface;
     final baseTextStyle =
         (baseStyle ??
                 context.textTheme.bodyMedium?.copyWith(
@@ -361,12 +358,27 @@ class MessageContent extends HookConsumerWidget {
       child: GptMarkdown(
         text,
         style: style,
+        styleSheet: bubble
+            ? GptMarkdownStyleSheet(
+                blockQuote: BlockQuoteStyle(barColor: bubbleInk),
+                hr: HrStyle(color: bubbleInk.withValues(alpha: 0.3)),
+                table: TableStyle(
+                  borderColor: bubbleInk.withValues(alpha: 0.3),
+                  headerBackground: Colors.transparent,
+                  headerTextStyle: TextStyle(color: bubbleInk),
+                ),
+              )
+            : null,
         followLinkColor: false,
         // normalizeBareLinks() already turns bare URLs into Markdown links;
         // gpt_markdown 1.2.0 autolinks by default, so both would run.
         autolink: false,
-        codeBuilder: (context, name, code, closed) =>
-            _MessageCodeBlock(name: name, code: code),
+        codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
+          name: name,
+          code: code,
+          bubble: bubble,
+          ink: bubble && ownMessage ? ownTextColor : null,
+        ),
         linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
           context,
           ref,
@@ -426,7 +438,7 @@ class MessageContent extends HookConsumerWidget {
                     child: LocalSendBubbleSurface(
                       color: ownMessage
                           ? chatColors.outgoing
-                          : context.colors.secondaryContainer,
+                          : receivedMessageSurface(context.colors.brightness),
                       shape: const _MessageBubbleShape(),
                       child: Padding(
                         padding: EdgeInsets.fromLTRB(
@@ -445,6 +457,20 @@ class MessageContent extends HookConsumerWidget {
                           ),
                           child: GptMarkdownTheme(
                             gptThemeData: markdownTheme.copyWith(
+                              linkColor: linkColor,
+                              // A neutral chip would put white ink on a light
+                              // fill; tint the accent instead.
+                              inlineCode: ownMessage
+                                  ? markdownTheme.inlineCode.copyWith(
+                                      color: ownTextColor,
+                                      backgroundColor: ownTextColor.withValues(
+                                        alpha: 0.18,
+                                      ),
+                                      borderColor: ownTextColor.withValues(
+                                        alpha: 0.3,
+                                      ),
+                                    )
+                                  : null,
                               h1: markdownTheme.h1?.copyWith(
                                 color: ownMessage
                                     ? ownTextColor
@@ -869,7 +895,18 @@ class _MessageCodeBlock extends HookWidget {
   final String name;
   final String code;
 
-  const _MessageCodeBlock({required this.name, required this.code});
+  /// Whether the block sits inside a message bubble.
+  final bool bubble;
+
+  /// Text color on an accent bubble; null keeps the neutral highlighted card.
+  final Color? ink;
+
+  const _MessageCodeBlock({
+    required this.name,
+    required this.code,
+    this.bubble = false,
+    this.ink,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -884,83 +921,102 @@ class _MessageCodeBlock extends HookWidget {
       });
     }
 
+    final ink = this.ink;
+    // A fence's closing newline would otherwise render as a blank last line.
+    final shownCode = code.trimRight();
     final codeBaseStyle = TextStyle(
       fontFamily: CodeStyle.fontFamily,
       fontSize: CodeStyle.fontSize,
       height: CodeStyle.lineHeight,
-      color: context.colors.onSurface,
+      color: ink ?? context.colors.onSurface,
     );
     final isDark = context.theme.brightness == Brightness.dark;
     final codeTheme = isDark ? highlightDarkTheme : highlightLightTheme;
+    // Syntax colors are tuned for neutral cards and lose contrast on accents.
     final codeSpans = useMemoized(
-      () => highlightCode(code, name, codeTheme, codeBaseStyle),
-      [code, name, isDark],
+      () => ink == null
+          ? highlightCode(shownCode, name, codeTheme, codeBaseStyle)
+          : [TextSpan(text: shownCode)],
+      [code, name, isDark, ink],
     );
+    final mutedInk = ink?.withValues(alpha: 0.7);
     return Container(
-      margin: const EdgeInsets.only(top: Grid.half),
+      // In a bubble, the vertical margin brings the bubble's 8px vertical
+      // padding up to its 16px side padding, so the block is inset evenly and
+      // its corners stay concentric with the bubble's.
+      margin: bubble
+          ? const EdgeInsets.symmetric(vertical: Grid.xs - Grid.xxs)
+          : const EdgeInsets.only(top: Grid.half),
       decoration: BoxDecoration(
-        color: CodeStyle.background(context.colors),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: CodeStyle.border(context.colors)),
+        color:
+            ink?.withValues(alpha: 0.14) ??
+            CodeStyle.background(context.colors),
+        borderRadius: BorderRadius.circular(
+          bubble ? Radii.container - Grid.xs : 12,
+        ),
+        border: Border.all(
+          color:
+              ink?.withValues(alpha: 0.24) ?? CodeStyle.border(context.colors),
+        ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
+      child: Stack(
         children: [
-          if (name.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(
-                left: Grid.twelve,
-                top: Grid.half + Grid.quarter,
-              ),
-              child: Text(
-                name,
-                style: context.textTheme.labelSmall?.copyWith(
-                  color: context.colors.onSurfaceVariant,
-                ),
-              ),
+          // Even 12px insets; the right side also reserves the copy button.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.twelve,
+              Grid.twelve,
+              Grid.twelve + 28,
+              Grid.twelve,
             ),
-          Stack(
-            children: [
-              Padding(
-                padding: EdgeInsets.fromLTRB(
-                  Grid.twelve,
-                  name.isEmpty ? Grid.half + Grid.quarter : Grid.quarter,
-                  44,
-                  Grid.half + Grid.quarter,
-                ),
-                child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (name.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: Grid.half),
+                    child: Text(
+                      name,
+                      style: context.textTheme.labelSmall?.copyWith(
+                        color: mutedInk ?? context.colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   child: RichText(
                     softWrap: false,
                     text: TextSpan(style: codeBaseStyle, children: codeSpans),
                   ),
                 ),
-              ),
-              Positioned(
-                top: 0,
-                right: Grid.quarter,
-                child: SizedBox(
-                  width: 28,
-                  height: 28,
-                  child: IconButton(
-                    onPressed: handleCopy,
-                    padding: EdgeInsets.zero,
-                    visualDensity: VisualDensity.compact,
-                    style: IconButton.styleFrom(
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                    icon: Icon(
-                      isCopied.value ? BuzzIcons.check : BuzzIcons.copy,
-                      size: 14,
-                      color: isCopied.value
+              ],
+            ),
+          ),
+          Positioned(
+            top: Grid.half + Grid.quarter,
+            right: Grid.half + Grid.quarter,
+            child: SizedBox(
+              width: 28,
+              height: 28,
+              child: IconButton(
+                onPressed: handleCopy,
+                padding: EdgeInsets.zero,
+                visualDensity: VisualDensity.compact,
+                style: IconButton.styleFrom(
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                icon: Icon(
+                  isCopied.value ? BuzzIcons.check : BuzzIcons.copy,
+                  size: 14,
+                  color:
+                      ink ??
+                      (isCopied.value
                           ? context.colors.primary
-                          : context.colors.onSurfaceVariant,
-                    ),
-                  ),
+                          : context.colors.onSurfaceVariant),
                 ),
               ),
-            ],
+            ),
           ),
         ],
       ),

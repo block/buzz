@@ -100,3 +100,17 @@ LinearGradient? buzzTopSectionGradient(
     ],
   );
 }
+
+/// Desktop navigation ink distinguishes read destinations from unread labels.
+Color channelNavigationForeground(BuildContext context, {bool unread = false}) {
+  if (unread || Theme.of(context).brightness != Brightness.dark) {
+    return navigationPrimaryForeground(context);
+  }
+  return Theme.of(context).colorScheme.onSurfaceVariant;
+}
+
+/// Metadata ink used by Home section headings and muted destinations.
+Color navigationMetadataForeground(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? const Color(0xFFA4A4A4)
+    : const Color(0xFF5F5F5F);
