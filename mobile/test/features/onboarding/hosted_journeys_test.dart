@@ -374,7 +374,7 @@ void main() {
         if (boundAccount) f.cloudKeys.add(f.secondKeys);
         await f.tap(tester, 'Continue with Builderlab');
         if (!boundAccount) {
-          expect(find.text('Saved account identity'), findsOneWidget);
+          expect(find.text('Saved identity'), findsOneWidget);
           expect(f.sent('/verify'), isEmpty);
           expect(f.sent('/nsec-backups'), isEmpty);
           expect(await f.store.read(), isNull);
@@ -506,7 +506,7 @@ void main() {
         'my-community.example',
       );
       await f.tap(tester, 'Continue');
-      await f.tap(tester, 'Saved account identity');
+      await f.tap(tester, 'Saved identity');
       final saved = (await f.storage.loadAll()).single;
       expect(saved.relayUrl, 'wss://my-community.example');
       expect(saved.nsec, f.keys.nsec);
@@ -557,8 +557,17 @@ void main() {
         'my-community.example',
       );
       await f.tap(tester, 'Continue');
+      // A refused key must not pin the URL against an explicit allowed choice.
+      f.refusedSelfHostedPubkey = f.keys.public;
+      await f.tap(tester, fullNpub(f.keys.public)!);
+      expect(await f.storage.loadAll(), isEmpty);
+      expect(find.textContaining('Could not join.'), findsOneWidget);
       await f.tap(tester, fullNpub(f.secondKeys.public)!);
       expect((await f.storage.loadAll()).single.nsec, f.secondKeys.nsec);
+      expect(
+        (await AccountIdentityStore().forPairing(f.keys.public).read())!.pubkey,
+        f.keys.public,
+      );
     },
   );
 

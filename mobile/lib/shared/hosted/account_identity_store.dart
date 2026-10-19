@@ -199,11 +199,21 @@ class AccountIdentityStore {
           ),
         );
 
+  // Android readAll decrypts unrelated entries too. An unrelated broken entry
+  // must not prevent reading the legacy/current slot or an explicitly named key.
+  Future<Set<String>> _identityKeys({String? pubkey}) async {
+    try {
+      return (await _storage.readAll()).keys.where(_isIdentityKey).toSet();
+    } catch (_) {
+      return {storageKey, _key, if (pubkey != null) forPairing(pubkey)._key};
+    }
+  }
+
   /// Saved account keys offered for explicit reuse, including pre-scope keys.
   Future<List<AccountIdentitySnapshot>> identities() => _serialized(() async {
-    final records = await _storage.readAll();
+    final keys = await _identityKeys();
     final identities = <String, AccountIdentitySnapshot>{};
-    for (final key in records.keys.where(_isIdentityKey)) {
+    for (final key in keys) {
       final record = await _atKey(key)._read();
       if (record != null) identities[record.pubkey] = record.snapshot;
     }
@@ -224,8 +234,8 @@ class AccountIdentityStore {
 
   Future<String> _savedNsec(String pubkey) => _serialized(() async {
     try {
-      final records = await _storage.readAll();
-      for (final key in records.keys.where(_isIdentityKey)) {
+      final keys = await _identityKeys(pubkey: pubkey);
+      for (final key in keys) {
         final record = await _atKey(key)._read();
         if (record?.pubkey == pubkey) return record!.nsec;
       }

@@ -39,7 +39,7 @@ class SelfHostedEntry {
       ...device,
       for (final account in accounts)
         if (!device.any((item) => item.pubkey == account.pubkey))
-          DeviceIdentityChoice(account.pubkey, 'Saved account identity'),
+          DeviceIdentityChoice(account.pubkey, 'Saved identity'),
     ];
   }
 
@@ -84,9 +84,12 @@ class SelfHostedEntry {
         if (candidate != null &&
             AccountIdentityStore.publicKeyForNsec(candidate) !=
                 retainedPubkey) {
-          throw AccountIdentityFailure.occupied;
+          // An explicit replacement may follow a refused or uncertain probe.
+          // Preserve the previous key before changing the relay's retry slot.
+          await _accountStore.forPairing(retainedPubkey).create(retained);
+          check();
         }
-        candidate = retained;
+        candidate ??= retained;
       }
       if (candidate == null) {
         if (!create || (await choices()).isNotEmpty) {
@@ -96,7 +99,7 @@ class SelfHostedEntry {
       }
       final pubkey = AccountIdentityStore.publicKeyForNsec(candidate);
       check();
-      if (retained == null) {
+      if (retained != candidate) {
         await _storage.write(key: key, value: candidate);
         if (await _storage.read(key: key) != candidate) {
           throw AccountIdentityFailure.unreadable;

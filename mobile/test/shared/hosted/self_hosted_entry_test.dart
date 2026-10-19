@@ -186,18 +186,19 @@ void main() {
   });
 
   test(
-    'different import cannot replace retained key after a failed probe',
+    'explicit replacement preserves refused key and retries the chosen key',
     () async {
       refuseProbe = true;
       await expectLater(prepare(nsec: key.nsec), throwsStateError);
-      final before = Map<String, String>.of(storage.data);
-      await expectLater(
-        prepare(nsec: other.nsec),
-        throwsA(AccountIdentityFailure.occupied),
-      );
-      expect(storage.data, before);
-      expect(storage.writes, 1);
-      expect(probes, hasLength(1));
+      refuseProbe = false;
+      final joined = await prepare(nsec: other.nsec);
+      expect(joined.pubkey, other.public);
+      final retained = AccountIdentityStore(
+        storage: storage,
+      ).forPairing(key.public);
+      expect(await retained.withKeys((keys) async => keys.public), key.public);
+      expect((await prepare(create: true)).pubkey, other.public);
+      expect(probes, hasLength(3));
     },
   );
 

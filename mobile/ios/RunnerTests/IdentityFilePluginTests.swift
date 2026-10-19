@@ -50,8 +50,10 @@ final class IdentityFilePluginTests: XCTestCase {
     // A previous process died with a share open. Startup must remove only its
     // export directory, while preserving unrelated temporary documents.
     let manager = FileManager.default
-    let interrupted = manager.temporaryDirectory.appendingPathComponent("buzz-identity-\(UUID().uuidString)")
-    let unrelated = manager.temporaryDirectory.appendingPathComponent("unrelated-\(UUID().uuidString)")
+    // Matches path_provider_foundation 2.6.0 getTemporaryPath().
+    let exportRoot = try XCTUnwrap(manager.urls(for: .cachesDirectory, in: .userDomainMask).first)
+    let interrupted = exportRoot.appendingPathComponent("buzz-identity-\(UUID().uuidString)")
+    let unrelated = exportRoot.appendingPathComponent("unrelated-\(UUID().uuidString)")
     try manager.createDirectory(at: interrupted, withIntermediateDirectories: true)
     try Data("synthetic-export-not-a-key".utf8).write(to: interrupted.appendingPathComponent("buzz-identity.nsec"))
     try Data("keep".utf8).write(to: unrelated)

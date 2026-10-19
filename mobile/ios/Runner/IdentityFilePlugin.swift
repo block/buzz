@@ -33,18 +33,23 @@ final class IdentityFilePlugin: NSObject, UIDocumentPickerDelegate,
   /// on the next launch; active shares cannot exist while this engine starts.
   private static func removeInterruptedExports() {
     let manager = FileManager.default
-    do {
-      let entries = try manager.contentsOfDirectory(
-        at: manager.temporaryDirectory,
-        includingPropertiesForKeys: nil,
-        options: [.skipsHiddenFiles]
-      )
-      for entry in entries where entry.lastPathComponent.hasPrefix("buzz-identity-") {
-        try manager.removeItem(at: entry)
+    // path_provider_foundation resolves getTemporaryDirectory to Caches.
+    let roots = manager.urls(for: .cachesDirectory, in: .userDomainMask)
+      + [manager.temporaryDirectory]
+    for root in roots {
+      do {
+        let entries = try manager.contentsOfDirectory(
+          at: root,
+          includingPropertiesForKeys: nil,
+          options: [.skipsHiddenFiles]
+        )
+        for entry in entries where entry.lastPathComponent.hasPrefix("buzz-identity-") {
+          try manager.removeItem(at: entry)
+        }
+      } catch {
+        // No path or key material in diagnostics. Retry on the next launch.
+        NSLog("Buzz could not clean up an interrupted identity export")
       }
-    } catch {
-      // No path or key material in diagnostics. Retry on the next launch.
-      NSLog("Buzz could not clean up an interrupted identity export")
     }
   }
 

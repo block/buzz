@@ -60,6 +60,34 @@ void main() {
   }
 
   test(
+    'unrelated enumeration failure preserves known-slot access and errors',
+    () async {
+      final storage = EnumerationFailureStorage();
+      final legacy = AccountIdentityStore(storage: storage);
+      await legacy.create(key.nsec);
+      final scoped = legacy.forSubject('b');
+      final other = nostr.Keys('2'.padLeft(64, '0'));
+      await scoped.create(other.nsec);
+      expect((await scoped.identities()).map((item) => item.pubkey).toSet(), {
+        key.public,
+        other.public,
+      });
+      expect(
+        await scoped.withSavedIdentity(key.public, (value) async => value),
+        key.nsec,
+      );
+      await storage.write(
+        key: AccountIdentityStore.storageKey,
+        value: 'broken',
+      );
+      await expectLater(
+        scoped.identities(),
+        throwsA(AccountIdentityFailure.unreadable),
+      );
+    },
+  );
+
+  test(
     'unreadable storage never allows creation or touches legacy keys',
     () async {
       FlutterSecureStorage.setMockInitialValues({
@@ -225,4 +253,16 @@ class UncertainStorage extends FlutterSecureStorage {
     await super.write(key: key, value: value);
     throw StateError('plugin response lost');
   }
+}
+
+class EnumerationFailureStorage extends FlutterSecureStorage {
+  @override
+  Future<Map<String, String>> readAll({
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async => throw StateError('unrelated entry cannot decrypt');
 }

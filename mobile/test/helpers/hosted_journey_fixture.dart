@@ -45,6 +45,7 @@ class HostedJourneyFixture {
   Future<void> Function()? beforeEnrollmentReturn;
   Future<void> Function()? beforeUploadReturn;
   final probes = <Community>[];
+  String? refusedSelfHostedPubkey;
   final profileWrites = <String>[];
   final recoveryScopes = <InviteJoinRecoveryScope>[];
   final rows = <Map<String, dynamic>>[];
@@ -348,6 +349,9 @@ class HostedJourneyFixture {
             SelfHostedEntry(
               probe: (community) async {
                 probes.add(community);
+                if (community.pubkey == refusedSelfHostedPubkey) {
+                  throw StateError('Community refused entry');
+                }
               },
             ),
           ),

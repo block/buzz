@@ -201,7 +201,7 @@ void main() {
     await tester.tap(find.text('Continue').hitTestable());
     await tester.pumpAndSettle();
     expect(find.byType(SelfHostedEntrySheet), findsOneWidget);
-    await tester.tap(find.text('Saved account identity').hitTestable());
+    await tester.tap(find.text('Saved identity').hitTestable());
     await tester.pumpAndSettle();
     expect(probes, 1);
     expect(find.byType(SelfHostedEntrySheet), findsNothing);

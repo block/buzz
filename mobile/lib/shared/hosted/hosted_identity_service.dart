@@ -106,7 +106,7 @@ class HostedIdentityService {
       ...device,
       for (final saved in savedAccounts)
         if (!device.any((item) => item.pubkey == saved.pubkey))
-          DeviceIdentityChoice(saved.pubkey, 'Saved account identity'),
+          DeviceIdentityChoice(saved.pubkey, 'Saved identity'),
     ];
     _sameAccount(subject);
     checkCurrent();
