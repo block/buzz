@@ -42,3 +42,17 @@ require_mobile_release_branch_ruleset() {
     return 1
   }
 }
+
+# Compare immutable SHAs, not a mutable branch name. The selected branch may
+# advance after this snapshot without changing the authorized candidate source.
+require_mobile_release_commit_ancestor() {
+  local target_sha="$1" source_sha="$2" merge_base
+  merge_base="$(gh api "repos/block/buzz/compare/$target_sha...$source_sha" --jq .merge_base_commit.sha)" || {
+    echo "Could not verify candidate source ancestry" >&2
+    return 1
+  }
+  [[ "$merge_base" == "$target_sha" ]] || {
+    echo "Candidate commit $target_sha is not in selected source history at $source_sha" >&2
+    return 1
+  }
+}

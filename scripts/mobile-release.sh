@@ -4,10 +4,10 @@ set -euo pipefail
 usage() {
   cat >&2 <<'USAGE'
 usage:
-  scripts/mobile-release.sh candidate X.Y.Z [--source-branch mobile-vX.Y]
+  scripts/mobile-release.sh candidate X.Y.Z [--source-branch mobile-vX.Y] [--commit FULL_SHA]
 
 candidate  Publish the next immutable mobile-vX.Y.Z-rc.N candidate tag at the
-           exact current remote source commit (main unless --source-branch is set).
+           selected commit in source history (defaults to the current source tip).
 USAGE
   exit 2
 }
@@ -94,16 +94,12 @@ remote_tag_commit_sha() {
 }
 
 remote_source_commit_sha() {
-  local ref="refs/heads/$MOBILE_RELEASE_SOURCE_BRANCH" line advertised_oid fetched_oid commit
-  line="$(git ls-remote --refs origin "$ref")" || return 1
-  [[ -n "$line" && "$line" != *$'\n'* ]] || return 1
-  advertised_oid="${line%%$'\t'*}"
-  git fetch -q --no-tags origin "$ref"
-  fetched_oid="$(git rev-parse --verify FETCH_HEAD)"
-  [[ "$fetched_oid" == "$advertised_oid" ]] || \
-    fail "origin/$MOBILE_RELEASE_SOURCE_BRANCH moved while it was being resolved"
+  local ref="refs/heads/$MOBILE_RELEASE_SOURCE_BRANCH" fetched_oid commit
+  # Fetch a single snapshot. A later branch advance does not invalidate it.
+  git fetch -q --no-tags origin "$ref" || return 1
+  fetched_oid="$(git rev-parse --verify FETCH_HEAD)" || return 1
   commit="$(git rev-parse --verify 'FETCH_HEAD^{commit}')" || return 1
-  [[ "$commit" == "$advertised_oid" ]] || \
+  [[ "$commit" == "$fetched_oid" ]] || \
     fail "origin/$MOBILE_RELEASE_SOURCE_BRANCH did not resolve directly to a commit"
   printf '%s' "$commit"
 }
@@ -111,13 +107,31 @@ remote_source_commit_sha() {
 command="${1:-}"
 case "$command" in
   candidate)
-    [[ "$#" -eq 2 || "$#" -eq 4 ]] || usage
+    [[ "$#" -ge 2 ]] || usage
     version="$2"
+    shift 2
     MOBILE_RELEASE_SOURCE_BRANCH=main
-    if [[ "$#" -eq 4 ]]; then
-      [[ "$3" == --source-branch ]] || usage
-      MOBILE_RELEASE_SOURCE_BRANCH="$4"
-    fi
+    requested_sha=""
+    source_option_seen=false
+    commit_option_seen=false
+    while [[ "$#" -gt 0 ]]; do
+      [[ "$#" -ge 2 ]] || usage
+      case "$1" in
+        --source-branch)
+          [[ "$source_option_seen" == false ]] || usage
+          source_option_seen=true
+          MOBILE_RELEASE_SOURCE_BRANCH="$2"
+          ;;
+        --commit)
+          [[ "$commit_option_seen" == false ]] || usage
+          commit_option_seen=true
+          requested_sha="$2"
+          [[ "$requested_sha" =~ ^[0-9a-f]{40}$ ]] || fail "--commit requires a full commit SHA"
+          ;;
+        *) usage ;;
+      esac
+      shift 2
+    done
     require_clean_semver "$version"
     require_mobile_release_source "$version" "$MOBILE_RELEASE_SOURCE_BRANCH" || exit 1
     require_clean_tree
@@ -126,7 +140,9 @@ case "$command" in
     require_mobile_release_branch_ruleset "$MOBILE_RELEASE_SOURCE_BRANCH" || exit 1
 
     local_head_sha="$(git rev-parse --verify 'HEAD^{commit}')" || fail "HEAD is not a commit"
-    source_sha="$(remote_source_commit_sha)" || fail "origin/$MOBILE_RELEASE_SOURCE_BRANCH does not exist"
+    source_tip="$(remote_source_commit_sha)" || fail "origin/$MOBILE_RELEASE_SOURCE_BRANCH does not exist"
+    source_sha="${requested_sha:-$source_tip}"
+    require_mobile_release_commit_ancestor "$source_sha" "$source_tip" || exit 1
     next=1
     if ! remote_tags="$(git ls-remote --refs --tags origin "refs/tags/mobile-v${version}-rc.*")"; then
       fail "could not list existing candidates for $version"
@@ -161,17 +177,14 @@ case "$command" in
     gh run watch "$run_id" --repo block/buzz --exit-status --compact || \
       fail "App-backed publication failed: $run_url"
 
-    current_source_sha="$(remote_source_commit_sha)" || fail "origin/$MOBILE_RELEASE_SOURCE_BRANCH does not exist after publication"
-    [[ "$current_source_sha" == "$source_sha" ]] || \
-      fail "origin/$MOBILE_RELEASE_SOURCE_BRANCH moved from requested commit $source_sha to $current_source_sha during publication"
     published_sha="$(remote_tag_commit_sha "refs/tags/$tag")" || \
       fail "publication completed without exact annotated candidate tag $tag"
     [[ "$published_sha" == "$source_sha" ]] || \
       fail "$tag resolved to $published_sha instead of requested commit $source_sha"
     if [[ "$local_head_sha" != "$source_sha" ]]; then
-      echo "Note: local HEAD is $local_head_sha; candidate source is current origin/$MOBILE_RELEASE_SOURCE_BRANCH $source_sha." >&2
+      echo "Note: local HEAD is $local_head_sha; candidate source is pinned from origin/$MOBILE_RELEASE_SOURCE_BRANCH $source_sha." >&2
     fi
-    printf 'Published %s at origin/%s commit %s through buzz-release-bot. Use this exact tag in Release Mobile.\n' \
+    printf 'Published %s at pinned origin/%s commit %s through buzz-release-bot. Use this exact tag in Release Mobile.\n' \
       "$tag" "$MOBILE_RELEASE_SOURCE_BRANCH" "$source_sha"
     ;;
 

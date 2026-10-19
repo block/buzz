@@ -135,11 +135,13 @@ release notes and require operators to upgrade before distributing these clients
 1. **Publish a candidate.** From a clean checkout whose `origin` is the
    canonical `block/buzz` repository, run
    `scripts/mobile-release.sh candidate X.Y.Z`. The script resolves and fetches
-   the exact current `origin/main` commit, derives the next number from exact
+   a snapshot of `origin/main`, derives the next number from exact
    remote tags for that marketing version, and publishes an annotated
    `mobile-vX.Y.Z-rc.N` tag there through the dedicated `buzz-release-bot`
    GitHub App. It never uses the operator's checked-out commit and never moves
-   an existing candidate.
+   an existing candidate. To select a historical commit, add `--commit FULL_SHA`.
+   Both operator and publisher require that commit to be in the selected source
+   branch's history. Later branch advances do not change or invalidate the tag.
 2. **Build the exact tag.** Enter the candidate tag as `mobile_ref` in the
    private Buzz mobile Buildkite pipeline. OSS CI deliberately cannot trigger
    that private pipeline. The tag supplies both source commit and release
@@ -168,7 +170,9 @@ scripts/mobile-release.sh candidate 0.25.0 --source-branch mobile-v0.25
 The branch must match the marketing version's major and minor components:
 `mobile-v0.25` accepts 0.25.x, but rejects 0.26.x and 1.25.x. Without the option,
 the source remains `main`. Both the operator and publisher validate the source;
-a missing branch or changed tip fails rather than falling back to `main`.
+a missing branch or a commit outside its history fails rather than falling back
+to `main`. `--commit FULL_SHA` also works with a stable source branch, whose
+review and check protections remain required.
 The GitHub workflow itself continues to run from reviewed `main`. The private
 pipeline still builds only the resulting immutable candidate tag.
 
@@ -191,7 +195,8 @@ Never merge `main` wholesale.
 Remote agents and App Clip are post-conference work. There is no preselected
 fix list and no requirement to create a stable branch for every minor release.
 
-The initial 0.25.0 candidate uses an empty commit above that baseline to verify
+The initial 0.25.0 candidate pins that baseline with `--commit`. The second
+candidate uses an empty commit above that baseline to verify
 that the existing pipeline builds a commit outside `main`. Verify identical
 source trees, absence of that commit from remote `main`, and the exact tag,
 commit, marketing version and build number in the uploaded artifacts. Upload
@@ -394,14 +399,13 @@ option for a stable release. The command publishes a new immutable RC tag at the
 remote commit. Continue referring to each tested or shipped platform artifact by
 its own exact tag.
 
-### `scripts/mobile-release.sh candidate` fails because the source branch moved during publication
+### The source branch advances during candidate publication
 
-The App-backed workflow may already have published the requested immutable RC
-at the prior source branch tip before the operator command detects the race. Do not
-move or delete that tag, and do not treat it as the candidate for the current
-source branch. Inspect the run URL from the command output, then rerun
-`scripts/mobile-release.sh candidate <version>` to publish the next RC from the
-new current source branch tip, preserving the source-branch option.
+Publication remains pinned to the selected SHA. The publisher verifies that it
+is an ancestor of a resolved source-branch snapshot, then creates and verifies
+an immutable annotated tag for that exact SHA. The operator verifies the tag,
+not the branch's later tip. A newer commit does not require retrying or creating
+another candidate. Missing or unverifiable ancestry still fails closed.
 
 ### A mobile candidate command selects the wrong RC number
 

@@ -18,7 +18,7 @@ on:
         default: main
         type: string
       target_sha:
-        description: Exact current source branch commit
+        description: Pinned commit in the selected source branch history
         required: true
         type: string
 
