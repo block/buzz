@@ -96,7 +96,7 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
       } catch (_) {}
     }
 
-    final saved = choices.data ?? const <DeviceIdentityChoice>[];
+    final saved = choices.data?.choices ?? const <DeviceIdentityChoice>[];
     return Padding(
       padding: const EdgeInsets.all(Grid.gutter),
       child: SingleChildScrollView(
@@ -110,9 +110,9 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
               'Choose the identity to use in this community. Your key stays on this device.',
             ),
             const SizedBox(height: Grid.sm),
-            if (choices.hasError)
+            if (choices.hasError || choices.data?.complete == false)
               const Text(
-                'Saved identities could not be read. Unlock your device and try again.',
+                'Some saved identities could not be read. You can use an available identity or import a key.',
               ),
             for (final identity in saved)
               OutlinedButton(
@@ -126,8 +126,7 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
                   ],
                 ),
               ),
-            if (choices.connectionState == ConnectionState.done &&
-                !choices.hasError) ...[
+            if (choices.connectionState == ConnectionState.done) ...[
               OutlinedButton(
                 onPressed: busy.value
                     ? null
@@ -142,12 +141,12 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
                       },
                 child: const Text('Import a Nostr key'),
               ),
-              if (saved.isEmpty)
+              if (saved.isEmpty && choices.data?.complete == true)
                 FilledButton(
                   onPressed: busy.value ? null : () => select(create: true),
                   child: const Text('Create an identity and join'),
                 ),
-              if (saved.isEmpty)
+              if (saved.isEmpty && choices.data?.complete == true)
                 const Text(
                   'Export a backup in Settings after joining. This device will hold your only copy until you back it up.',
                 ),

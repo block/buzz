@@ -208,7 +208,8 @@ void main() {
       );
       await f.settle(tester);
       expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
-      f.denyAssertion = true;
+      final beforeWrongAccount = f.sent('/identity/assertions').length;
+      f.bound = f.secondKeys.public;
       f.subject = 'wrong-owner';
       await f.tap(tester, 'Sign in');
       await f.settle(tester);
@@ -218,8 +219,23 @@ void main() {
         ),
         findsOneWidget,
       );
-      f.denyAssertion = false;
+      expect(f.sent('/identity/assertions'), hasLength(beforeWrongAccount));
+      // An empty different account cannot claim the saved key through reconnect.
+      f.bound = null;
+      await f.tap(tester, 'Use a different account');
+      await f.settle(tester);
+      expect(
+        find.text(
+          'This account cannot reconnect to this community with its saved key.',
+        ),
+        findsOneWidget,
+      );
+      expect(f.sent('/identity/assertions'), hasLength(beforeWrongAccount));
+      expect(f.bound, isNull);
+      expect(await f.store.read(), isNull);
+      expect((await f.storage.loadAll()).single.nsec, community.nsec);
       f.subject = 'journey-owner';
+      f.bound = f.keys.public;
       await f.tap(tester, 'Use a different account');
       await f.settle(tester);
       expect(

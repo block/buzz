@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import '../relay/relay_provider.dart';
 import 'builderlab_account.dart';
+import 'account_identity_store.dart';
 import 'hosted_environment.dart';
 
 final builderlabAccountProvider = Provider<BuilderlabAccountClient>((ref) {
@@ -99,9 +100,36 @@ class HostedRelayAuth extends ChangeNotifier {
         throw AccountFailure.signedOut;
       }
       final session = account.account!;
-      // The issuer atomically binds this saved key on first use, or refuses
-      // conflicting bindings. Reconnect never generates or replaces a key.
-      final value = await account.relayAssertion(relay, config.nsec!);
+      // Issuance can create a binding. Reconnect must not silently give a
+      // different, unbound account this community's saved identity.
+      final current = await account.currentIdentity();
+      if (!identical(session, account.account)) throw AccountFailure.denied;
+      final identity = current['identity'];
+      if (current['error'] != null) throw AccountFailure.invalidResponse;
+      if (identity == null) {
+        final AccountIdentitySnapshot? saved;
+        try {
+          saved = await AccountIdentityStore()
+              .forSubject(session.subject)
+              .read();
+        } on AccountIdentityFailure {
+          throw AccountFailure.storage;
+        }
+        if (saved?.pubkey != pubkey ||
+            !saved!.hasBackupFor(
+              backend: BuilderlabAccountClient.origin.origin,
+              subject: session.subject,
+            )) {
+          throw AccountFailure.denied;
+        }
+      } else if (identity is! Map || identity['pubkey_hex'] != pubkey) {
+        throw AccountFailure.denied;
+      }
+      final value = await account.relayAssertion(
+        relay,
+        config.nsec!,
+        expectedSubject: session.subject,
+      );
       final token = value['assertion'];
       final expiry = value['expires_at'];
       if (token is! String ||

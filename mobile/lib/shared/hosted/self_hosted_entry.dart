@@ -32,15 +32,30 @@ class SelfHostedEntry {
 
   /// Saved keys available for explicit reuse, including a hosted account that
   /// has not joined any community yet. This performs no account network calls.
-  Future<List<DeviceIdentityChoice>> choices() async {
-    final device = await identities.choices();
-    final accounts = await _accountStore.identities();
-    return [
-      ...device,
-      for (final account in accounts)
-        if (!device.any((item) => item.pubkey == account.pubkey))
-          DeviceIdentityChoice(account.pubkey, 'Saved identity'),
-    ];
+  Future<({List<DeviceIdentityChoice> choices, bool complete})>
+  choices() async {
+    var complete = true;
+    var device = <DeviceIdentityChoice>[];
+    var accounts = <AccountIdentitySnapshot>[];
+    try {
+      device = await identities.choices();
+    } on AccountIdentityFailure {
+      complete = false;
+    }
+    try {
+      accounts = await _accountStore.identities();
+    } on AccountIdentityFailure {
+      complete = false;
+    }
+    return (
+      choices: [
+        ...device,
+        for (final account in accounts)
+          if (!device.any((item) => item.pubkey == account.pubkey))
+            DeviceIdentityChoice(account.pubkey, 'Saved identity'),
+      ],
+      complete: complete,
+    );
   }
 
   Future<Community> prepare({
@@ -71,13 +86,19 @@ class SelfHostedEntry {
       final retained = await _storage.read(key: key);
       String? candidate = nsec;
       if (savedPubkey != null) {
-        final accounts = await _accountStore.identities();
-        candidate = accounts.any((item) => item.pubkey == savedPubkey)
-            ? await _accountStore.withSavedIdentity(
-                savedPubkey,
-                (nsec) async => nsec,
-              )
-            : await identities.withIdentity(savedPubkey, (nsec) async => nsec);
+        // Selection is explicit: resolve the exact key without requiring a
+        // complete inventory of unrelated account slots.
+        try {
+          candidate = await identities.withIdentity(
+            savedPubkey,
+            (nsec) async => nsec,
+          );
+        } on AccountIdentityFailure {
+          candidate = await _accountStore.withSavedIdentity(
+            savedPubkey,
+            (nsec) async => nsec,
+          );
+        }
       }
       if (retained != null) {
         final retainedPubkey = AccountIdentityStore.publicKeyForNsec(retained);
@@ -92,7 +113,10 @@ class SelfHostedEntry {
         candidate ??= retained;
       }
       if (candidate == null) {
-        if (!create || (await choices()).isNotEmpty) {
+        if (!create) throw AccountIdentityFailure.absent;
+        final inventory = await choices();
+        if (!inventory.complete) throw AccountIdentityFailure.unreadable;
+        if (inventory.choices.isNotEmpty) {
           throw AccountIdentityFailure.absent;
         }
         candidate = nostr.Keys.generate().nsec;

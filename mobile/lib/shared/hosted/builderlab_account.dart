@@ -224,6 +224,7 @@ class BuilderlabAccountClient {
     String path,
     Map<String, dynamic> body, {
     String? signingKey,
+    String? expectedSubject,
   }) {
     if (!RegExp(r'^/v1/buzz(/[a-z0-9_-]+)+$').hasMatch(path)) {
       throw ArgumentError.value(path, 'path', 'not a /v1/buzz/ route');
@@ -231,6 +232,9 @@ class BuilderlabAccountClient {
     return _serial(() async {
       final credential = _credential;
       if (credential == null) throw AccountFailure.signedOut;
+      if (expectedSubject != null && _account?.subject != expectedSubject) {
+        throw AccountFailure.denied;
+      }
       try {
         return await _request(
           path,
@@ -259,11 +263,19 @@ class BuilderlabAccountClient {
 
   /// Proves the saved key. The issuer may establish its first account binding;
   /// conflicting or retired bindings are refused atomically by the backend.
-  Future<Map<String, dynamic>> relayAssertion(String relay, String nsec) =>
-      _post('/v1/buzz/identity/assertions', {
-        'relay_url': relay,
-        'nostr_pubkey': AccountIdentityStore.publicKeyForNsec(nsec),
-      }, signingKey: nsec);
+  Future<Map<String, dynamic>> relayAssertion(
+    String relay,
+    String nsec, {
+    required String expectedSubject,
+  }) => _post(
+    '/v1/buzz/identity/assertions',
+    {
+      'relay_url': relay,
+      'nostr_pubkey': AccountIdentityStore.publicKeyForNsec(nsec),
+    },
+    signingKey: nsec,
+    expectedSubject: expectedSubject,
+  );
 
   Future<void> clearLocalSession() => _serial(_clear);
   Future<void> _clear() async {

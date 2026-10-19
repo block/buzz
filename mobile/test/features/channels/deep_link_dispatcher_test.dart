@@ -19,15 +19,30 @@ void main() {
     testWidgets('hosted handler drains queued links after $outcome setup', (
       tester,
     ) async {
-      const first = AddCommunityDeepLink(
-        relayUrl: 'wss://one.communities.buzz.xyz',
-        name: 'One',
-      );
+      final BuzzDeepLink first = outcome == 'declined'
+          ? const AddCommunityDeepLink(
+              relayUrl: 'wss://one.communities.buzz.xyz',
+              name: 'One',
+            )
+          : const InviteDeepLink(
+              relayUrl: 'wss://one.communities.buzz.xyz',
+              code: 'same',
+            );
+      final duplicate = outcome == 'declined'
+          ? first
+          : InviteDeepLink(
+              relayUrl: 'wss://one.communities.buzz.xyz',
+              code: 'same',
+            );
       const second = InviteDeepLink(
         relayUrl: 'wss://two.communities.buzz.xyz',
         code: 'invite',
       );
-      final pending = _QueuedPendingDeepLinkNotifier([first, second]);
+      final pending = _QueuedPendingDeepLinkNotifier([
+        first,
+        duplicate,
+        second,
+      ]);
       final handled = <BuzzDeepLink>[];
       await tester.pumpWidget(
         ProviderScope(
@@ -54,8 +69,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(handled, [first, second]);
-      expect(pending.consumeCalls, 2);
+      expect(handled, [first, duplicate, second]);
+      expect(pending.consumeCalls, 3);
     });
   }
   testWidgets('queues deep links in arrival order until acknowledged', (

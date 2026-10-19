@@ -126,43 +126,54 @@ void main() {
     },
   );
 
-  for (final source in ['legacy', 'community', 'account']) {
-    test(
-      '$source identity forbids generation; explicit reuse preserves saved keys',
-      () async {
-        if (source == 'account') {
-          await AccountIdentityStore(storage: storage).create(key.nsec);
-        } else if (source == 'legacy') {
-          storage.data['buzz_nsec'] = key.nsec;
-        } else {
-          storage.data['buzz_communities'] = jsonEncode([
-            {'name': 'Saved', 'nsec': key.nsec, 'pubkey': key.public},
-          ]);
-          storage.data['buzz_nsec'] = other.nsec;
-        }
-        final before = Map<String, String>.of(storage.data);
-        final writesBefore = storage.writes;
-        expect(
-          (await entry.choices()).map((choice) => choice.pubkey),
-          contains(key.public),
-        );
-        await expectLater(
-          prepare(create: true),
-          throwsA(AccountIdentityFailure.absent),
-        );
-        expect(storage.writes, writesBefore);
-        expect(probes, isEmpty);
-        expect(storage.data, before);
-        final community = await prepare(savedPubkey: key.public);
-        expect(community.nsec, key.nsec);
-        expect(community.pubkey, key.public);
-        expect(community.relayUrl, relay);
-        for (final saved in before.entries) {
-          expect(storage.data[saved.key], saved.value);
-        }
-        expect(probes, [community]);
-      },
-    );
+  for (final brokenEnumeration in [false, true]) {
+    for (final source in ['legacy', 'community', 'account']) {
+      test(
+        '$source identity with broken enumeration=$brokenEnumeration forbids generation; explicit reuse preserves saved keys',
+        () async {
+          if (source == 'account') {
+            await AccountIdentityStore(storage: storage).create(key.nsec);
+          } else if (source == 'legacy') {
+            storage.data['buzz_nsec'] = key.nsec;
+          } else {
+            storage.data['buzz_communities'] = jsonEncode([
+              {'name': 'Saved', 'nsec': key.nsec, 'pubkey': key.public},
+            ]);
+            storage.data['buzz_nsec'] = other.nsec;
+          }
+          storage.failEnumeration = brokenEnumeration;
+          final before = Map<String, String>.of(storage.data);
+          final writesBefore = storage.writes;
+          final inventory = await entry.choices();
+          expect(inventory.complete, !brokenEnumeration);
+          if (!brokenEnumeration || source != 'account') {
+            expect(
+              inventory.choices.map((choice) => choice.pubkey),
+              contains(key.public),
+            );
+          }
+          await expectLater(
+            prepare(create: true),
+            throwsA(
+              brokenEnumeration
+                  ? AccountIdentityFailure.unreadable
+                  : AccountIdentityFailure.absent,
+            ),
+          );
+          expect(storage.writes, writesBefore);
+          expect(probes, isEmpty);
+          expect(storage.data, before);
+          final community = await prepare(savedPubkey: key.public);
+          expect(community.nsec, key.nsec);
+          expect(community.pubkey, key.public);
+          expect(community.relayUrl, relay);
+          for (final saved in before.entries) {
+            expect(storage.data[saved.key], saved.value);
+          }
+          expect(probes, [community]);
+        },
+      );
+    }
   }
 
   test(
@@ -170,7 +181,7 @@ void main() {
     () async {
       await AccountIdentityStore(storage: storage).create(key.nsec);
       storage.data['buzz_nsec'] = key.nsec;
-      expect((await entry.choices()).map((choice) => choice.pubkey), [
+      expect((await entry.choices()).choices.map((choice) => choice.pubkey), [
         key.public,
       ]);
     },
@@ -253,6 +264,7 @@ class _Storage extends Fake implements FlutterSecureStorage {
   int writes = 0;
   int reads = 0;
   bool dropWrites = false;
+  bool failEnumeration = false;
   void Function()? onRead;
   void Function()? onWrite;
 
@@ -264,7 +276,10 @@ class _Storage extends Fake implements FlutterSecureStorage {
     WebOptions? webOptions,
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
-  }) async => Map.of(data);
+  }) async {
+    if (failEnumeration) throw StateError('unrelated entry cannot decrypt');
+    return Map.of(data);
+  }
 
   @override
   Future<void> delete({

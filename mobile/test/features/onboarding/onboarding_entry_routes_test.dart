@@ -15,6 +15,7 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_community_connection.dart';
 import 'package:buzz/shared/hosted/self_hosted_entry.dart';
+import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/widgets/buzz_sheet_header.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -44,6 +45,7 @@ void main() {
       await f.dispose();
     });
     var probes = 0;
+    final inventoryStorage = _EnumerationStorage();
     await tester.pumpWidget(
       WidgetHelpers.testable(
         disableAnimations: true,
@@ -52,6 +54,7 @@ void main() {
           channelsProvider.overrideWith(_NoChannels.new),
           selfHostedEntryProvider.overrideWithValue(
             SelfHostedEntry(
+              accountStore: AccountIdentityStore(storage: inventoryStorage),
               probe: (_) async {
                 probes++;
               },
@@ -202,7 +205,27 @@ void main() {
     await tester.tap(find.text('Continue').hitTestable());
     await tester.pumpAndSettle();
     expect(find.byType(SelfHostedEntrySheet), findsOneWidget);
-    await tester.tap(find.text('Saved identity').hitTestable());
+    expect(find.text('Saved identity').hitTestable(), findsOneWidget);
+    expect(find.text('Import a Nostr key').hitTestable(), findsOneWidget);
+    Navigator.of(tester.element(find.byType(SelfHostedEntrySheet))).pop();
+    await tester.pumpAndSettle();
+    // A failed bulk read must keep explicit import available, but not offer
+    // generation on the strength of a falsely empty inventory.
+    inventoryStorage.failEnumeration = true;
+    await tester.tap(find.text('Continue').hitTestable());
+    await tester.pumpAndSettle();
+    expect(find.text('Import a Nostr key').hitTestable(), findsOneWidget);
+    expect(find.text('Create an identity and join'), findsNothing);
+    Navigator.of(tester.element(find.byType(SelfHostedEntrySheet))).pop();
+    await tester.pumpAndSettle();
+    await const FlutterSecureStorage().write(
+      key: 'buzz_nsec',
+      value: f.keys.nsec,
+    );
+    await tester.tap(find.text('Continue').hitTestable());
+    await tester.pumpAndSettle();
+    expect(find.text('Import a Nostr key').hitTestable(), findsOneWidget);
+    await tester.tap(find.text('Previous device identity').hitTestable());
     await tester.pumpAndSettle();
     expect(probes, 1);
     expect(find.byType(SelfHostedEntrySheet), findsNothing);
@@ -317,4 +340,20 @@ void main() {
     await tester.pump();
     expect(tester.takeException(), isNull);
   });
+}
+
+class _EnumerationStorage extends FlutterSecureStorage {
+  bool failEnumeration = false;
+  @override
+  Future<Map<String, String>> readAll({
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (failEnumeration) throw StateError('unrelated entry cannot decrypt');
+    return super.readAll();
+  }
 }

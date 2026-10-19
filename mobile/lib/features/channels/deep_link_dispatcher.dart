@@ -97,23 +97,27 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
 
   Future<void> _dispatchOnboarding(BuzzDeepLink link) async {
     _handlingOnboarding = true;
+    var consumed = false;
     try {
       final handled = await widget.onboardingHandler!(context, link);
       if (!mounted) return;
       if (handled) {
         if (ref.read(pendingDeepLinkProvider) == link) {
           ref.read(pendingDeepLinkProvider.notifier).consume();
+          consumed = true;
         }
       } else if (link is InviteDeepLink) {
         _maybeDispatchInvite(link);
       } else if (ref.read(pendingDeepLinkProvider) == link) {
         // No fallback owns this link. It must not block later entry attempts.
         ref.read(pendingDeepLinkProvider.notifier).consume();
+        consumed = true;
       }
     } catch (_) {
       if (mounted) {
         if (ref.read(pendingDeepLinkProvider) == link) {
           ref.read(pendingDeepLinkProvider.notifier).consume();
+          consumed = true;
         }
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
           const SnackBar(
@@ -125,7 +129,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
       }
     } finally {
       _handlingOnboarding = false;
-      if (mounted && ref.read(pendingDeepLinkProvider) != link) {
+      if (mounted && (consumed || ref.read(pendingDeepLinkProvider) != link)) {
         _maybeDispatch(ref.read(pendingDeepLinkProvider));
       }
     }
