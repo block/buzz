@@ -4399,7 +4399,7 @@ mod postgres_tests {
         })
         .await
         .expect("connect isolated migration DB");
-        crate::migration::run_migrations_through(&db.pool, 66)
+        crate::migration::run_migrations_through(&db.pool, 67)
             .await
             .expect("migrate with fence objects present");
         let store = db.deletion_store();

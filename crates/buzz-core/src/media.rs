@@ -34,6 +34,18 @@ pub fn shared_blob_hashes(event: &nostr::Event) -> Vec<String> {
     hashes.into_iter().collect()
 }
 
+/// The media blob used as a kind:0 profile's picture. A registered agent may
+/// publish this one field using its owner's upload proof; arbitrary content
+/// and tags must not inherit that authority.
+pub fn profile_picture_blob_hash(event: &nostr::Event) -> Option<String> {
+    if event.kind != nostr::Kind::Metadata {
+        return None;
+    }
+    let profile: serde_json::Value = serde_json::from_str(&event.content).ok()?;
+    let hash = media_path_hashes(profile.get("picture")?.as_str()?).next();
+    hash
+}
+
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
