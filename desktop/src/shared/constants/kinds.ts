@@ -20,6 +20,9 @@ export const KIND_STREAM_MESSAGE_V2 = 40002;
 export const KIND_STREAM_MESSAGE_EDIT = 40003;
 export const KIND_CHANNEL_THREAD_SUMMARY = 39005;
 export const KIND_CHANNEL_WINDOW_BOUNDS = 39006;
+// NIP-AR channel artifact revision and relay-signed removal marker.
+export const KIND_ARTIFACT = 45010;
+export const KIND_ARTIFACT_REMOVAL = 45011;
 export const KIND_STREAM_MESSAGE_DIFF = 40008;
 export const KIND_REMINDER = 40007;
 export const KIND_SYSTEM_MESSAGE = 40099;

@@ -9,6 +9,7 @@ import {
 import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import { preloadTimelineImages } from "@/features/messages/lib/timelineImagePreload";
 import type { TimelineMessage } from "@/features/messages/types";
+import { useThreadTitleLiveSync } from "@/features/threads/hooks";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -218,6 +219,13 @@ const MessageTimelineBase = React.forwardRef<
   }: MessageTimelineProps,
   ref,
 ) {
+  // Thread roots show their shared titles, which anyone (often an agent
+  // naming a new thread) can change while the channel is open.
+  const titleSyncChannels = React.useMemo(
+    () => (channelId ? [channelId] : []),
+    [channelId],
+  );
+  useThreadTitleLiveSync(titleSyncChannels);
   const internalScrollRef = React.useRef<HTMLDivElement>(null);
   const scrollContainerRef = externalScrollRef ?? internalScrollRef;
   const contentRef = React.useRef<HTMLDivElement>(null);

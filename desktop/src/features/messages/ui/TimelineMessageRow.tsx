@@ -134,6 +134,8 @@ export function MessageRowItem({
 
   if (summary && onOpenThread) {
     const isHighlighted = message.id === highlightedMessageId;
+    // Titles belong to whole threads, so nested sub-thread heads show none.
+    const isThreadRoot = !message.rootId || message.rootId === message.id;
     return (
       <div
         className={cn(
@@ -175,8 +177,10 @@ export function MessageRowItem({
               ? () => unfollowThreadById(effectiveThreadRootId)
               : undefined
           }
+          onOpenThreadTitle={() => onOpenThread(message)}
           profiles={profiles}
           showDepthGuides={false}
+          threadTitleRootId={isThreadRoot ? message.id : null}
           videoReviewContext={videoReviewContext}
         />
         <MessageThreadSummaryRow
@@ -195,6 +199,9 @@ export function MessageRowItem({
 
   const isSearchMatch = searchMatchingMessageIds?.has(message.id) ?? false;
   const isSearchActive = message.id === searchActiveMessageId;
+  // A root with no replies yet can already be titled (agents name the thread
+  // before they answer), so it shows the title too.
+  const isTopLevel = !message.rootId;
 
   return (
     <div
@@ -235,9 +242,13 @@ export function MessageRowItem({
             ? () => unfollowThreadById(effectiveThreadRootId)
             : undefined
         }
+        onOpenThreadTitle={
+          isTopLevel && onOpenThread ? () => onOpenThread(message) : undefined
+        }
         profiles={profiles}
         searchQuery={isSearchMatch ? searchQuery : undefined}
         showDepthGuides={false}
+        threadTitleRootId={isTopLevel ? message.id : null}
         videoReviewContext={videoReviewContext}
       />
       {footer}

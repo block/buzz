@@ -11157,6 +11157,22 @@ mod edit_native_steer_tests {
         assert!(steer.is_none(), "no native steer without a recorded prompt");
         assert_eq!(control, Some(ControlSignal::Steer));
     }
+
+    /// A new top-level channel message opens its own thread, so it is never
+    /// steered natively into a running turn. Thread auto-titling relies on
+    /// this: the ask lives in `<context>`, which only the cancel+merge
+    /// re-prompt carries.
+    #[tokio::test]
+    async fn new_channel_thread_during_running_turn_cancels_and_merges() {
+        let root = "ab".repeat(32);
+        for running in [message(None), message(Some(&root))] {
+            let (steer, control) =
+                steer_into_running_turn(false, Some(false), running, message(None), None);
+
+            assert!(steer.is_none(), "no native steer for a new thread");
+            assert_eq!(control, Some(ControlSignal::Steer));
+        }
+    }
 }
 
 #[cfg(test)]

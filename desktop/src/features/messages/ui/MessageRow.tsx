@@ -60,6 +60,7 @@ import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useMessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
+import { ThreadTitleLine } from "@/features/threads/ui/ThreadTitleLine";
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
 export type ThreadDepthGuideAction = {
@@ -105,9 +106,11 @@ export const MessageRow = React.memo(
     onEntranceComplete,
     playEntrance = false,
     onUnfollowThread,
+    onOpenThreadTitle,
     profiles,
     searchQuery,
     showDepthGuides = true,
+    threadTitleRootId = null,
     videoReviewCommentRootId,
     videoReviewContext,
   }: {
@@ -159,6 +162,9 @@ export const MessageRow = React.memo(
     profiles?: UserProfileLookup;
     searchQuery?: string;
     showDepthGuides?: boolean;
+    /** Thread root whose shared title shows under the author, if titled. */
+    threadTitleRootId?: string | null;
+    onOpenThreadTitle?: () => void;
     videoReviewCommentRootId?: string;
     videoReviewContext?: VideoReviewContext;
   }) {
@@ -679,6 +685,13 @@ export const MessageRow = React.memo(
         />
       </MessageHeaderRow>
     );
+    const threadTitleNode = threadTitleRootId ? (
+      <ThreadTitleLine
+        className="mt-0.5"
+        onOpen={onOpenThreadTitle}
+        rootId={threadTitleRootId}
+      />
+    ) : null;
     const bodyContainerClass = isDisplayedAsContinuation
       ? "mt-0"
       : bodyOffsetClass;
@@ -916,6 +929,7 @@ export const MessageRow = React.memo(
               {avatarGutterNode}
               <div className="flex min-w-0 flex-1 flex-col">
                 {headerNode}
+                {threadTitleNode}
                 <div className={bodyContainerClass} data-testid="message-body">
                   {messageBodyNode}
                 </div>
@@ -926,6 +940,7 @@ export const MessageRow = React.memo(
               {avatarGutterNode}
               <div className="flex min-w-0 flex-1 flex-col">
                 {headerNode}
+                {threadTitleNode}
                 <div className={bodyContainerClass} data-testid="message-body">
                   {messageBodyNode}
                 </div>
@@ -998,6 +1013,7 @@ export const MessageRow = React.memo(
     prev.onSendToChannel === next.onSendToChannel &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery &&
+    prev.threadTitleRootId === next.threadTitleRootId &&
     prev.videoReviewCommentRootId === next.videoReviewCommentRootId &&
     prev.videoReviewContext === next.videoReviewContext,
 );

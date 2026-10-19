@@ -3126,6 +3126,7 @@ pub async fn run_prompt_task(
             );
         }
 
+        let agent_pubkey = ctx.agent_keys.public_key().to_hex();
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
@@ -3141,6 +3142,7 @@ pub async fn run_prompt_task(
                 team_instructions: standing.team_instructions,
                 agent_canvas: standing.agent_canvas,
                 standing_context_sent,
+                agent_pubkey: Some(&agent_pubkey),
             },
         )
     } else {
