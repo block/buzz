@@ -368,8 +368,9 @@ canonical signed Nostr event fields (`id`, `pubkey`, `kind`, `content`,
 `--format` is a **global** flag — it goes before the subcommand:
 `buzz --format compact channels list`, NOT `buzz channels list --format compact`.
 It also reads `BUZZ_OUTPUT_FORMAT`; buzz-acp sets that to `agent` for agent
-processes, so their event reads drop `sig` and the NIP-OA `auth` tag and fold the
-NIP-10 `root`/`reply` tags into `reply_to`; other tags remain.
+processes, so their event reads drop `sig`, trim the NIP-OA `auth` tag to
+`["auth", <owner>]`, and fold the NIP-10 `root`/`reply` tags into `reply_to`
+(plus `thread_root` on nested replies); other tags remain.
 
 See `crates/buzz-cli/TESTING.md` for the full live-testing runbook.
 

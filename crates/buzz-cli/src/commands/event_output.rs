@@ -42,26 +42,29 @@ fn compact_event(event: &Value) -> Value {
     })
 }
 
-/// Drops signature material (`sig`, NIP-OA `auth`) and folds the NIP-10 thread
-/// markers into `reply_to`; every other tag (channel, mentions, edit targets,
-/// diff provenance, ...) is kept verbatim.
+/// Drops signature material (`sig`, and the NIP-OA `auth` conditions and
+/// signature while keeping its owner pubkey) and folds the NIP-10 thread
+/// markers into `reply_to`, plus `thread_root` for nested replies; every other
+/// tag (channel, mentions, edit targets, diff provenance, ...) is kept verbatim.
 fn agent_event(event: &Value) -> Value {
     let raw_tags = event.get("tags").unwrap_or(&Value::Null);
-    let reply_to = thread_markers(raw_tags).resolve().map(|(_, parent)| parent);
+    let thread = thread_markers(raw_tags).resolve();
     let kept: Vec<Value> = raw_tags
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|tag| {
+        .filter_map(|tag| {
             let name = tag.get(0).and_then(Value::as_str);
             let marker = tag.get(3).and_then(Value::as_str);
             match (name, marker) {
-                (Some("auth"), _) => false,
-                (Some("e"), Some("root" | "reply")) => reply_to.is_none(),
-                _ => true,
+                (Some("auth"), _) => Some(serde_json::json!([
+                    "auth",
+                    tag.get(1).cloned().unwrap_or_default()
+                ])),
+                (Some("e"), Some("root" | "reply")) if thread.is_some() => None,
+                _ => Some(tag.clone()),
             }
         })
-        .cloned()
         .collect();
     let mut projected = serde_json::json!({
         "id": field(event, "id"),
@@ -71,7 +74,10 @@ fn agent_event(event: &Value) -> Value {
         "content": field(event, "content"),
         "tags": kept,
     });
-    if let Some(parent) = reply_to {
+    if let Some((root, parent)) = thread {
+        if root != parent {
+            projected["thread_root"] = Value::String(root);
+        }
         projected["reply_to"] = Value::String(parent);
     }
     projected
@@ -123,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_format_drops_signature_material_and_folds_thread_markers_into_reply_to() {
+    fn agent_format_drops_signature_material_but_keeps_the_owner_and_thread() {
         assert_eq!(
             render(json!([signed_reply()]), &OutputFormat::Agent)[0],
             json!({
@@ -132,10 +138,21 @@ mod tests {
                 "kind": 9,
                 "created_at": 1_787_754_972_u64,
                 "content": "reply content",
+                "thread_root": "c".repeat(64),
                 "reply_to": "d".repeat(64),
-                "tags": [["h", CHANNEL], ["p", "e".repeat(64)]],
+                "tags": [["h", CHANNEL], ["p", "e".repeat(64)], ["auth", "9".repeat(64)]],
             })
         );
+    }
+
+    #[test]
+    fn agent_format_omits_thread_root_for_a_direct_reply() {
+        let mut direct = signed_reply();
+        direct["tags"] = json!([["h", CHANNEL], ["e", "c".repeat(64), "", "reply"]]);
+        let output = &render(json!([direct]), &OutputFormat::Agent)[0];
+        assert_eq!(output["reply_to"], "c".repeat(64));
+        assert!(output.get("thread_root").is_none());
+        assert_eq!(output["tags"], json!([["h", CHANNEL]]));
     }
 
     #[test]
@@ -163,7 +180,11 @@ mod tests {
 
         assert_eq!(
             output[0]["tags"],
-            json!([["h", CHANNEL], ["e", "c".repeat(64)]])
+            json!([
+                ["h", CHANNEL],
+                ["e", "c".repeat(64)],
+                ["auth", "9".repeat(64)]
+            ])
         );
         assert!(output[0].get("reply_to").is_none());
         assert_eq!(
