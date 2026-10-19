@@ -3414,8 +3414,10 @@ pub const NIP43_RECONCILE_LOCK_KEY: i64 = 0x4255_5A5A_4E34_3352;
 ///
 /// Only the replica holding the `lock_key` session advisory lock sweeps; the
 /// others retry the lock once per `every`. The holder keeps the lock across
-/// sweeps, and Postgres releases it when that session ends, so a killed leader
-/// is replaced on a standby's next attempt. Each sweep (and each attempt to
+/// sweeps, and Postgres releases it when that session ends: a leader whose
+/// process exits is replaced on a standby's next attempt, but one lost with its
+/// host or network holds the lock until the server's TCP keepalive drops the
+/// session, and nobody sweeps meanwhile. Each sweep (and each attempt to
 /// lead) starts `every` after the previous one finished; the first runs as soon
 /// as the task does. Startup never waits on it: the snapshots live in the shared
 /// database, so a new replica has nothing of its own to repair before it serves.
