@@ -77,7 +77,7 @@ pub enum StartupStep {
 
 impl StartupStep {
     /// The complete `phase` label vocabulary.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: &[Self] = &[
         Self::DbConnect,
         Self::DbMigrate,
         Self::PartitionEnsure,
