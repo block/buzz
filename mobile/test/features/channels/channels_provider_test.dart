@@ -746,6 +746,31 @@ void main() {
     },
   );
 
+  test('reads after the membership list share one round trip', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'joined-a')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    session.pauseNextHiddenDmQuery();
+    final load = container.read(channelsProvider.future);
+    await session.nextHiddenDmQueryStarted;
+    await _settle();
+
+    // The hidden-DM read is still parked, so anything sent after it would be
+    // missing here.
+    final sentKinds = {
+      for (final filter in session.historyFilters)
+        if (filter.tags['#p'] == null) ...filter.kinds,
+    };
+    expect(sentKinds, containsAll([39000, 39002, EventKind.huddleStarted]));
+
+    session.resumePausedHiddenDmQuery();
+    expect((await load).map((channel) => channel.id), [_channelA]);
+  });
+
   test('a newer ordinary refresh owns the installed membership list', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
