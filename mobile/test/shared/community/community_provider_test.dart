@@ -42,7 +42,7 @@ void main() {
 
   tearDown(() => container.dispose());
 
-  ProviderContainer createContainer() {
+  ProviderContainer createContainer({CommunitySnapshotWriter? snapshotWriter}) {
     Future<void> writeSnapshot(List<Community> communities) async {
       snapshots.add(List.of(communities));
     }
@@ -50,7 +50,9 @@ void main() {
     return ProviderContainer(
       overrides: [
         communityStorageProvider.overrideWithValue(communityStorage),
-        communitySnapshotWriterProvider.overrideWithValue(writeSnapshot),
+        communitySnapshotWriterProvider.overrideWithValue(
+          snapshotWriter ?? writeSnapshot,
+        ),
         communityPushLeaseDeactivatorProvider.overrideWithValue(deactivator),
         communityPushLeaseRevocationEnqueuerProvider.overrideWithValue((
           community,
@@ -305,6 +307,153 @@ void main() {
       expect(stored.pushSubscriptionState.generationCursor, 2);
       expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
       expect(deactivationGenerations, [2]);
+    });
+
+    test('opt-out dispatch does not wait for presentation export', () async {
+      final exportStarted = Completer<void>();
+      final finishExport = Completer<void>();
+      final subscription = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+        notificationClass: 'default',
+      );
+      final community =
+          Community.create(
+            name: 'Test',
+            relayUrl: 'https://test.example.com',
+          ).copyWith(
+            pushNotificationsEnabled: true,
+            pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+              desired: [subscription],
+            ).withAccepted(subscriptions: [subscription], generation: 7),
+          );
+      deactivator = (community, {generation}) async {
+        final stored = (await communityStorage.loadAll()).single;
+        expect(stored.pushNotificationsEnabled, isFalse);
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
+        deactivatedCommunityIds.add(community.id);
+        deactivationGenerations.add(generation);
+      };
+      container = createContainer(
+        snapshotWriter: (communities) async {
+          if (communities.isNotEmpty &&
+              !communities.single.pushNotificationsEnabled) {
+            if (!exportStarted.isCompleted) exportStarted.complete();
+            await finishExport.future;
+          }
+        },
+      );
+      await container.read(communityListProvider.future);
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+      final disable = notifier.setPushNotificationsEnabled(community.id, false);
+      await exportStarted.future;
+      try {
+        final stored = (await communityStorage.loadAll()).single;
+        expect(stored.pushNotificationsEnabled, isFalse);
+        // Presentation I/O is still blocked, but the durable opt-out must
+        // already be allowed to reach its relay-publication seam.
+        await container.pump();
+        expect(deactivatedCommunityIds, [community.id]);
+        expect(deactivationGenerations, [8]);
+        await disable.timeout(const Duration(seconds: 1));
+        final accepted = (await communityStorage.loadAll()).single;
+        expect(
+          accepted.pushSubscriptionState.pendingTombstoneGeneration,
+          isNull,
+        );
+      } finally {
+        finishExport.complete();
+        await disable;
+      }
+    });
+
+    test('failed OFF retries do not queue generation-only snapshots', () async {
+      final finishExport = Completer<void>();
+      var offExports = 0;
+      final subscription = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+        notificationClass: 'default',
+      );
+      final community =
+          Community.create(
+            name: 'Test',
+            relayUrl: 'https://test.example.com',
+          ).copyWith(
+            pushNotificationsEnabled: true,
+            pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+              desired: [subscription],
+            ).withAccepted(subscriptions: [subscription], generation: 7),
+          );
+      deactivator = (community, {generation}) async {
+        throw StateError('offline');
+      };
+      container = createContainer(
+        snapshotWriter: (communities) async {
+          if (communities.isNotEmpty &&
+              !communities.single.pushNotificationsEnabled) {
+            offExports++;
+            await finishExport.future;
+          }
+        },
+      );
+      await container.read(communityListProvider.future);
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+      try {
+        await notifier.setPushNotificationsEnabled(community.id, false);
+        for (var attempt = 0; attempt < 5; attempt++) {
+          await expectLater(
+            notifier.retryPendingPushLeaseTombstone(
+              community.id,
+              advanceGeneration: true,
+            ),
+            throwsStateError,
+          );
+        }
+        final stored = (await communityStorage.loadAll()).single;
+        expect(stored.pushNotificationsEnabled, isFalse);
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 13);
+      } finally {
+        finishExport.complete();
+        // ON still waits for all earlier exports, making replay observable.
+        await notifier.setPushNotificationsEnabled(community.id, true);
+      }
+      expect(offExports, 1);
+    });
+
+    test('opt-in still waits for presentation export', () async {
+      final exportStarted = Completer<void>();
+      final finishExport = Completer<void>();
+      final community = Community.create(
+        name: 'Test',
+        relayUrl: 'https://test.example.com',
+      ).copyWith(pushNotificationsEnabled: false);
+      container = createContainer(
+        snapshotWriter: (communities) async {
+          if (communities.isNotEmpty &&
+              communities.single.pushNotificationsEnabled) {
+            exportStarted.complete();
+            await finishExport.future;
+          }
+        },
+      );
+      await container.read(communityListProvider.future);
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+      var completed = false;
+      final enable = notifier
+          .setPushNotificationsEnabled(community.id, true)
+          .then((_) => completed = true);
+      await exportStarted.future;
+      await container.pump();
+      try {
+        expect(completed, isFalse);
+        expect(deactivatedCommunityIds, isEmpty);
+      } finally {
+        finishExport.complete();
+        await enable;
+      }
+      expect(completed, isTrue);
     });
 
     test('opt-out persists first and publishes a higher tombstone', () async {

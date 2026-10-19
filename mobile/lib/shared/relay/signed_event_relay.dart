@@ -64,7 +64,8 @@ class SignedEventRelay {
 /// Publishes one signed event over a short-lived authenticated NIP-42 socket.
 ///
 /// This is used for community-removal tombstones because the community being
-/// removed is not necessarily the app's active relay session.
+/// removed is not necessarily the app's active relay session. The deadline
+/// covers connection, authentication, and acknowledgement.
 Future<NostrEvent> submitSignedEventOnce({
   required String wsUrl,
   required String nsec,
@@ -73,6 +74,7 @@ Future<NostrEvent> submitSignedEventOnce({
   required List<List<String>> tags,
   int? createdAt,
   Duration timeout = const Duration(seconds: 12),
+  RelaySocketFactory socketFactory = _oneShotSocket,
 }) async {
   final privateKey = nostr.Nip19.decode(payload: nsec).data;
   if (privateKey.isEmpty) throw const FormatException('Invalid nsec');
@@ -87,7 +89,7 @@ Future<NostrEvent> submitSignedEventOnce({
   final event = NostrEvent.fromJson(signed.toMap());
   final result = Completer<NostrEvent>();
   late final RelaySocket socket;
-  socket = RelaySocket(
+  socket = socketFactory(
     wsUrl: wsUrl,
     nsec: nsec,
     onMessage: (message) {
@@ -122,11 +124,28 @@ Future<NostrEvent> submitSignedEventOnce({
       }
     },
   );
-  final resultFuture = result.future.timeout(timeout);
   try {
-    await socket.connect();
-    return await resultFuture;
+    await Future.wait<void>([
+      socket.connect(),
+      result.future.then<void>((_) {}),
+    ], eagerError: true).timeout(timeout);
+    return await result.future;
   } finally {
     await socket.disconnect();
   }
 }
+
+RelaySocket _oneShotSocket({
+  required String wsUrl,
+  required String? nsec,
+  required void Function(List<dynamic>) onMessage,
+  required void Function() onConnected,
+  required void Function(Object? error) onDisconnected,
+}) => RelaySocket(
+  wsUrl: wsUrl,
+  nsec: nsec,
+  onMessage: onMessage,
+  onConnected: onConnected,
+  onDisconnected: onDisconnected,
+  connectTimeout: const Duration(seconds: 8),
+);

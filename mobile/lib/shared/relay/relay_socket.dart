@@ -16,6 +16,10 @@ import 'nostr_models.dart';
 /// Does NOT handle reconnection — that is [RelaySessionNotifier]'s job.
 enum SocketState { disconnected, connecting, authenticating, connected }
 
+class _RelayDisconnectCancelled implements Exception {
+  const _RelayDisconnectCancelled();
+}
+
 class RelayAuthRejectedException implements Exception {
   final String message;
 
@@ -39,6 +43,7 @@ class RelaySocket {
 
   final String _wsUrl;
   final String? _nsec;
+  final Duration? _connectTimeout;
   final void Function(List<dynamic> message) _onMessage;
   final void Function() _onConnected;
   final void Function(Object? error) _onDisconnected;
@@ -58,8 +63,10 @@ class RelaySocket {
     required void Function(List<dynamic> message) onMessage,
     required void Function() onConnected,
     required void Function(Object? error) onDisconnected,
+    Duration? connectTimeout,
   }) : _wsUrl = wsUrl,
        _nsec = nsec,
+       _connectTimeout = connectTimeout,
        _onMessage = onMessage,
        _onConnected = onConnected,
        _onDisconnected = onDisconnected;
@@ -73,9 +80,13 @@ class RelaySocket {
       _channel = IOWebSocketChannel.connect(
         Uri.parse(_wsUrl),
         pingInterval: debugPingInterval,
+        connectTimeout: _connectTimeout,
       );
       await _channel!.ready;
     } catch (e) {
+      // A failed handshake also queues the error on the channel stream. No
+      // normal subscription exists yet; cancel it so sink.close can complete.
+      await _channel?.stream.listen((_) {}, onError: (Object _) {}).cancel();
       _state = SocketState.disconnected;
       _onDisconnected(e);
       return;
@@ -122,7 +133,7 @@ class RelaySocket {
     } catch (e) {
       _authTimeout?.cancel();
       await disconnect();
-      _onDisconnected(e);
+      if (e is! _RelayDisconnectCancelled) _onDisconnected(e);
     }
   }
 
@@ -133,6 +144,7 @@ class RelaySocket {
 
   /// Gracefully close the connection.
   Future<void> disconnect() async {
+    _failAuth(const _RelayDisconnectCancelled());
     _resetConnection();
     final channel = _channel;
     _channel = null;
