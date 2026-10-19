@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:convert';
 
 import 'package:buzz/shared/community/community.dart';
@@ -67,6 +68,7 @@ void main() {
         'wss://team.communities.public.builderlabstaging.xyz',
         'wss://BUILDERLAB.XYZ.',
       ]) {
+        if (!HostedEnvironment.requiresAuth(Uri.parse(address).host)) continue;
         await expectLater(
           prepare(address: address, nsec: key.nsec),
           throwsStateError,

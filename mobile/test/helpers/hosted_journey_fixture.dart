@@ -1,3 +1,5 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
+import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/services.dart';
@@ -146,7 +148,8 @@ class HostedJourneyFixture {
         headers: {'location': 'https://outside.example'},
       );
     } else if (path == '/query' || path == '/profiles/search') {
-      if (relayAuthEnabled) {
+      if (relayAuthEnabled &&
+          HostedEnvironment.requiresAuth(request.url.host)) {
         expect(
           request.headers['Nostr-Federated-Identity'],
           'Bearer synthetic-assertion',
@@ -283,7 +286,11 @@ class HostedJourneyFixture {
     },
   );
 
-  Future<void> mount(WidgetTester tester, {bool openEntry = true}) async {
+  Future<void> mount(
+    WidgetTester tester, {
+    bool openEntry = true,
+    PairingCredentialValidator? pairingValidator,
+  }) async {
     await tester.binding.setSurfaceSize(const Size(440, 1100));
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/hosted_hpke'),
@@ -297,6 +304,10 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
+          if (pairingValidator != null)
+            pairingProvider.overrideWith(
+              () => PairingNotifier(credentialValidator: pairingValidator),
+            ),
           if (relayAuthEnabled) ...[
             hostedRelayAuthProvider.overrideWith((ref) {
               final auth = HostedRelayAuth(
@@ -497,15 +508,22 @@ class _RelaySocket extends RelaySocket {
     required super.onMessage,
     required super.onConnected,
     required super.onDisconnected,
-  }) : _connected = onConnected,
+  }) : url = wsUrl,
+       _connected = onConnected,
        _disconnected = onDisconnected;
   final HostedJourneyFixture fixture;
+  final String url;
   final void Function() _connected;
   final void Function(Object?) _disconnected;
   @override
   Future<void> connect() async {
     fixture.socketHeaders.add(Map.of(headers));
-    expect(headers['Nostr-Federated-Identity'], 'Bearer synthetic-assertion');
+    expect(
+      headers['Nostr-Federated-Identity'],
+      HostedEnvironment.requiresAuth(Uri.parse(url).host)
+          ? 'Bearer synthetic-assertion'
+          : isNull,
+    );
     if (fixture.refuseUpgrade) {
       _disconnected(const WebSocketException('refused', 403));
     } else {

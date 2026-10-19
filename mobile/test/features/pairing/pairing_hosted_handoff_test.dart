@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:buzz/features/pairing/pairing_provider.dart';
@@ -17,6 +18,9 @@ void main() {
     test(
       'hosted pairing requires backup=$backup through real coordinator',
       () async {
+        if (!HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) {
+          return;
+        }
         final f = HostedCommunitiesFixture();
         await f.initialize(backup: backup);
         addTearDown(f.dispose);
@@ -93,6 +97,7 @@ void main() {
   );
 
   test('hosted pairing never replaces occupied account key', () async {
+    if (!HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) return;
     final f = HostedCommunitiesFixture();
     await f.initialize();
     addTearDown(f.dispose);

@@ -65,8 +65,8 @@ class HostedAppGate extends HookConsumerWidget {
         final relay = link.relayUrl;
         if (relay != null) {
           final host = Uri.parse(relay).host.toLowerCase();
-          final reserved = HostedEnvironment.isReservedHost(host);
-          if (link is InviteDeepLink && !reserved) return false;
+          final requiresAuth = HostedEnvironment.requiresAuth(host);
+          if (link is InviteDeepLink && !requiresAuth) return false;
           final communities = await ref
               .read(communityStorageProvider)
               .loadAll();
@@ -76,7 +76,7 @@ class HostedAppGate extends HookConsumerWidget {
               )
               .firstOrNull;
           if (existing != null &&
-              !(existing.starterSetupIncomplete && reserved)) {
+              !(existing.starterSetupIncomplete && requiresAuth)) {
             await ref
                 .read(communityListProvider.notifier)
                 .switchCommunity(existing.id);
@@ -85,7 +85,7 @@ class HostedAppGate extends HookConsumerWidget {
             }
             return true;
           }
-          if (!reserved && link is AddCommunityDeepLink) {
+          if (!requiresAuth && link is AddCommunityDeepLink) {
             if (routeContext.mounted) {
               final joined = await showSelfHostedEntry(
                 routeContext,
@@ -98,7 +98,8 @@ class HostedAppGate extends HookConsumerWidget {
             }
             return true;
           }
-          if (reserved && !HostedEnvironment.supportsRelay(Uri.parse(relay))) {
+          if (requiresAuth &&
+              !HostedEnvironment.supportsRelay(Uri.parse(relay))) {
             if (routeContext.mounted) {
               await showDialog<void>(
                 context: routeContext,

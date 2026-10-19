@@ -5,10 +5,29 @@ Flutter mobile client for Buzz.
 See [VISION_MOBILE.md](../VISION_MOBILE.md) for intended behavior and
 architecture.
 
+## Optional Builderlab login
+
+`BUZZ_AUTH_DOMAINS` is a comma-separated build-time environment setting, passed
+with Flutter's `--dart-define` (shell environment variables alone are not read):
+
+```bash
+flutter run --dart-define=BUZZ_AUTH_DOMAINS=communities.buzz.xyz,communities.public.builderlabstaging.xyz
+```
+
+Unset or empty means **no domains require Builderlab login**. QR/code pairing,
+community links and invites use Nostr-only entry; the optional Builderlab login
+and community creation UI remain available. Explicit Builderlab actions still
+need their backend endpoints. Normal relay key authentication remains in place.
+
+Entries match the domain itself and its subdomains, case-insensitively. Use DNS
+names, not URLs or wildcards. The list does not add trusted account servers:
+configured domains outside the supported Builderlab realm cannot use hosted
+setup. `BUZZ_BUILDERLAB_URL` still selects the trusted account environment.
+
 ## Hosted relay authentication
 
 `--dart-define=BUZZ_HOSTED_RELAY_AUTH=true` enables Builderlab relay assertions
-and reconnect sign-in. It defaults off: configure backend assertion issuance
+and reconnect sign-in **only for `BUZZ_AUTH_DOMAINS` matches**. It defaults off: configure backend assertion issuance
 before enabling mobile authentication, and enable relay enforcement last.
 
 ## Setup

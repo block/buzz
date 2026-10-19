@@ -135,6 +135,17 @@ jobs:
       - name: Test
         if: matrix.lane == 'test'
         run: cd mobile && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example --total-shards=3 --shard-index=${{ matrix.shard }}
+      - name: Test configured authentication domains
+        if: matrix.lane == 'checks'
+        run: >-
+          cd mobile && flutter test
+          --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+          --dart-define=BUZZ_AUTH_DOMAINS=buzz.xyz,builderlab.xyz,builderlabstaging.xyz
+          test/shared/hosted/hosted_environment_test.dart
+          test/shared/hosted/self_hosted_entry_test.dart
+          test/features/onboarding/hosted_app_gate_environment_test.dart
+          test/features/onboarding/hosted_journeys_test.dart
+          test/features/pairing/pairing_hosted_handoff_test.dart
       - name: Test mobile without push configuration
         if: matrix.lane == 'checks'
         run: cd mobile && flutter test test/shared/push/push_unconfigured_build_test.dart

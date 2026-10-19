@@ -752,7 +752,7 @@ class PairingNotifier extends Notifier<PairingState> {
           pairingGeneration == _pairingGeneration &&
           state.status == PairingStatus.storing &&
           !_sendIdentityToSource;
-      if (HostedEnvironment.isReservedHost(Uri.parse(relayUrl).host)) {
+      if (HostedEnvironment.requiresAuth(Uri.parse(relayUrl).host)) {
         final flow = ref.read(hostedFlowProvider);
         await flow.stagePairedCommunity(community, isCurrent: current);
         if (!current()) return;
@@ -869,9 +869,7 @@ class PairingNotifier extends Notifier<PairingState> {
 
     try {
       final community = _parseLegacyInput(rawInput);
-      if (HostedEnvironment.isReservedHost(
-        Uri.parse(community.relayUrl).host,
-      )) {
+      if (HostedEnvironment.requiresAuth(Uri.parse(community.relayUrl).host)) {
         final flow = ref.read(hostedFlowProvider);
         await flow.stagePairedCommunity(
           community,

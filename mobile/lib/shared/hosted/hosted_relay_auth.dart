@@ -54,7 +54,9 @@ class HostedRelayAuth extends ChangeNotifier {
   AccountFailure? failure;
 
   bool protects(RelayConfig config) =>
-      enabled && HostedEnvironment.supportsRelay(Uri.parse(config.baseUrl));
+      enabled &&
+      HostedEnvironment.requiresAuth(Uri.parse(config.baseUrl).host) &&
+      HostedEnvironment.supportsRelay(Uri.parse(config.baseUrl));
 
   Future<Map<String, String>> headers(RelayConfig config) async {
     if (!protects(config)) return const {};

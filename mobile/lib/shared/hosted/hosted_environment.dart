@@ -12,15 +12,34 @@ abstract final class HostedEnvironment {
       .singleWhere((entry) => Uri.parse(entry.value) == origin)
       .key;
 
-  /// Reserved domains cannot fall back to Nostr-only onboarding, even when
-  /// this build does not support their account environment.
-  static bool isReservedHost(String host) {
+  /// Comma-separated DNS domains requiring Builderlab authentication.
+  /// Empty builds keep Nostr-only entry available, including hosted QR pairing.
+  static final List<String> authDomains = List.unmodifiable(
+    const String.fromEnvironment('BUZZ_AUTH_DOMAINS')
+        .split(',')
+        .map(
+          (domain) =>
+              domain.trim().toLowerCase().replaceFirst(RegExp(r'\.+$'), ''),
+        )
+        .where((domain) => domain.isNotEmpty)
+        .map((domain) {
+          if (!RegExp(
+            r'^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$',
+          ).hasMatch(domain)) {
+            throw StateError(
+              'BUZZ_AUTH_DOMAINS must contain DNS names, not URLs or wildcards',
+            );
+          }
+          return domain;
+        }),
+  );
+
+  /// Matches a configured domain and its subdomains, never a string suffix.
+  static bool requiresAuth(String host) {
     final normalized = host.toLowerCase().replaceFirst(RegExp(r'\.+$'), '');
-    return [
-      'buzz.xyz',
-      'builderlab.xyz',
-      'builderlabstaging.xyz',
-    ].any((domain) => normalized == domain || normalized.endsWith('.$domain'));
+    return authDomains.any(
+      (domain) => normalized == domain || normalized.endsWith('.$domain'),
+    );
   }
 
   /// Explicit community-to-account mapping. Never infer an account endpoint

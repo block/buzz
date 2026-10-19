@@ -6,9 +6,9 @@ import 'hosted_environment.dart';
 /// The same hosted requirements apply to every new community, regardless of
 /// whether its credentials came from an invite, key import, or verified pairing.
 abstract final class CommunityEntryRequirements {
-  /// Legacy invite admission must never generate a key or claim a hosted invite.
+  /// Nostr-only entry cannot bypass a configured account requirement.
   static void requireSelfHosted(String relayUrl) {
-    if (HostedEnvironment.isReservedHost(Uri.parse(relayUrl).host)) {
+    if (HostedEnvironment.requiresAuth(Uri.parse(relayUrl).host)) {
       throw StateError(
         'This community requires Builderlab sign-in and identity '
         'backup. Open its link through community setup.',
@@ -21,7 +21,7 @@ abstract final class CommunityEntryRequirements {
     BuilderlabAccountClient account,
   ) async {
     final uri = Uri.parse(community.relayUrl);
-    if (!HostedEnvironment.isReservedHost(uri.host)) return;
+    if (!HostedEnvironment.requiresAuth(uri.host)) return;
     if (!HostedEnvironment.supportsRelay(uri)) throw AccountFailure.denied;
     {
       final session = account.account ?? await account.restore();

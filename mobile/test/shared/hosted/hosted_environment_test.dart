@@ -35,18 +35,26 @@ void main() {
     }
   });
 
-  test('reserved unsupported hosts never become self-hosted', () {
-    for (final host in [
-      'buzz.xyz',
-      'app.builderlab.xyz',
-      'TEAM.builderlabstaging.xyz',
-      'team.communities.public.builderlabstaging.xyz.',
-    ]) {
-      expect(HostedEnvironment.isReservedHost(host), isTrue);
+  test('authentication follows only configured DNS domain boundaries', () {
+    for (final domain in HostedEnvironment.authDomains) {
+      for (final host in [
+        domain,
+        'team.$domain',
+        'TEAM.${domain.toUpperCase()}.',
+      ]) {
+        expect(HostedEnvironment.requiresAuth(host), isTrue, reason: host);
+      }
+      expect(HostedEnvironment.requiresAuth('$domain.attacker.test'), isFalse);
+      expect(HostedEnvironment.requiresAuth('not$domain'), isFalse);
     }
-    expect(
-      HostedEnvironment.isReservedHost('builderlabstaging.xyz.attacker.test'),
-      isFalse,
-    );
+    if (HostedEnvironment.authDomains.isEmpty) {
+      for (final host in [
+        'buzz.xyz',
+        'team.communities.buzz.xyz',
+        'team.communities.public.builderlabstaging.xyz',
+      ]) {
+        expect(HostedEnvironment.requiresAuth(host), isFalse);
+      }
+    }
   });
 }

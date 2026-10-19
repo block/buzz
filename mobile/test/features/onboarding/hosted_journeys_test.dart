@@ -1,3 +1,5 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
+import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -20,24 +22,63 @@ import '../../helpers/hosted_journey_fixture.dart';
 void main() {
   void journey(
     String name,
-    Future<void> Function(WidgetTester, HostedJourneyFixture) run,
-  ) {
-    testWidgets(name, (tester) async {
-      final fixture = HostedJourneyFixture();
-      // Keep asynchronous storage/HTTP owners in one real zone across tests;
-      // their serialized tails otherwise outlive the widget fake clock. The
-      // fixture pumps bounded frames with event-loop yields, not pumpAndSettle.
-      await tester.runAsync(
-        () => http.runWithClient(() async {
-          try {
-            await run(tester, fixture);
-          } finally {
-            await fixture.dispose(tester);
-          }
-        }, fixture.client),
-      );
-    });
+    Future<void> Function(WidgetTester, HostedJourneyFixture) run, {
+    bool requiresAuthDomain = false,
+  }) {
+    testWidgets(
+      name,
+      (tester) async {
+        final fixture = HostedJourneyFixture();
+        // Keep asynchronous storage/HTTP owners in one real zone across tests;
+        // their serialized tails otherwise outlive the widget fake clock. The
+        // fixture pumps bounded frames with event-loop yields, not pumpAndSettle.
+        await tester.runAsync(
+          () => http.runWithClient(() async {
+            try {
+              await run(tester, fixture);
+            } finally {
+              await fixture.dispose(tester);
+            }
+          }, fixture.client),
+        );
+      },
+      skip:
+          requiresAuthDomain &&
+          !HostedEnvironment.requiresAuth('one.communities.buzz.xyz'),
+    );
   }
+
+  journey(
+    'QR credentials enter without an account when domain is not required',
+    (tester, f) async {
+      if (HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) return;
+      await f.initialize(localIdentity: false, signedIn: false);
+      await f.mount(
+        tester,
+        pairingValidator: ({required relayUrl, required nsec}) async {},
+      );
+      final notifier = f.container.read(pairingProvider.notifier);
+      await notifier.pair(
+        base64Url.encode(
+          utf8.encode(
+            jsonEncode({
+              'relayUrl': 'https://paired.communities.buzz.xyz',
+              'nsec': f.keys.nsec,
+              'pubkey': f.keys.public,
+            }),
+          ),
+        ),
+      );
+      await f.settle(tester);
+      final saved = (await f.storage.loadAll()).single;
+      expect(saved.nsec, f.keys.nsec);
+      expect(saved.pubkey, f.keys.public);
+      expect(f.sent('/exchange'), isEmpty);
+      expect(f.sent('/current'), isEmpty);
+      expect(f.sent('/nsec-backups/status'), isEmpty);
+      expect(find.text('Sign in to Builderlab to reconnect'), findsNothing);
+    },
+  );
 
   journey(
     'saved community signs in again without changing identity or onboarding',
@@ -55,6 +96,14 @@ void main() {
       await f.mount(tester, openEntry: false);
       final session = f.container.read(relaySessionProvider.notifier);
       await f.settle(tester);
+      if (!HostedEnvironment.requiresAuth(Uri.parse(community.relayUrl).host)) {
+        expect(find.text('Sign in to Builderlab to reconnect'), findsNothing);
+        expect(f.socketHeaders, isNotEmpty);
+        expect(f.socketHeaders, everyElement(isEmpty));
+        expect(f.sent('/assertions'), isEmpty);
+        expect(f.container.read(relayConfigProvider).nsec, community.nsec);
+        return;
+      }
       expect(find.text('Sign in to Builderlab to reconnect'), findsOneWidget);
       expect(f.socketHeaders, isEmpty);
 
@@ -307,6 +356,7 @@ void main() {
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Community home').hitTestable(), findsOneWidget);
     },
+    requiresAuthDomain: true,
   );
 
   journey(
@@ -542,6 +592,7 @@ void main() {
       expect(await f.storage.loadActiveId(), saved.id);
       expect(find.text('Community home').hitTestable(), findsOneWidget);
     },
+    requiresAuthDomain: true,
   );
 
   journey(
@@ -602,5 +653,6 @@ void main() {
       );
       expect(find.byType(OnboardingAppEntry), findsNothing);
     },
+    requiresAuthDomain: true,
   );
 }

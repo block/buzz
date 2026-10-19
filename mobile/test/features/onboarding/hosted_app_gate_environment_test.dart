@@ -68,6 +68,11 @@ void main() {
     );
     final pending = dispatcher.onboardingHandler!(context, staging);
     await tester.pumpAndSettle();
+    if (!HostedEnvironment.requiresAuth(Uri.parse(staging.relayUrl).host)) {
+      expect(await pending, isFalse);
+      expect(flow.started, isNull);
+      return;
+    }
     if (HostedEnvironment.origin.host == 'app.builderlabstaging.xyz') {
       expect(await pending, isTrue);
       expect(flow.started, staging);
