@@ -587,6 +587,7 @@ test-unit:
                 + test(=connection::terminal_close_delivery_tests::blocked_frame_handler_does_not_hold_socket_open)
                 + test(=connection::terminal_close_delivery_tests::refused_bootstrap_holds_connection_slot_until_socket_ends)
                 + test(=connection::terminal_close_delivery_tests::stalled_bootstrap_holds_connection_slot)
+                + test(=connection::terminal_close_delivery_tests::peer_wait_replies_to_client_initiated_close)
                 + test(=handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated)
                 + test(=handlers::auth::tests::fi_ban_check_error_emits_terminal_authorization_unavailable)
                 + test(=handlers::auth::tests::fi_root_authorization_denied_rows_emit_identical_frames)

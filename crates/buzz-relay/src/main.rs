@@ -2090,20 +2090,22 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// A single WebSocket can therefore stay open, from SIGTERM, for up to:
 ///
 /// ```text
-///   5s grace  +  up to 20s jitter  +  up to 5s close-frame ack  =  30s
-///   (fixed)      (MAX_DRAIN_JITTER_MS)  (RESTART_CLOSE_ACK_TIMEOUT)
+///   5s grace  +  up to 20s jitter  +  up to 5s close-frame ack  +  up to 1s peer wait  =  31s
+///   (fixed)      (MAX_DRAIN_JITTER_MS)  (RESTART_CLOSE_ACK_TIMEOUT)  (WS_TERMINAL_FLUSH_TIMEOUT)
 /// ```
 ///
 /// The 5s grace runs before the 30s hard-drain clock starts, so the jitter
-/// (capped at [`buzz_relay::config::MAX_DRAIN_JITTER_MS`] = 20s) plus the
+/// (capped at [`buzz_relay::config::MAX_DRAIN_JITTER_MS`] = 20s), the
 /// per-connection close-frame ack wait (`RESTART_CLOSE_ACK_TIMEOUT` = 5s in
-/// `state.rs`) sum to 25s and stay inside the 30s hard drain. Total worst
+/// `state.rs`) and the bounded wait for the client's Close reply
+/// (`WS_TERMINAL_FLUSH_TIMEOUT` = 1s in `connection.rs`) sum to 26s and stay
+/// inside the 30s hard drain. Total worst
 /// case from SIGTERM to forced exit is 5s + 30s = 35s. Both fit inside the
 /// chart's `terminationGracePeriodSeconds: 60` (`deploy/charts/buzz/values.yaml`),
 /// which leaves headroom but assumes no `preStop` hook adds further delay.
 /// With jitter off (`BUZZ_DRAIN_JITTER_MS=0`, the default) sockets close
 /// all-at-once right after the grace, so the per-socket delay collapses to
-/// roughly the 5s grace plus the ack wait.
+/// roughly the 5s grace plus the ack wait and the peer wait.
 const GRACEFUL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn serve(
