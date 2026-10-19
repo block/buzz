@@ -1625,6 +1625,12 @@ fn masker_blanks_every_literal_form_and_keeps_code() {
 /// continuations, `\n`/`\t`/`\r` escapes, and with or without a `public.`
 /// schema prefix.
 fn inserts_events_row(source: &str) -> bool {
+    !events_insert_tails(source).is_empty()
+}
+
+/// `source` lowercased, with every run of whitespace, `\` line continuations,
+/// and `\n`/`\t`/`\r` escapes collapsed to one space.
+fn normalized_sql(source: &str) -> String {
     let mut normalized = String::with_capacity(source.len());
     let mut chars = source.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -1639,16 +1645,26 @@ fn inserts_events_row(source: &str) -> bool {
             normalized.push(ch.to_ascii_lowercase());
         }
     }
-    ["insert into events", "insert into public.events"]
-        .iter()
-        .any(|marker| {
-            normalized.match_indices(marker).any(|(index, marker)| {
-                normalized[index + marker.len()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|next| !(next.is_ascii_alphanumeric() || next == '_'))
-            })
-        })
+    normalized
+}
+
+/// The normalized SQL that follows each `INSERT INTO events` in `source`.
+fn events_insert_tails(source: &str) -> Vec<String> {
+    let normalized = normalized_sql(source);
+    let mut tails = Vec::new();
+    for marker in ["insert into events", "insert into public.events"] {
+        for (index, marker) in normalized.match_indices(marker) {
+            let tail = &normalized[index + marker.len()..];
+            if tail
+                .chars()
+                .next()
+                .is_none_or(|next| !(next.is_ascii_alphanumeric() || next == '_'))
+            {
+                tails.push(tail.to_owned());
+            }
+        }
+    }
+    tails
 }
 
 /// An events insert must run both follow-ups: the push enqueue and the
@@ -2049,6 +2065,120 @@ fn every_production_event_insert_runs_the_roster_guard() {
         "production `INSERT INTO events` writers must run the app-side roster guard: {violations:?}"
     );
     // Five guarded writers plus the four explicitly exempt writers/probes.
+    assert!(
+        checked_writers >= 9,
+        "expected at least nine event writers, found {checked_writers}"
+    );
+}
+
+// The rolled-back replica-floor probe writes a kind 9 row, which has no `d`.
+const EVENT_INSERT_D_TAG_EXCEPTIONS: [&str; 1] = ["pub async fn verify_floor_guard_behavior("];
+
+/// Whether an `INSERT INTO events` tail names `d_tag` in an explicit column
+/// list. An insert without a column list does not count.
+fn events_insert_names_d_tag(tail: &str) -> bool {
+    tail.trim_start()
+        .strip_prefix('(')
+        .and_then(|columns| columns.split_once(')'))
+        .is_some_and(|(columns, _)| columns.split(',').any(|column| column.trim() == "d_tag"))
+}
+
+fn event_insert_d_tag_violations(production_source: &str) -> Vec<String> {
+    function_slices(production_source)
+        .into_iter()
+        .filter(|function_source| {
+            let header = function_header(function_source);
+            !EVENT_INSERT_D_TAG_EXCEPTIONS
+                .iter()
+                .any(|exception| header.starts_with(exception))
+                && !events_insert_tails(function_source)
+                    .iter()
+                    .all(|tail| events_insert_names_d_tag(tail))
+        })
+        .map(|function_source| function_header(function_source).to_owned())
+        .collect()
+}
+
+#[test]
+fn event_insert_d_tag_policy_rejects_writers_without_the_column() {
+    let source = r##"
+pub(crate) async fn writer_without_d_tag(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id, kind) VALUES ($1, $2, $3)");
+}
+pub(crate) async fn writer_with_d_tag(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events \
+                 (community_id, id, kind, d_tag) VALUES ($1, $2, $3, $4)");
+}
+pub(crate) async fn writer_with_compact_columns(tx: &mut AdmittedTx) {
+    sqlx::query("insert into public.events (community_id,id,kind,d_tag) VALUES ($1,$2,$3,$4)");
+}
+pub(crate) async fn writer_with_d_tag_only_in_values(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id, kind) SELECT community_id, id, d_tag FROM x");
+}
+pub(crate) async fn writer_with_lookalike_column(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id, kind, d_tag_hash) VALUES ($1, $2, $3, $4)");
+}
+pub(crate) async fn writer_without_column_list(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events SELECT * FROM staged_events");
+}
+pub(crate) async fn second_insert_without_d_tag(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id, d_tag) VALUES ($1, $2, $3)");
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
+}
+pub(crate) async fn mention_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO event_mentions (community_id, event_id) VALUES ($1, $2)");
+}
+pub async fn verify_floor_guard_behavior(pool: &PgPool) {
+    sqlx::query("INSERT INTO events (community_id, id, kind) VALUES ($1, $2, 9)");
+}
+#[cfg(test)]
+mod tests {
+    fn fixture() {
+        sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
+    }
+}
+"##;
+    assert_eq!(
+        event_insert_d_tag_violations(&strip_cfg_test_items(source)),
+        [
+            "pub(crate) async fn writer_without_d_tag(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_with_d_tag_only_in_values(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_with_lookalike_column(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn writer_without_column_list(tx: &mut AdmittedTx) {",
+            "pub(crate) async fn second_insert_without_d_tag(tx: &mut AdmittedTx) {",
+        ],
+        "every production events insert must name `d_tag` in its column list"
+    );
+}
+
+/// Addressable events (kinds 30000-39999) replace by `d_tag`, and the only
+/// index that serves that lookup is partial on `d_tag IS NOT NULL`. A writer
+/// that leaves the column out stores NULL, so its rows never replace. Nothing
+/// repairs them after the fact, so every production writer must name the column.
+#[test]
+fn every_production_event_insert_names_d_tag() {
+    let mut checked_writers = 0;
+    let mut violations = Vec::new();
+    for path in production_event_writer_source_files() {
+        let source = std::fs::read_to_string(&path).expect("read source file");
+        let production = strip_cfg_test_items(&source);
+        checked_writers += function_slices(&production)
+            .into_iter()
+            .filter(|function| inserts_events_row(function))
+            .count();
+        violations.extend(
+            event_insert_d_tag_violations(&production)
+                .into_iter()
+                .map(|header| format!("{}: {header}", path.display())),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "production `INSERT INTO events` writers must name `d_tag` in their column list: \
+         {violations:?}"
+    );
+    // The same writer set as the roster-guard scan. A lower count means the
+    // scan stopped seeing a writer, not that one was removed safely.
     assert!(
         checked_writers >= 9,
         "expected at least nine event writers, found {checked_writers}"
