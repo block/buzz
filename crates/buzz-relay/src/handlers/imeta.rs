@@ -1,6 +1,5 @@
 //! imeta tag validation helpers — shared between ingest pipeline and bridge.
 
-use buzz_core::media::is_sha256_hex;
 use buzz_core::tenant::TenantContext;
 use buzz_media::validation::mime_to_ext;
 
@@ -11,11 +10,11 @@ use buzz_media::validation::mime_to_ext;
 pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result<(), String> {
     const ALLOWED_IMETA_KEYS: &[&str] = &[
         "url", "m", "x", "size", "dim", "blurhash", "alt", "thumb", "fallback", "duration",
-        "bitrate", "image", "image-x", "filename",
+        "bitrate", "image", "filename",
     ];
     const SINGLETON_KEYS: &[&str] = &[
         "url", "m", "x", "size", "dim", "blurhash", "thumb", "alt", "duration", "bitrate", "image",
-        "image-x", "filename",
+        "filename",
     ];
     // Previewable media MIME types — these get the strict url-extension
     // consistency check below (their ext is derived from the MIME). Generic
@@ -44,8 +43,6 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
         let mut x_value = String::new();
         let mut m_value = String::new();
         let mut thumb_value = String::new();
-        let mut image_value = String::new();
-        let mut image_x_value = String::new();
 
         for part in tag.iter().skip(1) {
             let mut parts = part.splitn(2, ' ');
@@ -85,17 +82,13 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                     has_m = true;
                 }
                 "x" => {
-                    if !is_sha256_hex(value) {
+                    if value.len() != 64
+                        || !value.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+                    {
                         return Err("imeta x must be a 64-char lowercase hex SHA-256".into());
                     }
                     x_value = value.to_string();
                     has_x = true;
-                }
-                "image-x" => {
-                    if !is_sha256_hex(value) {
-                        return Err("imeta image-x must be a 64-char lowercase hex SHA-256".into());
-                    }
-                    image_x_value = value.to_string();
                 }
                 "size" => {
                     match value.parse::<u64>() {
@@ -143,7 +136,6 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                                 .into(),
                         );
                     }
-                    image_value = value.to_string();
                 }
                 "filename" => {
                     // Original filename for the file-card label. Bounded length;
@@ -173,7 +165,7 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
         // Video-only NIP-71 fields must not appear on image blobs.
         let is_video = m_value == "video/mp4";
         if !is_video {
-            for key in &["duration", "bitrate", "image", "image-x"] {
+            for key in &["duration", "bitrate", "image"] {
                 if seen_keys.contains(*key) {
                     return Err(format!(
                         "imeta {key} is only valid for video/mp4, not {m_value}"
@@ -207,13 +199,6 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                     return Err("imeta thumb hash does not match x".into());
                 }
             }
-        }
-        // `image-x` lets media reads find a poster by hash; it must name the
-        // poster that `image` points at.
-        if !image_x_value.is_empty()
-            && extract_hash_from_media_url(&image_value) != Some(image_x_value.as_str())
-        {
-            return Err("imeta image-x must match the image url hash".into());
         }
     }
     Ok(())
@@ -366,7 +351,11 @@ fn is_well_formed_mime(mime: &str) -> bool {
 fn extract_hash_from_media_url(url: &str) -> Option<&str> {
     let after = url.rsplit("/media/").next()?;
     let hash = after.split('.').next()?;
-    is_sha256_hex(hash).then_some(hash)
+    if hash.len() == 64 && hash.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
+        Some(hash)
+    } else {
+        None
+    }
 }
 
 /// Extract the primary extension from a `/media/{hash}.{ext}` URL (not thumb).
@@ -581,29 +570,6 @@ mod tests {
         ];
         let err = validate_imeta_tags(&[tag], BASE).unwrap_err();
         assert!(err.contains("url hash does not match x"), "{err}");
-    }
-
-    fn video_with_poster(poster_x: Option<&str>) -> Vec<String> {
-        let poster = "c".repeat(64);
-        let mut tag = vec![
-            "imeta".into(),
-            format!("url /media/{HASH}.mp4"),
-            "m video/mp4".into(),
-            format!("x {HASH}"),
-            "size 100".into(),
-            format!("image /media/{poster}.jpg"),
-        ];
-        tag.extend(poster_x.map(|x| format!("image-x {x}")));
-        tag
-    }
-
-    #[test]
-    fn test_imeta_image_x_must_name_the_poster() {
-        let poster = "c".repeat(64);
-        assert!(validate_imeta_tags(&[video_with_poster(Some(&poster))], BASE).is_ok());
-        assert!(validate_imeta_tags(&[video_with_poster(None)], BASE).is_ok());
-        let err = validate_imeta_tags(&[video_with_poster(Some(HASH))], BASE).unwrap_err();
-        assert!(err.contains("image-x must match"), "{err}");
     }
 
     #[test]
