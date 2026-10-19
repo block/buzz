@@ -14,6 +14,66 @@ import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
+  for (final retirement in ['community', 'age', 'dispose']) {
+    test(
+      'query retired during signing sends no HTTP request ($retirement)',
+      () async {
+        final started = Completer<void>();
+        final proof = Completer<String>();
+        final age = _MutableAgeNotifier();
+        var requests = 0;
+        final session = RelaySessionNotifier(
+          querySigner: RelayQuerySigner(
+            sign: (_) {
+              started.complete();
+              return proof.future;
+            },
+          ),
+          httpClient: http_testing.MockClient((_) async {
+            requests++;
+            return http.Response('[]', 200);
+          }),
+        );
+        final container = ProviderContainer(
+          overrides: [
+            authProvider.overrideWith(_PendingAuthNotifier.new),
+            ageSignalProvider.overrideWith(() => age),
+            relayConfigProvider.overrideWith(
+              () => _FakeRelayConfigNotifier(
+                baseUrl: 'https://relay.example',
+                nsec: 'test-key',
+              ),
+            ),
+            relaySessionProvider.overrideWith(() => session),
+          ],
+        );
+        addTearDown(container.dispose);
+        container.read(relaySessionProvider);
+        final query = expectLater(
+          session.queryRelay(const []),
+          throwsStateError,
+        );
+        await started.future;
+        expect(requests, 0);
+        switch (retirement) {
+          case 'community':
+            container
+                .read(relayConfigProvider.notifier)
+                .update(baseUrl: 'https://other.example', nsec: 'other-key');
+            container.read(relaySessionProvider);
+          case 'age':
+            age.setState(AgeSignalState.restricted);
+            container.read(relaySessionProvider);
+          case 'dispose':
+            session.debugDispose();
+        }
+        proof.complete('Nostr stale');
+        await query;
+        expect(requests, 0);
+      },
+    );
+  }
+
   test(
     'confirmed minor tears down retained relay and observer providers',
     () async {
@@ -23,6 +83,7 @@ void main() {
       var httpCalls = 0;
       final pendingResponse = Completer<http.Response>();
       final session = RelaySessionNotifier(
+        querySigner: RelayQuerySigner(sign: (_) async => 'Nostr test'),
         httpClient: http_testing.MockClient((_) {
           httpCalls++;
           return pendingResponse.future;
@@ -196,6 +257,7 @@ void main() {
         .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
         .join();
 
+    expect(nostr.Event.fromMap(authEvent).isValid(), isTrue);
     expect(authEvent['kind'], 27235);
     expect(authEvent['pubkey'], keychain.public);
     expect(
@@ -237,6 +299,7 @@ void main() {
   test('queryRelay rotates the client after a timeout', () async {
     final clients = <_ControlledHttpClient>[];
     final session = RelaySessionNotifier(
+      querySigner: RelayQuerySigner(sign: (_) async => 'Nostr test'),
       httpClientFactory: () {
         final client = _ControlledHttpClient();
         clients.add(client);
@@ -265,6 +328,7 @@ void main() {
     expect(clients.single.closed, isTrue);
 
     final nextQuery = session.queryRelay(const []);
+    await pumpEventQueue();
     expect(clients, hasLength(2));
     clients.last.complete(http.Response('[]', 200));
 
@@ -277,6 +341,7 @@ void main() {
     () async {
       final clients = <_QueuedControlledHttpClient>[];
       final session = RelaySessionNotifier(
+        querySigner: RelayQuerySigner(sign: (_) async => 'Nostr test'),
         httpClientFactory: () {
           final client = _QueuedControlledHttpClient();
           clients.add(client);
@@ -304,12 +369,18 @@ void main() {
         timeout: const Duration(milliseconds: 10),
       );
       final peerQuery = session.queryRelay(const []);
+      final timedOut = expectLater(
+        timedOutQuery,
+        throwsA(isA<TimeoutException>()),
+      );
+      await pumpEventQueue();
       expect(clients.single.requestCount, 2);
 
-      await expectLater(timedOutQuery, throwsA(isA<TimeoutException>()));
+      await timedOut;
       expect(clients.single.closed, isFalse);
 
       final nextQuery = session.queryRelay(const []);
+      await pumpEventQueue();
       expect(clients, hasLength(2));
       clients.first.complete(1, http.Response('[]', 200));
       expect(await peerQuery, isEmpty);
@@ -485,10 +556,8 @@ void main() {
     expect(gate.isActive, isTrue);
 
     final query = harness.session.queryRelay(const []);
-    await Future<void>.delayed(Duration.zero);
-
-    expect(requestCount, 1);
     expect(await query, isEmpty);
+    expect(requestCount, 1);
     // Still armed: the read must neither wait on the gate nor clear it.
     expect(gate.isActive, isTrue);
   });

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 
@@ -76,6 +77,7 @@ class _BufferedEvent {
 class RelaySessionNotifier extends Notifier<SessionState> {
   RelaySessionNotifier({
     http.Client? httpClient,
+    RelayQuerySigner? querySigner,
     http.Client Function()? httpClientFactory,
     RelaySocketFactory socketFactory = RelaySocket.new,
     DateTime Function()? now,
@@ -86,6 +88,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
          client: httpClient,
          clientFactory: httpClientFactory,
        ),
+       _querySigner = querySigner ?? RelayQuerySigner(),
        _socketFactory = socketFactory,
        _now = now ?? DateTime.now,
        _rateLimitGate = rateLimitGate ?? RelayRateLimitGate(),
@@ -93,6 +96,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
        _replayDelay = replayDelay;
 
   final RelayHttpQueryClient _httpQueryClient;
+  final RelayQuerySigner _querySigner;
   final RelaySocketFactory _socketFactory;
   final DateTime Function() _now;
   final RelayRateLimitGate _rateLimitGate;
@@ -233,17 +237,21 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final config = ref.read(relayConfigProvider);
     final url = Uri.parse(config.baseUrl).resolve(path).toString();
     final bodyBytes = utf8.encode(jsonEncode(payload));
+    final authorization = await _querySigner.sign((
+      method: 'POST',
+      url: url,
+      bodyBytes: bodyBytes,
+      nsec: config.nsec,
+    ));
+    if (_disposed || _ageRestricted || generation != _contextGeneration) {
+      throw StateError('Relay query belongs to a retired session');
+    }
     // Reuse the session transport on success. A timeout rotates immediately
     // for new queries, then closes the retired client after its peers finish.
     final response = await _httpQueryClient.post(
       Uri.parse(url),
       headers: {
-        'Authorization': buildNip98AuthHeader(
-          method: 'POST',
-          url: url,
-          bodyBytes: bodyBytes,
-          nsec: config.nsec,
-        ),
+        'Authorization': authorization,
         'Content-Type': 'application/json',
       },
       body: bodyBytes,
@@ -1041,6 +1049,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _dispose() {
     _disposed = true;
     _contextGeneration++;
+    _querySigner.retire();
     _beforePauseCallbacks.clear();
     _connectionGeneration++;
     _reconnectTimer?.cancel();
