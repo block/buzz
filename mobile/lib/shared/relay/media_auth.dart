@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -9,6 +10,8 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import 'package:buzz/shared/crypto/event_signer.dart';
 import 'relay_provider.dart';
+
+typedef _MediaSigningIdentity = ({String secret, String? public});
 
 const _mediaGetAuthKind = 24242;
 const _mediaGetAuthLifetimeSeconds = 60;
@@ -46,6 +49,10 @@ class MediaGetAuthService {
   final String _baseUrl;
   final String? _nsec;
   final DateTime Function() _now;
+
+  // Prepared only after a scoped request. Never shared across service/account
+  // lifetimes; background requests return it for reuse by the next queued job.
+  _MediaSigningIdentity? _signingIdentity;
 
   Map<String, String>? _cachedHeaders;
   DateTime? _refreshAt;
@@ -91,12 +98,15 @@ class MediaGetAuthService {
     final released = Completer<void>();
     final result = _signingTail.then((_) async {
       try {
-        return await compute(_mediaHeadersInBackground, (
+        final signed = await compute(_mediaHeadersInBackground, (
           baseUrl: _baseUrl,
           nsec: nsec,
+          identity: _signingIdentity,
           url: url,
           now: _now(),
         ), debugLabel: 'media-get-auth');
+        _signingIdentity ??= signed.identity;
+        return signed.headers;
       } finally {
         // A failed worker must propagate to its fetch without blocking later
         // requests in the queue.
@@ -193,10 +203,18 @@ class MediaGetAuthService {
   }
 
   nostr.Event _buildGetAuthEvent(String nsec) {
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
+    final privkeyHex =
+        _signingIdentity?.secret ?? nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) {
       throw Exception('Invalid nsec');
     }
+
+    final identity = _signingIdentity ??= (
+      secret: privkeyHex,
+      // The native signer derives this from its temporary keypair. Only the
+      // Dart backend needs a prepared public key to avoid redundant work.
+      public: Platform.isIOS ? null : nostr.Schnorr.derivePublicKey(privkeyHex),
+    );
 
     final expiration =
         (_now().millisecondsSinceEpoch ~/ 1000) + _mediaGetAuthLifetimeSeconds;
@@ -211,19 +229,32 @@ class MediaGetAuthService {
       kind: _mediaGetAuthKind,
       content: 'Get buzz-media',
       tags: tags,
-      secretKey: privkeyHex,
+      secretKey: identity.secret,
+      pubkey: identity.public,
       verify: false,
     );
   }
 }
 
-Map<String, String> _mediaHeadersInBackground(
-  ({String baseUrl, String nsec, String url, DateTime now}) request,
-) => MediaGetAuthService(
-  baseUrl: request.baseUrl,
-  nsec: request.nsec,
-  now: () => request.now,
-).headersFor(request.url);
+({Map<String, String> headers, _MediaSigningIdentity? identity})
+_mediaHeadersInBackground(
+  ({
+    String baseUrl,
+    String nsec,
+    _MediaSigningIdentity? identity,
+    String url,
+    DateTime now,
+  })
+  request,
+) {
+  final service = MediaGetAuthService(
+    baseUrl: request.baseUrl,
+    nsec: request.nsec,
+    now: () => request.now,
+  ).._signingIdentity = request.identity;
+  final headers = service.headersFor(request.url);
+  return (headers: headers, identity: service._signingIdentity);
+}
 
 final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
   final config = ref.watch(relayConfigProvider);

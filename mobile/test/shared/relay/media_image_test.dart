@@ -3,10 +3,12 @@ import 'dart:convert';
 
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
+import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 // Minimal valid 1x1 transparent PNG.
@@ -99,6 +101,89 @@ void main() {
           );
           expect(expiration, signedAt.millisecondsSinceEpoch ~/ 1000 + 60);
         }
+      },
+    );
+
+    test(
+      'prepared identity still mints fresh proofs after clock advances',
+      () async {
+        final keys = nostr.Keys.generate();
+        var now = DateTime.utc(2026, 10, 18, 12);
+        final auth = _auth(nsec: keys.nsec, now: () => now);
+        final first = await auth.headersForAsync(_mediaUrl);
+        now = now.add(const Duration(minutes: 2));
+        final next = await auth.headersForAsync(_mediaUrl);
+        final encoded = next['Authorization']!.substring('Nostr '.length);
+        final event = nostr.Event.fromJson(
+          utf8.decode(base64Url.decode(base64Url.normalize(encoded))),
+        );
+        expect(event.pubkey, keys.public);
+        expect(
+          event.tags,
+          contains(
+            equals([
+              'expiration',
+              '${now.millisecondsSinceEpoch ~/ 1000 + 60}',
+            ]),
+          ),
+        );
+        expect(next, isNot(equals(first)));
+        expect(auth.headersFor('https://elsewhere.com/media/a'), isEmpty);
+        expect(
+          await auth.headersForAsync('https://elsewhere.com/media/a'),
+          isEmpty,
+        );
+      },
+    );
+
+    test(
+      'provider replacement isolates warmed and queued identities',
+      () async {
+        final first = nostr.Keys.generate();
+        final second = nostr.Keys.generate();
+        final container = ProviderContainer(
+          overrides: [relayConfigProvider.overrideWith(_TestRelayConfig.new)],
+        );
+        addTearDown(container.dispose);
+        final config = container.read(relayConfigProvider.notifier);
+        config.update(baseUrl: _relayBase, nsec: first.nsec);
+        final old = container.read(mediaGetAuthServiceProvider);
+        await old.headersForAsync(_mediaUrl);
+        final queued = old.headersForAsync(_mediaUrl);
+        config.update(baseUrl: _relayBase, nsec: second.nsec);
+        final replacement = container.read(mediaGetAuthServiceProvider);
+        expect(identical(old, replacement), isFalse);
+        final results = await Future.wait([
+          queued,
+          replacement.headersForAsync(_mediaUrl),
+          replacement.headersForAsync(_mediaUrl),
+        ]);
+        for (var i = 0; i < results.length; i++) {
+          final encoded = results[i]['Authorization']!.substring(
+            'Nostr '.length,
+          );
+          final event = nostr.Event.fromJson(
+            utf8.decode(base64Url.decode(base64Url.normalize(encoded))),
+          );
+          expect(event.pubkey, i == 0 ? first.public : second.public);
+        }
+        config.update(
+          baseUrl: 'https://replacement.example',
+          nsec: second.nsec,
+        );
+        final switched = container.read(mediaGetAuthServiceProvider);
+        expect(await switched.headersForAsync(_mediaUrl), isEmpty);
+        expect(
+          await switched.headersForAsync('https://replacement.example/media/a'),
+          isNotEmpty,
+        );
+        config.update(baseUrl: _relayBase, nsec: null);
+        expect(
+          await container
+              .read(mediaGetAuthServiceProvider)
+              .headersForAsync(_mediaUrl),
+          isEmpty,
+        );
       },
     );
 
@@ -398,4 +483,9 @@ class _DeferredMediaAuth extends MediaGetAuthService {
   @override
   Map<String, String> headersFor(String url) =>
       throw StateError('Image layout must not sign synchronously');
+}
+
+class _TestRelayConfig extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(baseUrl: _relayBase);
 }
