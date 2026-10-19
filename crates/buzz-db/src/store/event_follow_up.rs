@@ -38,7 +38,7 @@ const SQLSTATE_LOCK_NOT_AVAILABLE: &str = "55P03";
 ///
 /// Call only when the INSERT affected a row, after releasing any savepoint
 /// that may roll it back. Stages push work for after commit, records TTL work,
-/// and shares every blob the event references into its channel in the same
+/// and shares the blobs the event references into its channel in the same
 /// transaction, so a stored reference always carries its share.
 pub(crate) async fn after_admitted_insert(
     tx: &mut AdmittedTx,
@@ -48,13 +48,14 @@ pub(crate) async fn after_admitted_insert(
     let kind = i32::from(event.kind.as_u16());
     tx.record_push_event(event.id.as_bytes(), kind);
     tx.record_channel_event(channel_id, kind);
-    let hashes = buzz_core::media::referenced_blob_hashes(event);
+    let hashes = buzz_core::media::shared_blob_hashes(event);
     if !hashes.is_empty() {
         let community = tx.community();
         crate::store::media_reference::record_media_shares(
             tx.conn(),
             community,
             &hashes,
+            event.pubkey.as_bytes(),
             channel_id,
         )
         .await?;

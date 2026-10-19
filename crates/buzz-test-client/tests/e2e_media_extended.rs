@@ -860,12 +860,13 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
         .sign_with_keys(&outsider)
         .unwrap();
     let ok = outsider_client.send_event(reshare).await.unwrap();
-    assert!(
-        !ok.accepted,
-        "knowing a hash must not let a non-member attach the blob publicly"
-    );
+    assert!(ok.accepted, "reshare rejected: {:?}", ok.message);
     outsider_client.disconnect().await.unwrap();
-    assert_eq!(read_status(&http, &outsider, Method::GET, url).await, 404);
+    assert_eq!(
+        read_status(&http, &outsider, Method::GET, url).await,
+        404,
+        "referencing a known hash must not share the blob"
+    );
 
     assert_eq!(upload(&http, &outsider, &body).await.status(), 200);
     assert_eq!(

@@ -729,11 +729,7 @@ async fn enforce_blossom_read_access(
     enforce_blossom_read_membership(state, tenant, auth_event, headers, strictness).await?;
     let readable = state
         .db
-        .can_read_blobs(
-            tenant.community(),
-            &[sha256.to_owned()],
-            auth_event.pubkey.as_bytes(),
-        )
+        .can_read_blob(tenant.community(), sha256, auth_event.pubkey.as_bytes())
         .await
         .map_err(|_| media_denial(MediaError::AuthorizationUnavailable, strictness))?;
     if readable {

@@ -2554,22 +2554,6 @@ async fn ingest_event_inner(
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
 
-    // A media reference changes who can read its blob, so only an author who can
-    // already read every referenced blob may publish it. Also before every kind
-    // branch, and one query however many blobs the event names.
-    let referenced = buzz_core::media::referenced_blob_hashes(&event);
-    if !referenced.is_empty()
-        && !state
-            .db
-            .can_read_blobs(tenant.community(), &referenced, event.pubkey.as_bytes())
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: checking media: {e}")))?
-    {
-        return Err(IngestError::Rejected(
-            "invalid: referenced media is not readable by the author".into(),
-        ));
-    }
-
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
