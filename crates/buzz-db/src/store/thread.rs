@@ -18,6 +18,62 @@ use crate::{
     ReadSessionInner, RouteDecision, RoutePredicate,
 };
 
+/// Correlated root-author lookup shared by historical retrieval and push matching.
+/// `event_table` is a trusted SQL alias, never client input. Exact timestamps keep
+/// joins partition-aware; community and channel equality prevent cross-scope roots.
+pub(crate) fn root_author_sql(event_table: &str) -> String {
+    format!(
+        "SELECT root.pubkey FROM thread_metadata tm \
+         JOIN events root ON root.community_id = tm.community_id \
+           AND root.id = tm.root_event_id \
+           AND root.created_at = tm.root_event_created_at \
+           AND root.channel_id = tm.channel_id \
+         WHERE tm.community_id = {event_table}.community_id \
+           AND tm.event_id = {event_table}.id \
+           AND tm.event_created_at = {event_table}.created_at \
+           AND tm.channel_id = {event_table}.channel_id \
+           AND tm.depth > 0 AND root.deleted_at IS NULL"
+    )
+}
+
+impl Db {
+    /// Resolve root authors for a bounded batch of reply events in one community.
+    /// Missing/deleted roots and non-replies have no entry.
+    #[datastore_span(name = "thread_root_authors", system = "postgresql")]
+    pub async fn thread_root_authors(
+        &self,
+        community: CommunityId,
+        event_ids: &[Vec<u8>],
+    ) -> Result<std::collections::HashMap<Vec<u8>, Vec<u8>>> {
+        if event_ids.len() > 500 {
+            return Err(crate::error::DbError::InvalidData(
+                "too many reply IDs".into(),
+            ));
+        }
+        let mut query = sqlx::QueryBuilder::new("SELECT e.id, (");
+        query
+            .push(root_author_sql("e"))
+            .push(") AS root_author FROM events e WHERE e.community_id = ")
+            .push_bind(community.as_uuid())
+            .push(" AND e.id = ANY(")
+            .push_bind(event_ids)
+            .push(") AND e.deleted_at IS NULL");
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?;
+        let rows = query.build().fetch_all(&mut *connection).await?;
+        let mut authors = std::collections::HashMap::new();
+        for row in rows {
+            if let Some(author) = row.try_get::<Option<Vec<u8>>, _>("root_author")? {
+                authors.insert(row.try_get("id")?, author);
+            }
+        }
+        Ok(authors)
+    }
+}
+
 // -- Structs ------------------------------------------------------------------
 
 /// A single reply within a thread, joined with event content.
@@ -1246,6 +1302,109 @@ mod postgres_tests {
         crate::channel::get_channel(pool, buzz_core::CommunityId::from_uuid(community_id), id)
             .await
             .map(|channel| (channel, buzz_core::CommunityId::from_uuid(community_id)))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn authored_thread_query_and_matcher_agree_for_nested_replies() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let owner = Keys::generate();
+        let other = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            "authored",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            owner.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("channel");
+        let root = make_stream_event(&owner, "root");
+        let reply = make_stream_event(&other, "direct");
+        let nested = make_stream_event(&other, "nested");
+        let unrelated = make_stream_event(&other, "unrelated root");
+        for (event, parent, depth) in [
+            (&root, None, 0),
+            (&reply, Some(&root), 1),
+            (&nested, Some(&reply), 2),
+            (&unrelated, None, 0),
+        ] {
+            insert_event_with_thread_metadata(
+                &pool,
+                community,
+                event,
+                Some(channel.id),
+                Some(ThreadMetadataParams {
+                    event_id: event.id.as_bytes(),
+                    event_created_at: event_created_at(event),
+                    channel_id: channel.id,
+                    parent_event_id: parent.map(|e| e.id.as_bytes().as_slice()),
+                    parent_event_created_at: parent.map(event_created_at),
+                    root_event_id: parent.map(|_| root.id.as_bytes().as_slice()),
+                    root_event_created_at: parent.map(|_| event_created_at(&root)),
+                    depth,
+                    broadcast: false,
+                }),
+            )
+            .await
+            .expect("insert event");
+        }
+        let ids = [root.id, reply.id, nested.id, unrelated.id].map(|id| id.as_bytes().to_vec());
+        let authors = db
+            .thread_root_authors(community, &ids)
+            .await
+            .expect("batch roots");
+        assert_eq!(authors.len(), 2);
+        for event in [&reply, &nested] {
+            assert_eq!(
+                authors.get(event.id.as_bytes().as_slice()),
+                Some(&owner.public_key().to_bytes().to_vec())
+            );
+        }
+        let mut query = crate::EventQuery::for_community(community);
+        query.thread_root_author = Some(owner.public_key().to_bytes().to_vec());
+        query.kinds = Some(vec![9]);
+        query.channel_ids = Some(vec![channel.id]);
+        let events = db.query_events(&query).await.expect("authored query");
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|event| authors.contains_key(event.event.id.as_bytes().as_slice())));
+        query.thread_root_author = Some(other.public_key().to_bytes().to_vec());
+        assert!(db
+            .query_events(&query)
+            .await
+            .expect("unrelated author")
+            .is_empty());
+        query.thread_root_author = Some(owner.public_key().to_bytes().to_vec());
+        query.channel_ids = Some(vec![]);
+        assert!(db.query_events(&query).await.expect("no access").is_empty());
+        let foreign = CommunityId::from_uuid(make_test_community(&pool).await);
+        assert!(db
+            .thread_root_authors(foreign, &ids)
+            .await
+            .expect("foreign community")
+            .is_empty());
+        sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(root.id.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .expect("delete root");
+        assert!(db
+            .thread_root_authors(community, &ids)
+            .await
+            .expect("deleted root")
+            .is_empty());
+        query.channel_ids = Some(vec![channel.id]);
+        assert!(db
+            .query_events(&query)
+            .await
+            .expect("deleted root query")
+            .is_empty());
     }
 
     #[tokio::test]

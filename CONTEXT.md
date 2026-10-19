@@ -1,6 +1,6 @@
 # Buzz domain language
 
-Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression); it is not a complete model of Buzz.
+Shared terminology for Buzz product behavior. This glossary currently covers mobile notification eligibility and [push suppression](#push-suppression); it is not a complete model of Buzz.
 
 ## Notifications
 
@@ -51,3 +51,15 @@ A [suppression activity signal](#suppression-activity-signal) that extends how l
 ### Inactivity cutoff
 
 The time of the last observed [desktop activity](#desktop-activity) plus the duration specified in the spec, when [desktop inactivity](#desktop-inactivity) begins. New desktop activity moves this cutoff forward.
+
+### Thread root
+
+The message identifying the outer thread containing a reply. A nested reply can have a different immediate parent while retaining the same thread root.
+
+### Authored-thread reply
+
+A message by another author in a thread whose root was authored by the notification recipient. This includes nested replies and does not imply an explicit follow or a prior mention.
+
+### Push eligibility
+
+Whether a message qualifies for a recipient's mobile push notification. Eligibility does not guarantee delivery or presentation, which remain subject to notification controls, suppression, and platform behavior.

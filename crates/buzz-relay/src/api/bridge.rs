@@ -1409,7 +1409,14 @@ pub async fn query_events(
             );
         }
     }
-    Ok(result.into_response())
+    let mut response = result.into_response();
+    if response.status().is_success() {
+        response.headers_mut().insert(
+            "x-buzz-query-extensions",
+            axum::http::HeaderValue::from_static("buzz-authored-thread-replies-v1"),
+        );
+    }
+    Ok(response)
 }
 
 /// Filter execution for [`query_events`], run once NIP-98 auth succeeds.
@@ -1442,6 +1449,53 @@ async fn query_events_authed(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if raw_filters
+        .iter()
+        .any(|raw| raw.get("authored_thread_replies").is_some())
+        && raw_filters
+            .iter()
+            .any(|raw| raw.get("authored_thread_replies").is_none())
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "authored_thread_replies cannot mix with other query modes",
+        ));
+    }
+    // Validate before any specialized query dispatcher can discard the extension.
+    for raw in &raw_filters {
+        if let Some(value) = raw.get("authored_thread_replies") {
+            let allowed = [
+                "kinds",
+                "authored_thread_replies",
+                "before_id",
+                "since",
+                "until",
+                "limit",
+                "#h",
+            ];
+            let valid = value == &Value::Bool(true)
+                && raw
+                    .as_object()
+                    .is_some_and(|object| object.keys().all(|key| allowed.contains(&key.as_str())))
+                && raw
+                    .get("kinds")
+                    .and_then(Value::as_array)
+                    .is_some_and(|kinds| {
+                        !kinds.is_empty()
+                            && kinds.iter().all(|kind| {
+                                kind.as_u64().is_some_and(|kind| {
+                                    crate::handlers::push_lease::PUSH_KINDS.contains(&kind)
+                                })
+                            })
+                    });
+            if !valid {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid authored_thread_replies query",
+                ));
+            }
+        }
+    }
     if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw_filters, false).await
     {
         return result;
@@ -1850,6 +1904,9 @@ async fn query_events_authed(
             extract_channel_from_filter(filter),
             &accessible_channels,
         );
+        if raw.get("authored_thread_replies") == Some(&Value::Bool(true)) {
+            query.thread_root_author = Some(pubkey_bytes.clone());
+        }
         if let Some(channel) = extract_buzz_channel(raw) {
             query.custom_tag = Some(("buzz-channel".into(), channel.into()));
         }
@@ -7859,6 +7916,147 @@ pub(crate) mod postgres_tests {
         );
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn authored_thread_bridge_uses_authenticated_root_author_before_limit() {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+        use uuid::Uuid;
+        let state = bridge_handler_test_state()
+            .await
+            .expect("test infrastructure");
+        let host = format!("authored-{}.local", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let owner = Keys::generate();
+        let other = Keys::generate();
+        let (channel, _) = state
+            .db
+            .create_channel_with_id(
+                community,
+                Uuid::new_v4(),
+                "authored",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                owner.public_key().as_bytes(),
+                None,
+            )
+            .await
+            .expect("channel");
+        let now = nostr::Timestamp::now().as_secs();
+        let root = EventBuilder::new(Kind::Custom(9), "owner root")
+            .tag(Tag::parse(["h", &channel.id.to_string()]).unwrap())
+            .custom_created_at(nostr::Timestamp::from(now - 100))
+            .sign_with_keys(&owner)
+            .unwrap();
+        state
+            .db
+            .insert_event(community, &root, Some(channel.id))
+            .await
+            .unwrap();
+        let reply = EventBuilder::new(Kind::Custom(9), "reply")
+            .tag(Tag::parse(["h", &channel.id.to_string()]).unwrap())
+            .tag(Tag::parse(["e", &root.id.to_hex(), "", "root"]).unwrap())
+            .custom_created_at(nostr::Timestamp::from(now - 5))
+            .sign_with_keys(&other)
+            .unwrap();
+        state
+            .db
+            .insert_event_with_thread_metadata(
+                community,
+                &reply,
+                Some(channel.id),
+                Some(buzz_db::event::ThreadMetadataParams {
+                    event_id: reply.id.as_bytes(),
+                    event_created_at: chrono::DateTime::from_timestamp(now as i64 - 5, 0).unwrap(),
+                    channel_id: channel.id,
+                    parent_event_id: Some(root.id.as_bytes()),
+                    parent_event_created_at: chrono::DateTime::from_timestamp(now as i64 - 100, 0),
+                    root_event_id: Some(root.id.as_bytes()),
+                    root_event_created_at: chrono::DateTime::from_timestamp(now as i64 - 100, 0),
+                    depth: 1,
+                    broadcast: false,
+                }),
+            )
+            .await
+            .unwrap();
+        // A newer non-reply must not consume the one-event result page.
+        let unrelated = EventBuilder::new(Kind::Custom(9), "newer unrelated")
+            .tag(Tag::parse(["h", &channel.id.to_string()]).unwrap())
+            .sign_with_keys(&other)
+            .unwrap();
+        state
+            .db
+            .insert_event(community, &unrelated, Some(channel.id))
+            .await
+            .unwrap();
+        let body = br#"[{"kinds":[9],"authored_thread_replies":true,"limit":1}]"#;
+        let (status, bytes) =
+            post_query(state.clone(), &host, &owner.public_key().to_hex(), body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let events: Vec<nostr::Event> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            events.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![reply.id]
+        );
+        let cursor_body = serde_json::to_vec(&serde_json::json!([{
+            "kinds": [9], "authored_thread_replies": true, "limit": 1,
+            "until": reply.created_at.as_secs(), "before_id": reply.id.to_hex()
+        }]))
+        .unwrap();
+        let (cursor_status, cursor_bytes) = post_query(
+            state.clone(),
+            &host,
+            &owner.public_key().to_hex(),
+            &cursor_body,
+        )
+        .await;
+        assert_eq!(cursor_status, StatusCode::OK);
+        assert!(serde_json::from_slice::<Vec<nostr::Event>>(&cursor_bytes)
+            .unwrap()
+            .is_empty());
+        let (status, bytes) =
+            post_query(state.clone(), &host, &other.public_key().to_hex(), body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_slice::<Vec<nostr::Event>>(&bytes)
+                .unwrap()
+                .len(),
+            0
+        );
+        for filter in [
+            serde_json::json!({"kinds": [9], "authored_thread_replies": false}),
+            serde_json::json!({"kinds": [9], "authored_thread_replies": true, "search": "reply"}),
+            serde_json::json!({"authored_thread_replies": true}),
+        ] {
+            let body = serde_json::to_vec(&vec![filter]).unwrap();
+            assert_eq!(
+                post_query(state.clone(), &host, &owner.public_key().to_hex(), &body)
+                    .await
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let body = serde_json::to_vec(&serde_json::json!([
+            {"kinds": [9], "authored_thread_replies": true, "since": now}
+        ]))
+        .unwrap();
+        let (status, bytes) = post_query(state, &host, &owner.public_key().to_hex(), &body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(serde_json::from_slice::<Vec<nostr::Event>>(&bytes)
+            .unwrap()
+            .is_empty());
+    }
+
     /// Drive a single POST /query request through the router and return the
     /// HTTP status code + body bytes.
     async fn post_query(
@@ -7885,6 +8083,18 @@ pub(crate) mod postgres_tests {
             .await
             .expect("router oneshot");
         let status = resp.status();
+        if status.is_success()
+            && serde_json::from_slice::<Vec<Value>>(body)
+                .unwrap()
+                .iter()
+                .any(|filter| filter.get("authored_thread_replies") == Some(&Value::Bool(true)))
+        {
+            assert_eq!(
+                resp.headers().get("x-buzz-query-extensions").unwrap(),
+                "buzz-authored-thread-replies-v1"
+            );
+        }
+
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .expect("read body");

@@ -72,13 +72,17 @@ public struct PushLeaseFilter: Codable, Equatable, Sendable {
   public let pTags: [String]?
   public let hTags: [String]?
   public let eTags: [String]?
+  public let authoredThreadReplies: Bool?
+  public let since: Int?
 
   enum CodingKeys: String, CodingKey {
     case kinds
+    case since
     case authors
     case pTags = "#p"
     case hTags = "#h"
     case eTags = "#e"
+    case authoredThreadReplies = "authored_thread_replies"
   }
 
   public init(
@@ -86,13 +90,17 @@ public struct PushLeaseFilter: Codable, Equatable, Sendable {
     authors: [String]? = nil,
     pTags: [String]? = nil,
     hTags: [String]? = nil,
-    eTags: [String]? = nil
+    eTags: [String]? = nil,
+    authoredThreadReplies: Bool? = nil,
+    since: Int? = nil
   ) {
     self.kinds = kinds
     self.authors = authors
     self.pTags = pTags
     self.hTags = hTags
     self.eTags = eTags
+    self.authoredThreadReplies = authoredThreadReplies
+    self.since = since
   }
 
   public func queryFilter(since: Int?, limit: Int) -> [String: Any] {
@@ -101,11 +109,14 @@ public struct PushLeaseFilter: Codable, Equatable, Sendable {
     if let pTags { filter["#p"] = pTags }
     if let hTags { filter["#h"] = hTags }
     if let eTags { filter["#e"] = eTags }
-    if let since { filter["since"] = since }
+    if authoredThreadReplies == true { filter["authored_thread_replies"] = true }
+    if let since = [self.since, since].compactMap({ $0 }).max() { filter["since"] = since }
     return filter
   }
 
-  public func matches(_ event: VerifiedNostrEvent) -> Bool {
+  public func matches(_ event: VerifiedNostrEvent, authoredThreadQuery: Bool = false) -> Bool {
+    if authoredThreadReplies == true && !authoredThreadQuery { return false }
+    if let since, event.createdAt < since { return false }
     guard kinds.contains(event.kind) else { return false }
     if let authors, !authors.contains(event.pubkey.lowercased()) { return false }
     if let pTags, !event.hasAnyTag(named: "p", values: pTags) { return false }
@@ -118,9 +129,10 @@ public struct PushLeaseFilter: Codable, Equatable, Sendable {
 public enum PushLeaseMatcher {
   public static func matches(
     event: VerifiedNostrEvent,
-    policy: PushResolutionPolicy
+    policy: PushResolutionPolicy,
+    authoredThreadQuery: Bool = false
   ) -> Bool {
-    guard policy.filter.matches(event) else { return false }
+    guard policy.filter.matches(event, authoredThreadQuery: authoredThreadQuery) else { return false }
     if policy.ignore.contains(where: { $0.matches(event) }) { return false }
     if let maximum = policy.suppress?.pTagsMax,
       event.tagCount(named: "p") > maximum

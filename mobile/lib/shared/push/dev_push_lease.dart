@@ -19,6 +19,7 @@ const _installationIdPattern = r'^[0-9a-f]{32}$';
 
 class BuzzPushLeaseDescriptor {
   final String origin;
+  final bool authoredThreadReplies;
   final String executorKeyId;
   final String executorPubkey;
   final String transport;
@@ -30,6 +31,7 @@ class BuzzPushLeaseDescriptor {
 
   const BuzzPushLeaseDescriptor({
     required this.origin,
+    this.authoredThreadReplies = false,
     required this.executorKeyId,
     required this.executorPubkey,
     required this.transport,
@@ -185,6 +187,9 @@ class BuzzPushLeaseDescriptor {
 
     return BuzzPushLeaseDescriptor(
       origin: origin,
+      authoredThreadReplies: extensions.contains(
+        'buzz-authored-thread-replies-v1',
+      ),
       executorKeyId: currentKey['id'] as String,
       executorPubkey: currentKey['pubkey'] as String,
       transport: transport,

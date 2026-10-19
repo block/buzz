@@ -32,6 +32,103 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     super.tearDown()
   }
 
+  func testAuthoredThreadQueryCannotMatchUnrelatedOrdinaryResults() throws {
+    let authored = PushResolutionPolicy(filter: PushLeaseFilter(
+      kinds: [9], authoredThreadReplies: true, since: Self.now - 10))
+    let mention = PushResolutionPolicy(filter: PushLeaseFilter(kinds: [9], pTags: [Self.ownPubkey]))
+    let snapshot = PushLeaseCommunity(id: "community-id", name: "Community",
+      relayUrl: "https://relay.example", pubkey: Self.ownPubkey,
+      policies: [mention, authored], notificationSessionID: "test-session")
+    let reply = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 9,
+      tags: [["h", Self.channelID], ["e", String(repeating: "a", count: 64), "", "root"]],
+      content: "Authored thread reply")
+    let unrelated = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now + 1, kind: 9, tags: [["h", Self.channelID]], content: "Unrelated")
+    URLProtocolStub.handler = { request in
+      var body = request.httpBody ?? Data()
+      if let stream = request.httpBodyStream {
+        stream.open()
+        defer { stream.close() }
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+          let count = stream.read(&buffer, maxLength: buffer.count)
+          if count <= 0 { break }
+          body.append(contentsOf: buffer.prefix(count))
+        }
+      }
+      let filters = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [[String: Any]])
+      let isAuthored = filters.first?["authored_thread_replies"] as? Bool == true
+      if isAuthored { XCTAssertEqual(filters.first?["since"] as? Int, Self.now - 10) }
+      return Self.response(request, status: 200,
+        data: try JSONEncoder().encode(isAuthored ? [reply] : [unrelated]),
+        headers: isAuthored ? ["x-buzz-query-extensions": "buzz-authored-thread-replies-v1"] : [:])
+    }
+    let result = resolve(makeResolver(communitiesData: try snapshotData([snapshot])))
+    XCTAssertEqual(result?.body, "Authored thread reply")
+    // Two eligibility requests and the existing presentation-enrichment request.
+    XCTAssertEqual(URLProtocolStub.requests.count, 3)
+  }
+
+  func testAuthoredQueryPagesPastMutedAndSelfRepliesAtSameTimestamp() throws {
+    let mutedChannel = "223e4567-e89b-42d3-a456-426614174000"
+    let policy = PushResolutionPolicy(
+      filter: PushLeaseFilter(kinds: [9], authoredThreadReplies: true, since: Self.now - 10),
+      ignore: [PushLeaseFilter(kinds: [9], authors: [Self.ownPubkey]),
+        PushLeaseFilter(kinds: [9], hTags: [mutedChannel])])
+    let snapshot = PushLeaseCommunity(id: "community-id", name: "Community",
+      relayUrl: "https://relay.example", pubkey: Self.ownPubkey,
+      policies: [policy], notificationSessionID: "test-session")
+    let rejected = try (0..<10).map { index in
+      try Self.signedEvent(privateKey: index < 5 ? Self.privateKey : Self.profilePrivateKey,
+        createdAt: Self.now, kind: 9,
+        tags: [["h", index < 5 ? Self.channelID : mutedChannel]], content: "Rejected \(index)")
+    }.sorted { $0.id < $1.id }
+    let eligible = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now - 1, kind: 9, tags: [["h", Self.channelID]], content: "Eligible older reply")
+    URLProtocolStub.handler = { request in
+      var body = request.httpBody ?? Data()
+      if let stream = request.httpBodyStream {
+        stream.open()
+        defer { stream.close() }
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+          let count = stream.read(&buffer, maxLength: buffer.count)
+          if count <= 0 { break }
+          body.append(contentsOf: buffer.prefix(count))
+        }
+      }
+      let filters = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [[String: Any]])
+      guard let filter = filters.first, filter["authored_thread_replies"] as? Bool == true else {
+        return Self.response(request, status: 200, data: Data("[]".utf8))
+      }
+      XCTAssertEqual(filter["since"] as? Int, Self.now - 10)
+      if filter["before_id"] != nil {
+        XCTAssertEqual(filter["before_id"] as? String, rejected.last?.id)
+        XCTAssertEqual(filter["until"] as? Int, Self.now)
+      }
+      return Self.response(request, status: 200,
+        data: try JSONEncoder().encode(filter["before_id"] == nil ? rejected : [eligible]),
+        headers: ["x-buzz-query-extensions": "buzz-authored-thread-replies-v1"])
+    }
+    let result = resolve(makeResolver(communitiesData: try snapshotData([snapshot])))
+    XCTAssertEqual(result?.body, "Eligible older reply")
+    XCTAssertEqual(URLProtocolStub.requests.count, 3)
+  }
+
+  func testAuthoredThreadQueryFailsClosedOnOlderRelay() throws {
+    let snapshot = PushLeaseCommunity(id: "community-id", name: "Community",
+      relayUrl: "https://relay.example", pubkey: Self.ownPubkey,
+      policies: [PushResolutionPolicy(filter: PushLeaseFilter(kinds: [9], authoredThreadReplies: true))],
+      notificationSessionID: "test-session")
+    let unrelated = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 9, tags: [["h", Self.channelID]], content: "Unrelated")
+    URLProtocolStub.handler = { request in
+      Self.response(request, status: 200, data: try JSONEncoder().encode([unrelated]))
+    }
+    XCTAssertNil(resolve(makeResolver(communitiesData: try snapshotData([snapshot]))))
+  }
+
   func testResolveReturnsNilWhenCommunitiesDataIsMissing() {
     let result = resolve(makeResolver(communitiesData: nil))
 
@@ -1026,13 +1123,14 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
   static func response(
     _ request: URLRequest,
     status: Int,
-    data: Data
+    data: Data,
+    headers: [String: String] = [:]
   ) -> (HTTPURLResponse, Data) {
     let response = HTTPURLResponse(
       url: request.url!,
       statusCode: status,
       httpVersion: "HTTP/1.1",
-      headerFields: ["Content-Type": "application/json"]
+      headerFields: ["Content-Type": "application/json"].merging(headers) { _, value in value }
     )!
     return (response, data)
   }

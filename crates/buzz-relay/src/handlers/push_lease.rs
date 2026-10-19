@@ -246,9 +246,41 @@ fn validate_filter(
     limits: &LeaseLimits<'_>,
     require_narrowing: bool,
 ) -> Result<(), String> {
-    const ALLOWED: &[&str] = &["kinds", "authors", "#p", "#h", "#e"];
+    const ALLOWED: &[&str] = &[
+        "kinds",
+        "authors",
+        "#p",
+        "#h",
+        "#e",
+        "authored_thread_replies",
+        "since",
+    ];
     if let Some(key) = filter.keys().find(|key| !ALLOWED.contains(&key.as_str())) {
         return Err(format!("filter member not permitted: {key}"));
+    }
+    let authored_replies = match filter.get("authored_thread_replies") {
+        None => false,
+        Some(Value::Bool(true)) if require_narrowing => true,
+        Some(_) => {
+            return Err(
+                "authored_thread_replies must be true and is not permitted in ignore filters"
+                    .into(),
+            )
+        }
+    };
+    if authored_replies
+        && ["authors", "#p", "#e"]
+            .iter()
+            .any(|key| filter.contains_key(*key))
+    {
+        return Err("authored_thread_replies only combines with kinds, #h and since".into());
+    }
+    if let Some(since) = filter.get("since") {
+        if !authored_replies || since.as_u64().is_none() {
+            return Err(
+                "since requires authored_thread_replies and a nonnegative timestamp".into(),
+            );
+        }
     }
     let kinds = string_or_integer_array(filter, "kinds", limits.max_kinds, true)?;
     let kinds: Vec<u64> = kinds
@@ -266,7 +298,7 @@ fn validate_filter(
     let p = optional_string_array(filter, "#p", limits.max_tag_values)?;
     let h = optional_string_array(filter, "#h", limits.max_h)?;
     let e = optional_string_array(filter, "#e", limits.max_tag_values)?;
-    if require_narrowing && authors.is_none() && p.is_none() && h.is_none() {
+    if require_narrowing && !authored_replies && authors.is_none() && p.is_none() && h.is_none() {
         return Err("lease filter not narrowed".into());
     }
     for value in authors.into_iter().flatten() {
@@ -638,6 +670,22 @@ mod tests {
             parse_plaintext(body, 4096).unwrap_err(),
             "unknown field: app_profile"
         );
+    }
+
+    #[test]
+    fn authored_thread_filter_is_self_scoped_and_not_an_ignore_rule() {
+        let raw = serde_json::json!({"kinds": [9], "authored_thread_replies": true, "since": 1000});
+        let filter = raw.as_object().unwrap();
+        assert!(validate_filter(filter, &limits(), true).is_ok());
+        assert!(validate_filter(filter, &limits(), false).is_err());
+        for raw in [
+            serde_json::json!({"kinds": [9], "authored_thread_replies": false}),
+            serde_json::json!({"kinds": [9], "authored_thread_replies": "true"}),
+            serde_json::json!({"kinds": [9], "authored_thread_replies": true, "since": -1}),
+            serde_json::json!({"kinds": [9], "since": 1000}),
+        ] {
+            assert!(validate_filter(raw.as_object().unwrap(), &limits(), true).is_err());
+        }
     }
 
     fn limits<'a>() -> LeaseLimits<'a> {

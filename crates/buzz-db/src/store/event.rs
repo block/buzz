@@ -125,6 +125,8 @@ pub struct EventQuery {
     /// containment alone would also admit decoys like `["x","shared","true"]`.
     /// `event_visible_to_reader` remains the post-filter.
     pub shared_gated_reader: Option<Vec<u8>>,
+    /// Restrict replies to threads whose root has this author, before pagination.
+    pub thread_root_author: Option<Vec<u8>>,
 }
 
 impl EventQuery {
@@ -158,6 +160,7 @@ impl EventQuery {
             channel_ids_include_global: true,
             max_limit: None,
             shared_gated_reader: None,
+            thread_root_author: None,
         }
     }
 }
@@ -649,6 +652,15 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
 
     // Use unqualified column names when no join, qualified when joined.
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
+    if let Some(author) = &q.thread_root_author {
+        let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
+        qb.push(" AND EXISTS (")
+            .push(crate::thread::root_author_sql(table))
+            .push(" AND root.pubkey = ")
+            .push_bind(author.clone())
+            .push(")");
+    }
+
     // Generic reads return only current artifact revisions, including delete
     // tombstones; explicit revision IDs also read earlier revisions.
     if q.ids.is_none() {
@@ -1024,6 +1036,15 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     };
 
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
+    if let Some(author) = &q.thread_root_author {
+        let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
+        qb.push(" AND EXISTS (")
+            .push(crate::thread::root_author_sql(table))
+            .push(" AND root.pubkey = ")
+            .push_bind(author.clone())
+            .push(")");
+    }
+
     // Generic reads return only current artifact revisions, including delete
     // tombstones; explicit revision IDs also read earlier revisions.
     if q.ids.is_none() {

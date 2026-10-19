@@ -13,7 +13,15 @@ const buzzPushMaxIgnoreFilters = 8;
 const buzzPushHellthreadParticipantLimit = 20;
 
 const _supportedNotificationClasses = {'default'};
-const _filterKeys = {'kinds', 'authors', '#p', '#h', '#e'};
+const _filterKeys = {
+  'kinds',
+  'authors',
+  '#p',
+  '#h',
+  '#e',
+  'authored_thread_replies',
+  'since',
+};
 final _exactHexPattern = RegExp(r'^[0-9a-f]{64}$');
 final _channelIdPattern = RegExp(
   r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
@@ -27,6 +35,8 @@ class BuzzPushFilter {
   final List<String>? pTags;
   final List<String>? hTags;
   final List<String>? eTags;
+  final bool authoredThreadReplies;
+  final int? since;
 
   BuzzPushFilter({
     required Iterable<int> kinds,
@@ -34,6 +44,8 @@ class BuzzPushFilter {
     Iterable<String>? pTags,
     Iterable<String>? hTags,
     Iterable<String>? eTags,
+    this.authoredThreadReplies = false,
+    this.since,
   }) : kinds = List.unmodifiable(kinds),
        authors = _optionalList(authors),
        pTags = _optionalList(pTags),
@@ -48,11 +60,19 @@ class BuzzPushFilter {
     if (pTags != null) '#p': pTags,
     if (hTags != null) '#h': hTags,
     if (eTags != null) '#e': eTags,
+    if (authoredThreadReplies) 'authored_thread_replies': true,
+    if (since != null) 'since': since,
   };
 
   factory BuzzPushFilter.fromJson(Map<String, dynamic> json) {
     _rejectUnknownKeys(json, _filterKeys, 'push filter');
+    if (json.containsKey('authored_thread_replies') &&
+        json['authored_thread_replies'] != true) {
+      throw const FormatException('authored_thread_replies must be true.');
+    }
     return BuzzPushFilter(
+      authoredThreadReplies: json['authored_thread_replies'] == true,
+      since: json['since'] as int?,
       kinds: _intList(json, 'kinds'),
       authors: _optionalStringList(json, 'authors'),
       pTags: _optionalStringList(json, '#p'),
@@ -62,6 +82,17 @@ class BuzzPushFilter {
   }
 
   void _validate() {
+    if (authoredThreadReplies &&
+        (authors != null || pTags != null || eTags != null)) {
+      throw const FormatException(
+        'Authored-thread eligibility only combines with kinds, channels and since.',
+      );
+    }
+    if (since != null && (!authoredThreadReplies || since! < 0)) {
+      throw const FormatException(
+        'since requires authored-thread eligibility and a nonnegative timestamp.',
+      );
+    }
     if (kinds.isEmpty ||
         kinds.any((kind) => !buzzPushEligibleKinds.contains(kind))) {
       throw const FormatException('Push filter contains invalid kinds.');
@@ -117,8 +148,14 @@ class BuzzPushSubscription {
     }
     if (filter.authors == null &&
         filter.pTags == null &&
-        filter.hTags == null) {
+        filter.hTags == null &&
+        !filter.authoredThreadReplies) {
       throw const FormatException('Push subscription filter is not narrowed.');
+    }
+    if (this.ignore.any((filter) => filter.authoredThreadReplies)) {
+      throw const FormatException(
+        'Thread eligibility is not an ignore filter.',
+      );
     }
     if (this.ignore.length > buzzPushMaxIgnoreFilters) {
       throw const FormatException(
@@ -449,6 +486,8 @@ List<BuzzPushSubscription> buildDesiredBuzzPushSubscriptions({
   required String myPubkey,
   Iterable<String> channelIds = const [],
   Iterable<String> mutedChannelIds = const [],
+  bool authoredThreadReplies = false,
+  int? authoredThreadRepliesSince,
 }) {
   final normalizedPubkey = myPubkey.toLowerCase();
   if (!_exactHexPattern.hasMatch(normalizedPubkey)) {
@@ -504,6 +543,32 @@ List<BuzzPushSubscription> buildDesiredBuzzPushSubscriptions({
   if (subscriptions.length > buzzPushMaxSubscriptions) {
     throw const FormatException('Too many channels for a push lease.');
   }
+  // Existing relay limits may leave no room for a fully muted authored rule.
+  // Omit that rule rather than dropping exclusions or aborting mention/DM sync.
+  final muted = normalizedMuted.toList()..sort();
+  final authoredMuteChunks = _chunks(muted, buzzPushChannelChunkSize);
+  if (authoredThreadReplies &&
+      authoredMuteChunks.length + 1 <= buzzPushMaxIgnoreFilters &&
+      subscriptions.length < buzzPushMaxSubscriptions) {
+    subscriptions.insert(
+      1,
+      BuzzPushSubscription(
+        filter: BuzzPushFilter(
+          kinds: buzzPushEligibleKinds,
+          authoredThreadReplies: true,
+          since: authoredThreadRepliesSince,
+        ),
+        notificationClass: 'default',
+        ignore: [
+          selfAuthored,
+          for (final chunk in authoredMuteChunks)
+            BuzzPushFilter(kinds: buzzPushEligibleKinds, hTags: chunk),
+        ],
+        suppress: suppression,
+      ),
+    );
+  }
+
   return List.unmodifiable(subscriptions);
 }
 

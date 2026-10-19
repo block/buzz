@@ -10,6 +10,39 @@ void main() {
   const archivedID = '123e4567-e89b-42d3-a456-426614174001';
   const nonMemberID = '123e4567-e89b-42d3-a456-426614174002';
 
+  test('authored reply activation time survives desired policy rebuilding', () {
+    final community = Community.create(
+      name: 'Team',
+      relayUrl: 'https://relay.example.com',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    final first = desiredBuzzPushSubscriptions(
+      community: community,
+      channels: [],
+      mutedChannelIds: [],
+      authoredThreadReplies: true,
+    )!;
+    final persisted = community.copyWith(
+      pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+        desired: first,
+      ),
+    );
+    final rebuilt = desiredBuzzPushSubscriptions(
+      community: persisted,
+      channels: [],
+      mutedChannelIds: [activeID],
+      authoredThreadReplies: true,
+    )!;
+    final before = first
+        .singleWhere((s) => s.filter.authoredThreadReplies)
+        .filter;
+    final after = rebuilt
+        .singleWhere((s) => s.filter.authoredThreadReplies)
+        .filter;
+    expect(before.since, isNotNull);
+    expect(after.since, before.since);
+  });
+
   test(
     'derives desired subscriptions from nsec, membership, and mute state',
     () {

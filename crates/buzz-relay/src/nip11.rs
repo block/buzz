@@ -421,9 +421,10 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         &state.relay_keypair,
         tenant_host.as_deref(),
     ) {
-        info.supported_extensions
-            .get_or_insert_default()
-            .push("buzz-push-v1".to_string());
+        info.supported_extensions.get_or_insert_default().extend([
+            "buzz-push-v1".to_string(),
+            "buzz-authored-thread-replies-v1".to_string(),
+        ]);
         info.push = Some(push);
     }
     info

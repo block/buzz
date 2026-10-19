@@ -6,6 +6,23 @@ final class PushLeaseTests: XCTestCase {
   private let mine = String(repeating: "a", count: 64)
   private let other = String(repeating: "b", count: 64)
 
+  func testAuthoredRepliesRequireRelationalQueryAndPreserveRestrictions() throws {
+    let filter = PushLeaseFilter(kinds: [9], authoredThreadReplies: true, since: 900)
+    let policy = PushResolutionPolicy(filter: filter,
+      ignore: [PushLeaseFilter(kinds: [9], hTags: ["muted"])])
+    let event = makeEvent(kind: 9)
+    XCTAssertFalse(PushLeaseMatcher.matches(event: event, policy: policy))
+    XCTAssertTrue(PushLeaseMatcher.matches(event: event, policy: policy, authoredThreadQuery: true))
+    XCTAssertFalse(PushLeaseMatcher.matches(
+      event: makeEvent(kind: 9, tags: [["h", "muted"]]), policy: policy, authoredThreadQuery: true))
+    let future = PushResolutionPolicy(filter: PushLeaseFilter(kinds: [9], authoredThreadReplies: true, since: 1001))
+    XCTAssertFalse(PushLeaseMatcher.matches(event: event, policy: future, authoredThreadQuery: true))
+    XCTAssertEqual(filter.queryFilter(since: nil, limit: 10)["since"] as? Int, 900)
+    XCTAssertEqual(filter.queryFilter(since: 950, limit: 10)["since"] as? Int, 950)
+    XCTAssertEqual(filter.queryFilter(since: nil, limit: 10)["authored_thread_replies"] as? Bool, true)
+    XCTAssertEqual(try JSONDecoder().decode(PushLeaseFilter.self, from: JSONEncoder().encode(filter)), filter)
+  }
+
   func testFilterBuildsQueryFromLeaseWithoutHardcodedKinds() {
     let filter = PushLeaseFilter(
       kinds: [7, 1059],

@@ -71,8 +71,9 @@ enum DeliveryResponse {
 /// Continuously claim accepted events in per-community batches and match
 /// them against active leases (T2b). One batch costs one claim statement,
 /// one event load, one lease scan, one membership scan, and one wake-enqueue
-/// transaction — plus one complete/retry statement each — regardless of
-/// batch size or how many (event, lease) pairs match.
+/// transaction, plus one complete/retry statement each, regardless of
+/// batch size or how many (event, lease) pairs match. Leases requesting authored
+/// thread replies add one bounded root-author lookup for the whole batch.
 pub async fn run_matcher(state: Arc<AppState>) {
     run_push_task(
         state.config.push_enabled,
@@ -121,6 +122,7 @@ async fn matcher_loop(state: &AppState) {
 struct MatchContext {
     leases: Vec<buzz_db::push::MatchLease>,
     memberships: std::collections::HashSet<(uuid::Uuid, Vec<u8>)>,
+    root_authors: std::collections::HashMap<Vec<u8>, Vec<u8>>,
 }
 
 async fn load_match_context(
@@ -151,9 +153,29 @@ async fn load_match_context(
         .into_iter()
         .filter(|(channel, _)| !system.contains(channel))
         .collect();
+    let ids: Vec<Vec<u8>> = batch
+        .jobs
+        .iter()
+        .map(|job| job.event.event.id.as_bytes().to_vec())
+        .collect();
+    let needs_roots = leases.iter().any(|lease| {
+        lease.subscriptions.as_array().is_some_and(|subscriptions| {
+            subscriptions.iter().any(|sub| {
+                sub.get("filter")
+                    .and_then(|filter| filter.get("authored_thread_replies"))
+                    == Some(&serde_json::Value::Bool(true))
+            })
+        })
+    });
+    let root_authors = if needs_roots {
+        state.db.thread_root_authors(batch.community, &ids).await?
+    } else {
+        std::collections::HashMap::new()
+    };
     Ok(MatchContext {
         leases,
         memberships,
+        root_authors,
     })
 }
 
@@ -298,6 +320,15 @@ fn match_job(
         let subscriptions: Vec<Subscription> = serde_json::from_value(lease.subscriptions.clone())?;
         let mut class: Option<&str> = None;
         for sub in &subscriptions {
+            if sub.filter.get("authored_thread_replies") == Some(&serde_json::Value::Bool(true))
+                && (context
+                    .root_authors
+                    .get(job.event.event.id.as_bytes().as_slice())
+                    != Some(&lease.author)
+                    || job.event.event.pubkey.to_bytes().as_slice() == lease.author.as_slice())
+            {
+                continue;
+            }
             let filter: Filter =
                 serde_json::from_value(serde_json::Value::Object(sub.filter.clone()))?;
             if !push_filter_authorized_for_event(&filter, &job.event.event, &author_hex)
@@ -730,6 +761,83 @@ mod tests {
     use serde_json::Value;
     use std::{future::IntoFuture, sync::Arc};
     use tokio::sync::Mutex;
+
+    #[test]
+    fn authored_reply_matching_preserves_membership_mutes_self_and_dedup() {
+        let owner = nostr::Keys::generate();
+        let sender = nostr::Keys::generate();
+        let channel = uuid::Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "reply")
+            .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
+            .tag(Tag::public_key(owner.public_key()))
+            .sign_with_keys(&sender)
+            .unwrap();
+        let owner_bytes = owner.public_key().to_bytes().to_vec();
+        let mut context = MatchContext {
+            leases: vec![buzz_db::push::MatchLease {
+                author: owner_bytes.clone(),
+                installation_id: "installation".into(),
+                generation: 1,
+                expires_at: Utc::now().timestamp() + 3600,
+                subscriptions: serde_json::json!([
+                    {"filter": {"kinds": [9], "authored_thread_replies": true}, "class": "default"},
+                    {"filter": {"kinds": [9], "#p": [owner.public_key().to_hex()]}, "class": "default"}
+                ]),
+            }],
+            memberships: [(channel, owner_bytes.clone())].into(),
+            root_authors: [(event.id.as_bytes().to_vec(), owner_bytes.clone())].into(),
+        };
+        let job = buzz_db::push::BatchedMatch {
+            event: buzz_core::StoredEvent::new(event, Some(channel)),
+            attempt: 1,
+        };
+        assert_eq!(
+            match_job(&job, &context).unwrap().len(),
+            1,
+            "overlap emits one wake"
+        );
+        context.leases[0]
+            .subscriptions
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        assert_eq!(match_job(&job, &context).unwrap().len(), 1);
+        context.root_authors.clear();
+        assert!(
+            match_job(&job, &context).unwrap().is_empty(),
+            "no root evidence"
+        );
+        context
+            .root_authors
+            .insert(job.event.event.id.as_bytes().to_vec(), owner_bytes);
+        context.memberships.clear();
+        assert!(
+            match_job(&job, &context).unwrap().is_empty(),
+            "membership is required"
+        );
+        context
+            .memberships
+            .insert((channel, context.leases[0].author.clone()));
+        context.leases[0].subscriptions[0]["ignore"] =
+            serde_json::json!([{"kinds": [9], "#h": [channel.to_string()]}]);
+        assert!(
+            match_job(&job, &context).unwrap().is_empty(),
+            "channel mute"
+        );
+        context.leases[0].subscriptions[0]["ignore"] = serde_json::json!([]);
+        context.leases[0].author = sender.public_key().to_bytes().to_vec();
+        context
+            .memberships
+            .insert((channel, context.leases[0].author.clone()));
+        context.root_authors.insert(
+            job.event.event.id.as_bytes().to_vec(),
+            context.leases[0].author.clone(),
+        );
+        assert!(
+            match_job(&job, &context).unwrap().is_empty(),
+            "self authored reply"
+        );
+    }
 
     #[test]
     fn gift_wrap_match_requires_self_p_filter_and_recipient() {

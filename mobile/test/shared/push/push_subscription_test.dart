@@ -8,6 +8,93 @@ void main() {
   const channelA = '123e4567-e89b-42d3-a456-426614174000';
   const channelB = '123e4567-e89b-42d3-a456-426614174001';
 
+  List<String> channels(int count) => [
+    for (var i = 0; i < count; i++)
+      '00000000-0000-4000-8000-${i.toString().padLeft(12, '0')}',
+  ];
+
+  test(
+    'authored mute capacity preserves every exclusion or omits the rule',
+    () {
+      final mutes = channels(351);
+      final atLimit = buildDesiredBuzzPushSubscriptions(
+        myPubkey: me,
+        authoredThreadReplies: true,
+        mutedChannelIds: mutes.take(350),
+      ).singleWhere((s) => s.filter.authoredThreadReplies);
+      expect(atLimit.ignore, hasLength(buzzPushMaxIgnoreFilters));
+      expect(atLimit.ignore.skip(1).expand((f) => f.hTags!), mutes.take(350));
+
+      final overLimit = buildDesiredBuzzPushSubscriptions(
+        myPubkey: me,
+        channelIds: [channelA],
+        authoredThreadReplies: true,
+        mutedChannelIds: mutes,
+      );
+      final baseline = buildDesiredBuzzPushSubscriptions(
+        myPubkey: me,
+        channelIds: [channelA],
+        mutedChannelIds: mutes,
+      );
+      expect(
+        buzzPushSubscriptionsFingerprint(overLimit),
+        buzzPushSubscriptionsFingerprint(baseline),
+      );
+      expect(overLimit.last.filter.hTags, [channelA]);
+    },
+  );
+
+  test('authored rule never consumes a required DM subscription slot', () {
+    final dms = channels(750);
+    final withRoom = buildDesiredBuzzPushSubscriptions(
+      myPubkey: me,
+      channelIds: dms.take(700),
+      authoredThreadReplies: true,
+    );
+    expect(withRoom, hasLength(buzzPushMaxSubscriptions));
+    expect(withRoom.any((s) => s.filter.authoredThreadReplies), isTrue);
+
+    final full = buildDesiredBuzzPushSubscriptions(
+      myPubkey: me,
+      channelIds: dms,
+      authoredThreadReplies: true,
+    );
+    expect(full, hasLength(buzzPushMaxSubscriptions));
+    expect(full.any((s) => s.filter.authoredThreadReplies), isFalse);
+    expect(full.skip(1).expand((s) => s.filter.hTags!), dms);
+  });
+
+  test(
+    'authored replies opt in without enumerating roots and honor all mutes',
+    () {
+      final subscriptions = buildDesiredBuzzPushSubscriptions(
+        myPubkey: me,
+        authoredThreadReplies: true,
+        authoredThreadRepliesSince: 1000,
+        mutedChannelIds: [channelA],
+      );
+      final rule = subscriptions.singleWhere(
+        (s) => s.filter.authoredThreadReplies,
+      );
+      expect(rule.filter.eTags, isNull);
+      expect(rule.filter.since, 1000);
+      expect(rule.ignore.first.authors, [me]);
+      expect(rule.ignore.last.hTags, [channelA]);
+      expect(rule.ignore.last.kinds, buzzPushEligibleKinds);
+      expect(rule.suppress!.pTagsMax, buzzPushHellthreadParticipantLimit);
+      expect(
+        BuzzPushSubscription.fromJson(rule.toJson()).toJson(),
+        rule.toJson(),
+      );
+      expect(
+        buildDesiredBuzzPushSubscriptions(
+          myPubkey: me,
+        ).any((s) => s.filter.authoredThreadReplies),
+        isFalse,
+      );
+    },
+  );
+
   test(
     'desired subscription state round-trips with an accepted-state seam',
     () {

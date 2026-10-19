@@ -135,20 +135,65 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     return key
   }
 
+  // Keep relational queries separate from ordinary filters. Their authorized
+  // response carries the relay's root-authorship decision; a response to an
+  // ordinary mention/DM query must never satisfy that relational policy.
   private func query(
     _ community: PushLeaseCommunity,
     completion: @escaping ((VerifiedNostrEvent, PushLeaseCommunity)?) -> Void
   ) {
-    guard let privateKey = accountPrivateKey(for: community), community.pubkey?.isEmpty == false else {
+    let ordinary = community.policies.filter { $0.filter.authoredThreadReplies != true }
+    // Each relational policy needs its own cursor: a union's oldest row could
+    // skip rows hidden by another policy's per-filter limit.
+    let groups = ([ordinary] + community.policies.filter {
+      $0.filter.authoredThreadReplies == true
+    }.map { [$0] }).filter { !$0.isEmpty }
+    let group = DispatchGroup()
+    let lock = NSLock()
+    var candidates: [(VerifiedNostrEvent, PushLeaseCommunity)] = []
+    for policies in groups {
+      group.enter()
+      queryPolicies(community, policies: policies) { candidate in
+        if let candidate {
+          lock.lock()
+          candidates.append(candidate)
+          lock.unlock()
+        }
+        group.leave()
+      }
+    }
+    group.notify(queue: .global(qos: .userInitiated)) {
+      completion(candidates.max {
+        $0.0.createdAt == $1.0.createdAt ? $0.0.id > $1.0.id : $0.0.createdAt < $1.0.createdAt
+      })
+    }
+  }
+
+  private func queryPolicies(
+    _ community: PushLeaseCommunity,
+    policies: [PushResolutionPolicy],
+    before: VerifiedNostrEvent? = nil,
+    deadline: Date = Date().addingTimeInterval(8),
+    completion: @escaping ((VerifiedNostrEvent, PushLeaseCommunity)?) -> Void
+  ) {
+    guard deadline.timeIntervalSinceNow > 0,
+      let privateKey = accountPrivateKey(for: community), community.pubkey?.isEmpty == false else {
       completion(nil)
       return
     }
     guard
-      !community.policies.isEmpty,
+      !policies.isEmpty,
       let relayURL = community.relayURL,
       let url = URL(string: "/query", relativeTo: relayURL),
       let body = try? JSONSerialization.data(
-        withJSONObject: community.policies.map { $0.filter.queryFilter(since: nil, limit: 10) }
+        withJSONObject: policies.map { policy in
+          var filter = policy.filter.queryFilter(since: nil, limit: 10)
+          if let before {
+            filter["until"] = before.createdAt
+            filter["before_id"] = before.id
+          }
+          return filter
+        }
       )
     else {
       completion(nil)
@@ -157,7 +202,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.httpBody = body
-    request.timeoutInterval = 8
+    request.timeoutInterval = max(0.001, deadline.timeIntervalSinceNow)
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     guard
       let auth = try? NostrHTTPAuth.authorizationHeader(
@@ -176,15 +221,34 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         completion(nil)
         return
       }
+      let authoredQuery = policies.allSatisfy { $0.filter.authoredThreadReplies == true }
+      // Older relays silently discard unknown filter members. Require an
+      // explicit response capability before trusting relational selection.
+      if authoredQuery && response.value(forHTTPHeaderField: "x-buzz-query-extensions") != "buzz-authored-thread-replies-v1" {
+        completion(nil)
+        return
+      }
       let candidate = Self.newestMessage(
         events: events.filter { event in
           event.hasValidIDAndSignature()
-            && community.policies.contains { policy in
-              PushLeaseMatcher.matches(event: event, policy: policy)
+            && policies.contains { policy in
+              PushLeaseMatcher.matches(event: event, policy: policy,
+                authoredThreadQuery: authoredQuery)
             }
         },
         community: community
       )
+      if candidate == nil, authoredQuery, events.count == 10,
+        let oldest = events.min(by: {
+          $0.createdAt == $1.createdAt ? $0.id > $1.id : $0.createdAt < $1.createdAt
+        }), oldest.hasValidIDAndSignature(),
+        before.map({ oldest.createdAt < $0.createdAt
+          || (oldest.createdAt == $0.createdAt && oldest.id > $0.id) }) ?? true
+      {
+        self.queryPolicies(community, policies: policies, before: oldest,
+          deadline: deadline, completion: completion)
+        return
+      }
       completion(candidate.map { ($0, community) })
     }.resume()
   }
