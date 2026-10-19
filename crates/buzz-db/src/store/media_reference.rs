@@ -1,35 +1,30 @@
-//! Where an uploaded blob is referenced, for media read authorization.
+//! Media read authorization from where a blob is referenced.
 
 use buzz_datastore_tracing::datastore_span;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use crate::{error::Result, Db};
 use buzz_core::CommunityId;
 
-/// Image extensions a video poster (`imeta image`) may carry; ingest rejects others.
-const POSTER_EXTS: [&str; 4] = ["jpg", "png", "gif", "webp"];
-
-/// Distinct `channel_id`s of every stored event, deleted or not, that attaches
-/// the blob `sha256`; `None` is a channel-less event.
+/// Whether `reader` may read the blob `sha256`.
 ///
-/// A blob is attached as an `imeta` file (`x <sha256>`, required by ingest), as
-/// a video poster (`image <url>`, relative or on `media_base_url` as ingest
-/// requires), or as a `link-preview` image or favicon hash. Containment is the
-/// GIN-indexed prefilter; the positional check keeps the hash appearing in some
-/// other field from counting as an attachment.
-pub async fn get_blob_reference_channels(
+/// A blob attached in a channel is readable only through an attachment the
+/// reader can see: one in a channel they are an active member of or that is
+/// open, or a channel-less one. Attachments count whether or not the event was
+/// deleted. Blobs attached in no channel, current avatars, and custom emoji
+/// stay readable to the whole community.
+///
+/// A blob is attached as an `imeta` file (`x`) or video poster (`image-x`), or
+/// as a `link-preview` image or favicon hash. Containment is the GIN-indexed
+/// prefilter; the positional check keeps the hash in another field from
+/// counting.
+pub async fn can_read_blob(
     pool: &PgPool,
     community_id: CommunityId,
     sha256: &str,
-    media_base_url: &str,
-) -> Result<Vec<Option<Uuid>>> {
-    let base = media_base_url.trim_end_matches('/');
-    let mut imeta_entries = vec![format!("x {sha256}")];
-    for ext in POSTER_EXTS {
-        imeta_entries.push(format!("image /media/{sha256}.{ext}"));
-        imeta_entries.push(format!("image {base}/{sha256}.{ext}"));
-    }
+    reader: &[u8],
+) -> Result<bool> {
+    let imeta_entries = vec![format!("x {sha256}"), format!("image-x {sha256}")];
     let mut containments: Vec<serde_json::Value> = imeta_entries
         .iter()
         .map(|entry| serde_json::json!([["imeta", entry]]))
@@ -41,71 +36,60 @@ pub async fn get_blob_reference_channels(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    let channels = sqlx::query_scalar(
-        "SELECT DISTINCT channel_id FROM events \
-         WHERE community_id = $1 \
-           AND tags @> ANY($2::jsonb[]) \
-           AND EXISTS (SELECT 1 FROM jsonb_array_elements(tags) AS tag \
-                       WHERE (tag->>0 = 'imeta' AND tag ?| $3) \
-                          OR (tag->>0 = 'link-preview' AND $4 IN (tag->>8, tag->>10)))",
+    let readable = sqlx::query_scalar(
+        "WITH refs AS ( \
+             SELECT DISTINCT channel_id FROM events \
+             WHERE community_id = $1 \
+               AND tags @> ANY($2::jsonb[]) \
+               AND EXISTS (SELECT 1 FROM jsonb_array_elements(tags) AS tag \
+                           WHERE (tag->>0 = 'imeta' AND tag ?| $3) \
+                              OR (tag->>0 = 'link-preview' AND $4 IN (tag->>8, tag->>10))) \
+         ) \
+         SELECT NOT EXISTS (SELECT 1 FROM refs WHERE channel_id IS NOT NULL) \
+             OR EXISTS (SELECT 1 FROM refs WHERE channel_id IS NULL) \
+             OR EXISTS (SELECT 1 FROM refs r \
+                        JOIN channels c ON c.community_id = $1 AND c.id = r.channel_id \
+                        WHERE c.deleted_at IS NULL \
+                          AND (c.visibility = 'open' \
+                               OR EXISTS (SELECT 1 FROM channel_members cm \
+                                          WHERE cm.community_id = $1 AND cm.channel_id = c.id \
+                                            AND cm.pubkey = $5 AND cm.removed_at IS NULL)))",
     )
     .bind(community_id.as_uuid())
     .bind(containments)
     .bind(imeta_entries)
     .bind(sha256)
-    .fetch_all(&mut *connection)
+    .bind(reader)
+    .fetch_one(&mut *connection)
     .await?;
-    Ok(channels)
-}
+    if readable {
+        return Ok(true);
+    }
 
-/// Whether the blob `sha256` is a current profile avatar or in a live custom
-/// emoji set, both of which every community member must be able to load.
-///
-/// Neither reference is indexed by hash, so callers should consult this only
-/// after the channel references alone would refuse a read.
-pub async fn is_blob_publicly_referenced(
-    pool: &PgPool,
-    community_id: CommunityId,
-    sha256: &str,
-) -> Result<bool> {
-    let pattern = format!("%{sha256}%");
-    let mut connection = crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::Authorization,
-    )
-    .await?;
-    let referenced = sqlx::query_scalar(
+    // Avatars and emoji are not indexed by hash, so only a would-be refusal pays
+    // for this scan.
+    let referenced_publicly = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM users WHERE community_id = $1 AND avatar_url LIKE $2) \
              OR EXISTS (SELECT 1 FROM events WHERE community_id = $1 AND kind = $3 \
                         AND deleted_at IS NULL AND tags::text LIKE $2)",
     )
     .bind(community_id.as_uuid())
-    .bind(pattern)
+    .bind(format!("%{sha256}%"))
     .bind(buzz_core::kind::KIND_EMOJI_SET as i32)
     .fetch_one(&mut *connection)
     .await?;
-    Ok(referenced)
+    Ok(referenced_publicly)
 }
 
 impl Db {
-    /// Channels the blob `sha256` is attached in; see [`get_blob_reference_channels`].
-    #[datastore_span(name = "get_blob_reference_channels", system = "postgresql")]
-    pub async fn get_blob_reference_channels(
+    /// Whether `reader` may read the blob; see [`can_read_blob`].
+    #[datastore_span(name = "can_read_blob", system = "postgresql")]
+    pub async fn can_read_blob(
         &self,
         community_id: CommunityId,
         sha256: &str,
-        media_base_url: &str,
-    ) -> Result<Vec<Option<Uuid>>> {
-        get_blob_reference_channels(&self.pool, community_id, sha256, media_base_url).await
-    }
-
-    /// Whether the blob is an avatar or custom emoji; see [`is_blob_publicly_referenced`].
-    #[datastore_span(name = "is_blob_publicly_referenced", system = "postgresql")]
-    pub async fn is_blob_publicly_referenced(
-        &self,
-        community_id: CommunityId,
-        sha256: &str,
+        reader: &[u8],
     ) -> Result<bool> {
-        is_blob_publicly_referenced(&self.pool, community_id, sha256).await
+        can_read_blob(&self.pool, community_id, sha256, reader).await
     }
 }

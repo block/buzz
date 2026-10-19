@@ -704,69 +704,10 @@ async fn enforce_blossom_read_membership(
     .map_err(|e| membership_denial(e, strictness))
 }
 
-/// Channel gate for media reads, after the community membership gate.
-///
-/// A blob attached in a channel is readable only through an attachment the
-/// reader can see: one in a channel they can read, or a channel-less one.
-/// Avatars, custom emoji, and blobs never attached in a channel (unsent
-/// uploads) stay readable to the whole community. A refusal is `NotFound` so a
-/// non-member cannot probe whether a private attachment exists.
-async fn enforce_blossom_read_channel_access(
-    state: &AppState,
-    tenant: &TenantContext,
-    reader: &nostr::PublicKey,
-    sha256: &str,
-    strictness: BlossomStrictness,
-) -> Result<(), MediaDenial> {
-    let community = tenant.community();
-    let unavailable = |_| media_denial(MediaError::AuthorizationUnavailable, strictness);
-    let media_base = media_base_url_for_tenant(&state.config.relay_url, tenant.host());
-    let references = state
-        .db
-        .get_blob_reference_channels(community, sha256, &media_base)
-        .await
-        .map_err(unavailable)?;
-    let Some(channels) = references.into_iter().collect::<Option<Vec<_>>>() else {
-        return Ok(());
-    };
-    if channels.is_empty() {
-        return Ok(());
-    }
-    let reader = reader.as_bytes();
-    let readable = |ids: &[uuid::Uuid]| channels.iter().any(|id| ids.contains(id));
-    let cached = state
-        .get_accessible_channel_ids_cached(community, reader)
-        .await
-        .map_err(unavailable)?;
-    if readable(&cached) {
-        return Ok(());
-    }
-    // A cached miss may predate a join on another pod; confirm before refusing.
-    let live = state
-        .db
-        .get_accessible_channel_ids(community, reader)
-        .await
-        .map_err(unavailable)?;
-    let readable_system = state
-        .db
-        .get_readable_system_channel_ids(community, reader)
-        .await
-        .map_err(unavailable)?;
-    if readable(&live) || readable(&readable_system) {
-        return Ok(());
-    }
-    if state
-        .db
-        .is_blob_publicly_referenced(community, sha256)
-        .await
-        .map_err(unavailable)?
-    {
-        return Ok(());
-    }
-    Err(MediaError::NotFound.into())
-}
-
-/// Every read gate a Blossom GET/HEAD passes before any storage lookup.
+/// Every read gate a Blossom GET/HEAD passes before any storage lookup:
+/// community membership, then the channels the blob is attached in. A channel
+/// refusal is `NotFound` so a non-member cannot probe whether a private
+/// attachment exists.
 async fn enforce_blossom_read_access(
     state: &AppState,
     tenant: &TenantContext,
@@ -776,7 +717,16 @@ async fn enforce_blossom_read_access(
     strictness: BlossomStrictness,
 ) -> Result<(), MediaDenial> {
     enforce_blossom_read_membership(state, tenant, auth_event, headers, strictness).await?;
-    enforce_blossom_read_channel_access(state, tenant, &auth_event.pubkey, sha256, strictness).await
+    let readable = state
+        .db
+        .can_read_blob(tenant.community(), sha256, auth_event.pubkey.as_bytes())
+        .await
+        .map_err(|_| media_denial(MediaError::AuthorizationUnavailable, strictness))?;
+    if readable {
+        Ok(())
+    } else {
+        Err(MediaError::NotFound.into())
+    }
 }
 
 fn blob_cache_control() -> &'static str {
