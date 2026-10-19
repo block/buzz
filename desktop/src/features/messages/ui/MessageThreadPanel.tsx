@@ -208,6 +208,7 @@ export function MessageThreadPanel({
   splitPaneClamp,
   showBackButton,
   testId = "message-thread-panel",
+  threadTitleEditable = true,
   widthPx,
   transparentChrome = false,
   autoSendDraftKey = null,
@@ -228,10 +229,10 @@ export function MessageThreadPanel({
   const threadRootId = threadHead ? (threadHead.rootId ?? threadHead.id) : null;
   const threadTitleTarget = React.useMemo(
     () =>
-      channelId && threadRootId && !disabled
+      channelId && threadRootId && !disabled && threadTitleEditable
         ? { channelId, rootId: threadRootId }
         : null,
-    [channelId, disabled, threadRootId],
+    [channelId, disabled, threadRootId, threadTitleEditable],
   );
   const titleSyncChannels = React.useMemo(
     () => (isHuddleTranscript || !channelId ? [] : [channelId]),

@@ -104,6 +104,27 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goThreads = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      // Re-selecting Threads while on it closes any open thread, so carry a
+      // fresh id the screen can react to instead of no-oping.
+      location.pathname === "/threads"
+        ? commitNavigation(
+            {
+              to: "/threads",
+              state: { threadsResetId: crypto.randomUUID() },
+            },
+            { ...behavior, replace: true },
+          )
+        : commitNavigation(
+            {
+              to: "/threads",
+            },
+            behavior,
+          ),
+    [commitNavigation, location.pathname],
+  );
+
   const goProfile = React.useCallback(
     (pubkey: string, behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -472,6 +493,7 @@ export function useAppNavigation() {
     goPulse,
     goProfile,
     goSettings,
+    goThreads,
     goWorkflow,
     goWorkflows,
     openSearchHit,

@@ -19,6 +19,8 @@ export type ThreadPanelLayoutProps = {
   onResizeStart?: React.PointerEventHandler<HTMLButtonElement>;
   splitPaneClamp?: boolean;
   testId?: string;
+  /** False shows the shared title read-only, e.g. when the header links out. */
+  threadTitleEditable?: boolean;
   transparentChrome?: boolean;
 };
 

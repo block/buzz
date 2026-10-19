@@ -152,6 +152,7 @@ export function AppShell() {
     goProjects,
     goPulse,
     goSettings,
+    goThreads,
     goWorkflows,
     closeSettings,
     openSearchHit,
@@ -894,6 +895,7 @@ export function AppShell() {
                           onSelectProjects={() => void goProjects()}
                           onSelectPulse={() => void goPulse()}
                           onSelectSettings={handleOpenSettings}
+                          onSelectThreads={() => void goThreads()}
                           onSelectWorkflows={() => void goWorkflows()}
                           onSetPresenceStatus={(status) =>
                             presenceSession.setStatus(status)
