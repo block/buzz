@@ -80,74 +80,70 @@ void main() {
     );
   }
 
-  testWidgets(
-    'native callbacks and disposal release subscribed images',
-    (tester) async {
-      final provider = _TestImage();
-      final harness = await _mount(tester, [provider]);
-      await harness.send('open', 0);
-      await harness.send('open', 2);
-      await harness.send('page', 0);
-      await harness.send('scroll', 21.5);
-      expect(harness.opened, [0]);
-      expect(harness.pages, [0]);
-      expect(harness.offsets, [21.5]);
-      await harness.send('subscribeImage', {'id': 'a', 'index': 0});
-      expect(provider.completer.listeners, hasLength(1));
-      await tester.pumpWidget(const SizedBox());
-      expect(provider.completer.listeners, isEmpty);
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-  );
+  testWidgets('native callbacks and disposal release subscribed images', (
+    tester,
+  ) async {
+    final provider = _TestImage();
+    final harness = await _mount(tester, [provider]);
+    await harness.send('open', 0);
+    await harness.send('open', 2);
+    await harness.send('page', 0);
+    await harness.send('scroll', 21.5);
+    expect(harness.opened, [0]);
+    expect(harness.pages, [0]);
+    expect(harness.offsets, [21.5]);
+    await harness.send('subscribeImage', {'id': 'a', 'index': 0});
+    expect(provider.completer.listeners, hasLength(1));
+    await tester.pumpWidget(const SizedBox());
+    expect(provider.completer.listeners, isEmpty);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-  testWidgets(
-    'multi-image native gallery forwards continuing animation frames',
-    (tester) async {
-      final animated = _TestImage();
-      final still = _TestImage();
-      final harness = await _mount(tester, [animated, still]);
-      await harness.send('subscribeImage', {'id': 'animated', 'index': 0});
-      await harness.send('subscribeImage', {'id': 'still', 'index': 1});
-      final decoded = await tester.runAsync(() async {
-        // Two 1x1 GIF frames with different palette indices: red, then blue.
-        final codec = await ui.instantiateImageCodec(
-          base64Decode(
-            'R0lGODlhAQABAIAAAP8AAAAA/yH5BAAKAAAALAAAAAABAAEAAAICRAEAIfkEAAoAAAAsAAAAAAEAAQAAAgJMAQA7',
-          ),
-        );
-        try {
-          expect(codec.frameCount, 2);
-          return [
-            (await codec.getNextFrame()).image,
-            (await codec.getNextFrame()).image,
-          ];
-        } finally {
-          codec.dispose();
-        }
-      });
-      await tester.runAsync(() async {
-        animated.completer.emit(decoded![0]);
-        await harness.waitForFrames(1);
-        animated.completer.emit(decoded[1]);
-        await harness.waitForFrames(2);
-      });
-      expect(harness.frames.map((f) => f['id']), ['animated', 'animated']);
-      expect(
-        harness.frames[0]['bytes'],
-        isNot(orderedEquals(harness.frames[1]['bytes'] as Uint8List)),
+  testWidgets('multi-image native gallery forwards continuing animation frames', (
+    tester,
+  ) async {
+    final animated = _TestImage();
+    final still = _TestImage();
+    final harness = await _mount(tester, [animated, still]);
+    await harness.send('subscribeImage', {'id': 'animated', 'index': 0});
+    await harness.send('subscribeImage', {'id': 'still', 'index': 1});
+    final decoded = await tester.runAsync(() async {
+      // Two 1x1 GIF frames with different palette indices: red, then blue.
+      final codec = await ui.instantiateImageCodec(
+        base64Decode(
+          'R0lGODlhAQABAIAAAP8AAAAA/yH5BAAKAAAALAAAAAABAAEAAAICRAEAIfkEAAoAAAAsAAAAAAEAAQAAAgJMAQA7',
+        ),
       );
-      await harness.send('cancelImage', 'animated');
-      expect(animated.completer.listeners, isEmpty);
-      final count = harness.frames.length;
-      final green = await tester.runAsync(() => _frame(Colors.green));
-      animated.completer.emit(green!);
-      await tester.pump();
-      expect(harness.frames, hasLength(count));
-      await tester.pumpWidget(const SizedBox());
-      expect(still.completer.listeners, isEmpty);
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-  );
+      try {
+        expect(codec.frameCount, 2);
+        return [
+          (await codec.getNextFrame()).image,
+          (await codec.getNextFrame()).image,
+        ];
+      } finally {
+        codec.dispose();
+      }
+    });
+    await tester.runAsync(() async {
+      animated.completer.emit(decoded![0]);
+      await harness.waitForFrames(1);
+      animated.completer.emit(decoded[1]);
+      await harness.waitForFrames(2);
+    });
+    expect(harness.frames.map((f) => f['id']), ['animated', 'animated']);
+    expect(
+      harness.frames[0]['bytes'],
+      isNot(orderedEquals(harness.frames[1]['bytes'] as Uint8List)),
+    );
+    await harness.send('cancelImage', 'animated');
+    expect(animated.completer.listeners, isEmpty);
+    final count = harness.frames.length;
+    final green = await tester.runAsync(() => _frame(Colors.green));
+    animated.completer.emit(green!);
+    await tester.pump();
+    expect(harness.frames, hasLength(count));
+    await tester.pumpWidget(const SizedBox());
+    expect(still.completer.listeners, isEmpty);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets(
     'rapid reuse bounds unresolved loads and drops cancelled queued requests',

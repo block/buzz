@@ -1,9 +1,3 @@
-[graph]
-# buzz-mesh-smoke is a test-only hardware smoke-test crate; nothing from it ships.
-# It is the only root-workspace crate depending on mesh-llm, whose zip/zbus
-# advisories have no usable upstream fix for our pinned version.
-exclude = ["buzz-mesh-smoke"]
-
 [advisories]
 ignore = [
     # instant 0.1.13 — unmaintained crate. Transitive dep: nostr → instant.
@@ -32,6 +26,23 @@ ignore = [
     # Keep the exact NetEQ pin and the wrapper ban below together. Re-audit or
     # remove this exception when NetEQ removes/updates the unused dependency.
     { id = "RUSTSEC-2026-0293", reason = "unused dependency of audited, exactly pinned neteq 0.8.3; no Rust references to ringbuf; other consumers forbidden by bans.deny" },
+    # zip 8.6.0 < 9: extraction keeps setuid/setgid bits (0367), creates
+    # symlinks that escape the destination (0368) and applies permissions through
+    # symlinks (0369). Only path: buzz-mesh-smoke → mesh-llm v0.76.2 →
+    # mesh-llm-host-runtime / mesh-llm-plugin-manager / mesh-llm-system → zip 8.
+    # mesh-llm's zip readers copy entries manually and never call
+    # ZipArchive::extract; recheck if that changes. Remove on the mesh-llm bump
+    # that ships Mesh-LLM/mesh-llm#2471.
+    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    # zbus 5 D-Bus crates (zvariant, zbus_names, zvariant_derive) — unmaintained,
+    # not vulnerable. Only path: buzz-mesh-smoke → mesh-llm → keyring 4 →
+    # zbus-secret-service-keyring-store / secret-service 5 → zbus 5.
+    # Remove when mesh-llm's keyring stack moves off zbus 5.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
 ]
 
 [licenses]

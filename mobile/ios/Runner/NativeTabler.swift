@@ -16,10 +16,6 @@ enum NativeTabler {
   }()
 
   static func image(_ symbol: String, size: CGFloat = 20) -> UIImage? {
-    // Back and Close deliberately retain native navigation artwork.
-    if ["chevron.backward", "chevron.left", "xmark", "xmark.circle.fill"].contains(symbol) {
-      return UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: size, weight: .semibold))
-    }
     guard let code = glyphs[symbol], let scalar = UnicodeScalar(code),
       let name = fontName, let font = UIFont(name: name, size: size) else {
       assertionFailure("Missing Tabler icon: \(symbol)")

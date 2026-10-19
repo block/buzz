@@ -452,7 +452,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       )
       let pointSize: CGFloat = icon == "shutter"
         ? controlSize * Self.shutterIconRatio
-        : 17
+        : 24
       buttonImage = NativeTabler.image(buttonIconName, size: pointSize)
     }
     updateDisplayedContent()

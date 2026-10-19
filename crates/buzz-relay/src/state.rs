@@ -1379,6 +1379,10 @@ pub struct AppState {
     /// 4) and HTTP admission (`nip_fi_http`): one `Arc`, never a second map.
     pub nip_fi_deny_map: Option<Arc<buzz_auth::NipFiDenyMap>>,
 
+    /// The database community resolver (`BUZZ_NIP_FI_COMMUNITY_SOURCE=database`),
+    /// installed by `main.rs`; `None` resolves from `config.nip_fi.communities`.
+    pub nip_fi_resolver: Option<Arc<crate::nip_fi_resolver::DatabaseResolver>>,
+
     /// Command JWT verifier for the NIP-FI admin disconnect endpoint.
     ///
     /// `None` when mode is `Off` (no command API is reachable).  When
@@ -1399,6 +1403,17 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The NIP-FI community source admission resolves against.
+    pub(crate) fn nip_fi_communities(&self) -> crate::nip_fi_core::Communities<'_> {
+        use crate::nip_fi_config::CommunitySource;
+        use crate::nip_fi_core::Communities;
+        match (self.config.nip_fi.source, &self.nip_fi_resolver) {
+            (CommunitySource::Env, _) => Communities::Env(&self.config.nip_fi.communities),
+            (CommunitySource::Database, Some(resolver)) => Communities::Database(resolver),
+            (CommunitySource::Database, None) => Communities::Unavailable,
+        }
+    }
+
     /// Constructs `AppState` from its component services.
     ///
     /// Returns `(state, audit_shutdown)`. The caller should call
@@ -1600,6 +1615,7 @@ impl AppState {
             // `main.rs` after startup validation.  `None` is safe before that
             // call: the endpoint returns 503 when the verifier is absent.
             nip_fi_deny_map: None,
+            nip_fi_resolver: None,
             nip_fi_command_verifier: None,
             nip_fi_command_replay,
             nip_fi_publish_tasks: tokio_util::task::TaskTracker::new(),

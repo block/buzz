@@ -1,6 +1,222 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  for (final author in ['self', 'alice']) {
+    testWidgets('date divider owns equal space around $author messages', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(390, 1100);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _buildTestable(
+          signingPubkey: 'self',
+          messages: [
+            _textMsg(
+              id: 'before-day',
+              pubkey: author,
+              content: 'Before',
+              createdAt: 1000,
+            ),
+            _textMsg(
+              id: 'after-day',
+              pubkey: author,
+              content: 'After',
+              createdAt: 87400,
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final before = tester.getRect(
+        find
+            .descendant(
+              of: find.byKey(const ValueKey('message-row-before-day')),
+              matching: find.byType(LocalSendBubbleSurface),
+            )
+            .first,
+      );
+      final divider = tester.getRect(
+        find.byKey(const ValueKey('channel-day-divider-opacity-87400')),
+      );
+      final after = tester.getRect(
+        find.byKey(const ValueKey('message-author-after-day')),
+      );
+      expect(
+        divider.top - before.bottom,
+        closeTo(after.top - divider.bottom, 1),
+      );
+      expect(divider.top - before.bottom, closeTo(Grid.gutter, 1));
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final personalChat in [false, true]) {
+    for (final scale in [1.0, 2.0]) {
+      testWidgets(
+        'viewer bubbles align right: personal=$personalChat scale=$scale',
+        (tester) async {
+          tester.view.physicalSize = const Size(390, 1100);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          await tester.pumpWidget(
+            _buildTestable(
+              signingPubkey: 'self',
+              personalChat: personalChat,
+              textScaler: TextScaler.linear(scale),
+              users: const {
+                'self': UserProfile(pubkey: 'self', displayName: 'Me'),
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              },
+              messages: [
+                _textMsg(
+                  id: 'incoming',
+                  pubkey: 'alice',
+                  content: 'Hello',
+                  createdAt: 1000,
+                ),
+                _textMsg(
+                  id: 'outgoing',
+                  pubkey: 'self',
+                  content: 'Hi',
+                  createdAt: 1001,
+                ),
+                _reaction(
+                  id: 'reaction-in',
+                  targetId: 'incoming',
+                  pubkey: 'self',
+                ),
+                _reaction(
+                  id: 'reaction-out',
+                  targetId: 'outgoing',
+                  pubkey: 'alice',
+                ),
+              ],
+            ),
+          );
+          await tester.pumpAndSettle();
+          Rect bounds(String id, Finder child) => tester.getRect(
+            find
+                .descendant(
+                  of: find.byKey(ValueKey('message-row-$id')),
+                  matching: child,
+                )
+                .first,
+          );
+          final incoming = bounds(
+            'incoming',
+            find.byType(LocalSendBubbleSurface),
+          );
+          final outgoing = bounds(
+            'outgoing',
+            find.byType(LocalSendBubbleSurface),
+          );
+          expect(outgoing.center.dx, greaterThan(incoming.center.dx));
+          expect(
+            bounds(
+              'outgoing',
+              find.byKey(const ValueKey('message-author-outgoing')),
+            ).right,
+            lessThan(
+              bounds(
+                'outgoing',
+                find.byKey(const ValueKey('message-timestamp-outgoing')),
+              ).left,
+            ),
+          );
+          expect(
+            bounds(
+              'incoming',
+              find.byKey(const ValueKey('message-author-incoming')),
+            ).right,
+            lessThan(
+              bounds(
+                'incoming',
+                find.byKey(const ValueKey('message-timestamp-incoming')),
+              ).left,
+            ),
+          );
+
+          expect(outgoing.right, greaterThan(300));
+          expect(incoming.left, lessThan(90));
+          final incomingAvatar = bounds(
+            'incoming',
+            find.byType(MessageMediaAvatar),
+          );
+          expect(incomingAvatar.right, lessThan(incoming.left));
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('message-row-outgoing')),
+              matching: find.byType(MessageMediaAvatar),
+            ),
+            findsNothing,
+          );
+          expect(
+            outgoing.right,
+            closeTo(
+              tester
+                  .getRect(find.byKey(const ValueKey('message-row-outgoing')))
+                  .right,
+              0.01,
+            ),
+          );
+          final incomingReaction = bounds(
+            'incoming',
+            find.byKey(const ValueKey('combined-reaction-tray')),
+          );
+          final outgoingReaction = bounds(
+            'outgoing',
+            find.byKey(const ValueKey('combined-reaction-tray')),
+          );
+          expect(
+            outgoingReaction.center.dx,
+            greaterThan(incomingReaction.center.dx),
+          );
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  testWidgets('thread replies reclaim the outgoing avatar gutter', (
+    tester,
+  ) async {
+    final root = _textMsg(id: threadIdRoot, pubkey: 'alice', content: 'Root');
+    final reply = _textMsg(
+      id: threadIdR1,
+      pubkey: 'self',
+      content: 'My reply',
+      createdAt: 1100,
+      extraTags: const [
+        ['e', threadIdRoot, '', 'reply'],
+      ],
+    );
+    await tester.pumpWidget(
+      _buildTestable(
+        signingPubkey: 'self',
+        messages: [root, reply],
+        threadReplies: {
+          threadIdRoot: [reply],
+        },
+        initialThreadRootId: threadIdRoot,
+      ),
+    );
+    await tester.pumpAndSettle();
+    final row = find.byKey(const ValueKey('thread-message-row-$threadIdR1'));
+    final bubble = tester.getRect(
+      find
+          .descendant(of: row, matching: find.byType(LocalSendBubbleSurface))
+          .first,
+    );
+    expect(
+      find.descendant(of: row, matching: find.byType(MessageMediaAvatar)),
+      findsNothing,
+    );
+    expect(bubble.right, closeTo(tester.getRect(row).right, 0.01));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('large activity members build and fetch only visible rows', (
     tester,
   ) async {
@@ -60,58 +276,56 @@ void bubbleLayoutTests() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'status bar pagination is capped and later taps continue',
-    (tester) async {
-      final notifier = _FakeMessagesNotifier(
-        [
-          for (var index = 0; index < 30; index++)
+  testWidgets('status bar pagination is capped and later taps continue', (
+    tester,
+  ) async {
+    final notifier = _FakeMessagesNotifier(
+      [
+        for (var index = 0; index < 30; index++)
+          _textMsg(
+            id: 'recent-$index',
+            pubkey: 'alice',
+            content: 'Recent $index',
+            createdAt: 3000 + index,
+          ),
+      ],
+      olderPages: [
+        for (var index = 1; index <= 10; index++)
+          [
             _textMsg(
-              id: 'recent-$index',
+              id: 'page-$index',
               pubkey: 'alice',
-              content: 'Recent $index',
-              createdAt: 3000 + index,
+              content: 'Older page $index',
+              createdAt: 3000 - index * 100,
             ),
-        ],
-        olderPages: [
-          for (var index = 1; index <= 10; index++)
-            [
-              _textMsg(
-                id: 'page-$index',
-                pubkey: 'alice',
-                content: 'Older page $index',
-                createdAt: 3000 - index * 100,
-              ),
-            ],
-        ],
-      );
-      await tester.pumpWidget(
-        _buildTestable(messages: const [], messagesNotifier: notifier),
+          ],
+      ],
+    );
+    await tester.pumpWidget(
+      _buildTestable(messages: const [], messagesNotifier: notifier),
+    );
+    await tester.pumpAndSettle();
+    expect(notifier.fetchOlderCalls, 0);
+    for (final expected in [3, 6, 9, 10]) {
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        'flutter/status_bar',
+        const JSONMethodCodec().encodeMethodCall(
+          const MethodCall('handleScrollToTop'),
+        ),
+        (_) {},
       );
       await tester.pumpAndSettle();
-      expect(notifier.fetchOlderCalls, 0);
-      for (final expected in [3, 6, 9, 10]) {
-        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-          'flutter/status_bar',
-          const JSONMethodCodec().encodeMethodCall(
-            const MethodCall('handleScrollToTop'),
-          ),
-          (_) {},
-        );
-        await tester.pumpAndSettle();
-        expect(notifier.fetchOlderCalls, expected);
-        expect(find.text('Older page $expected').hitTestable(), findsOneWidget);
-        await tester.pumpAndSettle();
-        expect(
-          notifier.fetchOlderCalls,
-          expected,
-          reason: 'landing must not bypass the gesture cap',
-        );
-      }
-      expect(notifier.reachedOldest, isTrue);
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-  );
+      expect(notifier.fetchOlderCalls, expected);
+      expect(find.text('Older page $expected').hitTestable(), findsOneWidget);
+      await tester.pumpAndSettle();
+      expect(
+        notifier.fetchOlderCalls,
+        expected,
+        reason: 'landing must not bypass the gesture cap',
+      );
+    }
+    expect(notifier.reachedOldest, isTrue);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets(
     'grouped removal quick reactions remove reactions on later events',
@@ -426,68 +640,66 @@ void bubbleLayoutTests() {
   );
 
   for (final thread in [false, true]) {
-    testWidgets(
-      'status bar tap reaches oldest content, thread=$thread',
-      (tester) async {
-        final events = [
+    testWidgets('status bar tap reaches oldest content, thread=$thread', (
+      tester,
+    ) async {
+      final events = [
+        _textMsg(
+          id: threadIdTopDashRoot,
+          pubkey: 'bob',
+          content: 'Oldest content',
+          createdAt: 900,
+        ),
+        for (var index = 0; index < 60; index++)
           _textMsg(
-            id: threadIdTopDashRoot,
-            pubkey: 'bob',
-            content: 'Oldest content',
-            createdAt: 900,
+            id: 'top-$index',
+            pubkey: 'alice',
+            content: 'Message $index',
+            createdAt: 1000 + index,
+            extraTags: thread
+                ? const [
+                    ['e', threadIdTopDashRoot, '', 'reply'],
+                  ]
+                : const [],
           ),
-          for (var index = 0; index < 60; index++)
-            _textMsg(
-              id: 'top-$index',
-              pubkey: 'alice',
-              content: 'Message $index',
-              createdAt: 1000 + index,
-              extraTags: thread
-                  ? const [
-                      ['e', threadIdTopDashRoot, '', 'reply'],
-                    ]
-                  : const [],
-            ),
-        ];
-        final messages = formatTimeline(events);
-        await tester.pumpWidget(
-          _buildTestable(
-            messages: events,
-            home: thread
-                ? ThreadDetailPage(
-                    threadHead: messages.firstWhere(
-                      (m) => m.id == threadIdTopDashRoot,
-                    ),
-                    allMessages: messages,
-                    channelId: _channelId,
-                    currentPubkey: 'me',
-                    isMember: true,
-                    isArchived: false,
-                  )
-                : null,
-          ),
-        );
-        await tester.pumpAndSettle();
-        final list = tester.widget<ScrollablePositionedList>(
-          find.byKey(
-            ValueKey(thread ? 'thread-message-list' : 'channel-message-list'),
-          ),
-        );
-        list.itemScrollController!.jumpTo(index: thread ? 55 : 0);
-        await tester.pumpAndSettle();
-        expect(find.text('Oldest content').hitTestable(), findsNothing);
-        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-          'flutter/status_bar',
-          const JSONMethodCodec().encodeMethodCall(
-            const MethodCall('handleScrollToTop'),
-          ),
-          (_) {},
-        );
-        await tester.pumpAndSettle();
-        expect(find.text('Oldest content').hitTestable(), findsOneWidget);
-      },
-      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-    );
+      ];
+      final messages = formatTimeline(events);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: events,
+          home: thread
+              ? ThreadDetailPage(
+                  threadHead: messages.firstWhere(
+                    (m) => m.id == threadIdTopDashRoot,
+                  ),
+                  allMessages: messages,
+                  channelId: _channelId,
+                  currentPubkey: 'me',
+                  isMember: true,
+                  isArchived: false,
+                )
+              : null,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final list = tester.widget<ScrollablePositionedList>(
+        find.byKey(
+          ValueKey(thread ? 'thread-message-list' : 'channel-message-list'),
+        ),
+      );
+      list.itemScrollController!.jumpTo(index: thread ? 55 : 0);
+      await tester.pumpAndSettle();
+      expect(find.text('Oldest content').hitTestable(), findsNothing);
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        'flutter/status_bar',
+        const JSONMethodCodec().encodeMethodCall(
+          const MethodCall('handleScrollToTop'),
+        ),
+        (_) {},
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Oldest content').hitTestable(), findsOneWidget);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
   }
 
   testWidgets('newest short message keeps the same group gap', (tester) async {

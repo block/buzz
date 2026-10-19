@@ -83,7 +83,7 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 | Rust | 1.88+ | Install via [rustup](https://rustup.rs/) |
 | Node.js | 24+ | Required for desktop app commands and `just ci` |
 | pnpm | 10+ | Required for desktop app commands and `just ci` |
-| Flutter | 3.41+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
+| Flutter | 3.47.7+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
 | Xcode | 27.0 recommended; 26 supported | Required for iOS builds; see [iOS toolchain setup](mobile/README.md#ios-toolchain) |
 | Docker | 24+ | For Postgres, Redis, MinIO |
 | `just` | latest | Task runner — `cargo install just` |

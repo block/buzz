@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
-use axum::http::HeaderMap;
 use buzz_auth::{DenialClass, VerifiedAssertion};
 use nostr::PublicKey;
 use tokio_util::sync::CancellationToken;
@@ -69,10 +68,12 @@ impl ShadowSessions {
     }
 }
 
+/// A shadow session exists only for an assertion verified against a resolved
+/// community, whose label all its records carry.
 pub(crate) struct ShadowSession {
     id: u64,
     route: &'static str,
-    community: String,
+    community: metrics::SharedString,
     assertion: VerifiedAssertion,
     phase: Mutex<Phase>,
     /// The socket's cancellation, read only to stop recording.
@@ -87,7 +88,7 @@ impl ShadowSession {
     pub(crate) fn start(
         state: &AppState,
         route: &'static str,
-        headers: &HeaderMap,
+        community: metrics::SharedString,
         assertion: VerifiedAssertion,
         connection_time: chrono::DateTime<chrono::Utc>,
     ) -> Arc<Self> {
@@ -101,7 +102,7 @@ impl ShadowSession {
         let session = Arc::new(Self {
             id: sessions.next_id.fetch_add(1, Ordering::Relaxed),
             route,
-            community: crate::nip_fi_shadow::community_label(headers, &nip_fi.communities),
+            community,
             assertion,
             phase: Mutex::new(Phase::Pending { revoked: false }),
             cancel: OnceLock::new(),
@@ -263,13 +264,13 @@ impl Drop for ShadowSession {
 /// returns `true` when enforce would have refused the upgrade here.
 pub(crate) fn upgrade_denied(
     state: &AppState,
-    headers: &HeaderMap,
+    community: &metrics::SharedString,
     assertion: &VerifiedAssertion,
 ) -> bool {
     let denied = deny_listed(state, assertion);
     if denied {
         let verdict = Err((Stage::DenySet, DenialClass::AuthorizationDenied));
-        crate::nip_fi_shadow::record("ws", headers, &state.config.nip_fi.communities, verdict);
+        crate::nip_fi_shadow::record_for("ws", community.clone(), verdict);
     }
     denied
 }
@@ -383,7 +384,13 @@ pub(crate) mod tests {
         lifetime: Duration,
     ) -> Arc<ShadowSession> {
         let assertion = VerifiedAssertion::for_test(key, vec![Utc::now() + lifetime]);
-        ShadowSession::start(state, "ws", &HeaderMap::new(), assertion, Utc::now())
+        ShadowSession::start(
+            state,
+            "ws",
+            crate::nip_fi_shadow::BOUND.into(),
+            assertion,
+            Utc::now(),
+        )
     }
 
     fn auth(session: &Arc<ShadowSession>, state: &AppState, pubkey: PublicKey) {
@@ -629,8 +636,16 @@ pub(crate) mod tests {
                 VerifiedAssertion::for_test(Some(key), vec![Utc::now() + Duration::hours(1)]);
             let clean =
                 VerifiedAssertion::for_test(Some(Keys::generate().public_key()), vec![Utc::now()]);
-            assert!(upgrade_denied(&state, &HeaderMap::new(), &listed));
-            assert!(!upgrade_denied(&state, &HeaderMap::new(), &clean));
+            assert!(upgrade_denied(
+                &state,
+                &crate::nip_fi_shadow::BOUND.into(),
+                &listed
+            ));
+            assert!(!upgrade_denied(
+                &state,
+                &crate::nip_fi_shadow::BOUND.into(),
+                &clean
+            ));
         });
         assert_eq!(records, ["deny_set/denied"]);
     }

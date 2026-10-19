@@ -305,7 +305,7 @@ class _ThemePreviewCloseButton extends StatelessWidget {
             borderRadius: BorderRadius.circular(Radii.dialog),
           ),
         ),
-        icon: const Icon(BuzzIcons.x, size: 22),
+        icon: const Icon(BuzzIcons.x, size: 24),
       ),
     );
   }

@@ -25,6 +25,8 @@ const double kEmojiOnlyCustomEmojiSize = kEmojiOnlyFontSize * 1.45;
 /// digit-based sequences don't match — those are covered by the dataset's own
 /// native set instead, exactly as desktop does it.
 final RegExp _pictographic = RegExp(
+  // The Dart VM supports this Unicode property; the analyzer parser does not.
+  // ignore: valid_regexps
   r'\p{Extended_Pictographic}',
   unicode: true,
 );

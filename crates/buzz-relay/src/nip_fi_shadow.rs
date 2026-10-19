@@ -1,15 +1,18 @@
 //! Shadow-mode recording of what enforce would have decided. The verdict
-//! never reaches admission, a connection, or a response. Labels are bounded:
-//! the community is its configured URI or `unmapped`, never the raw `Host`,
-//! and no token, claim, or issuer is logged. The one key logged is the NIP-98
-//! proof key, in the debug line of the key-pairing step shadow shares with
+//! never reaches admission, a connection, or a response. Shadow resolves the
+//! community exactly as enforce does, database lookup and freshness included,
+//! and once per HTTP request. Labels are bounded and never the raw `Host`: the
+//! community label is the configured URI for the `env` source (a set bounded
+//! by config), `bound` for the `database` source, and `unmapped` when the
+//! community did not resolve. No token, claim, or issuer is logged. The one
+//! key logged is the NIP-98 proof key, in the debug line of the key-pairing step shadow shares with
 //! enforce. [FI-TRACE-PRIVACY-NONPUBLIC]
 //!
 //! # Metrics
 //!
 //! | Series | Labels | One increment per |
 //! |---|---|---|
-//! | `buzz_nip_fi_shadow_total` | `route` (`http`, `ws`, `audio`), `stage`, `outcome`, `community` | NIP-FI decision enforce would make: one per HTTP request that reaches admission, one per WebSocket upgrade enforce would refuse, and one per observed session: at the AUTH where enforce would admit or deny it, or `deadline` when its deadline passes first |
+//! | `buzz_nip_fi_shadow_total` | `route` (`http`, `ws`, `audio`), `stage`, `outcome`, `community` | NIP-FI decision enforce would make: one per HTTP request that reaches admission, one per WebSocket upgrade enforce would refuse, and one per observed session: at the AUTH where enforce would admit or deny it, or `deadline` when its deadline passes first. A request or upgrade whose community binding goes stale before enforce's final re-check also records `deadline` |
 //! | `buzz_nip_fi_shadow_strict_proof_total` | `route` (`bridge`, `blossom`), `outcome` (`pass`, `rejected`), `community` | strict NIP-98 side check on a route whose proof is stricter in enforce (payload tag, Blossom proof); not every request runs one |
 //! | `buzz_nip_fi_shadow_session_end_total` | `route` (`ws`, `audio`), `reason` (`expired`, `revoked`), `community` | admitted shadow session enforce would have ended; a session never admitted records none |
 //! | `buzz_nip_fi_shadow_disconnect_total` | `route` (`admin`, `cross_pod`), `outcome` | disconnect-path event that moves a real disconnect counter in enforce: an accepted admin command, a capacity rejection, a subscriber lag, or a cross-pod capacity or poison failsafe. An admin command refused for its header, body, proof, replay, or a dependency error records nothing |
@@ -24,7 +27,9 @@
 use axum::http::HeaderMap;
 use buzz_auth::DenialClass;
 
-use crate::nip_fi_config::NipFiCommunities;
+use metrics::SharedString;
+
+use crate::nip_fi_http::Resolution;
 
 /// Which enforce step would have denied, and with which class.
 pub(crate) type WouldDeny = (Stage, DenialClass);
@@ -55,18 +60,30 @@ impl Stage {
     }
 }
 
-/// Record one would-be enforce verdict for a request at `route`.
-pub(crate) fn record(
-    route: &'static str,
-    headers: &HeaderMap,
-    communities: &NipFiCommunities,
-    verdict: Result<(), WouldDeny>,
-) {
-    record_for(route, community_label(headers, communities), verdict);
+/// The `community` label of a `database`-source community that resolved.
+pub(crate) const BOUND: &str = "bound";
+/// The `community` label of a verdict whose community did not resolve.
+const UNMAPPED: &str = "unmapped";
+
+/// The `community` label of `community`.
+pub(crate) fn label(community: &Resolution) -> SharedString {
+    community
+        .as_ref()
+        .map_or(SharedString::const_str(UNMAPPED), |c| c.shadow_label())
+}
+
+/// Record one would-be enforce verdict for a request at `route` whose Host
+/// resolved to `community`.
+pub(crate) fn record(route: &'static str, community: &Resolution, verdict: Result<(), WouldDeny>) {
+    record_for(route, label(community), verdict);
 }
 
 /// [`record`] for a caller that resolved its community label earlier.
-pub(crate) fn record_for(route: &'static str, community: String, verdict: Result<(), WouldDeny>) {
+pub(crate) fn record_for(
+    route: &'static str,
+    community: SharedString,
+    verdict: Result<(), WouldDeny>,
+) {
     let (stage, outcome) = match verdict {
         Ok(()) => ("admit", "admit"),
         Err((stage, class)) => (stage.label(), class_label(class)),
@@ -74,11 +91,10 @@ pub(crate) fn record_for(route: &'static str, community: String, verdict: Result
     emit(route, community, stage, outcome);
 }
 
-/// The bounded community label for `headers`: its configured URI or `unmapped`.
-pub(crate) fn community_label(headers: &HeaderMap, communities: &NipFiCommunities) -> String {
-    crate::nip_fi_core::resolve_community(headers, communities)
-        .map_or("unmapped", |binding| binding.expected_aud())
-        .to_owned()
+/// The request's community, from the router guard's resolution when there is
+/// one.
+async fn resolution(state: &crate::state::AppState, headers: &HeaderMap) -> Resolution {
+    crate::nip_fi_http::resolve_for_admission(state.nip_fi_communities(), headers).await
 }
 
 tokio::task_local! {
@@ -90,14 +106,13 @@ tokio::task_local! {
 /// verdict.  Enforce never lets a guard-denied request reach a handler, so
 /// none of that request's handler-side records are emitted.
 pub(crate) async fn observe_guard<F: std::future::Future>(
-    state: &crate::state::AppState,
-    headers: &HeaderMap,
+    community: SharedString,
     verdict: Result<(), WouldDeny>,
     run: F,
 ) -> F::Output {
     let denied = verdict.is_err();
     if denied {
-        record("http", headers, &state.config.nip_fi.communities, verdict);
+        record_for("http", community, verdict);
     }
     GUARD_DENIED.scope(denied, run).await
 }
@@ -107,7 +122,7 @@ fn guard_denied() -> Option<bool> {
     GUARD_DENIED.try_with(|denied| *denied).ok()
 }
 
-fn emit(route: &'static str, community: String, stage: &'static str, outcome: &'static str) {
+fn emit(route: &'static str, community: SharedString, stage: &'static str, outcome: &'static str) {
     if guard_denied() == Some(true) {
         return;
     }
@@ -121,7 +136,7 @@ fn emit(route: &'static str, community: String, stage: &'static str, outcome: &'
     .increment(1);
     // The counter is the record; only a would-deny earns a (debug) line.
     if stage != "admit" {
-        tracing::debug!(route, stage, outcome, community, "nip-fi shadow would-deny");
+        tracing::debug!(route, stage, outcome, %community, "nip-fi shadow would-deny");
     }
 }
 
@@ -136,7 +151,7 @@ const fn class_label(class: DenialClass) -> &'static str {
 
 /// In shadow mode only, record whether `strict` (a pure check) would reject,
 /// on its own counter: a pass is one proof, not an admission verdict.
-pub(crate) fn observe_strict_proof<E>(
+pub(crate) async fn observe_strict_proof<E>(
     state: &crate::state::AppState,
     headers: &HeaderMap,
     route: &'static str,
@@ -145,11 +160,12 @@ pub(crate) fn observe_strict_proof<E>(
     let nip_fi = &state.config.nip_fi;
     if nip_fi.mode.observes_only() && guard_denied() != Some(true) {
         let outcome = strict().map_or(class_label(DenialClass::EvidenceRejected), |()| "pass");
+        let community = label(&resolution(state, headers).await);
         metrics::counter!(
             "buzz_nip_fi_shadow_strict_proof_total",
             "route" => route,
             "outcome" => outcome,
-            "community" => community_label(headers, &nip_fi.communities)
+            "community" => community
         )
         .increment(1);
     }
@@ -170,7 +186,7 @@ pub(crate) async fn bind_tenant(
         .await
         .ok();
     if tenant.is_none() {
-        observe_unbound(state, headers);
+        observe_unbound(state, headers).await;
     }
     tenant
 }
@@ -179,15 +195,16 @@ pub(crate) async fn bind_tenant(
 /// Host bound no tenant: `community` when the Host maps to no configured
 /// community; an admit when enforce's guard passed it, since the handler's
 /// own rejection is no NIP-FI denial; nothing outside a guarded route.
-fn observe_unbound(state: &crate::state::AppState, headers: &HeaderMap) {
+async fn observe_unbound(state: &crate::state::AppState, headers: &HeaderMap) {
     let nip_fi = &state.config.nip_fi;
     if nip_fi.mode.observes_only() {
-        let verdict = match crate::nip_fi_core::resolve_community(headers, &nip_fi.communities) {
-            Err(class) => Err((Stage::Community, class)),
+        let community = resolution(state, headers).await;
+        let verdict = match &community {
+            Err(class) => Err((Stage::Community, *class)),
             Ok(_) if guard_denied() == Some(false) => Ok(()),
             Ok(_) => return,
         };
-        record("http", headers, &nip_fi.communities, verdict);
+        record("http", &community, verdict);
     }
 }
 
@@ -241,15 +258,19 @@ mod tests {
         headers
     }
 
-    // Mutation: labelling by the raw Host leaks `attacker.example`.
-    #[test]
-    fn community_label_is_configured_uri_or_unmapped() {
+    // Mutation: labelling by the raw Host leaks `attacker.example`; labelling
+    // an `env` community `bound` drops its per-community series.
+    #[tokio::test(flavor = "current_thread")]
+    async fn env_label_is_configured_uri_or_unmapped() {
+        let map = communities();
         let recorder = DebuggingRecorder::new();
-        metrics::with_local_recorder(&recorder, || {
-            for host in [Some(TEST_HOST), Some("attacker.example"), None] {
-                super::record("http", &with_host(host), &communities(), Ok(()));
-            }
-        });
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        for host in [Some(TEST_HOST), Some("attacker.example"), None] {
+            let community = crate::nip_fi_core::Communities::from(&map)
+                .resolve(&with_host(host))
+                .await;
+            super::record("http", &community, Ok(()));
+        }
         let labels: Vec<String> = shadow_counts(&recorder)
             .into_iter()
             .map(|(c, _, _)| c)
@@ -311,7 +332,8 @@ mod tests {
             state.config = Arc::new(config);
             state.nip98_replay = guard.clone();
             let recorder = DebuggingRecorder::new();
-            metrics::with_local_recorder(&recorder, || {
+            {
+                let _guard = metrics::set_default_local_recorder(&recorder);
                 super::observe_strict_proof(&state, &headers, "bridge", || {
                     crate::api::bridge::verify_bridge_auth_with_options(
                         &headers,
@@ -322,8 +344,9 @@ mod tests {
                         true,
                     )
                     .map(drop)
-                });
-            });
+                })
+                .await;
+            }
             let counts = counts_of(&recorder, STRICT);
             assert_eq!(counts.len(), expected, "{mode:?}");
             assert!(
@@ -336,13 +359,15 @@ mod tests {
                 // Both outcomes stay on the proof counter, never an admit
                 // that could be summed with whole-request verdicts.
                 let recorder = DebuggingRecorder::new();
-                metrics::with_local_recorder(&recorder, || {
-                    super::observe_strict_proof(&state, &headers, "bridge", || Ok::<_, ()>(()));
-                    super::observe_strict_proof(&state, &headers, "bridge", || Err(()));
-                });
+                {
+                    let _guard = metrics::set_default_local_recorder(&recorder);
+                    super::observe_strict_proof(&state, &headers, "bridge", || Ok::<_, ()>(()))
+                        .await;
+                    super::observe_strict_proof(&state, &headers, "bridge", || Err(())).await;
+                }
                 let label = |outcome: &str| {
                     (
-                        "https://relay.example".to_owned(),
+                        TEST_COMMUNITY_URI.to_owned(),
                         "-".to_owned(),
                         outcome.to_owned(),
                     )

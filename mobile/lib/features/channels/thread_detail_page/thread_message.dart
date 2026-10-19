@@ -7,6 +7,8 @@ class _ThreadMessage extends HookConsumerWidget {
   final String? currentPubkey;
   final bool showAuthor;
   final bool showAvatar;
+  final bool startsDay;
+  final bool endsDay;
   final bool isHighlighted;
   final List<TimelineMessage>? allMessages;
   final bool isMember;
@@ -25,6 +27,8 @@ class _ThreadMessage extends HookConsumerWidget {
     required this.currentPubkey,
     required this.showAuthor,
     this.showAvatar = true,
+    this.startsDay = false,
+    this.endsDay = false,
     this.isHighlighted = false,
     this.allMessages,
     this.isMember = false,
@@ -37,8 +41,10 @@ class _ThreadMessage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
+    final swipeContentKey = useMemoized(GlobalKey.new, const []);
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
     final pk = message.pubkey.toLowerCase();
+    final ownMessage = currentPubkey?.toLowerCase() == pk;
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
@@ -128,13 +134,13 @@ class _ThreadMessage extends HookConsumerWidget {
             alpha: _landingHighlightOpacity * highlightProgress,
           );
 
-    return NotificationListener<MessageGalleryScrollNotification>(
+    final content = NotificationListener<MessageGalleryScrollNotification>(
       onNotification: (notification) {
         mediaOffset.value = notification.offset;
         return true;
       },
       child: Padding(
-        padding: EdgeInsets.only(top: showAuthor ? Grid.xs : 0),
+        padding: EdgeInsets.only(top: showAuthor && !startsDay ? Grid.xs : 0),
         child: DecoratedBox(
           key: ValueKey('thread-message-${message.id}'),
           decoration: BoxDecoration(
@@ -156,31 +162,40 @@ class _ThreadMessage extends HookConsumerWidget {
               snapshotKey: messageSnapshotKey,
               child: Padding(
                 padding: EdgeInsets.only(
-                  bottom: showAvatar ? Grid.quarter : Grid.quarter / 2,
+                  bottom: endsDay
+                      ? 0
+                      : (showAvatar ? Grid.quarter : Grid.quarter / 2),
                 ),
                 child: MessageFooterLayout(
                   animateSize: true,
                   overlap: message.reactions.isNotEmpty ? Grid.xs : 0,
                   footer: (isThreadHead || message.reactions.isNotEmpty)
-                      ? Padding(
-                          padding: const EdgeInsets.only(
-                            left:
-                                messageAvatarSize +
-                                messageAvatarContentGap +
-                                Grid.xxs,
-                          ),
-                          child: ReactionRow(
-                            combined: true,
-                            messageId: message.id,
-                            channelId: channelId,
-                            reactions: message.reactions,
-                            onToggle: (emoji) =>
-                                toggleReaction(ref, message, emoji),
-                            showAddButton: isMember && !isArchived,
-                            onAddReaction: () => showAddReactionPicker(
-                              context: context,
-                              ref: ref,
-                              message: message,
+                      ? Align(
+                          alignment: ownMessage
+                              ? Alignment.centerRight
+                              : Alignment.centerLeft,
+                          child: Padding(
+                            padding: EdgeInsets.only(
+                              right: ownMessage ? Grid.xxs : 0,
+                              left: ownMessage
+                                  ? 0
+                                  : messageAvatarSize +
+                                        messageAvatarContentGap +
+                                        Grid.xxs,
+                            ),
+                            child: ReactionRow(
+                              combined: true,
+                              messageId: message.id,
+                              channelId: channelId,
+                              reactions: message.reactions,
+                              onToggle: (emoji) =>
+                                  toggleReaction(ref, message, emoji),
+                              showAddButton: isMember && !isArchived,
+                              onAddReaction: () => showAddReactionPicker(
+                                context: context,
+                                ref: ref,
+                                message: message,
+                              ),
                             ),
                           ),
                         )
@@ -191,29 +206,41 @@ class _ThreadMessage extends HookConsumerWidget {
                       clipBehavior: Clip.none,
                       children: [
                         Row(
+                          textDirection: ownMessage
+                              ? TextDirection.rtl
+                              : TextDirection.ltr,
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            const SizedBox(width: messageAvatarSize),
-                            const SizedBox(width: messageAvatarContentGap),
+                            if (!ownMessage)
+                              const SizedBox(width: messageAvatarSize),
+                            if (!ownMessage)
+                              const SizedBox(width: messageAvatarContentGap),
                             Expanded(
                               child: Padding(
                                 padding: EdgeInsets.only(
-                                  top: showAuthor ? Grid.half : 0,
+                                  top: showAuthor && !startsDay ? Grid.half : 0,
                                 ),
                                 child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  crossAxisAlignment: ownMessage
+                                      ? CrossAxisAlignment.end
+                                      : CrossAxisAlignment.start,
                                   children: [
                                     if (showAuthor)
                                       Padding(
-                                        padding: const EdgeInsets.only(
+                                        padding: EdgeInsets.only(
                                           bottom: Grid.quarter,
-                                          left: Grid.xs,
+                                          left: ownMessage ? 0 : Grid.xs,
+                                          right: ownMessage ? Grid.xs : 0,
                                         ),
                                         child: Row(
                                           children: [
                                             Expanded(
                                               child: MessageAuthorMeta(
                                                 showTimestamp: true,
+                                                reversed: false,
+                                                alignment: ownMessage
+                                                    ? MainAxisAlignment.end
+                                                    : MainAxisAlignment.start,
                                                 nameStyle:
                                                     messageUsernameTextStyle
                                                         .copyWith(
@@ -284,14 +311,15 @@ class _ThreadMessage extends HookConsumerWidget {
                                         ),
                                       ),
                                     MessageContent(
+                                      key: swipeContentKey,
                                       content: message.content,
                                       bubble: true,
                                       hasReactions:
                                           message.reactions.isNotEmpty,
                                       bubbleEnd: showAvatar,
                                       bubbleStart: showAuthor,
-                                      ownMessage:
-                                          currentPubkey?.toLowerCase() == pk,
+                                      ownMessage: ownMessage,
+                                      trimTrailingSpacing: endsDay,
                                       mentionNames: resolvedMentionNames,
                                       mentionLabels: mentionLabels,
                                       agentMentionPubkeys: agentMentionPubkeys,
@@ -362,9 +390,10 @@ class _ThreadMessage extends HookConsumerWidget {
                             ),
                           ],
                         ),
-                        if (showAvatar)
+                        if (showAvatar && !ownMessage)
                           Positioned(
-                            left: 0,
+                            left: ownMessage ? null : 0,
+                            right: ownMessage ? 0 : null,
                             bottom: 0,
                             child: MessageMediaAvatar(
                               offset: mediaOffset,
@@ -406,6 +435,16 @@ class _ThreadMessage extends HookConsumerWidget {
           ),
         ),
       ),
+    );
+    return MessageSwipeReply(
+      contentKey: swipeContentKey,
+      message: message,
+      allMessages: allMessages,
+      channelId: channelId,
+      currentPubkey: currentPubkey,
+      isMember: isMember,
+      isArchived: isArchived,
+      child: content,
     );
   }
 }

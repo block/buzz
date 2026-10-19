@@ -13,11 +13,15 @@ class ReplySummaryLink extends ConsumerWidget {
     required this.summary,
     required this.onTap,
     this.hasReactions = false,
+    this.mirrored = false,
   });
 
   final ThreadSummary summary;
   final VoidCallback onTap;
   final bool hasReactions;
+
+  /// Places the connector on the outgoing edge without reversing its contents.
+  final bool mirrored;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -28,7 +32,10 @@ class ReplySummaryLink extends ConsumerWidget {
         : '${summary.replyCount}${summary.isLowerBound ? '+' : ''} ${summary.replyCount == 1 ? 'reply' : 'replies'}';
     final connectorTop = hasReactions ? -Grid.half : Grid.half;
     return Padding(
-      padding: const EdgeInsetsDirectional.only(start: Grid.xxs),
+      padding: EdgeInsets.only(
+        left: mirrored ? 0 : Grid.xxs,
+        right: mirrored ? Grid.xxs : 0,
+      ),
       child: Stack(
         clipBehavior: Clip.none,
         children: [
@@ -38,14 +45,17 @@ class ReplySummaryLink extends ConsumerWidget {
               child: CustomPaint(
                 painter: _ReplyConnector(
                   context.colors.outlineVariant,
-                  Directionality.of(context),
+                  mirrored ? TextDirection.rtl : TextDirection.ltr,
                   connectorTop,
                 ),
               ),
             ),
           ),
           Padding(
-            padding: const EdgeInsetsDirectional.only(start: Grid.twelve),
+            padding: EdgeInsets.only(
+              left: mirrored ? 0 : Grid.twelve,
+              right: mirrored ? Grid.twelve : 0,
+            ),
             child: Semantics(
               button: true,
               label: 'View thread: $label',

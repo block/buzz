@@ -376,7 +376,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
             // NIP-FI key pairing [FI-INV-05]: immediately after successful
             // verify_auth_event, before community-ban/allowlist/membership gates.
-            // Pre-DB positioning means a denied caller pays zero DB cost and the
+            // Running before those gates means a denied caller skips their DB reads and the
             // production call site is falsifiable without live tenant policy.
             // [FI-TRACE-DENIAL-ORACLE post-establishment]
             if crate::nip_fi_session::enforce_nip_fi_key_pairing(
@@ -1465,11 +1465,10 @@ mod tests {
         let t = crate::connection::tests::test_conn(pending, None);
         let assertion =
             buzz_auth::VerifiedAssertion::for_test(Some(asserted), vec![Utc::now() + lifetime]);
-        let headers = axum::http::HeaderMap::new();
         let session = crate::nip_fi_shadow_session::ShadowSession::start(
             state,
             "ws",
-            &headers,
+            crate::nip_fi_shadow::BOUND.into(),
             assertion,
             Utc::now(),
         );

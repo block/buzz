@@ -105,8 +105,8 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         if !mode.restricts() {
             if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
                 // Off returns `rejection` as is; shadow also records the
-                // enforce verdict for the failed proof, still with no DB work.
-                crate::nip_fi_http::observe_failed_proof(state, &parts.headers);
+                // enforce verdict for the failed proof.
+                crate::nip_fi_http::observe_failed_proof(state, &parts.headers).await;
                 return Err(rejection);
             }
         }
@@ -195,7 +195,8 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
                     (event, signed_auth_created_at),
                 ))
             },
-        )?;
+        )
+        .await?;
 
         let pubkey = *admission.proven_pubkey();
         let (event, signed_auth_created_at) = admission.into_extra();

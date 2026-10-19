@@ -292,10 +292,10 @@ class _CreateChannelRadioGroup<T> extends StatelessWidget {
       children: [
         _CreateChannelFieldLabel(label: label),
         const SizedBox(height: Grid.xxs),
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: context.colors.surface,
-            border: Border.all(color: context.colors.outlineVariant),
+        Material(
+          color: context.colors.surface,
+          shape: RoundedRectangleBorder(
+            side: BorderSide(color: context.colors.outlineVariant),
             borderRadius: BorderRadius.circular(Radii.container),
           ),
           child: RadioGroup<T>(

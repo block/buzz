@@ -16,6 +16,8 @@ void main() {
     );
     expect(community.starterSetupIncomplete, isFalse);
     expect(community.pushLeaseInstallationId, isNull);
+    expect(community.pushNotificationsEnabled, isTrue);
+    expect(community.pushSubscriptionState.pendingTombstoneGeneration, isNull);
   });
 
   test('new community gets a unique canonical push lease address id', () {
@@ -25,6 +27,8 @@ void main() {
       relayUrl: 'https://relay.test',
     );
 
+    expect(first.pushNotificationsEnabled, isTrue);
+    expect(Community.fromJson(first.toJson()).pushNotificationsEnabled, isTrue);
     expect(first.pushLeaseInstallationId, matches(RegExp(r'^[0-9a-f]{32}$')));
     expect(
       second.pushLeaseInstallationId,
@@ -48,6 +52,31 @@ void main() {
     expect(roundTrip.starterSetupIncomplete, isTrue);
     expect(roundTrip.pushLeaseInstallationId, 'a' * 32);
   });
+
+  for (final enabled in [true, false]) {
+    test('saved push preference $enabled survives loading and copying', () {
+      final community = Community.fromJson({
+        'id': 'one',
+        'name': 'Buzz',
+        'relayUrl': 'https://relay.test',
+        'pushNotificationsEnabled': enabled,
+        'addedAt': '2026-08-05T00:00:00.000Z',
+      });
+      expect(community.pushNotificationsEnabled, enabled);
+      expect(
+        community.copyWith(name: 'Renamed').pushNotificationsEnabled,
+        enabled,
+      );
+      expect(
+        Community.fromJson(community.toJson()).pushNotificationsEnabled,
+        enabled,
+      );
+      expect(
+        community.pushSubscriptionState.pendingTombstoneGeneration,
+        isNull,
+      );
+    });
+  }
 
   test('malformed stored push lease address id is rejected', () {
     expect(

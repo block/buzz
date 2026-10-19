@@ -97,6 +97,7 @@ part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
 part 'channel_detail_page_test/bubble_tests.dart';
+part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
@@ -566,6 +567,7 @@ void main() {
   presenceTests();
   actionRowTests();
   bubbleLayoutTests();
+  swipeReplyTests();
   reviewAvatarTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
@@ -4548,12 +4550,22 @@ void main() {
     });
 
     for (final gesture in ['status bar', 'scroll']) {
-      testWidgets(
-        'Me history uses selected provider for $gesture',
-        (tester) async {
-          final notifier = _FakeMessagesNotifier(
+      testWidgets('Me history uses selected provider for $gesture', (
+        tester,
+      ) async {
+        final notifier = _FakeMessagesNotifier(
+          [
+            for (var i = 50; i < 250; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ],
+          olderPages: [
             [
-              for (var i = 50; i < 250; i++)
+              for (var i = 0; i < 50; i++)
                 _textMsg(
                   id: 'msg$i',
                   pubkey: 'alice',
@@ -4561,64 +4573,52 @@ void main() {
                   createdAt: 1000 + i,
                 ),
             ],
-            olderPages: [
-              [
-                for (var i = 0; i < 50; i++)
-                  _textMsg(
-                    id: 'msg$i',
-                    pubkey: 'alice',
-                    content: 'Message $i',
-                    createdAt: 1000 + i,
-                  ),
-              ],
-            ],
-          );
-          await tester.pumpWidget(
-            _buildTestable(
-              messages: const [],
-              messagesNotifier: notifier,
-              personalChat: true,
-              disableAnimations: true,
+          ],
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: notifier,
+            personalChat: true,
+            disableAnimations: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+        if (gesture == 'status bar') {
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            'flutter/status_bar',
+            const JSONMethodCodec().encodeMethodCall(
+              const MethodCall('handleScrollToTop'),
             ),
+            (_) {},
           );
           await tester.pumpAndSettle();
-          if (gesture == 'status bar') {
-            await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-              'flutter/status_bar',
-              const JSONMethodCodec().encodeMethodCall(
-                const MethodCall('handleScrollToTop'),
-              ),
-              (_) {},
-            );
-            await tester.pumpAndSettle();
-          } else {
-            final list = tester.widget<ScrollablePositionedList>(
-              find.byType(ScrollablePositionedList),
-            );
-            list.itemScrollController!.jumpTo(index: 195);
-            await tester.pumpAndSettle();
-            await tester.drag(
-              find.byType(ScrollablePositionedList),
-              const Offset(0, 350),
-            );
-            await tester.pumpAndSettle();
-          }
-          expect(notifier.fetchOlderCalls, greaterThan(0));
-          if (gesture == 'status bar') {
-            expect(findRichText('Message 0'), findsOneWidget);
-          } else {
-            // Scroll pagination extends the visible provider, even if the user
-            // has not scrolled through every newly loaded row yet.
-            expect(
-              ProviderScope.containerOf(
-                tester.element(find.byType(ChannelDetailPage)),
-              ).read(meMessagesProvider(_channelId)).requireValue.first.id,
-              'msg0',
-            );
-          }
-        },
-        variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-      );
+        } else {
+          final list = tester.widget<ScrollablePositionedList>(
+            find.byType(ScrollablePositionedList),
+          );
+          list.itemScrollController!.jumpTo(index: 195);
+          await tester.pumpAndSettle();
+          await tester.drag(
+            find.byType(ScrollablePositionedList),
+            const Offset(0, 350),
+          );
+          await tester.pumpAndSettle();
+        }
+        expect(notifier.fetchOlderCalls, greaterThan(0));
+        if (gesture == 'status bar') {
+          expect(findRichText('Message 0'), findsOneWidget);
+        } else {
+          // Scroll pagination extends the visible provider, even if the user
+          // has not scrolled through every newly loaded row yet.
+          expect(
+            ProviderScope.containerOf(
+              tester.element(find.byType(ChannelDetailPage)),
+            ).read(meMessagesProvider(_channelId)).requireValue.first.id,
+            'msg0',
+          );
+        }
+      }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     }
 
     for (final personal in [false, true]) {
@@ -5679,7 +5679,7 @@ void main() {
     for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
       for (final multiline in [false, true]) {
         testWidgets(
-          'group avatar stays fixed throughout a local send: $platform, multiline=$multiline',
+          'outgoing group stays avatar-free throughout a local send: $platform, multiline=$multiline',
           (tester) async {
             final previousPlatform = debugDefaultTargetPlatformOverride;
             debugDefaultTargetPlatformOverride = platform;
@@ -5710,7 +5710,7 @@ void main() {
                 of: find.byKey(ValueKey('message-row-$id')),
                 matching: find.byType(AvatarImage),
               );
-              final before = tester.getRect(avatar('first'));
+              expect(avatar('first'), findsNothing);
               final container = ProviderScope.containerOf(
                 tester.element(find.byType(ChannelDetailPage)),
               );
@@ -5730,19 +5730,19 @@ void main() {
               ]);
               for (var frame = 0; frame < 32; frame++) {
                 await tester.pump(const Duration(milliseconds: 16));
-                final visibleAvatar = avatar('second').evaluate().isNotEmpty
-                    ? avatar('second')
-                    : avatar('first');
-                expect(visibleAvatar, findsOneWidget);
-                final current = tester.getRect(visibleAvatar);
                 expect(
-                  current.top,
-                  closeTo(before.top, 1),
-                  reason: 'avatar frame $frame',
+                  avatar('first'),
+                  findsNothing,
+                  reason: 'first avatar frame $frame',
+                );
+                expect(
+                  avatar('second'),
+                  findsNothing,
+                  reason: 'second avatar frame $frame',
                 );
               }
               await tester.pumpAndSettle();
-              expect(avatar('second'), findsOneWidget);
+              expect(avatar('second'), findsNothing);
             } finally {
               debugDefaultTargetPlatformOverride = previousPlatform;
             }
@@ -6507,6 +6507,51 @@ void main() {
         );
       },
     );
+
+    testWidgets('own ended huddle reclaims avatar space and aligns reactions', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          signingPubkey: 'alice',
+          messages: [
+            _huddleMsg(id: 'own-huddle', kind: EventKind.huddleStarted),
+            _huddleMsg(
+              id: 'own-ending',
+              kind: EventKind.huddleEnded,
+              createdAt: 1500,
+            ),
+            _reaction(id: 'own-huddle-reaction', targetId: 'own-huddle'),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final card = tester.getRect(
+        find.byKey(const ValueKey('huddle-card-own-huddle')),
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('huddle-activity-own-huddle')),
+          matching: find.byType(AvatarImage),
+        ),
+        findsNothing,
+      );
+      expect(find.text('Huddle ended'), findsOneWidget);
+      expect(
+        card.right,
+        closeTo(
+          tester
+              .getRect(find.byKey(const ValueKey('huddle-activity-own-huddle')))
+              .right,
+          0.01,
+        ),
+      );
+      final tray = tester.getRect(
+        find.byKey(const ValueKey('combined-reaction-tray')),
+      );
+      expect(tray.right, lessThan(card.right));
+      expect(tray.right, greaterThan(card.center.dx));
+    });
 
     testWidgets('renders a compact huddle activity row', (tester) async {
       await tester.pumpWidget(

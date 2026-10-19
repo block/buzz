@@ -34,7 +34,7 @@ class _ChannelsSkeleton extends StatelessWidget {
     if (widths.isEmpty) widths.addAll(fallbackWidths);
 
     return ListView.builder(
-      cacheExtent: 0,
+      scrollCacheExtent: const ScrollCacheExtent.pixels(0),
       physics: const NeverScrollableScrollPhysics(),
       padding: EdgeInsets.fromLTRB(
         Grid.gutter,
