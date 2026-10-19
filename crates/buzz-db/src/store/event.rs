@@ -125,12 +125,12 @@ pub struct EventQuery {
     /// containment alone would also admit decoys like `["x","shared","true"]`.
     /// `event_visible_to_reader` remains the post-filter.
     pub shared_gated_reader: Option<Vec<u8>>,
-    /// Whether results may include membership notices about system channels
-    /// ([`buzz_core::filter::is_system_notice`]). Off by default, so a read
-    /// path that does not ask never returns one (NIP-CL). Set it only for a
-    /// filter that asks for them
-    /// ([`buzz_core::filter::filter_asks_for_system_notices`]).
-    pub include_system_notices: bool,
+    /// The channel types whose membership notices (44100/44101) the query may
+    /// return: the filter's `#t` values
+    /// ([`buzz_core::filter::notice_channel_types`]). `None` means the legacy
+    /// types only, so a read path that does not set it never returns a notice
+    /// about a type added later, such as a system channel (NIP-CL).
+    pub notice_channel_types: Option<Vec<String>>,
 }
 
 impl EventQuery {
@@ -164,7 +164,7 @@ impl EventQuery {
             channel_ids_include_global: true,
             max_limit: None,
             shared_gated_reader: None,
-            include_system_notices: false,
+            notice_channel_types: None,
         }
     }
 }
@@ -662,7 +662,7 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
         qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
-    push_system_notice_exclusion(&mut qb, col_prefix, q);
+    push_notice_visibility(&mut qb, col_prefix, q);
 
     if let Some(ch) = q.channel_id {
         qb.push(format!(" AND {col_prefix}channel_id = "))
@@ -920,34 +920,52 @@ fn push_tag_value_filters(
     }
 }
 
-/// Hide membership notices about system channels unless the query asks for
-/// them (NIP-CL): `AND NOT (kind IN (44100, 44101) AND <exact ["t","system"]>)`.
-/// The same rule as [`buzz_core::filter::is_system_notice`] in `filters_match`,
-/// pushed before `LIMIT` so hidden rows cannot take page slots. Skipped when
-/// the query's kinds cannot match a notice.
-fn push_system_notice_exclusion(
-    qb: &mut QueryBuilder<sqlx::Postgres>,
-    col_prefix: &str,
-    q: &EventQuery,
-) {
-    use buzz_core::filter::{SYSTEM_NOTICE_KINDS, SYSTEM_NOTICE_TAG};
-    if q.include_system_notices {
-        return;
-    }
+/// Return only membership notices whose channel type the query may see
+/// (NIP-CL), as [`buzz_core::filter::notice_visible`] does in `filters_match`:
+/// `AND (kind NOT IN (44100, 44101) OR <type tag in visible types>
+/// [OR <no type tag>])`. An untagged notice is a legacy type, so it is kept
+/// only when a legacy type is visible. Pushed before `LIMIT` so hidden rows
+/// cannot take page slots. Skipped when the query's kinds cannot match a
+/// notice.
+fn push_notice_visibility(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
+    use buzz_core::filter::{
+        LEGACY_NOTICE_CHANNEL_TYPES, MEMBERSHIP_NOTICE_KINDS, NOTICE_CHANNEL_TYPE_TAG,
+    };
     if let Some(kinds) = q.kinds.as_deref() {
         if !kinds
             .iter()
-            .any(|kind| SYSTEM_NOTICE_KINDS.contains(&(*kind as u32)))
+            .any(|kind| MEMBERSHIP_NOTICE_KINDS.contains(&(*kind as u32)))
         {
             return;
         }
     }
-    let [added, removed] = SYSTEM_NOTICE_KINDS;
-    let [name, value] = SYSTEM_NOTICE_TAG;
+    let visible: Vec<String> = match &q.notice_channel_types {
+        Some(types) => types.clone(),
+        None => LEGACY_NOTICE_CHANNEL_TYPES
+            .iter()
+            .map(|t| (*t).to_owned())
+            .collect(),
+    };
+    let untagged_visible = visible
+        .iter()
+        .any(|t| LEGACY_NOTICE_CHANNEL_TYPES.contains(&t.as_str()));
+    let [added, removed] = MEMBERSHIP_NOTICE_KINDS;
     qb.push(format!(
-        " AND NOT ({col_prefix}kind IN ({added}, {removed}) AND "
+        " AND ({col_prefix}kind NOT IN ({added}, {removed}) OR "
     ));
-    push_exact_tag_match(qb, col_prefix, name, &[value.to_owned()]);
+    if visible.is_empty() {
+        qb.push("FALSE");
+    } else {
+        push_exact_tag_match(qb, col_prefix, NOTICE_CHANNEL_TYPE_TAG, &visible);
+    }
+    if untagged_visible {
+        qb.push(format!(
+            " OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag \
+             WHERE tag->>0 = "
+        ))
+        .push_bind(NOTICE_CHANNEL_TYPE_TAG.to_owned())
+        .push(")");
+    }
     qb.push(")");
 }
 
@@ -1069,7 +1087,7 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
         let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
         qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
-    push_system_notice_exclusion(&mut qb, col_prefix, q);
+    push_notice_visibility(&mut qb, col_prefix, q);
 
     if let Some(ch) = q.channel_id {
         qb.push(format!(" AND {col_prefix}channel_id = "))
