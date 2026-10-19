@@ -826,25 +826,25 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
         "a blob not yet attached anywhere stays community-readable"
     );
 
-    let mut client = BuzzTestClient::connect(&relay_ws_url(), &owner)
+    let imeta = Tag::parse([
+        "imeta",
+        &format!("url {url}"),
+        &format!("m {}", desc["type"].as_str().unwrap()),
+        &format!("x {}", desc["sha256"].as_str().unwrap()),
+        &format!("size {}", desc["size"]),
+    ])
+    .unwrap();
+
+    let mut owner_client = BuzzTestClient::connect(&relay_ws_url(), &owner)
         .await
         .unwrap();
     let event = EventBuilder::new(Kind::from(9), "private attachment")
-        .tags(vec![
-            Tag::parse(["h", &channel_id]).unwrap(),
-            Tag::parse([
-                "imeta",
-                &format!("url {url}"),
-                &format!("m {}", desc["type"].as_str().unwrap()),
-                &format!("x {}", desc["sha256"].as_str().unwrap()),
-                &format!("size {}", desc["size"]),
-            ])
-            .unwrap(),
-        ])
+        .tags(vec![Tag::parse(["h", &channel_id]).unwrap(), imeta.clone()])
         .sign_with_keys(&owner)
         .unwrap();
-    let ok = client.send_event(event).await.unwrap();
+    let ok = owner_client.send_event(event).await.unwrap();
     assert!(ok.accepted, "attachment rejected: {:?}", ok.message);
+    owner_client.disconnect().await.unwrap();
 
     for method in [Method::GET, Method::HEAD] {
         assert_eq!(
@@ -859,18 +859,25 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
         );
     }
 
-    let profile = EventBuilder::new(
-        Kind::Metadata,
-        serde_json::json!({ "picture": url }).to_string(),
-    )
-    .sign_with_keys(&owner)
-    .unwrap();
-    let ok = client.send_event(profile).await.unwrap();
-    assert!(ok.accepted, "profile rejected: {:?}", ok.message);
-    client.disconnect().await.unwrap();
+    let mut outsider_client = BuzzTestClient::connect(&relay_ws_url(), &outsider)
+        .await
+        .unwrap();
+    let reshare = EventBuilder::new(Kind::TextNote, "reshare by hash")
+        .tags(vec![imeta])
+        .sign_with_keys(&outsider)
+        .unwrap();
+    let ok = outsider_client.send_event(reshare).await.unwrap();
+    assert!(
+        !ok.accepted,
+        "knowing a hash must not let a non-member attach the blob publicly"
+    );
+    outsider_client.disconnect().await.unwrap();
+    assert_eq!(read_status(&http, &outsider, Method::GET, url).await, 404);
+
+    assert_eq!(upload(&http, &outsider, &body).await.status(), 200);
     assert_eq!(
         read_status(&http, &outsider, Method::GET, url).await,
         200,
-        "an avatar stays community-readable even when also attached privately"
+        "uploading the same bytes proves possession"
     );
 }

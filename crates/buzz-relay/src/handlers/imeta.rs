@@ -361,6 +361,27 @@ fn is_well_formed_mime(mime: &str) -> bool {
         && !mime.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
+/// Hashes of every blob `event` attaches, as `buzz_db::store::media_reference`
+/// counts them: imeta `x` and `image-x`, and link-preview image and favicon.
+pub fn attached_blob_hashes(event: &nostr::Event) -> std::collections::BTreeSet<String> {
+    let mut hashes = std::collections::BTreeSet::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        match parts.first().map(String::as_str) {
+            Some("imeta") => hashes.extend(parts.iter().skip(1).filter_map(|part| {
+                let (key, value) = part.split_once(' ')?;
+                matches!(key, "x" | "image-x").then(|| value.to_owned())
+            })),
+            Some("link-preview") => {
+                hashes.extend([8, 10].iter().filter_map(|&i| parts.get(i).cloned()));
+            }
+            _ => {}
+        }
+    }
+    hashes.retain(|hash| is_sha256_hex(hash));
+    hashes
+}
+
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
@@ -607,6 +628,30 @@ mod tests {
         assert!(validate_imeta_tags(&[video_with_poster(None)], BASE).is_ok());
         let err = validate_imeta_tags(&[video_with_poster(Some(HASH))], BASE).unwrap_err();
         assert!(err.contains("image-x must match"), "{err}");
+    }
+
+    #[test]
+    fn attached_blob_hashes_reads_only_attachment_positions() {
+        let poster = "c".repeat(64);
+        let preview_image = "d".repeat(64);
+        let mut preview = vec!["link-preview".to_owned(); 11];
+        preview[4] = "f".repeat(64);
+        preview[8] = preview_image.clone();
+        preview[10] = String::new();
+        let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "")
+            .tags([
+                nostr::Tag::parse(video_with_poster(Some(&poster))).unwrap(),
+                nostr::Tag::parse(preview).unwrap(),
+                nostr::Tag::parse(["x", &"e".repeat(64)]).unwrap(),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        assert_eq!(
+            attached_blob_hashes(&event),
+            [HASH.to_owned(), poster, preview_image]
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]

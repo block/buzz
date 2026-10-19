@@ -8,11 +8,13 @@ use buzz_core::CommunityId;
 
 /// Whether `reader` may read the blob `sha256`.
 ///
-/// A blob attached in a channel is readable only through an attachment the
-/// reader can see: one in a channel they are an active member of or that is
-/// open, or a channel-less one. Attachments count whether or not the event was
-/// deleted. Blobs attached in no channel, current avatars, and custom emoji
-/// stay readable to the whole community.
+/// The uploader can always read it: uploading the exact bytes proves
+/// possession. Otherwise a blob attached in a channel is readable only through
+/// an attachment the reader can see: one in a channel they are an active member
+/// of or that is open, or a channel-less one. Attachments count whether or not
+/// the event was deleted; blobs attached in no channel stay readable to the
+/// whole community. Ingest only admits an attachment whose author can read the
+/// blob, so knowing a hash is not enough to widen who can read it.
 ///
 /// A blob is attached as an `imeta` file (`x`) or video poster (`image-x`), or
 /// as a `link-preview` image or favicon hash. Containment is the GIN-indexed
@@ -45,7 +47,9 @@ pub async fn can_read_blob(
                            WHERE (tag->>0 = 'imeta' AND tag ?| $3) \
                               OR (tag->>0 = 'link-preview' AND $4 IN (tag->>8, tag->>10))) \
          ) \
-         SELECT NOT EXISTS (SELECT 1 FROM refs WHERE channel_id IS NOT NULL) \
+         SELECT EXISTS (SELECT 1 FROM media_uploaders \
+                        WHERE community_id = $1 AND sha256 = $4 AND pubkey = $5) \
+             OR NOT EXISTS (SELECT 1 FROM refs WHERE channel_id IS NOT NULL) \
              OR EXISTS (SELECT 1 FROM refs WHERE channel_id IS NULL) \
              OR EXISTS (SELECT 1 FROM refs r \
                         JOIN channels c ON c.community_id = $1 AND c.id = r.channel_id \
@@ -62,23 +66,7 @@ pub async fn can_read_blob(
     .bind(reader)
     .fetch_one(&mut *connection)
     .await?;
-    if readable {
-        return Ok(true);
-    }
-
-    // Avatars and emoji are not indexed by hash, so only a would-be refusal pays
-    // for this scan.
-    let referenced_publicly = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM users WHERE community_id = $1 AND avatar_url LIKE $2) \
-             OR EXISTS (SELECT 1 FROM events WHERE community_id = $1 AND kind = $3 \
-                        AND deleted_at IS NULL AND tags::text LIKE $2)",
-    )
-    .bind(community_id.as_uuid())
-    .bind(format!("%{sha256}%"))
-    .bind(buzz_core::kind::KIND_EMOJI_SET as i32)
-    .fetch_one(&mut *connection)
-    .await?;
-    Ok(referenced_publicly)
+    Ok(readable)
 }
 
 impl Db {
