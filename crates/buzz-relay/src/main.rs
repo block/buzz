@@ -704,19 +704,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
     step.finish();
 
-    // NIP-33: backfill d_tag for any existing parameterized replaceable events
-    // that predate the column addition. Idempotent — no-ops when fully populated.
-    let mut step = StepTimer::start(StartupStep::DTagBackfill);
-    match db.backfill_d_tags().await {
-        Ok(0) => {}
-        Ok(n) => info!("Backfilled d_tag for {n} NIP-33 events"),
-        Err(e) => {
-            step.degrade();
-            error!("Failed to backfill d_tags: {e}");
-        }
-    }
-    step.finish();
-
     let (audit, audit_metrics_pool) = if config.audit_enabled {
         let step = StepTimer::start(StartupStep::AuditConnect);
         let audit_pool = connect_audit_pool(&db_config)

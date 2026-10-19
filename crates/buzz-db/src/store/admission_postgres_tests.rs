@@ -1005,41 +1005,6 @@ async fn fleet_sweep_returns_committed_results_when_database_drops_mid_page() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn d_tag_backfill_admits_active_tenant_and_skips_quiescing_tenant() {
-    let (db, communities) = fixture().await;
-    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
-    for (index, community) in communities[..2].iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
-             VALUES ($1, $2, $3, to_timestamp(1), 30023, '[[\"d\",\"tag\"]]'::jsonb, '', $4)",
-        )
-        .bind(community.as_uuid())
-        .bind(vec![index as u8; 32])
-        .bind(vec![2_u8; 32])
-        .bind(vec![3_u8; 64])
-        .execute(&db.pool)
-        .await
-        .expect("seed addressable event");
-    }
-    assert_eq!(db.backfill_d_tags().await.unwrap(), 1);
-    let active: Option<String> =
-        sqlx::query_scalar("SELECT d_tag FROM events WHERE community_id = $1")
-            .bind(communities[0].as_uuid())
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    let quiescing: Option<String> =
-        sqlx::query_scalar("SELECT d_tag FROM events WHERE community_id = $1")
-            .bind(communities[1].as_uuid())
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    assert_eq!(active.as_deref(), Some("tag"));
-    assert_eq!(quiescing, None);
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
 async fn match_claim_admits_active_tenant_and_skips_quiescing_tenant() {
     let (db, communities) = fixture().await;
     crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;

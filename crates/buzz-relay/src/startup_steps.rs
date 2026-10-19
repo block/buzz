@@ -51,8 +51,6 @@ pub enum StartupStep {
     ReplicaFenceProbe,
     /// Ensure the deployment community, backfill the allowlist, and bootstrap the owner.
     MembershipBootstrap,
-    /// Backfill NIP-33 `d_tag` values.
-    DTagBackfill,
     /// Connect the audit database pool (only when audit is enabled).
     AuditConnect,
     /// Connect Redis commands and pub/sub.
@@ -86,7 +84,6 @@ impl StartupStep {
         Self::DeletionFenceVerify,
         Self::ReplicaFenceProbe,
         Self::MembershipBootstrap,
-        Self::DTagBackfill,
         Self::AuditConnect,
         Self::RedisConnect,
         Self::SearchConnect,
@@ -109,7 +106,6 @@ impl StartupStep {
             Self::DeletionFenceVerify => "deletion_fence_verify",
             Self::ReplicaFenceProbe => "replica_fence_probe",
             Self::MembershipBootstrap => "membership_bootstrap",
-            Self::DTagBackfill => "d_tag_backfill",
             Self::AuditConnect => "audit_connect",
             Self::RedisConnect => "redis_connect",
             Self::SearchConnect => "search_connect",

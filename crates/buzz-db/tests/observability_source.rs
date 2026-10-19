@@ -156,14 +156,6 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     assert!(event.contains("WriterOperation::Authorization"));
     assert!(event.contains("WriterOperation::SubscriptionHistory"));
     assert!(event.contains("ReaderOperation::SubscriptionHistory"));
-    let backfill_d_tags = event
-        .split_once("pub async fn backfill_d_tags")
-        .expect("event store must expose the startup d-tag backfill")
-        .1
-        .split_once("/// Soft-delete NIP-29 discovery events")
-        .expect("d-tag backfill must precede discovery deletion")
-        .0;
-    assert!(backfill_d_tags.contains("WriterOperation::Bootstrap"));
     let soft_delete_discovery = event
         .split_once("pub async fn soft_delete_discovery_events")
         .expect("event store must expose discovery-event deletion")
