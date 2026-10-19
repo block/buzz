@@ -55,7 +55,7 @@ pub(crate) async fn after_admitted_insert(
             tx.conn(),
             community,
             &hashes,
-            event.pubkey.as_bytes(),
+            event,
             channel_id,
         )
         .await?;

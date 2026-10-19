@@ -1,3 +1,7 @@
+-- Durable historical backfill cutoff, independent of the schema install tool.
+ALTER TABLE communities
+    ADD COLUMN media_shares_recording_started_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
 -- Channel-scoped media access: who may read each blob.
 --
 -- media_uploaders: who has uploaded each blob. Uploading the exact bytes

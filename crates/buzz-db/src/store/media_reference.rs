@@ -10,20 +10,14 @@ use buzz_core::CommunityId;
 
 /// SQL predicate: whether the reader `$3` may read the blob `b.sha256` in community `$1`.
 ///
-/// Everyone may when the blob is shared with the whole community, and readers
-/// of a channel it is shared into (open, or one they actively belong to). A
-/// blob not yet shared into any channel is readable only by its uploader.
-/// Shares are never withdrawn.
+/// A share admits everyone when it is community-wide, or readers of its
+/// channel (open, or one they actively belong to). An unknown or unshared hash
+/// grants nothing. Shares are never withdrawn.
 macro_rules! readable_sql {
     () => {
         "( \
     EXISTS (SELECT 1 FROM media_shares s \
                WHERE s.community_id = $1 AND s.sha256 = b.sha256 AND s.channel_id IS NULL) \
-    OR (NOT EXISTS (SELECT 1 FROM media_shares s \
-                    WHERE s.community_id = $1 AND s.sha256 = b.sha256 \
-                      AND s.channel_id IS NOT NULL) \
-        AND EXISTS (SELECT 1 FROM media_uploaders u \
-                    WHERE u.community_id = $1 AND u.sha256 = b.sha256 AND u.pubkey = $3)) \
     OR EXISTS (SELECT 1 FROM media_shares s \
                JOIN channels c ON c.community_id = $1 AND c.id = s.channel_id \
                WHERE s.community_id = $1 AND s.sha256 = b.sha256 AND c.deleted_at IS NULL \
@@ -35,15 +29,16 @@ macro_rules! readable_sql {
 }
 
 /// Share into `channel_id` (or with the whole community when `None`) each blob
-/// in `sha256s` that `author` can read or has uploaded (uploading the exact
-/// bytes proves possession). Any other blob is left unshared, so a reference
-/// built from a leaked hash shows it to no one new. Called with the
+/// in `sha256s` that the event's author can read or has uploaded (uploading
+/// the exact bytes proves possession). An agent's profile picture may also
+/// use its registered owner's upload proof. Any other blob is left unshared,
+/// so a reference built from a leaked hash shows it to no one new. Called with the
 /// transaction that stores the referencing event; returns the shares added.
 pub(crate) async fn record_media_shares(
     conn: &mut PgConnection,
     community_id: CommunityId,
     sha256s: &[String],
-    author: &[u8],
+    event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<u64> {
     let added = sqlx::query(concat!(
@@ -51,21 +46,27 @@ pub(crate) async fn record_media_shares(
          SELECT $1, b.sha256, $4 FROM (SELECT DISTINCT unnest($2::text[]) AS sha256) b \
          WHERE EXISTS (SELECT 1 FROM media_uploaders u \
                        WHERE u.community_id = $1 AND u.sha256 = b.sha256 AND u.pubkey = $3) \
+            OR (b.sha256 = $5 AND EXISTS ( \
+                SELECT 1 FROM users agent JOIN media_uploaders u \
+                  ON u.community_id = agent.community_id AND u.pubkey = agent.agent_owner_pubkey \
+                WHERE agent.community_id = $1 AND agent.pubkey = $3 AND u.sha256 = b.sha256)) \
             OR ",
         readable_sql!(),
         " ORDER BY b.sha256 ON CONFLICT DO NOTHING"
     ))
     .bind(community_id.as_uuid())
     .bind(sha256s)
-    .bind(author)
+    .bind(event.pubkey.as_bytes().as_slice())
     .bind(channel_id)
+    .bind(buzz_core::media::profile_picture_blob_hash(event))
     .execute(conn)
     .await?
     .rows_affected();
     Ok(added)
 }
 
-/// Whether `reader` may read the blob `sha256`; see `readable_sql`.
+/// Whether `reader` has a readable share, or uploaded a blob not yet shared
+/// into any channel. Upload proof alone does not bypass existing channel shares.
 pub async fn can_read_blob(
     pool: &PgPool,
     community_id: CommunityId,
@@ -80,7 +81,12 @@ pub async fn can_read_blob(
     let readable = sqlx::query_scalar(concat!(
         "SELECT ",
         readable_sql!(),
-        " FROM (SELECT $2::text AS sha256) b"
+        " OR (NOT EXISTS (SELECT 1 FROM media_shares s \
+                          WHERE s.community_id = $1 AND s.sha256 = b.sha256 \
+                            AND s.channel_id IS NOT NULL) \
+              AND EXISTS (SELECT 1 FROM media_uploaders u \
+                          WHERE u.community_id = $1 AND u.sha256 = b.sha256 AND u.pubkey = $3)) \
+          FROM (SELECT $2::text AS sha256) b"
     ))
     .bind(community_id.as_uuid())
     .bind(sha256)
@@ -113,21 +119,19 @@ impl Db {
     /// refused. Idempotent and resumable: rerunning only fills missing shares.
     #[datastore_span(name = "backfill_media_shares", system = "postgresql")]
     pub async fn backfill_media_shares(&self, batch_size: i64) -> Result<u64> {
-        let installed: Option<DateTime<Utc>> =
-            sqlx::query_scalar("SELECT installed_on FROM _sqlx_migrations WHERE version = 67")
-                .fetch_optional(&self.pool)
-                .await?;
-        let installed = installed.ok_or_else(|| {
-            crate::DbError::InvalidData("media access migration 0067 is not installed".into())
-        })?;
-        let communities: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM communities WHERE deleted_at IS NULL AND deletion_state = 'active' \
-             ORDER BY id",
+        if batch_size <= 0 {
+            return Err(crate::DbError::InvalidData(
+                "batch size must be positive".into(),
+            ));
+        }
+        let communities: Vec<(Uuid, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT id, media_shares_recording_started_at FROM communities \
+             WHERE deleted_at IS NULL AND deletion_state = 'active' ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await?;
         let mut added = 0;
-        for community in communities {
+        for (community, installed) in communities {
             let community = CommunityId::from_uuid(community);
             let mut cursor: Option<(DateTime<Utc>, Vec<u8>)> = None;
             loop {
@@ -168,7 +172,7 @@ impl Db {
                     if received_at < installed {
                         history.extend(hashes.into_iter().map(|hash| (hash, stored.channel_id)));
                     } else {
-                        recorded_live.push((stored.event.pubkey, hashes, stored.channel_id));
+                        recorded_live.push((stored.event, hashes, stored.channel_id));
                     }
                 }
                 // Insert in key order, as live recording does, so a concurrent
@@ -193,16 +197,10 @@ impl Db {
                     .rows_affected();
                     tx.commit().await?;
                 }
-                for (author, hashes, channel) in recorded_live {
+                for (event, hashes, channel) in recorded_live {
                     let mut tx = self.begin_media_share_transaction(community).await?;
-                    added += record_media_shares(
-                        tx.conn(),
-                        community,
-                        &hashes,
-                        author.as_bytes(),
-                        channel,
-                    )
-                    .await?;
+                    added +=
+                        record_media_shares(tx.conn(), community, &hashes, &event, channel).await?;
                     tx.commit().await?;
                 }
                 if !full_batch {
@@ -275,7 +273,7 @@ mod postgres_tests {
         if let Some(channel) = channel {
             tags.push(Tag::parse(["h", &channel.to_string()]).unwrap());
         }
-        EventBuilder::new(Kind::from(9), "attachment")
+        EventBuilder::new(Kind::from(9), format!("attachment {}", Uuid::new_v4()))
             .tags(tags)
             .sign_with_keys(keys)
             .unwrap()
@@ -323,7 +321,18 @@ mod postgres_tests {
         let private = channel(&db, community, &alice, ChannelVisibility::Private).await;
         let bobs = channel(&db, community, &bob, ChannelVisibility::Open).await;
 
-        upload(&db, community, &alice, &sha).await;
+        for uploader_present in [false, true] {
+            if uploader_present {
+                upload(&db, community, &alice, &sha).await;
+            }
+            db.insert_event(community, &attachment(&bob, &sha, None), None)
+                .await
+                .expect("bob references an unshared hash");
+            assert!(
+                shares(&db, community, &sha).await.is_empty(),
+                "a hash alone grants nothing, even before its uploader posts it"
+            );
+        }
         db.insert_event(
             community,
             &attachment(&alice, &sha, Some(private)),
@@ -358,6 +367,10 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn backfill_trusts_history_and_rechecks_recorded_events() {
+        check_backfill().await;
+    }
+
+    async fn check_backfill() {
         let (db, community) = fixture().await;
         let (alice, bob, carol) = (Keys::generate(), Keys::generate(), Keys::generate());
         let (sha, historical) = (unique_sha(), unique_sha());
@@ -398,12 +411,92 @@ mod postgres_tests {
             .expect("forget shares");
         tx.commit().await.expect("commit");
 
-        db.backfill_media_shares(100).await.expect("backfill");
+        db.backfill_media_shares(1).await.expect("backfill");
+        assert_eq!(db.backfill_media_shares(1).await.expect("rerun"), 0);
         assert_eq!(
             shares(&db, community, &sha).await,
             vec![Some(private)],
             "a reference live recording refused must stay unshared"
         );
         assert_eq!(shares(&db, community, &historical).await, vec![None]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_backfill_trusts_history_and_rechecks_recorded_events() {
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to migration DB");
+        crate::migration::run_migrations_through(&pool, 67)
+            .await
+            .expect("migrate");
+        pool.close().await;
+        check_backfill().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn agent_profile_picture_uses_only_its_registered_owners_upload_proof() {
+        let (db, community) = fixture().await;
+        let (owner, agent) = (Keys::generate(), Keys::generate());
+        let (avatar, secret, unknown) = (unique_sha(), unique_sha(), unique_sha());
+        for sha in [&avatar, &secret] {
+            upload(&db, community, &owner, sha).await;
+        }
+        let profile = |picture: &str| {
+            EventBuilder::new(
+                Kind::Metadata,
+                serde_json::json!({
+                    "name": Uuid::new_v4().to_string(),
+                    "picture": format!("/media/{picture}.jpg"),
+                    "about": format!("/media/{secret}.jpg"),
+                })
+                .to_string(),
+            )
+            .tags([Tag::parse(["p", &owner.public_key().to_hex()]).unwrap()])
+            .sign_with_keys(&agent)
+            .unwrap()
+        };
+        db.insert_event(community, &profile(&avatar), None)
+            .await
+            .unwrap();
+        assert!(
+            shares(&db, community, &avatar).await.is_empty(),
+            "an unverified owner tag grants nothing"
+        );
+        for keys in [&owner, &agent] {
+            db.ensure_user(community, &keys.public_key().to_bytes())
+                .await
+                .unwrap();
+        }
+        db.set_agent_owner(
+            community,
+            &agent.public_key().to_bytes(),
+            &owner.public_key().to_bytes(),
+        )
+        .await
+        .unwrap();
+        db.insert_event(community, &profile(&avatar), None)
+            .await
+            .unwrap();
+        assert_eq!(shares(&db, community, &avatar).await, vec![None]);
+        assert!(
+            shares(&db, community, &secret).await.is_empty(),
+            "owner proof applies only to picture"
+        );
+        db.insert_event(community, &profile(&unknown), None)
+            .await
+            .unwrap();
+        assert!(
+            shares(&db, community, &unknown).await.is_empty(),
+            "the owner must have uploaded these bytes"
+        );
+        db.insert_event(community, &attachment(&agent, &secret, None), None)
+            .await
+            .unwrap();
+        assert!(
+            shares(&db, community, &secret).await.is_empty(),
+            "ordinary events cannot borrow the owner's uploads"
+        );
     }
 }
