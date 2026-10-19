@@ -26,6 +26,7 @@ void main() {
     String name,
     Future<void> Function(WidgetTester, HostedJourneyFixture) run, {
     bool requiresAuthDomain = false,
+    bool requiresBuilderlab = true,
   }) {
     testWidgets(
       name,
@@ -45,8 +46,9 @@ void main() {
         );
       },
       skip:
-          requiresAuthDomain &&
-          !HostedEnvironment.requiresAuth('one.communities.buzz.xyz'),
+          (requiresBuilderlab && HostedEnvironment.authDomains.isEmpty) ||
+          (requiresAuthDomain &&
+              !HostedEnvironment.requiresAuth('one.communities.buzz.xyz')),
     );
   }
 
@@ -54,11 +56,31 @@ void main() {
     'QR credentials enter without an account when domain is not required',
     (tester, f) async {
       if (HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) return;
-      await f.initialize(localIdentity: false, signedIn: false);
+      // Seed a previous account session: an opt-out build must not restore it.
+      await f.initialize(localIdentity: false);
+      f.requests.clear();
       await f.mount(
         tester,
         pairingValidator: ({required relayUrl, required nsec}) async {},
       );
+      if (HostedEnvironment.authDomains.isEmpty) {
+        expect(f.activeFlow, isNull);
+        expect(f.requests, isEmpty);
+        expect(find.text('Connect to Builderlab'), findsNothing);
+        expect(find.text('Continue with Builderlab'), findsNothing);
+        expect(find.text('Create a community'), findsNothing);
+        expect(find.text('Enter a community link'), findsOneWidget);
+        expect(find.text('Scan a QR code'), findsOneWidget);
+        expect(find.text('Use pairing code'), findsOneWidget);
+        await f.tap(tester, 'Enter a community link');
+        expect(
+          find.byKey(const Key('community-link-input')).hitTestable(),
+          findsOneWidget,
+        );
+        expect(f.activeFlow, isNull);
+        await f.tap(tester, 'Back');
+        expect(f.requests, isEmpty);
+      }
       final notifier = f.container.read(pairingProvider.notifier);
       await notifier.pair(
         base64Url.encode(
@@ -80,6 +102,7 @@ void main() {
       expect(f.sent('/nsec-backups/status'), isEmpty);
       expect(find.text('Sign in to Builderlab to reconnect'), findsNothing);
     },
+    requiresBuilderlab: false,
   );
 
   journey(
@@ -96,6 +119,12 @@ void main() {
       await f.storage.save(community);
       await f.storage.saveActiveId(community.id);
       await f.mount(tester, openEntry: false);
+      // The real signed-in app watches its session; the fixture's home is inert.
+      final sessionSubscription = f.container.listen(
+        relaySessionProvider,
+        (_, _) {},
+      );
+      addTearDown(sessionSubscription.close);
       final session = f.container.read(relaySessionProvider.notifier);
       await f.settle(tester);
       if (!HostedEnvironment.requiresAuth(Uri.parse(community.relayUrl).host)) {
@@ -252,6 +281,7 @@ void main() {
       f.beforeAssertionReturn = null;
       expect(f.container.read(relayConfigProvider).nsec, community.nsec);
     },
+    requiresBuilderlab: false,
   );
 
   journey(
@@ -499,6 +529,7 @@ void main() {
     'self-hosted link explicitly reuses saved account key and persists admission',
     (tester, f) async {
       await f.initialize();
+      f.requests.clear();
       await f.mount(tester);
       await f.tap(tester, 'Enter a community link');
       await tester.enterText(
@@ -568,7 +599,11 @@ void main() {
         (await AccountIdentityStore().forPairing(f.keys.public).read())!.pubkey,
         f.keys.public,
       );
+      if (HostedEnvironment.authDomains.isEmpty) {
+        expect(f.requests, isEmpty);
+      }
     },
+    requiresBuilderlab: false,
   );
 
   journey(

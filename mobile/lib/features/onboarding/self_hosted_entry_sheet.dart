@@ -107,7 +107,7 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
             Text(Uri.parse(relay).host, style: context.textTheme.titleMedium),
             const SizedBox(height: Grid.sm),
             const Text(
-              'Choose the identity to use in this community. Your key stays on this device; Builderlab is not required.',
+              'Choose the identity to use in this community. Your key stays on this device.',
             ),
             const SizedBox(height: Grid.sm),
             if (choices.hasError)

@@ -36,6 +36,7 @@ void main() {
   });
 
   test('authentication follows only configured DNS domain boundaries', () {
+    expect(HostedEnvironment.enabled, HostedEnvironment.authDomains.isNotEmpty);
     for (final domain in HostedEnvironment.authDomains) {
       for (final host in [
         domain,

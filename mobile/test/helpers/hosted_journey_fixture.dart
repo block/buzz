@@ -50,7 +50,8 @@ class HostedJourneyFixture {
   final recoveryScopes = <InviteJoinRecoveryScope>[];
   final rows = <Map<String, dynamic>>[];
   final cloudKeys = <nostr.Keys>[];
-  late HostedFlow flow;
+  HostedFlow? activeFlow;
+  HostedFlow get flow => activeFlow!;
   late ProviderContainer container;
   String? bound;
   int starterFailures = 0;
@@ -272,7 +273,7 @@ class HostedJourneyFixture {
     );
   });
 
-  HostedFlow createFlow(Ref ref) => flow = createHostedFlow(
+  HostedFlow createFlow(Ref ref) => activeFlow = createHostedFlow(
     ref,
     browserAuth: _Browser(() async {
       browserStarts++;
@@ -400,7 +401,7 @@ class HostedJourneyFixture {
     for (var i = 0; i < 60; i++) {
       await Future<void>.delayed(Duration.zero);
       await tester.pump(const Duration(milliseconds: 50));
-      if (i >= 15 && flow.stage != HostedFlowStage.working) return;
+      if (i >= 15 && activeFlow?.stage != HostedFlowStage.working) return;
     }
     throw StateError(
       'Journey did not settle: ${flow.stage} / ${flow.problem}; requests: ${requests.map((r) => r.url.path).join(',')}',

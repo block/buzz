@@ -1,5 +1,8 @@
 /// Trusted build configuration, never supplied by a deep link or relay.
 abstract final class HostedEnvironment {
+  /// Account UI and startup work are opt-in, independently of the backend URL.
+  static bool get enabled => authDomains.isNotEmpty;
+
   static final Uri origin = _origin();
   static const _communityAccounts = {
     'communities.buzz.xyz': 'https://app.builderlab.xyz',

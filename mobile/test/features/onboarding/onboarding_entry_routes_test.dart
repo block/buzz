@@ -108,35 +108,36 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
     }
 
-    // A root-navigator choice modal must remain actionable above pushed Add.
-    f.rows = [f.row('one'), f.row('two')];
-    f.beforeAdmission = (name) async {
-      if (name == 'two') throw const SavedCommunityIdentityConflict();
-    };
-    await openEntry();
-    await tester.tap(find.text('Continue with Builderlab').hitTestable());
-    await tester.pumpAndSettle();
-    expect(f.admitted, ['one']);
-    expect(f.flow.stage, HostedFlowStage.communityConflict);
-    expect(
-      find.text('Keep saved identity and skip').hitTestable(),
-      findsOneWidget,
-    );
-    expect(find.text('Back to choices').hitTestable(), findsOneWidget);
-    await tester.tap(find.text('Back to choices').hitTestable());
-    await tester.pumpAndSettle();
-    expect(find.byType(CheckboxListTile).hitTestable(), findsOneWidget);
-    expect(find.text('two').hitTestable(), findsOneWidget);
-    f.beforeAdmission = null;
-    await tester.tap(find.text('Continue').hitTestable());
-    await tester.pumpAndSettle();
-    expect(f.admitted, ['one', 'two']);
-    expect(find.byType(OnboardingAppEntry), findsNothing);
-    expect(find.text('Add community').hitTestable(), findsOneWidget);
-    f.admitted.clear();
-    f.rows = [];
-    await f.flow.leave();
-
+    if (HostedEnvironment.authDomains.isNotEmpty) {
+      // A root-navigator choice modal must remain actionable above pushed Add.
+      f.rows = [f.row('one'), f.row('two')];
+      f.beforeAdmission = (name) async {
+        if (name == 'two') throw const SavedCommunityIdentityConflict();
+      };
+      await openEntry();
+      await tester.tap(find.text('Continue with Builderlab').hitTestable());
+      await tester.pumpAndSettle();
+      expect(f.admitted, ['one']);
+      expect(f.flow.stage, HostedFlowStage.communityConflict);
+      expect(
+        find.text('Keep saved identity and skip').hitTestable(),
+        findsOneWidget,
+      );
+      expect(find.text('Back to choices').hitTestable(), findsOneWidget);
+      await tester.tap(find.text('Back to choices').hitTestable());
+      await tester.pumpAndSettle();
+      expect(find.byType(CheckboxListTile).hitTestable(), findsOneWidget);
+      expect(find.text('two').hitTestable(), findsOneWidget);
+      f.beforeAdmission = null;
+      await tester.tap(find.text('Continue').hitTestable());
+      await tester.pumpAndSettle();
+      expect(f.admitted, ['one', 'two']);
+      expect(find.byType(OnboardingAppEntry), findsNothing);
+      expect(find.text('Add community').hitTestable(), findsOneWidget);
+      f.admitted.clear();
+      f.rows = [];
+      await f.flow.leave();
+    }
     if (HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) {
       await openEntry();
       final admission = Completer<void>();
@@ -272,6 +273,8 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     expect(tester.takeException(), isNull);
+
+    if (HostedEnvironment.authDomains.isEmpty) return;
 
     // A new coordinator restores the paired target and presents its waiting
     // state on the entry route, without depending on accountOnly discovery.

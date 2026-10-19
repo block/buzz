@@ -14,10 +14,15 @@ with Flutter's `--dart-define` (shell environment variables alone are not read):
 flutter run --dart-define=BUZZ_AUTH_DOMAINS=communities.buzz.xyz,communities.public.builderlabstaging.xyz
 ```
 
-Unset or empty means **no domains require Builderlab login**. QR/code pairing,
-community links and invites use Nostr-only entry; the optional Builderlab login
-and community creation UI remain available. Explicit Builderlab actions still
-need their backend endpoints. Normal relay key authentication remains in place.
+Unset or empty means **Builderlab features are disabled**: no account login,
+community creation, backup/recovery UI, reconnect prompts, or background account
+restoration. QR/code pairing, community links and invites use Nostr-only entry.
+Saved account keys and sessions are retained for a later enabled build.
+
+A nonempty list enables Builderlab features and requires account setup only for
+matching domains. Those features need their backend endpoints. Normal relay key
+authentication remains in place. `BUZZ_BUILDERLAB_URL` selects the backend; setting
+it alone does not enable Builderlab features.
 
 Entries match the domain itself and its subdomains, case-insensitively. Use DNS
 names, not URLs or wildcards. The list does not add trusted account servers:

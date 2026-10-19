@@ -694,7 +694,8 @@ pub async fn delete_community(
     ))
 }
 
-/// Return active memberships for the session identity supplied by Builderlab.
+/// Return active memberships for an operator-supplied pubkey.
+/// The operator is trusted to select the identity; this route does not bind it to a user session.
 pub async fn list_joined_communities(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

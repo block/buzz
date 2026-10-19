@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/features/onboarding/hosted_connect_page.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
@@ -89,5 +90,6 @@ void main() {
         expect(find.text('two'), findsOneWidget);
       }
     },
+    skip: HostedEnvironment.authDomains.isEmpty,
   );
 }

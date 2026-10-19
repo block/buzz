@@ -8,6 +8,7 @@ import 'features/onboarding/hosted_connect_sheet.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'shared/hosted/hosted_flow_provider.dart';
 import 'shared/hosted/hosted_flow.dart';
+import 'shared/hosted/hosted_environment.dart';
 import 'shared/hosted/hosted_community_creation.dart';
 import 'shared/hosted/hosted_flow_problem_message.dart';
 
@@ -21,9 +22,12 @@ class OnboardingAppEntry extends HookConsumerWidget {
     final existingUser = useState(false);
     final creating = useState(false);
     final enteringCommunityLink = useState(false);
-    final flow = ref.watch(hostedFlowProvider);
+    final flow = HostedEnvironment.enabled
+        ? ref.watch(hostedFlowProvider)
+        : null;
     useListenable(flow);
     useEffect(() {
+      if (flow == null) return null;
       Future<void> restore() async {
         await flow.initialize();
         if (context.mounted) await flow.signInAccount(openBrowser: false);
@@ -50,21 +54,24 @@ class OnboardingAppEntry extends HookConsumerWidget {
         if (context.mounted) presentation.setActive(true);
       });
       void completed() {
-        if (flow.stage == HostedFlowStage.complete) finishEntry();
+        if (flow?.stage == HostedFlowStage.complete) finishEntry();
       }
 
-      flow.addListener(completed);
+      flow?.addListener(completed);
       return () {
-        flow.removeListener(completed);
+        flow?.removeListener(completed);
         scheduleMicrotask(() {
           presentation.setActive(false);
-          if (addingCommunity && flow.stage != HostedFlowStage.complete) {
+          if (addingCommunity &&
+              flow != null &&
+              flow.stage != HostedFlowStage.complete) {
             unawaited(flow.leave());
           }
         });
       };
     }, [flow]);
     final inlineSetup =
+        flow != null &&
         !flow.accountOnly &&
         flow.stage != HostedFlowStage.signIn &&
         !(flow.stage == HostedFlowStage.working &&
@@ -75,14 +82,17 @@ class OnboardingAppEntry extends HookConsumerWidget {
         flow.stage != HostedFlowStage.chooseCommunities &&
         flow.stage != HostedFlowStage.communityConflict &&
         !flow.canChangeCommunities;
-    final signingIn = flow.stage == HostedFlowStage.signIn;
+    final signingIn = flow?.stage == HostedFlowStage.signIn;
     final busy =
+        flow != null &&
         flow.accountOnly &&
         (flow.stage == HostedFlowStage.working ||
             flow.stage == HostedFlowStage.signIn);
-    final connected = flow.account.account != null;
-    final problem = flow.accountOnly ? flow.problem : null;
-    final status = problem != null
+    final connected = flow?.account.account != null;
+    final problem = flow != null && flow.accountOnly ? flow.problem : null;
+    final status = flow == null
+        ? null
+        : problem != null
         ? hostedFlowProblemMessage(problem)
         : busy
         ? 'Connecting to Builderlab…'
@@ -92,7 +102,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
         ? 'Connected to Builderlab.'
         : null;
     void back() {
-      unawaited(flow.leave());
+      unawaited(flow?.leave());
       existingUser.value = false;
       creating.value = false;
       enteringCommunityLink.value = false;
@@ -115,19 +125,25 @@ class OnboardingAppEntry extends HookConsumerWidget {
         existingUser: existingUser.value,
         enteringCommunityLink: enteringCommunityLink.value,
         creatingCommunity: creating.value,
-        onSubmitCommunity: (name) {
-          creating.value = false;
-          unawaited(flow.start(HostedCreateCommunity(name)));
-        },
+        onSubmitCommunity: flow == null
+            ? null
+            : (name) {
+                creating.value = false;
+                unawaited(flow.start(HostedCreateCommunity(name)));
+              },
         onCommunityLink: () => enteringCommunityLink.value = true,
-        onCreateCommunity: busy ? null : () => creating.value = true,
-        onBuilderlab: signingIn
+        onCreateCommunity: flow == null || busy
+            ? null
+            : () => creating.value = true,
+        onBuilderlab: flow == null
+            ? null
+            : signingIn
             ? () => unawaited(flow.leave())
             : busy
             ? null
             : () => unawaited(flow.signInAccount()),
         accountStatus: status,
-        setupContent: inlineSetup
+        setupContent: flow != null && inlineSetup
             ? Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [

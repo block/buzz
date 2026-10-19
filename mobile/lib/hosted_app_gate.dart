@@ -29,9 +29,12 @@ class HostedAppGate extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final flow = ref.watch(hostedFlowProvider);
+    final flow = HostedEnvironment.enabled
+        ? ref.watch(hostedFlowProvider)
+        : null;
     useListenable(flow);
     useEffect(() {
+      if (flow == null) return null;
       void onFlowChanged() {
         if (flow.stage == HostedFlowStage.complete) {
           ref.read(hostedInlineEntryProvider.notifier).setActive(false);
@@ -44,16 +47,19 @@ class HostedAppGate extends HookConsumerWidget {
     }, [flow]);
     final inlineEntry = ref.watch(hostedInlineEntryProvider);
     final visible =
+        flow != null &&
         flow.stage != HostedFlowStage.idle &&
         flow.stage != HostedFlowStage.complete;
     // Native browser authentication presents its own alert over the current
     // screen. Keep that screen in place while checking the session/opening it.
     final openingSignIn =
-        flow.stage == HostedFlowStage.signIn ||
-        (flow.accountOnly &&
-            flow.stage == HostedFlowStage.working &&
-            flow.account.account == null);
+        flow != null &&
+        (flow.stage == HostedFlowStage.signIn ||
+            (flow.accountOnly &&
+                flow.stage == HostedFlowStage.working &&
+                flow.account.account == null));
     final inlineAccountStatus =
+        flow != null &&
         (!authenticated || inlineEntry) &&
         flow.accountOnly &&
         (flow.stage == HostedFlowStage.working ||
@@ -120,6 +126,7 @@ class HostedAppGate extends HookConsumerWidget {
             return true;
           }
         }
+        if (flow == null) return false;
         await flow.start(link);
         return true;
       },
@@ -127,48 +134,53 @@ class HostedAppGate extends HookConsumerWidget {
         fit: StackFit.expand,
         children: [
           child,
-          if (authenticated && !visible) HostedReconnectBanner(flow: flow),
-          if (flow.stage == HostedFlowStage.signIn &&
-              authenticated &&
-              !inlineEntry)
-            Positioned(
-              left: Grid.sm,
-              right: Grid.sm,
-              bottom: 0,
-              child: SafeArea(
-                child: Material(
-                  color: Colors.transparent,
-                  child: Wrap(
-                    alignment: WrapAlignment.center,
-                    children: [
-                      TextButton(
-                        onPressed: flow.retry,
-                        child: const Text('Start login again'),
-                      ),
-                      TextButton(
-                        onPressed: flow.leave,
-                        child: Text(
-                          flow.reconnecting ? 'Cancel sign-in' : 'Leave setup',
+          if (flow != null) ...[
+            if (authenticated && !visible) HostedReconnectBanner(flow: flow),
+            if (flow.stage == HostedFlowStage.signIn &&
+                authenticated &&
+                !inlineEntry)
+              Positioned(
+                left: Grid.sm,
+                right: Grid.sm,
+                bottom: 0,
+                child: SafeArea(
+                  child: Material(
+                    color: Colors.transparent,
+                    child: Wrap(
+                      alignment: WrapAlignment.center,
+                      children: [
+                        TextButton(
+                          onPressed: flow.retry,
+                          child: const Text('Start login again'),
                         ),
-                      ),
-                    ],
+                        TextButton(
+                          onPressed: flow.leave,
+                          child: Text(
+                            flow.reconnecting
+                                ? 'Cancel sign-in'
+                                : 'Leave setup',
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-          if (visible &&
-              !openingSignIn &&
-              !inlineAccountStatus &&
-              (!inlineEntry ||
-                  (flow.accountOnly && flow.stage == HostedFlowStage.profile) ||
-                  flow.stage == HostedFlowStage.chooseIdentity ||
-                  flow.stage == HostedFlowStage.chooseCommunities ||
-                  flow.stage == HostedFlowStage.communityConflict ||
-                  flow.canChangeCommunities))
-            HostedConnectPage(
-              flow: flow,
-              onClose: () => unawaited(flow.leave()),
-            ),
+            if (visible &&
+                !openingSignIn &&
+                !inlineAccountStatus &&
+                (!inlineEntry ||
+                    (flow.accountOnly &&
+                        flow.stage == HostedFlowStage.profile) ||
+                    flow.stage == HostedFlowStage.chooseIdentity ||
+                    flow.stage == HostedFlowStage.chooseCommunities ||
+                    flow.stage == HostedFlowStage.communityConflict ||
+                    flow.canChangeCommunities))
+              HostedConnectPage(
+                flow: flow,
+                onClose: () => unawaited(flow.leave()),
+              ),
+          ],
         ],
       ),
     );

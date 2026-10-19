@@ -92,18 +92,20 @@ class _PairingWelcomeView extends StatelessWidget {
                 const SizedBox(height: Grid.xs),
               ],
               if (page == 1) ...[
-                FilledButton(
-                  style: context._onboardingGlassButtonStyle,
-                  onPressed: onBuilderlab,
-                  child: Text(builderlabLabel),
-                ),
-                const SizedBox(height: Grid.xxs),
+                if (HostedEnvironment.enabled) ...[
+                  FilledButton(
+                    style: context._onboardingGlassButtonStyle,
+                    onPressed: onBuilderlab,
+                    child: Text(builderlabLabel),
+                  ),
+                  const SizedBox(height: Grid.xxs),
+                ],
                 FilledButton(
                   style: context._onboardingGlassButtonStyle,
                   onPressed: onCommunityLink,
                   child: const Text('Enter a community link'),
                 ),
-                if (onCreateCommunity != null) ...[
+                if (HostedEnvironment.enabled && onCreateCommunity != null) ...[
                   const SizedBox(height: Grid.xxs),
                   FilledButton(
                     style: context._onboardingGlassButtonStyle,
