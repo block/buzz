@@ -1982,11 +1982,20 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
     db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(5)));
 
     let read_pool = db.read_pool.clone().expect("reader pool configured");
-    // Establish and hold the reader's only connection: saturated.
-    let held = read_pool
-        .acquire()
-        .await
-        .expect("establish the reader's sole connection");
+    // Establish and hold the reader's only connection: saturated. A fresh
+    // connection can outlast the 150ms acquire budget on a loaded runner, and
+    // the budget is under test only once the connection is held.
+    let held = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match read_pool.acquire().await {
+                Err(sqlx::Error::PoolTimedOut) => continue,
+                connection => break connection,
+            }
+        }
+    })
+    .await
+    .expect("reader connects within 5s")
+    .expect("establish the reader's sole connection");
     assert_eq!(
         db.read_max_connections, 1,
         "reader max must report 1 for this fixture to test saturation"
