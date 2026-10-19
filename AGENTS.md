@@ -771,22 +771,29 @@ maintain, so each one must protect a distinct user outcome or invariant.
 - **Start with journeys.** For each user-visible flow, write one widget test
   that drives it through real widgets, notifiers and coordinators. Assert what
   the user sees and what is durably saved, not internal stages or call counts.
+  Where Flutter can observe it, include semantics and non-primary input in the
+  journey: screen-reader labels and actions, keyboard, alternate gestures, text
+  scale and reduced motion.
 - **Put failure paths inside the journey.** Retry, cancel, resume and a second
   request arriving midway are steps of a journey, not separate tests.
 - **Fake only external boundaries:** network, relay, OS, browser and storage.
   Keep the flow's own notifiers and coordinators real. Override boundary
   providers with `ProviderScope(overrides: [...])`, using
   `WidgetHelpers.testable()` or a custom `ProviderScope` + `MaterialApp`.
-- **Use focused tests only for what a journey can't enumerate.** That means
-  security and data-loss invariants, protocol or crypto vectors, and pure
-  functions with many input combinations. Make them table-driven.
+- **Use focused tests only for what a journey can't enumerate or observe.**
+  That means security and data-loss invariants, protocol or crypto vectors,
+  pure functions with many input combinations, and accessibility or platform
+  behavior owned by native code that a widget journey can't observe, such as
+  VoiceOver stops and traits, Dynamic Type layout and reduced motion in native
+  views. Make them table-driven where cases repeat.
 - **Extend before adding.** When a review finds a defect, add a step to an
   existing journey or a row to an existing table. Don't add a new test per
   finding. When a Review-Proven Rule says to test each path, cover the paths
   as journey steps or table rows.
 - **Delete what a journey covers.** Remove a lower-level test once a journey
   demonstrably catches the same failures; passing through the same path is not
-  enough. Keep distinct safety and interop invariants.
+  enough. Keep distinct safety, interop, accessibility and native-platform
+  invariants.
 - **Prove it can fail.** Break the production code a test guards once and
   confirm the test fails. A test that only exercises a fake protects nothing.
 
