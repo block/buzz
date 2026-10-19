@@ -25,6 +25,7 @@ import {
   shouldUseScopedProjectHomeLookup,
 } from "@/features/projects/projectSnapshot";
 import { ProjectChannelHome } from "@/features/projects/ui/ProjectChannelHome";
+import { useChannelNextUpPanel } from "@/features/projects/ui/useChannelNextUpPanel";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { getEventById } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
@@ -159,6 +160,11 @@ export function ChannelRouteScreen({
   );
   const projectHome =
     enumeratedProjectHome ?? projectHomeLookupQuery.data ?? null;
+  const nextUp = useChannelNextUpPanel({
+    channel: isHuddleTranscript ? null : activeChannel,
+    projects: projectsQuery.data ?? [],
+    pubkey: identityQuery.data?.pubkey,
+  });
   const [targetMessageEvents, setTargetMessageEvents] = React.useState<
     RelayEvent[]
   >(() => {
@@ -314,6 +320,12 @@ export function ChannelRouteScreen({
       autoSendDraftKey={autoSendDraftKey}
       currentIdentity={identityQuery.data}
       currentProfile={profileQuery.data}
+      headerEndActions={nextUp.headerAction}
+      idleAuxiliaryPanel={nextUp.panel}
+      idleAuxiliaryHeaderActions={nextUp.headerControls}
+      idleAuxiliaryOverridesThread={nextUp.isOpen}
+      idleAuxiliaryTitle="Next up"
+      onCloseIdleAuxiliaryPanel={nextUp.close}
       onCloseForumPost={() => {
         void closeForumPost(channelId);
       }}

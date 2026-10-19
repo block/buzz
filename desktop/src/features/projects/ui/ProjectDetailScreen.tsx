@@ -188,7 +188,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     },
     [],
   );
-  const issuesQuery = useProjectIssuesQuery(repository);
+  const issuesQuery = useProjectIssuesQuery(repository, selectedIssueId);
   const {
     activeRepoPullRequest,
     openBranchPullRequest,
@@ -717,7 +717,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     displayedRepositorySnapshot?.contributors ?? repoContributors;
   const displayedRepositoryFiles = displayedRepositorySnapshot?.files ?? [];
   const selectedIssue =
-    issuesQuery.data?.find((item) => item.id === selectedIssueId) ?? null;
+    issuesQuery.data?.find(
+      (item) => item.id === selectedIssueId?.toLowerCase(),
+    ) ?? null;
   const displayedSnapshotCommits =
     repoSource === "local"
       ? (localRepoSnapshotQuery.data?.snapshot.commits ?? [])

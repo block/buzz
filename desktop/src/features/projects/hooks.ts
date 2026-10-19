@@ -57,6 +57,7 @@ import {
   projectPullRequestEventsToPullRequests,
 } from "./projectPullRequests.mjs";
 import { fetchProjectsWorkItems } from "./projectWorkItems";
+import { fetchProjectTask } from "./channelTaskFetch";
 import {
   projectDeletionMutationOptions,
   projectsQueryKey,
@@ -803,12 +804,19 @@ export function useProjectLocalRepositoriesQuery(reposDir?: string | null) {
   });
 }
 
-export function useProjectIssuesQuery(project: Repository | null | undefined) {
+export function useProjectIssuesQuery(
+  project: Repository | null | undefined,
+  selectedIssueId?: string | null,
+) {
   return useQuery({
     enabled: Boolean(project),
-    queryKey: ["project", project?.id ?? "none", "issues"],
-    queryFn: () => {
+    queryKey: selectedIssueId
+      ? ["project", project?.id ?? "none", "issues", selectedIssueId]
+      : ["project", project?.id ?? "none", "issues"],
+    queryFn: ({ signal }) => {
       if (!project) throw new Error("No project selected.");
+      if (selectedIssueId)
+        return fetchProjectTask(project.repoAddress, selectedIssueId, signal);
       return fetchProjectIssues(project);
     },
     staleTime: 30_000,

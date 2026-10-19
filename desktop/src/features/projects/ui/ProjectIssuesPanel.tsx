@@ -438,11 +438,14 @@ export function ProjectIssuesPanel({
 }) {
   const issuesQuery = useProjectIssuesQuery(
     issueItems === undefined ? project : null,
+    selectedIssueId,
   );
   const resolvedItems =
     issueItems ?? (issuesQuery.data ?? []).map((issue) => ({ issue, project }));
   const selectedItem =
-    resolvedItems.find(({ issue }) => issue.id === selectedIssueId) ?? null;
+    resolvedItems.find(
+      ({ issue }) => issue.id === selectedIssueId?.toLowerCase(),
+    ) ?? null;
   const loading = isLoading ?? issuesQuery.isLoading;
   const loadError = error ?? issuesQuery.error;
 
