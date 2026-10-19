@@ -13,26 +13,29 @@ class HostedCommunitySelection extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(flow);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final community in flow.communities)
-          CheckboxListTile(
-            key: ValueKey(community.relayUrl),
-            title: Text(community.name),
-            subtitle: Text(Uri.parse(community.relayUrl).host),
-            value: flow.selectedRelays.contains(community.relayUrl),
-            onChanged: (value) =>
-                flow.selectCommunity(community.relayUrl, value ?? false),
+    return Material(
+      type: MaterialType.transparency,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final community in flow.communities)
+            CheckboxListTile(
+              key: ValueKey(community.relayUrl),
+              title: Text(community.name),
+              subtitle: Text(Uri.parse(community.relayUrl).host),
+              value: flow.selectedRelays.contains(community.relayUrl),
+              onChanged: (value) =>
+                  flow.selectCommunity(community.relayUrl, value ?? false),
+            ),
+          const SizedBox(height: Grid.sm),
+          FilledButton(
+            onPressed: flow.selectedRelays.isEmpty
+                ? null
+                : flow.addSelectedCommunities,
+            child: const Text('Continue'),
           ),
-        const SizedBox(height: Grid.sm),
-        FilledButton(
-          onPressed: flow.selectedRelays.isEmpty
-              ? null
-              : flow.addSelectedCommunities,
-          child: const Text('Continue'),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

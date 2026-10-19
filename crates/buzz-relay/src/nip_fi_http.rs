@@ -61,11 +61,40 @@ use chrono::{DateTime, Utc};
 use nostr::PublicKey;
 use std::fmt;
 
-use crate::nip_fi_config::NipFiCommunities;
+use crate::nip_fi_core::ResolvedCommunity;
 use crate::nip_fi_core::{
-    asserted_key_matches, evaluate_attached_assertion, http_denial, resolve_community,
-    AssertionRejection,
+    asserted_key_matches, evaluate_attached_assertion, http_denial, AssertionRejection, Communities,
 };
+use buzz_auth::CommunityBinding;
+
+/// One resolution of the request `Host`, shared by every step of a request.
+pub(crate) type Resolution = Result<ResolvedCommunity, DenialClass>;
+
+tokio::task_local! {
+    /// The community the router guard resolved for this request.
+    static GUARD_COMMUNITY: Resolution;
+}
+
+/// Run `next` with the guard's resolution, so the handler's admission and
+/// every shadow record reuse it instead of resolving the Host again.
+pub(crate) async fn with_resolved_community<F: std::future::Future>(
+    community: Resolution,
+    next: F,
+) -> F::Output {
+    GUARD_COMMUNITY.scope(community, next).await
+}
+
+/// Enforce step 1 for one HTTP admission: the guard's resolution when the
+/// request passed through the guard, else one resolution (guard-exempt routes).
+pub(crate) async fn resolve_for_admission(
+    communities: Communities<'_>,
+    headers: &HeaderMap,
+) -> Resolution {
+    match GUARD_COMMUNITY.try_with(Resolution::clone) {
+        Ok(community) => community,
+        Err(_) => communities.resolve(headers).await,
+    }
+}
 use crate::nip_fi_shadow::Stage;
 
 // ── Deny-map seam ─────────────────────────────────────────────────────────────
@@ -291,10 +320,10 @@ impl<X> NipFiAdmission<X> {
 // would add allocation without architectural benefit. The large Err variant
 // is load-bearing: it IS the HTTP response, returned directly by handlers.
 #[allow(clippy::result_large_err)]
-pub(crate) fn admit_nip_fi_http<D, X, F>(
+pub(crate) async fn admit_nip_fi_http<'a, D, X, F>(
     headers: &HeaderMap,
     extract_nip98: F,
-    communities: &NipFiCommunities,
+    communities: impl Into<Communities<'a>>,
     verifier: Option<&dyn VerifyAssertion>,
     mode: NipFiMode,
     deny_map: &D,
@@ -309,6 +338,7 @@ where
     if mode.denies_unconditionally() {
         return Err(http_denial(DenialClass::AuthorizationUnavailable));
     }
+    let communities = communities.into();
 
     // Off and Shadow: the NIP-98 result passes through unchanged (legacy
     // behavior); shadow only records the enforce verdict.  [FI-INV-15 exemption]
@@ -316,7 +346,7 @@ where
         let proof = extract_nip98();
         if mode.observes_only() {
             let signed = proof.as_ref().ok().filter(|p| p.signed).map(|p| p.pubkey);
-            observe_shadow_verdict(headers, communities, verifier, deny_map, signed);
+            observe_shadow_verdict(headers, communities, verifier, deny_map, signed).await;
         }
         let proof = proof?;
         return Ok(NipFiAdmission {
@@ -326,20 +356,30 @@ where
         });
     }
 
-    let (proof, assertion) =
-        evaluate_enforce_steps(headers, communities, verifier, deny_map, extract_nip98).map_err(
-            |(stage, class)| {
-                let reason = match stage {
-                    Stage::Pairing => Some("nip_fi_http_key_mismatch"),
-                    Stage::DenySet => Some("nip_fi_http_denied_pubkey"),
-                    _ => None,
-                };
-                if let Some(reason) = reason {
-                    metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
-                }
-                http_denial(class)
-            },
-        )?;
+    let community = resolve_for_admission(communities, headers).await;
+    let (proof, assertion) = evaluate_enforce_steps(
+        headers,
+        community.as_deref(),
+        verifier,
+        deny_map,
+        extract_nip98,
+    )
+    .map_err(|(stage, class)| {
+        let reason = match stage {
+            Stage::Pairing => Some("nip_fi_http_key_mismatch"),
+            Stage::DenySet => Some("nip_fi_http_denied_pubkey"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
+        }
+        http_denial(class)
+    })?;
+    // The handler may have awaited (tenant lookup) since the guard resolved
+    // the community; a snapshot that went stale meanwhile admits nothing.
+    if let Ok(community) = &community {
+        community.deadline().check().map_err(http_denial)?;
+    }
 
     // Step 8: admit.
     Ok(NipFiAdmission {
@@ -351,32 +391,42 @@ where
 
 /// Record the verdict enforce would reach for a request whose NIP-98 step
 /// proved `signed` (`None`: missing, rejected or unsigned).
-fn observe_shadow_verdict<D: HttpDenyMap>(
+async fn observe_shadow_verdict<D: HttpDenyMap>(
     headers: &HeaderMap,
-    communities: &NipFiCommunities,
+    communities: Communities<'_>,
     verifier: Option<&dyn VerifyAssertion>,
     deny_map: &D,
     signed: Option<PublicKey>,
 ) {
-    let verdict = evaluate_enforce_steps(headers, communities, verifier, deny_map, || {
+    let community = resolve_for_admission(communities, headers).await;
+    let verdict = evaluate_enforce_steps(headers, community.as_deref(), verifier, deny_map, || {
         signed.map(|key| Nip98Proof::new(key, ())).ok_or(())
+    })
+    .and_then(|_| match &community {
+        // Enforce's final re-check, after the handler's awaits.
+        Ok(community) => community
+            .deadline()
+            .check()
+            .map_err(|class| (Stage::Deadline, class)),
+        Err(_) => Ok(()),
     });
-    crate::nip_fi_shadow::record("http", headers, communities, verdict.map(drop));
+    crate::nip_fi_shadow::record("http", &community, verdict);
 }
 
 /// Shadow only: record the enforce verdict for a request whose NIP-98 proof
-/// already failed, without any DB work. Off and enforce are untouched.
-pub(crate) fn observe_failed_proof(state: &crate::state::AppState, headers: &HeaderMap) {
+/// already failed. Off and enforce are untouched.
+pub(crate) async fn observe_failed_proof(state: &crate::state::AppState, headers: &HeaderMap) {
     let nip_fi = &state.config.nip_fi;
     if nip_fi.mode.observes_only() {
         let verifier = state.nip_fi_verifier.as_deref();
         observe_shadow_verdict(
             headers,
-            &nip_fi.communities,
+            state.nip_fi_communities(),
             verifier,
             &NoDenyMapConfigured,
             None,
-        );
+        )
+        .await;
     }
 }
 
@@ -384,7 +434,7 @@ pub(crate) fn observe_failed_proof(state: &crate::state::AppState, headers: &Hea
 /// (the shadow `stage` label) and its class.
 fn evaluate_enforce_steps<D, X, E, F>(
     headers: &HeaderMap,
-    communities: &NipFiCommunities,
+    community: Result<&CommunityBinding, &DenialClass>,
     verifier: Option<&dyn VerifyAssertion>,
     deny_map: &D,
     extract_nip98: F,
@@ -397,7 +447,7 @@ where
     // evidence (`Authorization`, NIP-98, assertion) is examined. Explicit
     // here because some admitted routes are exempt from the router guard.
     // [NIP-FI.md:266-268]
-    let community = resolve_community(headers, communities).map_err(|c| (Stage::Community, c))?;
+    let community = community.map_err(|c| (Stage::Community, *c))?;
 
     // Step 2 — cardinality gate: exactly one Authorization field per
     // NIP-FI.md:695-700.
@@ -464,7 +514,7 @@ where
 /// [FI-TRACE-AUTHORITY-UNIFORM]
 // Response<Body> is intentionally large (axum's design); see admit_nip_fi_http.
 #[allow(clippy::result_large_err)]
-pub(crate) fn admit_nip_fi_http_on_state<X, F>(
+pub(crate) async fn admit_nip_fi_http_on_state<X, F>(
     state: &crate::state::AppState,
     headers: &HeaderMap,
     extract_nip98: F,
@@ -474,24 +524,30 @@ where
 {
     let mode = state.config.nip_fi.mode;
     let verifier = state.nip_fi_verifier.as_deref();
-    let communities = &state.config.nip_fi.communities;
+    let communities = state.nip_fi_communities();
     match state.nip_fi_deny_map.as_deref() {
-        Some(deny_map) => admit_nip_fi_http(
-            headers,
-            extract_nip98,
-            communities,
-            verifier,
-            mode,
-            deny_map,
-        ),
-        None => admit_nip_fi_http(
-            headers,
-            extract_nip98,
-            communities,
-            verifier,
-            mode,
-            &NoDenyMapConfigured,
-        ),
+        Some(deny_map) => {
+            admit_nip_fi_http(
+                headers,
+                extract_nip98,
+                communities,
+                verifier,
+                mode,
+                deny_map,
+            )
+            .await
+        }
+        None => {
+            admit_nip_fi_http(
+                headers,
+                extract_nip98,
+                communities,
+                verifier,
+                mode,
+                &NoDenyMapConfigured,
+            )
+            .await
+        }
     }
 }
 
@@ -508,6 +564,7 @@ mod tests {
     use crate::nip_fi_core::tests::ScriptedVerifier;
     use axum::http::StatusCode;
     use buzz_auth::CLIENT_ATTACHED_HEADER;
+    use futures_util::FutureExt as _;
 
     /// Test fixture: a deny map with no entries.
     struct AlwaysAdmitStubDenyMap;
@@ -733,6 +790,8 @@ mod tests {
                 NipFiMode::Enforce,
                 deny_map,
             )
+            .now_or_never()
+            .expect("env resolution never waits")
         };
         let snapshot = |resp: Response<Body>| {
             let status = resp.status();
@@ -779,7 +838,9 @@ mod tests {
             None::<&dyn VerifyAssertion>,
             NipFiMode::Off,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         let admission =
             outcome.expect("Off mode MUST not require NIP-FI assertion — OSS default regression");
         assert_eq!(*admission.proven_pubkey(), expected_pubkey);
@@ -802,7 +863,9 @@ mod tests {
             None::<&dyn VerifyAssertion>,
             NipFiMode::Off,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         let resp = outcome.unwrap_err();
         assert_eq!(resp.status(), deny_status);
     }
@@ -834,7 +897,9 @@ mod tests {
             None::<&dyn VerifyAssertion>,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         let resp = outcome.unwrap_err();
         assert_eq!(
             resp.status(),
@@ -860,7 +925,9 @@ mod tests {
             None::<&dyn VerifyAssertion>,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         let resp = outcome.unwrap_err();
         assert_eq!(
             resp.status(),
@@ -884,7 +951,9 @@ mod tests {
             None::<&dyn VerifyAssertion>,
             NipFiMode::Off,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         let resp = outcome.unwrap_err();
         assert_eq!(
             resp.status(),
@@ -922,7 +991,9 @@ mod tests {
             None::<&dyn VerifyAssertion>,
             NipFiMode::Off,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         let resp = outcome.unwrap_err();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
@@ -1014,7 +1085,9 @@ mod tests {
                 Some(&verifier as &dyn VerifyAssertion),
                 NipFiMode::DenyProtected,
                 &AlwaysAdmitStubDenyMap,
-            );
+            )
+            .now_or_never()
+            .expect("env resolution never waits");
             let Err(resp) = outcome else {
                 panic!("{case}: DenyProtected must deny with 503");
             };
@@ -1058,7 +1131,9 @@ mod tests {
             None::<&dyn VerifyAssertion>,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         // Missing header → MissingEvidence before verifier check.
         match outcome {
             Err(resp) => {
@@ -1090,7 +1165,9 @@ mod tests {
             None::<&dyn VerifyAssertion>,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         match outcome {
             Err(resp) => {
                 assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1150,7 +1227,9 @@ mod tests {
             Some(&verifier as &dyn VerifyAssertion),
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         match outcome {
             Err(resp) => {
                 assert_eq!(
@@ -1226,7 +1305,9 @@ mod tests {
             None::<&dyn VerifyAssertion>,
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         let resp = outcome.unwrap_err();
         assert_eq!(
             resp.status(),
@@ -1276,7 +1357,9 @@ mod tests {
             None::<&dyn VerifyAssertion>,
             NipFiMode::Off,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         let admission = match outcome {
             Ok(a) => a,
             Err(resp) => panic!(
@@ -1321,6 +1404,8 @@ mod tests {
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
         )
+        .now_or_never()
+        .expect("env resolution never waits")
     }
 
     fn denial_parts(outcome: Result<NipFiAdmission<()>, Response<Body>>) -> (StatusCode, Vec<u8>) {
@@ -1434,7 +1519,9 @@ mod tests {
             Some(&verifier as &dyn VerifyAssertion),
             NipFiMode::Enforce,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         let (status, body) = denial_parts(outcome);
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body, b"authentication required\n");
@@ -1466,7 +1553,9 @@ mod tests {
                 Some(&verifier as &dyn VerifyAssertion),
                 NipFiMode::Enforce,
                 &AlwaysAdmitStubDenyMap,
-            );
+            )
+            .now_or_never()
+            .expect("env resolution never waits");
             let (status, body) = denial_parts(outcome);
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(body, b"authorization unavailable\n");
@@ -1500,6 +1589,8 @@ mod tests {
                 NipFiMode::Shadow,
                 &AlwaysAdmitStubDenyMap,
             )
+            .now_or_never()
+            .expect("env resolution never waits")
             .expect("shadow admits an unmapped Host");
             assert_eq!(admission.proven_pubkey, key);
             assert!(admission.assertion.is_none());
@@ -1537,6 +1628,8 @@ mod tests {
                 NipFiMode::Shadow,
                 &AlwaysAdmitStubDenyMap,
             )
+            .now_or_never()
+            .expect("env resolution never waits")
         })
         .expect("shadow admits the dev fallback like Off");
         assert_eq!(admission.proven_pubkey, key);
@@ -1567,6 +1660,8 @@ mod tests {
             NipFiMode::Shadow,
             &AlwaysAdmitStubDenyMap,
         )
+        .now_or_never()
+        .expect("env resolution never waits")
         .expect("shadow admits");
         assert!(admission.assertion.is_none());
         assert_eq!(verifier.calls(), 1);
@@ -1578,7 +1673,9 @@ mod tests {
             Some(&verifier as &dyn VerifyAssertion),
             NipFiMode::Shadow,
             &AlwaysAdmitStubDenyMap,
-        );
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
         let Err(resp) = legacy else {
             panic!("NIP-98 failure must propagate")
         };

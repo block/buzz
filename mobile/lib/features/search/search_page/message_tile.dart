@@ -1,5 +1,16 @@
 part of '../search_page.dart';
 
+// Two-line search snippets must not parse an entire document. Long messages
+// use literal text so cutting a code fence or link cannot create a new embed.
+const _richSearchPreviewLimit = 512;
+
+String _literalSearchPreview(String content) {
+  var end = _richSearchPreviewLimit;
+  final last = content.codeUnitAt(end - 1);
+  if (last >= 0xD800 && last <= 0xDBFF) end--;
+  return '${content.substring(0, end)}…';
+}
+
 class _MessageTile extends ConsumerWidget {
   final SearchHit hit;
   final UserProfile? authorProfile;
@@ -19,7 +30,9 @@ class _MessageTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final mentionedPubkeys = mentionedPubkeysFromTags(hit.tags);
+    final mentionedPubkeys = hit.content.length > _richSearchPreviewLimit
+        ? <String>{}
+        : mentionedPubkeysFromTags(hit.tags);
     // A hit is labelled within its channel, as it would be there.
     final hitChannelId = channel?.id ?? hit.channelId;
     final labelPubkeys = {hit.pubkey.toLowerCase(), ...mentionedPubkeys};
@@ -40,28 +53,6 @@ class _MessageTile extends ConsumerWidget {
     final channelName = hit.channelName?.trim().replaceFirst(RegExp(r'^#'), '');
     final hasChannelName = channelName != null && channelName.isNotEmpty;
     final isDm = channel?.isDm ?? false;
-    final profileMentionNames = {
-      for (final pubkey in mentionedPubkeysFromTags(hit.tags))
-        if (userCache[pubkey]?.displayName?.trim().isNotEmpty == true)
-          pubkey: userCache[pubkey]!.displayName!.trim(),
-    };
-    final mentionPubkeys = mentionedPubkeysFromTags(hit.tags);
-    final knownAgentPubkeys = channel == null
-        ? ref.watch(knownAgentPubkeysProvider)
-        : ref.watch(agentMentionPubkeysProvider(channel!.id));
-    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
-      knownAgentPubkeys: knownAgentPubkeys,
-      profileOwnedAgentPubkeys: [
-        for (final profile in userCache.values)
-          if (profile.ownerPubkey != null) profile.pubkey,
-      ],
-    );
-    final mentionNames = mentionNamesWithDirectoryLabels(
-      mentionPubkeys: mentionPubkeys,
-      profileMentionNames: profileMentionNames,
-      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
-      agentMentionPubkeys: agentMentionPubkeys,
-    );
 
     return ListTile(
       key: ValueKey('search-message-row-${hit.eventId}'),
@@ -130,24 +121,66 @@ class _MessageTile extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: Grid.half),
-          MessageContent(
-            key: ValueKey('search-message-body-${hit.eventId}'),
-            content: hit.content,
-            mentionNames: mentionNames,
-            mentionLabels: labels,
-            agentMentionPubkeys: agentMentionPubkeys,
-            tags: hit.tags,
-            maxLines: 2,
-            baseStyle: activityPreviewTextStyle.copyWith(
-              color: context.colors.onSurface,
-            ),
-          ),
+          _buildPreview(context, ref, labels),
         ],
       ),
       onTap: () {
         onResultSelected();
         _navigateToHit(context, ref, hit, channel);
       },
+    );
+  }
+
+  Widget _buildPreview(
+    BuildContext context,
+    WidgetRef ref,
+    Map<String, String> labels,
+  ) {
+    if (hit.content.length > _richSearchPreviewLimit) {
+      return Text(
+        _literalSearchPreview(hit.content),
+        key: ValueKey('search-message-body-${hit.eventId}'),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: activityPreviewTextStyle.copyWith(
+          color: context.colors.onSurface,
+        ),
+      );
+    }
+    final profileMentionNames = {
+      for (final pubkey in mentionedPubkeysFromTags(hit.tags))
+        if (userCache[pubkey]?.displayName?.trim().isNotEmpty == true)
+          pubkey: userCache[pubkey]!.displayName!.trim(),
+    };
+    final mentionPubkeys = mentionedPubkeysFromTags(hit.tags);
+    final knownAgentPubkeys = channel == null
+        ? ref.watch(knownAgentPubkeysProvider)
+        : ref.watch(agentMentionPubkeysProvider(channel!.id));
+    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: knownAgentPubkeys,
+      profileOwnedAgentPubkeys: [
+        for (final profile in userCache.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
+    );
+    final mentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: mentionPubkeys,
+      profileMentionNames: profileMentionNames,
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
+    );
+
+    return MessageContent(
+      key: ValueKey('search-message-body-${hit.eventId}'),
+      content: hit.content,
+      mentionNames: mentionNames,
+      mentionLabels: labels,
+      agentMentionPubkeys: agentMentionPubkeys,
+      tags: hit.tags,
+      maxLines: 2,
+      baseStyle: activityPreviewTextStyle.copyWith(
+        color: context.colors.onSurface,
+      ),
     );
   }
 

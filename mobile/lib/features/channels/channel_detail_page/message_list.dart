@@ -963,6 +963,13 @@ class _MessageList extends HookConsumerWidget {
                         if (message.isSystem)
                           _SystemMessageRow(
                             message: message,
+                            startsDay: showDayDivider,
+                            endsDay:
+                                nextMessage != null &&
+                                !isSameDay(
+                                  message.createdAt,
+                                  nextMessage.createdAt,
+                                ),
                             groupedMessages: entryGroup.length > 1
                                 ? entryGroup
                                       .map((entry) => entry.message)
@@ -977,6 +984,13 @@ class _MessageList extends HookConsumerWidget {
                         else ...[
                           _MessageBubble(
                             message: message,
+                            startsDay: showDayDivider,
+                            endsDay:
+                                nextMessage != null &&
+                                !isSameDay(
+                                  message.createdAt,
+                                  nextMessage.createdAt,
+                                ),
                             showAuthor:
                                 showAuthor ||
                                 isRecentAgentReplyHandoff(

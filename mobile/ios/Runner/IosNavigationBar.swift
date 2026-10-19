@@ -606,7 +606,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private func makeAction(_ data: [String: Any]) -> UIAction {
     let id = data["id"] as? String ?? ""
     let enabled = data["enabled"] as? Bool == true
-    let symbol = (data["symbol"] as? String).flatMap { NativeTabler.image($0) }
+    let symbol = (data["symbol"] as? String).flatMap { NativeTabler.image($0, size: 24) }
     return UIAction(title: data["label"] as? String ?? "", image: symbol,
                     attributes: enabled ? [] : [.disabled],
                     state: data["selected"] as? Bool == true ? .on : .off) { [weak self] _ in
@@ -615,14 +615,20 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   }
 
   private func makeControlGroup(_ actions: [[String: Any]]) -> UIBarButtonItem {
-    if actions.count == 1, actions[0]["plain"] as? Bool == true {
-      return makeItem(actions[0])
+    if actions.count == 1 {
+      let item = makeItem(actions[0])
+      // Let UIKit retain its navigation typography and sizing for text actions
+      // such as Edit/Done, rather than inheriting UIButton's default styling.
+      if actions[0]["plain"] as? Bool == true || (item.image == nil && item.customView == nil) {
+        return item
+      }
     }
     let surface = UIVisualEffectView()
     if #available(iOS 26.0, *) {
       let glass = UIGlassEffect(style: .regular)
       glass.isInteractive = true
       surface.effect = glass
+      surface.cornerConfiguration = .capsule()
     } else {
       surface.backgroundColor = controlBackground
     }
@@ -647,6 +653,16 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         if let action = item.primaryAction { button.addAction(action, for: .touchUpInside) }
         button.menu = item.menu
         button.showsMenuAsPrimaryAction = item.menu != nil
+        if item.menu != nil {
+          // UIKit lifts the button itself for its menu transition, not the
+          // enclosing glass. Give that return target the same rounded shape.
+          if #available(iOS 26.0, *) {
+            button.cornerConfiguration = .capsule()
+          }
+          button.layer.cornerRadius = 22
+          button.layer.cornerCurve = .circular
+          button.clipsToBounds = true
+        }
         button.isEnabled = item.isEnabled
         button.accessibilityLabel = item.accessibilityLabel
         button.accessibilityValue = item.accessibilityValue

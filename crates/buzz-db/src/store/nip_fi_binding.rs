@@ -311,6 +311,86 @@ impl Db {
     }
 }
 
+/// A snapshot load produced more rows than its cap allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("row cap of {0} exceeded")]
+pub struct RowCapExceeded(pub usize);
+
+impl Db {
+    /// Read every binding of an active community to an issuer in `registry`,
+    /// on the primary, as `(host, issuer)` rows, one per community-issuer
+    /// pair. It is one `SELECT`, so every row comes from the same statement
+    /// snapshot. The read stops at the `max_rows + 1`st row and fails.
+    #[datastore_span(name = "load_nip_fi_binding_snapshot", system = "postgresql")]
+    pub async fn load_nip_fi_binding_snapshot(
+        &self,
+        registry: &[String],
+        max_rows: usize,
+    ) -> Result<std::result::Result<Vec<(String, String)>, RowCapExceeded>> {
+        use futures_util::StreamExt;
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let mut stream = sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT c.host, b.issuer
+            FROM community_nip_fi_issuers b
+            JOIN communities c ON c.id = b.community_id
+            WHERE b.issuer = ANY($1)
+              AND c.archived_at IS NULL
+              AND c.deletion_state = 'active'
+              AND c.deleted_at IS NULL
+            "#,
+        )
+        .bind(registry)
+        .fetch(&mut *connection);
+        let mut rows = Vec::new();
+        while let Some(row) = stream.next().await {
+            if rows.len() == max_rows {
+                return Ok(Err(RowCapExceeded(max_rows)));
+            }
+            rows.push(row?);
+        }
+        Ok(Ok(rows))
+    }
+
+    /// The registry-filtered issuers bound to the active community at
+    /// `normalized_host`, on the primary. Empty when the host is unknown,
+    /// inactive, or bound only to unregistered issuers. The primary key
+    /// `(community_id, issuer)` bounds the result at `registry.len()` rows.
+    #[datastore_span(name = "lookup_nip_fi_admission_binding", system = "postgresql")]
+    pub async fn lookup_nip_fi_admission_binding(
+        &self,
+        normalized_host: &str,
+        registry: &[String],
+    ) -> Result<Vec<String>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let issuers = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT b.issuer
+            FROM community_nip_fi_issuers b
+            JOIN communities c ON c.id = b.community_id
+            WHERE lower(c.host) = lower($1)
+              AND b.issuer = ANY($2)
+              AND c.archived_at IS NULL
+              AND c.deletion_state = 'active'
+              AND c.deleted_at IS NULL
+            "#,
+        )
+        .bind(normalized_host)
+        .bind(registry)
+        .fetch_all(&mut *connection)
+        .await?;
+        Ok(issuers)
+    }
+}
+
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
@@ -642,5 +722,130 @@ mod postgres_tests {
             std::slice::from_ref(&unbound)
         );
         assert_eq!(bound(&db, &unique_host("missing")).await, None);
+    }
+
+    /// Move `host`'s community out of `active` the way the deletion executor
+    /// does: the tombstone trigger admits the state change only under the
+    /// executor's community and fence-generation settings.
+    async fn start_deleting(db: &Db, host: &str) {
+        let mut tx = db.pool.begin().await.expect("begin");
+        let id: Uuid = sqlx::query_scalar("SELECT id FROM communities WHERE host = $1")
+            .bind(host)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("community id");
+        sqlx::query("SELECT set_config('buzz.deletion_executor_community', $1, true), set_config('buzz.deletion_fence_generation', '1', true)")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .expect("executor settings");
+        sqlx::query("UPDATE communities SET deletion_state = 'quiescing', deletion_fence_generation = 1 WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .expect("start deletion");
+        tx.commit().await.expect("commit");
+    }
+
+    async fn snapshot_hosts(db: &Db, registry: &[String]) -> Vec<String> {
+        db.load_nip_fi_binding_snapshot(registry, 100_000)
+            .await
+            .expect("snapshot")
+            .expect("under cap")
+            .into_iter()
+            .map(|(host, _)| host)
+            .collect()
+    }
+
+    async fn admission(db: &Db, host: &str, registry: &[String]) -> Vec<String> {
+        db.lookup_nip_fi_admission_binding(host, registry)
+            .await
+            .expect("admission lookup")
+    }
+
+    // Criterion 14(a): archived and deleting communities drop out of both the
+    // snapshot load and the admission miss lookup; an active control stays.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn snapshot_and_admission_lookup_skip_archived_and_deleting_communities() {
+        let db = setup_db().await;
+        let registry = issuers();
+        let [archived, deleting, control] = ["archived", "deleting", "control"].map(unique_host);
+        for host in [&archived, &deleting, &control] {
+            db.ensure_configured_community_with_nip_fi_issuers(host, &registry)
+                .await
+                .expect("seed");
+            assert!(snapshot_hosts(&db, &registry).await.contains(host));
+            assert_eq!(admission(&db, host, &registry).await, registry);
+        }
+
+        sqlx::query("UPDATE communities SET archived_at = now() WHERE host = $1")
+            .bind(&archived)
+            .execute(&db.pool)
+            .await
+            .expect("archive");
+        start_deleting(&db, &deleting).await;
+
+        let hosts = snapshot_hosts(&db, &registry).await;
+        for gone in [&archived, &deleting] {
+            assert!(!hosts.contains(gone), "{gone} must leave the snapshot");
+            assert!(admission(&db, gone, &registry).await.is_empty(), "{gone}");
+        }
+        assert!(hosts.contains(&control));
+        assert_eq!(admission(&db, &control, &registry).await, registry);
+    }
+
+    // Criterion 17(a)(1): only registered issuers come back, and a host bound
+    // only to unregistered issuers yields zero rows from the real SQL.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admission_lookup_returns_only_registered_issuers() {
+        let db = setup_db().await;
+        let other = "https://unregistered.example".to_string();
+        let mixed = unique_host("mixed");
+        let foreign = unique_host("foreign");
+        db.ensure_configured_community_with_nip_fi_issuers(
+            &mixed,
+            &[ISS.to_string(), other.clone()],
+        )
+        .await
+        .expect("seed mixed");
+        db.ensure_configured_community_with_nip_fi_issuers(&foreign, std::slice::from_ref(&other))
+            .await
+            .expect("seed foreign");
+
+        assert_eq!(
+            admission(&db, &mixed.to_uppercase(), &issuers()).await,
+            issuers()
+        );
+        assert!(admission(&db, &foreign, &issuers()).await.is_empty());
+        assert!(!snapshot_hosts(&db, &issuers()).await.contains(&foreign));
+    }
+
+    // The load fails at the `max_rows + 1`st row instead of truncating.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn snapshot_load_over_its_row_cap_fails() {
+        let db = setup_db().await;
+        let registry = vec![format!("https://issuer-{}.example", uuid::Uuid::new_v4())];
+        for prefix in ["cap-a", "cap-b"] {
+            db.ensure_configured_community_with_nip_fi_issuers(&unique_host(prefix), &registry)
+                .await
+                .expect("seed");
+        }
+        assert_eq!(
+            db.load_nip_fi_binding_snapshot(&registry, 1)
+                .await
+                .expect("load"),
+            Err(RowCapExceeded(1))
+        );
+        assert_eq!(
+            db.load_nip_fi_binding_snapshot(&registry, 2)
+                .await
+                .expect("load")
+                .expect("at cap")
+                .len(),
+            2
+        );
     }
 }

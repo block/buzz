@@ -97,6 +97,7 @@ class _ThreadMessageList extends HookWidget {
           ),
           _ThreadMessage(
             message: head,
+            startsDay: true,
             channelNames: channelNames,
             channelId: channelId,
             currentPubkey: currentPubkey,
@@ -300,6 +301,13 @@ class _ThreadMessageList extends HookWidget {
                                     ),
                                   _ThreadMessage(
                                     message: reply,
+                                    startsDay: showDayDivider,
+                                    endsDay:
+                                        nextReply != null &&
+                                        !isSameDay(
+                                          reply.createdAt,
+                                          nextReply.createdAt,
+                                        ),
                                     channelNames: channelNames,
                                     channelId: channelId,
                                     currentPubkey: currentPubkey,

@@ -141,6 +141,9 @@ jobs:
           cd mobile && flutter test
           --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
           --dart-define=BUZZ_AUTH_DOMAINS=buzz.xyz,builderlab.xyz,builderlabstaging.xyz
+          test/shared/auth/community_entry_requirements_test.dart
+          test/features/invites/invite_join_provider_test.dart
+          test/features/onboarding/onboarding_entry_routes_test.dart
           test/shared/hosted/hosted_environment_test.dart
           test/shared/hosted/self_hosted_entry_test.dart
           test/features/onboarding/hosted_app_gate_environment_test.dart

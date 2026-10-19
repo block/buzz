@@ -17,6 +17,11 @@ cat > "$bin/gh" <<'GH'
 set -euo pipefail
 case "${1:-}:${2:-}" in
   --version:*) printf 'gh version %s (test)\n' "${GH_VERSION:-2.94.0}" ;;
+  api:repos/block/buzz/rulesets/19321162)
+    [[ "${GH_BRANCH_POLICY_FAIL:-}" != 1 ]] || exit 1
+    policy='{"target":"branch","enforcement":"active","current_user_can_bypass":"never","conditions":{"ref_name":{"include":["refs/heads/mobile-v*"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true,"require_last_push_approval":true,"required_review_thread_resolution":true}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"Mobile"},{"context":"DCO Check"}]}}]}'
+    printf '%s\n' "${GH_BRANCH_POLICY:-$policy}" | jq -r "$4"
+    ;;
   api:repos/block/buzz/rulesets/14378754)
     case "$*" in
       *'.enforcement'*) printf '%s\n' "${GH_TAG_RULESET_STATE:-active}" ;;
@@ -42,15 +47,18 @@ case "${1:-}:${2:-}" in
     version=""
     number=""
     sha=""
+    source_branch=""
     while [[ "$#" -gt 0 ]]; do
       case "$1" in
         version=*) version="${1#version=}" ;;
         candidate_number=*) number="${1#candidate_number=}" ;;
+        source_branch=*) source_branch="${1#source_branch=}" ;;
         target_sha=*) sha="${1#target_sha=}" ;;
       esac
       shift
     done
-    [[ -n "$version" && -n "$number" && -n "$sha" ]]
+    [[ -n "$version" && -n "$number" && -n "$sha" && -n "$source_branch" ]] || exit 1
+    [[ "$(git --git-dir="$GH_REMOTE" rev-parse "refs/heads/$source_branch")" == "$sha" ]] || exit 1
     printf '%s\t%s\t%s\n' "$version" "$number" "$sha" >> "$GH_WORKFLOW_CAPTURE"
     if [[ "${GH_WORKFLOW_NO_URL:-}" == "1" ]]; then
       exit 0
@@ -86,6 +94,7 @@ chmod +x "$bin/gh"
 export PATH="$bin:$PATH"
 export GH_WORKFLOW_CAPTURE="$tmp/workflow-dispatches"
 export GH_WORKTREE="$work"
+export GH_REMOTE="$remote"
 
 run_release() {
   local repo="$1"
@@ -106,7 +115,7 @@ fail() {
 assert_no_removed_mobile_release_behavior() {
   local status
 
-  grep -Eq 'gh[[:space:]]+release|mobile-release/|finalize' "$@" && \
+  grep -Eq 'gh[[:space:]]+release|finalize' "$@" && \
     fail "removed branch/finalization/GitHub Release behavior remains"
   status="$?"
   [[ "$status" -eq 1 ]] || \
@@ -148,6 +157,37 @@ cat "$tmp/stale-output"
    "$remote_main_sha" ]]
 [[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v1.2.3-rc.1)" == tag ]]
 grep -Fq $'1.2.3\t1\t' "$GH_WORKFLOW_CAPTURE"
+
+# A stable branch may diverge from main, including an empty release-only commit.
+git -C "$work" switch -q -c mobile-v1.2
+git -C "$work" commit -q --allow-empty -m stable-only
+git -C "$work" push -q origin mobile-v1.2
+stable_sha="$(git -C "$work" rev-parse HEAD)"
+git -C "$work" switch -q main
+if GH_BRANCH_POLICY_FAIL=1 run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2 > "$tmp/policy-error" 2>&1; then
+  fail "operator accepted unavailable stable-branch policy"
+fi
+grep -Fq 'Could not verify mobile stable-branch protection' "$tmp/policy-error"
+if GH_BRANCH_POLICY='{}' run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2 > "$tmp/policy-error" 2>&1; then
+  fail "operator accepted missing stable-branch policy"
+fi
+run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2
+[[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.4-rc.1^{commit}')" == "$stable_sha" ]]
+# Existing mismatched refs must be rejected by the guard, not missing-ref errors.
+for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary; do
+  git -C "$work" switch -q -c "$source"
+  git -C "$work" commit -q --allow-empty -m "$source"
+  git -C "$work" push -q origin "$source"
+done
+git -C "$work" switch -q main
+for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary ''; do
+  if run_release "$operator" candidate 1.2.4 --source-branch "$source" >/dev/null 2>&1; then
+    fail "accepted mismatched source '$source'"
+  fi
+done
+if run_release "$operator" candidate 8.8.0 --source-branch mobile-v8.8 >/dev/null 2>&1; then
+  fail "missing stable branch fell back to main"
+fi
 
 # Existing remote identities remain unchanged. Later candidates sequence
 # monotonically and target the then-current remote main commit.

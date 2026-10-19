@@ -5,6 +5,8 @@ class _MessageBubble extends HookConsumerWidget {
   final bool showAuthor;
   final bool typingHandoff;
   final bool showAvatar;
+  final bool startsDay;
+  final bool endsDay;
   final bool hasReplies;
   final Widget? replyFooter;
   final Map<String, String> channelNames;
@@ -21,6 +23,8 @@ class _MessageBubble extends HookConsumerWidget {
     required this.showAuthor,
     this.typingHandoff = false,
     this.showAvatar = true,
+    this.startsDay = false,
+    this.endsDay = false,
     required this.hasReplies,
     this.replyFooter,
     required this.channelNames,
@@ -36,6 +40,7 @@ class _MessageBubble extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
+    final swipeContentKey = useMemoized(GlobalKey.new, const []);
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
     final hasLocalReplies = ref.watch(
       threadLocalRepliesProvider(
@@ -52,6 +57,7 @@ class _MessageBubble extends HookConsumerWidget {
     );
     // Watch only this user's profile to avoid rebuilding on unrelated cache changes.
     final pk = message.pubkey.toLowerCase();
+    final ownMessage = currentPubkey?.toLowerCase() == pk;
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
@@ -127,13 +133,13 @@ class _MessageBubble extends HookConsumerWidget {
       );
     }
 
-    return NotificationListener<MessageGalleryScrollNotification>(
+    final content = NotificationListener<MessageGalleryScrollNotification>(
       onNotification: (notification) {
         mediaOffset.value = notification.offset;
         return true;
       },
       child: Padding(
-        padding: EdgeInsets.only(top: showAuthor ? Grid.xs : 0),
+        padding: EdgeInsets.only(top: showAuthor && !startsDay ? Grid.xs : 0),
         child: Material(
           color: Colors.transparent,
           borderRadius: BorderRadius.circular(Radii.md),
@@ -165,46 +171,60 @@ class _MessageBubble extends HookConsumerWidget {
                   ),
             child: Padding(
               padding: EdgeInsets.only(
-                bottom: showAvatar ? Grid.quarter : Grid.quarter / 2,
+                bottom: endsDay
+                    ? 0
+                    : (showAvatar ? Grid.quarter : Grid.quarter / 2),
               ),
               child: MessageFooterLayout(
                 animateSize: true,
                 overlap: message.reactions.isNotEmpty ? Grid.xs : 0,
                 footer: message.reactions.isNotEmpty || replyFooter != null
-                    ? Padding(
-                        padding: const EdgeInsets.only(
-                          left:
-                              messageAvatarSize +
-                              messageAvatarContentGap +
-                              Grid.xxs,
-                        ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (message.reactions.isNotEmpty)
-                              ReactionRow(
-                                combined: true,
-                                messageId: message.id,
-                                channelId: currentChannelId,
-                                reactions: message.reactions,
-                                onToggle: (emoji) =>
-                                    toggleReaction(ref, message, emoji),
-                                showAddButton: isMember && !isArchived,
-                                onAddReaction: () => showAddReactionPicker(
-                                  context: context,
-                                  ref: ref,
-                                  message: message,
+                    ? Align(
+                        alignment: ownMessage
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            right: ownMessage ? Grid.xxs : 0,
+                            left: ownMessage
+                                ? 0
+                                : messageAvatarSize +
+                                      messageAvatarContentGap +
+                                      Grid.xxs,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: ownMessage
+                                ? CrossAxisAlignment.end
+                                : CrossAxisAlignment.start,
+                            children: [
+                              if (message.reactions.isNotEmpty)
+                                ReactionRow(
+                                  combined: true,
+                                  messageId: message.id,
+                                  channelId: currentChannelId,
+                                  reactions: message.reactions,
+                                  onToggle: (emoji) =>
+                                      toggleReaction(ref, message, emoji),
+                                  showAddButton: isMember && !isArchived,
+                                  onAddReaction: () => showAddReactionPicker(
+                                    context: context,
+                                    ref: ref,
+                                    message: message,
+                                  ),
                                 ),
-                              ),
-                            if (replyFooter != null)
-                              Padding(
-                                padding: const EdgeInsets.only(
-                                  bottom: Grid.xxs,
+                              if (replyFooter != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(
+                                    bottom: Grid.xxs,
+                                  ),
+                                  child: Directionality(
+                                    textDirection: Directionality.of(context),
+                                    child: replyFooter!,
+                                  ),
                                 ),
-                                child: replyFooter,
-                              ),
-                          ],
+                            ],
+                          ),
                         ),
                       )
                     : const SizedBox.shrink(),
@@ -214,29 +234,41 @@ class _MessageBubble extends HookConsumerWidget {
                     clipBehavior: Clip.none,
                     children: [
                       Row(
+                        textDirection: ownMessage
+                            ? TextDirection.rtl
+                            : TextDirection.ltr,
                         crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
-                          const SizedBox(width: messageAvatarSize),
-                          const SizedBox(width: messageAvatarContentGap),
+                          if (!ownMessage)
+                            const SizedBox(width: messageAvatarSize),
+                          if (!ownMessage)
+                            const SizedBox(width: messageAvatarContentGap),
                           Expanded(
                             child: Padding(
                               padding: EdgeInsets.only(
-                                top: showAuthor ? Grid.half : 0,
+                                top: showAuthor && !startsDay ? Grid.half : 0,
                               ),
                               child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                                crossAxisAlignment: ownMessage
+                                    ? CrossAxisAlignment.end
+                                    : CrossAxisAlignment.start,
                                 children: [
                                   if (showAuthor)
                                     Padding(
-                                      padding: const EdgeInsets.only(
+                                      padding: EdgeInsets.only(
                                         bottom: Grid.quarter,
-                                        left: Grid.xs,
+                                        left: ownMessage ? 0 : Grid.xs,
+                                        right: ownMessage ? Grid.xs : 0,
                                       ),
                                       child: Row(
                                         children: [
                                           Expanded(
                                             child: MessageAuthorMeta(
                                               showTimestamp: true,
+                                              reversed: false,
+                                              alignment: ownMessage
+                                                  ? MainAxisAlignment.end
+                                                  : MainAxisAlignment.start,
                                               nameStyle:
                                                   messageUsernameTextStyle
                                                       .copyWith(
@@ -311,6 +343,7 @@ class _MessageBubble extends HookConsumerWidget {
                                     ),
                                     animate: typingHandoff,
                                     child: MessageContent(
+                                      key: swipeContentKey,
                                       content: message.content,
                                       bubble: true,
                                       hasReactions:
@@ -318,8 +351,8 @@ class _MessageBubble extends HookConsumerWidget {
                                           replyFooter != null,
                                       bubbleEnd: showAvatar,
                                       bubbleStart: showAuthor,
-                                      ownMessage:
-                                          currentPubkey?.toLowerCase() == pk,
+                                      ownMessage: ownMessage,
+                                      trimTrailingSpacing: endsDay,
                                       mentionNames: resolvedMentionNames,
                                       mentionLabels: mentionLabels,
                                       agentMentionPubkeys: agentMentionPubkeys,
@@ -392,9 +425,10 @@ class _MessageBubble extends HookConsumerWidget {
                           ),
                         ],
                       ),
-                      if (showAvatar)
+                      if (showAvatar && !ownMessage)
                         Positioned(
-                          left: 0,
+                          left: ownMessage ? null : 0,
+                          right: ownMessage ? 0 : null,
                           bottom: 0,
                           child: MessageMediaAvatar(
                             offset: mediaOffset,
@@ -435,6 +469,16 @@ class _MessageBubble extends HookConsumerWidget {
           ),
         ),
       ),
+    );
+    return MessageSwipeReply(
+      contentKey: swipeContentKey,
+      message: message,
+      allMessages: allMessages,
+      channelId: currentChannelId,
+      currentPubkey: currentPubkey,
+      isMember: isMember,
+      isArchived: isArchived,
+      child: content,
     );
   }
 }

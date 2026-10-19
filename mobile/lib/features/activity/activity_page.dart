@@ -437,7 +437,7 @@ class ActivityPage extends HookConsumerWidget {
         nativeActions: [
           IosNavigationAction(
             label: 'Filter inbox',
-            symbol: 'line.3.horizontal.decrease',
+            icon: BuzzIcons.filter2,
             children: [
               for (final entry in _filterLabels.entries)
                 IosNavigationAction(

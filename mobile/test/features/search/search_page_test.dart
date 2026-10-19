@@ -444,10 +444,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final results = tester.widget<ListView>(
-      find.byKey(const Key('search-results-list')),
+    final resultsPadding = tester.widget<SliverPadding>(
+      find.descendant(
+        of: find.byKey(const Key('search-results-list')),
+        matching: find.byType(SliverPadding),
+      ),
     );
-    final padding = results.padding! as EdgeInsets;
+    final padding = resultsPadding.padding as EdgeInsets;
 
     expect(padding.bottom, Grid.xl + footerClearance + keyboardInset);
   });

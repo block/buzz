@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -136,55 +137,59 @@ void main() {
     f.rows = [];
     await f.flow.leave();
 
-    await openEntry();
-    final admission = Completer<void>();
-    f.beforeAdmission = (_) => admission.future;
-    await pair();
-    expect(f.flow.accountOnly, isFalse);
-    expect(f.flow.stage, HostedFlowStage.working);
-    expect(find.text('Leave setup').hitTestable(), findsOneWidget);
-    expect(
-      find.byType(CircularProgressIndicator).hitTestable(),
-      findsOneWidget,
-    );
-    expect(find.byType(BuzzSheetHeader), findsNothing);
-    expect(find.byType(HostedConnectPage), findsNothing);
-    admission.completeError(AccountFailure.unavailable);
-    await tester.pumpAndSettle();
-    expect(f.flow.stage, HostedFlowStage.blocked);
-    expect(
-      find
-          .text('We could not finish connecting. You can try again.')
-          .hitTestable(),
-      findsOneWidget,
-    );
-    expect(find.text('Try again').hitTestable(), findsOneWidget);
-    expect(find.text('Leave setup').hitTestable(), findsOneWidget);
-    expect(find.byType(BuzzSheetHeader), findsNothing);
-    f.beforeAdmission = null;
-    await tester.tap(find.text('Try again').hitTestable());
-    await tester.pumpAndSettle();
-    expect(f.admitted, ['paired']);
-    expect(find.byType(OnboardingAppEntry), findsNothing);
-    expect(find.text('Add community').hitTestable(), findsOneWidget);
+    if (HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) {
+      await openEntry();
+      final admission = Completer<void>();
+      f.beforeAdmission = (_) => admission.future;
+      await pair();
+      expect(f.flow.accountOnly, isFalse);
+      expect(f.flow.stage, HostedFlowStage.working);
+      expect(find.text('Leave setup').hitTestable(), findsOneWidget);
+      expect(
+        find.byType(CircularProgressIndicator).hitTestable(),
+        findsOneWidget,
+      );
+      expect(find.byType(BuzzSheetHeader), findsNothing);
+      expect(find.byType(HostedConnectPage), findsNothing);
+      admission.completeError(AccountFailure.unavailable);
+      await tester.pumpAndSettle();
+      expect(f.flow.stage, HostedFlowStage.blocked);
+      expect(
+        find
+            .text('We could not finish connecting. You can try again.')
+            .hitTestable(),
+        findsOneWidget,
+      );
+      expect(find.text('Try again').hitTestable(), findsOneWidget);
+      expect(find.text('Leave setup').hitTestable(), findsOneWidget);
+      expect(find.byType(BuzzSheetHeader), findsNothing);
+      f.beforeAdmission = null;
+      await tester.tap(find.text('Try again').hitTestable());
+      await tester.pumpAndSettle();
+      expect(f.admitted, ['paired']);
+      expect(find.byType(OnboardingAppEntry), findsNothing);
+      expect(find.text('Add community').hitTestable(), findsOneWidget);
 
-    // Cancelling a paired sign-in keeps the Add route usable and clears intent.
-    await f.flow.leave();
-    await openEntry();
-    f.expired = true;
-    await pair();
-    await tester.pumpAndSettle();
-    expect(f.flow.stage, HostedFlowStage.signIn);
-    // Native browser owns sign-in presentation; the welcome/form stays behind it.
-    expect(find.byType(HostedConnectPage), findsNothing);
-    await f.flow.leave();
-    await tester.pumpAndSettle();
-    expect(f.flow.stage, HostedFlowStage.idle);
-    await tester.tap(find.text('Back').hitTestable());
-    await tester.pumpAndSettle();
-    expect(find.text('Enter a community link').hitTestable(), findsOneWidget);
-    expect(container.read(hostedInlineEntryProvider), isTrue);
-    f.expired = false;
+      // Cancelling a paired sign-in keeps the Add route usable and clears intent.
+      await f.flow.leave();
+      await openEntry();
+      f.expired = true;
+      await pair();
+      await tester.pumpAndSettle();
+      expect(f.flow.stage, HostedFlowStage.signIn);
+      // Native browser owns sign-in presentation; the welcome/form stays behind it.
+      expect(find.byType(HostedConnectPage), findsNothing);
+      await f.flow.leave();
+      await tester.pumpAndSettle();
+      expect(f.flow.stage, HostedFlowStage.idle);
+      await tester.tap(find.text('Back').hitTestable());
+      await tester.pumpAndSettle();
+      expect(find.text('Enter a community link').hitTestable(), findsOneWidget);
+      expect(container.read(hostedInlineEntryProvider), isTrue);
+      f.expired = false;
+    } else {
+      await openEntry();
+    }
 
     // Drive the real deep-link dispatcher, sheet, service and auth persistence.
     await tester.tap(find.text('Enter a community link').hitTestable());
@@ -239,26 +244,28 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(OnboardingAppEntry), findsNothing);
     expect(container.read(hostedInlineEntryProvider), isFalse);
-    f.expired = true;
-    container
-        .read(pendingDeepLinkProvider.notifier)
-        .open(
-          Uri(
-            scheme: 'buzz',
-            host: 'join',
-            queryParameters: {
-              'relay': 'wss://invited.communities.buzz.xyz',
-              'code': 'invite',
-            },
-          ),
-        );
-    await tester.pumpAndSettle();
-    expect(f.flow.stage, HostedFlowStage.signIn);
-    expect(find.text('Start login again').hitTestable(), findsOneWidget);
-    expect(find.text('Leave setup').hitTestable(), findsOneWidget);
-    await tester.tap(find.text('Leave setup').hitTestable());
-    await tester.pumpAndSettle();
-    f.expired = false;
+    if (HostedEnvironment.requiresAuth('invited.communities.buzz.xyz')) {
+      f.expired = true;
+      container
+          .read(pendingDeepLinkProvider.notifier)
+          .open(
+            Uri(
+              scheme: 'buzz',
+              host: 'join',
+              queryParameters: {
+                'relay': 'wss://invited.communities.buzz.xyz',
+                'code': 'invite',
+              },
+            ),
+          );
+      await tester.pumpAndSettle();
+      expect(f.flow.stage, HostedFlowStage.signIn);
+      expect(find.text('Start login again').hitTestable(), findsOneWidget);
+      expect(find.text('Leave setup').hitTestable(), findsOneWidget);
+      await tester.tap(find.text('Leave setup').hitTestable());
+      await tester.pumpAndSettle();
+      f.expired = false;
+    }
 
     // Disposing the entire scope while an entry owns presentation is safe.
     await openEntry();

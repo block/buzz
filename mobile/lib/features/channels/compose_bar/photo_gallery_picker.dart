@@ -179,7 +179,7 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
                         : () => _runComposerAction(onBack),
                     tooltip: 'Back to attachment options',
                     visualDensity: VisualDensity.compact,
-                    icon: const Icon(BuzzIcons.arrowLeft, size: 20),
+                    icon: const Icon(BuzzIcons.arrowLeft, size: 24),
                   ),
                 const SizedBox(width: Grid.quarter),
                 Expanded(

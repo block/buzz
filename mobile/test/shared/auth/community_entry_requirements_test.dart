@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -19,7 +20,7 @@ void main() {
       'team.communities.public.builderlabstaging.xyz.',
     ]) {
       test(
-        'unsigned hosted entry cannot persist through '
+        'accountless entry follows domain policy through '
         '${useAuth ? "authentication" : "community addition"}: $host',
         () async {
           FlutterSecureStorage.setMockInitialValues({});
@@ -48,6 +49,16 @@ void main() {
               : container
                     .read(communityListProvider.notifier)
                     .addCommunity(community);
+          if (!HostedEnvironment.requiresAuth(host)) {
+            await pending;
+            expect((await storage.loadAll()).single.nsec, keys.nsec);
+            expect(
+              await storage.loadActiveId(),
+              useAuth ? community.id : isNull,
+            );
+            expect(transitions, useAuth ? 1 : 0);
+            return;
+          }
           await expectLater(pending, throwsA(isA<AccountFailure>()));
           expect(await storage.loadAll(), isEmpty);
           expect(await storage.loadActiveId(), isNull);

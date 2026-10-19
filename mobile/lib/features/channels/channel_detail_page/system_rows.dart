@@ -8,6 +8,8 @@ class _SystemMessageRow extends HookConsumerWidget {
   final List<TimelineMessage>? allMessages;
   final bool isMember;
   final bool isArchived;
+  final bool startsDay;
+  final bool endsDay;
 
   const _SystemMessageRow({
     required this.message,
@@ -17,6 +19,8 @@ class _SystemMessageRow extends HookConsumerWidget {
     this.allMessages,
     this.isMember = false,
     this.isArchived = false,
+    this.startsDay = false,
+    this.endsDay = false,
   });
 
   @override
@@ -136,37 +140,43 @@ class _SystemMessageRow extends HookConsumerWidget {
         systemEvent.type == SystemEventType.huddleStarted &&
         systemEvent.ephemeralChannelId != null;
     final actor = (systemEvent.actorPubkey ?? message.pubkey).toLowerCase();
+    final ownActor = currentPubkey?.toLowerCase() == actor;
+    final ownHuddle =
+        ownActor &&
+        (isHuddle || systemEvent.type == SystemEventType.huddleEnded);
     Widget withActor(Widget content) {
       if (!isHuddle) return content;
       return Row(
         key: ValueKey('huddle-activity-${message.id}'),
+        textDirection: ownHuddle ? TextDirection.rtl : TextDirection.ltr,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          Semantics(
-            container: true,
-            label: 'Open ${resolveLabel(actor)} profile',
-            button: true,
-            excludeSemantics: true,
-            onTap: () => showUserProfileSheet(
-              context,
-              actor,
-              names: channelIdentityNamesProvider(channelId),
-            ),
-            child: GestureDetector(
-              excludeFromSemantics: true,
+          if (!ownHuddle)
+            Semantics(
+              container: true,
+              label: 'Open ${resolveLabel(actor)} profile',
+              button: true,
+              excludeSemantics: true,
               onTap: () => showUserProfileSheet(
                 context,
                 actor,
                 names: channelIdentityNamesProvider(channelId),
               ),
-              child: _UserAvatar(
-                profile: userCache[actor],
-                pubkey: actor,
-                isAgent: userCache[actor]?.ownerPubkey != null,
+              child: GestureDetector(
+                excludeFromSemantics: true,
+                onTap: () => showUserProfileSheet(
+                  context,
+                  actor,
+                  names: channelIdentityNamesProvider(channelId),
+                ),
+                child: _UserAvatar(
+                  profile: userCache[actor],
+                  pubkey: actor,
+                  isAgent: userCache[actor]?.ownerPubkey != null,
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: messageAvatarContentGap),
+          if (!ownHuddle) const SizedBox(width: messageAvatarContentGap),
           Expanded(child: content),
         ],
       );
@@ -183,9 +193,14 @@ class _SystemMessageRow extends HookConsumerWidget {
         borderRadius: BorderRadius.circular(Radii.md),
         highlightColor: context.colors.primary.withValues(alpha: 0.1),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          padding: EdgeInsets.only(
+            top: startsDay ? 0 : Grid.xxs,
+            bottom: endsDay ? 0 : Grid.xxs,
+          ),
           child: Column(
-            crossAxisAlignment: isHuddle
+            crossAxisAlignment: ownHuddle
+                ? CrossAxisAlignment.end
+                : isHuddle
                 ? CrossAxisAlignment.start
                 : CrossAxisAlignment.center,
             children: [
@@ -193,18 +208,16 @@ class _SystemMessageRow extends HookConsumerWidget {
                 RepaintBoundary(
                   key: spotlightKey,
                   child: Align(
-                    alignment: isHuddle
+                    alignment: ownHuddle
+                        ? Alignment.centerRight
+                        : isHuddle
                         ? Alignment.centerLeft
                         : Alignment.center,
-                    child: Container(
+                    child: Padding(
                       key: ValueKey('activity-card-${message.id}'),
                       padding: const EdgeInsets.symmetric(
                         horizontal: Grid.twelve,
                         vertical: Grid.xxs,
-                      ),
-                      decoration: BoxDecoration(
-                        color: context.colors.onSurface.withValues(alpha: 0.06),
-                        borderRadius: BorderRadius.circular(Radii.container),
                       ),
                       child: IntrinsicWidth(
                         child: groupedMembership != null
@@ -248,25 +261,32 @@ class _SystemMessageRow extends HookConsumerWidget {
                   overlap: reactions.isNotEmpty ? Grid.xs : 0,
                   footer: reactions.isEmpty
                       ? const SizedBox.shrink()
-                      : Padding(
-                          padding: const EdgeInsets.only(
-                            left:
-                                messageAvatarSize +
-                                messageAvatarContentGap +
-                                Grid.xxs,
-                          ),
-                          child: ReactionRow(
-                            combined: true,
-                            messageId: message.id,
-                            channelId: channelId,
-                            reactions: reactions,
-                            onToggle: (emoji) =>
-                                toggleReaction(ref, message, emoji),
-                            showAddButton: isMember && !isArchived,
-                            onAddReaction: () => showAddReactionPicker(
-                              context: context,
-                              ref: ref,
-                              message: message,
+                      : Align(
+                          alignment: ownHuddle
+                              ? Alignment.centerRight
+                              : Alignment.centerLeft,
+                          child: Padding(
+                            padding: EdgeInsets.only(
+                              left: ownHuddle
+                                  ? 0
+                                  : messageAvatarSize +
+                                        messageAvatarContentGap +
+                                        Grid.xxs,
+                              right: ownHuddle ? Grid.xxs : 0,
+                            ),
+                            child: ReactionRow(
+                              combined: true,
+                              messageId: message.id,
+                              channelId: channelId,
+                              reactions: reactions,
+                              onToggle: (emoji) =>
+                                  toggleReaction(ref, message, emoji),
+                              showAddButton: isMember && !isArchived,
+                              onAddReaction: () => showAddReactionPicker(
+                                context: context,
+                                ref: ref,
+                                message: message,
+                              ),
                             ),
                           ),
                         ),
@@ -613,6 +633,7 @@ class _ThreadSummaryRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return ReplySummaryLink(
       key: ValueKey('thread-summary-${message.id}'),
+      mirrored: currentPubkey?.toLowerCase() == message.pubkey.toLowerCase(),
       summary: summary,
       hasReactions: message.reactions.isNotEmpty,
       onTap: () {

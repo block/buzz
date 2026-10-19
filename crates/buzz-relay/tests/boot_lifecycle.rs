@@ -674,7 +674,10 @@ mod postgres_tests {
     /// passes. Unlike `run_relay`, a relay that keeps serving is a result to
     /// assert on rather than a panic, which is the whole point here.
     fn run_until_exit(environment: &[(&str, &str)], timeout: Duration) -> (bool, Output) {
-        let mut process = RelayProcess::spawn(environment);
+        wait_for_exit(RelayProcess::spawn(environment), timeout)
+    }
+
+    fn wait_for_exit(mut process: RelayProcess, timeout: Duration) -> (bool, Output) {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if process.try_wait().is_some() {
@@ -866,6 +869,189 @@ mod postgres_tests {
         assert!(
             logs.contains("Health probe listener started"),
             "the sampler must be owned by a relay that finished booting: {logs}"
+        );
+    }
+
+    const NIP_FI_ISSUERS: &str = r#"[{
+        "issuer": "https://idp.example.com",
+        "command_audiences": ["https://relay.example.com"],
+        "token_class": "nip-fi+jwt",
+        "algorithms": ["ES256"],
+        "maximum_assertion_age_seconds": 3600,
+        "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+        "jwks_refresh_interval_seconds": 300,
+        "jwks_hard_deadline_seconds": 86400,
+        "maximum_command_age_seconds": 30,
+        "authorized_principals": ["https://idp.example.com/operator"]
+    }]"#;
+    /// A suffix that never covers the relay's own host, so deployment
+    /// bootstrap writes no binding and the startup load is the first reader
+    /// of `community_nip_fi_issuers`.
+    const NIP_FI_PROVISION_BINDING: &str = r#"{"host_suffix":"communities.example.com","authorized_issuers":["https://idp.example.com"]}"#;
+
+    /// Boots the relay with the database community source; `extra` adds or
+    /// overrides variables. Returns the health port alongside the process.
+    fn spawn_database_source(extra: &[(&str, &str)]) -> (RelayProcess, u16) {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("postgres lane provides DATABASE_URL for each test process");
+        let redis_url = std::env::var("REDIS_URL")
+            .expect("the postgres lane runs alongside Redis and exports REDIS_URL");
+        let metrics_port = reserve_closed_port().to_string();
+        let health_port = reserve_closed_port();
+        let health_port_value = health_port.to_string();
+        let bind_addr = format!("127.0.0.1:{}", reserve_closed_port());
+        let mut environment = vec![
+            ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+            ("BUZZ_METRICS_PORT", metrics_port.as_str()),
+            ("BUZZ_HEALTH_PORT", health_port_value.as_str()),
+            ("BUZZ_BIND_ADDR", bind_addr.as_str()),
+            ("DATABASE_URL", database_url.as_str()),
+            ("REDIS_URL", redis_url.as_str()),
+            ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
+            // Shadow: off builds no resolver, so it loads no snapshot.
+            ("BUZZ_NIP_FI_MODE", "shadow"),
+            ("BUZZ_NIP_FI_COMMUNITY_SOURCE", "database"),
+            ("BUZZ_NIP_FI_ISSUERS", NIP_FI_ISSUERS),
+            ("BUZZ_NIP_FI_PROVISION_BINDING", NIP_FI_PROVISION_BINDING),
+            ("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600"),
+        ];
+        environment.extend_from_slice(extra);
+        (RelayProcess::spawn(&environment), health_port)
+    }
+
+    /// Binds `count` active communities under the provision suffix to the
+    /// registered issuer, on the test's own database.
+    fn seed_bindings(count: u32) {
+        use sqlx::Connection as _;
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        runtime.block_on(async {
+            let mut connection = sqlx::PgConnection::connect(&database_url)
+                .await
+                .expect("connect to the test database");
+            // One statement per thousand rows: each insert takes a write-fence
+            // advisory lock per community, held to the end of its transaction.
+            for start in (1..=count).step_by(1000) {
+                sqlx::query(
+                    "WITH c AS (
+                         INSERT INTO communities (id, host)
+                         SELECT gen_random_uuid(), 'c' || n || '.communities.example.com'
+                         FROM generate_series($1, $2) AS n
+                         RETURNING id
+                     )
+                     INSERT INTO community_nip_fi_issuers (community_id, issuer)
+                     SELECT id, 'https://idp.example.com' FROM c",
+                )
+                .bind(i64::from(start))
+                .bind(i64::from(count.min(start + 999)))
+                .execute(&mut connection)
+                .await
+                .expect("seed NIP-FI bindings");
+            }
+        });
+    }
+
+    fn assert_failed_before_listeners(
+        exited: bool,
+        output: &Output,
+        health_port: u16,
+        failure: &str,
+    ) {
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            exited && !output.status.success(),
+            "a failed startup binding load must be startup-fatal: {logs}"
+        );
+        assert!(
+            logs.contains(&format!("startup binding snapshot load failed: {failure}")),
+            "the failure must name the snapshot load and why it failed: {logs}"
+        );
+        assert!(
+            !logs.contains("Health probe listener started"),
+            "no listener may bind before the snapshot loads: {logs}"
+        );
+        assert!(
+            TcpListener::bind(("0.0.0.0", health_port)).is_ok(),
+            "the health port must never have been bound"
+        );
+    }
+
+    /// The database source must never let a pod serve without a snapshot: a
+    /// load that fails exits non-zero before any listener binds, so the
+    /// orchestrator restarts the pod instead of routing to it. Two bindings
+    /// over a one-row cap make the load itself fail after every earlier
+    /// startup step has read the same table successfully.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn database_source_failed_snapshot_stops_boot_before_listeners_bind() {
+        seed_bindings(2);
+        let (process, health_port) =
+            spawn_database_source(&[("BUZZ_NIP_FI_SNAPSHOT_MAX_ROWS", "1")]);
+        let (exited, output) = wait_for_exit(process, CHILD_TIMEOUT);
+        assert_failed_before_listeners(exited, &output, health_port, "OverCap");
+    }
+
+    /// A load that cannot finish in time must hit the refresh timeout and fail
+    /// the same way, rather than leaving the pod waiting unbound. A
+    /// millisecond budget cannot cover a scan of this many rows.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn database_source_slow_snapshot_times_out_before_listeners_bind() {
+        seed_bindings(20_000);
+        let (process, health_port) =
+            spawn_database_source(&[("BUZZ_NIP_FI_SNAPSHOT_REFRESH_TIMEOUT_MS", "1")]);
+        let (exited, output) = wait_for_exit(process, CHILD_TIMEOUT);
+        assert_failed_before_listeners(exited, &output, health_port, "Timeout");
+    }
+
+    /// With a loadable snapshot the same configuration boots and readiness
+    /// turns ready, so the two failure tests above fail for the load alone. One
+    /// seeded binding proves the snapshot reads rows, not just an empty table.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn database_source_snapshot_load_lets_readiness_turn_ready() {
+        seed_bindings(1);
+        let (mut process, health_port) = spawn_database_source(&[]);
+        let deadline = Instant::now() + CHILD_TIMEOUT;
+        let ready = loop {
+            assert!(
+                process.try_wait().is_none(),
+                "relay exited: {}",
+                String::from_utf8_lossy(&process.terminate().stdout)
+            );
+            let response = TcpStream::connect(("127.0.0.1", health_port))
+                .and_then(|mut stream| {
+                    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                    stream.write_all(
+                        b"GET /_readiness HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    )?;
+                    let mut response = String::new();
+                    stream.read_to_string(&mut response)?;
+                    Ok(response)
+                })
+                .unwrap_or_default();
+            if response.starts_with("HTTP/1.1 200") || Instant::now() >= deadline {
+                break response;
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        let output = process.terminate();
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            ready.starts_with("HTTP/1.1 200"),
+            "readiness never turned ready: {ready}: {logs}"
+        );
+        assert!(
+            logs.contains("NIP-FI: binding snapshot loaded"),
+            "readiness must follow the snapshot load: {logs}"
         );
     }
 }

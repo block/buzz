@@ -217,6 +217,11 @@ const scenarios = [
     ["mobile"],
   ],
   ["mobile lockfile", ["mobile/pubspec.lock"], ["mobile"]],
+  [
+    "mobile release source helper",
+    ["scripts/mobile-release-source.sh"],
+    ["mobile"],
+  ],
   ["mobile release script", ["scripts/mobile-release.sh"], ["mobile"]],
   [
     "mobile gateway recipe tests",

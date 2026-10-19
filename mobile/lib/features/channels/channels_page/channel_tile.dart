@@ -86,10 +86,15 @@ class _ChannelTile extends ConsumerWidget {
             ],
             if (isMuted) ...[
               const SizedBox(width: Grid.xxs),
-              Icon(
-                BuzzIcons.bellOff,
-                size: 12,
-                color: context.colors.onSurface.withValues(alpha: 0.4),
+              SizedBox(
+                width: _kChannelIconSize,
+                child: Center(
+                  child: Icon(
+                    BuzzIcons.bellOff,
+                    size: 12,
+                    color: context.colors.onSurface.withValues(alpha: 0.4),
+                  ),
+                ),
               ),
             ],
             if (!channel.isMember && !channel.isDm)

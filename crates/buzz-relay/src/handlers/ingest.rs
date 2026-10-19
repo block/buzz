@@ -2381,6 +2381,18 @@ fn validate_canvas_future_timestamp(event_ts: i64, now: i64) -> Result<(), &'sta
     Ok(())
 }
 
+/// A validated kind:9007 whose channel is created when the event is stored.
+struct ChannelCreateRequest {
+    channel_id: Uuid,
+    name: String,
+    channel_type: buzz_db::channel::ChannelType,
+    visibility: buzz_db::channel::ChannelVisibility,
+    description: Option<String>,
+    ttl_seconds: Option<i32>,
+    labels: Vec<String>,
+    members: Vec<Vec<u8>>,
+}
+
 async fn ingest_event_inner(
     state: &Arc<AppState>,
     tracer: &Arc<dyn buzz_conformance::Tracer>,
@@ -3050,8 +3062,9 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // Track pre-created channel UUID for compensation on insert failure.
-    let mut pre_created_channel: Option<Uuid> = None;
+    // A kind:9007 with an `h` tag creates its channel when it is stored, in the
+    // same transaction (see the storage dispatch below).
+    let mut channel_create: Option<ChannelCreateRequest> = None;
 
     if kind_u32 == KIND_NIP29_CREATE_GROUP {
         // Validate name tag is present and non-empty before any DB work.
@@ -3112,50 +3125,24 @@ async fn ingest_event_inner(
             .unwrap_or_default();
 
         if let Some(client_uuid) = channel_id {
-            let name = create_name.unwrap_or_default();
-            let name = buzz_core::channel::canonical_channel_name(&name);
-
-            let description = event.tags.iter().find_map(|t| {
-                if t.kind().to_string() == "about" {
-                    t.content().map(|s| s.to_string())
-                } else {
-                    None
-                }
+            let members = super::side_effects::initial_members(&event)
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+            channel_create = Some(ChannelCreateRequest {
+                channel_id: client_uuid,
+                name: create_name.unwrap_or_default(),
+                channel_type,
+                visibility,
+                description: event.tags.iter().find_map(|t| {
+                    if t.kind().to_string() == "about" {
+                        t.content().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                }),
+                ttl_seconds: super::resolve_ttl(&event, state.config.ephemeral_ttl_override),
+                labels,
+                members,
             });
-
-            let ttl_seconds = super::resolve_ttl(&event, state.config.ephemeral_ttl_override);
-
-            let actor_bytes = event.pubkey.to_bytes().to_vec();
-            let (_, was_created) = state
-                .db
-                .create_labeled_channel_with_id(
-                    tenant.community(),
-                    client_uuid,
-                    name,
-                    channel_type,
-                    visibility,
-                    description.as_deref(),
-                    &actor_bytes,
-                    ttl_seconds,
-                    &labels,
-                )
-                .await
-                .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
-
-            if !was_created {
-                return Ok(IngestResult {
-                    event_id: event_id_hex,
-                    accepted: false,
-                    message: "duplicate: channel already exists".into(),
-                });
-            }
-            pre_created_channel = Some(client_uuid);
-            metrics::counter!(
-                "buzz_channels_created_total",
-                "community" => tenant.host().to_owned(),
-                "type" => channel_type.to_string()
-            )
-            .increment(1);
         }
     }
 
@@ -3406,7 +3393,49 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
-    let (stored_event, was_inserted) = if workflow_deletion {
+    let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
+        let creator = event.pubkey.to_bytes();
+        let channel = buzz_db::channel::NewChannel {
+            name: &create.name,
+            channel_type: create.channel_type,
+            visibility: create.visibility,
+            description: create.description.as_deref(),
+            created_by: &creator,
+            ttl_seconds: create.ttl_seconds,
+            labels: &create.labels,
+            members: &create.members,
+        };
+        match state
+            .db
+            .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+        {
+            buzz_db::channel::ChannelCreate::Created(stored) => {
+                metrics::counter!(
+                    "buzz_channels_created_total",
+                    "community" => tenant.host().to_owned(),
+                    "type" => create.channel_type.to_string()
+                )
+                .increment(1);
+                (*stored, true)
+            }
+            // Resending a create whose OK was lost confirms it. Anything else
+            // for a taken UUID is refused. Neither writes anything, so the
+            // create's side effects never run again.
+            buzz_db::channel::ChannelCreate::Exists { resent } => {
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: resent,
+                    message: if resent {
+                        "duplicate:".into()
+                    } else {
+                        "duplicate: channel already exists".into()
+                    },
+                });
+            }
+        }
+    } else if workflow_deletion {
         // A single commit owns public acceptance, domain mutation, and dispatch.
         // Failure rolls everything back; identical concurrent requests cannot
         // divide insertion and repair ownership between two relay workers.
@@ -3486,18 +3515,6 @@ async fn ingest_event_inner(
         {
             Ok(result) => result,
             Err(e) => {
-                // Compensate: if we pre-created a channel for kind:9007,
-                // soft-delete it so no orphaned channel row remains.
-                if let Some(ch_id) = pre_created_channel {
-                    if let Err(re) = state
-                        .db
-                        .soft_delete_channel(tenant.community(), ch_id)
-                        .await
-                    {
-                        warn!(event_id = %event_id_hex, "channel compensation failed: {re}");
-                    }
-                    state.invalidate_channel_deleted(tenant);
-                }
                 return Err(match e {
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())

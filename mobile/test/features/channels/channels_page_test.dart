@@ -248,6 +248,98 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  for (final label in ['Channels options', 'Design options']) {
+    testWidgets('$label exposes a labeled button and tap action', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        await tester.pumpWidget(
+          buildTestable(
+            overrides: [
+              channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+              channelSectionsProvider.overrideWith(
+                () => _FakeChannelSectionsNotifier(
+                  const ChannelSectionStore(
+                    sections: [
+                      ChannelSection(
+                        id: 'section-1',
+                        name: 'Design',
+                        icon: '🎨',
+                        order: 0,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        final control = find.bySemanticsLabel(label);
+        expect(control, findsOneWidget);
+        final node = tester.getSemantics(control);
+        expect(node.flagsCollection.isButton, isTrue);
+        expect(
+          node.getSemanticsData().hasAction(ui.SemanticsAction.tap),
+          isTrue,
+        );
+        node.owner!.performAction(node.id, ui.SemanticsAction.tap);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(
+            ValueKey(
+              label == 'Channels options'
+                  ? 'sort-popover-Channels'
+                  : 'section-popover-section-1',
+            ),
+          ),
+          findsOneWidget,
+        );
+      } finally {
+        semantics.dispose();
+      }
+    });
+  }
+
+  testWidgets('section ellipsis aligns with temporary channel icon', (
+    tester,
+  ) async {
+    final temporary = Channel(
+      id: 'temporary',
+      name: 'temporary',
+      channelType: 'stream',
+      visibility: 'open',
+      description: '',
+      createdBy: 'abc',
+      createdAt: DateTime(2025),
+      memberCount: 1,
+      isMember: true,
+      ttlSeconds: 3600,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier([temporary])),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final ellipsis = find.descendant(
+      of: find.byTooltip('Channels options'),
+      matching: find.byIcon(BuzzIcons.ellipsisVertical),
+    );
+    expect(
+      tester.getCenter(ellipsis).dx,
+      closeTo(
+        tester
+            .getCenter(find.byKey(const Key('channel-ephemeral-temporary')))
+            .dx,
+        0.01,
+      ),
+    );
+  });
+
   testWidgets('shows grouped channel list when data loads', (tester) async {
     // Valid fixture keys whose npub encodings were verified against the
     // NIP-19 codec independently of the code under test.
@@ -325,6 +417,17 @@ void main() {
       findsOneWidget,
     );
 
+    expect(
+      tester
+          .getTopRight(
+            find.descendant(
+              of: find.byTooltip('Channels options'),
+              matching: find.byIcon(BuzzIcons.ellipsisVertical),
+            ),
+          )
+          .dx,
+      closeTo(tester.getTopRight(find.byTooltip('Channels options')).dx, 0.01),
+    );
     await tester.tap(find.byTooltip('Channels options'));
     await tester.pumpAndSettle();
     expect(find.text('Sort: Recent'), findsOneWidget);
@@ -986,6 +1089,20 @@ void main() {
         AppTheme.light().colorScheme.onSurface.withValues(alpha: 0.07),
       );
     }
+    expect(
+      tester
+          .getTopRight(
+            find.descendant(
+              of: find.byKey(const Key('section-menu-section-1')),
+              matching: find.byIcon(BuzzIcons.ellipsisVertical),
+            ),
+          )
+          .dx,
+      closeTo(
+        tester.getTopRight(find.byKey(const Key('section-menu-section-1'))).dx,
+        0.01,
+      ),
+    );
     await tester.tap(find.byKey(const Key('section-menu-section-1')));
     await tester.pumpAndSettle();
 

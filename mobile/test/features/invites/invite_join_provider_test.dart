@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -53,6 +54,9 @@ void main() {
       expect(requests, 0);
       expect(await storage.loadAll(), isEmpty);
     },
+    skip: !HostedEnvironment.requiresAuth(
+      'team.communities.public.builderlabstaging.xyz',
+    ),
   );
 
   for (final existingRelayUrl in [
