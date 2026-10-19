@@ -71,10 +71,10 @@ class _IosPresenceMenuState extends State<IosPresenceMenu> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final route = ModalRoute.of(context);
-    if (identical(route, _route)) return;
+    if (route != null && identical(route, _route)) return;
     _listenToRoute(route);
-    // A route that is about to be pushed still reports its predecessor's
-    // completed animation while it first builds, so decide after this frame.
+    // A newly pushed route can still report a completed animation while it
+    // first builds, so decide once that frame has been laid out.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _syncRouteSettled();
     });

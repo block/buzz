@@ -146,6 +146,13 @@ void main() {
           find.byKey(const ValueKey('settings-presence-menu')),
           findsNothing,
         );
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('settings-presence-target')),
+            matching: find.text('Offline'),
+          ),
+          findsOneWidget,
+        );
       } else {
         await tester.tap(find.byType(ProfileAvatar));
       }
