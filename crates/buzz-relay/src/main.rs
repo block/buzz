@@ -295,23 +295,15 @@ where
     }
 }
 
-/// Prompt retries allowed while an empty catch-all awaits advancement. With the
-/// 5 s to 60 s backoff they span about five minutes, after which the normal
-/// period applies until the catch-all no longer awaits advancement.
+/// Prompt retries allowed while rows timestamped now route to an empty catch-all
+/// awaiting advancement. With the 5 s to 60 s backoff they span about five
+/// minutes, after which the normal period applies until that changes.
 const PARTITION_ADVANCE_RETRY_LIMIT: u32 = 8;
 
-/// Whether the next maintenance pass would advance an empty catch-all.
-fn partition_advance_pending(
-    policy: buzz_db::partition::PartitionMaintenancePolicy,
-    audit: &PartitionAudit,
-) -> bool {
-    policy.create_enabled && policy.advance_enabled && audit.awaits_catch_all_advance()
-}
-
 /// Retry missing diagnostics promptly, without tying audit recovery to readiness.
-/// Also retries promptly, a bounded number of times, while an empty catch-all
-/// awaits advancement, so a failed first pass on a fresh install does not wait
-/// a full period. Delays start after each attempt finishes, so slow audits
+/// Also retries promptly, a bounded number of times, while the current month
+/// routes to an empty catch-all awaiting advancement, so a failed first pass on
+/// a fresh install does not wait a full period. Delays start after each attempt finishes, so slow audits
 /// cannot cause bursts.
 struct PartitionAuditSchedule {
     period: std::time::Duration,
@@ -947,7 +939,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
     let startup_partition_attempt = startup_partition_audit
         .as_ref()
-        .map(|audit| partition_advance_pending(partition_policy, audit));
+        .map(|audit| audit.awaits_catch_all_advance(partition_policy));
     if let Some(audit) = startup_partition_audit {
         state.record_partition_audit(audit);
     }
@@ -986,7 +978,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                     result
                         .as_ref()
                         .ok()
-                        .map(|audit| partition_advance_pending(partition_policy, audit)),
+                        .map(|audit| audit.awaits_catch_all_advance(partition_policy)),
                 );
                 match result {
                     Ok(audit) => partition_state.record_partition_audit(audit),

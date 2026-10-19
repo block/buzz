@@ -225,23 +225,6 @@ impl PartitionTableAudit {
             .count()
     }
 
-    /// Whether an empty catch-all still serves an audited month, so a
-    /// maintenance pass with advancement enabled would replace it.
-    ///
-    /// False once any catch-all holds rows: that case needs an operator, and
-    /// retrying cannot fix it.
-    pub fn awaits_catch_all_advance(&self) -> bool {
-        self.nonempty_catch_all_count() == 0
-            && self.children.iter().any(|child| {
-                child.kind == PartitionChildKind::CatchAll
-                    && child.catch_all_nonempty == Some(false)
-            })
-            && self
-                .months
-                .iter()
-                .any(|month| month.kind == MonthCoverageKind::CoveredByCatchAll)
-    }
-
     /// Number of root children whose `DEFAULT` subtree contains at least one row.
     pub fn nonempty_default_count(&self) -> usize {
         self.children
@@ -397,14 +380,6 @@ impl PartitionAudit {
                 .iter()
                 .any(|leaf| leaf_covers_timestamp(leaf, &timestamp))
         })
-    }
-
-    /// Whether any managed parent still has an empty catch-all serving an
-    /// audited month. See [`PartitionTableAudit::awaits_catch_all_advance`].
-    pub fn awaits_catch_all_advance(&self) -> bool {
-        self.tables
-            .iter()
-            .any(PartitionTableAudit::awaits_catch_all_advance)
     }
 }
 
@@ -1986,33 +1961,6 @@ mod tests {
             months,
             serving_safe,
         }
-    }
-
-    #[test]
-    fn awaits_catch_all_advance_only_while_an_empty_catch_all_serves_a_month() {
-        let before = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
-        assert!(!repaired_incident_audit("events", before).awaits_catch_all_advance());
-
-        // October's three-month lookahead reaches January, which the catch-all serves.
-        let now = Utc.with_ymd_and_hms(2026, 10, 15, 12, 0, 0).unwrap();
-        let mut events = repaired_incident_audit("events", now);
-        assert!(events.awaits_catch_all_advance());
-        let audit = PartitionAudit {
-            audited_at: now,
-            tables: vec![
-                repaired_incident_audit("delivery_log", before),
-                events.clone(),
-            ],
-        };
-        assert!(audit.awaits_catch_all_advance());
-
-        // Rows in the catch-all need an operator; retrying cannot advance it.
-        for child in &mut events.children {
-            if child.kind == PartitionChildKind::CatchAll {
-                child.catch_all_nonempty = Some(true);
-            }
-        }
-        assert!(!events.awaits_catch_all_advance());
     }
 
     #[test]
