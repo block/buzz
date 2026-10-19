@@ -104,10 +104,7 @@ class HostedAdmission {
           ..followRedirects = false
           ..headers.addAll(headers)
           ..body = body;
-        final response = await _http
-            .send(request)
-            .timeout(const Duration(seconds: 30));
-        await readJoinResponse(response);
+        await readJoinResponse(_http, request);
         checkCurrent();
       } on HostedInviteFailure catch (failure) {
         if (failure == HostedInviteFailure.policyRequired) rethrow;

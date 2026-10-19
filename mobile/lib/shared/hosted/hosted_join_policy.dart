@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'builderlab_account.dart';
+import 'bounded_http_response.dart';
 
 /// Public policy text bound to the exact version the user accepts.
 class HostedJoinPolicy {
@@ -20,21 +21,17 @@ enum HostedInviteFailure { policyRequired, expired, exhausted, invalid }
 
 /// Reads only a bounded JSON document, never follows redirects or logs bodies.
 Future<Map<String, dynamic>> readJoinResponse(
-  http.StreamedResponse response,
+  http.Client client,
+  http.Request request,
 ) async {
-  final bytes = <int>[];
-  await for (final chunk in response.stream.timeout(
-    const Duration(seconds: 30),
-  )) {
-    if (bytes.length + chunk.length > 65536) {
-      throw AccountFailure.invalidResponse;
-    }
-    bytes.addAll(chunk);
-  }
-  Map<String, dynamic> data;
+  final http.Response response;
+  final Map<String, dynamic> data;
   try {
-    data = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
-  } catch (_) {
+    response = await boundedHttpResponse(client, request);
+    data = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+  } on FormatException {
+    throw AccountFailure.invalidResponse;
+  } on TypeError {
     throw AccountFailure.invalidResponse;
   }
   if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -71,10 +68,7 @@ Future<String?> freshJoinPolicyReceipt({
       request.headers['Content-Type'] = 'application/json';
       request.body = jsonEncode(body);
     }
-    final response = await client
-        .send(request)
-        .timeout(const Duration(seconds: 30));
-    final data = await readJoinResponse(response);
+    final data = await readJoinResponse(client, request);
     checkCurrent();
     return data;
   }

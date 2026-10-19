@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -48,19 +49,31 @@ abstract final class NsecTransfer {
   /// The OS share target owns any copy the user chooses to save or send.
   static Future<bool> shareFile(String nsec, Rect origin) async {
     preview(nsec);
-    if (Platform.isAndroid) {
+    if (defaultTargetPlatform == TargetPlatform.android) {
       return await const MethodChannel('buzz/identity_file').invokeMethod<bool>(
             'export',
             {'text': '${nsec.trim()}\n', 'name': 'buzz-identity.nsec'},
           ) ??
           false;
     }
-    final directory = await (await getTemporaryDirectory()).createTemp(
-      'buzz-identity-',
-    );
+    // iOS must apply protection when the secret is first written, not after it.
+    final File file;
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      final path = await const MethodChannel(
+        'buzz/identity_file',
+      ).invokeMethod<String>('prepareExport', {'text': '${nsec.trim()}\n'});
+      if (path == null) throw PlatformException(code: 'export_failed');
+      file = File(path);
+    } else {
+      final directory = await (await getTemporaryDirectory()).createTemp(
+        'buzz-identity-',
+      );
+      file = File('${directory.path}/buzz-identity.nsec');
+    }
     try {
-      final file = File('${directory.path}/buzz-identity.nsec');
-      await file.writeAsString('${nsec.trim()}\n', flush: true);
+      if (defaultTargetPlatform != TargetPlatform.iOS) {
+        await file.writeAsString('${nsec.trim()}\n', flush: true);
+      }
       final result = await SharePlus.instance.share(
         ShareParams(
           files: [XFile(file.path, mimeType: 'text/plain')],
@@ -69,7 +82,7 @@ abstract final class NsecTransfer {
       );
       return result.status == ShareResultStatus.success;
     } finally {
-      await directory.delete(recursive: true);
+      await file.parent.delete(recursive: true);
     }
   }
 }

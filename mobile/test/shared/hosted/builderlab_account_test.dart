@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'hosted_http_fixture.dart';
 import 'dart:convert';
 
 import 'package:buzz/shared/hosted/builderlab_account.dart';
@@ -60,6 +61,48 @@ void main() {
       );
     },
   );
+
+  testWidgets('total deadline releases account queue despite trickling body', (
+    tester,
+  ) async {
+    final transport = TrickleClient(
+      (request) => http.Response(
+        jsonEncode(
+          request.url.path.endsWith('/exchange')
+              ? {'session_credential': 'secret', 'expires_at': expiry}
+              : {'subject': 'account-1', 'expires_at': expiry},
+        ),
+        200,
+      ),
+    );
+    final client = BuilderlabAccountClient(httpClient: transport);
+    addTearDown(client.dispose);
+    Object? failure;
+    var cleared = false;
+    unawaited(
+      client
+          .exchange(code: 'code', verifier: verifier)
+          .then<void>(
+            (_) => fail('trickling response must not complete'),
+            onError: (Object error) => failure = error,
+          ),
+    );
+    unawaited(client.clearLocalSession().then((_) => cleared = true));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 20));
+    await tester.pump(const Duration(seconds: 5));
+    expect(failure, isNull);
+    expect(cleared, isFalse);
+    await tester.pump(const Duration(seconds: 5));
+    expect(failure, AccountFailure.unavailable);
+    expect(transport.aborted, isTrue);
+    expect(transport.cancelled, isTrue);
+    expect(cleared, isTrue);
+    transport.slow = false;
+    final retry = client.exchange(code: 'retry', verifier: verifier);
+    await tester.pump();
+    expect((await retry).subject, 'account-1');
+  });
 
   test('invalid verification cannot persist an exchanged credential', () async {
     final transport = MockClient(

@@ -52,10 +52,23 @@ final class IdentityFilePluginTests: XCTestCase {
     let manager = FileManager.default
     // Matches path_provider_foundation 2.6.0 getTemporaryPath().
     let exportRoot = try XCTUnwrap(manager.urls(for: .cachesDirectory, in: .userDomainMask).first)
-    let interrupted = exportRoot.appendingPathComponent("buzz-identity-\(UUID().uuidString)")
+    // Exercise the production method-channel writer, not a lookalike fixture.
+    let exporter = IdentityFilePlugin(messenger: messenger)
+    var exportedPath: String?
+    messenger.invoke("prepareExport", arguments: ["text": "synthetic-export-not-a-key\n"]) {
+      exportedPath = $0 as? String
+    }
+    let exported = URL(fileURLWithPath: try XCTUnwrap(exportedPath))
+    let interrupted = exported.deletingLastPathComponent()
+    XCTAssertEqual(interrupted.deletingLastPathComponent().standardizedFileURL, exportRoot.standardizedFileURL)
+    XCTAssertEqual(try String(contentsOf: exported, encoding: .utf8), "synthetic-export-not-a-key\n")
+    #if !targetEnvironment(simulator)
+    // Simulator does not implement iOS Data Protection attributes.
+    let attributes = try manager.attributesOfItem(atPath: exported.path)
+    XCTAssertEqual(attributes[.protectionKey] as? FileProtectionType, .complete)
+    #endif
+    withExtendedLifetime(exporter) {}
     let unrelated = exportRoot.appendingPathComponent("unrelated-\(UUID().uuidString)")
-    try manager.createDirectory(at: interrupted, withIntermediateDirectories: true)
-    try Data("synthetic-export-not-a-key".utf8).write(to: interrupted.appendingPathComponent("buzz-identity.nsec"))
     try Data("keep".utf8).write(to: unrelated)
     defer {
       try? manager.removeItem(at: interrupted)
@@ -158,8 +171,11 @@ private final class IdentityFileTestMessenger: NSObject, FlutterBinaryMessenger 
   }
   func cleanUpConnection(_ connection: FlutterBinaryMessengerConnection) { handler = nil }
   func invokeImport(reply: @escaping (Any?) -> Void) {
+    invoke("import", arguments: nil, reply: reply)
+  }
+  func invoke(_ method: String, arguments: Any?, reply: @escaping (Any?) -> Void) {
     let codec = FlutterStandardMethodCodec.sharedInstance()
-    handler?(codec.encode(FlutterMethodCall(methodName: "import", arguments: nil))) { data in
+    handler?(codec.encode(FlutterMethodCall(methodName: method, arguments: arguments))) { data in
       reply(data.flatMap { codec.decodeEnvelope($0) })
     }
   }

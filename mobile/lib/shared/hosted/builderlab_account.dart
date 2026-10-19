@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
+import 'bounded_http_response.dart';
 import '../relay/relay_session.dart';
 import 'account_identity_store.dart';
 
@@ -305,9 +306,7 @@ class BuilderlabAccountClient {
           );
         }
       }
-      final response = await _http
-          .send(request)
-          .timeout(const Duration(seconds: 30));
+      final response = await boundedHttpResponse(_http, request);
       if (kDebugMode && response.statusCode >= 400) {
         debugPrint(
           'Builderlab ${origin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
@@ -321,16 +320,7 @@ class BuilderlabAccountClient {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw AccountFailure.unavailable;
       }
-      final bytes = <int>[];
-      await for (final chunk in response.stream.timeout(
-        const Duration(seconds: 30),
-      )) {
-        if (bytes.length + chunk.length > 65536) {
-          throw AccountFailure.invalidResponse;
-        }
-        bytes.addAll(chunk);
-      }
-      final value = jsonDecode(utf8.decode(bytes));
+      final value = jsonDecode(utf8.decode(response.bodyBytes));
       if (value is! Map<String, dynamic>) throw AccountFailure.invalidResponse;
       return value;
     } on AccountFailure {

@@ -1,5 +1,7 @@
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'dart:async';
+import 'hosted_http_fixture.dart';
+import 'package:buzz/shared/hosted/hosted_join_policy.dart';
 import 'dart:convert';
 
 import 'package:buzz/shared/deeplink/deep_link.dart';
@@ -135,6 +137,41 @@ void main() {
       );
     });
   }
+
+  testWidgets('total policy deadline cancels body and permits policy retry', (
+    tester,
+  ) async {
+    final transport = TrickleClient((_) => http.Response('{}', 200));
+    Future<String?> policy() => freshJoinPolicyReceipt(
+      client: transport,
+      origin: Uri.parse(invite.relayUrl),
+      code: invite.code,
+      confirm: (_) async =>
+          fail('incomplete policy must never request consent'),
+      checkCurrent: () {},
+    );
+    Object? failure;
+    unawaited(
+      policy().then<void>(
+        (_) => fail('trickling policy must not complete'),
+        onError: (Object error) {
+          failure = error;
+        },
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 20));
+    await tester.pump(const Duration(seconds: 5));
+    expect(failure, isNull);
+    await tester.pump(const Duration(seconds: 5));
+    expect(failure, isA<TimeoutException>());
+    expect(transport.aborted, isTrue);
+    expect(transport.cancelled, isTrue);
+    transport.slow = false;
+    final retry = policy();
+    await tester.pump();
+    expect(await retry, isNull);
+  });
 
   test('cancellation during binding prevents external claim', () async {
     await store.create(keys.nsec);

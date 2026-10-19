@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/identity_transfer/nsec_transfer.dart';
@@ -112,6 +114,50 @@ void main() {
         ),
         throwsA(AccountIdentityFailure.mismatch),
       );
+
+      // Continue through the real share coordinator; only native boundaries
+      // are synthetic here. Native tests assert the file's protection class.
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      const channel = MethodChannel('buzz/identity_file');
+      const shareChannel = MethodChannel('dev.fluttercommunity.plus/share');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final root = await Directory.systemTemp.createTemp('nsec-export-test-');
+      addTearDown(() async {
+        debugDefaultTargetPlatformOverride = null;
+        messenger.setMockMethodCallHandler(channel, null);
+        messenger.setMockMethodCallHandler(shareChannel, null);
+        await root.delete(recursive: true);
+      });
+      File? prepared;
+      var failPrepare = false;
+      var failShare = false;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        expect(call.method, 'prepareExport');
+        expect(call.arguments, {'text': '${keys.nsec}\n'});
+        if (failPrepare) throw PlatformException(code: 'export_failed');
+        final directory = await root.createTemp('buzz-identity-');
+        prepared = File('${directory.path}/buzz-identity.nsec');
+        await prepared!.writeAsString('${keys.nsec}\n');
+        return prepared!.path;
+      });
+      messenger.setMockMethodCallHandler(shareChannel, (call) async {
+        expect(call.method, 'share');
+        expect(call.arguments['paths'], [prepared!.path]);
+        expect(await prepared!.readAsString(), '${keys.nsec}\n');
+        if (failShare) throw PlatformException(code: 'share_failed');
+        return 'com.apple.UIKit.activity.SaveToFiles';
+      });
+      Future<bool> shareFile() =>
+          NsecTransfer.shareFile(keys.nsec, const Rect.fromLTWH(0, 0, 10, 10));
+      expect(await shareFile(), isTrue);
+      expect(await prepared!.parent.exists(), isFalse);
+      failShare = true;
+      await expectLater(shareFile(), throwsA(isA<PlatformException>()));
+      expect(await prepared!.parent.exists(), isFalse);
+      failPrepare = true;
+      prepared = null; // Any accidental share after prepare fails is an error.
+      await expectLater(shareFile(), throwsA(isA<PlatformException>()));
     },
   );
 }

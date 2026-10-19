@@ -21,11 +21,38 @@ final class IdentityFilePlugin: NSObject, UIDocumentPickerDelegate,
         result(FlutterError(code: "import_failed", message: nil, details: nil))
         return
       }
+      if call.method == "prepareExport" {
+        self.prepareExport(call.arguments, result: result)
+        return
+      }
       guard call.method == "import" else {
         result(FlutterMethodNotImplemented)
         return
       }
       self.pick(result: result)
+    }
+  }
+
+  /// Write the share source with complete protection from its first byte.
+  /// Dart owns normal cleanup; startup handles a process killed during sharing.
+  private func prepareExport(_ arguments: Any?, result: FlutterResult) {
+    guard let arguments = arguments as? [String: Any],
+      let text = arguments["text"] as? String,
+      !text.isEmpty, text.utf8.count <= 1024,
+      let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+    else {
+      result(FlutterError(code: "export_failed", message: nil, details: nil))
+      return
+    }
+    let directory = root.appendingPathComponent("buzz-identity-\(UUID().uuidString)")
+    do {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+      let file = directory.appendingPathComponent("buzz-identity.nsec")
+      try Data(text.utf8).write(to: file, options: [.atomic, .completeFileProtection])
+      result(file.path)
+    } catch {
+      try? FileManager.default.removeItem(at: directory)
+      result(FlutterError(code: "export_failed", message: nil, details: nil))
     }
   }
 
