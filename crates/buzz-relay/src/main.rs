@@ -2087,19 +2087,23 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 ///    grace, this backstops the whole drain and force-exits the process if
 ///    exceeded. It bounds everything after the grace, not the grace itself.
 ///
-/// A single WebSocket can therefore stay open, from SIGTERM, for up to:
+/// Each socket's teardown after the grace runs in stages, each with its own
+/// budget:
 ///
-/// ```text
-///   5s grace  +  up to 20s jitter  +  up to 5s close-frame ack  +  up to 1s peer wait  =  31s
-///   (fixed)      (MAX_DRAIN_JITTER_MS)  (RESTART_CLOSE_ACK_TIMEOUT)  (WS_TERMINAL_FLUSH_TIMEOUT)
-/// ```
+/// - up to 20s jitter before the relay sends its restart Close
+///   ([`buzz_relay::config::MAX_DRAIN_JITTER_MS`]);
+/// - up to 5s for the writer to acknowledge sending that Close
+///   (`RESTART_CLOSE_ACK_TIMEOUT` in `state.rs`). If the acknowledgement
+///   times out, the connection is cancelled and its teardown can spend a
+///   separate 1s flushing the terminal frame (`WS_TERMINAL_FLUSH_TIMEOUT` in
+///   `connection.rs`);
+/// - up to 1s waiting for the client's Close reply (the same constant). This
+///   wait starts only once the reader has returned and the writer has joined.
 ///
-/// The 5s grace runs before the 30s hard-drain clock starts, so the jitter
-/// (capped at [`buzz_relay::config::MAX_DRAIN_JITTER_MS`] = 20s), the
-/// per-connection close-frame ack wait (`RESTART_CLOSE_ACK_TIMEOUT` = 5s in
-/// `state.rs`) and the bounded wait for the client's Close reply
-/// (`WS_TERMINAL_FLUSH_TIMEOUT` = 1s in `connection.rs`) sum to 26s and stay
-/// inside the 30s hard drain. Total worst
+/// These are stage budgets, not a guaranteed per-socket total: after a
+/// successful acknowledgement nothing cancels the reader, so a silent peer
+/// does not go straight into the peer wait. The 30s hard drain is what bounds
+/// every socket. Total worst
 /// case from SIGTERM to forced exit is 5s + 30s = 35s. Both fit inside the
 /// chart's `terminationGracePeriodSeconds: 60` (`deploy/charts/buzz/values.yaml`),
 /// which leaves headroom but assumes no `preStop` hook adds further delay.

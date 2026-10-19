@@ -510,8 +510,9 @@ fn hand_off_socket(
 /// An admission error frame followed by the Close that ends the socket, so
 /// the client gets a clean close handshake instead of waiting out the
 /// bounded peer wait for a Close that never comes. `code` is
-/// `close_code::POLICY` (1008) for a refusal and `close_code::ERROR` (1011)
-/// for a server-side failure.
+/// `close_code::POLICY` (1008) for a refusal, `close_code::ERROR` (1011)
+/// for a server-side failure and `close_code::RESTART` (1012) when the relay
+/// is draining and the client should reconnect.
 fn error_exit_frames(error: serde_json::Value, code: u16) -> [WsMessage; 2] {
     [WsMessage::Text(error.to_string().into()), exit_close(code)]
 }
@@ -1026,15 +1027,14 @@ async fn run_active_audio_connection(
                 shadow_attempt.refused();
                 crate::connection::send_exit_frames_bounded(
                     &mut ws_send,
-                    [WsMessage::Text(
+                    error_exit_frames(
                         serde_json::json!({
                             "type": "error",
                             "code": "huddle_relay_draining",
                             "message": "relay is draining; reconnect"
-                        })
-                        .to_string()
-                        .into(),
-                    )],
+                        }),
+                        axum::extract::ws::close_code::RESTART,
+                    ),
                 )
                 .await;
                 return;
@@ -1087,15 +1087,14 @@ async fn run_active_audio_connection(
                     );
                     crate::connection::send_exit_frames_bounded(
                         &mut ws_send,
-                        [WsMessage::Text(
+                        error_exit_frames(
                             serde_json::json!({
                                 "type": "error",
                                 "code": "join_rejected",
                                 "message": "huddle join rejected"
-                            })
-                            .to_string()
-                            .into(),
-                        )],
+                            }),
+                            axum::extract::ws::close_code::ERROR,
+                        ),
                     )
                     .await;
                     return;
@@ -1115,15 +1114,14 @@ async fn run_active_audio_connection(
                 );
                 crate::connection::send_exit_frames_bounded(
                     &mut ws_send,
-                    [WsMessage::Text(
+                    error_exit_frames(
                         serde_json::json!({
                             "type": "error",
                             "code": "huddle_audio_unavailable",
                             "message": "huddle audio unavailable in this deployment"
-                        })
-                        .to_string()
-                        .into(),
-                    )],
+                        }),
+                        axum::extract::ws::close_code::POLICY,
+                    ),
                 )
                 .await;
                 return;
@@ -5421,6 +5419,13 @@ mod tests {
     /// Reads `BUZZ_TEST_DATABASE_URL`; falls back to the local development URL.
     /// Returns `None` if the resolved database is not reachable.
     async fn audio_test_state_real_db() -> Option<std::sync::Arc<crate::state::AppState>> {
+        audio_test_state_real_db_with(|_| {}).await
+    }
+
+    /// `audio_test_state_real_db` with a final `configure` pass over the config.
+    async fn audio_test_state_real_db_with(
+        configure: impl FnOnce(&mut crate::config::Config),
+    ) -> Option<std::sync::Arc<crate::state::AppState>> {
         use std::sync::Arc;
         let db_url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| {
             "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string() // sadscan:disable np.postgres.1 -- local test-only credentials
@@ -5433,6 +5438,7 @@ mod tests {
         config.require_relay_membership = false;
         config.database_url = db_url.clone();
         config.redis_url = "redis://127.0.0.1:1".to_string();
+        configure(&mut config);
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
@@ -14238,6 +14244,39 @@ mod tests {
             let close = close.expect("close frame carries a reason");
             assert_eq!(u16::from(close.code), 1008);
             assert_eq!(close.reason.as_str(), "access revoked");
+        }
+
+        /// A deployment without huddle audio refuses the join with its error
+        /// frame and then a Close 1008, so the client gets a clean handshake
+        /// instead of waiting out the peer wait.
+        /// Mutation: drop the Close from the refusal → no Close frame → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn huddle_audio_unavailable_sends_error_then_policy_close() {
+            let state = audio_test_state_real_db_with(|c| c.huddle_audio_available = false)
+                .await
+                .expect(
+                    "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+                );
+            let (tenant, channel_id, key) = seed_audio_fixture(state.db.pool()).await;
+            let (mut client, server) =
+                start_audio_auth(&state, tenant, channel_id, &key, None, None).await;
+
+            let error = next_audio_text(&mut client).await;
+            assert!(
+                error.contains("\"huddle_audio_unavailable\""),
+                "expected the unavailable refusal; got {error}"
+            );
+            match tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+                .await
+                .expect("close must follow the refusal")
+            {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(Some(frame)))) => {
+                    assert_eq!(u16::from(frame.code), 1008)
+                }
+                other => panic!("expected Close 1008 after the refusal; got {other:?}"),
+            }
+            server.abort();
         }
 
         /// Adds `key` as a member of the audio fixture's channel.
