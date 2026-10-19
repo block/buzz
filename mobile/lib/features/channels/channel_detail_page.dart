@@ -937,9 +937,10 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                               }
                               var recipients = mentionPubkeys;
                               if (personalChat) {
-                                if (mePlacement?.asData?.value.channels
-                                        .contains(channel.id) !=
-                                    true) {
+                                if (!resolvedChannel.isSolo &&
+                                    mePlacement?.asData?.value.channels
+                                            .contains(channel.id) !=
+                                        true) {
                                   throw StateError(
                                     'Refresh Solo before sending to this chat.',
                                   );

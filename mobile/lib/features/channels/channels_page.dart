@@ -232,10 +232,11 @@ class ChannelsPage extends HookConsumerWidget {
     if (channelsAsync.asData?.value case final data?) {
       cachedChannels.value = data;
     }
+    final soloViewer = ref.watch(myPubkeyProvider);
     final personalIds =
         ref.watch(meGroupsProvider).asData?.value.channels ?? const <String>[];
     final channels = cachedChannels.value
-        ?.where((channel) => !personalIds.contains(channel.id))
+        ?.where((channel) => !channel.isPersonalChat(soloViewer, personalIds))
         .toList();
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;

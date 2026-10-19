@@ -490,10 +490,11 @@ ChannelDetails channelDetailsFromEvent(NostrEvent event) {
     id: data.id,
     name: data.name,
     channelType: data.channelType,
+    labels: data.labels,
     visibility: data.visibility,
     description: data.description,
     topic: data.topic,
-    createdBy: event.pubkey,
+    createdBy: data.creator ?? event.pubkey,
     createdAt: eventTime,
     memberCount: 0,
     // Same archival-timestamp convention as `_channelFromMeta` — the event's

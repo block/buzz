@@ -10596,6 +10596,52 @@ void main() {
     expect(sender.sent, isEmpty);
   });
 
+  for (final own in [true, false]) {
+    testWidgets('label-only Solo uses owner-aware sending: $own', (
+      tester,
+    ) async {
+      final ordinary = _RecordingOrdinarySender(),
+          solo = _RecordingOrdinarySender();
+      final channel = Channel(
+        id: _channelId,
+        name: 'Labeled Solo',
+        channelType: 'stream',
+        visibility: 'private',
+        labels: const ['buzz.solo'],
+        description: '',
+        createdBy: own ? 'self' : 'other',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [],
+          channel: channel,
+          signingPubkey: 'self',
+          personalChat: own,
+          organization: Stream.value(const MeGroups()),
+          sender: ordinary,
+          soloSender: solo,
+          members: [
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2026),
+            ),
+          ],
+          home: ChannelDetailPage(channel: channel),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester
+          .widget<ComposeBar>(find.byType(ComposeBar))
+          .onSend('Label message', own ? ['agent'] : []);
+      expect(own ? solo.sent : ordinary.sent, ['Label message']);
+      expect(own ? ordinary.sent : solo.sent, isEmpty);
+    });
+  }
+
   testWidgets('identified Solo sends through the Solo sender', (tester) async {
     final ordinary = _RecordingOrdinarySender(),
         solo = _RecordingOrdinarySender();

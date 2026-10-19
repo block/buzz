@@ -607,10 +607,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       id: data.id,
       name: data.name,
       channelType: data.channelType,
+      labels: data.labels,
       visibility: data.visibility,
       description: data.description,
       topic: data.topic,
-      createdBy: event.pubkey,
+      createdBy: data.creator ?? event.pubkey,
       createdAt: DateTime.fromMillisecondsSinceEpoch(
         event.createdAt * 1000,
         isUtc: true,
