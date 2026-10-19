@@ -207,7 +207,10 @@ A client that knows system channels sends one more filter:
 ```
 
 The `#p` rule for 44100/44101 still applies: it must be the reader's own
-pubkey. The tag comes from the channel type when the relay sends the notice.
+pubkey. An `ids` filter does not lift it: the relay returns, counts or
+delivers a 44100/44101 only to the pubkey in its `p` tag, even to a reader
+who knows the event id. The tag comes from the channel type when the relay
+sends the notice.
 
 Because the notices are stored, a client that reconnects can set `since` to
 the newest notice it has seen. One subscription then returns the notices it

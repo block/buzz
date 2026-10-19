@@ -174,14 +174,13 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
-    // Owner-only kinds (kind:30622 DM visibility, kind:44200 agent turn
-    // metrics) reach only the pubkey named in their `p` tag. Same predicate as
-    // the pull paths, applied here so local and Redis delivery share it — a
-    // kindless `ids:[…]` subscription can otherwise match these events.
+    // Owner-only kinds (`RESULT_GATED_KINDS`: DM visibility, agent turn
+    // metrics, membership notices) reach only the pubkey named in their `p`
+    // tag. Same predicate as the pull paths, applied here so local and Redis
+    // delivery share it — a kindless `ids:[…]` subscription can otherwise
+    // match these events.
     let kind = event_kind_u32(&stored_event.event);
-    let matches = if kind == buzz_core::kind::KIND_DM_VISIBILITY
-        || kind == buzz_core::kind::KIND_AGENT_TURN_METRIC
-    {
+    let matches = if buzz_core::kind::RESULT_GATED_KINDS.contains(&kind) {
         matches
             .into_iter()
             .filter(|(conn_id, _)| {

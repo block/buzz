@@ -454,34 +454,45 @@ async fn system_channel_notices_reach_only_filters_that_ask() {
     let asks = json!({"kinds": kinds, "#p": [member_hex], "#t": ["system"]});
 
     // The member's live global subscriptions: one as clients send today, one
-    // that asks for system notices.
-    let conn_id = Uuid::new_v4();
-    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-    f.state.conn_manager.register(
-        conn_id,
-        tx,
-        tokio::sync::mpsc::channel(4).0,
-        tokio::sync::mpsc::channel(1).0,
-        None,
-        tokio_util::sync::CancellationToken::new(),
-        f.tenant.community(),
-        Arc::new(std::sync::atomic::AtomicU8::new(0)),
-        Arc::new(tokio::sync::Mutex::new(Default::default())),
-        3,
-        crate::state::CommunityConnectionControl::new(tokio_util::sync::CancellationToken::new()),
-    );
-    f.state
-        .conn_manager
-        .set_authenticated_pubkey(conn_id, member.public_key().to_bytes().to_vec());
-    for (sub, filter) in [("old", &old), ("asks", &asks)] {
-        f.state.sub_registry.register_scoped(
-            f.tenant.community(),
+    // that asks for system notices. An outsider also holds a subscription
+    // that asks. It is registered directly, as if some filter (for example a
+    // kindless `ids` lookup) had been admitted, so only the fan-out gate can
+    // keep the notices from it.
+    let register = |reader: &Keys, subs: &[(&str, &Value)]| {
+        let conn_id = Uuid::new_v4();
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        f.state.conn_manager.register(
             conn_id,
-            sub.into(),
-            vec![serde_json::from_value(filter.clone()).expect("filter")],
+            tx,
+            tokio::sync::mpsc::channel(4).0,
+            tokio::sync::mpsc::channel(1).0,
             None,
+            tokio_util::sync::CancellationToken::new(),
+            f.tenant.community(),
+            Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            Arc::new(tokio::sync::Mutex::new(Default::default())),
+            3,
+            crate::state::CommunityConnectionControl::new(
+                tokio_util::sync::CancellationToken::new(),
+            ),
         );
-    }
+        f.state
+            .conn_manager
+            .set_authenticated_pubkey(conn_id, reader.public_key().to_bytes().to_vec());
+        for (sub, filter) in subs {
+            f.state.sub_registry.register_scoped(
+                f.tenant.community(),
+                conn_id,
+                (*sub).into(),
+                vec![serde_json::from_value((*filter).clone()).expect("filter")],
+                None,
+            );
+        }
+        rx
+    };
+    let mut rx = register(&member, &[("old", &old), ("asks", &asks)]);
+    let outsider = Keys::generate();
+    let mut outsider_rx = register(&outsider, &[("outsider", &json!({"#t": ["system"]}))]);
 
     let system = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
     let ordinary = create_channel(&f.state, &f.tenant, &owner, &[]).await;
@@ -594,6 +605,40 @@ async fn system_channel_notices_reach_only_filters_that_ask() {
     let mut since = asks.clone();
     since["since"] = json!(0);
     assert_eq!(sorted(req(&f, &member, since).await), system_notices);
+
+    // Knowing a notice's id is not authorization: only its target reads,
+    // counts or receives it, with or without `kinds`.
+    // Mutation: drop 44100/44101 from RESULT_GATED_KINDS → RED.
+    assert!(
+        outsider_rx.try_recv().is_err(),
+        "live fan-out reached a non-target"
+    );
+    let by_id = |with_kinds: bool| {
+        let mut filter = json!({"ids": system_notices, "#t": ["system"]});
+        if with_kinds {
+            filter["kinds"] = json!(kinds);
+        }
+        filter
+    };
+    for with_kinds in [true, false] {
+        let filter = by_id(with_kinds);
+        assert!(
+            req(&f, &outsider, filter.clone()).await.is_empty(),
+            "{filter}"
+        );
+        assert_eq!(count(&f, &outsider, filter.clone()).await, 0, "{filter}");
+        assert!(
+            bridge_ids(bridge(&f, &outsider, "/query", json!([filter])).await).is_empty(),
+            "{filter}"
+        );
+        assert_eq!(
+            bridge_count(bridge(&f, &outsider, "/count", json!([filter])).await),
+            0,
+            "{filter}"
+        );
+    }
+    // The target's own kindless id lookup still works.
+    assert_eq!(sorted(req(&f, &member, by_id(false)).await), system_notices);
 }
 
 /// The database hides system notices unless the query asks, so a read path
