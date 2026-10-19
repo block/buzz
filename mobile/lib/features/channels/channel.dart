@@ -11,6 +11,8 @@ const privateChannelAddDeniedMessage =
 class Channel {
   final String id;
   final String name;
+
+  /// NIP-CL labels from metadata; presentation hints, never access grants.
   final List<String> labels;
   final String channelType; // "stream", "forum", "dm"
   final String visibility; // "open", "private"
@@ -196,6 +198,8 @@ class Channel {
 class ChannelDetails {
   final String id;
   final String name;
+
+  /// NIP-CL labels from metadata; presentation hints, never access grants.
   final List<String> labels;
   final String channelType;
   final String visibility;

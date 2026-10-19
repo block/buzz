@@ -234,6 +234,7 @@ NostrEvent _edit({
 );
 
 Widget _buildTestable({
+  bool useRealChannelProviders = false,
   ProfileNotifier? profileNotifier,
   String? signingPubkey,
   bool darkTheme = false,
@@ -355,14 +356,16 @@ Widget _buildTestable({
         myPubkeyProvider.overrideWithValue(signingPubkey),
       if (presenceCache != null)
         presenceCacheProvider.overrideWith(() => presenceCache),
-      channelsProvider.overrideWith(() => fakeChannelsNotifier),
+      if (!useRealChannelProviders)
+        channelsProvider.overrideWith(() => fakeChannelsNotifier),
       channelStarsProvider.overrideWith(_FakeChannelStarsNotifier.new),
       channelMutesProvider.overrideWith(_FakeChannelMutesNotifier.new),
-      channelDetailsProvider(_channelId).overrideWith(
-        (ref) async =>
-            channelDetails?.call() ??
-            ChannelDetails.fromChannel(resolvedChannel),
-      ),
+      if (!useRealChannelProviders)
+        channelDetailsProvider(_channelId).overrideWith(
+          (ref) async =>
+              channelDetails?.call() ??
+              ChannelDetails.fromChannel(resolvedChannel),
+        ),
       channelCanvasProvider(_channelId).overrideWith(
         (ref) async => ChannelCanvas(
           content: canvasContent,
@@ -561,6 +564,95 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  testWidgets(
+    'refresh replaces stale Solo details before opening and sending',
+    (tester) async {
+      final session = _SoloMetadataRelaySession();
+      final solo = _RecordingOrdinarySender();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [],
+          personalChat: true,
+          signingPubkey: session.creator,
+          useRealChannelProviders: true,
+          disableRetries: true,
+          relaySessionNotifier: session,
+          organization: Stream.value(const MeGroups()),
+          soloSender: solo,
+          members: [
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2026),
+            ),
+          ],
+          home: Consumer(
+            builder: (context, ref, _) => Scaffold(
+              body: TextButton(
+                onPressed: () async {
+                  await ref.read(channelsProvider.notifier).refresh();
+                  if (!context.mounted) return;
+                  await Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChannelDetailPage(
+                        channel: ref.read(channelsProvider).requireValue.single,
+                        personalChat: true,
+                      ),
+                    ),
+                  );
+                },
+                child: const Text('Open refreshed Solo'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Open refreshed Solo')),
+      );
+      final initial = container.read(channelsProvider.future);
+      await tester.pumpAndSettle();
+      await initial;
+      final details = container.read(channelDetailsProvider(_channelId).future);
+      await tester.pumpAndSettle();
+      final stale = await details;
+      expect(stale.labels, isEmpty);
+      session.solo = true;
+      await tester.tap(find.text('Open refreshed Solo'));
+      await tester.pumpAndSettle();
+      await tester.widget<ComposeBar>(find.byType(ComposeBar)).onSend(
+        'After refresh',
+        ['agent'],
+      );
+      expect(solo.sent, ['After refresh']);
+      expect(
+        (await container.read(
+          channelDetailsProvider(_channelId).future,
+        )).labels,
+        ['buzz.solo'],
+      );
+      session.solo = false;
+      final refresh = container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      await refresh;
+      expect(
+        (await container.read(
+          channelDetailsProvider(_channelId).future,
+        )).labels,
+        isEmpty,
+      );
+      await expectLater(
+        tester.widget<ComposeBar>(find.byType(ComposeBar)).onSend(
+          'After conversion',
+          ['agent'],
+        ),
+        throwsStateError,
+      );
+      expect(solo.sent, ['After refresh']);
+    },
+  );
+
   _loadingReviewTests();
   threadReplyRefreshTests();
   threadTitleCapsuleTests();
@@ -17771,4 +17863,77 @@ class _RecordingOrdinarySender implements SendMessage {
   }) async {
     sent.add(content);
   }
+}
+
+class _SoloMetadataRelaySession extends RelaySessionNotifier {
+  final fixture =
+      jsonDecode(File('../test-fixtures/solo-creation.json').readAsStringSync())
+          as Map<String, dynamic>;
+  String get creator => fixture['creator'] as String;
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [
+    for (final filter in filters)
+      ...await fetchHistory(filter, timeout: timeout),
+  ];
+  bool solo = false;
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (filter.kinds.contains(39002)) {
+      return [
+        NostrEvent(
+          id: 'membership',
+          pubkey: 'relay',
+          createdAt: 1,
+          kind: 39002,
+          tags: [
+            ['d', _channelId],
+            ['p', creator],
+          ],
+          content: '',
+          sig: '',
+        ),
+      ];
+    }
+    if (filter.kinds.contains(39000)) {
+      return [
+        NostrEvent(
+          id: solo ? 'new' : 'old',
+          pubkey: 'relay',
+          createdAt: solo ? 2 : 1,
+          kind: 39000,
+          tags: [
+            ['d', _channelId],
+            ['name', 'Solo'],
+            ['private'],
+            if (solo) ...[
+              for (final tag in fixture['identity_tags'] as List)
+                List<String>.from(tag as List),
+            ] else ...[
+              ['t', 'stream'],
+              ['P', creator],
+            ],
+          ],
+          content: '',
+          sig: '',
+        ),
+      ];
+    }
+    return [];
+  }
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function()? onEose,
+    void Function(String)? onClosed,
+  }) async => () {};
 }

@@ -348,6 +348,37 @@ mod tests {
     }
 
     #[test]
+    fn desktop_solo_creation_preserves_mobile_identity_contract() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-fixtures/solo-creation.json"))
+                .expect("Solo creation fixture");
+        let tags: Vec<Vec<String>> = serde_json::from_value(fixture["creation"]["tags"].clone())
+            .expect("captured production command tags");
+        let labels = super::parse_channel_labels(
+            tags.iter()
+                .filter(|tag| tag[0] == "t")
+                .map(|tag| tag[1].as_str()),
+        )
+        .expect("valid creation labels");
+        let channel_type = tags
+            .iter()
+            .find(|tag| tag[0] == "channel_type")
+            .expect("creation type")[1]
+            .as_str();
+        let creator =
+            hex::decode(fixture["creator"].as_str().expect("creator")).expect("creator hex");
+        let actual: Vec<Vec<String>> = group_state_identity_tags(channel_type, &labels, &creator)
+            .expect("relay identity tags")
+            .into_iter()
+            .map(|tag| tag.to_vec())
+            .collect();
+        assert_eq!(
+            serde_json::to_value(actual).expect("identity JSON"),
+            fixture["identity_tags"]
+        );
+    }
+
+    #[test]
     fn group_state_identity_tags_put_the_type_first_then_labels_then_the_creator() {
         let creator = [0xab; 32];
         let labels = vec!["workspace".to_string(), "team:core".to_string()];

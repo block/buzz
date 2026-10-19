@@ -276,7 +276,11 @@ class ChannelData {
   final String id;
   final String name;
   final String channelType;
+
+  /// NIP-CL labels in `t` tags after the leading channel-type tag.
   final List<String> labels;
+
+  /// Original channel creator from the relay-authored uppercase `P` tag.
   final String? creator;
   final String visibility;
   final String description;
