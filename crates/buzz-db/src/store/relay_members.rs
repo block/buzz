@@ -1170,13 +1170,7 @@ pub(crate) async fn write_nip43_membership_snapshot(
     .bind(d_tag.as_deref())
     .execute(tx.conn())
     .await?;
-    crate::store::event_follow_up::after_admitted_insert(
-        tx,
-        event.id.as_bytes().as_slice(),
-        kind_i32,
-        None,
-    )
-    .await?;
+    crate::store::event_follow_up::after_admitted_insert(tx, &event, None).await?;
 
     Ok(StoredEvent::with_received_at(
         event,

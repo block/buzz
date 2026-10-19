@@ -579,6 +579,16 @@ async fn upload_blob_result(
         auth.tenant.host(),
     );
 
+    state
+        .db
+        .record_media_uploader(
+            serving_write.lease(),
+            &descriptor.sha256,
+            auth.auth_event.pubkey.as_bytes(),
+        )
+        .await
+        .map_err(|error| serving_lease_lost(error.into()))?;
+
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
         "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4" => {
@@ -2144,11 +2154,13 @@ mod tests {
         const TEST_ISSUER: &str = "https://issuer.example";
         const TEST_AUDIENCE: &str = "https://relay.example";
         const TEST_KID: &str = "test-key-1";
-        const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-            MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-            WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-            zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-            -----END PRIVATE KEY-----\n";
+        const TEST_EC_PKCS8_PEM: &str = concat!(
+            "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- static test-only key
+            "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+            "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+            "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+            "-----END PRIVATE KEY-----\n",
+        );
 
         /// Build an AppState with NIP-FI Enforce and a real injected P-256 verifier.
         async fn media_enforce_test_state() -> Option<Arc<AppState>> {

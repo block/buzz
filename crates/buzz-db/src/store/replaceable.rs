@@ -383,8 +383,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         .execute(tx.conn())
         .await?;
     if status == ParameterizedReplaceStatus::Inserted {
-        crate::store::event_follow_up::after_admitted_insert(tx, incoming_id, kind_i32, channel_id)
-            .await?;
+        crate::store::event_follow_up::after_admitted_insert(tx, event, channel_id).await?;
     }
 
     Ok(ParameterizedReplaceResult::new(
@@ -547,13 +546,8 @@ impl Db {
                     ));
                 }
 
-                crate::store::event_follow_up::after_admitted_insert(
-                    &mut tx,
-                    event.id.as_bytes().as_slice(),
-                    kind_i32,
-                    channel_id,
-                )
-                .await?;
+                crate::store::event_follow_up::after_admitted_insert(&mut tx, event, channel_id)
+                    .await?;
 
                 // The replaceable event and its denormalized mention index are one
                 // authoritative discovery write. An indexing error must roll back the

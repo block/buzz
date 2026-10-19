@@ -100,6 +100,15 @@ enum Command {
         #[arg(long, default_value_t = 10_000_000)]
         max_objects: u64,
     },
+    /// Record media shares for events stored before share recording existed.
+    ///
+    /// Idempotent and resumable; run once after deploying share recording and
+    /// before enforcing channel-scoped media reads.
+    BackfillMediaShares {
+        /// Events read and recorded per transaction.
+        #[arg(long, default_value_t = 1000)]
+        batch_size: i64,
+    },
     /// Run the partition catalog audit using a read-only database session.
     PartitionAudit {
         /// Future months to include in the coverage check.
@@ -193,6 +202,14 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Command::StorageSnapshot { max_objects } => cmd_storage_snapshot(max_objects).await,
+        Command::BackfillMediaShares { batch_size } => {
+            let added = connect_db()
+                .await?
+                .backfill_media_shares(batch_size)
+                .await?;
+            println!("Recorded {added} media shares.");
+            Ok(0)
+        }
         Command::PartitionAudit { months_ahead } => cmd_partition_audit(months_ahead).await,
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
