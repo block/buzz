@@ -251,6 +251,22 @@ mod postgres_tests {
         format!("{:064x}", Uuid::new_v4().as_u128())
     }
 
+    async fn upload(db: &Db, community: CommunityId, uploader: &Keys, sha256: &str) {
+        let lease = db
+            .deletion_store()
+            .acquire_serving_write_lease(
+                community,
+                "media_upload",
+                "media-shares-test",
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("acquire lease");
+        db.record_media_uploader(&lease, sha256, &uploader.public_key().to_bytes())
+            .await
+            .expect("record uploader");
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn stored_references_share_only_blobs_their_author_can_read() {
@@ -260,6 +276,7 @@ mod postgres_tests {
         let private = channel(&db, community, &alice, ChannelVisibility::Private).await;
         let bobs = channel(&db, community, &bob, ChannelVisibility::Open).await;
 
+        upload(&db, community, &alice, &sha).await;
         db.insert_event(
             community,
             &attachment(&alice, &sha, Some(private)),
@@ -278,19 +295,7 @@ mod postgres_tests {
             "a hash alone must not share a blob its author cannot read"
         );
 
-        let lease = db
-            .deletion_store()
-            .acquire_serving_write_lease(
-                community,
-                "media_upload",
-                "media-shares-test",
-                Duration::from_secs(60),
-            )
-            .await
-            .expect("acquire lease");
-        db.record_media_uploader(&lease, &sha, &bob.public_key().to_bytes())
-            .await
-            .expect("bob uploads the same bytes");
+        upload(&db, community, &bob, &sha).await;
         db.insert_event(community, &attachment(&bob, &sha, Some(bobs)), Some(bobs))
             .await
             .expect("bob posts his copy");
