@@ -316,6 +316,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       myPk,
     );
 
+    // Name resolution may return without a fenced read; check before writing.
+    fence.ensureCurrent();
     _hiddenDmIds = Set.unmodifiable(hiddenDmIds);
     final huddleBackingIds = huddleBackingChannelIds(
       huddleStarts,

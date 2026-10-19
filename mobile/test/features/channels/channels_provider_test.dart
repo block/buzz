@@ -754,11 +754,12 @@ void main() {
     final container = _buildContainer(session: session);
     addTearDown(container.dispose);
 
-    // Park three of the four reads. Any of them waiting on another would leave
-    // that one unsent.
+    // Park all four reads. Any of them waiting on another would leave that one
+    // unsent.
     final metadataGate = session.metadataGate = Completer<void>();
     session.pauseNextHiddenDmQuery();
     session.pauseNextMemberCountQuery();
+    session.pauseNextHuddleStartQuery();
     final load = container.read(channelsProvider.future);
     await _settle();
 
@@ -781,6 +782,7 @@ void main() {
     metadataGate.complete();
     session.resumePausedHiddenDmQuery();
     session.resumePausedMemberCountQuery();
+    session.resumePausedHuddleStartQuery();
     expect((await load).map((channel) => channel.id), [_channelA]);
   });
 
