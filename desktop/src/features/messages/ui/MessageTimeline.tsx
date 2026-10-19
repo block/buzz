@@ -432,6 +432,21 @@ const MessageTimelineBase = React.forwardRef<
     },
     [onVirtualizerAtBottomStateChange, queueSemanticBottom],
   );
+  const hasPendingLiveRows = bufferedTimeline.pendingCount > 0;
+  React.useEffect(() => {
+    // With nothing buffered, the freeze is a model no-op, so the synthetic
+    // bottom report the suppression waits for never arrives. Disarm it, and
+    // release if the reader already came back, so a single scroll back to
+    // the floor (scrollbar jump, End key) does not strand the tail frozen.
+    if (isSemanticallyAtBottom || hasPendingLiveRows) return;
+    suppressNextSemanticBottomRef.current = false;
+    if (isAtBottom) queueSemanticBottom(true);
+  }, [
+    hasPendingLiveRows,
+    isAtBottom,
+    isSemanticallyAtBottom,
+    queueSemanticBottom,
+  ]);
 
   const timelineIntroSurface = showTimelineError
     ? null

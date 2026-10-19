@@ -926,3 +926,52 @@ test("live tail arrivals stay buffered while reading and release on jump", async
   await page.getByTestId("message-scroll-to-latest").click();
   await expect(page.getByText("buffered live tail sentinel")).toBeVisible();
 });
+
+test("a single scroll back to the bottom releases the live tail", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  await page.evaluate(() => {
+    for (let index = 0; index < 20; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `single-return seed ${index}\nsecond line ${index}`,
+        createdAt: 1_700_000_000 + index,
+      });
+    }
+  });
+  await page.getByTestId("channel-general").click();
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText("single-return seed 19");
+  const distanceFromBottom = () =>
+    timeline.evaluate(
+      (element) =>
+        element.scrollHeight - element.clientHeight - element.scrollTop,
+    );
+  await expect.poll(distanceFromBottom).toBeLessThanOrEqual(1);
+
+  // Leave the bottom, then come back in one native scroll event, as a
+  // scrollbar jump, End key, or Playwright's scroll-into-view retry does.
+  await timeline.evaluate((element) => {
+    element.scrollTop -= 150;
+  });
+  await expect(page.getByTestId("message-scroll-to-latest")).toBeVisible();
+  await timeline.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(page.getByTestId("message-scroll-to-latest")).toHaveCount(0);
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: "single-return live sentinel",
+      createdAt: 1_800_000_000,
+    });
+  });
+  await expect(page.getByText("single-return live sentinel")).toBeVisible();
+  await expect(page.getByTestId("message-scroll-to-latest")).toHaveCount(0);
+});
