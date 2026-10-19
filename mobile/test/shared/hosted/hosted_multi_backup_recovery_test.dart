@@ -46,7 +46,7 @@ void main() {
     FlutterSecureStorage.setMockInitialValues({
       'buzz_communities': communityJson,
     });
-    store = AccountIdentityStore();
+    store = AccountIdentityStore(subject: 'a');
     recoveryCalls = 0;
     recoveryStatus = 200;
     duringRecovery = null;
@@ -183,13 +183,16 @@ void main() {
       await store.create(keys[1].nsec);
       final resolver = await service();
       expect((await resolver.resolve()).state, HostedIdentityState.mismatch);
-      await store.confirmBackup(
-        BackupReceipt(
-          backend: BuilderlabAccountClient.origin.origin,
-          subject: 'another-account',
-          pubkey: keys[1].public,
-          backupId: 'other-account-backup',
+      await expectLater(
+        store.confirmBackup(
+          BackupReceipt(
+            backend: BuilderlabAccountClient.origin.origin,
+            subject: 'another-account',
+            pubkey: keys[1].public,
+            backupId: 'other-account-backup',
+          ),
         ),
+        throwsA(AccountIdentityFailure.mismatch),
       );
       expect((await resolver.resolve()).state, HostedIdentityState.mismatch);
       expect(recoveryCalls, 0);
@@ -218,6 +221,7 @@ void main() {
         HostedIdentityState.needsSelection,
       );
       recovery['backups'] = [backup(0)];
+      listedKeys = [keys[0].public];
       expect(
         (await resolver.resolve(selectedPubkey: keys[1].public)).state,
         HostedIdentityState.needsSelection,
@@ -230,6 +234,7 @@ void main() {
     'duplicate backups of one key do not create an ambiguous choice',
     () async {
       recovery['backups'] = [backup(0), backup(0, id: 'duplicate')];
+      listedKeys = [keys[0].public];
       final result = await (await service()).resolve();
       expect(result.state, HostedIdentityState.needsBinding);
       expect(result.pubkey, keys[0].public);
@@ -265,6 +270,8 @@ void main() {
 
   for (final scenario in [
     'partial',
+    'omitted',
+    'unexpected',
     'malformed',
     'mismatched',
     'refused',
@@ -275,6 +282,12 @@ void main() {
       switch (scenario) {
         case 'partial':
           recovery['failed_backup_ids'] = ['unreadable'];
+        case 'omitted':
+          bound = null;
+          recovery['backups'] = [backup(0)];
+        case 'unexpected':
+          bound = null;
+          listedKeys = [keys[0].public];
         case 'malformed':
           (recovery['backups'] as List)[1]['secret_key'] = 'invalid';
         case 'mismatched':
@@ -286,12 +299,12 @@ void main() {
           recovery['backups'] = [];
       }
       final resolver = await service();
-      if (scenario == 'partial' || scenario == 'empty') {
+      if (['partial', 'omitted', 'unexpected', 'empty'].contains(scenario)) {
         expect(
           (await resolver.resolve()).state,
-          scenario == 'partial'
-              ? HostedIdentityState.recoveryBlocked
-              : HostedIdentityState.needsAuthoritativeAbsence,
+          scenario == 'empty'
+              ? HostedIdentityState.needsAuthoritativeAbsence
+              : HostedIdentityState.recoveryBlocked,
         );
       } else {
         await expectLater(

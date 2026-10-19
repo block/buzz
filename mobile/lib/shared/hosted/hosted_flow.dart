@@ -336,7 +336,7 @@ class HostedFlow extends ChangeNotifier {
     }
 
     check();
-    await store.create(nsec, checkCurrent: check);
+    await store.forPairing(pubkey).create(nsec, checkCurrent: check);
     check();
     final relay = uri.replace(scheme: 'wss').toString();
     final target = AddCommunityDeepLink(relayUrl: relay, name: community.name);
@@ -440,6 +440,7 @@ class HostedFlow extends ChangeNotifier {
     if ((target == null && !accountOnly) || session == null) {
       throw AccountFailure.signedOut;
     }
+    final store = this.store.forSubject(session.subject);
     if (target != null && !_acceptTarget(target)) return;
     if (target == null && _batchSubject != session.subject) {
       _clearCommunityBatch();
@@ -447,7 +448,7 @@ class HostedFlow extends ChangeNotifier {
     }
     var resolved = await identity.resolve(
       isCurrent: _isCurrent(generation),
-      selectedPubkey: selectedPubkey,
+      selectedPubkey: selectedPubkey ?? _pairedPubkey,
     );
     if (_pairedPubkey != null && resolved.pubkey != _pairedPubkey) {
       _set(HostedFlowStage.blocked, HostedFlowProblem.identityMismatch);

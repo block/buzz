@@ -73,7 +73,7 @@ class AccountIdentitySnapshot {
       backup?.pubkey == pubkey;
 }
 
-/// Single create-only AccountKey slot per configured backend. Exact-key retries
+/// Create-only AccountKey slots per backend and authenticated subject. Exact-key retries
 /// are idempotent; they never discard or replace an existing backup receipt. Does not choose or mutate legacy
 /// community identities. Migration must explicitly resolve a candidate first.
 ///
@@ -82,8 +82,37 @@ class AccountIdentitySnapshot {
 /// app isolate. Native extensions/other isolates must not write this slot:
 /// FlutterSecureStorage does not provide a cross-process compare-and-set.
 class AccountIdentityStore {
-  AccountIdentityStore({FlutterSecureStorage? storage})
-    : _storage = storage ?? accountSecureStorage;
+  AccountIdentityStore({FlutterSecureStorage? storage, String? subject})
+    : _storage = storage ?? accountSecureStorage,
+      _subject = subject,
+      _pairingPubkey = null;
+
+  AccountIdentityStore._paired(this._storage, this._pairingPubkey)
+    : _subject = null;
+
+  final String? _subject;
+  final String? _pairingPubkey;
+
+  /// Retain a transferred key before account login without occupying any
+  /// account slot or replacing a previous pending transfer.
+  AccountIdentityStore forPairing(String pubkey) {
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(pubkey)) {
+      throw AccountIdentityFailure.invalidKey;
+    }
+    return AccountIdentityStore._paired(_storage, pubkey);
+  }
+
+  /// Pin an operation to its authenticated account, never a mutable session.
+  AccountIdentityStore forSubject(String subject) {
+    if (subject.isEmpty) throw AccountIdentityFailure.mismatch;
+    return AccountIdentityStore(storage: _storage, subject: subject);
+  }
+
+  String get _key => _pairingPubkey != null
+      ? '${storageKey}_pairing_$_pairingPubkey'
+      : _subject == null
+      ? storageKey
+      : '${storageKey}_subject_${base64Url.encode(utf8.encode(_subject))}';
 
   static final storageKey =
       'buzz_account_identity_${HostedEnvironment.origin.host.replaceAll('.', '_')}_v1';
@@ -155,6 +184,57 @@ class AccountIdentityStore {
         return updated.snapshot;
       });
 
+  static bool _isIdentityKey(String key) =>
+      key == storageKey ||
+      key.startsWith('${storageKey}_subject_') ||
+      key.startsWith('${storageKey}_pairing_');
+
+  AccountIdentityStore _atKey(String key) => key == storageKey
+      ? AccountIdentityStore(storage: _storage)
+      : key.startsWith('${storageKey}_pairing_')
+      ? forPairing(key.substring('${storageKey}_pairing_'.length))
+      : forSubject(
+          utf8.decode(
+            base64Url.decode(key.substring('${storageKey}_subject_'.length)),
+          ),
+        );
+
+  /// Saved account keys offered for explicit reuse, including pre-scope keys.
+  Future<List<AccountIdentitySnapshot>> identities() => _serialized(() async {
+    final records = await _storage.readAll();
+    final identities = <String, AccountIdentitySnapshot>{};
+    for (final key in records.keys.where(_isIdentityKey)) {
+      final record = await _atKey(key)._read();
+      if (record != null) identities[record.pubkey] = record.snapshot;
+    }
+    return identities.values.toList();
+  });
+
+  /// Copy a chosen saved account key without deleting its original owner.
+  Future<AccountIdentitySnapshot> adoptSaved(
+    String pubkey, {
+    required void Function() checkCurrent,
+  }) async => create(await _savedNsec(pubkey), checkCurrent: checkCurrent);
+
+  /// Supplies only the explicitly selected saved key to an admission service.
+  Future<T> withSavedIdentity<T>(
+    String pubkey,
+    Future<T> Function(String nsec) operation,
+  ) async => operation(await _savedNsec(pubkey));
+
+  Future<String> _savedNsec(String pubkey) => _serialized(() async {
+    try {
+      final records = await _storage.readAll();
+      for (final key in records.keys.where(_isIdentityKey)) {
+        final record = await _atKey(key)._read();
+        if (record?.pubkey == pubkey) return record!.nsec;
+      }
+    } catch (_) {
+      throw AccountIdentityFailure.unreadable;
+    }
+    throw AccountIdentityFailure.absent;
+  });
+
   /// Service-only signing/export boundary. Do not return keys from this closure
   /// to a provider/widget. Avoid reentering this store inside the callback.
   Future<T> withKeys<T>(Future<T> Function(nostr.Keys keys) operation) =>
@@ -166,17 +246,32 @@ class AccountIdentityStore {
 
   Future<_Record?> _read() async {
     try {
-      final raw = await _storage.read(key: storageKey);
+      final raw = await _storage.read(key: _key);
+      // Preserve the old record. Only a receipt for this exact account can
+      // authorize its automatic migration; other keys remain explicit choices.
+      if (raw == null && _subject != null) {
+        final legacy = await AccountIdentityStore(storage: _storage)._read();
+        if (legacy?.backup?.subject == _subject &&
+            legacy?.backup?.backend == HostedEnvironment.origin.origin) {
+          await _write(legacy!);
+          return legacy;
+        }
+      }
       if (raw == null) return null;
       final value = jsonDecode(raw) as Map<String, dynamic>;
       if (value['version'] != 1) throw AccountIdentityFailure.unreadable;
       final nsec = value['nsec'] as String;
       final pubkey = _keys(nsec).public;
-      if (value['pubkey'] != pubkey) throw AccountIdentityFailure.unreadable;
+      if (value['pubkey'] != pubkey ||
+          (_pairingPubkey != null && _pairingPubkey != pubkey)) {
+        throw AccountIdentityFailure.unreadable;
+      }
       final receipt = value['backup'] == null
           ? null
           : BackupReceipt._decode(value['backup']);
-      if (receipt != null && receipt.pubkey != pubkey) {
+      if (receipt != null &&
+          (receipt.pubkey != pubkey ||
+              (_subject != null && receipt.subject != _subject))) {
         throw AccountIdentityFailure.unreadable;
       }
       return _Record(nsec, pubkey, receipt);
@@ -186,6 +281,12 @@ class AccountIdentityStore {
   }
 
   Future<void> _write(_Record record) async {
+    if ((_pairingPubkey != null && record.pubkey != _pairingPubkey) ||
+        (_subject != null &&
+            record.backup != null &&
+            record.backup!.subject != _subject)) {
+      throw AccountIdentityFailure.mismatch;
+    }
     final raw = jsonEncode({
       'version': 1,
       'nsec': record.nsec,
@@ -193,8 +294,8 @@ class AccountIdentityStore {
       'backup': record.backup?._json(),
     });
     try {
-      await _storage.write(key: storageKey, value: raw);
-      if (await _storage.read(key: storageKey) != raw) {
+      await _storage.write(key: _key, value: raw);
+      if (await _storage.read(key: _key) != raw) {
         throw AccountIdentityFailure.unreadable;
       }
     } catch (_) {

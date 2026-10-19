@@ -38,6 +38,23 @@ void main() {
         );
         expect(await store.withKeys((keys) async => keys.public), key.public);
         expect((await store.create(key.nsec)).pubkey, key.public);
+        // Existing receipt migrates only to its owner; another account has
+        // an independent create-only slot and cannot replace the first key.
+        final owner = store.forSubject('account-a');
+        final otherAccount = store.forSubject('account-b');
+        expect((await owner.read())!.pubkey, key.public);
+        expect(await otherAccount.read(), isNull);
+        final otherKey = nostr.Keys('2'.padLeft(64, '0'));
+        await otherAccount.create(otherKey.nsec);
+        expect((await owner.read())!.pubkey, key.public);
+        expect((await store.read())!.pubkey, key.public);
+        expect((await otherAccount.read())!.pubkey, otherKey.public);
+        await store.forPairing(key.public).create(key.nsec);
+        await store.forPairing(otherKey.public).create(otherKey.nsec);
+        expect((await store.identities()).map((item) => item.pubkey).toSet(), {
+          key.public,
+          otherKey.public,
+        });
       },
     );
   }

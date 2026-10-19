@@ -29,7 +29,7 @@ void main() {
   setUp(() {
     FlutterSecureStorage.setMockInitialValues({});
     account = _Account(keys.public);
-    store = AccountIdentityStore();
+    store = AccountIdentityStore(subject: 'owner');
     claims = [];
     admission = HostedAdmission(
       account: account,

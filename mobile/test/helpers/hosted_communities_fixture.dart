@@ -67,7 +67,7 @@ class WidgetDiscoveryAccount extends BuilderlabAccountClient {
 
 class HostedCommunitiesFixture {
   final keys = nostr.Keys('1'.padLeft(64, '0'));
-  final store = AccountIdentityStore();
+  AccountIdentityStore get store => AccountIdentityStore(subject: subject);
   final browser = DiscoveryBrowser();
   late BuilderlabAccountClient account;
   late final HostedFlow flow;

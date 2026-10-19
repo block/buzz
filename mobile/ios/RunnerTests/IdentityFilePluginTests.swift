@@ -47,9 +47,23 @@ final class IdentityFilePluginTests: XCTestCase {
   @MainActor
   func testPickerResolvesPresenterAtRequestAndCancelsExactlyOnce() async throws {
     let messenger = IdentityFileTestMessenger()
+    // A previous process died with a share open. Startup must remove only its
+    // export directory, while preserving unrelated temporary documents.
+    let manager = FileManager.default
+    let interrupted = manager.temporaryDirectory.appendingPathComponent("buzz-identity-\(UUID().uuidString)")
+    let unrelated = manager.temporaryDirectory.appendingPathComponent("unrelated-\(UUID().uuidString)")
+    try manager.createDirectory(at: interrupted, withIntermediateDirectories: true)
+    try Data("synthetic-export-not-a-key".utf8).write(to: interrupted.appendingPathComponent("buzz-identity.nsec"))
+    try Data("keep".utf8).write(to: unrelated)
+    defer {
+      try? manager.removeItem(at: interrupted)
+      try? manager.removeItem(at: unrelated)
+    }
     // Initialize before this window exists: registrar startup timing must not
     // permanently prevent later user-triggered presentation.
     let plugin = IdentityFilePlugin(messenger: messenger)
+    XCTAssertFalse(manager.fileExists(atPath: interrupted.path))
+    XCTAssertTrue(manager.fileExists(atPath: unrelated.path))
     let (window, parent) = try makeWindow()
     defer { window.isHidden = true }
     var responses = 0

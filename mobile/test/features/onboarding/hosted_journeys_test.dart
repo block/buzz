@@ -8,6 +8,8 @@ import 'package:buzz/features/onboarding/hosted_profile_setup.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/account_identity_store.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
@@ -359,6 +361,37 @@ void main() {
     requiresAuthDomain: true,
   );
 
+  for (final boundAccount in [false, true]) {
+    journey(
+      'switch accounts preserves both keys and requires unbound reuse consent ($boundAccount)',
+      (tester, f) async {
+        await f.initialize();
+        final original = f.store;
+        await f.mount(tester);
+        await f.container.read(builderlabAccountProvider).clearLocalSession();
+        f.subject = 'new-owner';
+        f.bound = boundAccount ? f.secondKeys.public : null;
+        if (boundAccount) f.cloudKeys.add(f.secondKeys);
+        await f.tap(tester, 'Continue with Builderlab');
+        if (!boundAccount) {
+          expect(find.text('Saved account identity'), findsOneWidget);
+          expect(f.sent('/verify'), isEmpty);
+          expect(f.sent('/nsec-backups'), isEmpty);
+          expect(await f.store.read(), isNull);
+          await f.tap(tester, fullNpub(f.keys.public)!);
+        }
+        final saved = (await f.store.read())!;
+        expect(
+          saved.pubkey,
+          boundAccount ? f.secondKeys.public : f.keys.public,
+        );
+        expect(saved.backup!.subject, 'new-owner');
+        expect((await original.read())!.pubkey, f.keys.public);
+        expect((await original.read())!.backup!.subject, 'journey-owner');
+      },
+    );
+  }
+
   journey(
     'choose second cloud identity, dismiss profile, retry remaining batch without losing keys',
     (tester, f) async {
@@ -480,6 +513,12 @@ void main() {
       expect(await f.storage.loadActiveId(), saved.id);
       expect(f.probes, hasLength(1));
       expect(f.sent('/claim'), isEmpty);
+      expect(
+        (await const FlutterSecureStorage().readAll()).keys.where(
+          (key) => key.startsWith('buzz_pending_self_hosted_'),
+        ),
+        isEmpty,
+      );
       // Reopening an interrupted self-hosted invite follows legacy recovery.
       await f.storage.save(saved.copyWith(starterSetupIncomplete: true));
       f.container.invalidate(communityListProvider);
@@ -504,6 +543,22 @@ void main() {
       expect(f.sent('/claim'), isEmpty);
 
       expect(find.byType(OnboardingAppEntry), findsNothing);
+      await f.container
+          .read(communityListProvider.notifier)
+          .removeCommunity(saved.id);
+      await AccountIdentityStore(
+        subject: 'other-owner',
+      ).create(f.secondKeys.nsec);
+      await f.restart(tester);
+      await f.tap(tester, 'Community home');
+      await f.tap(tester, 'Enter a community link');
+      await tester.enterText(
+        find.byKey(const Key('community-link-input')).hitTestable(),
+        'my-community.example',
+      );
+      await f.tap(tester, 'Continue');
+      await f.tap(tester, fullNpub(f.secondKeys.public)!);
+      expect((await f.storage.loadAll()).single.nsec, f.secondKeys.nsec);
     },
   );
 

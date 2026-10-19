@@ -56,6 +56,7 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
       if (busy.value) return;
       busy.value = true;
       error.value = null;
+      final storage = ref.read(communityStorageProvider);
       try {
         final community = await service.prepare(
           relay: relay,
@@ -69,6 +70,14 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
         await ref
             .read(authProvider.notifier)
             .authenticateWithCommunity(community, shouldContinue: mounted);
+        // Admission can return early after cancellation. Check the durable
+        // record before retiring the only retry copy of a generated key.
+        final saved = await storage.loadAll();
+        if (saved.any(
+          (item) => item.id == community.id && item.nsec == community.nsec,
+        )) {
+          await service.complete(community);
+        }
         if (close && context.mounted) Navigator.of(context).pop(true);
       } catch (_) {
         if (mounted()) {

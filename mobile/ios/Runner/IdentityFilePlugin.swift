@@ -15,6 +15,7 @@ final class IdentityFilePlugin: NSObject, UIDocumentPickerDelegate,
   init(messenger: FlutterBinaryMessenger) {
     channel = FlutterMethodChannel(name: "buzz/identity_file", binaryMessenger: messenger)
     super.init()
+    Self.removeInterruptedExports()
     channel.setMethodCallHandler { [weak self] call, result in
       guard let self else {
         result(FlutterError(code: "import_failed", message: nil, details: nil))
@@ -25,6 +26,25 @@ final class IdentityFilePlugin: NSObject, UIDocumentPickerDelegate,
         return
       }
       self.pick(result: result)
+    }
+  }
+
+  /// A terminated share never reaches Dart's finally. Retire its sandbox copy
+  /// on the next launch; active shares cannot exist while this engine starts.
+  private static func removeInterruptedExports() {
+    let manager = FileManager.default
+    do {
+      let entries = try manager.contentsOfDirectory(
+        at: manager.temporaryDirectory,
+        includingPropertiesForKeys: nil,
+        options: [.skipsHiddenFiles]
+      )
+      for entry in entries where entry.lastPathComponent.hasPrefix("buzz-identity-") {
+        try manager.removeItem(at: entry)
+      }
+    } catch {
+      // No path or key material in diagnostics. Retry on the next launch.
+      NSLog("Buzz could not clean up an interrupted identity export")
     }
   }
 

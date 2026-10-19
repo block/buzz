@@ -44,7 +44,7 @@ void main() {
       ]),
     });
     account = InventoryAccount();
-    store = AccountIdentityStore();
+    store = AccountIdentityStore(subject: 'fixture');
     browser = _Browser();
     flow = HostedFlow(
       account: account,

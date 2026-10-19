@@ -48,7 +48,7 @@ abstract final class CommunityEntryRequirements {
     if (account.account?.subject != subject) {
       throw AccountFailure.differentAccount;
     }
-    final snapshot = await store.read();
+    final snapshot = await store.forSubject(subject).read();
     if (snapshot?.pubkey != pubkey ||
         !snapshot!.hasBackupFor(
           backend: HostedEnvironment.origin.origin,

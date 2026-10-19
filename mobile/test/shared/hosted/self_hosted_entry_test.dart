@@ -256,6 +256,29 @@ class _Storage extends Fake implements FlutterSecureStorage {
   void Function()? onWrite;
 
   @override
+  Future<Map<String, String>> readAll({
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async => Map.of(data);
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    data.remove(key);
+  }
+
+  @override
   Future<String?> read({
     required String key,
     AppleOptions? iOptions,

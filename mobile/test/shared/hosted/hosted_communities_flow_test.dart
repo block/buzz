@@ -26,9 +26,7 @@ void main() {
       () async {
         final f = await fixture(backup: failure != 'backup');
         if (failure == 'binding') f.bound = '2' * 64;
-        final before = await const FlutterSecureStorage().read(
-          key: AccountIdentityStore.storageKey,
-        );
+        final before = await const FlutterSecureStorage().readAll();
         await f.flow.signInAccount();
         expect(f.flow.stage, HostedFlowStage.blocked);
         if (failure == 'binding') {
@@ -38,12 +36,7 @@ void main() {
           f.requests.any((path) => path.endsWith('/communities/joined')),
           isFalse,
         );
-        expect(
-          await const FlutterSecureStorage().read(
-            key: AccountIdentityStore.storageKey,
-          ),
-          before,
-        );
+        expect(await const FlutterSecureStorage().readAll(), before);
         expect(f.admitted, isEmpty);
       },
     );
@@ -74,6 +67,7 @@ void main() {
     f.expired = false;
     f.subject = 'other-owner';
     f.rows = [f.row('b-one')];
+    await f.store.create(f.keys.nsec);
     await f.store.confirmBackup(
       BackupReceipt(
         backend: BuilderlabAccountClient.origin.toString(),

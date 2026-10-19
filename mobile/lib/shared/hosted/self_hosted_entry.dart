@@ -34,12 +34,12 @@ class SelfHostedEntry {
   /// has not joined any community yet. This performs no account network calls.
   Future<List<DeviceIdentityChoice>> choices() async {
     final device = await identities.choices();
-    final account = await _accountStore.read();
+    final accounts = await _accountStore.identities();
     return [
       ...device,
-      if (account != null &&
-          !device.any((item) => item.pubkey == account.pubkey))
-        DeviceIdentityChoice(account.pubkey, 'Saved account identity'),
+      for (final account in accounts)
+        if (!device.any((item) => item.pubkey == account.pubkey))
+          DeviceIdentityChoice(account.pubkey, 'Saved account identity'),
     ];
   }
 
@@ -67,23 +67,17 @@ class SelfHostedEntry {
       }
 
       check();
-      final key =
-          'buzz_pending_self_hosted_${base64Url.encode(utf8.encode(relay))}';
+      final key = _pendingKey(relay);
       final retained = await _storage.read(key: key);
       String? candidate = nsec;
       if (savedPubkey != null) {
-        final account = await _accountStore.read();
-        candidate = account?.pubkey == savedPubkey
-            ? await _accountStore.withKeys((keys) async {
-                if (keys.public != savedPubkey) {
-                  throw AccountIdentityFailure.mismatch;
-                }
-                return keys.nsec;
-              })
-            : await identities.withIdentity(
+        final accounts = await _accountStore.identities();
+        candidate = accounts.any((item) => item.pubkey == savedPubkey)
+            ? await _accountStore.withSavedIdentity(
                 savedPubkey,
-                (value) async => value,
-              );
+                (nsec) async => nsec,
+              )
+            : await identities.withIdentity(savedPubkey, (nsec) async => nsec);
       }
       if (retained != null) {
         final retainedPubkey = AccountIdentityStore.publicKeyForNsec(retained);
@@ -121,6 +115,19 @@ class SelfHostedEntry {
     });
     return result;
   }
+
+  static String _pendingKey(String relay) =>
+      'buzz_pending_self_hosted_${base64Url.encode(utf8.encode(relay))}';
+
+  /// Retire this exact pending key only after its community is durably saved.
+  Future<void> complete(Community community) => _queue.run(() async {
+    final key = _pendingKey(community.relayUrl);
+    if (await _storage.read(key: key) != community.nsec) return;
+    await _storage.delete(key: key);
+    if (await _storage.read(key: key) != null) {
+      throw AccountIdentityFailure.unreadable;
+    }
+  });
 
   /// Authentication must succeed before a new community becomes active.
   static Future<void> probeRelay(Community community) async {

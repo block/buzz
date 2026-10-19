@@ -51,7 +51,7 @@ void main() {
           : 'team.communities.public.builderlabstaging.xyz';
       final keys = nostr.Keys('1'.padLeft(64, '0'));
       final account = _Account(keys.public);
-      final store = AccountIdentityStore();
+      final store = AccountIdentityStore(subject: 'owner');
       await store.create(keys.nsec);
       await store.confirmBackup(
         BackupReceipt(

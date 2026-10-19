@@ -38,7 +38,7 @@ import 'widget_helpers.dart';
 class HostedJourneyFixture {
   final keys = nostr.Keys('1'.padLeft(64, '0'));
   final secondKeys = nostr.Keys('2'.padLeft(64, '0'));
-  final store = AccountIdentityStore();
+  AccountIdentityStore get store => AccountIdentityStore(subject: subject);
   final storage = CommunityStorage();
   final requests = <http.Request>[];
   Future<void> Function()? beforeBrowserReturn;

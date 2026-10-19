@@ -52,7 +52,7 @@ void main() {
   setUp(() {
     FlutterSecureStorage.setMockInitialValues({});
     account = InventoryAccount();
-    store = AccountIdentityStore();
+    store = AccountIdentityStore(subject: 'fixture');
     service = HostedIdentityService(
       account: account,
       store: store,
@@ -86,13 +86,20 @@ void main() {
       await secure.write(key: 'buzz_workspaces', value: raw);
       account.bound = scenario.bound ? first.public : null;
       account.backups = scenario.backups;
-      final result = await service.resolve();
+      if (!scenario.bound) {
+        expect(
+          (await service.resolve()).state,
+          HostedIdentityState.needsSelection,
+        );
+        expect(await store.read(), isNull);
+      }
+      final result = await service.resolve(selectedPubkey: first.public);
       expect(result.state, scenario.state);
       expect(result.pubkey, first.public);
       expect((await store.read())?.pubkey, first.public);
       expect(await secure.read(key: 'buzz_workspaces'), raw);
       expect(await secure.read(key: 'buzz_communities'), isNull);
-      expect(account.calls, ['/v1/buzz/nsec-backups/status']);
+      expect(account.calls.every((path) => path.endsWith('/status')), isTrue);
     });
   }
 
@@ -125,16 +132,19 @@ void main() {
     },
   );
 
-  test(
-    'duplicate device identities auto-resolve without replacement',
-    () async {
-      FlutterSecureStorage.setMockInitialValues({
-        'buzz_nsec': first.nsec,
-        'buzz_communities': jsonEncode([record(first, 'Same identity')]),
-      });
-      expect((await service.resolve()).pubkey, first.public);
-    },
-  );
+  test('duplicate device identities offer one explicit reuse choice', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      'buzz_nsec': first.nsec,
+      'buzz_communities': jsonEncode([record(first, 'Same identity')]),
+    });
+    expect((await service.resolve()).choices.map((item) => item.pubkey), [
+      first.public,
+    ]);
+    expect(
+      (await service.resolve(selectedPubkey: first.public)).pubkey,
+      first.public,
+    );
+  });
 
   test(
     'corrupt, incomplete and mismatched legacy records never authorize generation',

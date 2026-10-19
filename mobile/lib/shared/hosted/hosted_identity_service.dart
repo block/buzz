@@ -57,6 +57,7 @@ class HostedIdentityService {
     checkCurrent();
     final subject = account.account?.subject;
     if (subject == null) throw AccountFailure.signedOut;
+    final store = this.store.forSubject(subject);
     final local = await store.read();
     final response = await account.currentIdentity();
     _sameAccount(subject);
@@ -100,34 +101,47 @@ class HostedIdentityService {
       return _result(local, bound, subject);
     }
     final device = await deviceIdentities.choices();
+    final savedAccounts = await store.identities();
+    final choices = [
+      ...device,
+      for (final saved in savedAccounts)
+        if (!device.any((item) => item.pubkey == saved.pubkey))
+          DeviceIdentityChoice(saved.pubkey, 'Saved account identity'),
+    ];
     _sameAccount(subject);
     checkCurrent();
     // The authoritative bound key already on this device needs no remote
     // decryption, even when the account retains backups of older identities.
     final matchingDevice =
-        bound != null && device.any((item) => item.pubkey == bound);
+        bound != null && choices.any((item) => item.pubkey == bound);
     if ((statusKeys.isEmpty && bound == null) || matchingDevice) {
-      final eligible = device
+      final eligible = choices
           .where((item) => bound == null || item.pubkey == bound)
           .toList();
       if (eligible.isNotEmpty) {
         final chosen =
             selectedPubkey ??
-            (eligible.length == 1 ? eligible.single.pubkey : null);
+            (bound != null && eligible.length == 1
+                ? eligible.single.pubkey
+                : null);
         if (!eligible.any((item) => item.pubkey == chosen)) {
           return HostedIdentityResult(
             HostedIdentityState.needsSelection,
             choices: eligible,
           );
         }
-        final saved = await deviceIdentities.adopt(
-          chosen!,
-          store,
-          checkCurrent: () {
-            _sameAccount(subject);
-            checkCurrent();
-          },
-        );
+        void checkSelection() {
+          _sameAccount(subject);
+          checkCurrent();
+        }
+
+        final saved = device.any((item) => item.pubkey == chosen)
+            ? await deviceIdentities.adopt(
+                chosen!,
+                store,
+                checkCurrent: checkSelection,
+              )
+            : await store.adoptSaved(chosen!, checkCurrent: checkSelection);
         return _result(saved, bound, subject);
       }
     }
@@ -201,6 +215,11 @@ class HostedIdentityService {
       }
     } catch (_) {
       throw AccountFailure.invalidResponse;
+    }
+    if (bound == null &&
+        (statusKeys.length != candidates.length ||
+            !statusKeys.every(candidates.containsKey))) {
+      return const HostedIdentityResult(HostedIdentityState.recoveryBlocked);
     }
     // An account binding is authoritative even when older backups contain
     // other keys. Without a binding, distinct keys require an explicit choice;
