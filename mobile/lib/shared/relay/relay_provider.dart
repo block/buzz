@@ -122,7 +122,7 @@ String? pubkeyFromNsec(String? nsec) {
 /// The current user's hex pubkey, derived from the active community nsec.
 final myPubkeyProvider = Provider<String?>((ref) {
   final config = ref.watch(relayConfigProvider);
-  return pubkeyFromNsec(config.nsec);
+  return pubkeyFromNsec(config.nsec?.trim());
 });
 
 /// Provides a [RelayClient] that reacts to config changes.

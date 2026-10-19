@@ -30,7 +30,7 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
     _storage = ref.watch(communityThemeStorageProvider);
     final config = ref.watch(relayConfigProvider);
     final session = ref.watch(relaySessionProvider);
-    final pubkey = pubkeyFromNsec(config.nsec);
+    final pubkey = ref.watch(myPubkeyProvider);
     _pubkey = pubkey;
     _relayUrl = config.baseUrl;
 
@@ -65,7 +65,7 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
           session: ref.read(relaySessionProvider.notifier),
           nsec: config.nsec!,
         ),
-        crypto: _crypto(config.nsec!, pubkey),
+        crypto: ref.watch(communityThemeCryptoProvider)!,
         onRemote: (remote) => _applyRemote(manager, remote),
         onPublished: (preference) {
           if (_scopedLocalPubkey == pubkey &&
@@ -216,14 +216,18 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
   }
 }
 
-CommunityThemeCrypto _crypto(String nsec, String pubkey) {
-  final privateHex = nostr.Nip19.decode(payload: nsec).data;
+/// Retains theme encryption material while the same community reconnects.
+final communityThemeCryptoProvider = Provider<CommunityThemeCrypto?>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final pubkey = ref.watch(myPubkeyProvider);
+  if (pubkey == null || config.nsec == null) return null;
+  final privateHex = nostr.Nip19.decode(payload: config.nsec!).data;
   final key = getConversationKey(privateHex, pubkey);
   return CommunityThemeCrypto(
     encrypt: (plaintext) => nip44Encrypt(key, plaintext),
     decrypt: (ciphertext) => nip44Decrypt(key, ciphertext),
   );
-}
+});
 
 final communityThemeStorageProvider = Provider<CommunityThemeStorage>(
   (ref) => CommunityThemeStorage(ref.watch(savedPrefsProvider)),
