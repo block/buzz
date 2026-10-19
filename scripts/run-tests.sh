@@ -350,6 +350,7 @@ run_unit_tests() {
     connection::terminal_close_delivery_tests::stalled_cleanup_does_not_hold_socket_open
     connection::terminal_close_delivery_tests::bootstrap_drain_holds_socket_for_client_close_reply
     connection::terminal_close_delivery_tests::stalled_expiry_barrier_does_not_hold_socket_open
+    connection::terminal_close_delivery_tests::blocked_frame_handler_does_not_hold_socket_open
     connection::terminal_close_delivery_tests::refused_bootstrap_holds_connection_slot_until_socket_ends
     connection::terminal_close_delivery_tests::stalled_bootstrap_holds_connection_slot
     handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated
