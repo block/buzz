@@ -693,7 +693,8 @@ pub struct DbConfig {
     /// [`DEFAULT_STATEMENT_TIMEOUT_MS`]. Every writer session is bounded:
     /// `0` or a value above [`MAX_STATEMENT_TIMEOUT_MS`] installs the maximum
     /// (see [`Self::effective_statement_timeout_ms`]). Migration and
-    /// schema-destruction sessions lift it on their own detached connection.
+    /// schema-destruction sessions lift it on their own detached connection;
+    /// community-deletion inventory and purge lift it per transaction.
     pub statement_timeout_ms: u64,
     /// Whether every new writer-pool connection defaults all transactions to
     /// read-only. Intended for operator audit commands, never the relay pool.

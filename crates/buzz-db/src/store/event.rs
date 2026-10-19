@@ -3326,6 +3326,13 @@ mod postgres_tests {
     /// The time-bounded `#p` join returns exactly the mentioned events in
     /// the window, through the production mention insert, for both the page
     /// and the COUNT, including the keyset cursor (`until` + `before_id`).
+    ///
+    /// Every bound sits exactly on a mentioned row's second, so an
+    /// off-by-one on the mention side (`>=`→`>` or `<=`→`<` in
+    /// `push_mention_join`) drops a row and fails an assertion. The cursor
+    /// page includes a second mentioned event in the cursor's own second
+    /// whose id sorts after the cursor id: `until` must be an inclusive
+    /// superset bound on `m`, leaving the exact cursor test to `e`.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn p_tag_read_with_mention_bounds_keeps_results() {
@@ -3337,8 +3344,11 @@ mod postgres_tests {
         let mentioned = Keys::generate().public_key().to_hex();
         let now = nostr::Timestamp::now().as_secs();
         let at = |secs: u64| DateTime::from_timestamp(secs as i64, 0).unwrap();
-        let mut ids = Vec::new();
-        for (i, created) in [now - 300, now - 200, now - 100].into_iter().enumerate() {
+        let mut events = Vec::new();
+        for (i, created) in [now - 300, now - 200, now - 100, now - 100]
+            .into_iter()
+            .enumerate()
+        {
             let event = EventBuilder::new(Kind::Custom(9), format!("mention {i}"))
                 .tags([Tag::parse(["p", &mentioned]).unwrap()])
                 .custom_created_at(nostr::Timestamp::from(created))
@@ -3350,8 +3360,13 @@ mod postgres_tests {
             crate::insert_mentions(&pool, community, &event, Some(channel))
                 .await
                 .unwrap();
-            ids.push(event.id.as_bytes().to_vec());
+            events.push((created, event.id.as_bytes().to_vec()));
         }
+        // Production order: created_at DESC, id ASC. `newest` is the
+        // same-second pair at now-100; `newest[0]` becomes the cursor.
+        events.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let ids: Vec<Vec<u8>> = events.into_iter().map(|(_, id)| id).collect();
+        let (newest, mid, oldest) = (&ids[..2], &ids[2], &ids[3]);
         let unmentioned = EventBuilder::new(Kind::Custom(9), "no mention")
             .custom_created_at(nostr::Timestamp::from(now - 150))
             .sign_with_keys(&author)
@@ -3377,34 +3392,40 @@ mod postgres_tests {
         q.channel_id = Some(channel);
         q.kinds = Some(vec![9]);
 
+        assert_eq!(read(q.clone()).await, (ids.clone(), 4), "unbounded");
+
+        // `since` exactly on `mid`'s second keeps it (inclusive).
+        q.since = Some(at(now - 200));
         assert_eq!(
             read(q.clone()).await,
-            (vec![ids[2].clone(), ids[1].clone(), ids[0].clone()], 3),
-            "unbounded"
+            (vec![newest[0].clone(), newest[1].clone(), mid.clone()], 3),
+            "since on a row's second"
         );
 
-        q.since = Some(at(now - 250));
+        // `since` == `until` on `mid`'s second keeps exactly `mid`.
+        q.until = Some(at(now - 200));
         assert_eq!(
             read(q.clone()).await,
-            (vec![ids[2].clone(), ids[1].clone()], 2),
-            "since"
+            (vec![mid.clone()], 1),
+            "window collapsed onto one row's second"
         );
 
-        q.until = Some(at(now - 150));
-        assert_eq!(read(q.clone()).await, (vec![ids[1].clone()], 1), "window");
-
-        // Keyset cursor at the newest row's timestamp: `until` is a superset
-        // bound on the mention side, the exact cursor test stays on `e`.
+        // Keyset cursor at the newest second: the same-second sibling after
+        // the cursor id must survive the mention-side `until` bound.
         q.since = None;
         q.until = Some(at(now - 100));
-        q.before_id = Some(ids[2].clone());
+        q.before_id = Some(newest[0].clone());
         q.limit = Some(10);
         let rows = query_events(&pool, &q).await.unwrap();
         let page: Vec<Vec<u8>> = rows
             .iter()
             .map(|row| row.event.id.as_bytes().to_vec())
             .collect();
-        assert_eq!(page, vec![ids[1].clone(), ids[0].clone()], "cursor page");
+        assert_eq!(
+            page,
+            vec![newest[1].clone(), mid.clone(), oldest.clone()],
+            "cursor page keeps the same-second sibling"
+        );
     }
 
     #[tokio::test]

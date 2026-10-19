@@ -1232,11 +1232,15 @@ impl DeletionStore {
         let live_tables = self.live_scoped_tables().await?;
         let fenced_tables = self.live_fenced_tables().await?;
         let mut row_counts = BTreeMap::new();
+        // Whole-tenant counts on a large community can outrun the writer
+        // statement timeout; this read-only transaction lifts it.
+        let mut tx = self.pool.begin().await?;
+        lift_statement_timeout(&mut tx).await?;
         for table in &live_tables {
             let sql = format!("SELECT count(*)::BIGINT FROM {table} WHERE community_id = $1");
             let count: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
                 .bind(community.as_uuid())
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *tx)
                 .await?;
             row_counts.insert(table.clone(), count);
         }
@@ -1244,10 +1248,11 @@ impl DeletionStore {
             let sql = format!("SELECT count(*)::BIGINT {rows}");
             let count: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
                 .bind(community.as_uuid())
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *tx)
                 .await?;
             row_counts.insert((*table).to_owned(), count);
         }
+        tx.rollback().await?;
         Ok(SchemaManifest {
             scoped_tables: live_tables.into_iter().collect(),
             row_counts,
@@ -2242,13 +2247,7 @@ impl DeletionStore {
     pub async fn purge_postgres(&self, token: &LeaseToken) -> Result<BTreeMap<String, u64>> {
         let generation = require_fence_generation(token)?;
         let mut tx = self.pool.begin().await?;
-        // Each scoped purge is one whole-community DELETE, which can outrun
-        // the 2-minute writer default on a large tenant. Raise this
-        // transaction to the writer ceiling — still bounded, never disabled.
-        sqlx::query("SELECT set_config('statement_timeout', $1, true)")
-            .bind(crate::runtime::MAX_STATEMENT_TIMEOUT_MS.to_string())
-            .execute(&mut *tx)
-            .await?;
+        lift_statement_timeout(&mut tx).await?;
         // Revalidate the exact catalog inside the purge transaction under the
         // shared schema/destruction lock. Migrations hold the exclusive
         // counterpart for their entire run, so no migration can commit a new
@@ -3705,6 +3704,23 @@ async fn verify_lease_and_fence(
             token.request_id
         )))
     }
+}
+
+/// Disable `statement_timeout` for the rest of `tx`.
+///
+/// Community deletion runs whole-tenant statements (per-table counts at
+/// inventory, one `DELETE ... WHERE community_id` per table at purge) whose
+/// runtime scales with the tenant. Under the always-on writer cap a large
+/// tenant's purge would be cancelled (57014, transient), retried from
+/// scratch, and eventually blocked. Like migrations and schema destruction,
+/// these paths are operator-approved and fenced; `lock_timeout` and
+/// `idle_in_transaction_session_timeout` still bound them. Transaction-local,
+/// so the pooled session's cap returns at commit or rollback.
+async fn lift_statement_timeout(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT set_config('statement_timeout', '0', true)")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 async fn set_executor_gucs(
@@ -7407,6 +7423,60 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             Some("57014"),
             "unexpected error: {error:?}"
         );
+    }
+
+    /// Community-deletion inventory and purge transactions outlive the
+    /// always-on writer statement cap, and only for their own transaction.
+    /// Mutation oracles: drop `lift_statement_timeout` → the sleep past the
+    /// cap is cancelled → RED; lift to a bounded value (e.g. the 5-minute
+    /// ceiling) → `SHOW` is not `0` → RED; session scope → restore → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn deletion_transactions_lift_the_writer_statement_timeout() {
+        let db = Db::new(&DbConfig {
+            database_url: crate::test_support::database_url(),
+            max_connections: 1,
+            min_connections: 0,
+            statement_timeout_ms: 500,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect capped writer");
+        let cancelled = |error: &sqlx::Error| {
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref()
+                == Some("57014")
+        };
+
+        // Control: the writer cap is live on an ordinary transaction.
+        let mut plain = db.pool.begin().await.expect("begin plain");
+        let error = sqlx::query("SELECT pg_sleep(1)")
+            .execute(&mut *plain)
+            .await
+            .expect_err("writer cap must cancel the plain sleep");
+        assert!(cancelled(&error), "unexpected error: {error:?}");
+        plain.rollback().await.expect("roll back plain");
+
+        let mut tx = db.pool.begin().await.expect("begin deletion tx");
+        lift_statement_timeout(&mut tx).await.expect("lift");
+        let lifted: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("show lifted");
+        assert_eq!(lifted, "0", "deletion transactions run without a cap");
+        sqlx::query("SELECT pg_sleep(1)")
+            .execute(&mut *tx)
+            .await
+            .expect("lifted transaction outlives the writer cap");
+        tx.rollback().await.expect("roll back deletion tx");
+
+        let restored: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&db.pool)
+            .await
+            .expect("show restored");
+        assert_eq!(restored, "500ms", "the lift is transaction-local");
     }
 
     #[tokio::test]
