@@ -21,7 +21,9 @@ pub fn shared_blob_hashes(event: &nostr::Event) -> Vec<String> {
     {
         return Vec::new();
     }
-    let mut hashes: BTreeSet<String> = media_path_hashes(&event.content).collect();
+    // JSON content may escape `/` as `\/`; scan the path as clients will see it.
+    let content = event.content.replace("\\/", "/");
+    let mut hashes: BTreeSet<String> = media_path_hashes(&content).collect();
     for tag in event.tags.iter() {
         hashes.extend(
             tag.as_slice()
@@ -94,6 +96,11 @@ mod tests {
         let content = format!(r#"{{"picture":"{}"}}"#, media_url(&avatar, "jpg"));
         let profile = signed(EventBuilder::new(Kind::Metadata, &content));
         assert_eq!(shared_blob_hashes(&profile), vec![avatar.clone()]);
+        let escaped = signed(EventBuilder::new(
+            Kind::Metadata,
+            content.replace('/', "\\/"),
+        ));
+        assert_eq!(shared_blob_hashes(&escaped), vec![avatar.clone()]);
 
         let emoji_set = signed(
             EventBuilder::new(Kind::from(30030), "").tags([Tag::parse([
