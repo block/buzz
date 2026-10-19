@@ -54,6 +54,8 @@ const PRUNE_INTERVAL_MS = 5_000;
 type ActiveTurn = {
   turnId: string;
   channelId: string;
+  /** Thread the turn runs in (thread-scoped sessions only; #8029). */
+  threadRootEventId: string | null;
   startedAt: number;
   lastActivityAt: number;
 };
@@ -71,6 +73,11 @@ export type ActiveChannelTurnSummary = {
   agentCount: number;
   agentPubkeys: string[];
   agentNames?: string[];
+};
+
+/** One thread with active agent work, aggregated across agents. */
+export type ActiveThreadTurnSummary = ActiveChannelTurnSummary & {
+  threadRootEventId: string;
 };
 
 // Module-level state: agentPubkey → turnId → ActiveTurn
@@ -98,6 +105,10 @@ const clockOffsetByAgent = new Map<string, number>();
 // Only regenerated when the underlying turn map for an agent actually changes.
 const cachedTurnSummaries = new Map<string, ActiveTurnSummary[]>();
 let cachedChannelTurnSummaries: ActiveChannelTurnSummary[] | null = null;
+let cachedThreadTurnSummaries: ReadonlyMap<
+  string,
+  ActiveThreadTurnSummary
+> | null = null;
 
 // Composite watermark per (agent, channel): the newest observer event
 // processed for that channel, by (timestamp, seq) ordering. An event is
@@ -144,6 +155,7 @@ let unsubscribePruneVisibility: (() => void) | null = null;
 function invalidateCache(agentKey: string) {
   cachedTurnSummaries.delete(agentKey);
   cachedChannelTurnSummaries = null;
+  cachedThreadTurnSummaries = null;
 }
 
 function notifyListeners() {
@@ -169,6 +181,14 @@ function sampleClockOffset(agentKey: string, timestamp: string): boolean {
   return true;
 }
 
+/** The harness's `threadRootEventId` payload field, when present. */
+function threadRootOf(event: ObserverEvent): string | null {
+  const payload = event.payload;
+  if (!payload || typeof payload !== "object") return null;
+  const root = (payload as { threadRootEventId?: unknown }).threadRootEventId;
+  return typeof root === "string" && root.length > 0 ? root : null;
+}
+
 function parseTimestamp(timestamp: string): number | null {
   const parsed = Date.parse(timestamp);
   return Number.isFinite(parsed) ? parsed : null;
@@ -179,6 +199,7 @@ function startTurn(
   channelId: string,
   turnId: string,
   timestamp: string,
+  threadRootEventId: string | null = null,
 ) {
   const key = normalizePubkey(agentPubkey);
   let agentTurns = activeTurnsByAgent.get(key);
@@ -206,23 +227,35 @@ function startTurn(
   agentTurns.set(turnId, {
     turnId,
     channelId,
+    threadRootEventId,
     startedAt,
     lastActivityAt: Date.now(),
   });
   invalidateCache(key);
 }
 
-function recordActivity(agentPubkey: string, turnId: string | null): boolean {
-  if (!turnId) return false;
+type ActivityResult = "missing" | "refreshed" | "thread-learned";
+
+function recordActivity(
+  agentPubkey: string,
+  turnId: string | null,
+  threadRootEventId: string | null,
+): ActivityResult {
+  if (!turnId) return "missing";
   const key = normalizePubkey(agentPubkey);
   const agentTurns = activeTurnsByAgent.get(key);
-  if (!agentTurns) return false;
+  if (!agentTurns) return "missing";
   const turn = agentTurns.get(turnId);
-  if (turn) {
-    turn.lastActivityAt = Date.now();
-    return true;
+  if (!turn) return "missing";
+  turn.lastActivityAt = Date.now();
+  // A turn first seen without its thread (e.g. turn_started dropped from the
+  // buffer) learns it from liveness, which carries the same root.
+  if (threadRootEventId && turn.threadRootEventId !== threadRootEventId) {
+    turn.threadRootEventId = threadRootEventId;
+    invalidateCache(key);
+    return "thread-learned";
   }
-  return false;
+  return "refreshed";
 }
 
 /**
@@ -254,7 +287,13 @@ function resurrectTurn(agentPubkey: string, event: ObserverEvent): boolean {
     frameAt !== null && startedAtMs !== null && startedAtMs <= frameAt
       ? startedAt
       : event.timestamp;
-  startTurn(agentPubkey, event.channelId, event.turnId, safeStartedAt);
+  startTurn(
+    agentPubkey,
+    event.channelId,
+    event.turnId,
+    safeStartedAt,
+    threadRootOf(event),
+  );
   return true;
 }
 
@@ -408,6 +447,7 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
           event.channelId,
           event.turnId ?? `seq-${event.seq}`,
           event.timestamp,
+          threadRootOf(event),
         );
         notifyListeners();
         return;
@@ -432,8 +472,16 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
     // turn was pruned out from under a still-running host (a transient drop
     // raced the pause, or the lone-crash residual self-healed), resurrect it.
     case "turn_liveness": {
-      const refreshed = recordActivity(agentPubkey, event.turnId ?? null);
-      if (!refreshed && resurrectTurn(agentPubkey, event)) {
+      const activity = recordActivity(
+        agentPubkey,
+        event.turnId ?? null,
+        threadRootOf(event),
+      );
+      if (activity === "thread-learned") {
+        notifyListeners();
+        return;
+      }
+      if (activity === "missing" && resurrectTurn(agentPubkey, event)) {
         notifyListeners();
         return;
       }
@@ -576,6 +624,58 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
   return result;
 }
 
+const EMPTY_THREAD_TURNS: ReadonlyMap<string, ActiveThreadTurnSummary> =
+  new Map();
+
+/**
+ * Returns active working threads across all tracked agents, keyed by thread
+ * root event id and anchored to the earliest live turn in each thread. Turns
+ * without a thread root (channel-scoped or heartbeat) are not included.
+ */
+export function getActiveTurnsByThread(): ReadonlyMap<
+  string,
+  ActiveThreadTurnSummary
+> {
+  if (cachedThreadTurnSummaries) return cachedThreadTurnSummaries;
+  if (activeTurnsByAgent.size === 0) return EMPTY_THREAD_TURNS;
+
+  const summaries = new Map<
+    string,
+    { channelId: string; anchorAt: number; agentPubkeys: Set<string> }
+  >();
+  for (const [agentKey, agentTurns] of activeTurnsByAgent) {
+    const offset = clockOffsetByAgent.get(agentKey) ?? 0;
+    for (const turn of agentTurns.values()) {
+      if (!turn.threadRootEventId) continue;
+      const anchorAt = turn.startedAt + offset;
+      const summary = summaries.get(turn.threadRootEventId);
+      if (!summary) {
+        summaries.set(turn.threadRootEventId, {
+          channelId: turn.channelId,
+          anchorAt,
+          agentPubkeys: new Set([agentKey]),
+        });
+        continue;
+      }
+      summary.agentPubkeys.add(agentKey);
+      if (anchorAt < summary.anchorAt) summary.anchorAt = anchorAt;
+    }
+  }
+
+  const result = new Map<string, ActiveThreadTurnSummary>();
+  for (const [threadRootEventId, summary] of summaries) {
+    result.set(threadRootEventId, {
+      threadRootEventId,
+      channelId: summary.channelId,
+      anchorAt: summary.anchorAt,
+      agentCount: summary.agentPubkeys.size,
+      agentPubkeys: [...summary.agentPubkeys].sort(),
+    });
+  }
+  cachedThreadTurnSummaries = result.size === 0 ? EMPTY_THREAD_TURNS : result;
+  return cachedThreadTurnSummaries;
+}
+
 /**
  * Synchronize the active-turns store with the latest observer events for a
  * given agent.
@@ -613,6 +713,20 @@ export function useActiveAgentTurnsByChannel(): ActiveChannelTurnSummary[] {
   return React.useSyncExternalStore(
     subscribeActiveAgentTurns,
     getActiveTurnsByChannel,
+  );
+}
+
+/**
+ * Hook: returns threads with active agent work, keyed by thread root event id.
+ * Re-renders when the thread set changes — not when the clock ticks.
+ */
+export function useActiveAgentTurnsByThread(): ReadonlyMap<
+  string,
+  ActiveThreadTurnSummary
+> {
+  return React.useSyncExternalStore(
+    subscribeActiveAgentTurns,
+    getActiveTurnsByThread,
   );
 }
 
@@ -710,6 +824,7 @@ export function resetActiveAgentTurnsStore() {
   clockOffsetByAgent.clear();
   cachedTurnSummaries.clear();
   cachedChannelTurnSummaries = null;
+  cachedThreadTurnSummaries = null;
   terminalAtByAgent.clear();
   notifyListeners();
 }
@@ -826,6 +941,7 @@ export function restoreActiveAgentTurnsForCommunity(communityId: string): void {
 
   cachedTurnSummaries.clear();
   cachedChannelTurnSummaries = null;
+  cachedThreadTurnSummaries = null;
   notifyListeners();
 }
 

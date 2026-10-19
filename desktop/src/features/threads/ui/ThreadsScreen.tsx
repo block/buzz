@@ -5,6 +5,11 @@ import * as React from "react";
 
 import { useAppShell } from "@/app/AppShellContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import {
+  type ActiveThreadTurnSummary,
+  useActiveAgentTurnsByThread,
+} from "@/features/agents/activeAgentTurnsStore";
+import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import {
@@ -20,6 +25,7 @@ import {
   ProjectConversationPanel,
 } from "@/features/projects/ui/ProjectConversationPanel";
 import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
+import { formatWorkingTooltip } from "@/features/sidebar/ui/SidebarSection";
 import {
   useMarkOpenThreadRead,
   useThreadTitlesQuery,
@@ -42,6 +48,7 @@ import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { cn } from "@/shared/lib/cn";
+import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
 import { Skeleton } from "@/shared/ui/skeleton";
 
@@ -88,6 +95,21 @@ function channelLabel(
   return channel.channelType === "dm" ? label : `#${label}`;
 }
 
+/** Live agent-working timer, the thread-scoped twin of the sidebar's badge. */
+function ThreadWorkingBadge({ summary }: { summary: ActiveThreadTurnSummary }) {
+  const now = useNow(1000);
+  const elapsed = formatElapsed(now - summary.anchorAt);
+  return (
+    <span
+      className="inline-flex shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums text-primary motion-safe:animate-pulse"
+      data-testid="threads-view-row-working"
+      title={formatWorkingTooltip(summary)}
+    >
+      {summary.agentCount > 1 ? `${elapsed} (${summary.agentCount})` : elapsed}
+    </span>
+  );
+}
+
 function ThreadRow({
   channel,
   currentPubkey,
@@ -97,6 +119,7 @@ function ThreadRow({
   pinned,
   selected,
   unreadCount,
+  working,
 }: {
   channel: Channel | undefined;
   currentPubkey: string | undefined;
@@ -106,6 +129,7 @@ function ThreadRow({
   pinned: boolean;
   selected: boolean;
   unreadCount: number;
+  working: ActiveThreadTurnSummary | undefined;
 }) {
   const hasUnread = unreadCount > 0;
   return (
@@ -136,6 +160,7 @@ function ThreadRow({
           >
             {entry.title}
           </span>
+          {working ? <ThreadWorkingBadge summary={working} /> : null}
           {hasUnread ? (
             <span
               className="flex shrink-0 items-center gap-1.5 text-xs font-medium text-primary"
@@ -197,6 +222,7 @@ function ThreadsBody({
   titlesQuery: ReturnType<typeof useThreadTitlesQuery>;
 }) {
   const unreadCounts = useTitledThreadUnreadCounts();
+  const workingThreads = useActiveAgentTurnsByThread();
   const relayOrigin = useRelayOrigin();
   const { pinned: pinnedRoots, toggle: handleTogglePin } = useThreadPins(
     relayOrigin,
@@ -262,6 +288,7 @@ function ThreadsBody({
           pinned={isPinned}
           selected={entry.rootId === selectedRootId}
           unreadCount={unreadCounts.get(entry.rootId) ?? 0}
+          working={workingThreads.get(entry.rootId)}
         />
       </li>
     ));

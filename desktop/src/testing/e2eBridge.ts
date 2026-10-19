@@ -1522,6 +1522,7 @@ declare global {
       channelId: string;
       turnId: string;
       kind?: "turn_started" | "turn_completed";
+      threadRootEventId?: string;
     }) => void;
     __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
       agentPubkey: string;
@@ -12032,6 +12033,7 @@ export function maybeInstallE2eTauriMocks() {
     channelId,
     turnId,
     kind = "turn_started",
+    threadRootEventId,
   }) => {
     seedTurnSeq += 1;
     const event = {
@@ -12042,7 +12044,7 @@ export function maybeInstallE2eTauriMocks() {
       channelId,
       sessionId: null,
       turnId,
-      payload: null,
+      payload: threadRootEventId ? { threadRootEventId } : null,
     };
     syncAgentTurnsFromEvents(agentPubkey, [event]);
     syncAgentObserverEvents(agentPubkey, [event]);

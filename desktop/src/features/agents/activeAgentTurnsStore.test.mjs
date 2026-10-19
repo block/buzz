@@ -6,6 +6,7 @@ import {
   syncActiveAgentTurnsFromObserver,
   getActiveTurnsForAgent,
   getActiveTurnsByChannel,
+  getActiveTurnsByThread,
   resetActiveAgentTurnsStore,
   subscribeActiveAgentTurns,
   saveActiveAgentTurnsForCommunity,
@@ -1582,6 +1583,123 @@ describe("activeAgentTurnsStore", () => {
  * through the real observer store (appendAgentEvent path) and the same sync
  * the bridge hook runs, asserting derived liveness clears with the raw feed.
  */
+describe("active turns by thread", () => {
+  beforeEach(() => {
+    resetActiveAgentTurnsStore();
+  });
+
+  const inThread = (root, overrides = {}) =>
+    makeEvent({ payload: { threadRootEventId: root }, ...overrides });
+
+  it("keys a thread-scoped turn by its root", () => {
+    syncAgentTurnsFromEvents(AGENT, [inThread("root-a")]);
+    const threads = getActiveTurnsByThread();
+    assert.deepEqual([...threads.keys()], ["root-a"]);
+    const summary = threads.get("root-a");
+    assert.equal(summary.channelId, "chan-1");
+    assert.equal(summary.agentCount, 1);
+    assert.deepEqual(summary.agentPubkeys, [AGENT]);
+  });
+
+  it("leaves channel-scoped and malformed-root turns out", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+      makeEvent({
+        seq: 2,
+        turnId: "t2",
+        channelId: "c2",
+        payload: { threadRootEventId: 42 },
+      }),
+      makeEvent({
+        seq: 3,
+        turnId: "t3",
+        channelId: "c3",
+        payload: { threadRootEventId: "" },
+      }),
+    ]);
+    assert.equal(getActiveTurnsByThread().size, 0);
+    assert.equal(getActiveTurnsByChannel().length, 3);
+  });
+
+  it("aggregates agents in one thread at the earliest start", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      inThread("root-a", { timestamp: "2024-01-01T00:01:00Z" }),
+    ]);
+    syncAgentTurnsFromEvents(AGENT_2, [
+      inThread("root-a", { timestamp: "2024-01-01T00:00:00Z" }),
+    ]);
+    const summary = getActiveTurnsByThread().get("root-a");
+    assert.equal(summary.agentCount, 2);
+    const byAgent = (pubkey) => getActiveTurnsForAgent(pubkey)[0].anchorAt;
+    assert.equal(summary.anchorAt, Math.min(byAgent(AGENT), byAgent(AGENT_2)));
+  });
+
+  it("separates concurrent threads in one channel", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      inThread("root-a", { seq: 1, turnId: "t1" }),
+      inThread("root-b", { seq: 2, turnId: "t2" }),
+    ]);
+    assert.deepEqual([...getActiveTurnsByThread().keys()].sort(), [
+      "root-a",
+      "root-b",
+    ]);
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 3, kind: "turn_completed", turnId: "t1" }),
+    ]);
+    assert.deepEqual([...getActiveTurnsByThread().keys()], ["root-b"]);
+  });
+
+  it("learns the thread from liveness and notifies", () => {
+    syncAgentTurnsFromEvents(AGENT, [makeEvent({ seq: 1 })]);
+    assert.equal(getActiveTurnsByThread().size, 0);
+    let notified = 0;
+    const unsubscribe = subscribeActiveAgentTurns(() => notified++);
+    try {
+      syncAgentTurnsFromEvents(AGENT, [
+        inThread("root-a", { seq: 2, kind: "turn_liveness" }),
+      ]);
+    } finally {
+      unsubscribe();
+    }
+    assert.ok(notified > 0);
+    assert.deepEqual([...getActiveTurnsByThread().keys()], ["root-a"]);
+  });
+
+  it("keeps the thread when a pruned turn is resurrected by liveness", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      inThread("root-a", {
+        seq: 1,
+        kind: "turn_liveness",
+        startedAt: "2024-01-01T00:00:00Z",
+      }),
+    ]);
+    assert.deepEqual([...getActiveTurnsByThread().keys()], ["root-a"]);
+  });
+
+  it("returns a stable reference until the turns change", () => {
+    syncAgentTurnsFromEvents(AGENT, [inThread("root-a", { seq: 1 })]);
+    const first = getActiveTurnsByThread();
+    syncAgentTurnsFromEvents(AGENT, [
+      inThread("root-a", { seq: 2, kind: "turn_liveness" }),
+    ]);
+    assert.equal(getActiveTurnsByThread(), first);
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 3, kind: "turn_completed" }),
+    ]);
+    assert.notEqual(getActiveTurnsByThread(), first);
+    assert.equal(getActiveTurnsByThread().size, 0);
+  });
+
+  it("carries the thread through a community switch", () => {
+    syncAgentTurnsFromEvents(AGENT, [inThread("root-a")]);
+    saveActiveAgentTurnsForCommunity("community-1");
+    resetActiveAgentTurnsStore();
+    assert.equal(getActiveTurnsByThread().size, 0);
+    restoreActiveAgentTurnsForCommunity("community-1");
+    assert.deepEqual([...getActiveTurnsByThread().keys()], ["root-a"]);
+  });
+});
+
 describe("observer → active-turns bridge sync", () => {
   const bridgeAgents = [{ pubkey: AGENT, status: "deployed" }];
 

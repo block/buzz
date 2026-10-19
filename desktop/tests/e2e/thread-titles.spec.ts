@@ -24,6 +24,13 @@ type MockMessageWindow = Window & {
     rootId: string;
     title: string;
   }) => void;
+  __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+    agentPubkey: string;
+    channelId: string;
+    turnId: string;
+    kind?: "turn_started" | "turn_completed";
+    threadRootEventId?: string;
+  }) => void;
 };
 
 const CHANNEL_NAME = "engineering";
@@ -599,6 +606,68 @@ test.describe("thread titles", () => {
     ).toBeVisible();
     await emitTyping(TEST_IDENTITIES.charlie.pubkey);
     await expect(panel.getByTestId("message-typing-indicator")).toBeVisible();
+  });
+
+  test("a Threads row shows a live timer while an agent works in that thread", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+    const workedRootId = await openThread(page, "Thread an agent works in.", {
+      channelName: "agents",
+    });
+    await nameOpenThread(page, "Worked thread");
+    await openThread(page, "Thread nobody works in.", {
+      channelName: "agents",
+    });
+    await nameOpenThread(page, "Idle thread");
+    const channelId = await page
+      .getByTestId("channel-agents")
+      .getAttribute("data-channel-id");
+    if (!channelId) throw new Error("#agents is missing its channel id.");
+
+    await page.getByTestId("open-threads-view").click();
+    const workedRow = page
+      .getByTestId("threads-view-row")
+      .filter({ hasText: "Worked thread" });
+    const idleRow = page
+      .getByTestId("threads-view-row")
+      .filter({ hasText: "Idle thread" });
+    await expect(workedRow).toBeVisible();
+    await expect(idleRow).toBeVisible();
+
+    const seedTurn = (
+      kind: "turn_started" | "turn_completed",
+      threadRootEventId?: string,
+    ) =>
+      page.evaluate(
+        (input) => {
+          (window as MockMessageWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__?.(input);
+        },
+        {
+          agentPubkey: TEST_IDENTITIES.alice.pubkey,
+          channelId,
+          kind,
+          threadRootEventId,
+          turnId: "thread-row-timer",
+        },
+      );
+
+    // A channel-scoped turn has no thread, so no row lights up.
+    await seedTurn("turn_started");
+    await expect(page.getByTestId("threads-view-row-working")).toHaveCount(0);
+    await seedTurn("turn_completed");
+
+    await seedTurn("turn_started", workedRootId);
+    await expect(workedRow.getByTestId("threads-view-row-working")).toHaveText(
+      /^\d+s$/,
+    );
+    await expect(idleRow.getByTestId("threads-view-row-working")).toHaveCount(
+      0,
+    );
+
+    await seedTurn("turn_completed", workedRootId);
+    await expect(page.getByTestId("threads-view-row-working")).toHaveCount(0);
   });
 
   test("the selected Threads item shows its unread dot while a thread is open", async ({
