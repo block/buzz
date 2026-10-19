@@ -35,42 +35,52 @@ macro_rules! readable_sql {
 /// in `sha256s` that `author` can read or has uploaded (uploading the exact
 /// bytes proves possession). Any other blob is left unshared, so a reference
 /// built from a leaked hash shows it to no one new. Called with the
-/// transaction that stores the referencing event.
+/// transaction that stores the referencing event; returns the shares added.
 pub(crate) async fn record_media_shares(
     conn: &mut PgConnection,
     community_id: CommunityId,
     sha256s: &[String],
     author: &[u8],
     channel_id: Option<Uuid>,
-) -> Result<()> {
-    sqlx::query(concat!(
+) -> Result<u64> {
+    let added = sqlx::query(concat!(
         "INSERT INTO media_shares (community_id, sha256, channel_id) \
          SELECT $1, b.sha256, $4 FROM (SELECT DISTINCT unnest($2::text[]) AS sha256) b \
          WHERE EXISTS (SELECT 1 FROM media_uploaders u \
                        WHERE u.community_id = $1 AND u.sha256 = b.sha256 AND u.pubkey = $3) \
             OR ",
         readable_sql!(),
-        " ON CONFLICT DO NOTHING"
+        " ORDER BY b.sha256 ON CONFLICT DO NOTHING"
     ))
     .bind(community_id.as_uuid())
     .bind(sha256s)
     .bind(author)
     .bind(channel_id)
     .execute(conn)
-    .await?;
-    Ok(())
+    .await?
+    .rows_affected();
+    Ok(added)
 }
 
 impl Db {
     /// Record the shares of every event already stored in an active community,
-    /// deleted events included, `batch_size` events per transaction; returns the
-    /// number of shares added.
+    /// deleted events included, reading `batch_size` events at a time; returns
+    /// the number of shares added.
     ///
-    /// Shares come from the same rule as live writes. History predates the
-    /// readability check, so its references are recorded as they stand.
-    /// Idempotent and resumable: rerunning only fills shares still missing.
+    /// Shares come from the same rule as live writes. Events received before
+    /// share recording was installed predate the readability check, so their
+    /// references are recorded as they stand; later events get the live,
+    /// checked recording, so the backfill never shares what live recording
+    /// refused. Idempotent and resumable: rerunning only fills missing shares.
     #[datastore_span(name = "backfill_media_shares", system = "postgresql")]
     pub async fn backfill_media_shares(&self, batch_size: i64) -> Result<u64> {
+        let installed: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT installed_on FROM _sqlx_migrations WHERE version = 67")
+                .fetch_optional(&self.pool)
+                .await?;
+        let installed = installed.ok_or_else(|| {
+            crate::DbError::InvalidData("media access migration 0067 is not installed".into())
+        })?;
         let communities: Vec<Uuid> = sqlx::query_scalar(
             "SELECT id FROM communities WHERE deleted_at IS NULL AND deletion_state = 'active' \
              ORDER BY id",
@@ -105,13 +115,10 @@ impl Db {
                 cursor = Some((last.try_get("created_at")?, last.try_get("id")?));
                 let full_batch = i64::try_from(rows.len()).unwrap_or(i64::MAX) == batch_size;
 
-                let mut tx = crate::begin_community_write_transaction(
-                    &self.pool,
-                    community,
-                    crate::observability::WriterOperation::Maintenance,
-                )
-                .await?;
+                let mut history: Vec<(String, Option<Uuid>)> = Vec::new();
+                let mut recorded_live = Vec::new();
                 for row in rows {
+                    let received_at: DateTime<Utc> = row.try_get("received_at")?;
                     let Some(stored) = crate::event::row_to_stored_event(row)? else {
                         continue;
                     };
@@ -119,24 +126,64 @@ impl Db {
                     if hashes.is_empty() {
                         continue;
                     }
+                    if received_at < installed {
+                        history.extend(hashes.into_iter().map(|hash| (hash, stored.channel_id)));
+                    } else {
+                        recorded_live.push((stored.event.pubkey, hashes, stored.channel_id));
+                    }
+                }
+                // Insert in key order, as live recording does, so a concurrent
+                // publish can never take the same share locks in reverse.
+                history.sort();
+                history.dedup();
+                if !history.is_empty() {
+                    let (hashes, channels): (Vec<String>, Vec<Option<Uuid>>) =
+                        history.into_iter().unzip();
+                    let mut tx = self.begin_media_share_transaction(community).await?;
                     added += sqlx::query(
                         "INSERT INTO media_shares (community_id, sha256, channel_id) \
-                         SELECT $1, unnest($2::text[]), $3 ON CONFLICT DO NOTHING",
+                         SELECT $1, h, c FROM unnest($2::text[], $3::uuid[]) AS t(h, c) \
+                         ORDER BY h, c NULLS FIRST \
+                         ON CONFLICT DO NOTHING",
                     )
                     .bind(community.as_uuid())
-                    .bind(&hashes)
-                    .bind(stored.channel_id)
+                    .bind(hashes)
+                    .bind(channels)
                     .execute(tx.conn())
                     .await?
                     .rows_affected();
+                    tx.commit().await?;
                 }
-                tx.commit().await?;
+                for (author, hashes, channel) in recorded_live {
+                    let mut tx = self.begin_media_share_transaction(community).await?;
+                    added += record_media_shares(
+                        tx.conn(),
+                        community,
+                        &hashes,
+                        author.as_bytes(),
+                        channel,
+                    )
+                    .await?;
+                    tx.commit().await?;
+                }
                 if !full_batch {
                     break;
                 }
             }
         }
         Ok(added)
+    }
+
+    async fn begin_media_share_transaction(
+        &self,
+        community: CommunityId,
+    ) -> Result<crate::AdmittedTx> {
+        crate::begin_community_write_transaction(
+            &self.pool,
+            community,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await
     }
 }
 
@@ -271,11 +318,12 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn backfill_records_shares_of_stored_events() {
+    async fn backfill_trusts_history_and_rechecks_recorded_events() {
         let (db, community) = fixture().await;
-        let alice = Keys::generate();
-        let sha = unique_sha();
+        let (alice, bob, carol) = (Keys::generate(), Keys::generate(), Keys::generate());
+        let (sha, historical) = (unique_sha(), unique_sha());
         let private = channel(&db, community, &alice, ChannelVisibility::Private).await;
+        upload(&db, community, &alice, &sha).await;
         db.insert_event(
             community,
             &attachment(&alice, &sha, Some(private)),
@@ -283,6 +331,14 @@ mod postgres_tests {
         )
         .await
         .expect("alice posts privately");
+        db.insert_event(community, &attachment(&bob, &sha, None), None)
+            .await
+            .expect("bob references the hash");
+        let old = attachment(&carol, &historical, None);
+        db.insert_event(community, &old, None)
+            .await
+            .expect("carol posts before share recording");
+
         let mut tx = crate::begin_community_write_transaction(
             &db.pool,
             community,
@@ -290,6 +346,12 @@ mod postgres_tests {
         )
         .await
         .expect("admit");
+        sqlx::query("UPDATE events SET received_at = 'epoch' WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(old.id.as_bytes().as_slice())
+            .execute(tx.conn())
+            .await
+            .expect("age carol's event");
         sqlx::query("DELETE FROM media_shares WHERE community_id = $1")
             .bind(community.as_uuid())
             .execute(tx.conn())
@@ -298,6 +360,11 @@ mod postgres_tests {
         tx.commit().await.expect("commit");
 
         db.backfill_media_shares(100).await.expect("backfill");
-        assert_eq!(shares(&db, community, &sha).await, vec![Some(private)]);
+        assert_eq!(
+            shares(&db, community, &sha).await,
+            vec![Some(private)],
+            "a reference live recording refused must stay unshared"
+        );
+        assert_eq!(shares(&db, community, &historical).await, vec![None]);
     }
 }
