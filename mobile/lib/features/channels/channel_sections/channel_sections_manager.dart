@@ -33,6 +33,7 @@ class ChannelSectionsCrypto {
 
 class ChannelSectionsManager {
   final String pubkey;
+  final String relayUrl;
   final ChannelSectionsStorage _storage;
   final ChannelSectionsCrypto _crypto;
   final RelaySessionNotifier? _relaySession;
@@ -61,6 +62,7 @@ class ChannelSectionsManager {
 
   ChannelSectionsManager({
     required this.pubkey,
+    required this.relayUrl,
     required SharedPreferences prefs,
     required ChannelSectionsCrypto crypto,
     required RelaySessionNotifier? relaySession,
@@ -76,7 +78,7 @@ class ChannelSectionsManager {
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay,
-       _store = ChannelSectionsStorage(prefs).read(pubkey);
+       _store = ChannelSectionsStorage(prefs).read(pubkey, relayUrl);
 
   ChannelSectionStore get store => _store;
 
@@ -400,6 +402,8 @@ class ChannelSectionsManager {
   }
 
   void _mergeEvent(NostrEvent event) {
+    // Another community's groups must never reach this community's store.
+    if (!_servesThisCommunity) return;
     // Only process channel-sections d-tag events.
     final dTag = event.getTagValue('d');
     if (dTag != 'channel-sections') return;
@@ -461,7 +465,8 @@ class ChannelSectionsManager {
   Future<void> _publish({bool allowDisposed = false}) async {
     if ((!allowDisposed && _disposed) ||
         !_remoteEnabled ||
-        _signedEventRelay == null) {
+        _signedEventRelay == null ||
+        !_servesThisCommunity) {
       return;
     }
 
@@ -469,7 +474,7 @@ class ChannelSectionsManager {
     await _fetchAndMerge(allowDisposed: allowDisposed);
 
     // No-op suppression: skip if nothing changed
-    if (_isIdenticalToLastPublished()) return;
+    if (_isIdenticalToLastPublished() || !_servesThisCommunity) return;
 
     final submitted = _store;
     final revision = _localRevision;
@@ -513,10 +518,17 @@ class ChannelSectionsManager {
     }
   }
 
+  /// Switching community rebuilds the session in place before this manager
+  /// is retired, so in between it must neither take in nor publish data.
+  bool get _servesThisCommunity {
+    final served = _relaySession?.relayUrl;
+    return served == null || served == relayUrl;
+  }
+
   /// A retired manager never writes the prefs key its successor now owns.
   void _persist() {
     if (_disposed) return;
-    _storage.write(pubkey, _store);
+    _storage.write(pubkey, relayUrl, _store);
   }
 
   List<ChannelSection> _sortedSections() {

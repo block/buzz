@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -17,6 +18,47 @@ import 'package:buzz/shared/deeplink/deep_link.dart';
 import '../../shared/community/community_storage_test.dart';
 
 void main() {
+  test(
+    'legacy invite entry refuses staging before key generation or claim',
+    () async {
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      var generated = 0;
+      var requests = 0;
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          inviteKeyGeneratorProvider.overrideWithValue(() {
+            generated++;
+            return nostr.Keys.generate();
+          }),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((_) async {
+              requests++;
+              return http.Response('{}', 500);
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(communityListProvider.future);
+      final notifier = container.read(inviteJoinProvider.notifier);
+      await notifier.prepare(
+        const InviteDeepLink(
+          relayUrl: 'wss://team.communities.public.builderlabstaging.xyz',
+          code: 'fixture',
+        ),
+      );
+      await notifier.confirmJoin();
+      expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
+      expect(generated, 0);
+      expect(requests, 0);
+      expect(await storage.loadAll(), isEmpty);
+    },
+    skip: !HostedEnvironment.requiresAuth(
+      'team.communities.public.builderlabstaging.xyz',
+    ),
+  );
+
   for (final existingRelayUrl in [
     'wss://relay.example.com',
     'https://relay.example.com',
@@ -749,7 +791,12 @@ class _RecordingAuthNotifier extends AuthNotifier {
       const AuthState(status: AuthStatus.unauthenticated);
 
   @override
-  Future<void> authenticateWithCommunity(Community community) async {
+  Future<void> authenticateWithCommunity(
+    Community community, {
+    bool Function()? shouldContinue,
+    bool activate = true,
+  }) async {
+    if (shouldContinue != null && !shouldContinue()) return;
     final storage = ref.read(communityStorageProvider);
     await storage.save(community);
     await storage.saveActiveId(community.id);

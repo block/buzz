@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'hosted_app_gate.dart';
+import 'onboarding_app_entry.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
 import 'shared/community/community_loading_surface.dart';
@@ -28,7 +30,6 @@ import 'features/pairing/pairing_page.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
-import 'features/channels/deep_link_dispatcher.dart';
 import 'shared/widgets/app_route_observer.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
@@ -330,16 +331,20 @@ class App extends HookConsumerWidget {
     if (ageSignalState != AgeSignalState.restricted &&
         authState.value?.status == AuthStatus.authenticated) {
       ref.watch(relaySessionProvider);
-      ref.watch(observerRelayProvider);
+      // Listen, not watch: these publish often, and an App rebuild rebuilds
+      // every route, including an open chat.
+      ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
-      ref.watch(userStatusCacheProvider);
+      ref.listen(userStatusCacheProvider, (_, _) {});
       if (ref.watch(activeCommunityProvider).value?.pushNotificationsEnabled ==
               true &&
           ref.watch(currentRelayPushDescriptorProvider).value != null) {
         ref.watch(pushSubscriptionSyncProvider);
       }
       hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
-      hasUnreadSolo = ref.watch(meUnreadChannelIdsProvider).isNotEmpty;
+      hasUnreadSolo = ref.watch(
+        meUnreadChannelIdsProvider.select((ids) => ids.isNotEmpty),
+      );
     }
 
     // Start listening for buzz:// links immediately (even pre-auth) so a
@@ -414,7 +419,8 @@ class App extends HookConsumerWidget {
         loading: () => const _SplashScreen(),
         error: (_, _) => const PairingPage(),
         data: (state) => switch (state.status) {
-          AuthStatus.authenticated => DeepLinkDispatcher(
+          AuthStatus.authenticated => HostedAppGate(
+            authenticated: true,
             child: HomePage(
               mePageBuilder: (_, action) => MePage(newChatAction: action),
               settingsPageBuilder: _buildSettingsPage,
@@ -424,9 +430,9 @@ class App extends HookConsumerWidget {
               hasUnreadSolo: hasUnreadSolo,
             ),
           ),
-          _ => const DeepLinkDispatcher(
-            dispatchMessageLinks: false,
-            child: PairingPage(),
+          _ => const HostedAppGate(
+            authenticated: false,
+            child: OnboardingAppEntry(),
           ),
         },
       ),

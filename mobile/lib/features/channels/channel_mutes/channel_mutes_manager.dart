@@ -30,6 +30,7 @@ class ChannelMutesCrypto {
 
 class ChannelMutesManager {
   final String pubkey;
+  final String relayUrl;
   final ChannelMutesStorage _storage;
   final ChannelMutesCrypto _crypto;
   final RelaySessionNotifier? _relaySession;
@@ -58,6 +59,7 @@ class ChannelMutesManager {
 
   ChannelMutesManager({
     required this.pubkey,
+    required this.relayUrl,
     required SharedPreferences prefs,
     required ChannelMutesCrypto crypto,
     required RelaySessionNotifier? relaySession,
@@ -73,7 +75,7 @@ class ChannelMutesManager {
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay,
-       _store = ChannelMutesStorage(prefs).read(pubkey);
+       _store = ChannelMutesStorage(prefs).read(pubkey, relayUrl);
 
   ChannelMuteStore get store => _store;
 
@@ -283,6 +285,8 @@ class ChannelMutesManager {
   /// then stays put so the same head is retried. An undecodable head is
   /// skipped without holding startup open.
   Future<bool> _applyEvents(List<NostrEvent> events) async {
+    // Another community's head must never reach this community's store.
+    if (!_servesThisCommunity) return true;
     var applied = true;
     for (final event in events) {
       if (event.pubkey != pubkey || event.getTagValue('d') != 'channel-mutes') {
@@ -336,7 +340,8 @@ class ChannelMutesManager {
   Future<void> _publish({bool allowDisposed = false}) async {
     if ((!allowDisposed && _disposed) ||
         !_remoteEnabled ||
-        _signedEventRelay == null) {
+        _signedEventRelay == null ||
+        !_servesThisCommunity) {
       return;
     }
 
@@ -346,7 +351,7 @@ class ChannelMutesManager {
     if (!_disposed) _onChanged();
 
     // No-op suppression: skip if nothing changed
-    if (_isIdenticalToLastPublished()) return;
+    if (_isIdenticalToLastPublished() || !_servesThisCommunity) return;
 
     try {
       final payload = jsonEncode(_store.toJson());
@@ -378,9 +383,16 @@ class ChannelMutesManager {
     }
   }
 
+  /// Switching community rebuilds the session in place before this manager
+  /// is retired, so in between it must neither take in nor publish data.
+  bool get _servesThisCommunity {
+    final served = _relaySession?.relayUrl;
+    return served == null || served == relayUrl;
+  }
+
   Future<bool> _persist() async {
     try {
-      if (await _storage.write(pubkey, _store)) return true;
+      if (await _storage.write(pubkey, relayUrl, _store)) return true;
       debugPrint('[ChannelMutesManager] persist returned false');
     } catch (error) {
       debugPrint('[ChannelMutesManager] persist failed: $error');

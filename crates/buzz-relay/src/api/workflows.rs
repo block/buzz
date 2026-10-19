@@ -79,7 +79,8 @@ async fn authorize_workflow_read(
             require_auth,
             false,
         ),
-    )?;
+    )
+    .await?;
     let pubkey = *admission.proven_pubkey();
     let (event_id_bytes, signed_created_at) = admission.into_extra();
 

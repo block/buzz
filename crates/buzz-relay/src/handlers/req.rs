@@ -7,9 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DELETION, KIND_DM_VISIBILITY, KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS,
-    SHARED_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_DELETION,
+    KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -1254,8 +1253,12 @@ fn filter_to_query_params(
         .map(|values| values.iter().map(|v| v.to_string()).collect());
 
     let tag_values = group_state_tag_values(filter);
+    // NIP-CL: a membership notice's `#t` is its channel type. SQL keeps only
+    // the types this filter may see; a filter without `#t` sees legacy types.
+    let notice_channel_types = buzz_core::filter::notice_channel_types(filter);
 
     EventQuery {
+        notice_channel_types,
         channel_id,
         kinds,
         pubkey,
@@ -1656,13 +1659,14 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
         // when `ids` is present. KIND_AGENT_TURN_METRIC events are long-lived
         // and their cleartext envelope (pubkey, agent tag, created_at) leaks
         // turn-activity metadata — knowing an event id is NOT authorization
-        // (NIP-AM §Relay Behavior). Only filters that explicitly name the kind
-        // lose the exemption — a kindless `ids` lookup is unaffected.
+        // (NIP-AM §Relay Behavior). Membership notices are relay-signed and
+        // name the target and channel. All of these are RESULT_GATED_KINDS.
+        // Only filters that explicitly name the kind lose the exemption — a
+        // kindless `ids` lookup is admitted and then gated per result by
+        // `reader_authorized_for_event`.
         let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
-            ks.iter().any(|kind| {
-                let k = kind.as_u16() as u32;
-                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
-            })
+            ks.iter()
+                .any(|kind| RESULT_GATED_KINDS.contains(&(kind.as_u16() as u32)))
         });
         if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             return true;
@@ -1761,8 +1765,7 @@ pub(crate) fn filter_can_match_shared_gated_kinds(filter: &Filter) -> bool {
 
 /// Returns `true` if the filter CAN match result-gated kinds — meaning it
 /// either has no `kinds` constraint (wildcard) or includes at least one kind
-/// that carries a per-event result-level read gate (currently
-/// `KIND_DM_VISIBILITY` and `KIND_AGENT_TURN_METRIC`).
+/// that carries a per-event result-level read gate (`RESULT_GATED_KINDS`).
 ///
 /// Used by the COUNT handler to force the per-event fallback path instead of
 /// the fast SQL `count_events()`, which cannot enforce the owner-only result
@@ -2952,13 +2955,22 @@ mod tests {
         let owner = Filter::new().kind(dm_vis).custom_tags(p_tag, [authed]);
         assert!(p_gated_filters_authorized(&[owner], authed));
 
-        // The ids exemption still applies to other p-gated kinds (member notifs).
-        let member_notif_ids = Filter::new()
-            .kind(nostr::Kind::Custom(
-                buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as u16,
-            ))
-            .id(nostr::EventId::from_hex(snapshot_id).unwrap());
-        assert!(p_gated_filters_authorized(&[member_notif_ids], authed));
+        // Membership notices are relay-signed too: knowing one's id is not
+        // authorization (a system channel's notice names a hidden channel).
+        for kind in [
+            buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION,
+            buzz_core::kind::KIND_MEMBER_REMOVED_NOTIFICATION,
+        ] {
+            let ids_only = Filter::new()
+                .kind(nostr::Kind::Custom(kind as u16))
+                .id(nostr::EventId::from_hex(snapshot_id).unwrap());
+            assert!(!p_gated_filters_authorized(&[ids_only], authed));
+            let own = Filter::new()
+                .kind(nostr::Kind::Custom(kind as u16))
+                .id(nostr::EventId::from_hex(snapshot_id).unwrap())
+                .custom_tags(p_tag, [authed]);
+            assert!(p_gated_filters_authorized(&[own], authed));
+        }
     }
 
     /// NIP-AM: kind 44200 must deny `{kinds:[44200], ids:[...]}` by non-owner.

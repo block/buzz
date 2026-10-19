@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:share_plus/share_plus.dart';
 
+import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/relay/relay.dart';
@@ -277,7 +278,7 @@ class RelayCommunityInviteActions implements CommunityInviteActions {
 
 /// Supplies the HTTP client used to mint community invite links.
 final communityInviteHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = ref.watch(hostedHttpClientFactoryProvider)();
   ref.onDispose(client.close);
   return client;
 });

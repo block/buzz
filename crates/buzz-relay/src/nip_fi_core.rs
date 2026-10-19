@@ -47,8 +47,14 @@ impl AssertionRejection {
     }
 }
 
-/// Resolve the community served at the request `Host` — enforce-mode
-/// admission step 1, before any evidence is examined (NIP-FI.md:266-268).
+/// The request `Host`, if present and readable.
+fn request_host(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+}
+
+/// Resolve the community served at the request `Host` from a static map.
 ///
 /// An absent, unreadable, or unmapped Host is `authorization_unavailable`.
 /// This makes mapped and unmapped Hosts distinguishable (401/403 vs 503) in
@@ -57,12 +63,98 @@ impl AssertionRejection {
 pub(crate) fn resolve_community<'a>(
     headers: &HeaderMap,
     communities: &'a NipFiCommunities,
-) -> Result<&'a CommunityBinding, DenialClass> {
-    headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
+) -> Result<&'a std::sync::Arc<CommunityBinding>, DenialClass> {
+    request_host(headers)
         .and_then(|host| communities.resolve(host))
         .ok_or(DenialClass::AuthorizationUnavailable)
+}
+
+/// A community resolved for one enforce admission.
+#[derive(Clone)]
+pub(crate) struct ResolvedCommunity {
+    binding: std::sync::Arc<CommunityBinding>,
+    deadline: AdmissionDeadline,
+}
+
+impl ResolvedCommunity {
+    /// The deadline admission must re-check after its own awaits.
+    pub(crate) fn deadline(&self) -> AdmissionDeadline {
+        self.deadline.clone()
+    }
+
+    /// The shadow `community` label: the configured URI for an `env`
+    /// binding, whose set is bounded by config, else `bound`, since the
+    /// database's host set is unbounded.
+    pub(crate) fn shadow_label(&self) -> metrics::SharedString {
+        if self.deadline.0.is_none() {
+            self.binding.expected_aud().to_owned().into()
+        } else {
+            metrics::SharedString::const_str(crate::nip_fi_shadow::BOUND)
+        }
+    }
+}
+
+impl std::ops::Deref for ResolvedCommunity {
+    type Target = CommunityBinding;
+    fn deref(&self) -> &CommunityBinding {
+        &self.binding
+    }
+}
+
+/// The point past which admitting on a resolved community is
+/// `authorization_unavailable`: the database snapshot's staleness deadline.
+/// A static `env` binding never goes stale.
+#[derive(Clone, Default)]
+pub(crate) struct AdmissionDeadline(Option<crate::nip_fi_resolver::FreshUntil>);
+
+impl AdmissionDeadline {
+    /// Run immediately before admitting.
+    pub(crate) fn check(&self) -> Result<(), DenialClass> {
+        self.0.as_ref().map_or(Ok(()), |fresh| fresh.check())
+    }
+}
+
+/// The relay's community source (`BUZZ_NIP_FI_COMMUNITY_SOURCE`): the
+/// static `env` map, or the database resolver.
+#[derive(Clone, Copy)]
+pub(crate) enum Communities<'a> {
+    Env(&'a NipFiCommunities),
+    Database(&'a std::sync::Arc<crate::nip_fi_resolver::DatabaseResolver>),
+    /// The `database` source with no resolver built: every host is
+    /// `authorization_unavailable`.
+    Unavailable,
+}
+
+impl Communities<'_> {
+    /// Resolve the community at the request `Host` — enforce-mode admission
+    /// step 1, before any evidence is examined (NIP-FI.md:266-268). Called
+    /// once per admission; the returned binding is what verification uses.
+    pub(crate) async fn resolve(
+        self,
+        headers: &HeaderMap,
+    ) -> Result<ResolvedCommunity, DenialClass> {
+        match self {
+            Self::Env(map) => resolve_community(headers, map).map(|b| ResolvedCommunity {
+                binding: std::sync::Arc::clone(b),
+                deadline: AdmissionDeadline::default(),
+            }),
+            Self::Database(resolver) => {
+                let host = request_host(headers).ok_or(DenialClass::AuthorizationUnavailable)?;
+                let (binding, fresh) = resolver.resolve(host).await?;
+                Ok(ResolvedCommunity {
+                    binding,
+                    deadline: AdmissionDeadline(Some(fresh)),
+                })
+            }
+            Self::Unavailable => Err(DenialClass::AuthorizationUnavailable),
+        }
+    }
+}
+
+impl<'a> From<&'a NipFiCommunities> for Communities<'a> {
+    fn from(map: &'a NipFiCommunities) -> Self {
+        Self::Env(map)
+    }
 }
 
 /// Extract and verify the attached assertion for `community`.
@@ -198,7 +290,7 @@ pub(crate) mod test_support {
 
     /// The binding a fixture community expecting `aud` presents.
     pub(crate) fn binding(aud: &str) -> CommunityBinding {
-        any_host(aud).resolve(TEST_HOST).expect("served").clone()
+        (**any_host(aud).resolve(TEST_HOST).expect("served")).clone()
     }
 
     /// Request headers addressed to [`TEST_HOST`].
@@ -220,10 +312,11 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn community() -> CommunityBinding {
-        communities()
-            .resolve(super::test_support::TEST_HOST)
-            .expect("mapped")
-            .clone()
+        CommunityBinding::clone(
+            communities()
+                .resolve(super::test_support::TEST_HOST)
+                .expect("mapped"),
+        )
     }
 
     /// Verifier returning a fixed result and counting calls.

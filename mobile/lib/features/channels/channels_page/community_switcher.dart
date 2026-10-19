@@ -62,8 +62,10 @@ class _CommunityFlight {
   final String? previousCommunityId;
 }
 
-class _CommunitySwitcherPage extends HookConsumerWidget {
-  const _CommunitySwitcherPage({
+/// Shared community management surface for app entry and switching.
+class CommunitySwitcherPage extends HookConsumerWidget {
+  const CommunitySwitcherPage({
+    super.key,
     required this.destination,
     this.arrivingCommunity,
     required this.prepareLanding,
@@ -247,7 +249,7 @@ class _CommunitySwitcherPage extends HookConsumerWidget {
       unawaited(
         navigator.push(
           MaterialPageRoute<void>(
-            builder: (_) => const PairingPage(addingCommunity: true),
+            builder: (_) => const OnboardingAppEntry(addingCommunity: true),
           ),
         ),
       );

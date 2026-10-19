@@ -31,12 +31,12 @@ require_mobile_release_branch_ruleset "$MOBILE_RELEASE_SOURCE_BRANCH" || exit 1
 
 source_sha="$(gh api "repos/$repo/git/ref/heads/$MOBILE_RELEASE_SOURCE_BRANCH" --jq .object.sha)" || \
   fail "could not resolve $repo $MOBILE_RELEASE_SOURCE_BRANCH"
-[[ "$source_sha" == "$target_sha" ]] || \
-  fail "$repo $MOBILE_RELEASE_SOURCE_BRANCH moved from requested commit $target_sha to $source_sha"
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || fail "GitHub returned an invalid source commit SHA"
 commit_sha="$(gh api "repos/$repo/commits/$target_sha" --jq .sha)" || \
   fail "$target_sha is not a commit in $repo"
 [[ "$commit_sha" == "$target_sha" ]] || \
   fail "GitHub resolved requested commit $target_sha as $commit_sha"
+require_mobile_release_commit_ancestor "$target_sha" "$source_sha" || exit 1
 
 refs="$(
   gh api --paginate "repos/$repo/git/matching-refs/tags/mobile-v${version}-rc." --jq '.[].ref'

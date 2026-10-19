@@ -127,6 +127,33 @@ void main() {
       );
     });
 
+    test('push choices persist independently across storage reloads', () async {
+      final first = Community.create(
+        name: 'First',
+        relayUrl: 'https://first.example',
+        pubkey: 'a' * 64,
+      );
+      final second = Community.create(
+        name: 'Second',
+        relayUrl: 'https://second.example',
+        pubkey: 'b' * 64,
+      );
+      await storage.saveAll([first, second]);
+      await storage.save(first.copyWith(pushNotificationsEnabled: false));
+
+      final reloaded = CommunityStorage(secure: fakeSecure);
+      final communities = await reloaded.loadAll();
+      expect(communities.map((c) => c.pushNotificationsEnabled), [false, true]);
+      expect(communities.map((c) => c.pubkey), [first.pubkey, second.pubkey]);
+      await reloaded.save(communities.last.copyWith(name: 'Renamed'));
+      expect(
+        (await CommunityStorage(
+          secure: fakeSecure,
+        ).loadAll()).map((c) => c.pushNotificationsEnabled),
+        [false, true],
+      );
+    });
+
     test('round-trips desired push subscription state', () async {
       final pubkey = 'a' * 64;
       final subscriptions = buildDesiredBuzzPushSubscriptions(

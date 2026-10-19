@@ -8,10 +8,14 @@
 library;
 
 import '../relay/relay_validation.dart';
+import '../hosted/hosted_environment.dart';
 
 /// A parsed deep link supported by the app.
 sealed class BuzzDeepLink {
   const BuzzDeepLink();
+
+  /// Community addressed by entry links; other actions have no relay target.
+  String? get relayUrl => null;
 }
 
 /// A parsed relay invite link.
@@ -21,6 +25,7 @@ sealed class BuzzDeepLink {
 /// handoff from the web landing page.
 class InviteDeepLink extends BuzzDeepLink {
   /// Relay URL normalized to the websocket scheme used by the app.
+  @override
   final String relayUrl;
 
   /// Invite code from the link.
@@ -292,6 +297,8 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
 
 /// Parse any supported Buzz deep link.
 BuzzDeepLink? parseBuzzDeepLink(Uri uri) =>
+    parseNostrBindDeepLink(uri) ??
+    parseAddCommunityDeepLink(uri) ??
     parseInviteDeepLink(uri) ??
     parseChannelDeepLink(uri) ??
     parseMessageDeepLink(uri);
@@ -350,5 +357,106 @@ EntityDeepLink? parseEntityDeepLink(Uri uri) {
     owner: owner.toLowerCase(),
     repository: repository,
     eventId: eventId?.toLowerCase(),
+  );
+}
+
+/// Web signup's challenge. Values are untrusted until authenticated verification.
+class NostrBindDeepLink extends BuzzDeepLink {
+  final Map<String, String> fields;
+  NostrBindDeepLink._(Map<String, String> fields)
+    : fields = Map.unmodifiable(fields);
+  String get challengeId => fields['challenge_id']!;
+  String get nonce => fields['nonce']!;
+  DateTime get expiresAt => DateTime.parse(fields['expires_at']!);
+  @override
+  String toString() => 'NostrBindDeepLink(redacted)';
+}
+
+class AddCommunityDeepLink extends BuzzDeepLink {
+  @override
+  final String relayUrl;
+  final String name;
+  const AddCommunityDeepLink({required this.relayUrl, required this.name});
+}
+
+bool _webHandoffShape(Uri uri, String host, Set<String> allowed) =>
+    uri.scheme == 'buzz' &&
+    uri.host == host &&
+    uri.path.isEmpty &&
+    !uri.hasFragment &&
+    !uri.hasPort &&
+    uri.userInfo.isEmpty &&
+    uri.toString().length <= 8192 &&
+    uri.queryParametersAll.keys.every(allowed.contains) &&
+    uri.queryParametersAll.values.every((values) => values.length == 1);
+
+NostrBindDeepLink? parseNostrBindDeepLink(Uri uri) {
+  const fields = {
+    'challenge_id',
+    'nonce',
+    'verification_code',
+    'audience',
+    'action',
+    'protocol',
+    'version',
+    'origin',
+    'expires_at',
+    'return',
+    'callback_url',
+  };
+  if (!_webHandoffShape(uri, 'nostr-bind', fields) ||
+      !fields.every(uri.queryParameters.containsKey)) {
+    return null;
+  }
+  final p = uri.queryParameters;
+  if (!RegExp(
+        r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+      ).hasMatch(p['challenge_id']!) ||
+      !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(p['nonce']!) ||
+      !RegExp(r'^[0-9]{6}$').hasMatch(p['verification_code']!) ||
+      p['audience'] != 'buzz:nostr-identity' ||
+      p['action'] != 'bind_nostr_identity' ||
+      p['protocol'] != 'buzz-nostr-identity' ||
+      p['version'] != '1' ||
+      p['origin'] != HostedEnvironment.origin.toString() ||
+      p['return'] != 'browser_fragment_v1' ||
+      p['callback_url'] !=
+          HostedEnvironment.origin.resolve('/buzz').toString() ||
+      !RegExp(r'(Z|[+-][0-9]{2}:[0-9]{2})$').hasMatch(p['expires_at']!) ||
+      DateTime.tryParse(p['expires_at']!) == null) {
+    return null;
+  }
+  return NostrBindDeepLink._(p);
+}
+
+AddCommunityDeepLink? parseAddCommunityDeepLink(Uri uri) {
+  if (!_webHandoffShape(uri, 'add-community', {'relay', 'name'})) return null;
+  final relay = Uri.tryParse(uri.queryParameters['relay'] ?? '');
+  final name = uri.queryParameters['name'];
+  if (relay == null ||
+      relay.scheme != 'wss' ||
+      relay.host.isEmpty ||
+      relay.host.endsWith('.') ||
+      relay.userInfo.isNotEmpty ||
+      relay.hasQuery ||
+      relay.hasFragment ||
+      (relay.path.isNotEmpty && relay.path != '/') ||
+      name == null ||
+      name.trim().isEmpty ||
+      name.length > 200) {
+    return null;
+  }
+  try {
+    validateInviteRelayUri(relay);
+  } on FormatException {
+    return null;
+  }
+  return AddCommunityDeepLink(
+    relayUrl: Uri(
+      scheme: 'wss',
+      host: relay.host,
+      port: relay.hasPort ? relay.port : null,
+    ).toString(),
+    name: name,
   );
 }

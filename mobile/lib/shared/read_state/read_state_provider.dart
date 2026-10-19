@@ -103,6 +103,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     late final ReadStateManager manager;
     manager = ReadStateManager(
       pubkey: pubkey,
+      relayUrl: relayConfig.baseUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),

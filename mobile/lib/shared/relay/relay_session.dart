@@ -12,6 +12,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../features/age_gate/age_signal_provider.dart';
 import '../auth/auth.dart';
+import '../hosted/hosted_relay_auth.dart';
+import '../hosted/builderlab_account.dart';
 import 'nostr_filters.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
@@ -131,10 +133,20 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
   bool _socketConnected = false;
   bool _closedRetryReplayScheduled = false;
+  String? _relayUrl;
+
+  /// The relay origin this session serves. Switching community rebuilds the
+  /// session in place, so work begun for another community compares this
+  /// before reading from or publishing through it.
+  String? get relayUrl => _relayUrl;
+
+  @visibleForTesting
+  set debugRelayUrl(String? value) => _relayUrl = value;
 
   @override
   SessionState build() {
     final config = ref.watch(relayConfigProvider);
+    _relayUrl = config.baseUrl;
     final authState = ref.watch(authProvider);
     _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
 
@@ -243,11 +255,19 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           url: url,
           bodyBytes: bodyBytes,
           nsec: config.nsec,
+          pubkey: ref.read(myPubkeyProvider),
         ),
         'Content-Type': 'application/json',
       },
       body: bodyBytes,
       timeout: timeout,
+      decorate: (client, active) => HostedRelayHttpClient(
+        ref.read(hostedRelayAuthProvider),
+        config,
+        inner: client,
+        canSend: () =>
+            active() && !_disposed && generation == _contextGeneration,
+      ),
     );
     if (_disposed || _ageRestricted || generation != _contextGeneration) {
       throw StateError('Relay query belongs to a retired session');
@@ -549,7 +569,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _connect(config);
   }
 
-  Future<void> _connect(RelayConfig config) async {
+  Future<void> _connect(RelayConfig config, {bool renewed = false}) async {
     if (_disposed || _ageRestricted) return;
 
     final generation = ++_connectionGeneration;
@@ -561,23 +581,48 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     );
 
     _socket?.dispose();
-    final socket = _socketFactory(
+    late final RelaySocket socket;
+    socket = _socketFactory(
       wsUrl: config.wsUrl,
       nsec: config.nsec,
       onMessage: (message) {
         if (generation == _connectionGeneration) _handleMessage(message);
       },
       onConnected: () => _handleConnected(generation),
-      onDisconnected: (error) => _handleDisconnected(generation, error),
+      onDisconnected: (error) {
+        if (_disposed || generation != _connectionGeneration) return;
+        final auth = ref.read(hostedRelayAuthProvider);
+        if (auth.protects(config) && relayUpgradeRefused(error)) {
+          auth.rejected(
+            config,
+            socket.headers['Nostr-Federated-Identity'],
+            terminal: renewed,
+          );
+          if (!renewed) {
+            unawaited(_connect(config, renewed: true));
+            return;
+          }
+          error = AccountFailure.denied;
+        }
+        _handleDisconnected(generation, error);
+      },
     );
     _socket = socket;
 
-    await socket.connect();
+    try {
+      final auth = ref.read(hostedRelayAuthProvider);
+      if (auth.protects(config)) socket.headers = await auth.headers(config);
+      if (_disposed || generation != _connectionGeneration) return;
+      await socket.connect();
+    } on AccountFailure catch (error) {
+      _handleDisconnected(generation, error);
+    }
   }
 
   Future<void> _handleConnected(int generation) async {
     if (_disposed || generation != _connectionGeneration) return;
     _socketConnected = true;
+    ref.read(hostedRelayAuthProvider).connected(ref.read(relayConfigProvider));
     _hasConnectedOnce = true;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
@@ -593,7 +638,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _eventBuffer.clear();
     _flushTimer?.cancel();
     _flushTimer = null;
-    if (error is RelayAuthRejectedException) {
+    if (error is RelayAuthRejectedException ||
+        (error is AccountFailure && error != AccountFailure.unavailable)) {
       _reconnectTimer?.cancel();
       state = const SessionState(status: SessionStatus.disconnected);
       return;

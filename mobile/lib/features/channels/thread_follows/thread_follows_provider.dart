@@ -19,11 +19,13 @@ class ThreadFollowsState {
 class ThreadFollowsNotifier extends Notifier<ThreadFollowsState> {
   List<ThreadFollowEntry> _entries = const [];
   String? _pubkey;
+  late String _relayUrl;
 
   @override
   ThreadFollowsState build() {
     final pubkey = ref.watch(myPubkeyProvider)?.trim().toLowerCase();
     _pubkey = pubkey;
+    _relayUrl = ref.watch(relayConfigProvider).baseUrl;
     if (pubkey == null || pubkey.isEmpty) {
       _entries = const [];
       return const ThreadFollowsState();
@@ -32,7 +34,7 @@ class ThreadFollowsNotifier extends Notifier<ThreadFollowsState> {
     try {
       _entries = ThreadFollowsStorage(
         ref.read(savedPrefsProvider),
-      ).read(pubkey);
+      ).read(pubkey, _relayUrl);
     } catch (_) {
       _entries = const [];
     }
@@ -66,7 +68,7 @@ class ThreadFollowsNotifier extends Notifier<ThreadFollowsState> {
     try {
       ThreadFollowsStorage(
         ref.read(savedPrefsProvider),
-      ).write(pubkey, _entries);
+      ).write(pubkey, _relayUrl, _entries);
     } catch (_) {
       // In-memory state still works this session.
     }

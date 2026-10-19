@@ -11,6 +11,8 @@ import 'package:buzz/shared/read_state/read_state_storage.dart';
 import 'package:buzz/shared/read_state/read_state_time.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
+const _relayUrl = 'https://relay.example';
+
 void main() {
   test('dispose flushes a pending publish after marking disposed', () async {
     SharedPreferences.setMockInitialValues({});
@@ -24,6 +26,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto!,
       relaySession: null,
@@ -59,6 +62,7 @@ void main() {
     final relay = _UnsupportedKindSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto!,
       relaySession: null,
@@ -91,6 +95,7 @@ void main() {
       final relay = _MissingScopeSignedEventRelay();
       final manager = ReadStateManager(
         pubkey: keychain.public,
+        relayUrl: _relayUrl,
         prefs: prefs,
         crypto: crypto!,
         relaySession: null,
@@ -121,6 +126,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: null,
@@ -166,6 +172,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: session,
@@ -215,6 +222,7 @@ void main() {
         final relay = _ParkedSignedEventRelay(failFirst: failFirst);
         final manager = ReadStateManager(
           pubkey: keychain.public,
+          relayUrl: _relayUrl,
           prefs: prefs,
           crypto: crypto,
           relaySession: null,
@@ -256,6 +264,7 @@ void main() {
     )!;
     ReadStateManager create() => ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: null,
@@ -275,7 +284,7 @@ void main() {
     expect(first.getEffectiveTimestamp('msg:stale'), isNotNull);
     first.dispose();
 
-    final stored = ReadStateStorage(prefs).read(keychain.public);
+    final stored = ReadStateStorage(prefs).read(keychain.public, _relayUrl);
     final messages = stored.contexts.keys.where((k) => k.startsWith('msg:'));
     expect(messages.length, localMaxPrunableContexts);
     expect(stored.contexts, isNot(contains('msg:stale')));
@@ -296,6 +305,36 @@ void main() {
     );
   });
 
+  test('each community keeps its own slot, seeded from the shared one, '
+      'and none takes the shared marks', () async {
+    SharedPreferences.setMockInitialValues({
+      'buzz.nip-rs.slot-id:pk': 'a' * 32,
+      'buzz.channel-read-state.v2:pk':
+          '{"channel-1":"2026-01-01T00:00:00.000",'
+          '"thread-activity:root-1":"2026-01-01T00:00:00.000"}',
+      'buzz.channel-read-state.publishable.v1:pk':
+          '["channel-1","thread-activity:root-1"]',
+    });
+    final prefs = await SharedPreferences.getInstance();
+    final storage = ReadStateStorage(prefs);
+
+    // Both communities keep publishing to the slot they already have.
+    expect(storage.getOrCreateSlotId('pk', _relayUrl), 'a' * 32);
+    expect(storage.getOrCreateSlotId('pk', 'https://other.example'), 'a' * 32);
+    storage.writeSlotId('pk', 'https://other.example', 'b' * 32);
+    expect(storage.getOrCreateSlotId('pk', _relayUrl), 'a' * 32);
+
+    // The shared marks may be another community's, and the relay keeps
+    // the published ones, so neither community takes them.
+    expect(storage.read('pk', _relayUrl).contexts, isEmpty);
+    expect(storage.read('pk', 'https://other.example').contexts, isEmpty);
+    expect(prefs.containsKey('buzz.channel-read-state.v2:pk'), isFalse);
+    expect(
+      prefs.containsKey('buzz.channel-read-state.publishable.v1:pk'),
+      isFalse,
+    );
+  });
+
   test('carries its own override keys and takes none from others', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -305,8 +344,8 @@ void main() {
       pubkey: keychain.public,
     )!;
     final storage = ReadStateStorage(prefs);
-    final clientId = storage.getOrCreateClientId(keychain.public);
-    final slotId = storage.getOrCreateSlotId(keychain.public);
+    final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
+    final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
     const ownGroup = {
       'ov_s:channel-1': 2,
       'ov_c:channel-1': 1,
@@ -345,6 +384,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: session,
@@ -378,6 +418,7 @@ void main() {
     final restartedRelay = _FakeSignedEventRelay();
     final restarted = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: null,
@@ -410,8 +451,8 @@ void main() {
       pubkey: keychain.public,
     )!;
     final storage = ReadStateStorage(prefs);
-    final clientId = storage.getOrCreateClientId(keychain.public);
-    final slotId = storage.getOrCreateSlotId(keychain.public);
+    final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
+    final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
     final session = _FakeRelaySession()
       ..historyEvents = [
         _readStateEvent(
@@ -439,6 +480,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: session,
@@ -475,8 +517,8 @@ void main() {
       pubkey: keychain.public,
     )!;
     final storage = ReadStateStorage(prefs);
-    final clientId = storage.getOrCreateClientId(keychain.public);
-    final slotId = storage.getOrCreateSlotId(keychain.public);
+    final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
+    final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
     final session = _FakeRelaySession()
       ..historyEvents = [
         _readStateEvent(
@@ -498,6 +540,7 @@ void main() {
     final relay = _FakeSignedEventRelay();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: session,
@@ -525,6 +568,7 @@ void main() {
     final relay = _FakeRelaySession();
     final manager = ReadStateManager(
       pubkey: keychain.public,
+      relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto!,
       relaySession: relay,

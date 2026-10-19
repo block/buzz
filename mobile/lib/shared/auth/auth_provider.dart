@@ -1,8 +1,10 @@
+import '../hosted/hosted_relay_auth.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../hosted/community_entry_requirements.dart';
 
 enum AuthStatus { unknown, unauthenticated, authenticated }
 
@@ -56,21 +58,34 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
   /// Authenticate with a community. Saves it and switches to it.
   /// Writes to storage directly to avoid circular dependency with community
   /// providers.
-  Future<void> authenticateWithCommunity(Community community) {
+  Future<void> authenticateWithCommunity(
+    Community community, {
+    bool Function()? shouldContinue,
+    bool activate = true,
+  }) {
     return ref.read(communityTransitionProvider).runExclusive(() async {
-      await ref.read(communityTransitionProvider).run();
+      if (shouldContinue != null && !shouldContinue()) return;
+      await CommunityEntryRequirements.verify(
+        community,
+        ref.read(builderlabAccountProvider),
+      );
+      if (shouldContinue != null && !shouldContinue()) return;
+      if (activate) await ref.read(communityTransitionProvider).run();
+      if (shouldContinue != null && !shouldContinue()) return;
       final storage = ref.read(communityStorageProvider);
       await storage.save(community);
-      await storage.saveActiveId(community.id);
+      if (activate) await storage.saveActiveId(community.id);
       await syncStoredCommunitySnapshot(ref);
 
       // Invalidate community providers so other consumers pick up the new data.
       ref.invalidate(communityListProvider);
       ref.invalidate(activeCommunityProvider);
 
-      state = AsyncData(
-        AuthState(status: AuthStatus.authenticated, community: community),
-      );
+      if (activate) {
+        state = AsyncData(
+          AuthState(status: AuthStatus.authenticated, community: community),
+        );
+      }
     });
   }
 

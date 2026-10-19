@@ -5,6 +5,36 @@ Flutter mobile client for Buzz.
 See [VISION_MOBILE.md](../VISION_MOBILE.md) for intended behavior and
 architecture.
 
+## Optional Builderlab login
+
+`BUZZ_AUTH_DOMAINS` is a comma-separated build-time environment setting, passed
+with Flutter's `--dart-define` (shell environment variables alone are not read):
+
+```bash
+flutter run --dart-define=BUZZ_AUTH_DOMAINS=communities.buzz.xyz,communities.public.builderlabstaging.xyz
+```
+
+Unset or empty means **Builderlab features are disabled**: no account login,
+community creation, backup/recovery UI, reconnect prompts, or background account
+restoration. QR/code pairing, community links and invites use Nostr-only entry.
+Saved account keys and sessions are retained for a later enabled build.
+
+A nonempty list enables Builderlab features and requires account setup only for
+matching domains. Those features need their backend endpoints. Normal relay key
+authentication remains in place. `BUZZ_BUILDERLAB_URL` selects the backend; setting
+it alone does not enable Builderlab features.
+
+Entries match the domain itself and its subdomains, case-insensitively. Use DNS
+names, not URLs or wildcards. The list does not add trusted account servers:
+configured domains outside the supported Builderlab realm cannot use hosted
+setup. `BUZZ_BUILDERLAB_URL` still selects the trusted account environment.
+
+## Hosted relay authentication
+
+`--dart-define=BUZZ_HOSTED_RELAY_AUTH=true` enables Builderlab relay assertions
+and reconnect sign-in **only for `BUZZ_AUTH_DOMAINS` matches**. It defaults off: configure backend assertion issuance
+before enabling mobile authentication, and enable relay enforcement last.
+
 ## Setup
 
 Use the Flutter SDK pinned by the repository. Activate Hermit from the repo
@@ -209,6 +239,10 @@ flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 Or from the repo root: `just mobile-check` and `just mobile-test`.
+
+When writing tests, favor a few journey tests that drive real user flows over
+many small logic tests. See
+[Testing Conventions](../AGENTS.md#testing-conventions).
 
 ## Android release signing
 

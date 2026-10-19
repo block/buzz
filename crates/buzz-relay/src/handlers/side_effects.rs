@@ -1059,8 +1059,12 @@ pub fn emit_live_thread_summary(
 
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).
 ///
-/// kind:44100 = member added, kind:44101 = member removed. System channels
-/// emit none.
+/// kind:44100 = member added, kind:44101 = member removed. Every notice
+/// carries its channel's type as `["t", <channel_type>]` (NIP-CL). This is
+/// the only place that reads the channel type for notices. Every read and live
+/// path shows a notice only to a filter that knows its type
+/// (`buzz_core::filter::notice_visible`), so a client never sees a notice
+/// about a type it does not know, such as a system channel.
 /// The p tag addresses the target pubkey; the h tag carries the channel UUID as metadata.
 /// Stored with channel_id = None so global subscribers receive it via slow-path fan-out.
 pub async fn emit_membership_notification(
@@ -1071,16 +1075,16 @@ pub async fn emit_membership_notification(
     actor_pubkey: &[u8],
     notification_kind: u32,
 ) -> anyhow::Result<()> {
-    // A system channel is left out of clients' channel lists, so it sends no
-    // membership notifications: a client that receives one would show it.
-    if !state
+    // No channel row means no type to tag. Send nothing rather than an
+    // untagged notice, which every client would treat as a legacy type.
+    let Some(channel_type) = state
         .db
-        .system_channel_ids_among(tenant.community(), &[channel_id])
+        .channel_type_of(tenant.community(), channel_id)
         .await?
-        .is_empty()
-    {
+    else {
+        warn!(%channel_id, "membership notice skipped: channel not found");
         return Ok(());
-    }
+    };
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
     let channel_id_str = channel_id.to_string();
@@ -1107,8 +1111,10 @@ pub async fn emit_membership_notification(
     })
     .to_string();
 
+    let type_tag = Tag::parse([buzz_core::filter::NOTICE_CHANNEL_TYPE_TAG, &channel_type])
+        .map_err(|e| anyhow::anyhow!("failed to build channel type tag: {e}"))?;
     let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
-        .tags([p_tag, h_tag])
+        .tags([p_tag, h_tag, type_tag])
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 

@@ -31,6 +31,7 @@ const _mediaGetAuthRefreshMarginSeconds = 60;
 class MediaGetAuthService {
   final String _baseUrl;
   final String? _nsec;
+  final String? _pubkey;
   final DateTime Function() _now;
 
   Map<String, String>? _cachedHeaders;
@@ -39,9 +40,11 @@ class MediaGetAuthService {
   MediaGetAuthService({
     required String baseUrl,
     required String? nsec,
+    String? pubkey,
     DateTime Function()? now,
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
+       _pubkey = pubkey,
        _now = now ?? DateTime.now;
 
   bool isRelayMediaUrl(String url) {
@@ -122,6 +125,8 @@ class MediaGetAuthService {
       content: 'Get buzz-media',
       tags: tags,
       secretKey: privkeyHex,
+      // Deriving the pubkey costs about a third of a signature, per image.
+      pubkey: _pubkey,
       verify: false,
     );
   }
@@ -129,7 +134,11 @@ class MediaGetAuthService {
 
 final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
   final config = ref.watch(relayConfigProvider);
-  return MediaGetAuthService(baseUrl: config.baseUrl, nsec: config.nsec);
+  return MediaGetAuthService(
+    baseUrl: config.baseUrl,
+    nsec: config.nsec,
+    pubkey: ref.watch(myPubkeyProvider),
+  );
 });
 
 Map<String, String> mediaGetHeadersFor(WidgetRef ref, String url) {

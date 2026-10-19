@@ -21,6 +21,8 @@ enum SensitiveActionPolicy { enabled, disabledByUser }
 class Community {
   static const _defaultPushNotificationsEnabled = true;
 
+  static const _pushNotificationsEnabledKey = 'pushNotificationsEnabledV2';
+
   final String id;
   final String name;
   final String relayUrl;
@@ -115,7 +117,7 @@ class Community {
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
-    'pushNotificationsEnabled': pushNotificationsEnabled,
+    _pushNotificationsEnabledKey: pushNotificationsEnabled,
     'pushSubscriptionState': pushSubscriptionState.toJson(),
     if (pushLeaseInstallationId != null)
       'pushLeaseInstallationId': pushLeaseInstallationId,
@@ -132,7 +134,7 @@ class Community {
       );
     }
     final pushNotificationsEnabled =
-        json['pushNotificationsEnabled'] as bool? ??
+        json[_pushNotificationsEnabledKey] as bool? ??
         _defaultPushNotificationsEnabled;
     var pushSubscriptionState = json['pushSubscriptionState'] == null
         ? const BuzzPushLeaseSubscriptionState.desired()

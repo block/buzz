@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -50,6 +51,7 @@ void main() {
   }) {
     return ChannelSectionsManager(
       pubkey: keychain.public,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: crypto,
       relaySession: relaySession,
@@ -291,32 +293,33 @@ void main() {
   });
 
   test('backoff resets after full recovery so later failures start from the '
-      'base delay', () async {
-    await setUpEnv();
-    // Climb the failure counter: 5 rate-limited attempts before success.
-    // With a 5ms base, attempt 5 would wait 5<<5 = 160ms if the counter
-    // were never reset.
-    final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 5);
-    final manager = buildManager(relaySession: relay);
-    await manager.initialize();
-    await _waitUntil(() => relay.subscribeCalls > 5);
+      'base delay', () {
+    fakeAsync((async) {
+      setUpEnv();
+      async.flushMicrotasks();
+      // Climb the failure counter: 5 rate-limited attempts before success.
+      // With a 5ms base, attempt 5 would wait 5<<5 = 160ms if the counter
+      // were never reset.
+      final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 5);
+      final manager = buildManager(relaySession: relay);
+      manager.initialize();
+      async.elapse(const Duration(seconds: 1));
+      expect(relay.subscribeCalls, greaterThan(5));
 
-    // Fully recovered. A later transient failure (late CLOSED) must retry
-    // from the base delay, not the climbed ceiling.
-    final subscribeCallsAfterRecovery = relay.subscribeCalls;
-    relay.closeLiveSubscription('rate-limited: quota exceeded');
-    final stopwatch = Stopwatch()..start();
-    await _waitUntil(() => relay.subscribeCalls > subscribeCallsAfterRecovery);
-    stopwatch.stop();
-
-    expect(
-      stopwatch.elapsedMilliseconds,
-      lessThan(100),
-      reason:
-          'retry after recovery must wait ~base delay (5ms), '
-          'not the pre-recovery backoff (160ms)',
-    );
-    manager.dispose(flushPending: false);
+      // Fully recovered. A later transient failure (late CLOSED) must retry
+      // from the base delay, not the climbed ceiling.
+      final subscribeCallsAfterRecovery = relay.subscribeCalls;
+      relay.closeLiveSubscription('rate-limited: quota exceeded');
+      async.elapse(const Duration(milliseconds: 6));
+      expect(
+        relay.subscribeCalls,
+        greaterThan(subscribeCallsAfterRecovery),
+        reason:
+            'retry after recovery must wait ~base delay (5ms), '
+            'not the pre-recovery backoff (160ms)',
+      );
+      manager.dispose(flushPending: false);
+    });
   });
 }
 

@@ -2,7 +2,16 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-String channelSectionsKey(String pubkey) => 'buzz.channel-sections.v1:$pubkey';
+import '../../../shared/theme/community_theme_preference.dart';
+
+/// Groups belong to one community, so the cache is keyed by relay as well as
+/// identity. One identity can be paired with several communities.
+String channelSectionsKey(String pubkey, String relayUrl) =>
+    'buzz.channel-sections.v1:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
+
+/// The earlier key, shared by every community of the identity.
+String legacyChannelSectionsKey(String pubkey) =>
+    'buzz.channel-sections.v1:$pubkey';
 
 class ChannelSection {
   final String id;
@@ -90,8 +99,11 @@ class ChannelSectionsStorage {
 
   ChannelSectionsStorage(this._prefs);
 
-  ChannelSectionStore read(String pubkey) {
-    final raw = _prefs.getString(channelSectionsKey(pubkey));
+  ChannelSectionStore read(String pubkey, String relayUrl) {
+    // The shared entry may hold another community's groups, and the relay
+    // copy is authoritative, so drop it rather than let one community claim it.
+    _prefs.remove(legacyChannelSectionsKey(pubkey));
+    final raw = _prefs.getString(channelSectionsKey(pubkey, relayUrl));
     if (raw == null || raw.isEmpty) {
       return const ChannelSectionStore();
     }
@@ -110,7 +122,10 @@ class ChannelSectionsStorage {
     }
   }
 
-  void write(String pubkey, ChannelSectionStore store) {
-    _prefs.setString(channelSectionsKey(pubkey), jsonEncode(store.toJson()));
+  void write(String pubkey, String relayUrl, ChannelSectionStore store) {
+    _prefs.setString(
+      channelSectionsKey(pubkey, relayUrl),
+      jsonEncode(store.toJson()),
+    );
   }
 }

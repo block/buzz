@@ -92,14 +92,14 @@ pub async fn ws_audio_handler(
     req: axum::extract::Request,
 ) -> impl IntoResponse {
     // NIP-FI assertion check at upgrade — before tenant lookup and before the
-    // WebSocket handshake. Running pre-lookup means a denied request pays zero
-    // DB cost and the gate is reachable in tests without a live community.
+    // WebSocket handshake. Running pre-lookup means a denied request skips the tenant
+    // lookup (a resolver miss costs one bounded binding lookup) and the gate is reachable in tests without a live community.
     // [FI-TRACE-TRANSPORT-CLOSED] [NIP-FI.md §Admission pairing sequence]
-    let (nip_fi_assertion, shadow_assertion) = {
+    let (nip_fi_assertion, shadow_assertion, nip_fi_deadline) = {
         use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
         let mode = state.config.nip_fi.mode;
         let verifier = state.nip_fi_verifier.as_deref();
-        let communities = &state.config.nip_fi.communities;
+        let communities = state.nip_fi_communities();
         match check_nip_fi_at_upgrade(
             crate::nip_fi_session::NipFiWsRoute::Audio,
             &headers,
@@ -107,6 +107,7 @@ pub async fn ws_audio_handler(
             verifier,
             mode,
         )
+        .await
         .into_assertions()
         {
             Ok(assertions) => assertions,
@@ -134,6 +135,16 @@ pub async fn ws_audio_handler(
         }
     };
 
+    // The tenant lookup awaited since the community resolved; a snapshot
+    // that went stale meanwhile accepts no socket.
+    if let Err(class) = nip_fi_deadline.check() {
+        return crate::nip_fi_core::http_denial(class).into_response();
+    }
+    let shadow_assertion = crate::nip_fi_upgrade::observe_deadline(
+        crate::nip_fi_session::NipFiWsRoute::Audio,
+        shadow_assertion,
+    );
+
     let ws = match WebSocketUpgrade::from_request(req, &state).await {
         Ok(ws) => ws,
         Err(e) => return e.into_response(),
@@ -158,11 +169,11 @@ pub async fn ws_audio_handler(
     // so the NIP-FI session partition is rooted at the HTTP handshake, not the
     // post-community-active-check instant. [FI-TRACE-LEASE-BOUND]
     let connection_time = chrono::Utc::now();
-    let shadow = shadow_assertion.map(|a| {
+    let shadow = shadow_assertion.map(|(a, community)| {
         crate::nip_fi_shadow_session::ShadowSession::start(
             &state,
             "audio",
-            &headers,
+            community,
             a,
             connection_time,
         )
@@ -283,6 +294,11 @@ pub(crate) async fn handle_audio_connection(
     let rx_for_run = Arc::clone(&rx_shared);
     let rx_for_drain = Arc::clone(&rx_shared);
 
+    // The drain path parks the read half here so the bounded wait for the
+    // client's Close runs after the registry entry is released.
+    let unread_shared = Arc::new(tokio::sync::Mutex::new(None));
+    let unread_for_drain = Arc::clone(&unread_shared);
+
     run_registered_community_connection(
         &registry,
         Uuid::new_v4(),
@@ -319,37 +335,21 @@ pub(crate) async fn handle_audio_connection(
         },
         move || async move {
             let socket = socket_for_drain.lock().await.take();
-            let mut pre_terminal_ctrl_rx = rx_for_drain.lock().await.take();
+            let queued = rx_for_drain.lock().await.take();
             if let Some(socket) = socket {
-                let (mut ws_send, _ws_recv) = socket.split();
-                if let Some(ref mut rx) = pre_terminal_ctrl_rx {
-                    while let Ok(msg) = rx.try_recv() {
-                        let _ = tokio::time::timeout(
-                            crate::connection::WS_TERMINAL_FLUSH_TIMEOUT,
-                            futures_util::SinkExt::send(&mut ws_send, msg),
-                        )
-                        .await;
-                    }
-                }
                 // A published reason (e.g. an expiry denial) closes with its
                 // own frame, exactly as the writer would.
                 let close = drain_reason.borrow().map(|reason| reason.close_message());
-                if let Some(close) = close {
-                    let _ = tokio::time::timeout(
-                        crate::connection::WS_TERMINAL_FLUSH_TIMEOUT,
-                        futures_util::SinkExt::send(&mut ws_send, close),
-                    )
-                    .await;
-                }
-                let _ = tokio::time::timeout(
-                    crate::connection::WS_TERMINAL_FLUSH_TIMEOUT,
-                    futures_util::SinkExt::close(&mut ws_send),
-                )
-                .await;
+                let ws_recv = crate::connection::drain_refused_socket(socket, queued, close).await;
+                *unread_for_drain.lock().await = Some(ws_recv);
             }
         },
     )
     .await;
+    let unread = unread_shared.lock().await.take();
+    if let Some(ws_recv) = unread {
+        crate::connection::await_client_close(ws_recv).await;
+    }
 }
 
 /// Mid-admission cancellation fence for the audio route: if `$cancel` fired,
@@ -400,6 +400,7 @@ async fn send_challenge_unless_cancelled<S>(
 ) -> bool
 where
     S: futures_util::Sink<WsMessage> + Unpin,
+    S::Error: std::error::Error + 'static,
 {
     tokio::select! {
         biased;
@@ -427,6 +428,10 @@ pub(crate) fn audio_post_auth_register(
     control.set_proven_identity(pubkey_bytes, nip_fi_issuer);
 }
 
+/// Runs the audio session, then holds the read half for the client's Close
+/// reply, bounded by `WS_TERMINAL_FLUSH_TIMEOUT`. An exit whose cleanup
+/// follows its terminal frames hands the socket off first through
+/// [`hand_off_socket`], so that cleanup never holds the socket open.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_active_audio_connection(
     socket: WebSocket,
@@ -441,12 +446,101 @@ pub(crate) async fn handle_active_audio_connection(
     // `None` is used by test call sites that bypass the outer wrapper.
     pre_built: Option<PreBuiltNipFiBundle>,
 ) {
+    let (ws_send, ws_recv) = socket.split();
+    let mut ws_recv = AudioReadHalf::Held(ws_recv);
+    run_active_audio_connection(
+        ws_send,
+        &mut ws_recv,
+        state,
+        tenant,
+        channel_id,
+        control,
+        nip_fi_assertion,
+        connection_time,
+        pre_built,
+    )
+    .await;
+    // Returning releases the caller's connection permit, so the socket must
+    // have ended first: wait on the read half here, or on the background
+    // close an exit handed it to.
+    match ws_recv {
+        AudioReadHalf::Held(ws_recv) => crate::connection::await_client_close(ws_recv).await,
+        AudioReadHalf::HandedOff(close) => {
+            if let Err(error) = close.await {
+                warn!(channel_id = %channel_id, "audio background close failed: {error}");
+            }
+        }
+    }
+}
+
+/// The audio session's read half, or the background close it was handed to.
+enum AudioReadHalf {
+    Held(futures_util::stream::SplitStream<WebSocket>),
+    HandedOff(tokio::task::JoinHandle<()>),
+}
+
+/// Hands the socket to a task that waits, bounded, for the client's Close
+/// reply and then drops it. Called once the terminal frames are sent and
+/// before cleanup that may block on Postgres, Redis or a remote owner, so
+/// that cleanup never holds the socket open. Pass the write half when the
+/// caller still owns it: either half alone keeps the socket open. The task
+/// handle is kept so the wrapper holds the connection permit until the
+/// socket ends.
+fn hand_off_socket(
+    ws_recv: &mut AudioReadHalf,
+    ws_send: Option<futures_util::stream::SplitSink<WebSocket, WsMessage>>,
+) {
+    if let AudioReadHalf::HandedOff(_) = ws_recv {
+        return;
+    }
+    // The task is spawned before the read half moves out of `ws_recv`, so
+    // `ws_recv` is never left without one of its two states.
+    let (recv_tx, recv_rx) = tokio::sync::oneshot::channel();
+    let close = tokio::spawn(async move {
+        if let Ok(recv) = recv_rx.await {
+            crate::connection::await_client_close(recv).await;
+        }
+        drop(ws_send);
+    });
+    if let AudioReadHalf::Held(recv) = std::mem::replace(ws_recv, AudioReadHalf::HandedOff(close)) {
+        let _ = recv_tx.send(recv);
+    }
+}
+
+/// An admission error frame followed by the Close that ends the socket, so
+/// the client gets a clean close handshake instead of waiting out the
+/// bounded peer wait for a Close that never comes. `code` is
+/// `close_code::POLICY` (1008) for a refusal, `close_code::ERROR` (1011)
+/// for a server-side failure and `close_code::RESTART` (1012) when the relay
+/// is draining and the client should reconnect.
+fn error_exit_frames(error: serde_json::Value, code: u16) -> [WsMessage; 2] {
+    [WsMessage::Text(error.to_string().into()), exit_close(code)]
+}
+
+fn exit_close(code: u16) -> WsMessage {
+    WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+        code,
+        reason: axum::extract::ws::Utf8Bytes::default(),
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_active_audio_connection(
+    mut ws_send: futures_util::stream::SplitSink<WebSocket, WsMessage>,
+    ws_recv: &mut AudioReadHalf,
+    state: Arc<AppState>,
+    tenant: TenantContext,
+    channel_id: Uuid,
+    control: CommunityConnectionControl,
+    nip_fi_assertion: Option<VerifiedAssertion>,
+    connection_time: chrono::DateTime<chrono::Utc>,
+    pre_built: Option<PreBuiltNipFiBundle>,
+) {
     let cancel = control.cancellation_token();
     let disconnect_reason = control.disconnect_reason();
     // connection_time is threaded in from the HTTP handler (captured immediately
     // before on_upgrade) so the session partition is rooted at the true upgrade
     // instant, not the post-community-active-check instant. [FI-TRACE-LEASE-BOUND]
-    let (mut ws_send, mut ws_recv) = socket.split();
 
     // P2 / Fix 3: Arm the NIP-FI session gate and expiry task.
     //
@@ -539,6 +633,9 @@ pub(crate) async fn handle_active_audio_connection(
             return;
         },
         result = tokio::time::timeout(AUTH_TIMEOUT, async {
+            let AudioReadHalf::Held(ws_recv) = ws_recv else {
+                return None;
+            };
             while let Some(Ok(msg)) = ws_recv.next().await {
                 if let WsMessage::Text(text) = msg {
                     if text.len() > MAX_TEXT_FRAME_BYTES {
@@ -558,8 +655,17 @@ pub(crate) async fn handle_active_audio_connection(
 
     let auth_msg = match auth_result {
         Ok(Some(a)) => a,
-        _ => {
-            debug!(channel_id = %channel_id, "audio auth timeout or disconnect");
+        Ok(None) => {
+            debug!(channel_id = %channel_id, "audio client disconnected before auth");
+            return;
+        }
+        Err(_) => {
+            debug!(channel_id = %channel_id, "audio auth timeout");
+            crate::connection::send_exit_frames_bounded(
+                &mut ws_send,
+                [exit_close(axum::extract::ws::close_code::POLICY)],
+            )
+            .await;
             return;
         }
     };
@@ -921,15 +1027,14 @@ pub(crate) async fn handle_active_audio_connection(
                 shadow_attempt.refused();
                 crate::connection::send_exit_frames_bounded(
                     &mut ws_send,
-                    [WsMessage::Text(
+                    error_exit_frames(
                         serde_json::json!({
                             "type": "error",
                             "code": "huddle_relay_draining",
                             "message": "relay is draining; reconnect"
-                        })
-                        .to_string()
-                        .into(),
-                    )],
+                        }),
+                        axum::extract::ws::close_code::RESTART,
+                    ),
                 )
                 .await;
                 return;
@@ -982,15 +1087,14 @@ pub(crate) async fn handle_active_audio_connection(
                     );
                     crate::connection::send_exit_frames_bounded(
                         &mut ws_send,
-                        [WsMessage::Text(
+                        error_exit_frames(
                             serde_json::json!({
                                 "type": "error",
                                 "code": "join_rejected",
                                 "message": "huddle join rejected"
-                            })
-                            .to_string()
-                            .into(),
-                        )],
+                            }),
+                            axum::extract::ws::close_code::ERROR,
+                        ),
                     )
                     .await;
                     return;
@@ -1010,15 +1114,14 @@ pub(crate) async fn handle_active_audio_connection(
                 );
                 crate::connection::send_exit_frames_bounded(
                     &mut ws_send,
-                    [WsMessage::Text(
+                    error_exit_frames(
                         serde_json::json!({
                             "type": "error",
                             "code": "huddle_audio_unavailable",
                             "message": "huddle audio unavailable in this deployment"
-                        })
-                        .to_string()
-                        .into(),
-                    )],
+                        }),
+                        axum::extract::ws::close_code::POLICY,
+                    ),
                 )
                 .await;
                 return;
@@ -1041,19 +1144,23 @@ pub(crate) async fn handle_active_audio_connection(
     // get_or_create (the old room was already cleaned up). This DB check
     // catches that case. The room-level ended flag (checked inside add_peer)
     // handles the same-room case.
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_room_archive_recheck(tenant.community()).await;
     match state.db.get_channel(tenant.community(), channel_id).await {
         Ok(ch) if ch.archived_at.is_some() => {
             shadow_attempt.refused();
             debug!(channel_id = %channel_id, "channel archived before room join");
             crate::connection::send_exit_frames_bounded(
                 &mut ws_send,
-                [WsMessage::Text(
-                    serde_json::json!({"type":"error","message":"huddle has ended"})
-                        .to_string()
-                        .into(),
-                )],
+                error_exit_frames(
+                    serde_json::json!({"type":"error","message":"huddle has ended"}),
+                    axum::extract::ws::close_code::POLICY,
+                ),
             )
             .await;
+            hand_off_socket(ws_recv, Some(ws_send));
+            #[cfg(test)]
+            crate::nip_fi_test_hooks::before_archived_exit_cleanup(tenant.community()).await;
             // I1 residual: release lease with an awaited call, not a detached task.
             if let Some((lease, directory)) = staged_lease {
                 if let Err(e) = directory.release(&lease).await {
@@ -1068,6 +1175,12 @@ pub(crate) async fn handle_active_audio_connection(
         Err(e) => {
             shadow_attempt.refused();
             warn!(channel_id = %channel_id, "pre-join channel check failed (fail-closed): {e}");
+            crate::connection::send_exit_frames_bounded(
+                &mut ws_send,
+                [exit_close(axum::extract::ws::close_code::ERROR)],
+            )
+            .await;
+            hand_off_socket(ws_recv, Some(ws_send));
             // I1 residual: release lease with an awaited call, not a detached task.
             if let Some((lease, directory)) = staged_lease {
                 if let Err(re) = directory.release(&lease).await {
@@ -1097,7 +1210,7 @@ pub(crate) async fn handle_active_audio_connection(
             current = CURRENT_PROTOCOL_VERSION,
             "audio: client requested unsupported protocol version"
         );
-        crate::connection::send_exit_frames_bounded(&mut ws_send, [WsMessage::Text(
+        crate::connection::send_exit_frames_bounded(&mut ws_send, error_exit_frames(
                 serde_json::json!({
                     "type": "error",
                     "code": "unsupported_version",
@@ -1105,11 +1218,11 @@ pub(crate) async fn handle_active_audio_connection(
                         "huddle audio protocol v{requested_version} not supported; relay max is v{CURRENT_PROTOCOL_VERSION}"
                     ),
                     "current_version": CURRENT_PROTOCOL_VERSION,
-                })
-                .to_string()
-                .into(),
-            )])
+                }),
+                axum::extract::ws::close_code::POLICY,
+            ))
             .await;
+        hand_off_socket(ws_recv, Some(ws_send));
         if let Some((lease, directory)) = staged_lease {
             // I1 residual: release lease with an awaited call, not a detached task.
             if let Err(e) = directory.release(&lease).await {
@@ -1171,11 +1284,13 @@ pub(crate) async fn handle_active_audio_connection(
                 warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "huddle owner rejected registration: {reason:?}");
                 crate::connection::send_exit_frames_bounded(
                     &mut ws_send,
-                    [WsMessage::Text(
-                        remote_rejection_ws_error(&reason).to_string().into(),
-                    )],
+                    error_exit_frames(
+                        remote_rejection_ws_error(&reason),
+                        axum::extract::ws::close_code::POLICY,
+                    ),
                 )
                 .await;
+                hand_off_socket(ws_recv, Some(ws_send));
                 // I3 residual: await expiry task before resource teardown.
                 cancel.cancel();
                 if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1192,16 +1307,16 @@ pub(crate) async fn handle_active_audio_connection(
                 warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "huddle owner registration failed: {e}");
                 crate::connection::send_exit_frames_bounded(
                     &mut ws_send,
-                    [WsMessage::Text(
+                    error_exit_frames(
                         serde_json::json!({
                             "type": "error", "code": "huddle_owner_unreachable",
                             "message": "could not reach the huddle owner"
-                        })
-                        .to_string()
-                        .into(),
-                    )],
+                        }),
+                        axum::extract::ws::close_code::ERROR,
+                    ),
                 )
                 .await;
+                hand_off_socket(ws_recv, Some(ws_send));
                 // I3 residual: await expiry task before resource teardown.
                 cancel.cancel();
                 if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1285,7 +1400,8 @@ pub(crate) async fn handle_active_audio_connection(
             Err(crate::audio::room::AdmissionError::Full) => {
                 shadow_attempt.refused();
                 warn!(channel_id = %channel_id, "audio room participant capacity reached");
-                crate::connection::send_exit_frames_bounded(&mut ws_send, [WsMessage::Text(serde_json::json!({"type":"error","code":"room_full","message":"room participant capacity reached"}).to_string().into())]).await;
+                crate::connection::send_exit_frames_bounded(&mut ws_send, error_exit_frames(serde_json::json!({"type":"error","code":"room_full","message":"room participant capacity reached"}), axum::extract::ws::close_code::POLICY)).await;
+                hand_off_socket(ws_recv, Some(ws_send));
                 // IMPORTANT 3: cancel + await expiry task before guard release.
                 cancel.cancel();
                 if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1297,7 +1413,8 @@ pub(crate) async fn handle_active_audio_connection(
             Err(crate::audio::room::AdmissionError::Ended) => {
                 shadow_attempt.refused();
                 debug!(channel_id = %channel_id, "room ended before admission");
-                crate::connection::send_exit_frames_bounded(&mut ws_send, [WsMessage::Text(serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}).to_string().into())]).await;
+                crate::connection::send_exit_frames_bounded(&mut ws_send, error_exit_frames(serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}), axum::extract::ws::close_code::POLICY)).await;
+                hand_off_socket(ws_recv, Some(ws_send));
                 // IMPORTANT 3: cancel + await expiry task before guard release.
                 cancel.cancel();
                 if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1309,11 +1426,12 @@ pub(crate) async fn handle_active_audio_connection(
             Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
                 shadow_attempt.refused();
                 info!(channel_id = %channel_id, pubkey = %pubkey_hex, pinned, requested, "audio: protocol version mismatch — upgrade required");
-                crate::connection::send_exit_frames_bounded(&mut ws_send, [WsMessage::Text(serde_json::json!({
+                crate::connection::send_exit_frames_bounded(&mut ws_send, error_exit_frames(serde_json::json!({
                 "type": "error", "code": "upgrade_required",
                 "message": format!("this huddle is using audio protocol v{pinned}; your client requested v{requested}"),
                 "pinned_version": pinned, "requested_version": requested,
-            }).to_string().into())]).await;
+            }), axum::extract::ws::close_code::POLICY)).await;
+                hand_off_socket(ws_recv, Some(ws_send));
                 // IMPORTANT 3: cancel + await expiry task before guard release.
                 cancel.cancel();
                 if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1615,6 +1733,7 @@ pub(crate) async fn handle_active_audio_connection(
                         .map_or(WsMessage::Close(None), |reason| reason.close_message());
                     let _ = tokio::time::timeout_at(deadline, ws_send.send(close)).await;
                 }
+                hand_off_socket(ws_recv, Some(ws_send));
                 if let (Some(session), Some(ref mut stream)) = (
                     guard.take_remote_session().as_ref(),
                     guard.take_remote_stream().as_mut(),
@@ -2010,20 +2129,29 @@ pub(crate) async fn handle_active_audio_connection(
         None
     };
 
-    recv_loop(
-        ws_recv,
-        Arc::clone(&room),
-        peer_id,
-        requested_version,
-        ctrl_tx,
-        Arc::clone(&missed_pongs),
-        cancel.clone(),
-        remote_session.as_mut(),
-    )
-    .await;
+    // Every exit that hands the socket off returns, so it is still held here;
+    // if it were not, the session would skip straight to teardown.
+    if let AudioReadHalf::Held(ws_recv) = ws_recv {
+        recv_loop(
+            ws_recv,
+            Arc::clone(&room),
+            peer_id,
+            requested_version,
+            ctrl_tx,
+            Arc::clone(&missed_pongs),
+            cancel.clone(),
+            remote_session.as_mut(),
+        )
+        .await;
+    }
 
     cancel.cancel();
     let _ = send_task.await;
+    // The writer has sent the Close and released the write half. Nothing
+    // below may hold the socket open, including the Postgres and Redis writes.
+    hand_off_socket(ws_recv, None);
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_audio_teardown_cleanup(tenant.community()).await;
     let _ = heartbeat_task.await;
     let _ = forward_task.await;
     // The reader task owns the owner control stream; joining it here guarantees
@@ -2215,7 +2343,7 @@ fn remote_rejection_ws_error(reason: &crate::audio::join::RegisterRejection) -> 
 /// clarifies at this single call site.
 #[allow(clippy::too_many_arguments)]
 async fn recv_loop(
-    mut ws_recv: futures_util::stream::SplitStream<WebSocket>,
+    ws_recv: &mut futures_util::stream::SplitStream<WebSocket>,
     room: Arc<crate::audio::room::Room>,
     peer_id: Uuid,
     protocol_version: u8,
@@ -2747,6 +2875,7 @@ pub(crate) async fn deny_audio_authorization<S>(
     terminal_rx: &mut mpsc::Receiver<WsMessage>,
 ) where
     S: futures_util::Sink<WsMessage> + Unpin,
+    S::Error: std::error::Error + 'static,
 {
     control.disconnect_nip_fi();
     crate::connection::send_exit_frames_bounded(
@@ -2781,6 +2910,7 @@ async fn exit_authorization_refusal<S>(
     off_mode: serde_json::Value,
 ) where
     S: futures_util::Sink<WsMessage> + Unpin,
+    S::Error: std::error::Error + 'static,
 {
     if nip_fi && class == buzz_auth::DenialClass::AuthorizationDenied {
         deny_audio_authorization(ws_send, control, terminal_rx).await;
@@ -3530,6 +3660,89 @@ async fn emit_participant_event(
             channel_id = %parent_channel_id,
             "audio: failed to publish lifecycle event: {e}"
         );
+    }
+}
+
+/// Drives one audio socket through the production NIP-42 and deny-set path.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    use super::*;
+
+    /// Whether the audio deny-set check refuses a session admitted on
+    /// `assertion` and authenticated by `key`: `true` on the denial frame,
+    /// `false` once the handler passes the check.
+    pub(crate) async fn deny_set_refuses(
+        state: Arc<AppState>,
+        assertion: VerifiedAssertion,
+        key: &nostr::Keys,
+    ) -> bool {
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+        let tenant = TenantContext::resolved(community, "audio-deny.test".to_owned());
+        let relay_url =
+            crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant);
+        let (passed, release) =
+            crate::nip_fi_test_hooks::audio_after_deny_check_passed_hook::arm(community);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |ws: WebSocketUpgrade| async move {
+                ws.on_upgrade(move |socket| {
+                    handle_active_audio_connection(
+                        socket,
+                        state,
+                        tenant,
+                        Uuid::new_v4(),
+                        CommunityConnectionControl::new(CancellationToken::new()),
+                        Some(assertion),
+                        chrono::Utc::now(),
+                        None,
+                    )
+                })
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let (mut client, _) = connect_async(format!("ws://{addr}/")).await.unwrap();
+        let challenge = match client.next().await {
+            Some(Ok(Message::Text(text))) => {
+                let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+                json["challenge"].as_str().unwrap().to_owned()
+            }
+            other => panic!("expected the AUTH challenge, got {other:?}"),
+        };
+        let auth = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+            .tag(nostr::Tag::parse(["relay", &relay_url]).unwrap())
+            .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+            .sign_with_keys(key)
+            .unwrap();
+        let auth = serde_json::json!({"type": "auth", "event": auth}).to_string();
+        client.send(Message::Text(auth.into())).await.unwrap();
+
+        let denial = serde_json::json!({
+            "type": "restricted",
+            "message": buzz_auth::DenialClass::AuthorizationDenied.nostr_text(),
+        })
+        .to_string();
+        let refused = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                frame = client.next() => match frame {
+                    Some(Ok(Message::Text(text))) if text.as_str() == denial => true,
+                    other => panic!("expected the denial frame, got {other:?}"),
+                },
+                arrived = passed => {
+                    arrived.expect("hook");
+                    false
+                }
+            }
+        })
+        .await
+        .expect("audio session reached neither outcome");
+        release.notify_one();
+        server.abort();
+        refused
     }
 }
 
@@ -5206,6 +5419,13 @@ mod tests {
     /// Reads `BUZZ_TEST_DATABASE_URL`; falls back to the local development URL.
     /// Returns `None` if the resolved database is not reachable.
     async fn audio_test_state_real_db() -> Option<std::sync::Arc<crate::state::AppState>> {
+        audio_test_state_real_db_with(|_| {}).await
+    }
+
+    /// `audio_test_state_real_db` with a final `configure` pass over the config.
+    async fn audio_test_state_real_db_with(
+        configure: impl FnOnce(&mut crate::config::Config),
+    ) -> Option<std::sync::Arc<crate::state::AppState>> {
         use std::sync::Arc;
         let db_url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| {
             "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string() // sadscan:disable np.postgres.1 -- local test-only credentials
@@ -5218,6 +5438,7 @@ mod tests {
         config.require_relay_membership = false;
         config.database_url = db_url.clone();
         config.redis_url = "redis://127.0.0.1:1".to_string();
+        configure(&mut config);
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
@@ -5994,7 +6215,7 @@ mod tests {
         crate::nip_fi_shadow_session::ShadowSession::start(
             state,
             "audio",
-            &axum::http::HeaderMap::new(),
+            crate::nip_fi_shadow::BOUND.into(),
             assertion,
             Utc::now(),
         )
@@ -9898,6 +10119,369 @@ mod tests {
             let _ = server.await;
         }
 
+        /// Answers the server's NIP-42 challenge with an audio `auth` message.
+        async fn send_audio_auth(
+            client: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            key: &nostr::Keys,
+            relay_url: &str,
+            protocol_version: u8,
+        ) {
+            let challenge =
+                match tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+                    .await
+                    .expect("challenge timeout")
+                    .expect("challenge msg")
+                    .expect("challenge ws msg")
+                {
+                    tokio_tungstenite::tungstenite::Message::Text(t) => {
+                        serde_json::from_str::<serde_json::Value>(&t).expect("challenge JSON")
+                            ["challenge"]
+                            .as_str()
+                            .expect("challenge field")
+                            .to_string()
+                    }
+                    other => panic!("expected text challenge; got {other:?}"),
+                };
+            let auth_event = nostr::EventBuilder::new(nostr::Kind::Authentication, "")
+                .tag(nostr::Tag::parse(["relay", relay_url]).unwrap())
+                .tag(nostr::Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(key)
+                .unwrap();
+            let auth_msg = serde_json::json!({
+                "type": "auth",
+                "event": auth_event,
+                "parent_channel_id": null,
+                "protocol_version": protocol_version,
+            })
+            .to_string();
+            client
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    auth_msg.into(),
+                ))
+                .await
+                .expect("send auth msg");
+        }
+
+        /// After an established session's writer sends its Close, the
+        /// teardown that follows writes to Postgres and Redis, which can stall
+        /// with no deadline. The socket must still end within the bounded wait
+        /// for the client's Close reply. This client never replies and the
+        /// teardown never finishes.
+        ///
+        /// Mutation: move `hand_off_socket(ws_recv, None)` to after the
+        /// teardown → the socket stays open while the teardown is held →
+        /// `time_to_eof` hits its watchdog and panics.
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        #[tokio::test]
+        async fn stalled_teardown_does_not_hold_established_socket_open() {
+            use crate::connection::terminal_close_delivery_tests::time_to_eof;
+            use crate::connection::WS_TERMINAL_FLUSH_TIMEOUT;
+            use buzz_auth::VerifiedAssertion;
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let pool = state.db.pool().clone();
+            let (tenant, channel_id, key) = seed_audio_fixture(&pool).await;
+            let community = tenant.community();
+            let assertion = VerifiedAssertion::for_test(
+                Some(key.public_key()),
+                vec![Utc::now() + Duration::hours(1)],
+            );
+            let relay_url = format!("ws://{}", tenant.host());
+            let conn_cancel = CancellationToken::new();
+
+            let (fanout_rx, fanout_release) =
+                crate::nip_fi_test_hooks::audio_participant_fanout_hook::arm(community);
+            let (teardown_rx, teardown_release) =
+                crate::nip_fi_test_hooks::audio_teardown_cleanup_hook::arm(community);
+
+            let app = axum::Router::new().route(
+                "/",
+                axum::routing::get({
+                    let conn_cancel = conn_cancel.clone();
+                    move |ws: axum::extract::ws::WebSocketUpgrade| {
+                        let (state, tenant, assertion) =
+                            (Arc::clone(&state), tenant.clone(), assertion.clone());
+                        let control =
+                            crate::state::CommunityConnectionControl::new(conn_cancel.clone());
+                        async move {
+                            ws.on_upgrade(move |socket| {
+                                handle_active_audio_connection(
+                                    socket,
+                                    state,
+                                    tenant,
+                                    channel_id,
+                                    control,
+                                    Some(assertion),
+                                    Utc::now(),
+                                    None,
+                                )
+                            })
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test listener");
+            let addr = listener.local_addr().expect("test listener addr");
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("connect client");
+            send_audio_auth(&mut client, &key, &relay_url, 1).await;
+
+            tokio::time::timeout(std::time::Duration::from_secs(10), fanout_rx)
+                .await
+                .expect("handler must commit the join within 10s")
+                .expect("fanout channel closed");
+            fanout_release.notify_one();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+            // From here the client only reads raw bytes, so it never answers
+            // the server's Close.
+            let tokio_tungstenite::MaybeTlsStream::Plain(socket) = client.get_mut() else {
+                panic!("plain TCP client");
+            };
+            let started = std::time::Instant::now();
+            conn_cancel.cancel();
+            tokio::time::timeout(std::time::Duration::from_secs(5), teardown_rx)
+                .await
+                .expect("teardown must reach the stall point")
+                .expect("teardown hook dropped");
+            // The hook runs just after the hand-off, so the socket must end
+            // within the bounded wait measured from here.
+            let handed_off = std::time::Instant::now();
+            let elapsed = time_to_eof(socket, started).await;
+            assert!(
+                elapsed >= WS_TERMINAL_FLUSH_TIMEOUT,
+                "server must wait for the client's Close reply, ended after {elapsed:?}"
+            );
+            let since_hand_off = handed_off.elapsed();
+            assert!(
+                since_hand_off <= WS_TERMINAL_FLUSH_TIMEOUT + std::time::Duration::from_millis(500),
+                "socket must end within the bounded wait after the hand-off, took {since_hand_off:?}"
+            );
+
+            teardown_release.notify_one();
+            server.abort();
+        }
+
+        /// The archived-channel exit sends its error and Close, then releases
+        /// the huddle lease in Redis, which can stall with no deadline. The
+        /// socket must end within the bounded wait for the client's Close
+        /// reply, not when that cleanup finishes. This client never replies
+        /// and the cleanup never finishes.
+        ///
+        /// Mutation: move that exit's `hand_off_socket` below the lease
+        /// release (or remove it) → the socket stays open while the cleanup
+        /// is held → `time_to_eof` hits its watchdog and panics.
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        #[tokio::test]
+        async fn stalled_archived_exit_cleanup_does_not_hold_socket_open() {
+            use crate::connection::terminal_close_delivery_tests::time_to_eof;
+            use crate::connection::WS_TERMINAL_FLUSH_TIMEOUT;
+            use buzz_auth::VerifiedAssertion;
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let pool = state.db.pool().clone();
+            let (tenant, channel_id, key) = seed_audio_fixture(&pool).await;
+            let community = tenant.community();
+            let assertion = VerifiedAssertion::for_test(
+                Some(key.public_key()),
+                vec![Utc::now() + Duration::hours(1)],
+            );
+            let relay_url = format!("ws://{}", tenant.host());
+
+            let (recheck_rx, recheck_release) =
+                crate::nip_fi_test_hooks::room_archive_recheck_hook::arm(community);
+            let (cleanup_rx, cleanup_release) =
+                crate::nip_fi_test_hooks::archived_exit_cleanup_hook::arm(community);
+
+            let app = axum::Router::new().route(
+                "/",
+                axum::routing::get(move |ws: axum::extract::ws::WebSocketUpgrade| {
+                    let (state, tenant, assertion) =
+                        (Arc::clone(&state), tenant.clone(), assertion.clone());
+                    let control =
+                        crate::state::CommunityConnectionControl::new(CancellationToken::new());
+                    async move {
+                        ws.on_upgrade(move |socket| {
+                            handle_active_audio_connection(
+                                socket,
+                                state,
+                                tenant,
+                                channel_id,
+                                control,
+                                Some(assertion),
+                                Utc::now(),
+                                None,
+                            )
+                        })
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test listener");
+            let addr = listener.local_addr().expect("test listener addr");
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("connect client");
+            send_audio_auth(&mut client, &key, &relay_url, 1).await;
+
+            // Admission passed the membership check; archive the channel
+            // before the re-check so the join takes the archived exit.
+            tokio::time::timeout(std::time::Duration::from_secs(10), recheck_rx)
+                .await
+                .expect("admission must reach the archive re-check")
+                .expect("re-check hook dropped");
+            sqlx::query("UPDATE channels SET archived_at = NOW() WHERE id = $1")
+                .bind(channel_id)
+                .execute(&pool)
+                .await
+                .expect("archive channel");
+
+            // From here the client only reads raw bytes, so it never answers
+            // the server's Close.
+            let tokio_tungstenite::MaybeTlsStream::Plain(socket) = client.get_mut() else {
+                panic!("plain TCP client");
+            };
+            let started = std::time::Instant::now();
+            recheck_release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), cleanup_rx)
+                .await
+                .expect("the archived exit must reach its cleanup")
+                .expect("cleanup hook dropped");
+            let elapsed = time_to_eof(socket, started).await;
+            assert!(
+                elapsed <= WS_TERMINAL_FLUSH_TIMEOUT + std::time::Duration::from_millis(500),
+                "a stalled exit cleanup must not hold the socket open, ended after {elapsed:?}"
+            );
+
+            cleanup_release.notify_one();
+            server.abort();
+        }
+
+        /// A fast refusal hands the socket to a background close and returns.
+        /// The connection permit must stay held until that socket ends, or a
+        /// client that never answers the Close lets open audio sockets exceed
+        /// `BUZZ_MAX_CONNECTIONS`.
+        ///
+        /// Mutation: stop the wrapper from joining the background close → the
+        /// permit is released while the socket is still open → the
+        /// `available_permits() == 0` assertion fails.
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        #[tokio::test]
+        async fn background_close_holds_connection_permit_until_socket_ends() {
+            use crate::connection::terminal_close_delivery_tests::time_to_eof;
+            use buzz_auth::VerifiedAssertion;
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+            use tokio::io::AsyncReadExt as _;
+
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let pool = state.db.pool().clone();
+            let (tenant, channel_id, key) = seed_audio_fixture(&pool).await;
+            let assertion = VerifiedAssertion::for_test(
+                Some(key.public_key()),
+                vec![Utc::now() + Duration::hours(1)],
+            );
+            let relay_url = format!("ws://{}", tenant.host());
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+
+            let app = axum::Router::new().route(
+                "/",
+                axum::routing::get({
+                    let semaphore = Arc::clone(&semaphore);
+                    move |ws: axum::extract::ws::WebSocketUpgrade| {
+                        let (state, tenant, assertion) =
+                            (Arc::clone(&state), tenant.clone(), assertion.clone());
+                        let permit = Arc::clone(&semaphore)
+                            .try_acquire_owned()
+                            .expect("one connection permit");
+                        async move {
+                            ws.on_upgrade(move |socket| {
+                                handle_audio_connection(
+                                    socket,
+                                    state,
+                                    tenant,
+                                    channel_id,
+                                    permit,
+                                    Some(assertion),
+                                    None,
+                                    Utc::now(),
+                                )
+                            })
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test listener");
+            let addr = listener.local_addr().expect("test listener addr");
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+                .await
+                .expect("connect client");
+            send_audio_auth(&mut client, &key, &relay_url, u8::MAX).await;
+
+            // From here the client only reads raw bytes, so it never answers
+            // the server's Close.
+            let tokio_tungstenite::MaybeTlsStream::Plain(socket) = client.get_mut() else {
+                panic!("plain TCP client");
+            };
+            let mut received = Vec::new();
+            let mut buf = [0u8; 512];
+            while !received
+                .windows(b"unsupported_version".len())
+                .any(|w| w == b"unsupported_version")
+            {
+                let n =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), socket.read(&mut buf))
+                        .await
+                        .expect("refusal must arrive")
+                        .expect("read");
+                assert_ne!(n, 0, "socket ended before the refusal");
+                received.extend_from_slice(&buf[..n]);
+            }
+            let started = std::time::Instant::now();
+            // The refusal has no staged lease, so its cleanup returns at once.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(
+                semaphore.available_permits(),
+                0,
+                "permit must stay held while the refused socket is open"
+            );
+
+            time_to_eof(socket, started).await;
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while semaphore.available_permits() == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("permit must be released once the socket ends");
+
+            server.abort();
+        }
+
         // ── F1: generation fencing witness ────────────────────────────────────────
         //
         // `commit_participant_join` must include `generation` in the committed
@@ -13662,6 +14246,39 @@ mod tests {
             assert_eq!(close.reason.as_str(), "access revoked");
         }
 
+        /// A deployment without huddle audio refuses the join with its error
+        /// frame and then a Close 1008, so the client gets a clean handshake
+        /// instead of waiting out the peer wait.
+        /// Mutation: drop the Close from the refusal → no Close frame → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn huddle_audio_unavailable_sends_error_then_policy_close() {
+            let state = audio_test_state_real_db_with(|c| c.huddle_audio_available = false)
+                .await
+                .expect(
+                    "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+                );
+            let (tenant, channel_id, key) = seed_audio_fixture(state.db.pool()).await;
+            let (mut client, server) =
+                start_audio_auth(&state, tenant, channel_id, &key, None, None).await;
+
+            let error = next_audio_text(&mut client).await;
+            assert!(
+                error.contains("\"huddle_audio_unavailable\""),
+                "expected the unavailable refusal; got {error}"
+            );
+            match tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+                .await
+                .expect("close must follow the refusal")
+            {
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(Some(frame)))) => {
+                    assert_eq!(u16::from(frame.code), 1008)
+                }
+                other => panic!("expected Close 1008 after the refusal; got {other:?}"),
+            }
+            server.abort();
+        }
+
         /// Adds `key` as a member of the audio fixture's channel.
         async fn add_channel_member(
             pool: &sqlx::PgPool,
@@ -14567,5 +15184,100 @@ mod tests {
              Mutation oracle: remove the timeout wrapper → send_frame awaited directly → \
              future never resolves → test hangs → RED"
         );
+    }
+
+    /// Real-socket proof that each audio exit path holds the socket for the
+    /// client's Close reply. The raw client never replies, so a server that
+    /// drops the socket right after its Close ends it before the bounded wait.
+    mod terminal_close_delivery {
+        use super::*;
+        use crate::connection::terminal_close_delivery_tests::{
+            raw_client_after_server_close, time_to_eof,
+        };
+        use crate::connection::WS_TERMINAL_FLUSH_TIMEOUT;
+
+        fn expired_assertion() -> VerifiedAssertion {
+            let deadline = chrono::Utc::now() - chrono::Duration::seconds(1);
+            VerifiedAssertion::for_test(Some(nostr::Keys::generate().public_key()), vec![deadline])
+        }
+
+        fn tenant() -> TenantContext {
+            TenantContext::resolved(
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                "test.local".to_owned(),
+            )
+        }
+
+        async fn assert_holds_for_close_reply(app: Router) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let address = listener.local_addr().expect("listener address");
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+            let started = std::time::Instant::now();
+            let mut socket = raw_client_after_server_close(address).await;
+            let elapsed = time_to_eof(&mut socket, started).await;
+            assert!(
+                elapsed >= WS_TERMINAL_FLUSH_TIMEOUT,
+                "server must wait for the client's Close reply, ended after {elapsed:?}"
+            );
+        }
+
+        /// Expired session refused during bootstrap: the `on_not_run` drain.
+        #[tokio::test]
+        async fn bootstrap_drain_holds_socket_for_client_close_reply() {
+            let state = audio_test_state().await;
+            let app = Router::new().route(
+                "/",
+                get(move |ws: WebSocketUpgrade| {
+                    let state = Arc::clone(&state);
+                    let permit = Arc::new(tokio::sync::Semaphore::new(1))
+                        .try_acquire_owned()
+                        .expect("permit");
+                    async move {
+                        ws.on_upgrade(move |socket| {
+                            handle_audio_connection(
+                                socket,
+                                state,
+                                tenant(),
+                                Uuid::new_v4(),
+                                permit,
+                                Some(expired_assertion()),
+                                None,
+                                chrono::Utc::now(),
+                            )
+                        })
+                    }
+                }),
+            );
+            assert_holds_for_close_reply(app).await;
+        }
+
+        /// Expired session inside the active handler: an early admission exit.
+        #[tokio::test]
+        async fn active_handler_exit_holds_socket_for_client_close_reply() {
+            let state = audio_test_state().await;
+            let app = Router::new().route(
+                "/",
+                get(move |ws: WebSocketUpgrade| {
+                    let state = Arc::clone(&state);
+                    async move {
+                        ws.on_upgrade(move |socket| {
+                            let cancel = CancellationToken::new();
+                            handle_active_audio_connection(
+                                socket,
+                                state,
+                                tenant(),
+                                Uuid::new_v4(),
+                                CommunityConnectionControl::new(cancel),
+                                Some(expired_assertion()),
+                                chrono::Utc::now(),
+                                None,
+                            )
+                        })
+                    }
+                }),
+            );
+            assert_holds_for_close_reply(app).await;
+        }
     }
 }

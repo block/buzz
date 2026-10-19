@@ -231,16 +231,54 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         .toSet();
     _cacheMemberSnapshots(memberships, replaceAll: true);
 
-    // Step 2: pull metadata for joined channels. A user with no memberships
-    // must still continue to directory discovery below.
-    final memberMetas = memberChannelIds.isEmpty
-        ? const <NostrEvent>[]
-        : await _fenced(
-            fence,
-            session.fetchHistory(
-              NostrFilters.channelMetadata(memberChannelIds.toList()),
+    // Step 2: everything below the membership list depends only on it, so
+    // send those reads together instead of one round trip after another. A
+    // user with no memberships must still continue to directory discovery.
+    final memberChannelIdList = memberChannelIds.toList();
+    final memberMetasRequest = memberChannelIds.isEmpty
+        ? Future.value(const <NostrEvent>[])
+        : session.fetchHistory(
+            NostrFilters.channelMetadata(memberChannelIdList),
+          );
+    final hiddenDmIdsRequest = _fetchHiddenDmIds(session, myPk);
+    // The authoritative membership snapshots are needed to filter Huddle
+    // backing channels. The relay-signed kind:39000 metadata identifies the
+    // relay, not the channel creator; the owner role in kind:39002 is the
+    // canonical creator identity used to reject forged Huddle links.
+    final memberEventsRequest = memberChannelIds.isEmpty
+        ? Future.value(const <NostrEvent>[])
+        : session.fetchHistory(
+            NostrFilter(
+              kinds: const [39002],
+              tags: {'#d': memberChannelIdList},
+              limit: memberChannelIdList.length,
             ),
           );
+    final huddleStartsRequest = _fetchHuddleStarts(
+      session,
+      memberChannelIdList,
+    );
+    final (
+      memberMetas,
+      hiddenDmIds,
+      memberEvents,
+      huddleStarts,
+    ) = await _fenced(fence, () async {
+      // Future.wait handles every request's failure and rethrows the first
+      // one unchanged, as soon as it happens.
+      await Future.wait(eagerError: true, [
+        memberMetasRequest,
+        hiddenDmIdsRequest,
+        memberEventsRequest,
+        huddleStartsRequest,
+      ]);
+      return (
+        await memberMetasRequest,
+        await hiddenDmIdsRequest,
+        await memberEventsRequest,
+        await huddleStartsRequest,
+      );
+    }());
 
     // Step 3: fetch the open-channel directory. The relay filters this global
     // kind:39000 query by the caller's access, but the client still rejects
@@ -278,31 +316,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       myPk,
     );
 
-    final hiddenDmIds = await _fenced(fence, _fetchHiddenDmIds(session, myPk));
+    // Name resolution may return without a fenced read; check before writing.
+    fence.ensureCurrent();
     _hiddenDmIds = Set.unmodifiable(hiddenDmIds);
-    // Fetch the authoritative membership snapshots before filtering Huddle
-    // backing channels. The relay-signed kind:39000 metadata identifies the
-    // relay, not the channel creator; the owner role in kind:39002 is the
-    // canonical creator identity used to reject forged Huddle links.
-    final memberCountChannelIds = memberChannelIds.toList();
-    final memberEvents = memberCountChannelIds.isEmpty
-        ? const <NostrEvent>[]
-        : await _fenced(
-            fence,
-            session.fetchHistory(
-              NostrFilter(
-                kinds: const [39002],
-                tags: {'#d': memberCountChannelIds},
-                limit: memberCountChannelIds.length,
-              ),
-            ),
-          );
-    final huddleStarts = memberCountChannelIds.isEmpty
-        ? const <NostrEvent>[]
-        : await _fenced(
-            fence,
-            _fetchHuddleStarts(session, memberCountChannelIds),
-          );
     final huddleBackingIds = huddleBackingChannelIds(
       huddleStarts,
       memberEvents,

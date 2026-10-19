@@ -2,6 +2,18 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'community.dart';
 
+/// Opens the existing community grid after a hosted account import completes.
+final communityGridLandingProvider =
+    NotifierProvider<CommunityGridLanding, bool>(CommunityGridLanding.new);
+
+class CommunityGridLanding extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void request() => state = true;
+  void clear() => state = false;
+}
+
 /// A one-shot request to reveal an imported community through its avatar.
 final pairedCommunityLandingProvider =
     NotifierProvider<PairedCommunityLanding, Community?>(
