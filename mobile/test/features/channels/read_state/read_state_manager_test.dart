@@ -305,42 +305,35 @@ void main() {
     );
   });
 
-  test(
-    'each community keeps its own slot and marks, seeded from the shared ones',
-    () async {
-      SharedPreferences.setMockInitialValues({
-        'buzz.nip-rs.slot-id:pk': 'a' * 32,
-        'buzz.channel-read-state.v2:pk':
-            '{"channel-1":"2026-01-01T00:00:00.000",'
-            '"thread-activity:root-1":"2026-01-01T00:00:00.000"}',
-        'buzz.channel-read-state.publishable.v1:pk':
-            '["channel-1","thread-activity:root-1"]',
-      });
-      final prefs = await SharedPreferences.getInstance();
-      final storage = ReadStateStorage(prefs);
+  test('each community keeps its own slot, seeded from the shared one, '
+      'and none takes the shared marks', () async {
+    SharedPreferences.setMockInitialValues({
+      'buzz.nip-rs.slot-id:pk': 'a' * 32,
+      'buzz.channel-read-state.v2:pk':
+          '{"channel-1":"2026-01-01T00:00:00.000",'
+          '"thread-activity:root-1":"2026-01-01T00:00:00.000"}',
+      'buzz.channel-read-state.publishable.v1:pk':
+          '["channel-1","thread-activity:root-1"]',
+    });
+    final prefs = await SharedPreferences.getInstance();
+    final storage = ReadStateStorage(prefs);
 
-      // Both communities keep publishing to the slot they already have.
-      expect(storage.getOrCreateSlotId('pk', _relayUrl), 'a' * 32);
-      expect(
-        storage.getOrCreateSlotId('pk', 'https://other.example'),
-        'a' * 32,
-      );
-      storage.writeSlotId('pk', 'https://other.example', 'b' * 32);
-      expect(storage.getOrCreateSlotId('pk', _relayUrl), 'a' * 32);
+    // Both communities keep publishing to the slot they already have.
+    expect(storage.getOrCreateSlotId('pk', _relayUrl), 'a' * 32);
+    expect(storage.getOrCreateSlotId('pk', 'https://other.example'), 'a' * 32);
+    storage.writeSlotId('pk', 'https://other.example', 'b' * 32);
+    expect(storage.getOrCreateSlotId('pk', _relayUrl), 'a' * 32);
 
-      // The shared marks come over only locally: they may be another
-      // community's, so none is published to its relay. Channel ids may
-      // repeat across communities, so only the first takes channel marks.
-      final mine = storage.read('pk', _relayUrl);
-      expect(mine.contexts.keys, {'channel-1', 'thread-activity:root-1'});
-      expect(mine.publishableContextIds, isEmpty);
-      storage.write('pk', _relayUrl, {}, {}, {});
-      final other = storage.read('pk', 'https://other.example');
-      expect(other.contexts.keys, ['thread-activity:root-1']);
-      expect(other.publishableContextIds, isEmpty);
-      expect(storage.read('pk', _relayUrl).contexts, isEmpty);
-    },
-  );
+    // The shared marks may be another community's, and the relay keeps
+    // the published ones, so neither community takes them.
+    expect(storage.read('pk', _relayUrl).contexts, isEmpty);
+    expect(storage.read('pk', 'https://other.example').contexts, isEmpty);
+    expect(prefs.containsKey('buzz.channel-read-state.v2:pk'), isFalse);
+    expect(
+      prefs.containsKey('buzz.channel-read-state.publishable.v1:pk'),
+      isFalse,
+    );
+  });
 
   test('carries its own override keys and takes none from others', () async {
     SharedPreferences.setMockInitialValues({});

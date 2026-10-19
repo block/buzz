@@ -181,6 +181,9 @@ class FlakyPrefs extends Fake implements SharedPreferences {
   String? getString(String key) => _inner.getString(key);
 
   @override
+  Future<bool> remove(String key) => _inner.remove(key);
+
+  @override
   Future<bool> setString(String key, String value) async {
     if (failures == 0) return _inner.setString(key, value);
     failures--;

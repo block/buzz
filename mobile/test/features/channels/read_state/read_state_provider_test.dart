@@ -69,32 +69,24 @@ void main() {
     // Recent, so the saved copy keeps message marks.
     final readAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final at = unixSecondsToDateTime(readAt).toIso8601String();
-    final catchUp = activityContextKey(channelId);
-    // Upgrading from the identity-wide marks: the first community to open
-    // takes them all, kept locally.
+    // Upgrading from the identity-wide marks: they may be another
+    // community's, and the relay keeps the published ones, so none is taken.
     final notifier = await pumpNotifier(
       stored: (pubkey) => {
         'buzz.channel-read-state.v2:$pubkey': jsonEncode({
           channelId: at,
-          catchUp: at,
           otherMsgKey: at,
         }),
       },
     );
-    expect(state().effectiveTimestamp(channelId), readAt);
-    expect(state().effectiveTimestamp(catchUp), readAt);
+    expect(state().contexts, isEmpty);
     notifier.markContextRead(msgKey, readAt);
 
-    // A second community may have a channel with the same id, so it takes
-    // only the shared marks keyed by event id, and none of the first
-    // community's own, which it would otherwise publish to its relay.
+    // Each community keeps its own marks, even for a channel with the same id.
     config.switchTo('http://localhost:2');
     container.read(readStateProvider);
     await settle();
-    expect(state().effectiveTimestamp(channelId), isNull);
-    expect(state().effectiveTimestamp(catchUp), isNull);
-    expect(state().effectiveTimestamp(otherMsgKey), readAt);
-    expect(state().effectiveTimestamp(msgKey), isNull);
+    expect(state().contexts, isEmpty);
     container
         .read(readStateProvider.notifier)
         .markContextRead(channelId, readAt + 5);
@@ -103,7 +95,7 @@ void main() {
     container.read(readStateProvider);
     await settle();
     expect(state().effectiveTimestamp(msgKey), readAt);
-    expect(state().effectiveTimestamp(channelId), readAt);
+    expect(state().effectiveTimestamp(channelId), isNull);
   });
 
   test('message unread → read → unread round-trips through the real '

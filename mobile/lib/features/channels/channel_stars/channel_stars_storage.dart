@@ -74,18 +74,10 @@ class ChannelStarsStorage {
   ChannelStarsStorage(this._prefs);
 
   ChannelStarStore read(String pubkey, String relayUrl) {
-    final key = channelStarsKey(pubkey, relayUrl);
-    // The first community to open claims the shared entry, which may hold
-    // changes not yet published. Its channel ids only match that community's
-    // channels, and the relay copy it merges with is already shared the same way.
-    final legacyKey = legacyChannelStarsKey(pubkey);
-    final legacy = _prefs.getString(legacyKey);
-    if (legacy != null) {
-      _prefs.remove(legacyKey);
-      if (!_prefs.containsKey(key)) _prefs.setString(key, legacy);
-    }
-
-    final raw = _prefs.getString(key);
+    // The shared entry may hold another community's channels, and the relay
+    // copy is authoritative, so drop it rather than let one community claim it.
+    _prefs.remove(legacyChannelStarsKey(pubkey));
+    final raw = _prefs.getString(channelStarsKey(pubkey, relayUrl));
     if (raw == null || raw.isEmpty) {
       return const ChannelStarStore();
     }

@@ -7,7 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Tests for [ChannelStarStore] parsing and [mergeStores] last-writer-wins.
 void main() {
   test(
-    'the first community to open claims the shared stars and mutes',
+    'identity-wide stars and mutes from before relay scoping are dropped',
     () async {
       SharedPreferences.setMockInitialValues({
         legacyChannelStarsKey(
@@ -17,17 +17,12 @@ void main() {
             '{"version":1,"channels":{"chan-a":{"muted":true,"updatedAt":1}}}',
       });
       final prefs = await SharedPreferences.getInstance();
-      const a = 'https://relay-a.example';
-      const b = 'https://relay-b.example';
-      final stars = ChannelStarsStorage(prefs);
-      final mutes = ChannelMutesStorage(prefs);
+      const relayUrl = 'https://relay.example';
 
-      expect(stars.read('pk', a).channels.keys, ['chan-a']);
-      expect(mutes.read('pk', a).channels.keys, ['chan-a']);
-      expect(stars.read('pk', b).channels, isEmpty);
-      expect(mutes.read('pk', b).channels, isEmpty);
-      expect(stars.read('pk', a).channels.keys, ['chan-a']);
-      expect(mutes.read('pk', a).channels.keys, ['chan-a']);
+      expect(ChannelStarsStorage(prefs).read('pk', relayUrl).channels, isEmpty);
+      expect(ChannelMutesStorage(prefs).read('pk', relayUrl).channels, isEmpty);
+      expect(prefs.containsKey(legacyChannelStarsKey('pk')), isFalse);
+      expect(prefs.containsKey(legacyChannelMutesKey('pk')), isFalse);
     },
   );
 
