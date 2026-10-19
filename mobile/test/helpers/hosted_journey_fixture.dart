@@ -40,6 +40,7 @@ class HostedJourneyFixture {
   final secondKeys = nostr.Keys('2'.padLeft(64, '0'));
   AccountIdentityStore get store => AccountIdentityStore(subject: subject);
   final storage = CommunityStorage();
+  final identityStorage = JourneyIdentityStorage();
   final requests = <http.Request>[];
   Future<void> Function()? beforeBrowserReturn;
   Future<void> Function()? beforeEnrollmentReturn;
@@ -348,6 +349,7 @@ class HostedJourneyFixture {
           ),
           selfHostedEntryProvider.overrideWithValue(
             SelfHostedEntry(
+              accountStore: AccountIdentityStore(storage: identityStorage),
               probe: (community) async {
                 probes.add(community);
                 if (community.pubkey == refusedSelfHostedPubkey) {
@@ -449,6 +451,25 @@ class HostedJourneyFixture {
       null,
     );
     await tester.binding.setSurfaceSize(null);
+  }
+}
+
+/// Keeps direct reads working when an unrelated secure-storage entry breaks
+/// enumeration, as can happen on Android after the identity picker is shown.
+class JourneyIdentityStorage extends FlutterSecureStorage {
+  bool failEnumeration = false;
+
+  @override
+  Future<Map<String, String>> readAll({
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (failEnumeration) throw StateError('unrelated entry cannot decrypt');
+    return super.readAll();
   }
 }
 

@@ -16,7 +16,7 @@
   "app": {
     "windows": [
       {
-        "title": "",
+        "title": "Buzz",
         "width": 900,
         "height": 650,
         "maximized": true,

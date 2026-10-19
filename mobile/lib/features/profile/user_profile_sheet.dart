@@ -28,8 +28,8 @@ import 'user_status_cache_provider.dart';
 /// Show a user profile bottom sheet for the given [pubkey].
 ///
 /// The sheet names [pubkey] as the opening surface did: within the live
-/// comparison context [names] (for example a channel's members or a Pulse
-/// timeline). Without it, the identity is compared only with itself.
+/// comparison context [names] (for example a channel's members). Without it,
+/// the identity is compared only with itself.
 void showUserProfileSheet(
   BuildContext context,
   String pubkey, {

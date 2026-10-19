@@ -331,16 +331,20 @@ class App extends HookConsumerWidget {
     if (ageSignalState != AgeSignalState.restricted &&
         authState.value?.status == AuthStatus.authenticated) {
       ref.watch(relaySessionProvider);
-      ref.watch(observerRelayProvider);
+      // Listen, not watch: these publish often, and an App rebuild rebuilds
+      // every route, including an open chat.
+      ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
-      ref.watch(userStatusCacheProvider);
+      ref.listen(userStatusCacheProvider, (_, _) {});
       if (ref.watch(activeCommunityProvider).value?.pushNotificationsEnabled ==
               true &&
           ref.watch(currentRelayPushDescriptorProvider).value != null) {
         ref.watch(pushSubscriptionSyncProvider);
       }
       hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
-      hasUnreadSolo = ref.watch(meUnreadChannelIdsProvider).isNotEmpty;
+      hasUnreadSolo = ref.watch(
+        meUnreadChannelIdsProvider.select((ids) => ids.isNotEmpty),
+      );
     }
 
     // Start listening for buzz:// links immediately (even pre-auth) so a

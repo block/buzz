@@ -3639,6 +3639,55 @@ void main() {
       );
     });
 
+    testWidgets('activity in another channel does not rebuild the open chat', (
+      tester,
+    ) async {
+      final otherChannel = Channel(
+        id: _otherChannelId,
+        name: 'random',
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'abc123',
+        createdAt: DateTime(2025),
+        memberCount: 5,
+        isMember: true,
+      );
+      final channelsNotifier = _FakeChannelsNotifier([
+        _testChannel,
+        otherChannel,
+      ]);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            for (var i = 0; i < 5; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: 'Message $i, see #random',
+                createdAt: 1000 + i,
+              ),
+          ],
+          channelsNotifier: channelsNotifier,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(MessageContent), findsWidgets);
+
+      final rebuilt = <Widget>[];
+      debugOnRebuildDirtyWidget = (element, _) => rebuilt.add(element.widget);
+      addTearDown(() => debugOnRebuildDirtyWidget = null);
+
+      // A live event elsewhere republishes the whole list.
+      channelsNotifier.setChannels([
+        _testChannel,
+        otherChannel.copyWith(lastMessageAt: DateTime.utc(2026)),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(rebuilt.whereType<MessageContent>(), isEmpty);
+    });
+
     testWidgets('clears the composer inset when membership is revoked', (
       tester,
     ) async {
@@ -4977,6 +5026,80 @@ void main() {
       await tester.pumpAndSettle();
       expect(findRichText('Reachable unread'), findsOneWidget);
     });
+
+    testWidgets(
+      'settles the unread jump each time history silently reaches its oldest page',
+      (tester) async {
+        final readMessage = _textMsg(
+          id: 'read',
+          pubkey: 'alice',
+          content: 'Already read',
+          createdAt: 1010,
+        );
+        final messagesNotifier = _SilentOldestMessagesNotifier([readMessage]);
+        final channelsNotifier = _FakeChannelsNotifier(
+          [_testChannel],
+          observedUnread: {
+            _channelId: [
+              for (final (id, createdAt) in [
+                ('never-loaded', 1021),
+                ('reachable-unread', 1022),
+              ])
+                makeObservedUnreadEvent(
+                  id: id,
+                  createdAt: createdAt,
+                  rootId: null,
+                  highPriority: false,
+                  channelType: 'stream',
+                  isThreadedReply: false,
+                ),
+            ],
+          },
+        );
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {_channelId: 1020},
+            version: 0,
+          ),
+        );
+        final unreadButton = find.byKey(
+          const ValueKey('channel-jump-to-oldest-unread'),
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            channelsNotifier: channelsNotifier,
+            readStateNotifier: readState,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await _settleThenFinishFetch(tester);
+        // The first fetch reached the oldest page with no unread row loaded.
+        expect(messagesNotifier.fetchOlderCalls, 1);
+        expect(unreadButton, findsNothing);
+
+        // A reconnect forgets the oldest page and reloads the window, now
+        // with an unread row; the next fetch reaches the oldest page again.
+        messagesNotifier.reconnect([
+          readMessage,
+          _textMsg(
+            id: 'reachable-unread',
+            pubkey: 'alice',
+            content: 'Reachable unread',
+            createdAt: 1022,
+          ),
+        ]);
+        await _settleThenFinishFetch(tester);
+        expect(messagesNotifier.fetchOlderCalls, 2);
+        expect(unreadButton, findsOneWidget);
+      },
+    );
 
     testWidgets('pages past a loaded forced unread for an older target', (
       tester,
@@ -16770,6 +16893,39 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
     _messages = messages;
     _hasLoadedMessages = true;
     state = AsyncData(messages);
+  }
+}
+
+/// Lets the rows settle while an older fetch is in flight, then lets it finish,
+/// so nothing but the fetch's own completion can rebuild the list afterwards.
+Future<void> _settleThenFinishFetch(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.pump(_SilentOldestMessagesNotifier.fetchDelay);
+  await tester.pumpAndSettle();
+}
+
+/// Each older fetch takes a while, then finds the oldest page without
+/// publishing anything, like a window whose cursor has run out.
+class _SilentOldestMessagesNotifier extends _FakeMessagesNotifier {
+  _SilentOldestMessagesNotifier(super.messages);
+
+  static const fetchDelay = Duration(seconds: 5);
+  bool _reachedOldest = false;
+
+  @override
+  bool get reachedOldest => _reachedOldest;
+
+  @override
+  Future<bool> fetchOlder() async {
+    fetchOlderCalls += 1;
+    await Future<void>.delayed(fetchDelay);
+    _reachedOldest = true;
+    return false;
+  }
+
+  void reconnect(List<NostrEvent> messages) {
+    _reachedOldest = false;
+    setMessages(messages);
   }
 }
 

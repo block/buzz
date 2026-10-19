@@ -118,6 +118,9 @@ class AccountIdentityStore {
       'buzz_account_identity_${HostedEnvironment.origin.host.replaceAll('.', '_')}_v1';
   static final _queue = SerialQueue();
   final FlutterSecureStorage _storage;
+  // Public lookup hints from the choices shown by this store. Always reread
+  // and validate the record; never retain signing material across selection.
+  final _savedLocations = <String, String>{};
 
   Future<T> _serialized<T>(Future<T> Function() operation) {
     final result = _queue.run(() => operation());
@@ -215,10 +218,17 @@ class AccountIdentityStore {
   Future<List<AccountIdentitySnapshot>> identities() => _serialized(() async {
     final keys = await _identityKeys();
     final identities = <String, AccountIdentitySnapshot>{};
+    final locations = <String, String>{};
     for (final key in keys) {
       final record = await _atKey(key)._read();
-      if (record != null) identities[record.pubkey] = record.snapshot;
+      if (record != null) {
+        identities[record.pubkey] = record.snapshot;
+        locations[record.pubkey] = key;
+      }
     }
+    _savedLocations
+      ..clear()
+      ..addAll(locations);
     return identities.values.toList();
   });
 
@@ -236,6 +246,11 @@ class AccountIdentityStore {
 
   Future<String> _savedNsec(String pubkey) => _serialized(() async {
     try {
+      final location = _savedLocations[pubkey];
+      if (location != null) {
+        final record = await _atKey(location)._read();
+        if (record?.pubkey == pubkey) return record!.nsec;
+      }
       final keys = await _identityKeys(pubkey: pubkey);
       for (final key in keys) {
         final record = await _atKey(key)._read();

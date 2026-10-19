@@ -28,9 +28,9 @@ class FilterChipItem<T> {
 
 /// A horizontally-scrolling row of Material [FilterChip]s.
 ///
-/// This is the single shared filter/segment selector used across Pulse,
-/// Search, and Activity. It relies on the app's `chipTheme` for styling so
-/// every screen looks identical — do not hand-roll chip rows elsewhere.
+/// This is the single shared filter/segment selector used across Search and
+/// Activity. It relies on the app's `chipTheme` for styling so every screen
+/// looks identical — do not hand-roll chip rows elsewhere.
 class FilterChipBar<T> extends StatelessWidget {
   final List<FilterChipItem<T>> items;
   final T selected;
