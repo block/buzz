@@ -1253,9 +1253,24 @@ fn filter_to_query_params(
         .filter(|values| !values.is_empty())
         .map(|values| values.iter().map(|v| v.to_string()).collect());
 
-    let tag_values = group_state_tag_values(filter);
+    let mut tag_values = group_state_tag_values(filter);
+    // A filter that asks for system-channel membership notices (`#t` has
+    // "system") may read them; match its `#t` in SQL so ordinary notices do
+    // not take its page slots. Every other filter keeps the default, which
+    // hides them (NIP-CL).
+    let include_system_notices = buzz_core::filter::filter_asks_for_system_notices(filter);
+    if include_system_notices && !tag_values.iter().any(|(name, _)| name == "t") {
+        let t = nostr::SingleLetterTag::lowercase(nostr::Alphabet::T);
+        if let Some(values) = filter.generic_tags.get(&t) {
+            tag_values.push((
+                t.to_string(),
+                values.iter().map(|value| value.to_string()).collect(),
+            ));
+        }
+    }
 
     EventQuery {
+        include_system_notices,
         channel_id,
         kinds,
         pubkey,

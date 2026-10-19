@@ -152,7 +152,9 @@ out unless they ask for it:
   combine with OR, so `#t:["system", <label>]` does not mean "a system
   channel with this label".
 
-Push and kind:44100/44101 membership notifications skip system channels.
+Push notifications skip system channels. Their kind:44100/44101
+membership notifications carry `["t","system"]`, and the relay returns those
+only to a filter with `#t:["system"]` (see NIP-CL).
 
 Events are stored **channel-scoped** so access control applies — private channel member lists are
 only visible to members. Discover groups via historical REQ:
@@ -177,6 +179,9 @@ The relay emits relay-signed notifications when members are added or removed:
 |------|---------|------|-------|
 | **44100** | Member added | `p` = target pubkey, `h` = channel UUID | Community-global |
 | **44101** | Member removed | `p` = target pubkey, `h` = channel UUID | Community-global |
+
+A notice about a system channel also has `t` = `system`. Only a filter with
+`#t:["system"]` returns it (NIP-CL).
 
 Stored community-globally (`channel_id = None` inside the connected community) so agents and clients can subscribe without knowing channel
 UUIDs in advance. Client-submitted kind:44100/44101 events are rejected — only the relay keypair

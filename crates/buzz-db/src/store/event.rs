@@ -125,6 +125,12 @@ pub struct EventQuery {
     /// containment alone would also admit decoys like `["x","shared","true"]`.
     /// `event_visible_to_reader` remains the post-filter.
     pub shared_gated_reader: Option<Vec<u8>>,
+    /// Whether results may include membership notices about system channels
+    /// ([`buzz_core::filter::is_system_notice`]). Off by default, so a read
+    /// path that does not ask never returns one (NIP-CL). Set it only for a
+    /// filter that asks for them
+    /// ([`buzz_core::filter::filter_asks_for_system_notices`]).
+    pub include_system_notices: bool,
 }
 
 impl EventQuery {
@@ -158,6 +164,7 @@ impl EventQuery {
             channel_ids_include_global: true,
             max_limit: None,
             shared_gated_reader: None,
+            include_system_notices: false,
         }
     }
 }
@@ -655,6 +662,7 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
         qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
+    push_system_notice_exclusion(&mut qb, col_prefix, q);
 
     if let Some(ch) = q.channel_id {
         qb.push(format!(" AND {col_prefix}channel_id = "))
@@ -912,6 +920,37 @@ fn push_tag_value_filters(
     }
 }
 
+/// Hide membership notices about system channels unless the query asks for
+/// them (NIP-CL): `AND NOT (kind IN (44100, 44101) AND <exact ["t","system"]>)`.
+/// The same rule as [`buzz_core::filter::is_system_notice`] in `filters_match`,
+/// pushed before `LIMIT` so hidden rows cannot take page slots. Skipped when
+/// the query's kinds cannot match a notice.
+fn push_system_notice_exclusion(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    q: &EventQuery,
+) {
+    use buzz_core::filter::{SYSTEM_NOTICE_KINDS, SYSTEM_NOTICE_TAG};
+    if q.include_system_notices {
+        return;
+    }
+    if let Some(kinds) = q.kinds.as_deref() {
+        if !kinds
+            .iter()
+            .any(|kind| SYSTEM_NOTICE_KINDS.contains(&(*kind as u32)))
+        {
+            return;
+        }
+    }
+    let [added, removed] = SYSTEM_NOTICE_KINDS;
+    let [name, value] = SYSTEM_NOTICE_TAG;
+    qb.push(format!(
+        " AND NOT ({col_prefix}kind IN ({added}, {removed}) AND "
+    ));
+    push_exact_tag_match(qb, col_prefix, name, &[value.to_owned()]);
+    qb.push(")");
+}
+
 /// Match `#d` on artifact rows before `LIMIT` while leaving other kinds to the
 /// caller's post-filter: `(kind NOT IN (artifact kinds) OR <exact d match>)`.
 fn push_artifact_d_tag_predicate(
@@ -1030,6 +1069,7 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
         let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
         qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
+    push_system_notice_exclusion(&mut qb, col_prefix, q);
 
     if let Some(ch) = q.channel_id {
         qb.push(format!(" AND {col_prefix}channel_id = "))

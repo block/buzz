@@ -32,7 +32,47 @@ pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str
         .any(|t| t.content() == Some(reader_pubkey_hex))
 }
 
+/// The tag that marks a kind:44100/44101 membership notice about a system
+/// channel (NIP-CL): `["t", "system"]`. Only the relay signs these kinds, and
+/// it adds the tag only when the channel is a system channel.
+pub const SYSTEM_NOTICE_TAG: [&str; 2] = ["t", "system"];
+
+/// The kinds that [`SYSTEM_NOTICE_TAG`] can mark.
+pub const SYSTEM_NOTICE_KINDS: [u32; 2] = [
+    crate::kind::KIND_MEMBER_ADDED_NOTIFICATION,
+    crate::kind::KIND_MEMBER_REMOVED_NOTIFICATION,
+];
+
+/// Whether `event` is a membership notice about a system channel.
+///
+/// Such a notice is hidden by default: it matches only a filter that asks
+/// for it ([`filter_asks_for_system_notices`]). Clients that do not know
+/// system channels never ask, so they never see one, on any read or live
+/// path that matches through [`filters_match`] or applies the same rule in
+/// SQL (`EventQuery::include_system_notices`, which defaults to off).
+pub fn is_system_notice(event: &nostr::Event) -> bool {
+    SYSTEM_NOTICE_KINDS.contains(&crate::kind::event_kind_u32(event))
+        && event.tags.iter().any(|tag| {
+            let tag = tag.as_slice();
+            tag.first().map(String::as_str) == Some(SYSTEM_NOTICE_TAG[0])
+                && tag.get(1).map(String::as_str) == Some(SYSTEM_NOTICE_TAG[1])
+        })
+}
+
+/// Whether `filter` asks for system-channel membership notices: its `#t`
+/// values include `"system"`.
+pub fn filter_asks_for_system_notices(filter: &Filter) -> bool {
+    filter
+        .generic_tags
+        .get(&nostr::SingleLetterTag::lowercase(nostr::Alphabet::T))
+        .is_some_and(|values| values.iter().any(|value| value == SYSTEM_NOTICE_TAG[1]))
+}
+
 fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
+    if is_system_notice(&ev.event) && !filter_asks_for_system_notices(f) {
+        return false;
+    }
+
     if let Some(kinds) = &f.kinds {
         if !kinds.contains(&ev.event.kind) {
             return false;
@@ -117,6 +157,58 @@ mod tests {
             .sign_with_keys(&keys)
             .expect("sign");
         StoredEvent::with_received_at(event, Utc::now(), None, true)
+    }
+
+    #[test]
+    fn a_system_notice_matches_only_a_filter_that_asks() {
+        let relay = Keys::generate();
+        let member = Keys::generate().public_key();
+        let notice = |kind: u32, system: bool| {
+            let mut tags = vec![
+                Tag::parse(["p", &member.to_hex()]).unwrap(),
+                Tag::parse(["h", "c"]).unwrap(),
+            ];
+            if system {
+                tags.push(Tag::parse(SYSTEM_NOTICE_TAG).unwrap());
+            }
+            let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags(tags)
+                .sign_with_keys(&relay)
+                .expect("sign");
+            StoredEvent::with_received_at(event, Utc::now(), None, true)
+        };
+        let filter = |json: serde_json::Value| -> Filter { serde_json::from_value(json).unwrap() };
+        let p = member.to_hex();
+        let old = [
+            filter(serde_json::json!({"kinds": [44100, 44101], "#p": [p]})),
+            filter(serde_json::json!({"#p": [p]})),
+            filter(serde_json::json!({})),
+            filter(serde_json::json!({"#t": ["other"]})),
+        ];
+        let asks = [
+            filter(serde_json::json!({"kinds": [44100, 44101], "#p": [p], "#t": ["system"]})),
+            filter(serde_json::json!({"#t": ["other", "system"]})),
+        ];
+        for kind in SYSTEM_NOTICE_KINDS {
+            let system = notice(kind, true);
+            assert!(is_system_notice(&system.event));
+            for f in &old {
+                assert!(!filters_match(std::slice::from_ref(f), &system), "{f:?}");
+            }
+            for f in &asks {
+                assert!(filters_match(std::slice::from_ref(f), &system), "{f:?}");
+            }
+            // An ordinary notice is unchanged: old filters see it, and the
+            // asking filter's `#t` does not match it.
+            let ordinary = notice(kind, false);
+            assert!(!is_system_notice(&ordinary.event));
+            assert!(filters_match(&old[..1], &ordinary));
+            assert!(!filters_match(&asks[..1], &ordinary));
+        }
+        // The tag hides nothing on other kinds.
+        let other = notice(44200, true);
+        assert!(!is_system_notice(&other.event));
+        assert!(filters_match(&old[2..3], &other));
     }
 
     #[test]

@@ -186,9 +186,34 @@ a system channel stays an ordinary NIP-29 group.
 The relay decides this for each filter. A filter that names a system channel
 does not add it to another filter in the same request.
 
-The relay MUST NOT send push notifications or kind:44100/44101 membership
-notifications for system channels. A client that received one would show the
-channel.
+The relay MUST NOT send push notifications for system channels.
+
+### Membership notices for system channels
+
+When a member is added to or removed from a system channel, the relay sends
+the usual kind:44100 or kind:44101 notice with one more tag,
+`["t", "system"]`. It stores the notice like any other 44100/44101.
+
+A client that does not know system channels would show the channel from such
+a notice. So the relay MUST return a notice with `["t", "system"]` only to a
+filter whose `#t` has the value `system`. This applies on every path: REQ
+history, live delivery, COUNT, and any relay-specific query API. Existing
+clients do not send `#t` on these kinds, so they see no change.
+
+A client that knows system channels sends one more filter:
+
+```json
+{"kinds": [44100, 44101], "#p": ["<me>"], "#t": ["system"]}
+```
+
+The `#p` rule for 44100/44101 still applies: it must be the reader's own
+pubkey. The tag comes from the channel type when the relay sends the notice.
+
+Because the notices are stored, a client that reconnects can set `since` to
+the newest notice it has seen. One subscription then returns the notices it
+missed and the new ones, so no change falls between a read and a
+subscription. A notice is a hint: the channel's group-state events decide
+membership.
 
 ### Asking for system channels
 
