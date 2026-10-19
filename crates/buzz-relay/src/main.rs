@@ -2103,13 +2103,15 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// These are stage budgets, not a guaranteed per-socket total: after a
 /// successful acknowledgement nothing cancels the reader, so a silent peer
 /// does not go straight into the peer wait. The 30s hard drain is what bounds
-/// every socket. Total worst
-/// case from SIGTERM to forced exit is 5s + 30s = 35s. Both fit inside the
-/// chart's `terminationGracePeriodSeconds: 60` (`deploy/charts/buzz/values.yaml`),
-/// which leaves headroom but assumes no `preStop` hook adds further delay.
-/// With jitter off (`BUZZ_DRAIN_JITTER_MS=0`, the default) sockets close
-/// all-at-once right after the grace, so the per-socket delay collapses to
-/// roughly the 5s grace plus the ack wait and the peer wait.
+/// every socket. The configured process shutdown budget, from SIGTERM to
+/// forced exit, is 5s + 30s = 35s, which fits within the chart's
+/// `terminationGracePeriodSeconds: 60` (`deploy/charts/buzz/values.yaml`).
+/// That leaves headroom but assumes no `preStop` hook adds further delay.
+/// With jitter off (`BUZZ_DRAIN_JITTER_MS=0`, the default), `drain_all()`
+/// queues every restart Close right after the grace and cancels the
+/// connections immediately, without waiting for any acknowledgement. The
+/// terminal-flush and peer-wait budgets then apply only to sockets whose
+/// teardown reaches those stages.
 const GRACEFUL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn serve(
