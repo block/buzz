@@ -579,12 +579,12 @@ async fn upload_blob_result(
     state
         .db
         .record_media_uploader(
-            auth.tenant.community(),
+            serving_write.lease(),
             &descriptor.sha256,
             auth.auth_event.pubkey.as_bytes(),
         )
         .await
-        .map_err(|_| MediaError::Internal)?;
+        .map_err(|error| serving_lease_lost(error.into()))?;
 
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
