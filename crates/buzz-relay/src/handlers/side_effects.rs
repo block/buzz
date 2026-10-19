@@ -3418,8 +3418,11 @@ pub fn spawn_nip43_membership_reconciler(
     every: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // `interval`'s first tick completes immediately.
+        // `interval`'s first tick completes immediately. A sweep can outlast
+        // `every`, so `Delay` keeps a full interval between sweeps instead of
+        // bursting the missed ticks back to back.
         let mut interval = tokio::time::interval(every);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             match reconcile_nip43_membership_snapshots(&state).await {
