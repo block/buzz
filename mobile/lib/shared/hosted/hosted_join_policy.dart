@@ -28,6 +28,10 @@ Future<Map<String, dynamic>> readJoinResponse(
   final Map<String, dynamic> data;
   try {
     response = await boundedHttpResponse(client, request);
+    if (response.statusCode == 429 ||
+        (response.statusCode >= 500 && response.statusCode < 600)) {
+      throw AccountFailure.unavailable;
+    }
     data = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
   } on FormatException {
     throw AccountFailure.invalidResponse;

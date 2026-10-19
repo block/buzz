@@ -55,7 +55,7 @@ class HostedJourneyFixture {
   late ProviderContainer container;
   String? bound;
   int starterFailures = 0;
-  int policyFailures = 0;
+  final policyResponses = <http.Response>[];
   int browserStarts = 0;
   int secondRelayFailures = 0;
   DateTime assertionNow = DateTime.now();
@@ -242,7 +242,7 @@ class HostedJourneyFixture {
       if (missingList) return http.Response('{}', 404);
       result = {'communities': rows};
     } else if (path == '/api/join-policy') {
-      if (policyFailures-- > 0) throw AccountFailure.unavailable;
+      if (policyResponses.isNotEmpty) return policyResponses.removeAt(0);
       result = {
         'policy': {
           'version': request.url.host,

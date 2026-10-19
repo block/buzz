@@ -731,9 +731,19 @@ void main() {
       f.offerProfile = false;
       // The first dispatched attempt ends; retry owns the pending consent.
       // A new incoming link must now invalidate that consent, not wait on it.
-      f.policyFailures = 1;
+      f.policyResponses.addAll([
+        http.Response('<html>Unavailable</html>', 502),
+        http.Response('', 503),
+        http.Response('{"error":"proxy_busy"}', 503),
+        http.Response('', 429),
+      ]);
       await f.mount(tester);
       await f.link(tester, 'one');
+      while (f.policyResponses.isNotEmpty) {
+        expect(find.text('Try again').hitTestable(), findsOneWidget);
+        expect(await f.storage.loadAll(), isEmpty);
+        await f.tap(tester, 'Try again');
+      }
       await f.tap(tester, 'Try again');
       expect(find.text('Accept and join').hitTestable(), findsOneWidget);
       await f.link(tester, 'two');

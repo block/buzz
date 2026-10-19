@@ -15,43 +15,49 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/community/community_storage_test.dart';
 
 void main() {
-  testWidgets('hosted handler drains queued links without legacy generation', (
-    tester,
-  ) async {
-    const first = AddCommunityDeepLink(
-      relayUrl: 'wss://one.communities.buzz.xyz',
-      name: 'One',
-    );
-    const second = InviteDeepLink(
-      relayUrl: 'wss://two.communities.buzz.xyz',
-      code: 'invite',
-    );
-    final pending = _QueuedPendingDeepLinkNotifier([first, second]);
-    final handled = <BuzzDeepLink>[];
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          pendingDeepLinkProvider.overrideWith(() => pending),
-          inviteKeyGeneratorProvider.overrideWithValue(
-            () => throw StateError('must not generate'),
-          ),
-        ],
-        child: MaterialApp(
-          home: DeepLinkDispatcher(
-            dispatchMessageLinks: false,
-            onboardingHandler: (_, link) async {
-              handled.add(link);
-              return true;
-            },
-            child: const Scaffold(body: SizedBox()),
+  for (final outcome in ['handled', 'declined', 'failed']) {
+    testWidgets('hosted handler drains queued links after $outcome setup', (
+      tester,
+    ) async {
+      const first = AddCommunityDeepLink(
+        relayUrl: 'wss://one.communities.buzz.xyz',
+        name: 'One',
+      );
+      const second = InviteDeepLink(
+        relayUrl: 'wss://two.communities.buzz.xyz',
+        code: 'invite',
+      );
+      final pending = _QueuedPendingDeepLinkNotifier([first, second]);
+      final handled = <BuzzDeepLink>[];
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pendingDeepLinkProvider.overrideWith(() => pending),
+            inviteKeyGeneratorProvider.overrideWithValue(
+              () => throw StateError('must not generate'),
+            ),
+          ],
+          child: MaterialApp(
+            home: DeepLinkDispatcher(
+              dispatchMessageLinks: false,
+              onboardingHandler: (_, link) async {
+                handled.add(link);
+                if (link == first) {
+                  if (outcome == 'declined') return false;
+                  if (outcome == 'failed') throw StateError('setup failed');
+                }
+                return true;
+              },
+              child: const Scaffold(body: SizedBox()),
+            ),
           ),
         ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(handled, [first, second]);
-    expect(pending.consumeCalls, 2);
-  });
+      );
+      await tester.pumpAndSettle();
+      expect(handled, [first, second]);
+      expect(pending.consumeCalls, 2);
+    });
+  }
   testWidgets('queues deep links in arrival order until acknowledged', (
     tester,
   ) async {

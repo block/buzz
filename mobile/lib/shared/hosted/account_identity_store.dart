@@ -205,7 +205,9 @@ class AccountIdentityStore {
     try {
       return (await _storage.readAll()).keys.where(_isIdentityKey).toSet();
     } catch (_) {
-      return {storageKey, _key, if (pubkey != null) forPairing(pubkey)._key};
+      // A partial inventory cannot establish absence or authorize generation.
+      if (pubkey == null) throw AccountIdentityFailure.unreadable;
+      return {storageKey, _key, forPairing(pubkey)._key};
     }
   }
 

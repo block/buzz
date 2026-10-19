@@ -165,6 +165,36 @@ void main() {
         );
         expect(await secure.readAll(), data);
       }
+      // Another account's scoped key must remain a choice, even when an
+      // unrelated Android entry prevents bulk enumeration. Never mint a key
+      // from that incomplete inventory; retry after storage recovers.
+      FlutterSecureStorage.setMockInitialValues({});
+      final storage = _InventoryStorage();
+      store = AccountIdentityStore(storage: storage, subject: 'fixture');
+      await store.forSubject('other-account').create(first.nsec);
+      service = HostedIdentityService(account: account, store: store);
+      final before = await secure.readAll();
+      expect(
+        (await service.resolve()).state,
+        HostedIdentityState.needsSelection,
+      );
+      storage.failEnumeration = true;
+      await expectLater(
+        service.resolve(),
+        throwsA(AccountIdentityFailure.unreadable),
+      );
+      expect(await secure.readAll(), before);
+      expect(await store.read(), isNull);
+      storage.failEnumeration = false;
+      expect((await service.resolve()).choices.single.pubkey, first.public);
+      expect(
+        (await service.resolve(selectedPubkey: first.public)).pubkey,
+        first.public,
+      );
+      expect(
+        (await store.forSubject('other-account').read())!.pubkey,
+        first.public,
+      );
     },
   );
 
@@ -225,4 +255,20 @@ void main() {
     );
     expect(await store.read(), isNull);
   });
+}
+
+class _InventoryStorage extends FlutterSecureStorage {
+  bool failEnumeration = false;
+  @override
+  Future<Map<String, String>> readAll({
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (failEnumeration) throw StateError('unrelated entry cannot decrypt');
+    return super.readAll();
+  }
 }

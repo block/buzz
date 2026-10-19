@@ -68,10 +68,11 @@ void main() {
       final scoped = legacy.forSubject('b');
       final other = nostr.Keys('2'.padLeft(64, '0'));
       await scoped.create(other.nsec);
-      expect((await scoped.identities()).map((item) => item.pubkey).toSet(), {
-        key.public,
-        other.public,
-      });
+      await expectLater(
+        scoped.identities(),
+        throwsA(AccountIdentityFailure.unreadable),
+      );
+      expect((await scoped.read())!.pubkey, other.public);
       expect(
         await scoped.withSavedIdentity(key.public, (value) async => value),
         key.nsec,

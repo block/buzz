@@ -1,4 +1,5 @@
 import 'package:buzz/features/channels/deep_link_dispatcher.dart';
+import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
@@ -71,6 +72,46 @@ void main() {
     if (!HostedEnvironment.requiresAuth(Uri.parse(staging.relayUrl).host)) {
       expect(await pending, isFalse);
       expect(flow.started, isNull);
+      if (!HostedEnvironment.enabled) {
+        final container = ProviderScope.containerOf(context);
+        final queue = container.read(pendingDeepLinkProvider.notifier);
+        final bind = Uri(
+          scheme: 'buzz',
+          host: 'nostr-bind',
+          queryParameters: {
+            'challenge_id': '12345678-1234-1234-1234-123456789012',
+            'nonce': 'a' * 43,
+            'verification_code': '123456',
+            'audience': 'buzz:nostr-identity',
+            'action': 'bind_nostr_identity',
+            'protocol': 'buzz-nostr-identity',
+            'version': '1',
+            'origin': HostedEnvironment.origin.toString(),
+            'expires_at': '2099-01-01T00:00:00Z',
+            'return': 'browser_fragment_v1',
+            'callback_url': HostedEnvironment.origin
+                .resolve('/buzz')
+                .toString(),
+          },
+        );
+        expect(parseBuzzDeepLink(bind), isA<NostrBindDeepLink>());
+        queue.open(bind);
+        queue.open(
+          Uri.parse(
+            'buzz://add-community?relay=wss%3A%2F%2Fcommunity.example.org&name=Community',
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(SelfHostedEntrySheet), findsOneWidget);
+        expect(
+          container.read(pendingDeepLinkProvider),
+          isA<AddCommunityDeepLink>(),
+        );
+        Navigator.of(tester.element(find.byType(SelfHostedEntrySheet))).pop();
+        await tester.pumpAndSettle();
+        expect(container.read(pendingDeepLinkProvider), isNull);
+        expect(flow.started, isNull);
+      }
       return;
     }
     if (HostedEnvironment.origin.host == 'app.builderlabstaging.xyz') {

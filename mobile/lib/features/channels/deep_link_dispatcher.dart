@@ -106,12 +106,20 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         }
       } else if (link is InviteDeepLink) {
         _maybeDispatchInvite(link);
+      } else if (ref.read(pendingDeepLinkProvider) == link) {
+        // No fallback owns this link. It must not block later entry attempts.
+        ref.read(pendingDeepLinkProvider.notifier).consume();
       }
     } catch (_) {
       if (mounted) {
+        if (ref.read(pendingDeepLinkProvider) == link) {
+          ref.read(pendingDeepLinkProvider.notifier).consume();
+        }
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
           const SnackBar(
-            content: Text('Could not open setup. Please try again.'),
+            content: Text(
+              'Could not open setup. Re-open the link to try again.',
+            ),
           ),
         );
       }
