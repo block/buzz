@@ -91,6 +91,9 @@ class _MessageList extends HookConsumerWidget {
     final oldestUnreadMessageId = useState<String?>(null);
     final unreadBoundaryLoadFailed = useState(false);
     final unreadBoundaryFetchCount = useRef(0);
+    // Reaching the oldest page publishes no messages, so nothing else
+    // rebuilds this list to re-run the unread effect below.
+    final unreadBoundaryReachedOldest = useState(false);
     final hasUnreadDeepLink =
         initialMessageId != null || initialThreadRootId != null;
     final dayTimestampByReversedIndex = <int, int>{};
@@ -172,7 +175,10 @@ class _MessageList extends HookConsumerWidget {
           unawaited(
             Future<void>(() async {
               final loaded = await notifier.fetchOlder();
-              if (!cancelled && !loaded && !notifier.reachedOldest) {
+              if (cancelled || loaded) return;
+              if (notifier.reachedOldest) {
+                unreadBoundaryReachedOldest.value = true;
+              } else {
                 unreadBoundaryLoadFailed.value = true;
               }
             }),
