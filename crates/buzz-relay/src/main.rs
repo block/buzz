@@ -1096,8 +1096,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     step.finish();
 
     // NIP-43: repair event-backed rosters (`relay_members` is canonical) in
-    // the background. The first sweep starts immediately but never blocks the
-    // listener; see `spawn_nip43_membership_reconciler`.
+    // the background, on the one replica holding the reconciler leader lock.
+    // It never blocks the listener; see `spawn_nip43_membership_reconciler`.
     if config.require_relay_membership {
         let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
             .ok()
@@ -1106,6 +1106,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             .max(1);
         buzz_relay::handlers::side_effects::spawn_nip43_membership_reconciler(
             Arc::clone(&state),
+            buzz_relay::handlers::side_effects::NIP43_RECONCILE_LOCK_KEY,
             std::time::Duration::from_secs(interval_secs),
         );
     }
@@ -2414,7 +2415,7 @@ fn dropped_in_memory_keys(
 async fn run_usage_metrics_tick(
     state: &AppState,
     emission_scope: &EmissionScope,
-    leader: &mut Option<buzz_db::UsageMetricsLeader>,
+    leader: &mut Option<buzz_db::SessionLeader>,
     emitted_in_memory: &mut HashSet<InMemoryMetricKey>,
     fleet_schedule: &mut FleetUsageSchedule,
 ) -> anyhow::Result<()> {
@@ -2456,7 +2457,7 @@ async fn run_usage_metrics_tick(
     if leader.is_none() && !demoted {
         *leader = state
             .db
-            .try_lock_usage_metrics(USAGE_METRICS_LOCK_KEY)
+            .try_lock_session_leader(USAGE_METRICS_LOCK_KEY)
             .await?;
         if leader.is_some() {
             info!("Acquired usage metrics leader lock");

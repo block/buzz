@@ -472,7 +472,7 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .next()
         .expect("usage production source");
     let usage_leader_lock = usage_production
-        .split_once("pub async fn try_lock_usage_metrics(")
+        .split_once("pub async fn try_lock_session_leader(")
         .expect("usage store must expose the legacy leader-lock acquisition")
         .1
         .split_once("pub async fn usage_community_count(")

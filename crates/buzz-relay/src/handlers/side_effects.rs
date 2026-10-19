@@ -3407,30 +3407,55 @@ pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyh
     Ok(reconciled)
 }
 
+/// Deployment-wide leader lock for the NIP-43 snapshot reconciler.
+pub const NIP43_RECONCILE_LOCK_KEY: i64 = 0x4255_5A5A_4E34_3352;
+
 /// Spawn the background NIP-43 snapshot reconciler.
 ///
-/// The first sweep starts as soon as the task runs; each later sweep starts
-/// `every` after the previous one finishes. Startup never waits on it: the
-/// snapshots live in the shared database, so a new replica has nothing of its
-/// own to repair before it serves. Trade-off: on a single-replica deployment, a
-/// missing or stale kind:13534 snapshot is served until this replica's first
-/// sweep reaches that community.
+/// Only the replica holding the `lock_key` session advisory lock sweeps; the
+/// others retry the lock once per `every`. The holder keeps the lock across
+/// sweeps, and Postgres releases it when that session ends, so a killed leader
+/// is replaced on a standby's next attempt. Each sweep (and each attempt to
+/// lead) starts `every` after the previous one finished; the first runs as soon
+/// as the task does. Startup never waits on it: the snapshots live in the shared
+/// database, so a new replica has nothing of its own to repair before it serves.
+/// Trade-off: a missing or stale kind:13534 snapshot is served until the
+/// leader's sweep reaches that community.
 pub fn spawn_nip43_membership_reconciler(
     state: Arc<AppState>,
+    lock_key: i64,
     every: std::time::Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // Sweep first, then sleep: the first sweep starts immediately and
-        // every later one waits a full `every` after the previous sweep ends,
-        // even when a sweep outlasts `every`.
+        let mut leader: Option<buzz_db::SessionLeader> = None;
         loop {
-            match reconcile_nip43_membership_snapshots(&state).await {
-                Ok(repaired) if repaired > 0 => {
-                    info!(count = repaired, "NIP-43 membership snapshots repaired")
+            if let Some(guard) = leader.as_mut() {
+                if !guard.is_live().await {
+                    warn!("NIP-43 reconciler leader lock connection lost; demoting");
+                    leader = None;
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    warn!(%error, "periodic NIP-43 membership snapshot reconciliation failed")
+            }
+            if leader.is_none() {
+                match state.db.try_lock_session_leader(lock_key).await {
+                    Ok(Some(guard)) => {
+                        info!("Acquired NIP-43 reconciler leader lock");
+                        leader = Some(guard);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(%error, "NIP-43 reconciler leader lock attempt failed")
+                    }
+                }
+            }
+            if leader.is_some() {
+                match reconcile_nip43_membership_snapshots(&state).await {
+                    Ok(repaired) if repaired > 0 => {
+                        info!(count = repaired, "NIP-43 membership snapshots repaired")
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(%error, "periodic NIP-43 membership snapshot reconciliation failed")
+                    }
                 }
             }
             tokio::time::sleep(every).await;
@@ -4354,6 +4379,7 @@ mod tests {
             // sweep can publish the snapshot.
             let reconciler = spawn_nip43_membership_reconciler(
                 Arc::clone(&state),
+                scratch_lock_key(),
                 std::time::Duration::from_secs(24 * 60 * 60),
             );
             let published = tokio::time::timeout(std::time::Duration::from_secs(60), async {
@@ -4368,6 +4394,86 @@ mod tests {
                 "the first background sweep must publish the missing snapshot without waiting an interval"
             );
             assert_eq!(membership_snapshots(&pool, community).await, 1);
+        }
+
+        /// A per-test leader key, so concurrent tests and any relay sharing
+        /// the test database never contend for the production lock.
+        fn scratch_lock_key() -> i64 {
+            Uuid::new_v4().as_u64_pair().0 as i64
+        }
+
+        /// Only the leader-lock holder sweeps. A replica that can't take the
+        /// lock never publishes, and it takes over once the holder lets go.
+        /// Runs in a private database so no other test's sweep can publish
+        /// the snapshot this test watches.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn background_reconciler_sweeps_only_while_holding_leader_lock() {
+            let admin_url = crate::test_support::database_url();
+            let admin = sqlx::PgPool::connect(&admin_url)
+                .await
+                .expect("connect admin to create scratch db");
+            let name = format!("nip43_leader_{}", Uuid::new_v4().simple());
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+                .execute(&admin)
+                .await
+                .expect("create scratch db");
+            let slash = admin_url
+                .rfind('/')
+                .expect("URL must have a path component");
+            let pool = sqlx::PgPool::connect(&format!("{}/{name}", &admin_url[..slash]))
+                .await
+                .expect("connect scratch db");
+            buzz_db::migration::run_migrations(&pool)
+                .await
+                .expect("migrate scratch db");
+            let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+            let community = insert_community(&pool).await;
+
+            // Another "replica" holds the leader lock.
+            let key = scratch_lock_key();
+            let mut holder = pool.acquire().await.expect("acquire lock holder");
+            sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(key)
+                .execute(&mut *holder)
+                .await
+                .expect("take leader lock");
+
+            let every = std::time::Duration::from_millis(100);
+            let reconciler = spawn_nip43_membership_reconciler(Arc::clone(&state), key, every);
+            // Twenty lock attempts' worth of standby: none may sweep.
+            tokio::time::sleep(every * 20).await;
+            let standby_snapshots = membership_snapshots(&pool, community).await;
+
+            sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(key)
+                .execute(&mut *holder)
+                .await
+                .expect("release leader lock");
+            let published = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                while membership_snapshots(&pool, community).await == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+            .await;
+            reconciler.abort();
+            drop(holder);
+            drop(state);
+            pool.close().await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+            )))
+            .execute(&admin)
+            .await;
+
+            assert_eq!(
+                standby_snapshots, 0,
+                "a replica without the leader lock must not sweep"
+            );
+            assert!(
+                published.is_ok(),
+                "the standby must take over and sweep once the leader lock is released"
+            );
         }
 
         /// Regression for #7558 on the worker path: repeated NIP-43
