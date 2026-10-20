@@ -526,10 +526,9 @@ shape is an explicit transition, not a flag day:
   the operational evidence path for rollout safety.
 
 The database end state (a declarative schema source, applied out of band at
-scale; no triggers, functions, or foreign keys;
-backfills outside migrations) and the
-expand → deploy → backfill → contract rules every schema change follows are in
-[docs/database.md](docs/database.md).
+scale; no triggers, functions, or foreign keys; backfills outside migrations)
+and the expand → deploy → backfill → contract rules every schema change follows
+are in [docs/database.md](docs/database.md).
 
 **Does NOT:** cache queries, implement connection pooling logic (delegated to sqlx), or make network calls outside Postgres.
 

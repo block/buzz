@@ -79,53 +79,59 @@ retirement sequence below.
 **No exception for the community write fence.** A new table MUST NOT get a
 fence trigger, including by calling the existing helper
 `attach_community_write_fence`. Writers of a new tenant-owned table MUST be
-fenced in the application instead, by community admission. Serving writers,
-including fleet sweeps (one community at a time), are admitted by
+fenced in the application instead, by community admission. New serving work,
+including fleet sweeps (one community at a time), is admitted by
 `DeletionStore::guard_transaction`, which takes the shared community deletion
-lock and refuses a community that is not `active`. Most open their transaction
-with `begin_community_write_transaction` or one of its variants
+lock and refuses a community that is not `active`. Most writers open their
+transaction with `begin_community_write_transaction` or one of its variants
 (`crates/buzz-db/src/runtime/mod.rs`), which returns an `AdmittedTx`
-(`crates/buzz-db/src/runtime/admitted_tx.rs`). Helpers that take
-`&mut AdmittedTx` reject a raw transaction at compile time, but crate code can
-still bypass the type, so the fence triggers remain the authoritative backstop
-(ARCHITECTURE.md § *Supported Writer Contract*). A table without a trigger has
-no database backstop. The remaining fence-retirement work makes every writer of
-every fenced table go through admission, then drops the fence triggers and
-functions. That work MUST also update ARCHITECTURE.md § *Dual enforcement*.
+(`crates/buzz-db/src/runtime/admitted_tx.rs`). One exception is deliberate:
+a write that finishes under an already-admitted serving lease
+(`insert_event_with_serving_write_guard`, through
+`AdmittedTx::admit_with_serving_lease`) is checked by
+`guard_transaction_with_serving_lease`, which lets that exact unexpired lease
+complete while the community is `quiescing`. Keep it.
 
-**Today this blocks new tenant-owned tables.** Community deletion's catalog
-checks still assume that every tenant-scoped table carries a trigger fence:
+Helpers that take `&mut AdmittedTx` reject a raw transaction at compile time,
+but crate code can still bypass the type, so the fence triggers remain the
+database backstop until they are dropped (ARCHITECTURE.md § *Supported Writer
+Contract*). A table without a trigger has no database backstop. Every serving
+writer of a fenced table already goes through admission. The remaining
+fence-retirement work drops the fence triggers and functions, and MUST also
+update ARCHITECTURE.md § *Dual enforcement*.
 
-- An unlisted `community_id` table, fenced or not, fails the exact-set check
-  against `EXPECTED_SCOPED_TABLES`
-  (`community deletion catalog drift (missing=…, unknown=…)`). Listing it
-  without a trigger fails the write-fence drift check. Either way, deletion
-  fails closed for every community, not only the new table's.
-- Relay startup refuses a binary that lists the table in
-  `EXPECTED_SCOPED_TABLES` when the database has no live fence on it
-  (`community serving write fences missing`).
+**Today this blocks new tenant-owned tables.** Startup and deletion validation
+no longer require a fence on any table; they pass with every universal fence
+object dropped (`migration_schema_fence_objects_are_optional_for_serving_and_deletion`
+in `crates/buzz-db/src/store/deletion.rs`). Two things still matter:
+
+- Deletion's catalog check is an exact set. A `community_id` table missing from
+  `EXPECTED_SCOPED_TABLES`, fenced or not, fails it
+  (`community deletion catalog drift (missing=…, unknown=…)`), and deletion
+  fails closed for every community, not only the new table's. Listing the
+  table is enough to pass.
 - Desired-state bootstraps run `schema/community_write_fence.sql`, which
-  attaches a fence trigger to every `community_id` table automatically.
+  attaches a fence trigger to every `community_id` table not excluded by
+  `community_write_fence_excluded_table`. A fresh desired-state database would
+  put a trigger on the new table and a migrated one would not, so the two
+  schema paths would diverge.
 
-So before a feature can add a tenant-owned `community_id` table, these checks
-must recognise application-fenced tables, and the desired-state loop must stop
-attaching triggers to them. That change belongs to the fence-retirement work.
-Land it before the feature, or as the feature's first PR. Do not work around
-it with a trigger, or with an entry in `community_write_fence_excluded_table`
-for a table the community owns.
+So before a feature can add a tenant-owned `community_id` table, the
+desired-state bootstrap must stop attaching fence triggers. That change belongs
+to the fence-retirement work. Land it before the feature, or as the feature's
+first PR. Do not work around it with a trigger, or with an entry in
+`community_write_fence_excluded_table` for a table the community owns.
 
 #### Checklist: adding a tenant-owned `community_id` table
 
-After the catalog change above has landed, all in the same PR:
+After the desired-state change above has landed, all in the same PR:
 
 - [ ] Every writer of the table goes through community admission
       (`begin_community_write_transaction` or another constructor that returns
       `AdmittedTx`). Nothing writes the table outside it.
 - [ ] No fence trigger: no `attach_community_write_fence` call in the
       migration and no `schema/triggers/` file.
-- [ ] The table in `EXPECTED_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`),
-      plus any registration the catalog change introduces for
-      application-fenced tables.
+- [ ] The table in `EXPECTED_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`).
 - [ ] The table in `PURGE_SCOPED_TABLES` in the same file, ordered child
       before parent. A table missing here keeps its rows after the purge, and
       deletion verification fails closed.
@@ -358,7 +364,7 @@ before the contract have already committed, so an old pod that restarts hits
 | Add `CHECK`, `UNIQUE`, or a narrower index | Old writes violate it, or an old `ON CONFLICT` target no longer matches an index | Deploy writers that satisfy it, backfill, then add it. Add a `CHECK` as `NOT VALID`, then `VALIDATE CONSTRAINT` in a later step. Keep every index an old `ON CONFLICT` names until no deployed code uses it |
 | Add an enum value that new code writes | Old code fails to decode the unknown variant | Deploy readers that accept the value, then deploy writers that produce it |
 | Drop a column, table, index, trigger, function, or FK | Old code reads it or relies on its side effect | Contract step only, after the release that stops relying on it is fully deployed |
-| Add a table with a `community_id` column | The old relay's exact-set deletion catalog check (`EXPECTED_SCOPED_TABLES`) sees an unknown table, so community deletion fails closed until the new release deploys. Serving is unaffected, apart from the auto-migration restart case in Rule 5 | Allowed, after Rule 1's catalog change for a tenant-owned table. Keep the gap between expand and deploy short, and do not run community deletion during it |
+| Add a table with a `community_id` column | The old relay's exact-set deletion catalog check (`EXPECTED_SCOPED_TABLES`) sees an unknown table, so community deletion fails closed until the new release deploys. Serving is unaffected, apart from the auto-migration restart case in Rule 5 | Allowed. For a tenant-owned table, only after the desired-state change in Rule 1. Keep the gap between expand and deploy short, and do not run community deletion during it |
 | `SELECT *` or `RETURNING *` decoded by position | Column order differs between desired-state and migrated databases and changes when columns are added | Select named columns |
 
 #### Adding `NOT NULL` to a populated table
