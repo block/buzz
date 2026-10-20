@@ -1340,6 +1340,33 @@ pub async fn system_channel_ids_among(
     .await?)
 }
 
+/// The IDs in `channel_ids` whose type is not a legacy type
+/// ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]), deleted or not: system
+/// channels and any type added later. A filter reads them only by naming them.
+pub async fn non_legacy_channel_ids_among(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_ids: &[Uuid],
+) -> Result<Vec<Uuid>> {
+    if channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let sql = format!(
+        "SELECT id FROM channels WHERE community_id = $1 AND id = ANY($2) AND NOT {}",
+        crate::store::channel::legacy_channel_type_sql("channel_type")
+    );
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(community_id.as_uuid())
+        .bind(channel_ids)
+        .fetch_all(&mut *connection)
+        .await?)
+}
+
 /// A large channel whose canonical active-member count may need its legacy
 /// discovery snapshot repaired.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2001,6 +2028,17 @@ impl Db {
         channel_ids: &[Uuid],
     ) -> Result<Vec<Uuid>> {
         system_channel_ids_among(&self.pool, community_id, channel_ids).await
+    }
+
+    /// The IDs in `channel_ids` whose type is not a legacy type, deleted or
+    /// not.
+    #[datastore_span(name = "non_legacy_channel_ids_among", system = "postgresql")]
+    pub async fn non_legacy_channel_ids_among(
+        &self,
+        community_id: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>> {
+        non_legacy_channel_ids_among(&self.pool, community_id, channel_ids).await
     }
 
     /// Returns large active-channel rosters whose relay-authored snapshots differ.

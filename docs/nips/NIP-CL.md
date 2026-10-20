@@ -176,8 +176,10 @@ A client sees a channel only if it knows the channel's type. A read that does
 not name a channel returns only the **legacy types**: `stream`, `forum`, `dm`
 and `workflow`, the types that every client knew before this NIP. This list is
 frozen. The relay leaves out every other type, so a channel type added later
-is also hidden from clients that do not know it. Each new type needs its own
-way to ask for it. This applies to:
+is also hidden from clients that do not know it. A filter that names such a
+channel reads it under the ordinary rules, and no other filter in the same
+request gains it. Each new type needs its own way to ask for all its channels.
+This applies to:
 
 - a filter without `#h`, for example the channels or messages a reader can see;
 - kind:39002 `#p:["<reader>"]`, the channels a reader belongs to;

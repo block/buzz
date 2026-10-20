@@ -180,7 +180,7 @@ pub async fn handle_count(
                 conn.send(RelayMessage::closed(&sub_id, "error: database error"));
                 return;
             }
-            if let Err(e) = super::system_channels::keep_repaired_system_channels_named(
+            if let Err(e) = super::system_channels::keep_repaired_non_legacy_channels_named(
                 &state,
                 conn.tenant.community(),
                 &mut accessible_channels,

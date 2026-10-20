@@ -341,7 +341,7 @@ async fn system_channels_are_read_only_by_name() {
 /// re-check then confirms membership. The channel must stay in the scope of
 /// the filter that names it, not the request-wide implicit set, so a sibling
 /// filter that never names it cannot read it.
-/// Mutation: drop `keep_repaired_system_channels_named` from
+/// Mutation: drop `keep_repaired_non_legacy_channels_named` from
 /// `repair_requested_channel_access` → RED (the sibling filter's scope gets
 /// the channel).
 #[tokio::test]
@@ -386,6 +386,97 @@ async fn a_system_channel_joined_mid_request_stays_in_its_named_filter() {
     };
     assert_eq!(scope(&filters[0]), [ordinary, system], "naming filter");
     assert_eq!(scope(&filters[1]), [ordinary], "sibling filter");
+}
+
+/// A channel of a type added later is never in the cached access set, so a
+/// filter that names it always reaches it through the membership re-check.
+/// The re-check must keep it in the scope of the filter that names it, as it
+/// does a system channel: a sibling filter that names no channel reads only
+/// the legacy types (NIP-CL).
+/// Mutation: classify the repaired tail with `system_channel_ids_among` in
+/// `keep_repaired_non_legacy_channels_named` → RED (the sibling filter's
+/// scope gets the channel).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_named_channel_of_a_later_type_stays_in_its_named_filter() {
+    let url = crate::test_support::database_url();
+    let admin = sqlx::PgPool::connect(&url).await.expect("connect admin");
+    let name = format!("later_type_{}", Uuid::new_v4().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+        .execute(&admin)
+        .await
+        .expect("create scratch db");
+    let scratch_url = format!("{}/{name}", &url[..url.rfind('/').expect("db url path")]);
+    let pool = sqlx::PgPool::connect(&scratch_url)
+        .await
+        .expect("connect scratch db");
+    buzz_db::migration::run_migrations(&pool)
+        .await
+        .expect("migrate scratch db");
+    sqlx::query("ALTER TYPE channel_type ADD VALUE 'future_type'")
+        .execute(&pool)
+        .await
+        .expect("add future channel type");
+    let state = crate::api::bridge::postgres_tests::bridge_handler_test_state_on(&scratch_url)
+        .await
+        .expect("scratch Postgres and local Redis");
+    let host = format!("later-type-{}.local", Uuid::new_v4().simple());
+    let community = state
+        .db
+        .ensure_configured_community(&host)
+        .await
+        .expect("ensure community")
+        .id;
+    let tenant = TenantContext::resolved(community, &host);
+
+    let owner = Keys::generate();
+    let ordinary = create_channel(&state, &tenant, &owner, &[]).await;
+    let later = create_channel(&state, &tenant, &owner, &[]).await;
+    sqlx::query("UPDATE channels SET channel_type = 'future_type' WHERE id = $1")
+        .bind(later)
+        .execute(&pool)
+        .await
+        .expect("retype channel");
+
+    let filters: Vec<nostr::Filter> = serde_json::from_value(json!([
+        {"kinds": [9], "#h": [later.to_string()]},
+        {"kinds": [39000]},
+    ]))
+    .expect("filters");
+    let mut implicit = state
+        .db
+        .get_accessible_channel_ids(community, &owner.public_key().to_bytes())
+        .await
+        .expect("implicit channels");
+    assert_eq!(implicit, [ordinary]);
+    let mut readable_system = Vec::new();
+
+    crate::api::bridge::repair_requested_channel_access(
+        &state,
+        &tenant,
+        &filters,
+        &owner.public_key().to_bytes(),
+        &mut implicit,
+        &mut readable_system,
+    )
+    .await
+    .expect("repair");
+
+    assert_eq!(implicit, [ordinary], "implicit set stays legacy");
+    let scope = |filter| {
+        crate::handlers::system_channels::filter_channel_scope(filter, &implicit, &readable_system)
+            .into_owned()
+    };
+    assert_eq!(scope(&filters[0]), [ordinary, later], "naming filter");
+    assert_eq!(scope(&filters[1]), [ordinary], "sibling filter");
+
+    drop(state);
+    pool.close().await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+    )))
+    .execute(&admin)
+    .await;
 }
 
 /// A request that names channels the cached access set lacks confirms them

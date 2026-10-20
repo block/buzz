@@ -1988,7 +1988,7 @@ pub(crate) async fn repair_requested_channel_access(
     )
     .await
     .map_err(|e| internal_error(&format!("channel membership confirmation: {e}")))?;
-    crate::handlers::system_channels::keep_repaired_system_channels_named(
+    crate::handlers::system_channels::keep_repaired_non_legacy_channels_named(
         state,
         tenant.community(),
         accessible_channels,
@@ -4506,8 +4506,15 @@ pub(crate) mod postgres_tests {
     ///
     /// Returns `None` when local Postgres is not reachable.
     pub(crate) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+        bridge_handler_test_state_on(&crate::test_support::database_url()).await
+    }
+
+    /// [`bridge_handler_test_state`] on the database at `database_url`.
+    pub(crate) async fn bridge_handler_test_state_on(
+        database_url: &str,
+    ) -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
-        config.database_url = crate::test_support::database_url();
+        config.database_url = database_url.to_string();
         // Use the real local Redis so enforce_http_admission can pass.
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -4515,9 +4522,7 @@ pub(crate) mod postgres_tests {
         config.require_auth_token = false;
         config.require_relay_membership = false;
 
-        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
-            .await
-            .ok()?;
+        let pool = sqlx::PgPool::connect(database_url).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))

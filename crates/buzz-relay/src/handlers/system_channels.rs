@@ -149,18 +149,24 @@ pub(crate) async fn readable_system_channels_for_filters(
     Ok(readable)
 }
 
-/// Move system channels out of the repaired tail of the implicit set.
+/// Move channels of non-legacy types out of the repaired tail of the implicit
+/// set.
 ///
 /// A request re-checks membership for named channels missing from its first
 /// lookups, and [`super::req::confirm_requested_channel_access`] appends each
-/// confirmed one to the implicit set. A system channel lands there when the
-/// reader joins it between the lookups and the re-check. This moves it to
-/// `readable_system`, so only the filters that name it can read it.
+/// confirmed one to the implicit set. Only legacy types
+/// ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]) may stay there. A system
+/// channel lands in the tail when the reader joins it between the lookups and
+/// the re-check. A channel of a type added later always lands there, because
+/// the first lookups leave it out. This moves both to `readable_system`, so
+/// only the filters that name them can read them. A filter that opts in to
+/// system channels can then also read such a channel, but only one that the
+/// same request names, so the client knows it.
 ///
 /// `repaired_from` is the length of `implicit` before the re-check. The tail
-/// after it holds the repaired channels; nothing before it is a system
-/// channel.
-pub(crate) async fn keep_repaired_system_channels_named(
+/// after it holds the repaired channels; nothing before it has a non-legacy
+/// type.
+pub(crate) async fn keep_repaired_non_legacy_channels_named(
     state: &AppState,
     community: CommunityId,
     implicit: &mut Vec<Uuid>,
@@ -173,26 +179,26 @@ pub(crate) async fn keep_repaired_system_channels_named(
     else {
         return Ok(());
     };
-    let system = state
+    let named_only = state
         .db
-        .system_channel_ids_among(community, repaired)
+        .non_legacy_channel_ids_among(community, repaired)
         .await?;
-    move_system_channels(implicit, repaired_from, &system, readable_system);
+    move_named_only_channels(implicit, repaired_from, &named_only, readable_system);
     Ok(())
 }
 
-fn move_system_channels(
+fn move_named_only_channels(
     implicit: &mut Vec<Uuid>,
     repaired_from: usize,
-    system: &[Uuid],
+    named_only: &[Uuid],
     readable_system: &mut Vec<Uuid>,
 ) {
-    if system.is_empty() {
+    if named_only.is_empty() {
         return;
     }
     let repaired = implicit.split_off(repaired_from);
     for id in repaired {
-        if !system.contains(&id) {
+        if !named_only.contains(&id) {
             implicit.push(id);
         } else if !readable_system.contains(&id) {
             readable_system.push(id);
@@ -259,7 +265,7 @@ mod tests {
         let joined_system = Uuid::new_v4();
         let mut implicit = vec![open, repaired_open, joined_system];
         let mut readable = Vec::new();
-        move_system_channels(&mut implicit, 1, &[joined_system], &mut readable);
+        move_named_only_channels(&mut implicit, 1, &[joined_system], &mut readable);
         assert_eq!(implicit, [open, repaired_open]);
         assert_eq!(readable, [joined_system]);
 

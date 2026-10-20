@@ -193,7 +193,7 @@ pub async fn handle_req(
                 crate::conformance::record_req_authcheck(&state.tracer, state_snap, ch_id, member);
             }
         }
-        if let Err(e) = super::system_channels::keep_repaired_system_channels_named(
+        if let Err(e) = super::system_channels::keep_repaired_non_legacy_channels_named(
             &state,
             conn.tenant.community(),
             &mut accessible_channels,

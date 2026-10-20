@@ -10,11 +10,11 @@ use uuid::Uuid;
 
 /// A channel type that no client knows. The test adds it to the enum of a
 /// scratch database, as a later migration would.
-const FUTURE_TYPE: &str = "future_type";
+pub(super) const FUTURE_TYPE: &str = "future_type";
 
 /// A migrated scratch database with [`FUTURE_TYPE`] in `channel_type`, so the
 /// shared test database keeps its schema. Returns `(db, admin, name)`.
-async fn scratch_db_with_future_type() -> (Db, PgPool, String) {
+pub(super) async fn scratch_db_with_future_type() -> (Db, PgPool, String) {
     let url = crate::test_support::database_url();
     let admin = PgPool::connect(&url).await.expect("connect admin");
     let name = format!("legacy_types_{}", Uuid::new_v4().simple());
