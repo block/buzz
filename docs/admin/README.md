@@ -48,6 +48,13 @@ RELAY_OPERATOR_PUBKEYS=<64-char hex pubkey>[,<64-char hex pubkey>...]
   with a `WARN` and provisioning requests fail closed at request time until the
   origin is set — the admin console is unaffected.
 
+`GET /operator/communities/joined?member_pubkey=<64-char hex pubkey>` returns
+active memberships for an operator-selected identity, excluding archived and
+deleting communities. Like the provisioning routes, it requires the configured
+operator origin and an allowlisted NIP-98 signature over the full request URL.
+The relay authenticates the operator, not a Builderlab end-user session; the
+operator is responsible for choosing the appropriate member pubkey.
+
 #### Auto-discovery via NIP-11
 
 When `BUZZ_ADMIN_HOST` is set, the relay advertises the admin API origin in its

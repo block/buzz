@@ -29,7 +29,10 @@ class ChannelDetailPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final groups = ref.watch(meGroupsProvider).value;
+    final details = ref.watch(channelDetailsProvider(channel.id)).value;
+    final current = details == null ? channel : channel.mergeDetails(details);
     final placed =
+        current.isPersonalChat(ref.watch(myPubkeyProvider), const []) ||
         personalChat ||
         placement == ChannelRoutePlacement.solo ||
         (groups?.channels.contains(channel.id) ?? false);
@@ -45,7 +48,7 @@ class ChannelDetailPage extends ConsumerWidget {
     }
     return _ResolvedChannelDetailPage(
       key: ValueKey((channel.id, placed)),
-      channel: channel,
+      channel: current,
       personalChat: placed,
       placementKnown:
           placed ||

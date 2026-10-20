@@ -26,6 +26,33 @@ void main() {
     expect(registrations, 1);
   });
 
+  testWidgets('new community starts registration once capability arrives', (
+    tester,
+  ) async {
+    final community = Community.create(
+      name: 'Team',
+      relayUrl: 'wss://relay.example',
+    );
+    var registrations = 0;
+    Widget bootstrap(BuzzPushLeaseDescriptor? descriptor) =>
+        BuzzPushRegistrationBootstrap(
+          shouldRegister: buzzPushLifecycleEnabled(
+            community: community,
+            descriptor: descriptor,
+          ),
+          attemptKey: '${community.id}|${community.relayUrl}',
+          startRegistration: () async => registrations += 1,
+          child: const SizedBox(),
+        );
+    await tester.pumpWidget(bootstrap(null));
+    expect(registrations, 0);
+    final descriptor = _descriptor(keyId: 'relay-v1', pubkey: _hex('b'));
+    await tester.pumpWidget(bootstrap(descriptor));
+    expect(registrations, 1);
+    await tester.pumpWidget(bootstrap(descriptor));
+    expect(registrations, 1);
+  });
+
   test(
     'superseded lease acceptance is a retryable publication failure',
     () async {
@@ -141,12 +168,12 @@ void main() {
     );
   });
 
-  test('relay capability alone does not activate push without opt-in', () {
-    final disabled = Community.create(
+  test('default push requires relay capability and respects opt-out', () {
+    final enabled = Community.create(
       name: 'Team',
       relayUrl: 'wss://relay.example',
     );
-    final enabled = disabled.copyWith(pushNotificationsEnabled: true);
+    final disabled = enabled.copyWith(pushNotificationsEnabled: false);
 
     expect(
       buzzPushLifecycleEnabled(

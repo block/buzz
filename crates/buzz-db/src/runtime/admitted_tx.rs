@@ -80,7 +80,7 @@ pub struct AdmittedTx {
 
 impl AdmittedTx {
     /// Take the shared community admission lock on `tx` and wrap it.
-    pub(super) async fn admit(
+    pub(crate) async fn admit(
         mut tx: Transaction<'static, Postgres>,
         store: &DeletionStore,
         community: CommunityId,

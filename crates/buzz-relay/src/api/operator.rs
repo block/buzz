@@ -41,6 +41,12 @@ pub struct ListCommunitiesQuery {
     owner_pubkey: String,
 }
 
+/// Query parameters for joined-community discovery by an authenticated operator.
+#[derive(Debug, Deserialize)]
+pub struct JoinedCommunitiesQuery {
+    member_pubkey: String,
+}
+
 /// Query parameters for `GET /operator/communities/availability`.
 #[derive(Debug, Deserialize)]
 pub struct CommunityAvailabilityQuery {
@@ -688,6 +694,42 @@ pub async fn delete_community(
     ))
 }
 
+/// Return active memberships for an operator-supplied pubkey.
+/// The operator is trusted to select the identity; this route does not bind it to a user session.
+pub async fn list_joined_communities(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<JoinedCommunitiesQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize_operator_request(
+        &state,
+        &headers,
+        "GET",
+        "/operator/communities/joined",
+        raw_query.as_deref(),
+        None,
+    )
+    .await?;
+    let pubkey = validate_pubkey_hex(&query.member_pubkey).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid member_pubkey: expected 64-char hex pubkey",
+        )
+    })?;
+    let communities = state
+        .db
+        .list_communities_joined_by(&pubkey)
+        .await
+        .map_err(|e| internal_error(&format!("list joined communities: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "member_pubkey": pubkey,
+        "communities": communities.into_iter().map(|row| serde_json::json!({
+            "community_id": row.id.to_string(), "host": row.host,
+        })).collect::<Vec<_>>()
+    })))
+}
+
 /// List communities where a pubkey currently holds the `owner` role.
 pub async fn list_owned_communities(
     State(state): State<Arc<AppState>>,
@@ -790,13 +832,41 @@ pub async fn transfer_community(
 
     let community = CommunityId::from_uuid(community_uuid);
 
-    let result = state
+    let write = state
         .db
-        .transfer_ownership(community, &new_owner_pubkey, &expected_owner_pubkey)
+        .transfer_ownership(
+            community,
+            &new_owner_pubkey,
+            &expected_owner_pubkey,
+            &state.relay_keypair,
+        )
         .await
         .map_err(|e| internal_error(&format!("transfer ownership: {e}")))?;
 
-    let (status, previous_owner) = match result {
+    // The transfer committed the NIP-43 membership list with it; deliver it
+    // to live subscribers. A delivery failure must not turn a success into an
+    // HTTP error, and the next fetch is already correct.
+    if write.snapshot.is_some() {
+        match state.db.lookup_community_host(community).await {
+            Ok(Some(host)) => {
+                let tenant = TenantContext::resolved(community, host);
+                crate::handlers::side_effects::fan_out_nip43_membership_list(
+                    &tenant,
+                    &state,
+                    write.snapshot,
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                community = %community,
+                error = %error,
+                "ownership transferred but the community host lookup for list delivery failed"
+            ),
+        }
+    }
+
+    let (status, previous_owner) = match write.outcome {
         buzz_db::relay_members::TransferResult::Transferred { previous_owner } => {
             ("transferred", previous_owner)
         }
@@ -834,29 +904,6 @@ pub async fn transfer_community(
             ));
         }
     };
-
-    // Best-effort NIP-43 membership snapshot publication — same pattern as
-    // provision_community. The DB mutation is already committed; a publication
-    // failure must not turn a success into an HTTP error.
-    if state.config.require_relay_membership {
-        if let Some(host) = state
-            .db
-            .lookup_community_host(community)
-            .await
-            .map_err(|e| internal_error(&format!("lookup community host: {e}")))?
-        {
-            let tenant = TenantContext::resolved(community, host);
-            if let Err(error) =
-                crate::handlers::side_effects::publish_nip43_membership_list(&tenant, &state).await
-            {
-                tracing::warn!(
-                    community = %community,
-                    error = %error,
-                    "ownership transferred but NIP-43 membership snapshot publication failed"
-                );
-            }
-        }
-    }
 
     let response = TransferCommunityResponse {
         community_id: request.community_id,

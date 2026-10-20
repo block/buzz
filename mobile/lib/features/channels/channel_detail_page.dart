@@ -1,3 +1,4 @@
+import 'message_swipe_reply.dart';
 import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -57,6 +58,7 @@ import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
 import 'channel_typing_indicator.dart';
 import 'inline_agent_typing.dart';
+import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
 import 'compose_bar.dart';
@@ -306,7 +308,14 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     );
     final mePlacement = personalChat ? ref.watch(meGroupsProvider) : null;
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
-    final channelsAsync = ref.watch(channelsProvider);
+    // Only this channel's entry: the list republishes on every live event.
+    final listedChannel = ref.watch(
+      channelsProvider.select(
+        (channels) => channels.value
+            ?.where((candidate) => candidate.id == channel.id)
+            .firstOrNull,
+      ),
+    );
     final huddleLifecycle =
         ref.watch(huddleLifecycleProvider(channel.id)).value ?? const [];
     final sessionStatus = ref.watch(relaySessionProvider).status;
@@ -364,16 +373,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
               e.pubkey.toLowerCase() != currentPubkey.toLowerCase(),
         )
         .toList();
-    final baseChannel =
-        channelsAsync
-            .whenData(
-              (channels) => channels.firstWhere(
-                (candidate) => candidate.id == channel.id,
-                orElse: () => channel,
-              ),
-            )
-            .value ??
-        channel;
+    final baseChannel = listedChannel ?? channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
     final participantCount = resolvedChannel.participantPubkeys
@@ -936,9 +936,11 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                               }
                               var recipients = mentionPubkeys;
                               if (personalChat) {
-                                if (mePlacement?.asData?.value.channels
-                                        .contains(channel.id) !=
-                                    true) {
+                                if (!resolvedChannel.isPersonalChat(
+                                  ref.read(myPubkeyProvider),
+                                  mePlacement?.asData?.value.channels ??
+                                      const [],
+                                )) {
                                   throw StateError(
                                     'Refresh Solo before sending to this chat.',
                                   );

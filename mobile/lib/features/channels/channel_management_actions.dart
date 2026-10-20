@@ -38,6 +38,7 @@ class ChannelActions {
     required String name,
     required String channelType,
     required String visibility,
+    List<String> labels = const [],
     String? description,
     int? ttlSeconds,
   }) async {
@@ -47,6 +48,7 @@ class ChannelActions {
       name: name,
       channelType: channelType,
       visibility: visibility,
+      labels: labels,
       description: description,
       ttlSeconds: ttlSeconds,
     );

@@ -40,6 +40,7 @@ class _MessageBubble extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
+    final swipeContentKey = useMemoized(GlobalKey.new, const []);
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
     final hasLocalReplies = ref.watch(
       threadLocalRepliesProvider(
@@ -132,7 +133,7 @@ class _MessageBubble extends HookConsumerWidget {
       );
     }
 
-    return NotificationListener<MessageGalleryScrollNotification>(
+    final content = NotificationListener<MessageGalleryScrollNotification>(
       onNotification: (notification) {
         mediaOffset.value = notification.offset;
         return true;
@@ -342,6 +343,7 @@ class _MessageBubble extends HookConsumerWidget {
                                     ),
                                     animate: typingHandoff,
                                     child: MessageContent(
+                                      key: swipeContentKey,
                                       content: message.content,
                                       bubble: true,
                                       hasReactions:
@@ -467,6 +469,16 @@ class _MessageBubble extends HookConsumerWidget {
           ),
         ),
       ),
+    );
+    return MessageSwipeReply(
+      contentKey: swipeContentKey,
+      message: message,
+      allMessages: allMessages,
+      channelId: currentChannelId,
+      currentPubkey: currentPubkey,
+      isMember: isMember,
+      isArchived: isArchived,
+      child: content,
     );
   }
 }

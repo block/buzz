@@ -169,9 +169,20 @@ pub fn k_tag_kinds(event: &nostr::Event) -> impl Iterator<Item = u32> + '_ {
 /// `#p` tag to receive the event. This closes the kindless `{ids:[…]}` read
 /// path for events whose existence must not be leaked.
 ///
-/// Used by `filter_can_match_result_gated_kinds` to force the per-event
-/// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+/// Membership notices (44100/44101) are here because the relay signs them, so
+/// their id is not author-bound, and they name the target, the channel and
+/// the actor. A system channel's notice must not reach anyone but its target.
+///
+/// This is the one list every delivery surface reads: the filter-level `ids`
+/// exemption, `reader_authorized_for_event` (WS/HTTP history, push), live
+/// fan-out (same pod and Redis), and the COUNT fallback
+/// (`filter_can_match_result_gated_kinds`).
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.

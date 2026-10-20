@@ -182,21 +182,6 @@ async fn event_write_transaction_preserves_legacy_acquisition_metrics() {
     assert_eq!(counters, expected);
 }
 
-#[test]
-fn nip43_reconciliation_compatibility_alias_is_preserved() {
-    #[allow(deprecated)]
-    async fn call(
-        db: &Db,
-        community_id: CommunityId,
-        relay_pubkey: &nostr::PublicKey,
-    ) -> crate::Result<bool> {
-        db.nip43_membership_snapshot_needs_reconciliation(community_id, relay_pubkey)
-            .await
-    }
-
-    let _ = call;
-}
-
 #[tokio::test]
 async fn community_write_transaction_compatibility_metrics_are_limited_to_legacy_entrypoints() {
     use metrics_util::debugging::DebuggingRecorder;
@@ -1863,12 +1848,28 @@ async fn is_relay_member_is_bounded_routed_and_fails_closed() {
     let cid = CommunityId::from_uuid(community);
     let writer_only = "aa".repeat(32);
     let replica_only = "bb".repeat(32);
-    relay_members::add_relay_member(&writer, cid, &writer_only, "member", None)
-        .await
-        .expect("seed writer member");
-    relay_members::add_relay_member(&replica, cid, &replica_only, "member", None)
-        .await
-        .expect("seed replica member");
+    relay_members::add_relay_member(
+        &writer,
+        cid,
+        &writer_only,
+        "member",
+        None,
+        &nostr::Keys::generate(),
+    )
+    .await
+    .map(|write| write.outcome)
+    .expect("seed writer member");
+    relay_members::add_relay_member(
+        &replica,
+        cid,
+        &replica_only,
+        "member",
+        None,
+        &nostr::Keys::generate(),
+    )
+    .await
+    .map(|write| write.outcome)
+    .expect("seed replica member");
 
     let mut db = Db::from_pools(writer.clone(), replica.clone());
     db.fence().force_open_for_tests(chrono::Utc::now());
@@ -1982,11 +1983,20 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
     db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(5)));
 
     let read_pool = db.read_pool.clone().expect("reader pool configured");
-    // Establish and hold the reader's only connection: saturated.
-    let held = read_pool
-        .acquire()
-        .await
-        .expect("establish the reader's sole connection");
+    // Establish and hold the reader's only connection: saturated. A fresh
+    // connection can outlast the 150ms acquire budget on a loaded runner, and
+    // the budget is under test only once the connection is held.
+    let held = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match read_pool.acquire().await {
+                Err(sqlx::Error::PoolTimedOut) => continue,
+                connection => break connection,
+            }
+        }
+    })
+    .await
+    .expect("reader connects within 5s")
+    .expect("establish the reader's sole connection");
     assert_eq!(
         db.read_max_connections, 1,
         "reader max must report 1 for this fixture to test saturation"

@@ -2,6 +2,7 @@ import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/widgets/compose_morph_icon.dart';
 import '../../shared/me/me_sync.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' show max, min, pi;
@@ -44,7 +45,7 @@ import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
-import '../pairing/pairing_page.dart';
+import '../../onboarding_app_entry.dart';
 import '../pairing/pairing_provider.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
@@ -77,7 +78,7 @@ part 'channels_page/quick_actions.dart';
 part 'channels_page/quick_actions_launcher.dart';
 part 'channels_page/header_actions.dart';
 
-enum _QuickAction { createChannel, newDm, browseChannels }
+enum _QuickAction { createChannel, newDm }
 
 const double _kChannelSectionInset = Grid.gutter;
 const double _kChannelLeadingWidth = 22.0;
@@ -232,10 +233,11 @@ class ChannelsPage extends HookConsumerWidget {
     if (channelsAsync.asData?.value case final data?) {
       cachedChannels.value = data;
     }
+    final soloViewer = ref.watch(myPubkeyProvider);
     final personalIds =
         ref.watch(meGroupsProvider).asData?.value.channels ?? const <String>[];
     final channels = cachedChannels.value
-        ?.where((channel) => !personalIds.contains(channel.id))
+        ?.where((channel) => !channel.isPersonalChat(soloViewer, personalIds))
         .toList();
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
@@ -350,7 +352,7 @@ class ChannelsPage extends HookConsumerWidget {
             opaque: false,
             transitionDuration: Duration.zero,
             reverseTransitionDuration: Duration.zero,
-            pageBuilder: (_, _, _) => _CommunitySwitcherPage(
+            pageBuilder: (_, _, _) => CommunitySwitcherPage(
               arrivingCommunity: arrivingCommunity,
               destination: measureCommunityAvatar(),
               prepareLanding: prepareCommunityLanding,
@@ -381,7 +383,7 @@ class ChannelsPage extends HookConsumerWidget {
       late final _CommunitySwitcherRoute route;
       route = _CommunitySwitcherRoute(
         onTransitionProgress: onSettingsTransitionProgress,
-        builder: (_) => _CommunitySwitcherPage(
+        builder: (_) => CommunitySwitcherPage(
           destination: destination,
           prepareLanding: prepareCommunityLanding,
           onFlightChanged: (flying) {
@@ -395,6 +397,25 @@ class ChannelsPage extends HookConsumerWidget {
         if (context.mounted) communityFlightActive.value = false;
       });
     }
+
+    final showImportedCommunities = ref.watch(communityGridLandingProvider);
+    useEffect(() {
+      if (!showImportedCommunities) return null;
+      var cancelled = false;
+      Future<void> revealImportedCommunities() async {
+        // Let the hosted sheet and pushed Add route finish dismissing first.
+        do {
+          await WidgetsBinding.instance.endOfFrame;
+          if (cancelled || !context.mounted) return;
+        } while (ModalRoute.of(context)?.isCurrent == false);
+        if (!ref.read(communityGridLandingProvider)) return;
+        ref.read(communityGridLandingProvider.notifier).clear();
+        openCommunityGrid();
+      }
+
+      unawaited(revealImportedCommunities());
+      return () => cancelled = true;
+    }, [showImportedCommunities]);
 
     void openCommunitySwitcher() {
       // Freeze the menu shape for this presentation. If a cold permission

@@ -54,6 +54,45 @@ void main() {
     );
   });
 
+  test(
+    'background batch addition preserves the first active community',
+    () async {
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final first = Community.create(
+        name: 'First',
+        relayUrl: 'wss://first.example',
+        nsec: nostr.Keys('1'.padLeft(64, '0')).nsec,
+      );
+      final second = Community.create(
+        name: 'Second',
+        relayUrl: 'wss://second.example',
+        nsec: nostr.Keys('1'.padLeft(64, '0')).nsec,
+      );
+      final container = ProviderContainer(
+        overrides: [communityStorageProvider.overrideWithValue(storage)],
+      );
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      await container
+          .read(authProvider.notifier)
+          .authenticateWithCommunity(first);
+      var transitions = 0;
+      container.read(communityTransitionProvider).register(() async {
+        transitions++;
+      });
+      await container
+          .read(authProvider.notifier)
+          .authenticateWithCommunity(second, activate: false);
+      expect(await storage.loadActiveId(), first.id);
+      expect(container.read(authProvider).value?.community?.id, first.id);
+      expect((await storage.loadAll()).map((item) => item.id), [
+        first.id,
+        second.id,
+      ]);
+      expect(transitions, 0);
+    },
+  );
+
   test('waits for transition teardown before removing credentials', () async {
     final storage = CommunityStorage(secure: FakeSecureStorage());
     final community = Community.create(

@@ -173,8 +173,8 @@ two gauges labelled `phase`:
 - `buzz_startup_phase_seconds` is the finished step's duration.
 
 `degraded` means the step hit a non-fatal error and startup continued — for
-example, some communities failed NIP-43 reconciliation or a NIP-FI issuer did
-not warm. `failed` means startup aborted inside the step.
+example, some large channel rosters failed reconciliation or a NIP-FI issuer
+did not warm. `failed` means startup aborted inside the step.
 
 These are gauges, not counters, because each value is written once per boot
 and a monotonic-counter scrape drops a series' first sample. Each is written
@@ -183,8 +183,7 @@ field of the `Prometheus metrics exporter started` log (2700 s with default
 intervals). A step that runs longer than that timeout loses its `_current`
 series, so a pod stuck that long shows no current step. The `phase` values are
 the closed `StartupStep` vocabulary in `crates/buzz-relay/src/startup_steps.rs`;
-they never reuse an early lifecycle phase name. The NIP-43 startup reconcile
-also logs `NIP-43 startup reconciliation progress` every 5,000 communities.
+they never reuse an early lifecycle phase name.
 
 ### Readiness contract
 
@@ -195,6 +194,15 @@ gating the probe on them removed the whole deployment from the load balancer at
 once and left a reconnect burst with nowhere to land. There is no separate
 "starting" state — the health listener does not bind until the database,
 migrations, Redis, and pub/sub are up, so a process that can answer has booted.
+With `BUZZ_NIP_FI_COMMUNITY_SOURCE=database` and a mode other than `off`, the
+first NIP-FI binding snapshot also loads before any listener binds (startup
+phase `nip_fi_snapshot_load`); a failed load exits the process, so a pod never
+reports ready without one. Later refresh failures do not affect readiness —
+watch `buzz_nip_fi_binding_snapshot_loaded_timestamp_seconds` instead. The
+source's env vars (`BUZZ_NIP_FI_COMMUNITY_SOURCE`,
+`BUZZ_NIP_FI_SNAPSHOT_MAX_ROWS`, `BUZZ_NIP_FI_SNAPSHOT_REFRESH_TIMEOUT_MS`,
+`BUZZ_NIP_FI_RESOLVER_NEGATIVE_CACHE_MAX`, `BUZZ_NIP_FI_RESOLVER_MAX_INFLIGHT`)
+and alerts are in `docs/operator-nip-fi-bindings.md`.
 
 Shared-dependency health moved to **`/_status`** on the same private health
 listener, under a `dependencies` object carrying the `postgres`, `redis`,

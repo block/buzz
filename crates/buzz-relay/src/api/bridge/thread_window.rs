@@ -85,8 +85,9 @@ fn append(events: &mut Vec<Value>, budget: &mut Budget, event: &nostr::Event) ->
 }
 
 /// The reader's implicit channel set and, when a request names a channel
-/// outside it, the system channels it can read. A thread window names its
-/// channel, so a readable system channel joins that request's scope only.
+/// outside it, the named-only channels it can read (system channels, and any
+/// type added later). A thread window names its channel, so a readable
+/// named-only channel joins that request's scope only.
 async fn access_sets(
     state: &AppState,
     tenant: &TenantContext,
@@ -105,9 +106,12 @@ async fn access_sets(
     {
         state
             .db
-            .get_readable_system_channel_ids(tenant.community(), &reader.to_bytes())
+            .get_readable_named_only_channels(tenant.community(), &reader.to_bytes())
             .await
             .map_err(|e| database_error(context, e))?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     } else {
         Vec::new()
     };

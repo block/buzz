@@ -12,13 +12,12 @@
 //! and rides Redis to live clients. Do not wire a delta call that passes
 //! in-process tests and silently no-ops in the deployed `compose exec` path.
 //!
-//! ## Same-second domination guard
+//! ## Where the list is written
 //!
-//! The `custom_created_at = max(now, newest_existing_13534 + 1s)` bump defeats
-//! same-second domination for serial invocations; it does NOT serialize
-//! concurrent CLI processes — two near-simultaneous adds can read the same
-//! newest timestamp and collide on the bumped second. run.sh serialization is
-//! the guard against parallel adds (e.g. `xargs -P`).
+//! `buzz-db` writes the kind:13534 list in the same transaction as the
+//! membership change, under the per-community list lock, with a `created_at`
+//! past every earlier list's. Concurrent CLI processes therefore serialize in
+//! the database; the CLI only pushes the committed list to Redis.
 
 mod communities;
 mod deletions;
@@ -30,7 +29,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
 use buzz_core::tenant::{relay_url_authority, TenantContext};
 use buzz_db::{
     partition::{PartitionAuditOutcome, PartitionAuditReport},
@@ -83,6 +81,13 @@ enum Command {
         #[arg(long)]
         role: Option<String>,
     },
+    /// Rewrite the community's kind:13534 membership list from the stored
+    /// members and push it to live clients.
+    ///
+    /// Membership changes write the list themselves; this repairs a list that
+    /// is missing or stale (membership turned on after running without it, a
+    /// manual `relay_members` edit, a restore).
+    RepublishMembers,
     /// List all relay members.
     ListMembers,
     /// Generate a new Nostr keypair (for bootstrapping).
@@ -191,6 +196,7 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::PartitionAudit { months_ahead } => cmd_partition_audit(months_ahead).await,
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
+        Command::RepublishMembers => cmd_republish_members().await,
         Command::ListMembers => cmd_list_members().await,
         Command::ProductFeedback {
             command: ProductFeedbackCommand::List { limit },
@@ -454,21 +460,22 @@ async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
     let (db, pubsub, relay_keypair) = connect_member_services().await?;
 
     let tenant = resolve_admin_tenant(&db).await?;
-    match db
-        .add_relay_member(tenant.community(), &pubkey_hex, &role, None)
+    let write = match db
+        .add_relay_member(tenant.community(), &pubkey_hex, &role, None, &relay_keypair)
         .await
     {
-        Ok(true) => println!("added {pubkey_hex} as {role}"),
-        Ok(false) => println!("already a member: {pubkey_hex} (no change)"),
+        Ok(write) => write,
         Err(e) => {
             eprintln!("error: DB write failed: {e}");
             return Ok(5);
         }
+    };
+    if write.outcome {
+        println!("added {pubkey_hex} as {role}");
+    } else {
+        println!("already a member: {pubkey_hex} (no change)");
     }
-
-    if let Err(e) = publish_membership_list_with_bump(&db, &pubsub, &relay_keypair, &tenant).await {
-        eprintln!("warning: member added to DB but list publish failed: {e}");
-    }
+    fan_out_membership_list(&pubsub, &tenant, write.snapshot).await;
 
     Ok(0)
 }
@@ -494,27 +501,30 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
     let tenant = resolve_admin_tenant(&db).await?;
     use buzz_db::relay_members::RemoveResult;
     let result = if let Some(ref role) = role_filter {
-        db.remove_relay_member_if_role(tenant.community(), &pubkey_hex, role)
+        db.remove_relay_member_if_role(tenant.community(), &pubkey_hex, role, &relay_keypair)
             .await
     } else {
-        db.remove_relay_member(tenant.community(), &pubkey_hex)
+        db.remove_relay_member(tenant.community(), &pubkey_hex, &relay_keypair)
             .await
     };
 
-    match result {
-        Ok(RemoveResult::Removed) => println!("removed {pubkey_hex}"),
-        Ok(RemoveResult::NotFound) => {
+    match result.map(|write| (write.outcome, write.snapshot)) {
+        Ok((RemoveResult::Removed, snapshot)) => {
+            println!("removed {pubkey_hex}");
+            fan_out_membership_list(&pubsub, &tenant, snapshot).await;
+        }
+        Ok((RemoveResult::NotFound, _)) => {
             eprintln!("error: member not found: {pubkey_hex}");
             return Ok(2);
         }
-        Ok(RemoveResult::IsOwner) => {
+        Ok((RemoveResult::IsOwner, _)) => {
             eprintln!(
                 "error: cannot remove relay owner: {pubkey_hex}\n\
                  To change the owner, update RELAY_OWNER_PUBKEY and restart."
             );
             return Ok(3);
         }
-        Ok(RemoveResult::RoleMismatch) => {
+        Ok((RemoveResult::RoleMismatch, _)) => {
             let role_str = role_filter.as_deref().unwrap_or("(unknown)");
             eprintln!("error: role mismatch — {pubkey_hex} is not currently '{role_str}'");
             return Ok(4);
@@ -525,10 +535,26 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
         }
     }
 
-    if let Err(e) = publish_membership_list_with_bump(&db, &pubsub, &relay_keypair, &tenant).await {
-        eprintln!("warning: member removed from DB but list publish failed: {e}");
-    }
+    Ok(0)
+}
 
+async fn cmd_republish_members() -> Result<i32> {
+    let (db, pubsub, relay_keypair) = connect_member_services().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    let write = match db
+        .rewrite_nip43_membership_list(tenant.community(), &relay_keypair)
+        .await
+    {
+        Ok(write) => write,
+        Err(e) => {
+            eprintln!("error: DB write failed: {e}");
+            return Ok(5);
+        }
+    };
+    if let Some(stored) = &write.snapshot {
+        println!("republished membership list {}", stored.event.id.to_hex());
+    }
+    fan_out_membership_list(&pubsub, &tenant, write.snapshot).await;
     Ok(0)
 }
 
@@ -588,81 +614,25 @@ fn parse_pubkey_hex(input: &str) -> std::result::Result<String, String> {
         .map_err(|e| format!("invalid pubkey '{input}': {e}"))
 }
 
-/// Publish kind:13534 with `custom_created_at = max(now, newest_existing + 1s)`.
-///
-/// Guarantees the new event is not dominated by a same-second prior invocation,
-/// so `replace_addressable_event` always inserts and dispatches to Redis.
-///
-/// See module-level doc for the TOCTOU caveat on concurrent CLI processes.
-async fn publish_membership_list_with_bump(
-    db: &Db,
+/// Push the kind:13534 list a membership change committed to Redis, so live
+/// clients receive the updated roster. The list is already stored, so a
+/// failed push only delays live updates.
+async fn fan_out_membership_list(
     pubsub: &Arc<PubSubManager>,
-    relay_keypair: &Keys,
     tenant: &TenantContext,
-) -> Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let relay_pubkey = relay_keypair.public_key();
-    let relay_pubkey_bytes = relay_pubkey.to_bytes();
-
-    // Query the newest existing kind:13534 for this relay's pubkey (channel_id=None).
-    let newest_ts = db
-        .get_latest_global_replaceable(
-            tenant.community(),
-            KIND_NIP43_MEMBERSHIP_LIST as i32,
-            &relay_pubkey_bytes,
-        )
-        .await?
-        .map(|e| e.event.created_at.as_secs());
-
-    // custom_created_at = max(now, existing + 1s) — defeats same-second domination.
-    let ts = match newest_ts {
-        Some(existing) => (existing + 1).max(now),
-        None => now,
+    snapshot: Option<buzz_core::StoredEvent>,
+) {
+    let Some(stored) = snapshot else {
+        return;
     };
-
-    let members = db.list_relay_members(tenant.community()).await?;
-
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
-    // NIP-70 protected-event marker — prevents re-broadcasting by third parties.
-    tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
-    for member in &members {
-        tags.push(
-            Tag::parse(["member", &member.pubkey, &member.role])
-                .map_err(|e| anyhow::anyhow!("failed to build member tag: {e}"))?,
-        );
+    // Community-global scope (EventTopic::Global) matches the relay's own
+    // membership-list delivery; the tenant fixes the community.
+    if let Err(e) = pubsub
+        .publish_event(tenant, EventTopic::Global, &stored.event)
+        .await
+    {
+        warn!("Redis publish of kind:13534 failed: {e}");
     }
-
-    let event = EventBuilder::new(Kind::Custom(KIND_NIP43_MEMBERSHIP_LIST as u16), "")
-        .tags(tags)
-        .custom_created_at(nostr::Timestamp::from(ts))
-        .sign_with_keys(relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:13534: {e}"))?;
-
-    let (stored, was_inserted) = db
-        .replace_addressable_event(tenant.community(), &event, None)
-        .await?;
-    if was_inserted {
-        // Publish to Redis so live clients receive the updated roster.
-        // Community-global scope (EventTopic::Global) matches the relay's own
-        // membership-list publish path; the tenant fixes the community.
-        if let Err(e) = pubsub
-            .publish_event(tenant, EventTopic::Global, &stored.event)
-            .await
-        {
-            warn!("Redis publish of kind:13534 failed: {e}");
-        }
-    }
-
-    tracing::info!(
-        member_count = members.len(),
-        ts,
-        "NIP-43 membership list published by buzz-admin"
-    );
-    Ok(())
 }
 
 /// Connect to DB, Redis pub/sub, and load the relay keypair.
@@ -674,7 +644,7 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
     let relay_keypair = {
         let hex = std::env::var("BUZZ_RELAY_PRIVATE_KEY").map_err(|_| {
             anyhow::anyhow!(
-                "BUZZ_RELAY_PRIVATE_KEY is required for add-member/remove-member.\n\
+                "BUZZ_RELAY_PRIVATE_KEY is required for add-member/remove-member/republish-members.\n\
                  The relay must have a stable signing key to publish kind:13534 events."
             )
         })?;

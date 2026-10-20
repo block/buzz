@@ -100,9 +100,10 @@ pub async fn handle_count(
     if let Some(allowed) = token_channel_ids.as_deref() {
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
-    // System channels are outside `accessible_channels`; a filter that names
-    // one counts it in its own scope only, as in the WS REQ handler.
-    let mut readable_system = match super::system_channels::readable_system_channels_for_filters(
+    // Named-only channels (system, and types added later) are outside
+    // `accessible_channels`; a filter that names one counts it in its own
+    // scope only, as in the WS REQ handler.
+    let mut named_only = match super::system_channels::readable_named_only_channels_for_filters(
         &state,
         conn.tenant.community(),
         &pubkey_bytes,
@@ -114,7 +115,7 @@ pub async fn handle_count(
     {
         Ok(ids) => ids,
         Err(e) => {
-            warn!(sub_id = %sub_id, "Failed to get readable system channels: {e}");
+            warn!(sub_id = %sub_id, "Failed to get readable named-only channels: {e}");
             conn.send(RelayMessage::closed(&sub_id, "error: database error"));
             return;
         }
@@ -154,7 +155,7 @@ pub async fn handle_count(
         // shared-tag check. A fast count over those kinds would include foreign
         // unshared events, leaking the existence of private agent activity.
         let needs_shared_gate_filtering = filter_can_match_shared_gated_kinds(filter);
-        // Determine if this filter can match result-gated kinds (44200, 30622)
+        // Determine if this filter can match result-gated kinds (`RESULT_GATED_KINDS`)
         // that require a per-event owner check. When the fast SQL path would
         // count matching rows without calling reader_authorized_for_event, a
         // non-owner learns the existence of events they are not allowed to see.
@@ -172,7 +173,7 @@ pub async fn handle_count(
                 &requested_channels,
                 token_channel_ids.as_deref(),
                 &mut accessible_channels,
-                &readable_system,
+                named_only.ids(),
             )
             .await
             {
@@ -180,12 +181,12 @@ pub async fn handle_count(
                 conn.send(RelayMessage::closed(&sub_id, "error: database error"));
                 return;
             }
-            if let Err(e) = super::system_channels::keep_repaired_system_channels_named(
+            if let Err(e) = super::system_channels::keep_repaired_named_only_channels_named(
                 &state,
                 conn.tenant.community(),
                 &mut accessible_channels,
                 repaired_from,
-                &mut readable_system,
+                &mut named_only,
             )
             .await
             {
@@ -196,7 +197,7 @@ pub async fn handle_count(
             let filter_scope = super::system_channels::filter_channel_scope(
                 filter,
                 &accessible_channels,
-                &readable_system,
+                &named_only,
             );
             let scope: HashSet<_> = filter_scope.iter().collect();
             let authorized_requested: Vec<_> = requested_channels
@@ -303,7 +304,7 @@ pub async fn handle_count(
                 super::system_channels::filter_channel_scope(
                     filter,
                     &accessible_channels,
-                    &readable_system,
+                    &named_only,
                 )
                 .into_owned(),
             );

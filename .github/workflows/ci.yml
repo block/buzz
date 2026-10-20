@@ -91,6 +91,7 @@ jobs:
               - 'Justfile'
               - 'scripts/test-mobile-gateway-recipes.sh'
               - 'scripts/mobile-release.sh'
+              - 'scripts/mobile-release-source.sh'
               - 'scripts/mobile-worktree-overrides.sh'
               - 'scripts/mobile-worktree-clean.sh'
               - 'scripts/publish-mobile-release-candidate.sh'

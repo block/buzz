@@ -7,9 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DELETION, KIND_DM_VISIBILITY, KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS,
-    SHARED_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_DELETION,
+    KIND_HUDDLE_LIVENESS, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -131,9 +130,10 @@ pub async fn handle_req(
     if let Some(allowed) = token_channel_ids.as_deref() {
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
-    // System channels are outside `accessible_channels`. A filter that names
-    // one adds it to its own scope only (see `system_channels`).
-    let mut readable_system = match super::system_channels::readable_system_channels_for_filters(
+    // Named-only channels (system, and types added later) are outside
+    // `accessible_channels`. A filter that names one adds it to its own scope
+    // only (see `system_channels`).
+    let mut named_only = match super::system_channels::readable_named_only_channels_for_filters(
         &state,
         conn.tenant.community(),
         &pubkey_bytes,
@@ -145,7 +145,7 @@ pub async fn handle_req(
     {
         Ok(ids) => ids,
         Err(e) => {
-            warn!(conn_id = %conn_id, "Failed to get readable system channels: {e}");
+            warn!(conn_id = %conn_id, "Failed to get readable named-only channels: {e}");
             conn.send(RelayMessage::closed(&sub_id, "error: database error"));
             return;
         }
@@ -178,7 +178,7 @@ pub async fn handle_req(
             requested,
             token_channel_ids.as_deref(),
             &mut accessible_channels,
-            &readable_system,
+            named_only.ids(),
         )
         .await
         {
@@ -194,12 +194,12 @@ pub async fn handle_req(
                 crate::conformance::record_req_authcheck(&state.tracer, state_snap, ch_id, member);
             }
         }
-        if let Err(e) = super::system_channels::keep_repaired_system_channels_named(
+        if let Err(e) = super::system_channels::keep_repaired_named_only_channels_named(
             &state,
             conn.tenant.community(),
             &mut accessible_channels,
             repaired_from,
-            &mut readable_system,
+            &mut named_only,
         )
         .await
         {
@@ -212,7 +212,7 @@ pub async fn handle_req(
     let authorized_requested_channels = requested_channel_ids.as_ref().map(|requested| {
         let authorized: HashSet<_> = accessible_channels
             .iter()
-            .chain(&readable_system)
+            .chain(named_only.ids())
             .copied()
             .collect();
         requested
@@ -345,7 +345,7 @@ pub async fn handle_req(
                 owner,
                 &filters,
                 &accessible_channels,
-                &readable_system,
+                &named_only,
                 token_channel_ids.is_none(),
                 &conn.tenant,
                 &pubkey_bytes,
@@ -447,7 +447,7 @@ pub async fn handle_req(
                     &super::system_channels::filter_channel_scope(
                         filter,
                         &accessible_channels,
-                        &readable_system,
+                        &named_only,
                     ),
                 );
                 // Shared-gated visibility pushdown: set reader bytes so query_events
@@ -483,7 +483,7 @@ pub async fn handle_req(
             let filter_scope = super::system_channels::filter_channel_scope(
                 filter,
                 &accessible_channels,
-                &readable_system,
+                &named_only,
             );
             let events = match filter_events {
                 Ok(evs) => evs,
@@ -635,7 +635,7 @@ const SEARCH_PAGE_SIZE: u32 = 100;
 const MAX_SEARCH_PAGES: u32 = (buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32).div_ceil(SEARCH_PAGE_SIZE);
 
 /// Requested channels whose access needs a DB membership check: not already
-/// in the cached `accessible_channels` or `readable_system` sets, and inside
+/// in the cached `accessible_channels` or `named_only` sets, and inside
 /// the scoped-auth `token_channel_ids` bound when one is present. Deduplicated,
 /// in request order.
 ///
@@ -646,12 +646,12 @@ const MAX_SEARCH_PAGES: u32 = (buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32).div_ceil(
 pub(crate) fn channels_needing_membership_check(
     requested: &[uuid::Uuid],
     accessible_channels: &[uuid::Uuid],
-    readable_system: &[uuid::Uuid],
+    named_only: &[uuid::Uuid],
     token_channel_ids: Option<&[uuid::Uuid]>,
 ) -> Vec<uuid::Uuid> {
     let mut known: HashSet<uuid::Uuid> = accessible_channels
         .iter()
-        .chain(readable_system)
+        .chain(named_only)
         .copied()
         .collect();
     let token: Option<HashSet<uuid::Uuid>> =
@@ -691,12 +691,12 @@ pub(crate) async fn confirm_requested_channel_access(
     requested: &[uuid::Uuid],
     token_channel_ids: Option<&[uuid::Uuid]>,
     accessible_channels: &mut Vec<uuid::Uuid>,
-    readable_system: &[uuid::Uuid],
+    named_only: &[uuid::Uuid],
 ) -> buzz_db::Result<Vec<(uuid::Uuid, bool)>> {
     let unconfirmed = channels_needing_membership_check(
         requested,
         accessible_channels,
-        readable_system,
+        named_only,
         token_channel_ids,
     );
     if unconfirmed.is_empty() {
@@ -763,7 +763,7 @@ async fn handle_search_req(
     owner: u64,
     filters: &[Filter],
     implicit_channels: &[uuid::Uuid],
-    readable_system: &[uuid::Uuid],
+    named_only: &super::system_channels::NamedOnlyChannels,
     include_global: bool,
     tenant: &TenantContext,
     reader_pubkey_bytes: &[u8],
@@ -773,9 +773,9 @@ async fn handle_search_req(
 ) {
     // `None` means "no accessible channels and no global access" → EOSE,
     // exactly as the legacy string-filter helper short-circuited. A filter
-    // that names a readable system channel can still match it.
+    // that names a readable named-only channel can still match it.
     if build_search_channel_scope_filter(implicit_channels, include_global).is_none()
-        && readable_system.is_empty()
+        && named_only.is_empty()
     {
         conn.send(RelayMessage::eose(sub_id));
         return;
@@ -788,13 +788,10 @@ async fn handle_search_req(
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
         };
-        // Implicit channels plus the readable system channels this filter
+        // Implicit channels plus the readable named-only channels this filter
         // names; never another filter's.
-        let accessible_channels = &*super::system_channels::filter_channel_scope(
-            filter,
-            implicit_channels,
-            readable_system,
-        );
+        let accessible_channels =
+            &*super::system_channels::filter_channel_scope(filter, implicit_channels, named_only);
 
         let limit = filter
             .limit
@@ -1254,8 +1251,12 @@ fn filter_to_query_params(
         .map(|values| values.iter().map(|v| v.to_string()).collect());
 
     let tag_values = group_state_tag_values(filter);
+    // NIP-CL: a membership notice's `#t` is its channel type. SQL keeps only
+    // the types this filter may see; a filter without `#t` sees legacy types.
+    let notice_channel_types = buzz_core::filter::notice_channel_types(filter);
 
     EventQuery {
+        notice_channel_types,
         channel_id,
         kinds,
         pubkey,
@@ -1656,13 +1657,14 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
         // when `ids` is present. KIND_AGENT_TURN_METRIC events are long-lived
         // and their cleartext envelope (pubkey, agent tag, created_at) leaks
         // turn-activity metadata — knowing an event id is NOT authorization
-        // (NIP-AM §Relay Behavior). Only filters that explicitly name the kind
-        // lose the exemption — a kindless `ids` lookup is unaffected.
+        // (NIP-AM §Relay Behavior). Membership notices are relay-signed and
+        // name the target and channel. All of these are RESULT_GATED_KINDS.
+        // Only filters that explicitly name the kind lose the exemption — a
+        // kindless `ids` lookup is admitted and then gated per result by
+        // `reader_authorized_for_event`.
         let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
-            ks.iter().any(|kind| {
-                let k = kind.as_u16() as u32;
-                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
-            })
+            ks.iter()
+                .any(|kind| RESULT_GATED_KINDS.contains(&(kind.as_u16() as u32)))
         });
         if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             return true;
@@ -1761,8 +1763,7 @@ pub(crate) fn filter_can_match_shared_gated_kinds(filter: &Filter) -> bool {
 
 /// Returns `true` if the filter CAN match result-gated kinds — meaning it
 /// either has no `kinds` constraint (wildcard) or includes at least one kind
-/// that carries a per-event result-level read gate (currently
-/// `KIND_DM_VISIBILITY` and `KIND_AGENT_TURN_METRIC`).
+/// that carries a per-event result-level read gate (`RESULT_GATED_KINDS`).
 ///
 /// Used by the COUNT handler to force the per-event fallback path instead of
 /// the fast SQL `count_events()`, which cannot enforce the owner-only result
@@ -2952,13 +2953,22 @@ mod tests {
         let owner = Filter::new().kind(dm_vis).custom_tags(p_tag, [authed]);
         assert!(p_gated_filters_authorized(&[owner], authed));
 
-        // The ids exemption still applies to other p-gated kinds (member notifs).
-        let member_notif_ids = Filter::new()
-            .kind(nostr::Kind::Custom(
-                buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as u16,
-            ))
-            .id(nostr::EventId::from_hex(snapshot_id).unwrap());
-        assert!(p_gated_filters_authorized(&[member_notif_ids], authed));
+        // Membership notices are relay-signed too: knowing one's id is not
+        // authorization (a system channel's notice names a hidden channel).
+        for kind in [
+            buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION,
+            buzz_core::kind::KIND_MEMBER_REMOVED_NOTIFICATION,
+        ] {
+            let ids_only = Filter::new()
+                .kind(nostr::Kind::Custom(kind as u16))
+                .id(nostr::EventId::from_hex(snapshot_id).unwrap());
+            assert!(!p_gated_filters_authorized(&[ids_only], authed));
+            let own = Filter::new()
+                .kind(nostr::Kind::Custom(kind as u16))
+                .id(nostr::EventId::from_hex(snapshot_id).unwrap())
+                .custom_tags(p_tag, [authed]);
+            assert!(p_gated_filters_authorized(&[own], authed));
+        }
     }
 
     /// NIP-AM: kind 44200 must deny `{kinds:[44200], ids:[...]}` by non-owner.

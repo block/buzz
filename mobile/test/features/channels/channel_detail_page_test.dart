@@ -31,7 +31,6 @@ import 'package:flutter/rendering.dart'
         SemanticsNode;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:leak_tracker/leak_tracker.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
@@ -98,8 +97,8 @@ part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
 part 'channel_detail_page_test/bubble_tests.dart';
+part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
-part 'channel_detail_page_test/retention_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -235,9 +234,11 @@ NostrEvent _edit({
 );
 
 Widget _buildTestable({
+  bool useRealChannelProviders = false,
   ProfileNotifier? profileNotifier,
   String? signingPubkey,
   bool darkTheme = false,
+  String? chatColor,
   bool personalChat = false,
   required List<NostrEvent> messages,
   PresenceCacheNotifier? presenceCache,
@@ -356,14 +357,16 @@ Widget _buildTestable({
         myPubkeyProvider.overrideWithValue(signingPubkey),
       if (presenceCache != null)
         presenceCacheProvider.overrideWith(() => presenceCache),
-      channelsProvider.overrideWith(() => fakeChannelsNotifier),
+      if (!useRealChannelProviders)
+        channelsProvider.overrideWith(() => fakeChannelsNotifier),
       channelStarsProvider.overrideWith(_FakeChannelStarsNotifier.new),
       channelMutesProvider.overrideWith(_FakeChannelMutesNotifier.new),
-      channelDetailsProvider(_channelId).overrideWith(
-        (ref) async =>
-            channelDetails?.call() ??
-            ChannelDetails.fromChannel(resolvedChannel),
-      ),
+      if (!useRealChannelProviders)
+        channelDetailsProvider(_channelId).overrideWith(
+          (ref) async =>
+              channelDetails?.call() ??
+              ChannelDetails.fromChannel(resolvedChannel),
+        ),
       channelCanvasProvider(_channelId).overrideWith(
         (ref) async => ChannelCanvas(
           content: canvasContent,
@@ -463,7 +466,14 @@ Widget _buildTestable({
     ],
     child: MaterialApp(
       navigatorKey: navigatorKey,
-      theme: darkTheme ? AppTheme.dark() : AppTheme.light(),
+      theme: chatColor != null
+          ? mobileAppearanceTheme(
+              darkTheme ? Brightness.dark : Brightness.light,
+              chatColor,
+            )
+          : darkTheme
+          ? AppTheme.dark()
+          : AppTheme.light(),
       builder: (context, child) => MediaQuery(
         data: MediaQuery.of(context).copyWith(
           textScaler: textScaler,
@@ -562,14 +572,103 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  testWidgets(
+    'refresh replaces stale Solo details before opening and sending',
+    (tester) async {
+      final session = _SoloMetadataRelaySession();
+      final solo = _RecordingOrdinarySender();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [],
+          personalChat: true,
+          signingPubkey: session.creator,
+          useRealChannelProviders: true,
+          disableRetries: true,
+          relaySessionNotifier: session,
+          organization: Stream.value(const MeGroups()),
+          soloSender: solo,
+          members: [
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2026),
+            ),
+          ],
+          home: Consumer(
+            builder: (context, ref, _) => Scaffold(
+              body: TextButton(
+                onPressed: () async {
+                  await ref.read(channelsProvider.notifier).refresh();
+                  if (!context.mounted) return;
+                  await Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChannelDetailPage(
+                        channel: ref.read(channelsProvider).requireValue.single,
+                        personalChat: true,
+                      ),
+                    ),
+                  );
+                },
+                child: const Text('Open refreshed Solo'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Open refreshed Solo')),
+      );
+      final initial = container.read(channelsProvider.future);
+      await tester.pumpAndSettle();
+      await initial;
+      final details = container.read(channelDetailsProvider(_channelId).future);
+      await tester.pumpAndSettle();
+      final stale = await details;
+      expect(stale.labels, isEmpty);
+      session.solo = true;
+      await tester.tap(find.text('Open refreshed Solo'));
+      await tester.pumpAndSettle();
+      await tester.widget<ComposeBar>(find.byType(ComposeBar)).onSend(
+        'After refresh',
+        ['agent'],
+      );
+      expect(solo.sent, ['After refresh']);
+      expect(
+        (await container.read(
+          channelDetailsProvider(_channelId).future,
+        )).labels,
+        ['buzz.solo'],
+      );
+      session.solo = false;
+      final refresh = container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      await refresh;
+      expect(
+        (await container.read(
+          channelDetailsProvider(_channelId).future,
+        )).labels,
+        isEmpty,
+      );
+      await expectLater(
+        tester.widget<ComposeBar>(find.byType(ComposeBar)).onSend(
+          'After conversion',
+          ['agent'],
+        ),
+        throwsStateError,
+      );
+      expect(solo.sent, ['After refresh']);
+    },
+  );
+
   _loadingReviewTests();
   threadReplyRefreshTests();
   threadTitleCapsuleTests();
   presenceTests();
   actionRowTests();
   bubbleLayoutTests();
+  swipeReplyTests();
   reviewAvatarTests();
-  channelRetentionTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
@@ -3640,6 +3739,55 @@ void main() {
       );
     });
 
+    testWidgets('activity in another channel does not rebuild the open chat', (
+      tester,
+    ) async {
+      final otherChannel = Channel(
+        id: _otherChannelId,
+        name: 'random',
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'abc123',
+        createdAt: DateTime(2025),
+        memberCount: 5,
+        isMember: true,
+      );
+      final channelsNotifier = _FakeChannelsNotifier([
+        _testChannel,
+        otherChannel,
+      ]);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            for (var i = 0; i < 5; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: 'Message $i, see #random',
+                createdAt: 1000 + i,
+              ),
+          ],
+          channelsNotifier: channelsNotifier,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(MessageContent), findsWidgets);
+
+      final rebuilt = <Widget>[];
+      debugOnRebuildDirtyWidget = (element, _) => rebuilt.add(element.widget);
+      addTearDown(() => debugOnRebuildDirtyWidget = null);
+
+      // A live event elsewhere republishes the whole list.
+      channelsNotifier.setChannels([
+        _testChannel,
+        otherChannel.copyWith(lastMessageAt: DateTime.utc(2026)),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(rebuilt.whereType<MessageContent>(), isEmpty);
+    });
+
     testWidgets('clears the composer inset when membership is revoked', (
       tester,
     ) async {
@@ -4978,6 +5126,80 @@ void main() {
       await tester.pumpAndSettle();
       expect(findRichText('Reachable unread'), findsOneWidget);
     });
+
+    testWidgets(
+      'settles the unread jump each time history silently reaches its oldest page',
+      (tester) async {
+        final readMessage = _textMsg(
+          id: 'read',
+          pubkey: 'alice',
+          content: 'Already read',
+          createdAt: 1010,
+        );
+        final messagesNotifier = _SilentOldestMessagesNotifier([readMessage]);
+        final channelsNotifier = _FakeChannelsNotifier(
+          [_testChannel],
+          observedUnread: {
+            _channelId: [
+              for (final (id, createdAt) in [
+                ('never-loaded', 1021),
+                ('reachable-unread', 1022),
+              ])
+                makeObservedUnreadEvent(
+                  id: id,
+                  createdAt: createdAt,
+                  rootId: null,
+                  highPriority: false,
+                  channelType: 'stream',
+                  isThreadedReply: false,
+                ),
+            ],
+          },
+        );
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {_channelId: 1020},
+            version: 0,
+          ),
+        );
+        final unreadButton = find.byKey(
+          const ValueKey('channel-jump-to-oldest-unread'),
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            channelsNotifier: channelsNotifier,
+            readStateNotifier: readState,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await _settleThenFinishFetch(tester);
+        // The first fetch reached the oldest page with no unread row loaded.
+        expect(messagesNotifier.fetchOlderCalls, 1);
+        expect(unreadButton, findsNothing);
+
+        // A reconnect forgets the oldest page and reloads the window, now
+        // with an unread row; the next fetch reaches the oldest page again.
+        messagesNotifier.reconnect([
+          readMessage,
+          _textMsg(
+            id: 'reachable-unread',
+            pubkey: 'alice',
+            content: 'Reachable unread',
+            createdAt: 1022,
+          ),
+        ]);
+        await _settleThenFinishFetch(tester);
+        expect(messagesNotifier.fetchOlderCalls, 2);
+        expect(unreadButton, findsOneWidget);
+      },
+    );
 
     testWidgets('pages past a loaded forced unread for an older target', (
       tester,
@@ -10596,6 +10818,106 @@ void main() {
     );
     expect(sender.sent, isEmpty);
   });
+
+  for (final own in [true, false]) {
+    testWidgets('label-only Solo uses owner-aware sending: $own', (
+      tester,
+    ) async {
+      final ordinary = _RecordingOrdinarySender(),
+          solo = _RecordingOrdinarySender();
+      final channel = Channel(
+        id: _channelId,
+        name: 'Labeled Solo',
+        channelType: 'stream',
+        visibility: 'private',
+        labels: const ['buzz.solo'],
+        description: '',
+        createdBy: own ? 'self' : 'other',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [],
+          channel: channel,
+          signingPubkey: 'self',
+          personalChat: own,
+          organization: Stream.value(const MeGroups()),
+          sender: ordinary,
+          soloSender: solo,
+          members: [
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2026),
+            ),
+          ],
+          home: ChannelDetailPage(channel: channel),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester
+          .widget<ComposeBar>(find.byType(ComposeBar))
+          .onSend('Label message', own ? ['agent'] : []);
+      expect(own ? solo.sent : ordinary.sent, ['Label message']);
+      expect(own ? ordinary.sent : solo.sent, isEmpty);
+    });
+  }
+
+  testWidgets(
+    'foreign Solo cannot force the personal sender through a route hint',
+    (tester) async {
+      final ordinary = _RecordingOrdinarySender(),
+          solo = _RecordingOrdinarySender();
+      final channel = Channel(
+        id: _channelId,
+        name: 'Shared Solo',
+        channelType: 'stream',
+        visibility: 'private',
+        labels: const ['buzz.solo'],
+        description: '',
+        createdBy: 'other',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [],
+          channel: channel,
+          signingPubkey: 'self',
+          personalChat: true,
+          organization: Stream.value(const MeGroups(channels: [_channelId])),
+          sender: ordinary,
+          soloSender: solo,
+          members: [
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2026),
+            ),
+          ],
+          home: ChannelDetailPage(channel: channel, personalChat: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await expectLater(
+        tester.widget<ComposeBar>(find.byType(ComposeBar)).onSend('Rejected', [
+          'agent',
+        ]),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            'Refresh Solo before sending to this chat.',
+          ),
+        ),
+      );
+      expect(solo.sent, isEmpty);
+      expect(ordinary.sent, isEmpty);
+    },
+  );
 
   testWidgets('identified Solo sends through the Solo sender', (tester) async {
     final ordinary = _RecordingOrdinarySender(),
@@ -16774,6 +17096,39 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   }
 }
 
+/// Lets the rows settle while an older fetch is in flight, then lets it finish,
+/// so nothing but the fetch's own completion can rebuild the list afterwards.
+Future<void> _settleThenFinishFetch(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.pump(_SilentOldestMessagesNotifier.fetchDelay);
+  await tester.pumpAndSettle();
+}
+
+/// Each older fetch takes a while, then finds the oldest page without
+/// publishing anything, like a window whose cursor has run out.
+class _SilentOldestMessagesNotifier extends _FakeMessagesNotifier {
+  _SilentOldestMessagesNotifier(super.messages);
+
+  static const fetchDelay = Duration(seconds: 5);
+  bool _reachedOldest = false;
+
+  @override
+  bool get reachedOldest => _reachedOldest;
+
+  @override
+  Future<bool> fetchOlder() async {
+    fetchOlderCalls += 1;
+    await Future<void>.delayed(fetchDelay);
+    _reachedOldest = true;
+    return false;
+  }
+
+  void reconnect(List<NostrEvent> messages) {
+    _reachedOldest = false;
+    setMessages(messages);
+  }
+}
+
 /// Counts loads; each settles after mount, like the real network load.
 class _RetryCountingMessagesNotifier extends ChannelMessagesNotifier {
   _RetryCountingMessagesNotifier(this.nextResult) : super(_channelId);
@@ -17726,4 +18081,77 @@ class _RecordingOrdinarySender implements SendMessage {
   }) async {
     sent.add(content);
   }
+}
+
+class _SoloMetadataRelaySession extends RelaySessionNotifier {
+  final fixture =
+      jsonDecode(File('../test-fixtures/solo-creation.json').readAsStringSync())
+          as Map<String, dynamic>;
+  String get creator => fixture['creator'] as String;
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [
+    for (final filter in filters)
+      ...await fetchHistory(filter, timeout: timeout),
+  ];
+  bool solo = false;
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (filter.kinds.contains(39002)) {
+      return [
+        NostrEvent(
+          id: 'membership',
+          pubkey: 'relay',
+          createdAt: 1,
+          kind: 39002,
+          tags: [
+            ['d', _channelId],
+            ['p', creator],
+          ],
+          content: '',
+          sig: '',
+        ),
+      ];
+    }
+    if (filter.kinds.contains(39000)) {
+      return [
+        NostrEvent(
+          id: solo ? 'new' : 'old',
+          pubkey: 'relay',
+          createdAt: solo ? 2 : 1,
+          kind: 39000,
+          tags: [
+            ['d', _channelId],
+            ['name', 'Solo'],
+            ['private'],
+            if (solo) ...[
+              for (final tag in fixture['identity_tags'] as List)
+                List<String>.from(tag as List),
+            ] else ...[
+              ['t', 'stream'],
+              ['P', creator],
+            ],
+          ],
+          content: '',
+          sig: '',
+        ),
+      ];
+    }
+    return [];
+  }
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function()? onEose,
+    void Function(String)? onClosed,
+  }) async => () {};
 }

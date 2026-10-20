@@ -14,7 +14,12 @@ Before planning or reviewing a non-trivial change:
 2. Read the `VISION_*.md` documents relevant to the affected product surface.
 3. Read the applicable guidance in [TESTING.md](TESTING.md) and any
    package-local `TESTING.md`.
-4. Check that the proposed design advances, or at least does not contradict,
+4. For any change to `migrations/`, `schema/`, or schema-dependent `buzz-db`
+   queries, read [docs/database.md](docs/database.md): no new triggers,
+   functions, or foreign keys; no data backfills in migrations; update every
+   schema location; and keep every migration compatible with the relay that
+   is currently deployed.
+5. Check that the proposed design advances, or at least does not contradict,
    that product intent. Call out any intentional tension explicitly.
 
 Implementation describes the product today; the vision documents describe the
@@ -128,7 +133,8 @@ crates/
 desktop/              # Tauri 2 + React 19 desktop app
 web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
-migrations/           # SQL migrations (auto-applied on relay startup)
+migrations/           # SQL migrations (run at relay startup when BUZZ_AUTO_MIGRATE is on: binary default off, Helm default on; deployments at scale apply them out of band — see docs/database.md)
+schema/               # Desired-state schema (schema/tables/public/ is the declarative schema source)
 scripts/              # Dev tooling
 .env.example          # Config template — copy to .env before running
 ```
@@ -602,7 +608,7 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
 6. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
-7. **`pgschema` omits seed DML and some storage parameters** — `schema/schema.sql` is an ordered `\i` manifest: `schema/tables/public/<table>.sql` holds only that table's `CREATE TABLE` and `CREATE INDEX` statements (one table per file, the shape SchemaBot reads), and types, functions, partitions, triggers, and seed rows live in the sibling `schema/` directories. Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
+7. **`pgschema` omits seed DML and some storage parameters** — `schema/schema.sql` is an ordered `\i` manifest: `schema/tables/public/<table>.sql` holds only that table's `CREATE TABLE` and `CREATE INDEX` statements (one table per file, the shape out-of-band schema tools read), and types, functions, partitions, triggers, and seed rows live in the sibling `schema/` directories. Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
 
 ---
 
@@ -765,12 +771,37 @@ usage.
 
 ### Testing Conventions
 
-- Prefer **widget tests** over unit tests for UI components — test the
-  whole widget tree, not individual methods.
-- Use `ProviderScope(overrides: [...])` to inject fake notifiers.
-- Fake notifiers should extend the real notifier class and override `build()`.
-- Use the `WidgetHelpers.testable()` wrapper for simple widget tests or
-  build a custom `ProviderScope` + `MaterialApp` when you need specific overrides.
+Favor a few functional tests over many small ones. Every test is code we
+maintain, so each one must protect a distinct user outcome or invariant.
+
+- **Start with journeys.** For each user-visible flow, write one widget test
+  that drives it through real widgets, notifiers and coordinators. Assert what
+  the user sees and what is durably saved, not internal stages or call counts.
+  Where Flutter can observe it, include semantics and non-primary input in the
+  journey: screen-reader labels and actions, keyboard, alternate gestures, text
+  scale and reduced motion.
+- **Put failure paths inside the journey.** Retry, cancel, resume and a second
+  request arriving midway are steps of a journey, not separate tests.
+- **Fake only external boundaries:** network, relay, OS, browser and storage.
+  Keep the flow's own notifiers and coordinators real. Override boundary
+  providers with `ProviderScope(overrides: [...])`, using
+  `WidgetHelpers.testable()` or a custom `ProviderScope` + `MaterialApp`.
+- **Use focused tests only for what a journey can't enumerate or observe.**
+  That means security and data-loss invariants, protocol or crypto vectors,
+  pure functions with many input combinations, and accessibility or platform
+  behavior owned by native code that a widget journey can't observe, such as
+  VoiceOver stops and traits, Dynamic Type layout and reduced motion in native
+  views. Make them table-driven where cases repeat.
+- **Extend before adding.** When a review finds a defect, add a step to an
+  existing journey or a row to an existing table. Don't add a new test per
+  finding. When a Review-Proven Rule says to test each path, cover the paths
+  as journey steps or table rows.
+- **Delete what a journey covers.** Remove a lower-level test once a journey
+  demonstrably catches the same failures; passing through the same path is not
+  enough. Keep distinct safety, interop, accessibility and native-platform
+  invariants.
+- **Prove it can fail.** Break the production code a test guards once and
+  confirm the test fails. A test that only exercises a fake protects nothing.
 
 ---
 

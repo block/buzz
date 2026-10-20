@@ -122,7 +122,7 @@ void main() {
     });
 
     test(
-      'push notifications default off and opt-in survives restart',
+      'push notifications default on and opt-out survives restart',
       () async {
         container = createContainer();
         await container.read(communityListProvider.future);
@@ -137,12 +137,12 @@ void main() {
           (await container.read(
             communityListProvider.future,
           )).single.pushNotificationsEnabled,
-          isFalse,
+          isTrue,
         );
 
         await container
             .read(communityListProvider.notifier)
-            .setPushNotificationsEnabled(community.id, true);
+            .setPushNotificationsEnabled(community.id, false);
         container.dispose();
         container = createContainer();
 
@@ -150,7 +150,7 @@ void main() {
           (await container.read(
             communityListProvider.future,
           )).single.pushNotificationsEnabled,
-          isTrue,
+          isFalse,
         );
       },
     );
