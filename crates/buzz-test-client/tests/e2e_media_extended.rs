@@ -903,6 +903,95 @@ fn imeta_for(desc: &serde_json::Value) -> Tag {
 
 #[tokio::test]
 #[ignore]
+async fn test_deleted_messages_revoke_only_their_own_media_shares() {
+    use buzz_test_client::BuzzTestClient;
+    use reqwest::Method;
+
+    let (owner, viewer) = (Keys::generate(), Keys::generate());
+    let http = http_client();
+    let private = create_channel(&http, &owner, "retained-media", "private").await;
+    let open = create_channel(&http, &owner, "deleted-media", "open").await;
+    let body = uuid::Uuid::new_v4().as_bytes().repeat(8);
+    let response = upload(&http, &owner, &body).await;
+    assert_eq!(response.status(), 200);
+    let desc: serde_json::Value = response.json().await.unwrap();
+    let url = desc["url"].as_str().unwrap();
+    let mut client = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    let mut messages = Vec::new();
+    for (name, channel) in [
+        ("private copy", &private),
+        ("first", &open),
+        ("last", &open),
+    ] {
+        let event = EventBuilder::new(Kind::from(9), name)
+            .tags([Tag::parse(["h", channel]).unwrap(), imeta_for(&desc)])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let result = client.send_event(event.clone()).await.unwrap();
+        assert!(result.accepted, "attachment rejected: {}", result.message);
+        messages.push(event);
+    }
+    for reader in [&owner, &viewer] {
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(read_status(&http, reader, method, url).await, 200);
+        }
+    }
+    // Author deletion removes the first post; the second must keep its grant.
+    // Moderator removal then removes the last open-channel grant.
+    for (kind, index, expected) in [(5, 1, 200), (9005, 2, 404)] {
+        let mut tags = vec![Tag::parse(["e", &messages[index].id.to_hex()]).unwrap()];
+        if kind == 5 {
+            tags.push(Tag::parse(["k", "9"]).unwrap());
+        } else {
+            tags.push(Tag::parse(["h", &open]).unwrap());
+        }
+        let deletion = EventBuilder::new(Kind::from(kind), "remove attachment")
+            .tags(tags)
+            .sign_with_keys(&owner)
+            .unwrap();
+        let result = client.send_event(deletion).await.unwrap();
+        assert!(result.accepted, "deletion rejected: {}", result.message);
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(
+                read_status(&http, &viewer, method.clone(), url).await,
+                expected
+            );
+            assert_eq!(read_status(&http, &owner, method, url).await, 200);
+        }
+    }
+
+    // A community-wide note grants access only for as long as it survives.
+    let note = EventBuilder::new(Kind::TextNote, format!("shared file {url}"))
+        .sign_with_keys(&owner)
+        .unwrap();
+    assert!(client.send_event(note.clone()).await.unwrap().accepted);
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(read_status(&http, &viewer, method, url).await, 200);
+    }
+    let deletion = EventBuilder::new(Kind::EventDeletion, "remove note")
+        .tags([
+            Tag::parse(["e", &note.id.to_hex()]).unwrap(),
+            Tag::parse(["k", "1"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let result = client.send_event(deletion).await.unwrap();
+    assert!(
+        result.accepted,
+        "note deletion rejected: {}",
+        result.message
+    );
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(read_status(&http, &viewer, method.clone(), url).await, 404);
+        assert_eq!(read_status(&http, &owner, method, url).await, 200);
+    }
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn test_private_attachment_cannot_hide_an_avatar() {
     use buzz_test_client::BuzzTestClient;
     use reqwest::Method;
