@@ -251,6 +251,12 @@ impl Db {
                 Err(error @ (DbError::InvalidData(_) | DbError::ThreadWindowBudgetExceeded(_))) => {
                     return Err(error);
                 }
+                // A cancelled statement (timeout) would be just as slow on the
+                // writer; surface it instead of doubling the cost.
+                Err(error) if error.is_statement_cancelled() => {
+                    Self::record_route(path, "replica", "statement_cancelled");
+                    return Err(error);
+                }
                 Err(error) => {
                     tracing::warn!(%error, path, "replica thread window failed; re-running on writer");
                     Self::record_route(path, "writer", "replica_error");
@@ -448,6 +454,9 @@ impl ReadSession {
                 Err(error @ (DbError::InvalidData(_) | DbError::ThreadWindowBudgetExceeded(_))) => {
                     return Err(error);
                 }
+                // A cancel would be just as slow on the writer: surface it and
+                // keep the proved replica session.
+                Err(error) if error.is_statement_cancelled() => return Err(error),
                 Err(error) => {
                     tracing::warn!(%error, "thread auxiliary read failed; degrading to writer");
                     metrics::counter!("buzz_db_read_session_degraded").increment(1);

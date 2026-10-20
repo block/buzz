@@ -3893,6 +3893,120 @@ async fn read_session_statement_cancel_propagates_without_writer_rerun() {
     fx.drop().await;
 }
 
+/// Cancels (57014) the backend on `db_name` parked behind a lock. The thread
+/// window sets its own 1s `lock_timeout`, which would otherwise fire (55P03)
+/// before any statement cap.
+async fn cancel_lock_waiter(admin: &PgPool, db_name: &str) {
+    for _ in 0..150 {
+        let pid: Option<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity WHERE datname = $1 AND wait_event_type = 'Lock' LIMIT 1",
+        )
+        .bind(db_name)
+        .fetch_optional(admin)
+        .await
+        .expect("poll lock waiters");
+        if let Some(pid) = pid {
+            let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+                .bind(pid)
+                .fetch_one(admin)
+                .await
+                .expect("cancel lock waiter");
+            assert!(cancelled, "pg_cancel_backend({pid}) refused");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("no lock waiter appeared on {db_name}");
+}
+
+/// The thread-window reads keep the same rule as the routed reads above: a
+/// replica cancel surfaces 57014. The writer copy is unlocked, so a writer
+/// re-run would succeed and fail the test.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_statement_cancel_propagates_without_writer_rerun() {
+    use crate::thread_window::{AuxQuery, ScanBudget};
+    let fx = e_tag_fixture("twcxl").await;
+    let db = fx.routed_db().await;
+    let request = buzz_core::thread_window::Request::parse(&serde_json::json!({
+        "thread_window": true, "#h": [fx.channel], "#e": [fx.root_hex],
+        "kinds": [9], "limit": 10,
+    }))
+    .expect("thread window request");
+
+    // Healthy control: the window is served from the replica.
+    let (_, session) = db
+        .get_thread_window_with_session(fx.cid, &request, &mut ScanBudget::default())
+        .await
+        .expect("healthy window");
+    assert!(session.is_replica(), "fixture must route to replica");
+    drop(session);
+
+    let mut locker = fx.replica.begin().await.expect("begin locker");
+    sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *locker)
+        .await
+        .expect("lock replica events");
+
+    let mut budget = ScanBudget::default();
+    let (window, ()) = tokio::join!(
+        db.get_thread_window_with_session(fx.cid, &request, &mut budget),
+        cancel_lock_waiter(&fx.admin, &fx.rname),
+    );
+    match window {
+        Err(e) => assert!(e.is_statement_cancelled(), "window: want 57014, got {e}"),
+        Ok(_) => panic!("window: replica cancel was re-run on the writer"),
+    }
+
+    // Auxiliary scan on a proved replica session: a cancel neither re-runs on
+    // the writer nor degrades the session for the rest of the request.
+    let reader_tx = db
+        .read_pool
+        .as_ref()
+        .expect("reader pool")
+        .begin()
+        .await
+        .expect("begin reader tx");
+    let mut session = ReadSession {
+        inner: ReadSessionInner::Replica {
+            tx: reader_tx,
+            writer: fx.writer.clone(),
+        },
+    };
+    let ReadSessionInner::Replica { tx, .. } = &mut session.inner else {
+        unreachable!()
+    };
+    sqlx::query("SET LOCAL statement_timeout = '50ms'")
+        .execute(&mut **tx)
+        .await
+        .expect("cap session");
+    let targets = [fx.root_hex.clone()];
+    let accessible = [fx.channel];
+    let aux = AuxQuery {
+        community: fx.cid,
+        targets: &targets,
+        kinds: &[7],
+        accessible: &accessible,
+        cursor: None,
+    };
+    match session
+        .thread_window_aux(&aux, &mut ScanBudget::default())
+        .await
+    {
+        Err(e) => assert!(e.is_statement_cancelled(), "aux: want 57014, got {e}"),
+        Ok(_) => panic!("aux: replica cancel was re-run on the writer"),
+    }
+    assert!(
+        session.is_replica(),
+        "aux: a cancel must not degrade the session"
+    );
+
+    locker.rollback().await.expect("unlock");
+    drop(session);
+    drop(db);
+    fx.drop().await;
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn replica_non_cancel_failure_still_falls_back_to_writer() {
