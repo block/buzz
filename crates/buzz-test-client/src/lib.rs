@@ -16,6 +16,13 @@ pub use buzz_ws_client::{parse_relay_message, OkResponse, RelayMessage, WsClient
 /// Errors returned by [`BuzzTestClient`] operations.
 #[derive(Debug, Error)]
 pub enum TestClientError {
+    /// The connection exceeded its configured resource budget and was closed.
+    #[error("WebSocket resource limit exceeded")]
+    ResourceLimit,
+    /// The requested connection options are invalid.
+    #[error("Invalid WebSocket connection options")]
+    InvalidConnectionOptions,
+
     /// A WebSocket transport error occurred.
     #[error("WebSocket error: {0}")]
     WebSocket(tokio_tungstenite::tungstenite::Error),
@@ -60,6 +67,8 @@ pub enum TestClientError {
 impl From<WsClientError> for TestClientError {
     fn from(e: WsClientError) -> Self {
         match e {
+            WsClientError::ResourceLimit => TestClientError::ResourceLimit,
+            WsClientError::InvalidConnectionOptions => TestClientError::InvalidConnectionOptions,
             WsClientError::WebSocket(e) => TestClientError::WebSocket(e),
             WsClientError::Json(e) => TestClientError::Json(e),
             WsClientError::EventBuilder(s) => TestClientError::EventBuilder(s),
@@ -219,6 +228,18 @@ impl BuzzTestClient {
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, RelayUrl, Tag};
+
+    #[test]
+    fn resource_error_categories_are_preserved() {
+        assert!(matches!(
+            TestClientError::from(WsClientError::ResourceLimit),
+            TestClientError::ResourceLimit
+        ));
+        assert!(matches!(
+            TestClientError::from(WsClientError::InvalidConnectionOptions),
+            TestClientError::InvalidConnectionOptions
+        ));
+    }
 
     #[test]
     fn parse_relay_messages() {
