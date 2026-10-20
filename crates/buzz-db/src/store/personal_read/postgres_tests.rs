@@ -164,8 +164,9 @@ async fn personal_read_sidebar_author_window_excludes_expired_and_late_old_messa
         "an empty author-time window has nothing unread"
     );
     assert_eq!(row.latest_id.as_deref(), Some(latest.id.to_hex().as_str()));
-    // Acceptance time is irrelevant: a message accepted now with an author
-    // time beyond the horizon stays out; one authored now is counted.
+    // Stored historical data with an author time beyond the horizon stays out;
+    // one authored now is counted. The serving writer now rejects the old
+    // timestamp, so seed the historical row through unarmed fixture SQL.
     let now = nostr::Timestamp::now().as_secs();
     for (age, unread, mentions) in [(40 * 86400, false, 0), (0, true, 1)] {
         let event = EventBuilder::new(Kind::Custom(9), "accepted now")
@@ -173,9 +174,7 @@ async fn personal_read_sidebar_author_window_excludes_expired_and_late_old_messa
             .custom_created_at(nostr::Timestamp::from(now - age))
             .sign_with_keys(&Keys::generate())
             .unwrap();
-        db.insert_event(community, &event, Some(channel))
-            .await
-            .unwrap();
+        crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
         let row = &sidebar(&db, community, &actor).await.channels[0];
         assert_eq!((row.unread, row.mentions), (unread, mentions), "age={age}");
     }

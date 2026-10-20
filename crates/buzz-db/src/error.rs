@@ -81,6 +81,13 @@ pub enum DbError {
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
 
+    /// A channel event is too old for replica-fence completeness. Retrying the
+    /// same signed event cannot make its timestamp newer. Like the mixed-version
+    /// trigger's SQLx error, this remains a database error at the relay boundary
+    /// (WS OK false / HTTP 500), rather than a different ingest rejection class.
+    #[error("database error: events.created_at is below the replica-fence floor")]
+    CreatedAtFloorRejected,
+
     /// A roster mutation would remove the last effective relay Operator,
     /// leaving no one able to administer the deployment through the API.
     /// The transaction is rolled back and the caller must add a replacement

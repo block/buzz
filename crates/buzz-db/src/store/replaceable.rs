@@ -251,6 +251,8 @@ async fn replace_parameterized_event_in_transaction_impl(
         ));
     }
 
+    crate::replica_fence::guard_event_created_at_floor(tx, created_at, channel_id).await?;
+
     // Everything from the supersede through the mention index runs under one
     // savepoint on the admitted transaction. A duplicate insert or any failure
     // (including mention indexing) rolls the whole replacement back and leaves
@@ -492,6 +494,9 @@ impl Db {
                     &mut tx, kind_i32, channel_id, &tags_json,
                 )
                 .await?;
+
+                crate::replica_fence::guard_event_created_at_floor(&mut tx, created_at, channel_id)
+                    .await?;
 
                 // Soft-delete the old event (if any). IS NOT DISTINCT FROM for NULL safety.
                 sqlx::query(
