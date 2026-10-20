@@ -10760,15 +10760,28 @@ void main() {
           organization: Stream.value(const MeGroups(channels: [_channelId])),
           sender: ordinary,
           soloSender: solo,
+          members: [
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2026),
+            ),
+          ],
           home: ChannelDetailPage(channel: channel, personalChat: true),
         ),
       );
       await tester.pumpAndSettle();
       await expectLater(
-        tester
-            .widget<ComposeBar>(find.byType(ComposeBar))
-            .onSend('Rejected', []),
-        throwsStateError,
+        tester.widget<ComposeBar>(find.byType(ComposeBar)).onSend('Rejected', [
+          'agent',
+        ]),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            'Refresh Solo before sending to this chat.',
+          ),
+        ),
       );
       expect(solo.sent, isEmpty);
       expect(ordinary.sent, isEmpty);
