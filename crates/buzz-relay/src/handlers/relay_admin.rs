@@ -353,10 +353,12 @@ async fn execute_relay_admin_command(
                 if let Err(e) = publish_nip43_member_added(tenant, state, &target_hex).await {
                     warn!(error = %e, "failed to publish NIP-43 member added event");
                 }
-                if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                    warn!(error = %e, "failed to publish NIP-43 membership list");
-                }
             }
+            // The canonical row survives a failed publication or process crash.
+            // A retry must repair the signed roster even when insertion is a no-op.
+            publish_nip43_membership_list(tenant, state)
+                .await
+                .map_err(|e| format!("membership stored but signed roster incomplete: {e}"))?;
         }
 
         // kind:9031 — Remove relay member
@@ -392,12 +394,9 @@ async fn execute_relay_admin_command(
             };
 
             match remove_result {
-                RemoveResult::Removed => {}
+                RemoveResult::Removed | RemoveResult::NotFound => {}
                 RemoveResult::IsOwner => {
                     return Err("cannot remove the relay owner".to_string());
-                }
-                RemoveResult::NotFound => {
-                    return Err(format!("member not found: {target_hex}"));
                 }
                 RemoveResult::RoleMismatch => {
                     return Err("actor not authorized: admins can only remove members".to_string());
@@ -425,14 +424,17 @@ async fn execute_relay_admin_command(
                 Err(e) => Err(format!("invalid target pubkey: {e}")),
             };
 
-            if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
-                warn!(error = %e, "failed to publish NIP-43 member removed event");
+            if remove_result == RemoveResult::Removed {
+                if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
+                    warn!(error = %e, "failed to publish NIP-43 member removed event");
+                }
             }
-            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                warn!(error = %e, "failed to publish NIP-43 membership list");
-            }
+            // Retry absent-target removals too: deletion may have committed
+            // before roster publication or live-session revocation failed.
+            let roster = publish_nip43_membership_list(tenant, state).await;
             revoked
                 .map_err(|e| format!("error: member removed but live revoke incomplete: {e}"))?;
+            roster.map_err(|e| format!("member removed but signed roster incomplete: {e}"))?;
         }
 
         // kind:9032 — Change relay member role
@@ -487,9 +489,9 @@ async fn execute_relay_admin_command(
                 "relay member role changed"
             );
 
-            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                warn!(error = %e, "failed to publish NIP-43 membership list");
-            }
+            publish_nip43_membership_list(tenant, state)
+                .await
+                .map_err(|e| format!("role stored but signed roster incomplete: {e}"))?;
         }
 
         other => {
@@ -770,6 +772,89 @@ mod postgres_tests {
             media_storage,
         );
         (Arc::new(state), tenant)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn roster_publication_failure_is_reported_and_admin_retries_repair() {
+        let host = format!("roster-retry-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let owner = Keys::generate();
+        let target = Keys::generate().public_key().to_hex();
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &owner.public_key().to_hex(),
+                "owner",
+                None,
+            )
+            .await
+            .expect("owner");
+        publish_nip43_membership_list(&tenant, &state)
+            .await
+            .expect("initial roster");
+        let command = |kind| {
+            EventBuilder::new(Kind::Custom(kind), "")
+                .tags([
+                    Tag::parse(["p", target.as_str()]).expect("target"),
+                    Tag::parse(["role", if kind == 9032 { "admin" } else { "member" }])
+                        .expect("role"),
+                ])
+                .sign_with_keys(&owner)
+                .expect("sign command")
+        };
+        // The per-test database isolates this injected failure. Membership
+        // writes still work; only the signed roster insert fails.
+        sqlx::raw_sql(
+            "CREATE FUNCTION reject_test_roster() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN IF NEW.kind = 13534 THEN RAISE EXCEPTION 'injected roster failure'; END IF;
+            RETURN NEW; END $$;
+            CREATE TRIGGER reject_test_roster BEFORE INSERT ON events
+            FOR EACH ROW EXECUTE FUNCTION reject_test_roster();",
+        )
+        .execute(state.db.pool())
+        .await
+        .expect("inject failure");
+        for kind in [9030, 9032, 9031] {
+            sqlx::query("ALTER TABLE events ENABLE TRIGGER reject_test_roster")
+                .execute(state.db.pool())
+                .await
+                .expect("enable failure");
+            let event = command(kind);
+            let error = handle_relay_admin_event(&tenant, &state, &event)
+                .await
+                .expect_err("report partial failure");
+            assert!(
+                matches!(&error, RelayAdminError::Rejected(message) if message.contains("signed roster incomplete")),
+                "{error:?}"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .get_relay_member(tenant.community(), &target)
+                    .await
+                    .expect("canonical row")
+                    .is_some(),
+                kind != 9031
+            );
+            sqlx::query("ALTER TABLE events DISABLE TRIGGER reject_test_roster")
+                .execute(state.db.pool())
+                .await
+                .expect("restore publication");
+            // Same command, same persistent membership: no-op add / absent remove.
+            handle_relay_admin_event(&tenant, &state, &event)
+                .await
+                .expect("retry repairs roster");
+            assert!(!state
+                .db
+                .nip43_membership_snapshot_needs_reconciliation_for_maintenance(
+                    tenant.community(),
+                    &state.relay_keypair.public_key()
+                )
+                .await
+                .expect("readback"));
+        }
     }
 
     /// Sign a fresh kind:9033 with `icon` and run it through the real

@@ -1342,7 +1342,27 @@ impl Db {
             })?);
         }
 
+        // Advance under the same lock as replacement, including deleted history.
+        // A same-second A -> B -> A transition must neither collide with the
+        // deleted A event nor lose to NIP-16's event-ID tie breaker in clients.
+        let previous: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT MAX(created_at) FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+             AND channel_id IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .fetch_one(tx.conn())
+        .await?;
+        let now = nostr::Timestamp::now().as_secs();
+        let timestamp = previous
+            .map(|value| (value.timestamp().max(0) as u64).saturating_add(1))
+            .unwrap_or(now)
+            .max(now);
+
         let event = EventBuilder::new(Kind::Custom(kind_i32 as u16), "")
+            .custom_created_at(nostr::Timestamp::from(timestamp))
             .tags(tags)
             .sign_with_keys(relay_keypair)
             .map_err(|e| {
@@ -1401,6 +1421,9 @@ impl Db {
             tx.commit().await?;
         } else {
             tx.rollback().await?;
+            return Err(DbError::InvalidData(
+                "NIP-43 snapshot insert conflicted; signed roster was not updated".to_string(),
+            ));
         }
         Ok::<_, DbError>((event, received_at, was_inserted, member_count))
             })
@@ -1475,6 +1498,73 @@ mod postgres_tests {
         PgPool::connect(&database_url)
             .await
             .expect("connect to test DB")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip43_snapshot_orders_rapid_transitions_and_deleted_history() {
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect");
+        let community = make_test_community(&pool).await;
+        let db = crate::Db::from_pool(pool.clone());
+        let keys = nostr::Keys::generate();
+        // Put the previous snapshot ahead of the wall clock so this tests
+        // same-second ordering deterministically, without timing sleeps.
+        let seed = nostr::EventBuilder::new(nostr::Kind::Custom(13534), "")
+            .custom_created_at(nostr::Timestamp::from(
+                nostr::Timestamp::now().as_secs() + 60,
+            ))
+            .tags([nostr::Tag::parse(["-"]).expect("protected tag")])
+            .sign_with_keys(&keys)
+            .expect("sign seed");
+        db.insert_event(community, &seed, None)
+            .await
+            .expect("seed snapshot");
+        let member = nostr::Keys::generate().public_key().to_hex();
+        let mut previous = seed.created_at;
+        for present in [true, false, true, false] {
+            if present {
+                db.add_relay_member(community, &member, "member", None)
+                    .await
+                    .expect("add");
+            } else {
+                db.remove_relay_member(community, &member)
+                    .await
+                    .expect("remove");
+            }
+            let (snapshot, inserted, count) = db
+                .publish_nip43_membership_locked(community, &keys)
+                .await
+                .expect("publish");
+            assert!(inserted, "return to prior roster must publish");
+            snapshot.event.verify().expect("valid signed snapshot");
+            assert!(snapshot.event.created_at > previous);
+            previous = snapshot.event.created_at;
+            assert_eq!(count, usize::from(present));
+            assert!(!db
+                .nip43_membership_snapshot_needs_reconciliation_for_maintenance(
+                    community,
+                    &keys.public_key()
+                )
+                .await
+                .expect("compare canonical membership"));
+        }
+        // Simulate old software having deleted the latest snapshot. History
+        // must still fence the next signed event across process restarts.
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = 13534",
+        )
+        .bind(community.as_uuid())
+        .execute(&pool)
+        .await
+        .expect("delete snapshot");
+        let (snapshot, inserted, _) = db
+            .publish_nip43_membership_locked(community, &keys)
+            .await
+            .expect("repair missing snapshot");
+        assert!(inserted);
+        assert!(snapshot.event.created_at > previous);
     }
 
     async fn make_test_community(pool: &PgPool) -> CommunityId {
