@@ -1044,6 +1044,56 @@ async fn test_private_attachment_cannot_hide_an_avatar() {
 
 #[tokio::test]
 #[ignore]
+async fn test_profile_replacement_preserves_only_its_retained_avatar() {
+    use buzz_test_client::BuzzTestClient;
+    use reqwest::Method;
+
+    let (uploader, publisher, viewer) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let http = http_client();
+    let mut image = tiny_gif();
+    image[13..19].copy_from_slice(&uuid::Uuid::new_v4().as_bytes()[..6]);
+    let response = upload(&http, &uploader, &image).await;
+    assert_eq!(response.status(), 200);
+    let descriptor: serde_json::Value = response.json().await.unwrap();
+    let url = descriptor["url"].as_str().unwrap();
+    let base = Timestamp::now().as_secs();
+    for (signer, keep_picture, step, expected) in [
+        (&uploader, true, 0, 200),
+        (&publisher, true, 0, 200),
+        (&uploader, false, 1, 200),
+        (&publisher, true, 1, 200),
+        (&publisher, false, 2, 404),
+        (&publisher, true, 3, 404),
+    ] {
+        let mut client = BuzzTestClient::connect(&relay_ws_url(), signer)
+            .await
+            .unwrap();
+        let profile = EventBuilder::new(
+            Kind::Metadata,
+            serde_json::json!({
+                "name": format!("updated-profile-{step}"),
+                "picture": if keep_picture { url } else { "" },
+            })
+            .to_string(),
+        )
+        .custom_created_at(Timestamp::from_secs(base + step))
+        .sign_with_keys(signer)
+        .unwrap();
+        let result = client.send_event(profile).await.unwrap();
+        assert!(result.accepted, "profile rejected: {}", result.message);
+        client.disconnect().await.unwrap();
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(
+                read_status(&http, &viewer, method, url).await,
+                expected,
+                "retaining a picture preserves its grant; removing it revokes it"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
 async fn test_agent_avatar_uploaded_by_owner_is_readable_to_other_members() {
     use buzz_sdk::nip_oa;
     use buzz_test_client::BuzzTestClient;
