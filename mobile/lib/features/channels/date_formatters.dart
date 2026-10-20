@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:intl/intl.dart';
 
 // Re-export shortPubkey so existing callers continue to compile.
@@ -78,6 +79,40 @@ bool isSameDay(int a, int b) {
   ).toLocal();
   return dtA.year == dtB.year && dtA.month == dtB.month && dtA.day == dtB.day;
 }
+
+/// Reuses local calendar components while building one timeline.
+///
+/// Adjacent rows compare the same timestamps for dividers, author grouping,
+/// avatars, and sticky headers. Resolve each timestamp only once. Create a new
+/// instance on each build so a timezone change cannot leave stale cached days.
+class TimelineCalendarDays {
+  /// Creates a calendar cache using local-time conversion.
+  TimelineCalendarDays() : _toLocalDate = _localDate;
+
+  /// Creates a cache with an observable conversion for regression tests.
+  @visibleForTesting
+  TimelineCalendarDays.withConverter(this._toLocalDate);
+
+  final DateTime Function(int) _toLocalDate;
+  final _days = <int, (int, int, int)>{};
+
+  static DateTime _localDate(int unixSeconds) =>
+      DateTime.fromMillisecondsSinceEpoch(unixSeconds * 1000);
+
+  (int, int, int) _day(int unixSeconds) => _days.putIfAbsent(unixSeconds, () {
+    final date = _toLocalDate(unixSeconds);
+    return (date.year, date.month, date.day);
+  });
+
+  /// Whether two timestamps fall on the same local calendar day.
+  bool isSameDay(int a, int b) => _day(a) == _day(b);
+}
+
+/// Creates a fresh calendar cache for each timeline build.
+final timelineCalendarDaysFactoryProvider =
+    Provider<TimelineCalendarDays Function()>(
+      (ref) => TimelineCalendarDays.new,
+    );
 
 /// Returns a compact relative time string like "just now", "5m ago", "3h ago",
 /// "2d ago", or a short date for older timestamps.

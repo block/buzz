@@ -92,6 +92,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../helpers/thread_ids.dart';
 
 part 'thread_reply_refresh_cases.dart';
+part 'timeline_calendar_builder_cases.dart';
 part 'thread_title_capsule_cases.dart';
 part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
@@ -234,6 +235,7 @@ NostrEvent _edit({
 );
 
 Widget _buildTestable({
+  TimelineCalendarDays Function()? calendarDaysFactory,
   ProfileNotifier? profileNotifier,
   String? signingPubkey,
   bool darkTheme = false,
@@ -301,6 +303,10 @@ Widget _buildTestable({
   return ProviderScope(
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
+      if (calendarDaysFactory != null)
+        timelineCalendarDaysFactoryProvider.overrideWithValue(
+          calendarDaysFactory,
+        ),
       if (sender != null) sendMessageProvider.overrideWithValue(sender),
       if (soloSender != null) ...[
         meSendMessageProvider.overrideWithValue(soloSender),
@@ -13406,134 +13412,7 @@ void main() {
       expect(observer.pushCount, initialPushCount + 1);
     });
 
-    testWidgets('thread shows day dividers when replies cross days', (
-      tester,
-    ) async {
-      final rootCreatedAt =
-          DateTime(2025, 1, 1, 12).toUtc().millisecondsSinceEpoch ~/ 1000;
-      final nextDayCreatedAt =
-          DateTime(2025, 1, 2, 12).toUtc().millisecondsSinceEpoch ~/ 1000;
-      final rootEvent = _textMsg(
-        id: threadIdThreadDashRoot,
-        pubkey: 'alice',
-        content: 'Thread root',
-        createdAt: rootCreatedAt,
-      );
-      final replies = [
-        _textMsg(
-          id: 'reply-same-day',
-          pubkey: 'bob',
-          content: 'Same day',
-          createdAt: rootCreatedAt + 60,
-          extraTags: const [
-            ['e', threadIdThreadDashRoot, '', 'reply'],
-          ],
-        ),
-        _textMsg(
-          id: 'reply-next-day',
-          pubkey: 'bob',
-          content: 'Next day',
-          createdAt: nextDayCreatedAt,
-          extraTags: const [
-            ['e', threadIdThreadDashRoot, '', 'reply'],
-          ],
-        ),
-      ];
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [rootEvent],
-          threadReplies: {threadIdThreadDashRoot: replies},
-          users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final threadHead = formatTimeline([rootEvent]).single;
-      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ThreadDetailPage(
-            threadHead: threadHead,
-            allMessages: [threadHead],
-            channelId: _channelId,
-            currentPubkey: 'self',
-            isMember: true,
-            isArchived: false,
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.byType(DayDivider), findsNWidgets(2));
-      expect(
-        find.descendant(
-          of: find.byType(DayDivider),
-          matching: find.text(formatDayHeading(rootCreatedAt)),
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.descendant(
-          of: find.byType(DayDivider),
-          matching: find.text(formatDayHeading(nextDayCreatedAt)),
-        ),
-        findsOneWidget,
-      );
-      // The list runs top-down (head first), so tail spacing lives on the list
-      // and reply groups carry none.
-      final threadList = tester.widget<ScrollablePositionedList>(
-        find.byKey(const ValueKey('thread-message-list')),
-      );
-      expect(threadList.reverse, isFalse);
-      final threadComposerDockHeight = tester
-          .getSize(find.byKey(const ValueKey('thread-composer-dock')))
-          .height;
-      expect(threadList.padding!.bottom, Grid.xs + threadComposerDockHeight);
-      final newestThreadGroup = tester.widget<Padding>(
-        find.byKey(const ValueKey('thread-message-group-reply-next-day')),
-      );
-      expect(newestThreadGroup.padding, EdgeInsets.zero);
-
-      // The head sits above its replies rather than jammed against the
-      // composer, matching desktop's thread panel.
-      final headY = tester
-          .getTopLeft(
-            find.byKey(
-              const ValueKey('thread-message-group-$threadIdThreadDashRoot'),
-            ),
-          )
-          .dy;
-      final oldestReplyY = tester
-          .getTopLeft(
-            find.byKey(const ValueKey('thread-message-group-reply-same-day')),
-          )
-          .dy;
-      final newestReplyY = tester
-          .getTopLeft(
-            find.byKey(const ValueKey('thread-message-group-reply-next-day')),
-          )
-          .dy;
-      expect(headY, lessThan(oldestReplyY));
-      expect(oldestReplyY, lessThan(newestReplyY));
-      final threadTimestamp = tester.widget<Text>(
-        find.byKey(
-          const ValueKey('thread-message-timestamp-$threadIdThreadDashRoot'),
-        ),
-      );
-      expect(threadTimestamp.style?.fontSize, 11);
-      expect(
-        find.descendant(
-          of: find.byKey(
-            const ValueKey('thread-message-row-$threadIdThreadDashRoot'),
-          ),
-          matching: find.text('·'),
-        ),
-        findsNothing,
-      );
-    });
+    timelineCalendarBuilderTests();
 
     testWidgets('thread pins and updates the active date while scrolling', (
       tester,

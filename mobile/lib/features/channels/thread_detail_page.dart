@@ -313,7 +313,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     const headIndex = 0;
     int indexForReply(int chronologicalIndex) => chronologicalIndex + 1;
     final tailAnchorIndex = replies.length + 1;
+    final calendarDays = ref.watch(timelineCalendarDaysFactoryProvider)();
     final stickyDateIndex = _ThreadStickyDateIndex(
+      calendarDays: calendarDays,
       head: liveHead,
       replies: replies,
     );
@@ -934,6 +936,7 @@ class ThreadDetailPage extends HookConsumerWidget {
             children: [
               Expanded(
                 child: _ThreadMessageList(
+                  calendarDays: calendarDays,
                   headHeight: headHeight.value ?? 0,
                   onHeadHeightChanged: (height) {
                     if (context.mounted) headHeight.value = height;

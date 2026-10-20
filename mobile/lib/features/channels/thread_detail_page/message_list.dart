@@ -1,6 +1,7 @@
 part of '../thread_detail_page.dart';
 
 class _ThreadMessageList extends HookWidget {
+  final TimelineCalendarDays calendarDays;
   final double headHeight;
   final ValueChanged<double> onHeadHeightChanged;
   final LaidOutViewport viewport;
@@ -30,6 +31,7 @@ class _ThreadMessageList extends HookWidget {
   final Map<String, List<TimelineMessage>> childrenByParent;
 
   const _ThreadMessageList({
+    required this.calendarDays,
     required this.headHeight,
     required this.onHeadHeightChanged,
     required this.viewport,
@@ -238,7 +240,7 @@ class _ThreadMessageList extends HookWidget {
                             ? replies[chronologicalIndex - 1]
                             : null;
                         final previousMessage = previousReply ?? head;
-                        final showDayDivider = !isSameDay(
+                        final showDayDivider = !calendarDays.isSameDay(
                           previousMessage.createdAt,
                           reply.createdAt,
                         );
@@ -259,7 +261,10 @@ class _ThreadMessageList extends HookWidget {
                             reply.hasAttachments ||
                             nextReply?.hasAttachments == true ||
                             nextReply == null ||
-                            !isSameDay(reply.createdAt, nextReply.createdAt) ||
+                            !calendarDays.isSameDay(
+                              reply.createdAt,
+                              nextReply.createdAt,
+                            ) ||
                             nextReply.pubkey.toLowerCase() !=
                                 reply.pubkey.toLowerCase() ||
                             nextReply.createdAt - reply.createdAt > 300;
@@ -304,7 +309,7 @@ class _ThreadMessageList extends HookWidget {
                                     startsDay: showDayDivider,
                                     endsDay:
                                         nextReply != null &&
-                                        !isSameDay(
+                                        !calendarDays.isSameDay(
                                           reply.createdAt,
                                           nextReply.createdAt,
                                         ),

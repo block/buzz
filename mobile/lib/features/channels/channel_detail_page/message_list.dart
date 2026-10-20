@@ -56,6 +56,7 @@ class _MessageList extends HookConsumerWidget {
       localMessageSendAnimationProvider(channelId),
     );
     final displayEntries = groupMembershipTimelineEntries(entries);
+    final calendarDays = ref.watch(timelineCalendarDaysFactoryProvider)();
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final stickyDayTimestamp = useValueNotifier<int?>(null);
@@ -125,7 +126,7 @@ class _MessageList extends HookConsumerWidget {
           : null;
       final startsDay =
           previousMessage == null ||
-          !isSameDay(previousMessage.createdAt, message.createdAt);
+          !calendarDays.isSameDay(previousMessage.createdAt, message.createdAt);
       final reversedIndex = displayEntries.length - 1 - chronologicalIndex;
       if (startsDay) {
         currentDayTimestamp = message.createdAt;
@@ -911,7 +912,10 @@ class _MessageList extends HookConsumerWidget {
                 final prevMessage = prevEntry?.message;
                 final showDayDivider =
                     prevMessage == null ||
-                    !isSameDay(prevMessage.createdAt, message.createdAt);
+                    !calendarDays.isSameDay(
+                      prevMessage.createdAt,
+                      message.createdAt,
+                    );
 
                 final showAuthor =
                     !message.isSystem &&
@@ -932,7 +936,10 @@ class _MessageList extends HookConsumerWidget {
                     nextMessage == null ||
                     nextMessage.isSystem ||
                     nextMessage.hasAttachments ||
-                    !isSameDay(message.createdAt, nextMessage.createdAt) ||
+                    !calendarDays.isSameDay(
+                      message.createdAt,
+                      nextMessage.createdAt,
+                    ) ||
                     nextMessage.pubkey.toLowerCase() !=
                         message.pubkey.toLowerCase() ||
                     nextMessage.createdAt - message.createdAt > 300;
@@ -966,7 +973,7 @@ class _MessageList extends HookConsumerWidget {
                             startsDay: showDayDivider,
                             endsDay:
                                 nextMessage != null &&
-                                !isSameDay(
+                                !calendarDays.isSameDay(
                                   message.createdAt,
                                   nextMessage.createdAt,
                                 ),
@@ -987,7 +994,7 @@ class _MessageList extends HookConsumerWidget {
                             startsDay: showDayDivider,
                             endsDay:
                                 nextMessage != null &&
-                                !isSameDay(
+                                !calendarDays.isSameDay(
                                   message.createdAt,
                                   nextMessage.createdAt,
                                 ),
