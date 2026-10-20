@@ -1812,7 +1812,9 @@ mod postgres_tests {
         let cold = Db::from_pools(writer.clone(), read_pool.clone());
         cold.fence().force_open_for_tests(Utc::now());
         proxy.set_dark(true);
-        tokio::time::timeout(Duration::from_secs(1), cold.usage_fleet_stock_snapshot())
+        // Under the reader's 1s fence-proof bound, so the caller deadline
+        // (not the proof timeout) is what abandons the checkout.
+        tokio::time::timeout(Duration::from_millis(500), cold.usage_fleet_stock_snapshot())
             .await
             .expect_err("a dark reader must stall the collection until its deadline");
         proxy.set_dark(false);

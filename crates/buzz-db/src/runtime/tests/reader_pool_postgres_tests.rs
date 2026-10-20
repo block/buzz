@@ -191,7 +191,8 @@ async fn terminated_warm_reader_connection_fails_closed_to_writer() {
     let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
     let count = {
         let _guard = metrics::set_default_local_recorder(&recorder);
-        db.count_events_routed("terminated_reader_probe", &query).await
+        db.count_events_routed("terminated_reader_probe", &query)
+            .await
     }
     .expect("a dead reader connection must not surface as a client error");
 
