@@ -2423,7 +2423,7 @@ async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::Ne
                 tracing::warn!(
                     retries,
                     retry_delay_ms,
-                    "Audit append timed out waiting on a lock; preserving entry for retry: {error}"
+                    "Audit append timed out; preserving entry for retry: {error}"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
                 retry_delay_ms = (retry_delay_ms * 2).min(1_000);
@@ -2437,11 +2437,14 @@ async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::Ne
     }
 }
 
-/// Whether an audit append was rolled back by a timeout while waiting on the
-/// audit-chain lock or on the community admission lock taken before it:
-/// `lock_timeout` (`55P03`), or `statement_timeout` (`57014`), which fires
-/// first when the lock timeout is disabled or longer than the writer
-/// statement cap. Both are transient; the entry is kept and retried.
+/// Whether an audit append was rolled back by a timeout: `lock_timeout`
+/// (`55P03`) while waiting on the audit-chain lock or the community admission
+/// lock taken before it, or `statement_timeout` (`57014`) on any statement of
+/// the append transaction — a lock wait when the lock timeout is disabled or
+/// longer than the writer cap, or a slow head read or insert. The whole
+/// append is one transaction, so either code means nothing was written; the
+/// entry is kept and retried. `buzz_audit_log_lock_retries_total` keeps its
+/// name for dashboard continuity and counts both codes.
 /// Admission refusal (`AccessDenied`) is terminal: a quiescing or fenced
 /// community refuses for good.
 fn is_retryable_append_failure(error: &buzz_audit::AuditError) -> bool {

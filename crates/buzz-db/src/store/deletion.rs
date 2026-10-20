@@ -7521,7 +7521,8 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
     /// `lift_statement_timeout` call in `count_tenant_rows` → inventory is
     /// cancelled (57014) → RED; drop it in `purge_postgres` → purge is
     /// cancelled → RED; lift with session scope → `SHOW` after is not
-    /// `500ms` → RED.
+    /// `500ms` → RED; lift to a bounded value (e.g. `'300000'`) → `SHOW`
+    /// inside the lifted transaction is not `0` → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn deletion_inventory_and_purge_outlive_the_writer_statement_timeout() {
@@ -7548,6 +7549,17 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             Some("57014"),
             "unexpected error: {error:?}"
         );
+
+        // The lift is unbounded, not merely longer than the cap: a bounded
+        // ceiling would bring back the large-tenant purge block.
+        let mut lifted = db.pool.begin().await.expect("begin lifted tx");
+        lift_statement_timeout(&mut lifted).await.expect("lift");
+        let inside: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *lifted)
+            .await
+            .expect("show lifted");
+        assert_eq!(inside, "0", "the lift must disable the cap, not raise it");
+        lifted.rollback().await.expect("rollback lifted tx");
 
         let host = format!("deletion-cap-{}.example", Uuid::new_v4().simple());
         let community = db
