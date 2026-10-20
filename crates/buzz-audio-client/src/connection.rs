@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::{collections::BTreeSet, future::Future, time::Duration};
 use tokio_tungstenite::{
     connect_async_tls_with_config,
-    tungstenite::{protocol::WebSocketConfig, Message},
+    tungstenite::{client::IntoClientRequest, protocol::WebSocketConfig, Message},
     Connector, MaybeTlsStream, WebSocketStream,
 };
 
@@ -99,11 +99,12 @@ async fn control(socket: &mut AudioSocket) -> Result<Value, String> {
 /// Connect and authenticate using a host-provided asynchronous signer.
 ///
 /// The host validates the destination before calling, and constructs the NIP-42
-/// event (including its exact relay tag) from the challenge. No private key is
+/// event (including its exact relay tag) from the challenge. `request` is the
+/// audio URL, or a request carrying host-supplied upgrade headers. No private key is
 /// accepted. Dropping this future cancels connection/admission; the entire
 /// operation is bounded to 15 seconds, including signing.
 pub async fn connect<F, Fut>(
-    audio_url: &str,
+    request: impl IntoClientRequest + Unpin,
     parent: Option<&str>,
     connector: Option<Connector>,
     sign: F,
@@ -117,7 +118,7 @@ where
             .max_message_size(Some(65_536))
             .max_frame_size(Some(65_536));
         let (mut socket, _) =
-            connect_async_tls_with_config(audio_url, Some(config), false, connector)
+            connect_async_tls_with_config(request, Some(config), false, connector)
                 .await
                 .map_err(|e| format!("audio WS connect failed: {e}"))?;
         let challenge = tokio::time::timeout(Duration::from_secs(5), control(&mut socket))
