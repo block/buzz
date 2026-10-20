@@ -494,9 +494,14 @@ async fn lock_owner_mutation_admission(
     mode: OwnerMutationMode,
 ) -> Result<OwnerMutationAdmission> {
     crate::deletion::lock_community_deletion_shared(tx, community).await?;
+    // `FOR NO KEY UPDATE` still serializes with archive (`FOR NO KEY UPDATE`),
+    // unarchive and deletion admission (`FOR UPDATE`), but not with the
+    // `FOR KEY SHARE` that every foreign-key child insert takes. A membership
+    // writer holding a member row or the list lock inserts its kind:13534
+    // list into `events` last, so `FOR UPDATE` here would deadlock with it.
     let target = sqlx::query(
         "SELECT archived_at, deletion_state, deleted_at FROM communities \
-         WHERE id = $1 FOR UPDATE",
+         WHERE id = $1 FOR NO KEY UPDATE",
     )
     .bind(community.as_uuid())
     .fetch_optional(&mut **tx)
@@ -1056,9 +1061,12 @@ impl<T> MembershipWrite<T> {
 ///
 /// Call it as the last statement before commit of any transaction that
 /// changes `relay_members`, so the list commits or rolls back with the change.
-/// The per-community list lock is taken last: every other lock a membership
-/// transaction takes comes first, so the final writer reads every committed
-/// change and no new lock order appears. `created_at` is at least one second
+/// The per-community list lock is the last explicit lock: every other lock a
+/// membership transaction takes comes first, so the final writer reads every
+/// committed change. The list insert then takes `FOR KEY SHARE` on the
+/// community row through `events.community_id`'s foreign key; owner mutations
+/// lock that row `FOR NO KEY UPDATE`, which doesn't conflict, so no lock cycle
+/// forms. `created_at` is at least one second
 /// past every earlier list's, so the id is new and a client replacing by
 /// timestamp never keeps an older list from the same second. A burst of
 /// changes runs the timestamp ahead of the clock by up to one second per
@@ -2535,6 +2543,156 @@ mod postgres_tests {
             8
         );
         assert_membership_list_matches(&pool, community, &keys, newest.as_ref()).await;
+    }
+
+    /// Wait until some backend is blocked behind `holder_pid`.
+    async fn wait_until_blocked_by(pool: &PgPool, holder_pid: i32) {
+        for _ in 0..400 {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(holder_pid)
+            .fetch_one(pool)
+            .await
+            .expect("read blocked backends");
+            if blocked {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("nothing blocked behind backend {holder_pid}");
+    }
+
+    /// Run `transfer_ownership` in the background.
+    fn spawn_transfer(
+        pool: &PgPool,
+        community: CommunityId,
+        new_owner: &str,
+        owner: &str,
+        keys: &nostr::Keys,
+    ) -> tokio::task::JoinHandle<Result<MembershipWrite<TransferResult>>> {
+        let (pool, keys) = (pool.clone(), keys.clone());
+        let (new_owner, owner) = (new_owner.to_owned(), owner.to_owned());
+        tokio::spawn(async move {
+            transfer_ownership(&pool, community, &new_owner, &owner, &keys).await
+        })
+    }
+
+    /// A list repair that holds the list lock while a transfer waits on it
+    /// still inserts its list: the transfer's community row lock doesn't
+    /// block the insert's foreign-key `FOR KEY SHARE`, so both commit.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_transfer_and_list_repair_both_commit() {
+        let pool = setup_pool().await;
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let new_owner = test_pubkey();
+        let _ = bootstrap_owner(&pool, community, &owner, &keys)
+            .await
+            .expect("bootstrap owner");
+
+        let mut repair = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await
+        .expect("begin repair");
+        let repair_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(repair.conn())
+            .await
+            .expect("repair pid");
+        let lock_key = replaceable::event_replacement_lock_key(
+            community,
+            buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+            keys.public_key().to_bytes().as_slice(),
+            None,
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(repair.conn())
+            .await
+            .expect("hold list lock");
+
+        // The transfer locks the community row, then waits on the list lock.
+        let transfer = spawn_transfer(&pool, community, &new_owner, &owner, &keys);
+        wait_until_blocked_by(&pool, repair_pid).await;
+
+        let repaired = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            write_nip43_membership_snapshot(&mut repair, &keys).await?;
+            repair.commit().await
+        })
+        .await
+        .expect("repair finishes");
+        repaired.expect("repair commits alongside the transfer");
+        let write = tokio::time::timeout(std::time::Duration::from_secs(30), transfer)
+            .await
+            .expect("transfer finishes")
+            .expect("transfer task")
+            .expect("transfer commits alongside the repair");
+        assert!(matches!(write.outcome, TransferResult::Transferred { .. }));
+        assert_role(&pool, community, &new_owner, "owner").await;
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+    }
+
+    /// Removing the transferee while a transfer waits on its member row:
+    /// the removal's list insert doesn't wait on the transfer's community
+    /// row lock, so the removal commits and the transfer then re-adds the
+    /// transferee as owner.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_transfer_and_member_removal_both_commit() {
+        let pool = setup_pool().await;
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let member = test_pubkey();
+        let _ = bootstrap_owner(&pool, community, &owner, &keys)
+            .await
+            .expect("bootstrap owner");
+        let _ = add_relay_member(&pool, community, &member, "member", None, &keys)
+            .await
+            .expect("add member");
+
+        let mut removal = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await
+        .expect("begin removal");
+        let removal_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(removal.conn())
+            .await
+            .expect("removal pid");
+        assert!(delete_member_with_acceptances(&mut removal, &member, None)
+            .await
+            .expect("delete member"));
+
+        // The transfer locks the community row, then waits on the member row.
+        let transfer = spawn_transfer(&pool, community, &member, &owner, &keys);
+        wait_until_blocked_by(&pool, removal_pid).await;
+
+        let removed = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            commit_membership_write(removal, RemoveResult::Removed, true, &keys),
+        )
+        .await
+        .expect("removal finishes")
+        .expect("removal commits alongside the transfer");
+        assert!(removed.snapshot.is_some());
+        let write = tokio::time::timeout(std::time::Duration::from_secs(30), transfer)
+            .await
+            .expect("transfer finishes")
+            .expect("transfer task")
+            .expect("transfer commits alongside the removal");
+        assert!(matches!(write.outcome, TransferResult::Transferred { .. }));
+        assert_role(&pool, community, &member, "owner").await;
+        assert_role(&pool, community, &owner, "member").await;
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
     }
 
     /// Returning to an earlier membership within the same second yields a new

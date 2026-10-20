@@ -629,7 +629,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         {
             Ok(Some(record)) => {
                 info!(host = %record.host, community = %record.id, "Deployment community ensured");
-                Some(record.id)
+                Some(buzz_core::tenant::TenantContext::resolved(
+                    record.id,
+                    record.host,
+                ))
             }
             Ok(None) => {
                 step.degrade();
@@ -659,14 +662,19 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // is promoted (otherwise enabling membership locks everyone out).
     //
     // Both steps write the NIP-43 membership list in their own transaction.
-    // The listener isn't up yet, so there is nobody to deliver it to live;
-    // clients fetch the stored list.
-    if let Some(community) = deployment_community {
+    // This listener isn't up yet, but in a rolling deploy other replicas have
+    // live subscribers; the newest list is fanned out once pub/sub is ready.
+    let mut startup_membership_list = None;
+    if let Some(tenant) = &deployment_community {
         match db
-            .backfill_from_allowlist(community, &relay_keypair)
+            .backfill_from_allowlist(tenant.community(), &relay_keypair)
             .await
-            .map(|write| write.outcome)
-        {
+            .map(|write| {
+                if write.snapshot.is_some() {
+                    startup_membership_list = write.snapshot;
+                }
+                write.outcome
+            }) {
             Ok(0) => {}
             Ok(n) => info!("Backfilled {n} pubkey_allowlist entries into relay_members"),
             Err(e) => {
@@ -687,14 +695,18 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 
     // NIP-43: ensure the configured relay owner always holds the owner role
     // within the deployment community.
-    if let (Some(community), Some(owner_pubkey)) =
-        (deployment_community, config.relay_owner_pubkey.as_ref())
+    if let (Some(tenant), Some(owner_pubkey)) =
+        (&deployment_community, config.relay_owner_pubkey.as_ref())
     {
         match db
-            .bootstrap_owner(community, owner_pubkey, &relay_keypair)
+            .bootstrap_owner(tenant.community(), owner_pubkey, &relay_keypair)
             .await
-            .map(|write| write.outcome)
-        {
+            .map(|write| {
+                if write.snapshot.is_some() {
+                    startup_membership_list = write.snapshot;
+                }
+                write.outcome
+            }) {
             Ok(()) => info!(pubkey = %owner_pubkey, "Relay owner bootstrapped"),
             Err(e) => {
                 if config.require_relay_membership {
@@ -899,6 +911,14 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         app_state.nip_fi_resolver = Some(resolver);
     }
     let state = Arc::new(app_state);
+    if let Some(tenant) = &deployment_community {
+        buzz_relay::handlers::side_effects::fan_out_nip43_membership_list(
+            tenant,
+            &state,
+            startup_membership_list,
+        )
+        .await;
+    }
     let has_startup_partition_audit = startup_partition_audit.is_some();
     if let Some(audit) = startup_partition_audit {
         state.record_partition_audit(audit);

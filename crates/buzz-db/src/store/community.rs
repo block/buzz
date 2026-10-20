@@ -710,8 +710,8 @@ impl Db {
     /// Idempotently archives a community when the asserted pubkey is its current owner.
     ///
     /// Locks the community row before reading ownership so a concurrent owner
-    /// transfer, whose `FOR UPDATE` conflicts with this `FOR NO KEY UPDATE`,
-    /// has one serial order with the archive. The weaker lock lets the archive
+    /// transfer, whose `FOR NO KEY UPDATE` conflicts with this one, has one
+    /// serial order with the archive. The weaker lock lets the archive
     /// proceed past foreign-key child inserts' `FOR KEY SHARE`. A single
     /// `UPDATE ... FROM relay_members` would keep its pre-lock ownership
     /// snapshot after waiting and could archive the new owner's community on
