@@ -206,3 +206,82 @@ async fn terminated_warm_reader_connection_fails_closed_to_writer() {
 
     drop_scratch_db(&admin, db.pool.clone(), &wname).await;
 }
+
+/// A proof that times out while its `BEGIN` is still in flight must not
+/// return the connection to the pool with a server-side transaction open.
+/// sqlx counts the transaction only once `BEGIN` is acknowledged, so a
+/// cancelled begin queues no `ROLLBACK`, and the release ping consumes the
+/// late `BEGIN` reply: dropped instead of detached, the connection comes
+/// back `idle in transaction` once the reader resumes.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires Postgres"]
+async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
+    use sqlx::postgres::PgPoolOptions;
+
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (writer, wname) = create_scratch_db(&admin, "proof_tx").await;
+    let writer_options = writer.connect_options();
+    let proxy = crate::test_support::PausingProxy::spawn(
+        writer_options.get_host().to_owned(),
+        writer_options.get_port(),
+    )
+    .await;
+    let read_pool = PgPoolOptions::new()
+        .max_connections(5)
+        .min_connections(1)
+        .test_before_acquire(false)
+        .acquire_timeout(Db::READER_ACQUIRE_TIMEOUT)
+        .connect_lazy_with((*writer_options).clone().host("127.0.0.1").port(proxy.port));
+    let mut db = Db::from_pools(writer.clone(), read_pool.clone());
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(30)));
+    // Primes the Aurora capability cache, so `BEGIN` is the proof's first
+    // round trip, and warms the floor the routed read will check out.
+    db.read_pool_boot_ping_for_tests().await;
+    await_idle_floor(&read_pool, 1).await;
+
+    proxy.set_paused(true);
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
+    let count = {
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        db.count_events_routed("proof_mid_begin_probe", &query)
+            .await
+    }
+    .expect("writer fallback answers while the reader is paused");
+    assert_eq!(count, 0, "writer answered on an empty scratch database");
+    let reasons = route_reasons(&snapshotter);
+    assert_eq!(
+        reasons.get(&("writer".to_owned(), "reader_proof_timeout".to_owned())),
+        Some(&1),
+        "paused reader must fall back as writer/reader_proof_timeout; got {reasons:?}"
+    );
+
+    proxy.set_paused(false);
+    await_idle_floor(&read_pool, 1).await;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let open: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = $1 AND state = 'idle in transaction'",
+        )
+        .bind(&wname)
+        .fetch_one(&admin)
+        .await
+        .expect("read pg_stat_activity");
+        if open == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{open} reader connection(s) returned to the pool idle in transaction"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    read_pool.close().await;
+    drop_scratch_db(&admin, writer, &wname).await;
+}

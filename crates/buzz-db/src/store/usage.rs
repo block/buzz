@@ -1679,74 +1679,6 @@ mod postgres_tests {
         drop_scratch_db(&admin, writer, &writer_name).await;
     }
 
-    /// Loopback TCP proxy that can make the reader go dark. While dark, any
-    /// session that receives bytes stops relaying for good but keeps both
-    /// sockets open, like a replica that stops answering mid-query. Sessions
-    /// opened after the proxy comes back relay normally.
-    struct DarkeningProxy {
-        port: u16,
-        dark: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl DarkeningProxy {
-        async fn spawn(upstream_host: String, upstream_port: u16) -> Self {
-            use std::sync::atomic::{AtomicBool, Ordering};
-            use std::sync::Arc;
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-            async fn pump(
-                mut from: tokio::net::tcp::OwnedReadHalf,
-                mut to: tokio::net::tcp::OwnedWriteHalf,
-                dark: Arc<AtomicBool>,
-            ) {
-                let mut buf = [0u8; 8192];
-                loop {
-                    let Ok(n) = from.read(&mut buf).await else {
-                        return;
-                    };
-                    if n == 0 {
-                        return;
-                    }
-                    if dark.load(Ordering::SeqCst) {
-                        // Swallow the bytes and hold both sockets open.
-                        let _held = (from, to);
-                        std::future::pending::<()>().await;
-                        return;
-                    }
-                    if to.write_all(&buf[..n]).await.is_err() {
-                        return;
-                    }
-                }
-            }
-
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("bind proxy");
-            let port = listener.local_addr().expect("proxy addr").port();
-            let dark = Arc::new(AtomicBool::new(false));
-            let accept_dark = dark.clone();
-            tokio::spawn(async move {
-                while let Ok((client, _)) = listener.accept().await {
-                    let Ok(server) =
-                        tokio::net::TcpStream::connect((upstream_host.as_str(), upstream_port))
-                            .await
-                    else {
-                        continue;
-                    };
-                    let (client_read, client_write) = client.into_split();
-                    let (server_read, server_write) = server.into_split();
-                    tokio::spawn(pump(client_read, server_write, accept_dark.clone()));
-                    tokio::spawn(pump(server_read, client_write, accept_dark.clone()));
-                }
-            });
-            Self { port, dark }
-        }
-
-        fn set_dark(&self, dark: bool) {
-            self.dark.store(dark, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
     /// A fleet collection abandoned at its relay-side deadline on a reader
     /// that went dark mid-query must release its slot in the shared reader
     /// pool within SQLx's bounded close-on-drop, not hold it until the kernel
@@ -1770,7 +1702,7 @@ mod postgres_tests {
         insert_user(&reader, reader_community, &random_pubkey(), false).await;
 
         let reader_options = reader.connect_options();
-        let proxy = DarkeningProxy::spawn(
+        let proxy = crate::test_support::PausingProxy::spawn(
             reader_options.get_host().to_owned(),
             reader_options.get_port(),
         )
@@ -1811,7 +1743,7 @@ mod postgres_tests {
         // a failed boot ping. This pins close-on-drop ahead of that await.
         let cold = Db::from_pools(writer.clone(), read_pool.clone());
         cold.fence().force_open_for_tests(Utc::now());
-        proxy.set_dark(true);
+        proxy.set_paused(true);
         // Under the reader's 1s fence-proof bound, so the caller deadline
         // (not the proof timeout) is what abandons the checkout.
         tokio::time::timeout(
@@ -1820,7 +1752,7 @@ mod postgres_tests {
         )
         .await
         .expect_err("a dark reader must stall the collection until its deadline");
-        proxy.set_dark(false);
+        proxy.set_paused(false);
 
         let started = Instant::now();
         let mut replacement = read_pool

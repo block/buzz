@@ -1294,11 +1294,11 @@ impl Db {
         // The proof is the reader's first wire round trip (no pre-acquire
         // ping, see `connect_read_pool`), so it carries the liveness bound:
         // a half-open socket to a vanished reader would otherwise hang the
-        // request until TCP gives up. On expiry the dropped transaction's
-        // connection goes back through sqlx's release path (rollback +
-        // ping) in the background, never back to a request.
-        let proof = async {
-            let aurora = self.reader_aurora_capability_on(&mut conn).await;
+        // request until TCP gives up. The proof owns everything it touches
+        // so an expired one can be detached instead of dropped (see below).
+        let aurora_identity = self.reader_aurora_identity.clone();
+        let mut proof = Box::pin(async move {
+            let aurora = Self::reader_aurora_capability_on(&aurora_identity, &mut conn).await;
             let mut tx = match sqlx::Transaction::begin(
                 conn,
                 Some(sqlx::SqlStr::from_static(
@@ -1349,11 +1349,25 @@ impl Db {
                 }
             };
             Ok((tx, obs))
-        };
-        let (tx, obs) = match tokio::time::timeout(Self::READER_PROOF_TIMEOUT, proof).await {
+        });
+        let (tx, obs) = match tokio::time::timeout(Self::READER_PROOF_TIMEOUT, &mut proof).await {
             Ok(proved) => proved?,
             Err(_) => {
                 tracing::warn!("reader fence proof timed out");
+                // Dropping the proof mid-`BEGIN` would leak a server-side
+                // transaction: sqlx counts the transaction only once `BEGIN`
+                // is acknowledged, so the cancelled begin queues no
+                // `ROLLBACK`, and the release ping then consumes the late
+                // `BEGIN` reply and returns the connection to the pool
+                // `idle in transaction`. Detached, the proof runs to
+                // completion off the request path; its transaction drops
+                // normally (rollback, then release ping), or the task ends
+                // when a dead reader's socket errors. A bounded-release
+                // checkout is closed on drop instead, so there is nothing to
+                // leak and its slot is freed within the close bound.
+                if !operation.bounded_release() {
+                    tokio::spawn(proof);
+                }
                 return Err("reader_proof_timeout");
             }
         };
@@ -1383,14 +1397,14 @@ impl Db {
     /// Aurora capability on a connection the caller already holds, so the
     /// routed path never spends a second acquire budget.
     async fn reader_aurora_capability_on(
-        &self,
+        aurora_identity: &std::sync::OnceLock<bool>,
         conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
     ) -> bool {
-        if let Some(cached) = self.reader_aurora_identity.get() {
+        if let Some(cached) = aurora_identity.get() {
             return *cached;
         }
         match replica_fence::reader_supports_aurora_identity(conn).await {
-            Ok(supported) => *self.reader_aurora_identity.get_or_init(|| supported),
+            Ok(supported) => *aurora_identity.get_or_init(|| supported),
             Err(e) => {
                 tracing::debug!(error = %e, "aurora identity probe failed; will retry");
                 false
