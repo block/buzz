@@ -342,8 +342,8 @@ struct OpenAiModelListItem {
     created: Option<i64>,
 }
 
-const MINIMAX_DEFAULT_MODEL: &str = "MiniMax-M3";
-const MINIMAX_KNOWN_MODELS: &[&str] = &[MINIMAX_DEFAULT_MODEL, "MiniMax-M2.7"];
+const MINIMAX_DEFAULT_MODEL: &str = "MiniMax-M3.1-Flash";
+const MINIMAX_KNOWN_MODELS: &[&str] = &[MINIMAX_DEFAULT_MODEL, "MiniMax-M3"];
 
 fn is_minimax_provider(provider: Option<&str>) -> bool {
     matches!(

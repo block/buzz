@@ -63,10 +63,10 @@ DATABRICKS_MODEL=goose-claude-4-6-sonnet \
   ./target/release/buzz-agent
 
 # Or MiniMax (global endpoint; use minimax-cn for the mainland-China host).
-# MINIMAX_MODEL is optional and defaults to MiniMax-M3.
+# MINIMAX_MODEL is optional and defaults to MiniMax-M3.1-Flash.
 BUZZ_AGENT_PROVIDER=minimax \
 MINIMAX_API_KEY=... \
-MINIMAX_MODEL=MiniMax-M3 \
+MINIMAX_MODEL=MiniMax-M3.1-Flash \
   ./target/release/buzz-agent
 ```
 
@@ -152,7 +152,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
 | `MINIMAX_API_KEY` | — | Required when provider=minimax or provider=minimax-cn. |
-| `MINIMAX_MODEL` | `MiniMax-M3` | Optional. Defaults to the current flagship; `BUZZ_AGENT_MODEL` overrides it. |
+| `MINIMAX_MODEL` | `MiniMax-M3.1-Flash` | Optional. `BUZZ_AGENT_MODEL` overrides it; saved/custom model IDs remain supported. |
 | `MINIMAX_BASE_URL` | region default | Optional override. Defaults to `https://api.minimax.io/v1` for `minimax` and `https://api.minimaxi.com/v1` for `minimax-cn`. |
 | `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
 | `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
@@ -252,15 +252,15 @@ lifecycle hook — see [MCP_DRIVEN_HOOKS.md](../../docs/MCP_DRIVEN_HOOKS.md).
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | OpenRouter | `openrouter` | `POST {base}/chat/completions` | anything they route (extended-thinking replay, provider-agnostic tool calling) |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
-| MiniMax (global) | `minimax` | `POST {base}/chat/completions` | MiniMax-M3, MiniMax-M2.7 |
-| MiniMax (China) | `minimax-cn` | `POST {base}/chat/completions` | MiniMax-M3, MiniMax-M2.7 |
+| MiniMax (global) | `minimax` | `POST {base}/chat/completions` | MiniMax-M3.1-Flash, MiniMax-M3 |
+| MiniMax (China) | `minimax-cn` | `POST {base}/chat/completions` | MiniMax-M3.1-Flash, MiniMax-M3 |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | workspace endpoints and Unity Catalog model-service FQNs; UC Claude services use Anthropic Messages, UC GPT-5+ services use OpenAI Responses, and unknown UC FQNs use MLflow Chat Completions |
 
 The optional `DATABRICKS_MODEL_FILTER` applies only to model discovery. Each comma-separated entry is trimmed and matched against the complete raw ID with case-sensitive `*` (zero or more characters) and `?` (one Unicode character) semantics; patterns are OR-ed. Unset or blank preserves the full authenticated catalog. A nonblank value containing no usable patterns is rejected. This controls picker visibility only; Databricks and Unity Catalog permissions remain the authorization boundary. A filtered-empty result is authoritative and does not restore the built-in fallback models.
 
 If a selected provider is missing its required API key, the agent returns an error — there is no implicit fallback to another provider.
 
-`minimax` and `minimax-cn` are the same OpenAI-compatible Chat Completions transport pointed at MiniMax's global (`api.minimax.io`) and mainland-China (`api.minimaxi.com`) hosts; the region is just the default base URL and is overridable with `MINIMAX_BASE_URL`. Both require `MINIMAX_API_KEY` (sent as a bearer token) and default to the `MiniMax-M3` model. MiniMax also publishes an Anthropic-compatible Messages endpoint — reach it with `BUZZ_AGENT_PROVIDER=anthropic` and `ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic` (or the `api.minimaxi.com` host for China).
+`minimax` and `minimax-cn` are the same OpenAI-compatible Chat Completions transport pointed at MiniMax's global (`api.minimax.io`) and mainland-China (`api.minimaxi.com`) hosts; the region is just the default base URL and is overridable with `MINIMAX_BASE_URL`. Both require `MINIMAX_API_KEY` (sent as a bearer token) and default to `MiniMax-M3.1-Flash`, with `MiniMax-M3` as the other current catalog choice. Explicit saved/custom IDs remain unchanged. Flash always thinks; `BUZZ_AGENT_THINKING_EFFORT` accepts `low`, `medium`, `high`, `xhigh`, or `max` (the API default when unset). MiniMax also publishes an Anthropic-compatible Messages endpoint — reach it with `BUZZ_AGENT_PROVIDER=anthropic` and `ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic` (or the `api.minimaxi.com` host for China).
 
 `provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
 

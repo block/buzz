@@ -36,8 +36,10 @@ pub struct ModelEntry {
     pub name: String,
 }
 
-pub const MINIMAX_KNOWN_MODELS: &[&str] = &["MiniMax-M3", "MiniMax-M2.7"];
+/// Current MiniMax text choices, with the default first.
+pub const MINIMAX_KNOWN_MODELS: &[&str] = &["MiniMax-M3.1-Flash", "MiniMax-M3"];
 
+/// Ordinary choices; explicit saved and custom model IDs remain valid.
 pub fn minimax_known_models() -> Vec<ModelEntry> {
     MINIMAX_KNOWN_MODELS
         .iter()
@@ -1968,6 +1970,6 @@ mod tests {
             .iter()
             .map(|model| model.id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["MiniMax-M3", "MiniMax-M2.7"]);
+        assert_eq!(ids, vec!["MiniMax-M3.1-Flash", "MiniMax-M3"]);
     }
 }

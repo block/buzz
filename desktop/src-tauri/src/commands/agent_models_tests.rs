@@ -66,9 +66,72 @@ fn minimax_model_discovery_returns_target_catalog_and_default() {
         .iter()
         .map(|model| model.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["MiniMax-M3", "MiniMax-M2.7"]);
-    assert_eq!(response.agent_default_model.as_deref(), Some("MiniMax-M3"));
+    assert_eq!(ids, vec!["MiniMax-M3.1-Flash", "MiniMax-M3"]);
+    assert_eq!(
+        response.agent_default_model.as_deref(),
+        Some("MiniMax-M3.1-Flash")
+    );
     assert_eq!(response.selected_model.as_deref(), Some("MiniMax-M2.7"));
+}
+
+#[test]
+fn minimax_catalog_preserves_custom_selection() {
+    let provider = effective_discovery_provider(
+        Some("minimax"),
+        Some("BUZZ_AGENT_PROVIDER"),
+        &BTreeMap::new(),
+    );
+    let response = discover_minimax_models(&provider, Some("custom-deployment".into())).unwrap();
+    assert_eq!(
+        response.selected_model.as_deref(),
+        Some("custom-deployment")
+    );
+    assert_eq!(response.models[0].id, "MiniMax-M3.1-Flash");
+}
+
+#[test]
+fn openrouter_minimax_choices_use_verified_routes_and_preserve_saved_models() {
+    let response = serde_json::from_value(serde_json::json!({ "data": [
+        { "id": "minimax/minimax-m2.7", "supported_parameters": ["tools"] },
+        { "id": "minimax/minimax-m3", "supported_parameters": ["tools"] },
+        { "id": "other/custom", "supported_parameters": ["tools"] },
+        { "id": "minimax/minimax-m3.1-flash:free", "supported_parameters": ["tools"] },
+        { "id": "minimax/minimax-01", "supported_parameters": ["tools"] },
+        { "id": "minimax/speech-02", "supported_parameters": ["tools"] }
+    ]}))
+    .unwrap();
+    let result = filter_openrouter_models(response, Some("minimax/minimax-m2.7".into()))
+        .unwrap()
+        .unwrap();
+    let ids: Vec<_> = result.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "minimax/minimax-m3.1-flash:free",
+            "minimax/minimax-m3",
+            "other/custom",
+            "minimax/speech-02"
+        ]
+    );
+    assert_eq!(
+        result.selected_model.as_deref(),
+        Some("minimax/minimax-m2.7")
+    );
+    assert!(result.agent_default_model.is_none());
+}
+
+#[test]
+fn openrouter_minimax_does_not_invent_missing_flash_route() {
+    let response = serde_json::from_value(serde_json::json!({ "data": [
+        { "id": "minimax/minimax-m3", "supported_parameters": ["tools"] }
+    ]}))
+    .unwrap();
+    let result = filter_openrouter_models(response, Some("custom-route".into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.models.len(), 1);
+    assert_eq!(result.models[0].id, "minimax/minimax-m3");
+    assert_eq!(result.selected_model.as_deref(), Some("custom-route"));
 }
 
 #[test]

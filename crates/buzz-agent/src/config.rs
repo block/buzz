@@ -424,8 +424,15 @@ const DEFAULT_SYSTEM_PROMPT: &str =
     "You are buzz-agent. Use the provided tools to act. Tool calls are your only output.";
 
 /// Default MiniMax text model when neither `BUZZ_AGENT_MODEL` nor
-/// `MINIMAX_MODEL` is set — the current flagship (1M-token context window).
-const DEFAULT_MINIMAX_MODEL: &str = "MiniMax-M3";
+/// `MINIMAX_MODEL` is set (1M-token context window).
+const DEFAULT_MINIMAX_MODEL: &str = "MiniMax-M3.1-Flash";
+
+pub(crate) fn is_minimax_flash(model: &str) -> bool {
+    matches!(
+        model,
+        "MiniMax-M3.1-Flash" | "minimax/minimax-m3.1-flash:free"
+    )
+}
 const DEFAULT_CONTEXT_TOKENS: u64 = 200_000;
 const MINIMAX_M3_CONTEXT_TOKENS: u64 = 1_000_000;
 const MINIMAX_M2_7_CONTEXT_TOKENS: u64 = 204_800;
@@ -735,7 +742,7 @@ impl Config {
             ),
             Provider::MiniMax => (
                 req("MINIMAX_API_KEY")?,
-                // MiniMax ships a documented default model (MiniMax-M3), so —
+                // MiniMax ships a default model (MiniMax-M3.1-Flash), so —
                 // unlike the OpenAI-compatible provider — a bare `minimax`
                 // selection resolves without an explicit model. An explicit
                 // BUZZ_AGENT_MODEL / MINIMAX_MODEL still wins.
@@ -1466,6 +1473,10 @@ mod tests {
 
     #[test]
     fn minimax_context_defaults_follow_model_windows() {
+        assert_eq!(
+            default_context_tokens(Provider::MiniMax, "MiniMax-M3.1-Flash"),
+            1_000_000
+        );
         assert_eq!(
             default_context_tokens(Provider::MiniMax, "MiniMax-M3"),
             1_000_000
