@@ -1232,32 +1232,40 @@ impl DeletionStore {
         let live_tables = self.live_scoped_tables().await?;
         let fenced_tables = self.live_fenced_tables().await?;
         let mut row_counts = BTreeMap::new();
-        // Whole-tenant counts on a large community can outrun the writer
-        // statement timeout; this read-only transaction lifts it.
-        let mut tx = self.pool.begin().await?;
-        lift_statement_timeout(&mut tx).await?;
         for table in &live_tables {
             let sql = format!("SELECT count(*)::BIGINT FROM {table} WHERE community_id = $1");
-            let count: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
-                .bind(community.as_uuid())
-                .fetch_one(&mut *tx)
-                .await?;
-            row_counts.insert(table.clone(), count);
+            row_counts.insert(table.clone(), self.count_tenant_rows(sql, community).await?);
         }
         for (table, rows) in RELAY_ADMIN_TABLES {
             let sql = format!("SELECT count(*)::BIGINT {rows}");
-            let count: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
-                .bind(community.as_uuid())
-                .fetch_one(&mut *tx)
-                .await?;
-            row_counts.insert((*table).to_owned(), count);
+            row_counts.insert(
+                (*table).to_owned(),
+                self.count_tenant_rows(sql, community).await?,
+            );
         }
-        tx.rollback().await?;
         Ok(SchemaManifest {
             scoped_tables: live_tables.into_iter().collect(),
             row_counts,
             fenced_tables: fenced_tables.into_iter().collect(),
         })
+    }
+
+    /// One inventory count, in its own read-only transaction.
+    ///
+    /// A whole-tenant count on a large community can outrun the writer
+    /// statement timeout, so the transaction lifts it. One transaction per
+    /// count releases each table's `AccessShare` lock (and snapshot) as soon
+    /// as its count finishes, as autocommit counts did, instead of holding
+    /// every table until the last count.
+    async fn count_tenant_rows(&self, sql: String, community: CommunityId) -> Result<i64> {
+        let mut tx = self.pool.begin().await?;
+        lift_statement_timeout(&mut tx).await?;
+        let count = sqlx::query_scalar(AssertSqlSafe(sql))
+            .bind(community.as_uuid())
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.rollback().await?;
+        Ok(count)
     }
 
     /// Freeze inventory and move submitted → inventoried atomically.
@@ -7425,58 +7433,189 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         );
     }
 
-    /// Community-deletion inventory and purge transactions outlive the
-    /// always-on writer statement cap, and only for their own transaction.
-    /// Mutation oracles: drop `lift_statement_timeout` → the sleep past the
-    /// cap is cancelled → RED; lift to a bounded value (e.g. the 5-minute
-    /// ceiling) → `SHOW` is not `0` → RED; session scope → restore → RED.
+    /// A scratch database bootstrapped from the desired-state schema, for
+    /// tests that alter shared objects (locks, session caps) and must not
+    /// disturb the shared test database. Returns the admin pool, the scratch
+    /// database name and its URL; drop with [`drop_scratch_database`].
+    async fn scratch_desired_state_database(prefix: &str) -> (PgPool, String, String) {
+        let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+        let admin = PgPool::connect(&base_url)
+            .await
+            .expect("connect admin database");
+        let probe_db = format!("{prefix}_{}", Uuid::new_v4().simple());
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {probe_db}")))
+            .execute(&admin)
+            .await
+            .expect("create probe database");
+        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
+        let probe_url = format!("{base_prefix}/{probe_db}");
+
+        let schema_sql = crate::test_support::desired_state_schema_sql();
+        let bootstrap = PgPool::connect(&probe_url)
+            .await
+            .expect("connect probe database");
+        sqlx::raw_sql(AssertSqlSafe(schema_sql))
+            .execute(&bootstrap)
+            .await
+            .expect("apply desired-state schema");
+        bootstrap.close().await;
+        (admin, probe_db, probe_url)
+    }
+
+    async fn drop_scratch_database(admin: &PgPool, probe_db: &str) {
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP DATABASE {probe_db} WITH (FORCE)"
+        )))
+        .execute(admin)
+        .await
+        .expect("drop probe database");
+    }
+
+    /// Run `op` while another session holds `ACCESS EXCLUSIVE` on `events`
+    /// until `op` has waited on it past a 500ms writer statement cap. Under
+    /// the cap the wait itself is cancelled (57014); `lock_timeout` (5s by
+    /// default) is far enough away not to fire first.
+    async fn run_behind_events_lock_past_cap<T>(
+        db: &Db,
+        admin: &PgPool,
+        probe_db: &str,
+        op: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let mut holder = db.pool.begin().await.expect("begin lock holder");
+        sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("lock events");
+        let release = async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let parked: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                         WHERE datname = $1 AND wait_event_type = 'Lock')",
+                    )
+                    .bind(probe_db)
+                    .fetch_one(admin)
+                    .await
+                    .expect("inspect lock waiters");
+                    if parked {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("deletion statement never waited on the events lock");
+            // Keep it waiting past the 500ms cap before letting it through.
+            tokio::time::sleep(Duration::from_millis(1_000)).await;
+            holder.rollback().await.expect("release events lock");
+        };
+        let (result, ()) = tokio::join!(op, release);
+        result
+    }
+
+    /// Community-deletion inventory and purge statements outlive the
+    /// always-on writer statement cap, through the production paths, and only
+    /// for their own transactions. Mutation oracles: drop the
+    /// `lift_statement_timeout` call in `count_tenant_rows` → inventory is
+    /// cancelled (57014) → RED; drop it in `purge_postgres` → purge is
+    /// cancelled → RED; lift with session scope → `SHOW` after is not
+    /// `500ms` → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn deletion_transactions_lift_the_writer_statement_timeout() {
+    async fn deletion_inventory_and_purge_outlive_the_writer_statement_timeout() {
+        let (admin, probe_db, probe_url) =
+            scratch_desired_state_database("buzz_deletion_cap").await;
         let db = Db::new(&DbConfig {
-            database_url: crate::test_support::database_url(),
-            max_connections: 1,
+            database_url: probe_url,
+            max_connections: 5,
             min_connections: 0,
             statement_timeout_ms: 500,
             ..DbConfig::default()
         })
         .await
         .expect("connect capped writer");
-        let cancelled = |error: &sqlx::Error| {
-            error
-                .as_database_error()
-                .and_then(|error| error.code())
-                .as_deref()
-                == Some("57014")
-        };
+        let store = db.deletion_store();
 
-        // Control: the writer cap is live on an ordinary transaction.
-        let mut plain = db.pool.begin().await.expect("begin plain");
+        // Control: the writer cap is live on an ordinary statement.
         let error = sqlx::query("SELECT pg_sleep(1)")
-            .execute(&mut *plain)
+            .execute(&db.pool)
             .await
             .expect_err("writer cap must cancel the plain sleep");
-        assert!(cancelled(&error), "unexpected error: {error:?}");
-        plain.rollback().await.expect("roll back plain");
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("57014"),
+            "unexpected error: {error:?}"
+        );
 
-        let mut tx = db.pool.begin().await.expect("begin deletion tx");
-        lift_statement_timeout(&mut tx).await.expect("lift");
-        let lifted: String = sqlx::query_scalar("SHOW statement_timeout")
-            .fetch_one(&mut *tx)
+        let host = format!("deletion-cap-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
             .await
-            .expect("show lifted");
-        assert_eq!(lifted, "0", "deletion transactions run without a cap");
-        sqlx::query("SELECT pg_sleep(1)")
-            .execute(&mut *tx)
+            .expect("create community");
+        let submitted = store
+            .submit(&host, "test-operator", Some("test deletion"))
             .await
-            .expect("lifted transaction outlives the writer cap");
-        tx.rollback().await.expect("roll back deletion tx");
+            .expect("submit");
+        let schema = run_behind_events_lock_past_cap(
+            &db,
+            &admin,
+            &probe_db,
+            store.inventory_schema(community.id),
+        )
+        .await
+        .expect("inventory outlives the writer cap");
+        let inventory = FrozenInventory {
+            schema,
+            storage: empty_storage_manifest(community.id),
+        };
+        let request = store
+            .freeze_inventory(submitted.id, &inventory)
+            .await
+            .expect("freeze inventory");
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        let generation = store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("freeze destructive storage");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings");
+        run_behind_events_lock_past_cap(&db, &admin, &probe_db, store.purge_postgres(&token))
+            .await
+            .expect("purge outlives the writer cap");
+        assert_eq!(
+            store.get(request.id).await.expect("request").stage,
+            DeletionStage::PostgresPurged
+        );
 
-        let restored: String = sqlx::query_scalar("SHOW statement_timeout")
-            .fetch_one(&db.pool)
-            .await
-            .expect("show restored");
-        assert_eq!(restored, "500ms", "the lift is transaction-local");
+        for _ in 0..5 {
+            let restored: String = sqlx::query_scalar("SHOW statement_timeout")
+                .fetch_one(&db.pool)
+                .await
+                .expect("show restored");
+            assert_eq!(restored, "500ms", "the lift is transaction-local");
+        }
+
+        db.pool.close().await;
+        drop_scratch_database(&admin, &probe_db).await;
     }
 
     #[tokio::test]
@@ -8427,29 +8566,8 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn desired_state_schema_bootstrap_progresses_beyond_fencing() {
-        let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
-        let admin = PgPool::connect(&base_url)
-            .await
-            .expect("connect admin database");
-        let probe_db = format!("buzz_desired_state_{}", Uuid::new_v4().simple());
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {probe_db}")))
-            .execute(&admin)
-            .await
-            .expect("create probe database");
-        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
-        let probe_url = format!("{base_prefix}/{probe_db}");
-
-        let schema_sql = crate::test_support::desired_state_schema_sql();
-        let bootstrap = PgPool::connect(&probe_url)
-            .await
-            .expect("connect probe database");
-        sqlx::raw_sql(AssertSqlSafe(schema_sql))
-            .execute(&bootstrap)
-            .await
-            .expect("apply desired-state schema");
-        bootstrap.close().await;
+        let (admin, probe_db, probe_url) =
+            scratch_desired_state_database("buzz_desired_state").await;
 
         let db = Db::new(&DbConfig {
             database_url: probe_url,
@@ -8529,11 +8647,6 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         assert_eq!(terminal.stage, DeletionStage::RetentionPending);
 
         db.pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP DATABASE {probe_db} WITH (FORCE)"
-        )))
-        .execute(&admin)
-        .await
-        .expect("drop probe database");
+        drop_scratch_database(&admin, &probe_db).await;
     }
 }

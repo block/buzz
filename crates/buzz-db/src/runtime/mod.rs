@@ -836,6 +836,14 @@ impl Db {
         let lock_timeout_ms = config.lock_timeout_ms;
         let idle_txn_timeout_ms = config.idle_txn_timeout_ms;
         let statement_timeout_ms = config.effective_statement_timeout_ms();
+        if statement_timeout_ms != config.statement_timeout_ms {
+            tracing::warn!(
+                configured_ms = config.statement_timeout_ms,
+                installed_ms = statement_timeout_ms,
+                "writer statement_timeout cannot be disabled or exceed the maximum; \
+                 installing the maximum (BUZZ_DB_STATEMENT_TIMEOUT_MS)"
+            );
+        }
         let default_transaction_read_only = config.default_transaction_read_only;
         let options = PgPoolOptions::new()
             .max_connections(config.max_connections)

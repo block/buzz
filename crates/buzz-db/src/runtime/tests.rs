@@ -3656,6 +3656,7 @@ struct EtagFixture {
     replica: PgPool,
     rname: String,
     cid: CommunityId,
+    channel: Uuid,
     root_hex: String,
     mentioned_hex: String,
 }
@@ -3700,6 +3701,7 @@ async fn e_tag_fixture(prefix: &str) -> EtagFixture {
         replica,
         rname,
         cid: CommunityId::from_uuid(community),
+        channel,
         root_hex: root.id.to_hex(),
         mentioned_hex: mentioned.public_key().to_hex(),
     }
@@ -3760,10 +3762,10 @@ async fn replica_statement_cancel_propagates_without_writer_rerun() {
     );
 
     let mut locker = fx.replica.begin().await.expect("begin locker");
-    sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+    sqlx::query("LOCK TABLE events, relay_members IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *locker)
         .await
-        .expect("lock replica events");
+        .expect("lock replica events and relay_members");
 
     let cancelled = |r: crate::Result<()>, what: &str| match r {
         Err(e) => assert!(e.is_statement_cancelled(), "{what}: want 57014, got {e}"),
@@ -3787,6 +3789,47 @@ async fn replica_statement_cancel_propagates_without_writer_rerun() {
             .await
             .map(drop),
         "get_events_by_ids_routed",
+    );
+    // The routed reads with their own SQL (feed, thread, channel window,
+    // relay membership) fall back to the writer on replica failure, but not
+    // on a cancel: the writer would repeat the same expensive work.
+    let mentioned = hex::decode(&fx.mentioned_hex).expect("hex");
+    let channels = [fx.channel];
+    cancelled(
+        db.query_feed_mentions_routed("t_cxl", fx.cid, &mentioned, &channels, None, 10)
+            .await
+            .map(drop),
+        "query_feed_mentions_routed",
+    );
+    cancelled(
+        db.query_feed_needs_action_routed("t_cxl", fx.cid, &mentioned, &channels, None, 10)
+            .await
+            .map(drop),
+        "query_feed_needs_action_routed",
+    );
+    cancelled(
+        db.query_feed_activity_routed("t_cxl", fx.cid, &channels, None, 10)
+            .await
+            .map(drop),
+        "query_feed_activity_routed",
+    );
+    cancelled(
+        db.get_thread_replies(fx.cid, &root_id, None, 10, None)
+            .await
+            .map(drop),
+        "get_thread_replies",
+    );
+    cancelled(
+        db.get_channel_window_with_session(fx.cid, fx.channel, 10, None, None)
+            .await
+            .map(drop),
+        "get_channel_window_with_session",
+    );
+    cancelled(
+        db.is_relay_member(fx.cid, &fx.mentioned_hex)
+            .await
+            .map(drop),
+        "is_relay_member",
     );
 
     locker.rollback().await.expect("unlock");

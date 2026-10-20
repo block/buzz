@@ -2417,13 +2417,13 @@ async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::Ne
                 metrics::histogram!("buzz_audit_log_seconds").record(t.elapsed().as_secs_f64());
                 return;
             }
-            Err(error) if is_lock_timeout(&error) => {
+            Err(error) if is_retryable_append_failure(&error) => {
                 retries += 1;
                 metrics::counter!("buzz_audit_log_lock_retries_total").increment(1);
                 tracing::warn!(
                     retries,
                     retry_delay_ms,
-                    "Audit advisory lock timed out; preserving entry for retry"
+                    "Audit append timed out waiting on a lock; preserving entry for retry: {error}"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
                 retry_delay_ms = (retry_delay_ms * 2).min(1_000);
@@ -2437,18 +2437,20 @@ async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::Ne
     }
 }
 
-/// Whether an audit append failed on `lock_timeout` (`55P03`), either on the
-/// audit-chain lock or on the community admission lock taken before it. Both
-/// are transient; the entry is kept and retried. Admission refusal
-/// (`AccessDenied`) is terminal: a quiescing or fenced community refuses for
-/// good.
-fn is_lock_timeout(error: &buzz_audit::AuditError) -> bool {
+/// Whether an audit append was rolled back by a timeout while waiting on the
+/// audit-chain lock or on the community admission lock taken before it:
+/// `lock_timeout` (`55P03`), or `statement_timeout` (`57014`), which fires
+/// first when the lock timeout is disabled or longer than the writer
+/// statement cap. Both are transient; the entry is kept and retried.
+/// Admission refusal (`AccessDenied`) is terminal: a quiescing or fenced
+/// community refuses for good.
+fn is_retryable_append_failure(error: &buzz_audit::AuditError) -> bool {
     let database_error = match error {
         buzz_audit::AuditError::Database(sqlx::Error::Database(e))
         | buzz_audit::AuditError::Admission(buzz_db::DbError::Sqlx(sqlx::Error::Database(e))) => e,
         _ => return false,
     };
-    database_error.code().as_deref() == Some("55P03")
+    matches!(database_error.code().as_deref(), Some("55P03" | "57014"))
 }
 
 impl std::fmt::Debug for AppState {
@@ -2967,15 +2969,41 @@ pub(crate) mod tests {
         CommunityDeletion,
     }
 
+    /// Which timeout cancels the audit append while it waits on the lock.
+    #[derive(Clone, Copy)]
+    enum AuditWaitTimeout {
+        /// `lock_timeout` (55P03).
+        Lock,
+        /// `statement_timeout` with `lock_timeout` disabled (57014), as under
+        /// `BUZZ_DB_LOCK_TIMEOUT_MS=0` with the writer statement cap.
+        Statement,
+    }
+
     async fn audit_worker_retries_lock_timeout_until_original_entry_is_appended_once() {
-        assert_audit_worker_retries_lock_timeout(HeldAuditLock::AuditChain).await;
+        assert_audit_worker_retries_lock_timeout(HeldAuditLock::AuditChain, AuditWaitTimeout::Lock)
+            .await;
     }
 
     async fn audit_worker_retries_admission_lock_timeout_until_original_entry_is_appended_once() {
-        assert_audit_worker_retries_lock_timeout(HeldAuditLock::CommunityDeletion).await;
+        assert_audit_worker_retries_lock_timeout(
+            HeldAuditLock::CommunityDeletion,
+            AuditWaitTimeout::Lock,
+        )
+        .await;
     }
 
-    async fn assert_audit_worker_retries_lock_timeout(held: HeldAuditLock) {
+    async fn audit_worker_retries_statement_timeout_until_original_entry_is_appended_once() {
+        assert_audit_worker_retries_lock_timeout(
+            HeldAuditLock::AuditChain,
+            AuditWaitTimeout::Statement,
+        )
+        .await;
+    }
+
+    async fn assert_audit_worker_retries_lock_timeout(
+        held: HeldAuditLock,
+        timeout: AuditWaitTimeout,
+    ) {
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let observer = sqlx::PgPool::connect(&database_url)
             .await
@@ -2987,11 +3015,18 @@ pub(crate) mod tests {
             .after_connect(move |conn, _meta| {
                 let application_name = hook_application_name.clone();
                 Box::pin(async move {
+                    let (lock_timeout, statement_timeout) = match timeout {
+                        AuditWaitTimeout::Lock => ("100", "0"),
+                        AuditWaitTimeout::Statement => ("0", "100"),
+                    };
                     sqlx::query(
                         "SELECT set_config('application_name', $1, false), \
-                                set_config('lock_timeout', '100', false)",
+                                set_config('lock_timeout', $2, false), \
+                                set_config('statement_timeout', $3, false)",
                     )
                     .bind(application_name)
+                    .bind(lock_timeout)
+                    .bind(statement_timeout)
                     .execute(&mut *conn)
                     .await?;
                     Ok(())
@@ -3130,6 +3165,13 @@ pub(crate) mod tests {
         async fn audit_worker_retries_admission_lock_timeout_until_original_entry_is_appended_once()
         {
             super::audit_worker_retries_admission_lock_timeout_until_original_entry_is_appended_once()
+                .await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn audit_worker_retries_statement_timeout_until_original_entry_is_appended_once() {
+            super::audit_worker_retries_statement_timeout_until_original_entry_is_appended_once()
                 .await;
         }
     }

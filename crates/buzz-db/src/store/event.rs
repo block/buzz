@@ -851,6 +851,17 @@ fn push_mention_join(b: &mut QueryBuilder<sqlx::Postgres>, q: &EventQuery, p_hex
     if let Some(u) = q.until {
         b.push(" AND m.event_created_at <= ").push_bind(u);
     }
+    // Every mention insert copies the event's kind, so repeating the `kinds`
+    // filter on `m` drops no rows and lets the planner range-scan
+    // `idx_event_mentions_pubkey_kind_created`.
+    if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
+        b.push(" AND m.event_kind IN (");
+        let mut sep = b.separated(", ");
+        for k in ks {
+            sep.push_bind(*k);
+        }
+        b.push(")");
+    }
 }
 
 /// Server-side deadline for every generic event read ([`query_events_on`] and
@@ -2890,6 +2901,7 @@ mod e_tag_filter_shape_tests {
         q.channel_id = Some(uuid::Uuid::nil());
         q.since = Some(Utc::now());
         q.until = Some(Utc::now());
+        q.kinds = Some(vec![9]);
         let select = build_query_events_sql(&q).sql().as_str().to_owned();
         let count = count_events_sql(&q).sql().as_str().to_owned();
         for (label, sql) in [("select", select), ("count", count)] {
@@ -2905,13 +2917,16 @@ mod e_tag_filter_shape_tests {
                 sql.contains("AND m.event_created_at <= $"),
                 "{label}: {sql}"
             );
+            assert!(sql.contains("AND m.event_kind IN ($"), "{label}: {sql}");
         }
 
         q.since = None;
         q.until = None;
+        q.kinds = None;
         let unbounded = build_query_events_sql(&q).sql().as_str().to_owned();
         assert!(!unbounded.contains("m.event_created_at >="));
         assert!(!unbounded.contains("m.event_created_at <="));
+        assert!(!unbounded.contains("m.event_kind"));
     }
 }
 

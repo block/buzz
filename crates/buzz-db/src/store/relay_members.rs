@@ -1232,6 +1232,12 @@ impl Db {
                         Self::record_route(path, "replica", reason);
                         Ok(is_member)
                     }
+                    // A cancelled statement (timeout) would be just as slow on the
+                    // writer; surface it instead of doubling the cost.
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
+                    }
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
