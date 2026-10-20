@@ -2304,60 +2304,6 @@ async fn routed_reads_are_confined_to_the_requested_community() {
     drop_scratch_db(&admin, writer, &wname).await;
 }
 
-/// The boot ping fills the reader pool to its warm floor, so a freshly
-/// started pod meets its first routed reads with established connections
-/// instead of dialing each one inside the 150ms reader acquire budget.
-/// Without the warm-up the ping leaves exactly one connection behind.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn reader_boot_ping_warms_pool_to_min_connections() {
-    let admin = PgPool::connect(&admin_url().await)
-        .await
-        .expect("connect admin");
-    let (seed, wname) = create_scratch_db(&admin, "warm_r").await;
-    seed.close().await;
-    let scratch_url = {
-        let base = admin_url().await;
-        let idx = base.rfind('/').expect("db url has a path segment");
-        format!("{}/{}", &base[..idx], wname)
-    };
-    let db = Db::new(&DbConfig {
-        database_url: scratch_url.clone(),
-        read_database_url: Some(scratch_url),
-        max_connections: 2,
-        read_max_connections: Some(15),
-        ..DbConfig::default()
-    })
-    .await
-    .expect("connect Db with lazy reader");
-    let read_pool = db.read_pool.clone().expect("reader pool configured");
-    let target = Db::reader_min_connections(15);
-    assert_eq!(
-        target, 3,
-        "fixture needs a floor above the ping's one connection"
-    );
-    assert_eq!(
-        read_pool.size(),
-        0,
-        "lazy reader dials nothing before the ping"
-    );
-
-    db.read_pool_boot_ping_for_tests().await;
-
-    assert_eq!(
-        read_pool.size(),
-        target,
-        "boot ping must dial the reader up to its warm floor, and no further"
-    );
-    assert_eq!(
-        read_pool.num_idle(),
-        target as usize,
-        "warm connections must be returned to the pool idle"
-    );
-
-    drop_scratch_db(&admin, db.pool.clone(), &wname).await;
-}
-
 /// D4: a LAZY reader pool (connect_lazy, never yet
 /// used) must still let [`Db::spawn_fence_probe`] verify the writer's
 /// floor guard and spawn — reader-down or reader-idle at boot must not
@@ -4172,6 +4118,9 @@ async fn e_tag_any_runs_with_real_binds_on_p_join_and_count() {
 
 #[path = "tests/thread_window_postgres_tests.rs"]
 mod thread_window_postgres_tests;
+
+#[path = "tests/reader_pool_postgres_tests.rs"]
+mod reader_pool_postgres_tests;
 
 /// `insert_event_with_serving_write_guard` indexes mentions in the event's own
 /// transaction, and an indexing failure stays best-effort: the savepoint rolls
