@@ -598,6 +598,61 @@ fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(Stri
     matches
 }
 
+/// Strip control characters and path separators, then cap length to the
+/// relay's `imeta filename` constraint (1-255 **bytes**, no control chars,
+/// no `/` or `\` — see `buzz-relay/src/handlers/imeta.rs`). Callers pass
+/// `Path::file_name()`, which already excludes `/`, but a filename that
+/// legitimately contains a literal `\` (legal on Linux) reaches here whole;
+/// without this, the relay rejects the whole send. Take the last path
+/// segment first, matching what `Path::file_name()` was reaching for, so
+/// the label a human sees is `notes.json`, not `notesjson` with the
+/// separators deleted out of the middle.
+fn sanitize_filename(name: &str) -> String {
+    let last_segment = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let cleaned: String = last_segment
+        .chars()
+        .filter(|c| !c.is_control() && *c != '/' && *c != '\\')
+        .collect();
+    let mut end = cleaned.len().min(255);
+    while end > 0 && !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    cleaned[..end].to_string()
+}
+
+/// Escape markdown link-label metacharacters (`\`, `[`, `]`) so a filename
+/// containing them renders as a link with the correct label instead of
+/// breaking the link syntax. Mirrors Desktop's
+/// `imetaMediaMarkdown.ts:305` (`label.replace(/[\\[\]]/g, "\\$&")`).
+fn escape_markdown_label(label: &str) -> String {
+    let mut escaped = String::with_capacity(label.len());
+    for c in label.chars() {
+        if matches!(c, '\\' | '[' | ']') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+/// Build the leading-newline markdown fragment for one uploaded attachment.
+/// Images and video render inline; everything else (JSON, text, PDF,
+/// octet-stream, ...) renders as a plain `[label](url)` link — an
+/// `![image](...)` tag for a non-image blob renders as a broken image in
+/// every client.
+fn attachment_markdown(mime_type: &str, url: &str, filename: Option<&str>) -> String {
+    if mime_type.starts_with("video/") {
+        format!("\n![video]({url})")
+    } else if mime_type.starts_with("image/") {
+        format!("\n![image]({url})")
+    } else {
+        let label = filename
+            .map(escape_markdown_label)
+            .unwrap_or_else(|| "attachment".to_string());
+        format!("\n[{label}]({url})")
+    }
+}
+
 pub struct SendMessageParams {
     pub channel_id: String,
     pub content: String,
@@ -655,14 +710,19 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        // Never fall back to the full local path — that would leak the
+        // caller's filesystem layout into a channel-visible message or tag.
+        let raw_name = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(sanitize_filename)
+            .filter(|n| !n.is_empty());
+        media_tags.push(crate::client::build_imeta_tag(&desc, raw_name.as_deref()));
+        media_content.push_str(&attachment_markdown(
+            &desc.mime_type,
+            &desc.url,
+            raw_name.as_deref(),
+        ));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -1084,10 +1144,11 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
-        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        attachment_markdown, channel_id_from_event, cmd_get_thread, cmd_send_message,
+        escape_markdown_label, event_mention_pubkeys, find_root_from_tags, format_events,
+        match_profiles_by_name, merge_message_mentions, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
+        resolve_thread_target, sanitize_filename, thread_ref_from_event,
         thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
@@ -1597,6 +1658,123 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    #[test]
+    fn attachment_markdown_renders_video_and_image_inline() {
+        assert_eq!(
+            attachment_markdown("video/mp4", "https://relay.test/a.bin", Some("clip.mp4")),
+            "\n![video](https://relay.test/a.bin)"
+        );
+        assert_eq!(
+            attachment_markdown("image/png", "https://relay.test/b.bin", Some("pic.png")),
+            "\n![image](https://relay.test/b.bin)"
+        );
+    }
+
+    #[test]
+    fn attachment_markdown_renders_generic_file_as_link() {
+        assert_eq!(
+            attachment_markdown(
+                "application/octet-stream",
+                "https://relay.test/c.bin",
+                Some("notes.json")
+            ),
+            "\n[notes.json](https://relay.test/c.bin)"
+        );
+    }
+
+    #[test]
+    fn attachment_markdown_falls_back_when_filename_missing() {
+        assert_eq!(
+            attachment_markdown("application/pdf", "https://relay.test/d.bin", None),
+            "\n[attachment](https://relay.test/d.bin)"
+        );
+    }
+
+    #[test]
+    fn escape_markdown_label_escapes_brackets_and_backslash() {
+        // `\` must escape before the closing `]` reads as literal, or the
+        // link breaks: `a\].pdf` unescaped renders as `[a\](url)`, where the
+        // `\]` is read as an escaped literal bracket, not the link's close.
+        assert_eq!(escape_markdown_label(r"a[b]c.pdf"), r"a\[b\]c.pdf");
+        assert_eq!(escape_markdown_label(r"a\.pdf"), r"a\\.pdf");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_control_chars() {
+        // A raw newline in a filename would otherwise split the attachment
+        // line and let arbitrary markdown ride in on the next line.
+        assert_eq!(sanitize_filename("notes\n.txt"), "notes.txt");
+        assert_eq!(sanitize_filename("a\tb\rc"), "abc");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_path_separators() {
+        // A filename that legitimately contains a literal `\` is legal on
+        // Linux and reaches here whole via `Path::file_name()`; the relay
+        // rejects any `filename` containing `/` or `\`, so the whole send
+        // fails without this. Take the last segment rather than deleting
+        // separators out of the middle, so the label is `notes.json`, not
+        // `notesjson`.
+        assert_eq!(sanitize_filename("a/b.pdf"), "b.pdf");
+        assert_eq!(sanitize_filename(r"C:\Users\kcao\notes.json"), "notes.json");
+    }
+
+    #[test]
+    fn sanitize_filename_caps_length_at_255_bytes_on_char_boundary() {
+        // The relay's cap (`imeta.rs:144`) is `value.len() > 255`, which on a
+        // `String` is bytes — a `.chars().take(255)` cap can stay under the
+        // client guard while landing over the relay's byte cap and getting
+        // rejected at ingest, in exactly the multi-byte case the guard exists
+        // to catch.
+        let long = "a".repeat(300);
+        assert_eq!(sanitize_filename(&long).len(), 255);
+
+        // 1-byte "a" + 90 * 3-byte "あ" = 271 bytes; the 255-byte cut point
+        // falls mid-character (byte 255 sits inside the 85th "あ"), so this
+        // is the case that actually exercises the walk-back loop, not just
+        // an input that happens to already land on a boundary.
+        let multibyte = format!("a{}", "あ".repeat(90));
+        let sanitized = sanitize_filename(&multibyte);
+        assert_eq!(sanitized.len(), 253);
+        assert!(sanitized.is_char_boundary(sanitized.len()));
+    }
+
+    #[test]
+    fn build_imeta_tag_filename_satisfies_relay_contract() {
+        // Mirrors the relay's validation rule for the `filename` field
+        // (`buzz-relay/src/handlers/imeta.rs`): 1-255 bytes, no control
+        // chars, no path separators. Feeding sanitize_filename's output
+        // straight through build_imeta_tag pins that contract at the point
+        // the two are wired together, not just on the sanitizer in
+        // isolation.
+        let desc = crate::client::BlobDescriptor {
+            url: "https://relay.test/d.bin".to_string(),
+            mime_type: "application/json".to_string(),
+            sha256: "deadbeef".to_string(),
+            size: 42,
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        };
+        let raw = r"C:\Users\kcao\notes.json";
+        let sanitized = sanitize_filename(raw);
+        let tag = crate::client::build_imeta_tag(&desc, Some(&sanitized));
+        let filename_entry = tag
+            .iter()
+            .find(|t| t.starts_with("filename "))
+            .expect("filename entry present")
+            .strip_prefix("filename ")
+            .unwrap();
+
+        assert!(!filename_entry.is_empty());
+        assert!(filename_entry.len() <= 255);
+        assert!(!filename_entry.contains('/'));
+        assert!(!filename_entry.contains('\\'));
+        assert!(!filename_entry.chars().any(|c| c.is_control()));
     }
 
     // ── cmd_send_message — emoji-tag binding seam ─────────────────────────
