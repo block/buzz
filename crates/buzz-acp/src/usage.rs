@@ -183,7 +183,7 @@ struct SessionState {
 ///
 /// `turn_*` fields are `None` when delta is unreliable (first turn or counter
 /// decrease). `cumulative_*` fields are always present when the agent reports them.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TurnUsage {
     /// Goose session id (maps to NIP-AM `sessionId`).
     pub session_id: String,
@@ -243,13 +243,27 @@ pub struct TurnUsage {
     /// `None` when the publisher omitted it (unrecognised endpoint, mixed
     /// identities, old harness). Per-turn only — not session-cumulative.
     pub pricing_identity: Option<buzz_core::agent_turn_metric::PricingIdentity>,
-    /// Tool calls by name for this turn; filled by `AcpClient::take_turn_usage`.
+    /// Non-token turn data; filled by `AcpClient::take_turn_usage`.
+    pub activity: TurnActivity,
+}
+
+/// Per-turn tool, skill, and context-window data (NIP-AM `tools`, `skills`,
+/// `context`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnActivity {
+    /// Tool calls by name for this turn.
     pub tools: Option<std::collections::BTreeMap<String, u32>>,
-    /// Skill invocations by name for this turn; filled like `tools`.
+    /// Skill invocations by name for this turn.
     pub skills: Option<std::collections::BTreeMap<String, u32>>,
-    /// Context-window occupancy at the last report this turn; filled by
-    /// `AcpClient::take_turn_usage`.
+    /// Context-window occupancy at the last report this turn.
     pub context: Option<buzz_core::agent_turn_metric::ContextUsage>,
+}
+
+impl TurnActivity {
+    /// True when no tool, skill, or context data was observed.
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl TurnUsage {
@@ -259,59 +273,8 @@ impl TurnUsage {
     pub(crate) fn tokenless(session_id: String) -> Self {
         Self {
             session_id,
-            turn_seq: None,
-            delta_reliable: false,
-            turn_input_tokens: None,
-            turn_output_tokens: None,
-            turn_total_tokens: None,
-            turn_cost_usd: None,
-            turn_cache_read_tokens: None,
-            turn_cache_write_tokens: None,
-            cumulative_input_tokens: None,
-            cumulative_output_tokens: None,
-            cumulative_total_tokens: None,
-            cumulative_cost_usd: None,
-            cumulative_cache_read_tokens: None,
-            cumulative_cache_write_tokens: None,
-            model: None,
-            pricing_identity: None,
-            tools: None,
-            skills: None,
-            context: None,
+            ..Default::default()
         }
-    }
-}
-
-/// Latest context-window snapshot for the in-flight turn. Latest report wins
-/// (end-of-turn occupancy); reports for other sessions or without a window
-/// size are ignored.
-#[derive(Debug, Default)]
-pub(crate) struct ContextTracker {
-    in_flight_session: Option<String>,
-    latest: Option<buzz_core::agent_turn_metric::ContextUsage>,
-}
-
-impl ContextTracker {
-    /// Start a turn for `session_id`, discarding any previous snapshot.
-    pub(crate) fn begin_turn(&mut self, session_id: &str) {
-        self.in_flight_session = Some(session_id.to_string());
-        self.latest = None;
-    }
-
-    /// Record `used`/`window` for `session_id`; a zero window means unknown.
-    pub(crate) fn record(&mut self, session_id: &str, used: u64, window: u64) {
-        if window > 0 && self.in_flight_session.as_deref() == Some(session_id) {
-            self.latest = Some(buzz_core::agent_turn_metric::ContextUsage {
-                used_tokens: used,
-                window_tokens: window,
-            });
-        }
-    }
-
-    /// Drain the snapshot and end the turn.
-    pub(crate) fn take(&mut self) -> Option<buzz_core::agent_turn_metric::ContextUsage> {
-        self.in_flight_session = None;
-        self.latest.take()
     }
 }
 
@@ -489,9 +452,7 @@ impl StandardUsageTracker {
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
-            tools: None,
-            skills: None,
-            context: None,
+            activity: Default::default(),
         })
     }
 }
@@ -900,9 +861,7 @@ impl UsageTracker {
                 // The folded identity is written in take() — use a placeholder
                 // here and replace it before returning the record.
                 pricing_identity: None,
-                tools: None,
-                skills: None,
-                context: None,
+                activity: Default::default(),
             });
         } else if self.in_flight_session.is_none() {
             // Not in-flight at all: advance the committed baseline so the next
@@ -2144,9 +2103,7 @@ mod tests {
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
-            tools: None,
-            skills: None,
-            context: None,
+            activity: Default::default(),
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
@@ -2188,9 +2145,7 @@ mod tests {
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
-            tools: None,
-            skills: None,
-            context: None,
+            activity: Default::default(),
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);

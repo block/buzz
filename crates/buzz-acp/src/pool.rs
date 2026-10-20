@@ -5389,9 +5389,9 @@ async fn publish_agent_turn_metric(
         delta_reliable: usage.delta_reliable,
         stop_reason,
         pricing_identity: usage.pricing_identity.clone(),
-        tools: usage.tools.clone(),
-        skills: usage.skills.clone(),
-        context: usage.context,
+        tools: usage.activity.tools.clone(),
+        skills: usage.activity.skills.clone(),
+        context: usage.activity.context,
     };
     let ciphertext = match buzz_core::agent_turn_metric::encrypt_agent_turn_metric(
         &ctx.agent_keys,
@@ -10100,9 +10100,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
-            tools: None,
-            skills: None,
-            context: None,
+            activity: Default::default(),
         };
         // owner_pubkey = None → early return, no panic.
         publish_agent_turn_metric(
@@ -10122,8 +10120,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     fn usage_null_record_payload_has_no_token_fields_and_validates() {
         use buzz_core::agent_turn_metric::{AgentTurnMetricPayload, ContextUsage};
         let mut usage = crate::usage::TurnUsage::tokenless("sess-1".to_string());
-        usage.tools = Some([("shell".to_string(), 2)].into());
-        usage.context = Some(ContextUsage {
+        usage.activity.tools = Some([("shell".to_string(), 2)].into());
+        usage.activity.context = Some(ContextUsage {
             used_tokens: 10,
             window_tokens: 100,
         });
@@ -10141,9 +10139,9 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             delta_reliable: usage.delta_reliable,
             stop_reason: None,
             pricing_identity: None,
-            tools: usage.tools.clone(),
+            tools: usage.activity.tools.clone(),
             skills: None,
-            context: usage.context,
+            context: usage.activity.context,
         };
         payload.validate().expect("usage-null payload is valid");
         let json = serde_json::to_value(&payload).unwrap();
@@ -10180,9 +10178,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
-            tools: None,
-            skills: None,
-            context: None,
+            activity: Default::default(),
         };
         // Will try to publish and fail (no real relay) but must not panic.
         publish_agent_turn_metric(
@@ -10223,9 +10219,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
-            tools: None,
-            skills: None,
-            context: None,
+            activity: Default::default(),
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
         publish_agent_turn_metric(
@@ -10266,9 +10260,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
-            tools: None,
-            skills: None,
-            context: None,
+            activity: Default::default(),
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
         publish_agent_turn_metric(
@@ -10306,9 +10298,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
-            tools: None,
-            skills: None,
-            context: None,
+            activity: Default::default(),
         };
 
         let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
@@ -10361,9 +10351,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             cumulative_cache_write_tokens: None,
             model: None,
             pricing_identity: None,
-            tools: None,
-            skills: None,
-            context: None,
+            activity: Default::default(),
         };
 
         let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);

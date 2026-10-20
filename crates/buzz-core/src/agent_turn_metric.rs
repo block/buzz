@@ -173,9 +173,8 @@ pub struct AgentTurnMetricPayload {
     pub pricing_identity: Option<PricingIdentity>,
 
     /// Tool calls made this turn, keyed by tool name. Omitted when no tool
-    /// calls were observed. At most [`MAX_TURN_METRIC_NAMES`] entries, each
-    /// name at most [`MAX_TURN_METRIC_NAME_BYTES`] bytes; overflow is folded
-    /// into `"_other"`.
+    /// calls were observed. Publishers bound the map and fold overflow into
+    /// `"_other"`; consumers must not reject the event over it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<BTreeMap<String, u32>>,
 
@@ -197,14 +196,10 @@ pub struct AgentTurnMetricPayload {
 pub struct ContextUsage {
     /// Tokens currently occupying the context window.
     pub used_tokens: u64,
-    /// Total context window size in tokens; always greater than zero.
+    /// Total context window size in tokens; publishers send it only when
+    /// greater than zero.
     pub window_tokens: u64,
 }
-
-/// Maximum distinct entries in `tools` / `skills`.
-pub const MAX_TURN_METRIC_NAMES: usize = 64;
-/// Maximum byte length of a `tools` / `skills` key.
-pub const MAX_TURN_METRIC_NAME_BYTES: usize = 128;
 
 fn default_delta_reliable() -> bool {
     true
@@ -226,23 +221,6 @@ impl AgentTurnMetricPayload {
                 }
             }
             Ok(())
-        }
-        for (field, map) in [("tools", &self.tools), ("skills", &self.skills)] {
-            if let Some(m) = map {
-                if m.len() > MAX_TURN_METRIC_NAMES
-                    || m.keys()
-                        .any(|k| k.is_empty() || k.len() > MAX_TURN_METRIC_NAME_BYTES)
-                {
-                    return Err(ObserverPayloadError::InvalidPayload(format!(
-                        "{field} exceeds {MAX_TURN_METRIC_NAMES} entries or has an empty/over-{MAX_TURN_METRIC_NAME_BYTES}-byte name"
-                    )));
-                }
-            }
-        }
-        if self.context.is_some_and(|c| c.window_tokens == 0) {
-            return Err(ObserverPayloadError::InvalidPayload(
-                "context.windowTokens must be greater than zero".into(),
-            ));
         }
         if let Some(t) = &self.turn {
             check_cost(t.cost_usd, "turn.costUsd")?;
@@ -382,62 +360,37 @@ mod tests {
     }
 
     #[test]
-    fn tools_and_skills_optional_bounded_and_backward_compatible() {
+    fn activity_fields_optional_and_never_fail_closed() {
         let old: AgentTurnMetricPayload =
             serde_json::from_str(r#"{"harness":"goose","timestamp":"t"}"#).unwrap();
-        assert!(old.tools.is_none() && old.skills.is_none());
-        assert!(!serde_json::to_string(&old).unwrap().contains("tools"));
+        assert!(old.tools.is_none() && old.skills.is_none() && old.context.is_none());
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("tools") && !json.contains("context"));
 
         let mut p = sample_payload();
         p.tools = Some(BTreeMap::from([("Read".to_string(), 2)]));
         p.skills = Some(BTreeMap::from([("git".to_string(), 1)]));
-        let json = serde_json::to_string(&p).unwrap();
-        assert!(json.contains(r#""tools":{"Read":2}"#));
-        assert_eq!(
-            serde_json::from_str::<AgentTurnMetricPayload>(&json).unwrap(),
-            p
-        );
-        assert!(p.validate().is_ok());
-
-        p.skills = Some(
-            (0..=MAX_TURN_METRIC_NAMES)
-                .map(|i| (i.to_string(), 1))
-                .collect(),
-        );
-        assert!(p.validate().is_err());
-        p.skills = None;
-        p.tools = Some(BTreeMap::from([(
-            "x".repeat(MAX_TURN_METRIC_NAME_BYTES + 1),
-            1,
-        )]));
-        assert!(p.validate().is_err());
-    }
-
-    #[test]
-    fn context_optional_round_trips_and_rejects_zero_window() {
-        let old: AgentTurnMetricPayload =
-            serde_json::from_str(r#"{"harness":"goose","timestamp":"t"}"#).unwrap();
-        assert!(old.context.is_none());
-        assert!(!serde_json::to_string(&old).unwrap().contains("context"));
-
-        let mut p = sample_payload();
         p.context = Some(ContextUsage {
             used_tokens: 50_000,
             window_tokens: 200_000,
         });
         let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains(r#""tools":{"Read":2}"#));
         assert!(json.contains(r#""context":{"usedTokens":50000,"windowTokens":200000}"#));
         assert_eq!(
             serde_json::from_str::<AgentTurnMetricPayload>(&json).unwrap(),
             p
         );
-        assert!(p.validate().is_ok());
 
+        // Out-of-bounds analytics fields must not drop the event's token/cost
+        // data: decrypt runs validate() fail-closed.
+        p.tools = Some((0..200).map(|i| (i.to_string(), 1)).collect());
+        p.skills = Some(BTreeMap::from([(String::new(), 1)]));
         p.context = Some(ContextUsage {
             used_tokens: 1,
             window_tokens: 0,
         });
-        assert!(p.validate().is_err());
+        assert!(p.validate().is_ok());
     }
 
     #[test]

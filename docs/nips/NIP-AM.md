@@ -128,14 +128,16 @@ The `content` field decrypts to a UTF-8 JSON object:
 
   // Tool calls and skill invocations during this turn, as name -> count.
   // Both OPTIONAL; omitted (not empty) when no tool calls were observed.
-  // At most 64 distinct names, each at most 128 bytes; publishers fold any
-  // overflow into the key "_other". Consumers MUST ignore them if absent.
+  // Publishers SHOULD send at most 64 distinct names, each at most 128 bytes,
+  // folding overflow into the key "_other". Consumers MUST NOT reject the
+  // event over these fields; they MUST ignore them if absent or malformed.
   "tools":  { "Read": 3, "shell": 1 },
   "skills": { "git": 1 },
 
   // Context-window occupancy at the last report during this turn. OPTIONAL;
-  // omitted when the harness reports no window size. windowTokens > 0.
-  // Percent used = usedTokens / windowTokens. Consumers MUST ignore if absent.
+  // omitted when the harness reports no window size. Publishers send
+  // windowTokens > 0; consumers MUST ignore the field (not the event) when it
+  // is absent or windowTokens is 0. Percent used = usedTokens / windowTokens.
   "context": { "usedTokens": 50000, "windowTokens": 200000 }
 }
 ```

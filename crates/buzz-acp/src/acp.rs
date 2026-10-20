@@ -221,7 +221,8 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Tool calls / skill invocations seen this turn (NIP-AM `tools`/`skills`).
     tool_counts: crate::tool_counts::ToolCallCounter,
-    context_usage: crate::usage::ContextTracker,
+    /// Context-window occupancy at the last report this turn (NIP-AM `context`).
+    context_usage: Option<buzz_core::agent_turn_metric::ContextUsage>,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
     /// Ask Claude Code for summarized thinking on `session/new`. Opus omits
@@ -637,7 +638,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             tool_counts: Default::default(),
-            context_usage: Default::default(),
+            context_usage: None,
             standard_adapter,
             claude_thinking_summaries,
         })
@@ -879,7 +880,7 @@ impl AcpClient {
         self.goose_usage.begin_turn(session_id);
         self.standard_usage.begin_turn(session_id);
         self.tool_counts.begin_turn();
-        self.context_usage.begin_turn(session_id);
+        self.context_usage = None;
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -980,21 +981,37 @@ impl AcpClient {
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
         let (tools, skills) = self.tool_counts.take();
-        let context = self.context_usage.take();
+        let activity = crate::usage::TurnActivity {
+            tools,
+            skills,
+            context: self.context_usage.take(),
+        };
         let mut usage = match goose_usage.or(standard_usage) {
             Some(usage) => usage,
             // No tokens reported (e.g. codex-acp or pi): publish a usage-null
             // record only when other turn data exists. It never touches the
             // token trackers' baselines or sequence numbers.
-            None if tools.is_some() || skills.is_some() || context.is_some() => {
-                TurnUsage::tokenless(in_flight_session?)
-            }
+            None if !activity.is_empty() => TurnUsage::tokenless(in_flight_session?),
             None => return None,
         };
-        usage.tools = tools;
-        usage.skills = skills;
-        usage.context = context;
+        usage.activity = activity;
         Some(usage)
+    }
+
+    /// Whether a `session/update` belongs to the in-flight turn's session.
+    fn is_in_flight(&self, session_id: Option<&str>) -> bool {
+        session_id.is_some_and(|id| self.standard_usage.in_flight_session() == Some(id))
+    }
+
+    /// Record a context-window snapshot for the in-flight turn; a zero window
+    /// means unknown and other sessions are ignored. Latest report wins.
+    fn record_context(&mut self, session_id: &str, used: u64, window: u64) {
+        if window > 0 && self.is_in_flight(Some(session_id)) {
+            self.context_usage = Some(buzz_core::agent_turn_metric::ContextUsage {
+                used_tokens: used,
+                window_tokens: window,
+            });
+        }
     }
 
     /// Notify the usage tracker that buzz-acp just spawned a new session.
@@ -1865,7 +1882,9 @@ impl AcpClient {
                 false
             }
             "tool_call" => {
-                self.tool_counts.observe(update);
+                if self.is_in_flight(msg["params"]["sessionId"].as_str()) {
+                    self.tool_counts.observe(update, true);
+                }
                 let title = update
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -1878,7 +1897,9 @@ impl AcpClient {
                 true
             }
             "tool_call_update" => {
-                self.tool_counts.observe(update);
+                if self.is_in_flight(msg["params"]["sessionId"].as_str()) {
+                    self.tool_counts.observe(update, false);
+                }
                 let tool_id = update
                     .get("toolCallId")
                     .and_then(|v| v.as_str())
@@ -1978,7 +1999,7 @@ impl AcpClient {
             msg.pointer("/params/update/size")
                 .and_then(serde_json::Value::as_u64),
         ) {
-            self.context_usage.record(session_id, used, size);
+            self.record_context(session_id, used, size);
         }
         if self.standard_adapter != Some(StandardAdapterKind::Claude) {
             return;
@@ -2026,11 +2047,7 @@ impl AcpClient {
                         cached = payload.accumulated_cached_input_tokens,
                         "goose usage update"
                     );
-                    self.context_usage.record(
-                        &notif.session_id,
-                        payload.used,
-                        payload.context_limit,
-                    );
+                    self.record_context(&notif.session_id, payload.used, payload.context_limit);
                     self.goose_usage.record(&notif.session_id, payload);
                 }
             }
@@ -5040,8 +5057,18 @@ sleep 1"#,
         use serde_json::json;
         let mut client = spawn_inert_client().await;
         client.goose_usage.begin_turn("s1");
+        client.standard_usage.begin_turn("s1");
         client.tool_counts.begin_turn();
+        // Another session's tool call is not this turn's.
+        let mut other = tool_update(
+            serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"o","title":"shell"}),
+        );
+        other["params"]["sessionId"] = "other".into();
+        client.handle_session_update(&other);
         for u in [
+            // An update for a call started before this turn (e.g. cancelled) is not counted.
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"stale","status":"cancelled",
+                "_meta":{"claudeCode":{"toolName":"Bash"}}}),
             json!({"sessionUpdate":"tool_call","toolCallId":"a","title":"Read src/x.rs","kind":"read",
                 "_meta":{"claudeCode":{"toolName":"Read"}}}),
             json!({"sessionUpdate":"tool_call_update","toolCallId":"a","status":"completed"}),
@@ -5055,17 +5082,18 @@ sleep 1"#,
         client.handle_goose_usage_update(&goose_usage_update_msg("s1", 10, 5, None));
         let usage = client.take_turn_usage().expect("usage");
         assert_eq!(
-            usage.tools.unwrap(),
+            usage.activity.tools.unwrap(),
             [("Read".into(), 1), ("load_skill".into(), 2)].into()
         );
-        assert_eq!(usage.skills.unwrap(), [("git".into(), 1)].into());
+        assert_eq!(usage.activity.skills.unwrap(), [("git".into(), 1)].into());
 
         // Next turn starts clean: counts never leak.
         client.goose_usage.begin_turn("s1");
+        client.standard_usage.begin_turn("s1");
         client.tool_counts.begin_turn();
         client.handle_goose_usage_update(&goose_usage_update_msg("s1", 20, 9, None));
         let usage = client.take_turn_usage().expect("usage");
-        assert!(usage.tools.is_none() && usage.skills.is_none());
+        assert!(usage.activity.tools.is_none() && usage.activity.skills.is_none());
     }
 
     fn codex_style_turn(
@@ -5077,7 +5105,7 @@ sleep 1"#,
         client.goose_usage.begin_turn(session);
         client.standard_usage.begin_turn(session);
         client.tool_counts.begin_turn();
-        client.context_usage.begin_turn(session);
+        client.standard_usage.begin_turn(session);
         if with_tool {
             client.handle_session_update(&tool_update(serde_json::json!({
                 "sessionUpdate":"tool_call","toolCallId":"a","title":"Tool: shell","kind":"execute"
@@ -5106,8 +5134,8 @@ sleep 1"#,
             (None, None),
             "no fabricated token counts"
         );
-        assert_eq!(usage.tools.unwrap(), [("shell".into(), 1)].into());
-        assert_eq!(usage.context.unwrap().used_tokens, 50_000);
+        assert_eq!(usage.activity.tools.unwrap(), [("shell".into(), 1)].into());
+        assert_eq!(usage.activity.context.unwrap().used_tokens, 50_000);
         assert!(client.take_turn_usage().is_none(), "drained");
     }
 
@@ -5237,18 +5265,18 @@ sleep 1"#,
             client.standard_adapter = Some(adapter);
             client.goose_usage.begin_turn("s1");
             client.standard_usage.begin_turn("s1");
-            client.context_usage.begin_turn("s1");
+            client.standard_usage.begin_turn("s1");
             client.handle_session_update(&standard_context_update("s1"));
             // Another session's report is ignored.
             client.handle_session_update(&standard_context_update("other"));
             client.handle_goose_usage_update(&goose_usage_update_msg("s1", 10, 5, None));
             // Latest snapshot wins: goose reported used = 15.
             let usage = client.take_turn_usage().expect("usage");
-            assert_eq!(usage.context, want(15));
+            assert_eq!(usage.activity.context, want(15));
 
             // Next turn starts clean.
             client.goose_usage.begin_turn("s1");
-            client.context_usage.begin_turn("s1");
+            client.standard_usage.begin_turn("s1");
             let mut next = goose_usage_update_msg("s1", 20, 9, None);
             next["params"]["update"]
                 .as_object_mut()
@@ -5256,24 +5284,24 @@ sleep 1"#,
                 .remove("contextLimit");
             client.handle_goose_usage_update(&next);
             let usage = client.take_turn_usage().expect("usage");
-            assert!(usage.context.is_none());
+            assert!(usage.activity.context.is_none());
         }
 
         // Claude: a cost-only turn still carries the standard snapshot.
         let mut client = spawn_inert_client().await;
         client.standard_adapter = Some(StandardAdapterKind::Claude);
         client.standard_usage.begin_turn("s1");
-        client.context_usage.begin_turn("s1");
+        client.standard_usage.begin_turn("s1");
         client.handle_session_update(&standard_context_update("s1"));
         let usage = client.take_turn_usage().expect("cost-only usage");
-        assert_eq!(usage.context, want(50_000));
+        assert_eq!(usage.activity.context, want(50_000));
     }
 
     #[tokio::test]
     async fn context_unknown_when_window_absent() {
         let mut client = spawn_inert_client().await;
         client.goose_usage.begin_turn("s1");
-        client.context_usage.begin_turn("s1");
+        client.standard_usage.begin_turn("s1");
         // buzz-agent style: `used` but no `contextLimit`.
         let mut msg = goose_usage_update_msg("s1", 10, 5, None);
         msg["params"]["update"]
@@ -5282,7 +5310,7 @@ sleep 1"#,
             .remove("contextLimit");
         client.handle_goose_usage_update(&msg);
         let usage = client.take_turn_usage().expect("usage");
-        assert!(usage.context.is_none());
+        assert!(usage.activity.context.is_none());
     }
 
     #[tokio::test]
