@@ -702,3 +702,88 @@ fn apply_strips_mixed_case_effort_keys() {
 #[cfg(test)]
 #[path = "effort_cmd_tests.rs"]
 mod cmd_tests;
+
+#[test]
+fn acp_defaults_effort_reaches_launch_and_instance_override_wins() {
+    for id in ["codex", "claude"] {
+        let runtime = known_acp_runtime_exact(id).unwrap();
+        for effort in ["low", "medium", "high"] {
+            let global = env(&[(ACP_KEY, effort)]);
+            let mut agent = record();
+            let resolved = effort_launch_projection(
+                &agent,
+                Some(runtime),
+                &[],
+                None,
+                &global,
+                None,
+                &BTreeMap::new(),
+            );
+            assert_eq!(resolved.key, ACP_KEY);
+            assert_eq!(
+                resolved.value.as_deref(),
+                Some(effort),
+                "{id} global effort ignored"
+            );
+            agent.effort_level = Some("high".into());
+            let resolved = effort_launch_projection(
+                &agent,
+                Some(runtime),
+                &[],
+                None,
+                &global,
+                None,
+                &BTreeMap::new(),
+            );
+            assert_eq!(resolved.value.as_deref(), Some("high"));
+        }
+    }
+}
+
+#[test]
+fn explicit_profile_adapter_default_overrides_global_effort() {
+    let runtime = known_acp_runtime_exact("claude").unwrap();
+    let profiles = [persona("test-profile", env(&[(ACP_KEY, "default")]))];
+    let global = env(&[(ACP_KEY, "high")]);
+    let projected = effort_launch_projection(
+        &record(),
+        Some(runtime),
+        &profiles,
+        Some("test-profile"),
+        &global,
+        None,
+        &BTreeMap::new(),
+    );
+    assert_eq!(projected.value.as_deref(), Some("default"));
+}
+
+#[test]
+fn acp_transport_never_shadows_canonical_instance_effort() {
+    for id in ["codex", "claude"] {
+        let runtime = known_acp_runtime_exact(id).unwrap();
+        let mut agent = record();
+        agent.env_vars = env(&[(ACP_KEY, "low")]);
+        agent.effort_level = Some("high".into());
+        let projected = effort_launch_projection(
+            &agent,
+            Some(runtime),
+            &[],
+            None,
+            &env(&[(ACP_KEY, "medium")]),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(projected.value.as_deref(), Some("high"), "{id}");
+        agent.effort_level = None;
+        let projected = effort_launch_projection(
+            &agent,
+            Some(runtime),
+            &[],
+            None,
+            &env(&[(ACP_KEY, "medium")]),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(projected.value.as_deref(), Some("low"), "{id}");
+    }
+}

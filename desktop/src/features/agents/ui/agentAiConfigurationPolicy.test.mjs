@@ -183,3 +183,7 @@ test("entering Customize pins unresolved fields from the inherited pair", () => 
     { provider: "anthropic", model: "llama" },
   );
 });
+
+test("an explicit harness alone opens Customize rather than implying inheritance", () => {
+  assert.equal(initialAgentAiConfigurationMode({ runtime: "codex" }), "custom");
+});

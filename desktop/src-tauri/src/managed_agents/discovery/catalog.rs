@@ -72,8 +72,8 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_path: Some("~/.claude/settings.json"),
         config_file_format: Some("json"),
         supports_acp_native_config: false,
-        thinking_env_var: None,
-        effort_normalization: None, // claude: canonical routes through BUZZ_ACP_EFFORT_LEVEL (ACP startup)
+        thinking_env_var: Some("BUZZ_ACP_EFFORT_LEVEL"),
+        effort_normalization: None, // ACP advertises model-specific values; defaults share its startup transport.
         effort_accepted_values: None, // claude: adapter accepts any value over BUZZ_ACP_EFFORT_LEVEL
         max_tokens_env_var: None,
         context_limit_env_var: None,
@@ -107,8 +107,8 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_path: Some("~/.codex/config.toml"),
         config_file_format: Some("toml"),
         supports_acp_native_config: false,
-        thinking_env_var: None,
-        effort_normalization: None, // codex: canonical routes through BUZZ_ACP_EFFORT_LEVEL (ACP startup)
+        thinking_env_var: Some("BUZZ_ACP_EFFORT_LEVEL"),
+        effort_normalization: None, // ACP advertises model-specific values; defaults share its startup transport.
         effort_accepted_values: None, // codex: adapter accepts any value over BUZZ_ACP_EFFORT_LEVEL
         max_tokens_env_var: None,
         context_limit_env_var: None,

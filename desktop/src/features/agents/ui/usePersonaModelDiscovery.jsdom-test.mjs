@@ -15,10 +15,15 @@ const discovered = {
   models: [{ id: "claude-sonnet-5", name: "Sonnet", description: null }],
 };
 const calls = [];
+const requests = [];
+let discover = () => Promise.resolve(discovered);
 const tauriMock = {
-  invoke(command) {
+  invoke(command, args) {
     calls.push(command);
-    if (command === "discover_agent_models") return Promise.resolve(discovered);
+    if (command === "discover_agent_models") {
+      requests.push(args.input);
+      return discover();
+    }
     return Promise.reject(new Error(`unmocked Tauri command: ${command}`));
   },
   transformCallback() {
@@ -48,12 +53,16 @@ let container;
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
+  calls.length = 0;
+  requests.length = 0;
+  discover = () => Promise.resolve(discovered);
 });
 
 let labels = null;
-function Probe({ selectedRuntime }) {
+function Probe({ selectedRuntime, model }) {
   const { discoveredModelOptions } = usePersonaModelDiscovery({
     envVars,
+    model,
     isCustomProviderEditing: false,
     modelFieldVisible: true,
     open: true,
@@ -90,5 +99,61 @@ test("hook relabels discovered models when the runtime switches", async () => {
   assert.equal(
     calls.filter((command) => command === "discover_agent_models").length,
     1,
+  );
+});
+
+const pause = async () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  });
+async function modelRender(model) {
+  await act(async () =>
+    root.render(
+      React.createElement(Probe, { selectedRuntime: runtime("codex"), model }),
+    ),
+  );
+}
+function setupRoot() {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+}
+test("selected-model typing is debounced before native discovery", async () => {
+  setupRoot();
+  await modelRender("g");
+  await modelRender("gpt");
+  await modelRender("gpt-6-luna");
+  assert.equal(
+    requests.length,
+    0,
+    "typing must not immediately spawn native probes",
+  );
+  await pause();
+  assert.deepEqual(
+    requests.map((input) => input.model),
+    ["gpt-6-luna"],
+  );
+});
+test("a changed model waits for the active probe and skips superseded models", async () => {
+  setupRoot();
+  let finish;
+  discover = () =>
+    new Promise((resolve) => {
+      finish = resolve;
+    });
+  await modelRender("gpt-6-astra");
+  await pause();
+  assert.equal(requests.length, 1);
+  await modelRender("gpt-6-sol");
+  await pause();
+  await modelRender("gpt-6-luna");
+  await pause();
+  assert.equal(requests.length, 1, "at most one native probe may be in flight");
+  discover = () => Promise.resolve(discovered);
+  await act(async () => finish(discovered));
+  await pause();
+  assert.deepEqual(
+    requests.map((input) => input.model),
+    ["gpt-6-astra", "gpt-6-luna"],
   );
 });

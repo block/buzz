@@ -589,6 +589,7 @@ fn build_thinking_field(
     // and the on-disk config file):
     //   record native > canonical column > record legacy > ACP >
     //   persona > global > definition > config file.
+    // For ACP transport, the canonical column precedes record native.
     //
     // Every candidate is normalized through the runtime's declared contract
     // (`effort_norm`) before validity, precedence, override tracking, and the B
@@ -602,8 +603,8 @@ fn build_thinking_field(
         super::effort::normalize_effort(effort_norm, effort_accepted, raw)
     };
 
-    // Record tiers, split exactly as the projection resolves them: native env
-    // strictly above the canonical column, legacy env strictly below it.
+    // Normalize record tiers before applying the shared projection order.
+    // ACP transport is below canonical effort; real native keys remain above.
     let rec_native = thinking_env_var
         .and_then(|k| super::effort::get_ci(&record.env_vars, k))
         .and_then(|v| norm(v));
@@ -656,9 +657,14 @@ fn build_thinking_field(
         _ => acp_norm.as_deref(),
     };
 
+    let [record_first, record_second] = super::effort::record_effort_tiers(
+        thinking_env_var,
+        rec_native.as_deref(),
+        column.as_deref(),
+    );
     let tiers_list: &[(Option<&str>, ConfigOrigin)] = &[
-        (rec_native.as_deref(), ConfigOrigin::BuzzExplicit),
-        (column.as_deref(), ConfigOrigin::BuzzExplicit),
+        (record_first, ConfigOrigin::BuzzExplicit),
+        (record_second, ConfigOrigin::BuzzExplicit),
         (rec_legacy.as_deref(), ConfigOrigin::BuzzExplicit),
         (acp_for_list, ConfigOrigin::AcpConfigOption),
         (pers.as_deref(), ConfigOrigin::PersonaDefault),

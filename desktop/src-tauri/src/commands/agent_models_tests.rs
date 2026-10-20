@@ -1034,3 +1034,20 @@ fn stable_current_value_outranks_unstable_current_model_id() {
 
     assert_eq!(response.agent_default_model.as_deref(), Some("opus[1m]"));
 }
+
+#[test]
+fn stable_models_preserve_display_label_description_and_effort_descriptor() {
+    let mut raw = claude_code_models_raw();
+    raw["stable"]["configOptions"][0]["options"][2]["displayName"] =
+        serde_json::json!("Haiku display");
+    let effort = serde_json::json!({"id": "effort", "category": "thought_level", "options": [{"value": "default"}, {"value": "medium"}]});
+    raw["stable"]["effortOption"] = effort.clone();
+    let response = normalize_agent_models(&raw, Some("haiku".into()));
+    let haiku = response.models.iter().find(|m| m.id == "haiku").unwrap();
+    assert_eq!(haiku.name.as_deref(), Some("Haiku display"));
+    assert_eq!(
+        haiku.description.as_deref(),
+        Some("Haiku 4.5 · Fastest for quick answers · $1/$5 per Mtok")
+    );
+    assert_eq!(response.effort_option, Some(effort));
+}

@@ -280,6 +280,47 @@ pub(crate) fn dangling_harness_display(id: &str) -> String {
     format!("harness (deleted): {id}")
 }
 
+/// Resolve the global harness only for records that inherit it. This is a
+/// transient projection: never persist it, or a future default change would
+/// become hidden behind yesterday's resolved runtime.
+pub(crate) fn record_with_global_runtime(
+    record: &crate::managed_agents::types::ManagedAgentRecord,
+    personas: &[crate::managed_agents::types::AgentDefinition],
+    global: &crate::managed_agents::GlobalAgentConfig,
+) -> crate::managed_agents::types::ManagedAgentRecord {
+    let mut resolved = record.clone();
+    let pinned = record
+        .agent_command_override
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let persona_runtime = record
+        .persona_id
+        .as_deref()
+        .and_then(|id| personas.iter().find(|persona| persona.id == id))
+        .and_then(|persona| persona.runtime.as_deref());
+    if !pinned && record.runtime.is_none() && persona_runtime.is_none() {
+        resolved.runtime = global
+            .preferred_runtime
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+    }
+    resolved
+}
+
+/// Command resolution with the same live global fallback as spawn.
+pub(crate) fn record_agent_command_with_global(
+    record: &crate::managed_agents::types::ManagedAgentRecord,
+    personas: &[crate::managed_agents::types::AgentDefinition],
+    global: &crate::managed_agents::GlobalAgentConfig,
+) -> String {
+    record_agent_command(
+        &record_with_global_runtime(record, personas, global),
+        personas,
+    )
+}
+
 /// Spawn-time variant of `record_agent_command` that returns a typed error when
 /// a record's `runtime` id or persona's `runtime` id is set but unresolvable
 /// (definition deleted after agent was created). Returns `Err("DANGLING_HARNESS_ID:<id>")`.
@@ -1258,3 +1299,6 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod global_runtime_tests;

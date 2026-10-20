@@ -4,11 +4,10 @@
 //! around the `global_config` module with the standard save-time validation.
 //!
 //! `set_global_agent_config` additionally auto-restarts any running local agent
-//! whose effective env changes under the new global config — including agents
+//! whose effective launch changes under the new global config — including agents
 //! that were in setup-listener mode (`NotReady`) but become `Ready`, and agents
-//! already running whose provider/model/env vars change.  This is the only
-//! honest way to deliver new env vars to a running process — the env is baked
-//! at spawn time and cannot be mutated in place.
+//! already running whose command, args, or provider/model/env vars change.
+//! These launch settings are baked at spawn time and require a restart.
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -17,10 +16,10 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
-        load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-        resolve_effective_agent_env, save_global_agent_config, save_managed_agents,
-        stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
-        AgentReadiness, BackendKind, GlobalAgentConfig,
+        load_global_agent_config, load_managed_agents, load_personas,
+        record_agent_command_with_global, resolve_effective_agent_env, save_global_agent_config,
+        save_managed_agents, stop_managed_agent_process, sync_managed_agent_processes,
+        validate_global_config, AgentReadiness, BackendKind, GlobalAgentConfig,
     },
 };
 
@@ -153,8 +152,7 @@ enum RestartOutcome {
 /// - its readiness transitions `NotReady → Ready` (was blocked on missing
 ///   provider/model key, now unblocked), OR
 /// - it was already `Ready`, its process is currently alive, and its effective
-///   env changed (provider, model, or env var update that needs a restart to
-///   take effect, since env is baked at spawn time).
+///   command, args, or env changed (launch settings are baked at spawn time).
 fn collect_restart_candidates(
     app: &AppHandle,
     old_global: &GlobalAgentConfig,
@@ -198,22 +196,31 @@ fn collect_restart_candidates(
             if !has_live_runtime {
                 return false;
             }
-            let effective_cmd = record_agent_command(record, &all_personas);
-            let runtime_meta = known_acp_runtime(&effective_cmd);
-            let old_effective =
-                resolve_effective_agent_env(record, &all_personas, runtime_meta, old_global);
-            let new_effective =
-                resolve_effective_agent_env(record, &all_personas, runtime_meta, new_global);
+            let old_cmd = record_agent_command_with_global(record, &all_personas, old_global);
+            let new_cmd = record_agent_command_with_global(record, &all_personas, new_global);
+            let old_effective = resolve_effective_agent_env(
+                record,
+                &all_personas,
+                known_acp_runtime(&old_cmd),
+                old_global,
+            );
+            let new_effective = resolve_effective_agent_env(
+                record,
+                &all_personas,
+                known_acp_runtime(&new_cmd),
+                new_global,
+            );
             let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
             let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
             // For a Ready+running agent: the process must be alive now and the
-            // process-env map must differ.  The alive check avoids queuing a
+            // effective launch must differ. The alive check avoids queuing a
             // restart for a process that already exited between the pre-filter
             // scan and Phase 2.  NotReady→Ready bypasses the alive check
             // because Phase 2 will stop-then-start unconditionally.
-            let env_changed = old_ready && old_effective.env != new_effective.env;
+            let launch_changed = old_ready
+                && effective_launch_changed(record, &all_personas, old_global, new_global);
 
-            should_restart_on_config_change(old_ready, new_ready, env_changed)
+            should_restart_on_config_change(old_ready, new_ready, launch_changed)
         })
         .map(|r| r.pubkey.clone())
         .collect();
@@ -309,17 +316,31 @@ async fn restart_local_agent_on_config_change(
         //
         // Reuse personas_snapshot from Phase 1 — avoids loading personas again
         // per agent when the save-command personas haven't changed.
-        let effective_cmd = record_agent_command(record, &personas_owned);
-        let runtime_meta = known_acp_runtime(&effective_cmd);
-        let old_effective =
-            resolve_effective_agent_env(record, &personas_owned, runtime_meta, &old_global_clone);
-        let new_effective =
-            resolve_effective_agent_env(record, &personas_owned, runtime_meta, &new_global_clone);
+        let old_cmd = record_agent_command_with_global(record, &personas_owned, &old_global_clone);
+        let new_cmd = record_agent_command_with_global(record, &personas_owned, &new_global_clone);
+        let old_effective = resolve_effective_agent_env(
+            record,
+            &personas_owned,
+            known_acp_runtime(&old_cmd),
+            &old_global_clone,
+        );
+        let new_effective = resolve_effective_agent_env(
+            record,
+            &personas_owned,
+            known_acp_runtime(&new_cmd),
+            &new_global_clone,
+        );
         let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
         let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
         // Under lock, the alive check was already done above via process_is_running.
-        let env_changed = old_ready && old_effective.env != new_effective.env;
-        if !should_restart_on_config_change(old_ready, new_ready, env_changed) {
+        let launch_changed = old_ready
+            && effective_launch_changed(
+                record,
+                &personas_owned,
+                &old_global_clone,
+                &new_global_clone,
+            );
+        if !should_restart_on_config_change(old_ready, new_ready, launch_changed) {
             return Err(format!(
                 "agent {pubkey_owned} restart condition no longer valid under lock"
             ));
@@ -397,8 +418,20 @@ fn persist_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), 
     save_managed_agents(app, &records)
 }
 
+/// Compare the same complete descriptor used by the spawn path. In particular,
+/// two custom harnesses can share a command/env while differing only in args.
+fn effective_launch_changed(
+    record: &crate::managed_agents::ManagedAgentRecord,
+    personas: &[crate::managed_agents::AgentDefinition],
+    old_global: &GlobalAgentConfig,
+    new_global: &GlobalAgentConfig,
+) -> bool {
+    crate::managed_agents::resolve_effective_harness_descriptor(record, personas, old_global)
+        != crate::managed_agents::resolve_effective_harness_descriptor(record, personas, new_global)
+}
+
 /// Pure predicate: should an agent be restarted given resolved readiness and
-/// effective-env snapshots?
+/// effective-launch snapshots?
 ///
 /// Extracted so the restart decision logic can be unit-tested without an
 /// `AppHandle` or `EffectiveAgentEnv`.  Both `collect_restart_candidates` and
@@ -407,7 +440,7 @@ fn persist_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), 
 ///
 /// Conditions:
 /// - `NotReady → Ready`: blocked on missing key, now unblocked.
-/// - `Ready + env changed`: running with stale env; env is baked at spawn time.
+/// - `Ready + launch changed`: running with stale command, args, or env.
 ///   Also covers `Ready → NotReady` when the env changed (key removed).
 ///
 /// **Readiness invariant (T,F,F):** For `buzz-agent` and `goose`, readiness is
@@ -419,13 +452,128 @@ fn persist_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), 
 /// restart would not repair the missing auth token. If the binary disappears,
 /// the process would already be dead and the PID alive-check in the candidate
 /// scan would have excluded it.
-fn should_restart_on_config_change(old_ready: bool, new_ready: bool, env_changed: bool) -> bool {
-    (!old_ready && new_ready) || (old_ready && env_changed)
+fn should_restart_on_config_change(old_ready: bool, new_ready: bool, launch_changed: bool) -> bool {
+    (!old_ready && new_ready) || (old_ready && launch_changed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::should_restart_on_config_change;
+
+    fn record_with(
+        runtime: Option<&str>,
+        persona_id: Option<&str>,
+        override_cmd: Option<&str>,
+    ) -> crate::managed_agents::ManagedAgentRecord {
+        crate::managed_agents::ManagedAgentRecord {
+            session_policy: Default::default(),
+            description: None,
+            pubkey: String::new(),
+            name: "r".to_string(),
+            persona_id: persona_id.map(str::to_string),
+            private_key_nsec: String::new(),
+            auth_tag: None,
+            relay_url: String::new(),
+            avatar_url: None,
+            acp_command: String::new(),
+            agent_command: String::new(),
+            agent_command_override: override_cmd.map(str::to_string),
+            agent_args: vec![],
+            mcp_command: String::new(),
+            turn_timeout_seconds: 0,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: 1,
+            system_prompt: None,
+            model: None,
+            provider: None,
+            persona_source_version: None,
+            start_on_app_launch: false,
+            auto_restart_on_config_change: true,
+            runtime_pid: None,
+            backend: Default::default(),
+            backend_agent_id: None,
+            provider_policy_pending: false,
+            provider_binary_path: None,
+            team_id: None,
+            persona_team_dir: None,
+            persona_name_in_team: None,
+            env_vars: std::collections::BTreeMap::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_started_at: None,
+            last_stopped_at: None,
+            last_exit_code: None,
+            last_error: None,
+            last_error_code: None,
+            respond_to: Default::default(),
+            respond_to_allowlist: vec![],
+            display_name: None,
+            slug: None,
+            runtime: runtime.map(str::to_string),
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            shared: false,
+            source_team: None,
+            source_team_persona_slug: None,
+            catalog_source: None,
+            team_catalog_source: None,
+            definition_respond_to: None,
+            definition_respond_to_allowlist: Vec::new(),
+            definition_parallelism: None,
+            relay_mesh: None,
+            effort_level: None,
+        }
+    }
+
+    #[test]
+    fn args_only_global_harness_change_restarts_inherited_agents() {
+        use crate::managed_agents::custom_harnesses::{
+            registry_test_lock, warm_harness_registry_from_dir,
+        };
+        use crate::managed_agents::{resolve_effective_harness_descriptor, GlobalAgentConfig};
+        let _lock = registry_test_lock();
+        let dir = tempfile::tempdir().unwrap();
+        for (id, arg) in [("restart-a", "a"), ("restart-b", "b")] {
+            std::fs::write(
+                dir.path().join(format!("{id}.json")),
+                serde_json::json!({
+                    "id": id, "label": id, "command": "custom-acp", "args": [arg]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        warm_harness_registry_from_dir(Some(dir.path()));
+        let old = GlobalAgentConfig {
+            preferred_runtime: Some("restart-a".into()),
+            ..Default::default()
+        };
+        let new = GlobalAgentConfig {
+            preferred_runtime: Some("restart-b".into()),
+            ..Default::default()
+        };
+        let mut record = record_with(None, None, None);
+        let a = resolve_effective_harness_descriptor(&record, &[], &old).unwrap();
+        let b = resolve_effective_harness_descriptor(&record, &[], &new).unwrap();
+        assert_eq!(a.command, b.command);
+        assert_eq!(a.env, b.env);
+        assert_ne!(a.args, b.args);
+        assert!(super::effective_launch_changed(&record, &[], &old, &new));
+        assert!(should_restart_on_config_change(
+            true,
+            true,
+            super::effective_launch_changed(&record, &[], &old, &new)
+        ));
+        // Explicit instance args keep the effective launch unchanged.
+        record.agent_args = vec!["pinned".into()];
+        assert!(!super::effective_launch_changed(&record, &[], &old, &new));
+        record.agent_args.clear();
+        record.runtime = Some("restart-a".into());
+        assert!(!super::effective_launch_changed(&record, &[], &old, &new));
+        warm_harness_registry_from_dir(None);
+    }
 
     /// Running agent (Ready) whose effective env changed → restart candidate.
     #[test]

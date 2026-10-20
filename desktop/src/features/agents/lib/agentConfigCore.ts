@@ -71,7 +71,8 @@ export type AgentConfigFieldDescriptor =
       optionSource:
         | "buzzAgentCatalog"
         | "legacyProviderModelCatalog"
-        | "harnessNative";
+        | "harnessNative"
+        | "acpSession";
       currentPersistence:
         | EnvVarPersistence
         | AcpConfigOptionPersistence
@@ -206,29 +207,39 @@ export function deriveAgentConfigFieldModel({
   if (runtime?.thinkingEnvVar) {
     // targetApplication is always the runtime's native key — how the harness
     // should receive effort. currentPersistence (where the value lives today)
-    // is scope-split until PR 2.7 migrates per-agent Goose/Claude:
+    // is scope-split for non-ACP runtimes pending the per-agent migration:
     //   - global/onboarding: native key, matching the launch projection's global
     //     tier (native-only; the legacy alias is record/persona scope), so a
     //     selection actually reaches the spawn rather than persisting a key the
     //     projection ignores. For buzz-agent this IS BUZZ_AGENT_THINKING_EFFORT.
-    //   - definition/instance: still the generic legacy BUZZ_AGENT_THINKING_EFFORT
+    //   - non-ACP definition/instance: generic BUZZ_AGENT_THINKING_EFFORT
     //     row, unchanged pending the per-agent migration.
     const nativeKey = runtime.thinkingEnvVar;
+    // The ACP transport key marks model-specific session options. Persist it
+    // natively in every scope; retain read compatibility with legacy profiles.
+    const isAcpSession = nativeKey === "BUZZ_ACP_EFFORT_LEVEL";
     const persistenceKey =
-      scope === "global" || scope === "onboarding"
+      scope === "global" || scope === "onboarding" || isAcpSession
         ? nativeKey
         : BUZZ_AGENT_THINKING_EFFORT;
     fields.push({
       kind: "effort",
-      optionSource:
-        runtime.id === "buzz-agent" ? "buzzAgentCatalog" : "harnessNative",
+      optionSource: isAcpSession
+        ? "acpSession"
+        : runtime.id === "buzz-agent"
+          ? "buzzAgentCatalog"
+          : "harnessNative",
       currentPersistence: {
         kind: "envVar",
         key: persistenceKey,
       },
       targetApplication: { kind: "envVar", key: nativeKey },
       render: "control",
-      value: valueFromEnv(config, persistenceKey),
+      value:
+        valueFromEnv(config, persistenceKey) ??
+        (isAcpSession && (scope === "definition" || scope === "instance")
+          ? valueFromEnv(config, BUZZ_AGENT_THINKING_EFFORT)
+          : null),
     });
   } else if (runtime?.id === "claude") {
     fields.push({
@@ -359,4 +370,17 @@ export function numericTuningPlaceholder(
   return inheritedValue
     ? `Inherit (${inheritedValue})`
     : "Inherit (agent default)";
+}
+
+/** Keys owned by an effort control, including migrated profile aliases. */
+export function effortPersistenceKeys(
+  field: Extract<AgentConfigFieldDescriptor, { kind: "effort" }> | undefined,
+): string[] {
+  if (field?.currentPersistence.kind !== "envVar") return [];
+  const keys = [field.currentPersistence.key];
+  if (field.targetApplication.kind === "envVar")
+    keys.push(field.targetApplication.key);
+  if (field.optionSource === "acpSession")
+    keys.push(BUZZ_AGENT_THINKING_EFFORT);
+  return [...new Set(keys)];
 }

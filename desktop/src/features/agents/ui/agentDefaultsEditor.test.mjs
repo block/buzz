@@ -160,14 +160,14 @@ globalThis.__TAURI_INTERNALS__ = {
 dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
 
 // ── Deferred imports ──────────────────────────────────────────────────────────
-let act, render, screen, cleanup, fireEvent, createElement;
+let act, render, screen, cleanup, fireEvent, createElement, waitFor;
 let AgentDefaultsEditor;
 let DefaultConfigStep;
 let QueryClient, QueryClientProvider;
 let acpRuntimesQueryKey, fromRawAcpRuntimeCatalogEntry;
 
 before(async () => {
-  ({ act, render, screen, cleanup, fireEvent } = await import(
+  ({ act, render, screen, cleanup, fireEvent, waitFor } = await import(
     "@testing-library/react"
   ));
   ({ createElement } = await import("react"));
@@ -266,12 +266,17 @@ async function settle() {
  * `${testId}-option-${value}`.
  */
 async function selectEffortOption(testId, value) {
-  const trigger = screen.getByTestId(testId);
+  const trigger = (await screen.findAllByTestId(testId)).find(
+    (element) => element.tagName === "BUTTON",
+  );
+  assert.ok(trigger, `missing button for ${testId}`);
+  await waitFor(() => assert.equal(trigger.disabled, false));
   await act(async () => {
     fireEvent.click(trigger);
   });
   await settle();
-  const option = screen.getByTestId(`${testId}-option-${value}`);
+  const option = await screen.findByTestId(`${testId}-option-${value}`);
+  await waitFor(() => assert.equal(option.disabled, false));
   await act(async () => {
     fireEvent.click(option);
   });
@@ -702,4 +707,160 @@ test("DefaultConfigStep: effort write→save→reread contract through the real 
     triggerRemount.textContent?.includes("Off"),
     `DefaultConfigStep trigger must show "Off" after fresh remount; got: "${triggerRemount.textContent}"`,
   );
+});
+
+function rawAcpRuntime(id) {
+  return {
+    ...rawGooseCatalogEntry(),
+    id,
+    label: id === "codex" ? "Codex" : "Claude Code",
+    command: id === "codex" ? "codex-acp" : "claude-agent-acp",
+    model_env_var: null,
+    provider_env_var: null,
+    thinking_env_var: "BUZZ_ACP_EFFORT_LEVEL",
+    effort_canonical_values: [],
+  };
+}
+const acpModels = {
+  codex: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+  claude: ["opus", "sonnet"],
+};
+function acpDiscovery({ input }) {
+  const id = input.agentCommand === "codex-acp" ? "codex" : "claude";
+  return Promise.resolve({
+    agentName: id,
+    agentVersion: "test",
+    supportsSwitching: true,
+    agentDefaultModel: acpModels[id][0],
+    selectedModel: input.model ?? null,
+    models: acpModels[id].map((id) => ({ id, name: id, description: null })),
+    effortOption: {
+      id: "effort",
+      options: [
+        "default",
+        "low",
+        "medium",
+        "high",
+        ...(input.model === "gpt-6-astra" ? ["ultra"] : []),
+      ].map((value) => ({ value })),
+    },
+  });
+}
+for (const [runtime, models] of Object.entries(acpModels)) {
+  for (const model of models) {
+    test(`ACP defaults: ${runtime}/${model} effort survives Save and fresh mount`, async () => {
+      const initial = {
+        preferred_runtime: runtime,
+        model,
+        provider: null,
+        env_vars: { BUZZ_ACP_EFFORT_LEVEL: "low" },
+      };
+      const handler = () =>
+        makeIpcHandler({
+          get_global_agent_config: () =>
+            Promise.resolve(storedCanonicalResponse ?? initial),
+          discover_agent_models: acpDiscovery,
+          discover_acp_providers: () =>
+            Promise.resolve([rawAcpRuntime(runtime)]),
+        });
+      globalThis.__TAURI_INTERNALS__.invoke = handler();
+      const mount = () => {
+        const client = makeQueryClient();
+        client.setQueryData(acpRuntimesQueryKey, [
+          fromRawAcpRuntimeCatalogEntry(rawAcpRuntime(runtime)),
+        ]);
+        return render(
+          withQueryClient(
+            client,
+            createElement(AgentDefaultsEditor, { layout: "flat" }),
+          ),
+        );
+      };
+      const view = mount();
+      await settle();
+      await settle();
+      assert.equal(saveCallCount, 0);
+      await selectEffortOption("global-agent-thinking-effort-select", "high");
+      assert.equal(saveCallCount, 0);
+      const save = screen.getByRole("button", { name: /Save defaults/i });
+      await waitFor(() => assert.equal(save.disabled, false));
+      await act(async () => fireEvent.click(save));
+      await settle();
+      assert.equal(saveCallCount, 1);
+      assert.equal(capturedSavePayload.preferred_runtime, runtime);
+      assert.equal(capturedSavePayload.model, model);
+      assert.equal(capturedSavePayload.env_vars.BUZZ_ACP_EFFORT_LEVEL, "high");
+      view.unmount();
+      cleanup();
+      globalThis.__TAURI_INTERNALS__.invoke = handler();
+      mount();
+      await settle();
+      await settle();
+      assert.equal(
+        screen
+          .getByTestId("global-agent-thinking-effort-select")
+          .getAttribute("data-value"),
+        "high",
+      );
+      assert.equal(saveCallCount, 1, "reopening never writes configuration");
+    });
+  }
+}
+
+test("ACP defaults switch models and harnesses without retaining incompatible effort", async () => {
+  const initial = {
+    preferred_runtime: "codex",
+    model: "gpt-6-astra",
+    provider: null,
+    env_vars: { BUZZ_ACP_EFFORT_LEVEL: "ultra" },
+  };
+  globalThis.__TAURI_INTERNALS__.invoke = makeIpcHandler({
+    get_global_agent_config: () => Promise.resolve(initial),
+    discover_agent_models: acpDiscovery,
+    discover_acp_providers: () =>
+      Promise.resolve([rawAcpRuntime("codex"), rawAcpRuntime("claude")]),
+  });
+  const client = makeQueryClient();
+  client.setQueryData(
+    acpRuntimesQueryKey,
+    ["codex", "claude"].map((id) =>
+      fromRawAcpRuntimeCatalogEntry(rawAcpRuntime(id)),
+    ),
+  );
+  render(
+    withQueryClient(
+      client,
+      createElement(AgentDefaultsEditor, { layout: "grouped" }),
+    ),
+  );
+  await settle();
+  await settle();
+  assert.equal(
+    screen
+      .getByTestId("global-agent-thinking-effort-select")
+      .getAttribute("data-value"),
+    "ultra",
+  );
+  await selectEffortOption("global-agent-model", "gpt-6-luna");
+  await settle();
+  assert.notEqual(
+    screen
+      .getByTestId("global-agent-thinking-effort-select")
+      .getAttribute("data-value"),
+    "ultra",
+  );
+  await selectEffortOption("global-agent-default-harness", "claude");
+  await settle();
+  await selectEffortOption("global-agent-model", "sonnet");
+  await settle();
+  await selectEffortOption("global-agent-thinking-effort-select", "medium");
+  assert.equal(saveCallCount, 0);
+  await act(async () =>
+    fireEvent.click(screen.getByRole("button", { name: /Save defaults/i })),
+  );
+  await settle();
+  assert.equal(saveCallCount, 1);
+  assert.equal(capturedSavePayload.preferred_runtime, "claude");
+  assert.equal(capturedSavePayload.model, "sonnet");
+  assert.equal(capturedSavePayload.env_vars.BUZZ_ACP_EFFORT_LEVEL, "medium");
 });
