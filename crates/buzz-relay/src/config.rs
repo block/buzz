@@ -24,6 +24,54 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
+/// Rollout policy for file shares, independent of authentication and membership.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MediaReadMode {
+    /// Preserve authenticated, community-scoped reads without checking shares.
+    Off,
+    /// Evaluate shares and record outcomes without denying reads.
+    #[default]
+    LogOnly,
+    /// Require a readable share, upload proof, or audited report access.
+    Enforce,
+}
+
+impl MediaReadMode {
+    fn from_env() -> Result<Self, ConfigError> {
+        match std::env::var("BUZZ_MEDIA_READ_MODE") {
+            Ok(value) => value.parse(),
+            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
+            Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidValue(
+                "BUZZ_MEDIA_READ_MODE must be valid Unicode".into(),
+            )),
+        }
+    }
+
+    /// Stable configuration and metric label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::LogOnly => "log-only",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+impl std::str::FromStr for MediaReadMode {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "" | "log-only" => Ok(Self::LogOnly),
+            "enforce" => Ok(Self::Enforce),
+            _ => Err(ConfigError::InvalidValue(
+                "BUZZ_MEDIA_READ_MODE must be off, log-only, or enforce".into(),
+            )),
+        }
+    }
+}
+
 /// Authentication mode for the deployment-admin API.
 ///
 /// Configured by `BUZZ_ADMIN_AUTH`: unset/empty/`nip98` → `Nip98` (fail-secure
@@ -398,6 +446,10 @@ pub struct Config {
     /// the enforce verdict but admits exactly as `off`. `Off` (the default)
     /// leaves all identity enforcement to NIP-42 alone.
     pub nip_fi: crate::nip_fi_config::NipFiRelayConfig,
+
+    /// `BUZZ_MEDIA_READ_MODE`: off, log-only (default), or enforce.
+    /// Loaded at startup; authentication and community membership always apply.
+    pub media_read_mode: MediaReadMode,
 
     /// Issuer binding written to communities created under a host suffix
     /// (`BUZZ_NIP_FI_PROVISION_BINDING`). `None` binds nothing at creation.
@@ -1382,6 +1434,7 @@ impl Config {
         };
 
         let nip_fi = crate::nip_fi_config::NipFiRelayConfig::from_env()?;
+        let media_read_mode = MediaReadMode::from_env()?;
         let nip_fi_provision_binding = crate::nip_fi_config::parse_provision_binding()?;
         let nip_fi_resolver_bounds =
             crate::nip_fi_resolver::ResolverBounds::from_env(db_pool_size)?;
@@ -1462,6 +1515,7 @@ impl Config {
             nip_fi_provision_binding,
             nip_fi_resolver_bounds,
             nip_fi,
+            media_read_mode,
         })
     }
 

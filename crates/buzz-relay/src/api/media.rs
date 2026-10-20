@@ -722,7 +722,7 @@ async fn enforce_blossom_read_membership(
 /// refusal is `NotFound` so a non-member cannot probe whether a private
 /// attachment exists.
 async fn enforce_blossom_read_access(
-    state: &AppState,
+    state: &Arc<AppState>,
     tenant: &TenantContext,
     auth_event: &nostr::Event,
     headers: &HeaderMap,
@@ -730,16 +730,9 @@ async fn enforce_blossom_read_access(
     strictness: BlossomStrictness,
 ) -> Result<(), MediaDenial> {
     enforce_blossom_read_membership(state, tenant, auth_event, headers, strictness).await?;
-    let readable = state
-        .db
-        .can_read_blob(tenant.community(), sha256, auth_event.pubkey.as_bytes())
+    super::media_access::enforce(state, tenant, auth_event.pubkey.as_bytes(), sha256)
         .await
-        .map_err(|_| media_denial(MediaError::AuthorizationUnavailable, strictness))?;
-    if readable {
-        Ok(())
-    } else {
-        Err(MediaError::NotFound.into())
-    }
+        .map_err(|error| media_denial(error, strictness))
 }
 
 fn blob_cache_control() -> &'static str {

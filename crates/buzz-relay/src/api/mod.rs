@@ -8,6 +8,7 @@ pub mod gifs;
 pub mod git;
 pub mod invites;
 pub mod media;
+mod media_access;
 pub mod mesh_demo;
 pub mod nip05;
 pub mod nip_fi;

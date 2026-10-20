@@ -453,6 +453,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         metrics_port = config.metrics_port,
         max_frame_bytes = config.max_frame_bytes,
         audit_enabled = config.audit_enabled,
+        media_read_mode = config.media_read_mode.as_str(),
         push_enabled = config.push_enabled,
         "Config loaded"
     );

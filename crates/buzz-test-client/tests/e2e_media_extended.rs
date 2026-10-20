@@ -2,6 +2,7 @@
 //! multi-format uploads, WebSocket imeta validation.
 //!
 //! Run: cargo test -p buzz-test-client --test e2e_media_extended -- --ignored --nocapture --test-threads=1
+//! The full suite expects BUZZ_MEDIA_READ_MODE=enforce on the relay.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
@@ -1140,4 +1141,30 @@ async fn test_agent_avatar_uploaded_by_owner_is_readable_to_other_members() {
     }
     agent_client.disconnect().await.unwrap();
     owner_client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_media_read_rollout_policy() {
+    use reqwest::Method;
+    let policy = std::env::var("MEDIA_READ_TEST_MODE").unwrap_or_else(|_| "enforce".into());
+    assert!(["off", "log-only", "enforce"].contains(&policy.as_str()));
+    let (owner, outsider) = (Keys::generate(), Keys::generate());
+    let http = http_client();
+    let response = upload(&http, &owner, &uuid::Uuid::new_v4().as_bytes().repeat(8)).await;
+    assert_eq!(response.status(), 200);
+    let descriptor: serde_json::Value = response.json().await.unwrap();
+    let url = descriptor["url"].as_str().unwrap();
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(read_status(&http, &owner, method.clone(), url).await, 200);
+        assert_eq!(
+            read_status(&http, &outsider, method.clone(), url).await,
+            if policy == "enforce" { 404 } else { 200 },
+            "{policy} {method}"
+        );
+        assert_eq!(
+            http.request(method, url).send().await.unwrap().status(),
+            401
+        );
+    }
 }
