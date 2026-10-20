@@ -2155,6 +2155,13 @@ mod tests {
 /// index that serves that lookup is partial on `d_tag IS NOT NULL`. A writer
 /// that leaves the column out stores NULL, so its rows never replace. Nothing
 /// repairs them after the fact, so every production writer must name the column.
+///
+/// This is a text match, not a proof. It checks the column list of literal
+/// `INSERT INTO [public.]events (...)` SQL inside function bodies under each
+/// crate's `src/`. It does not see `ONLY`, quoted or `format!`-built table
+/// names, a comment between the keywords, or SQL held in a constant outside a
+/// function, and it does not check that the bound value is non-NULL. Exempt
+/// probes are skipped by function header, so every insert inside them is too.
 #[test]
 fn every_production_event_insert_names_d_tag() {
     let mut checked_writers = 0;
