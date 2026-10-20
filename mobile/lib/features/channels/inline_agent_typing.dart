@@ -7,8 +7,9 @@ import '../../shared/widgets/avatar_image.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_typing_provider.dart';
 import 'agent_typing_bubble.dart';
+import '../../shared/mentions/agent_identity_provider.dart';
 
-/// Ephemeral personal-chat message rows, using desktop's three-dot work signal.
+/// Ephemeral typing message rows, using desktop's three-dot work signal.
 class InlineAgentTyping extends ConsumerWidget {
   const InlineAgentTyping({
     super.key,
@@ -22,6 +23,7 @@ class InlineAgentTyping extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final keys = entries.map((entry) => entry.pubkey.toLowerCase()).toSet();
     final profiles = ref.watch(userCacheProvider);
+    final bots = ref.watch(agentMentionPubkeysProvider(channelId));
     final labels = watchChannelIdentityLabels(ref, channelId, keys);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -30,7 +32,7 @@ class InlineAgentTyping extends ConsumerWidget {
           Semantics(
             key: ValueKey('inline-agent-typing-$key'),
             liveRegion: true,
-            label: '${labels[key]} is working',
+            label: '${labels[key]} is typing',
             child: ExcludeSemantics(
               child: Padding(
                 padding: const EdgeInsets.only(top: Grid.xs, bottom: Grid.xxs),
@@ -43,7 +45,9 @@ class InlineAgentTyping extends ConsumerWidget {
                                   ref.read(userCacheProvider.notifier).get(key))
                               ?.avatarUrl,
                       radius: messageAvatarSize / 2,
-                      isAgent: true,
+                      isAgent:
+                          bots.contains(key) ||
+                          (profiles[key]?.isAgent ?? false),
                       backgroundColor: context.controlSurface,
                       fallback: Text(
                         profiles[key]?.initial ??
