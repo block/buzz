@@ -18,6 +18,7 @@ dependencies:
   hooks_riverpod: ^3.0.3
   flutter_hooks: ^0.21.3
   http: ^1.4.0
+  crypto: ^3.0.7
   flutter_secure_storage: ^10.0.0
   flutter_svg: ^2.2.4
   mobile_scanner: ^7.0.0
@@ -57,7 +58,6 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   fake_async: ^1.3.3
   camera_platform_interface: ^2.13.1
-  crypto: ^3.0.7
   custom_lint: ^0.8.0
   riverpod_lint: ^3.1.0
   mocktail: ^1.0.4

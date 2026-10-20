@@ -26,11 +26,16 @@ class DeepLinkDispatcher extends ConsumerStatefulWidget {
   final DeepLinkDestinationBuilder? destinationBuilder;
   final bool dispatchMessageLinks;
 
+  /// App composition handles account onboarding without feature imports here.
+  /// Return true only after the destination has retained the link durably.
+  final Future<bool> Function(BuildContext, BuzzDeepLink)? onboardingHandler;
+
   const DeepLinkDispatcher({
     super.key,
     required this.child,
     this.destinationBuilder,
     this.dispatchMessageLinks = true,
+    this.onboardingHandler,
   });
 
   @override
@@ -39,6 +44,7 @@ class DeepLinkDispatcher extends ConsumerStatefulWidget {
 
 class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   bool _preparingInvite = false;
+  bool _handlingOnboarding = false;
 
   @override
   void initState() {
@@ -65,7 +71,14 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   }
 
   void _maybeDispatch(BuzzDeepLink? link) {
-    if (link == null || _preparingInvite) return;
+    if (link == null || _preparingInvite || _handlingOnboarding) return;
+    if (widget.onboardingHandler != null &&
+        (link is InviteDeepLink ||
+            link is NostrBindDeepLink ||
+            link is AddCommunityDeepLink)) {
+      unawaited(_dispatchOnboarding(link));
+      return;
+    }
     if (link is InviteDeepLink) {
       _maybeDispatchInvite(link);
       return;
@@ -80,6 +93,46 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
 
     _dispatchNavigableLink(link);
+  }
+
+  Future<void> _dispatchOnboarding(BuzzDeepLink link) async {
+    _handlingOnboarding = true;
+    var consumed = false;
+    try {
+      final handled = await widget.onboardingHandler!(context, link);
+      if (!mounted) return;
+      if (handled) {
+        if (ref.read(pendingDeepLinkProvider) == link) {
+          ref.read(pendingDeepLinkProvider.notifier).consume();
+          consumed = true;
+        }
+      } else if (link is InviteDeepLink) {
+        _maybeDispatchInvite(link);
+      } else if (ref.read(pendingDeepLinkProvider) == link) {
+        // No fallback owns this link. It must not block later entry attempts.
+        ref.read(pendingDeepLinkProvider.notifier).consume();
+        consumed = true;
+      }
+    } catch (_) {
+      if (mounted) {
+        if (ref.read(pendingDeepLinkProvider) == link) {
+          ref.read(pendingDeepLinkProvider.notifier).consume();
+          consumed = true;
+        }
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Could not open setup. Re-open the link to try again.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      _handlingOnboarding = false;
+      if (mounted && (consumed || ref.read(pendingDeepLinkProvider) != link)) {
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      }
+    }
   }
 
   Future<void> _dispatchNotificationLink(MessageDeepLink link) async {

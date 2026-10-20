@@ -56,6 +56,7 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
     late final ChannelMutesManager manager;
     manager = ChannelMutesManager(
       pubkey: pubkey,
+      relayUrl: relayConfig.baseUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),

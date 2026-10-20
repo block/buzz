@@ -65,8 +65,8 @@ run with a new outcome:
 - `buzz_partition_create_attempts_total{table, outcome}` counts per-month
   decisions in each maintenance pass: `created`, `error`, or `skipped_covered`
   for a month that was already covered. Maintenance runs at startup, and on
-  every periodic audit when `BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED` is on, so
-  `skipped_covered` then grows on every pass in steady state.
+  every periodic audit when `BUZZ_PARTITION_MANAGER_ADVANCE_ENABLED` is on (the
+  default), so `skipped_covered` then grows on every pass in steady state.
 
 ## Alerts
 

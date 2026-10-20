@@ -210,6 +210,19 @@ make_hook!(audio_refusal_frames_hook, before_audio_refusal_frames);
 make_hook!(join_refusal_rollback_hook, before_join_refusal_rollback);
 make_hook!(audio_participant_fanout_hook, after_participant_fanout);
 make_hook!(audio_add_peer_hook, after_add_peer);
+// `before_audio_teardown_cleanup`: fires in `run_active_audio_connection` once
+// the writer has sent its Close and the socket is handed off, before the
+// teardown that writes to Postgres and Redis. Holding it stands in for a
+// stalled cleanup that must not hold the socket open.
+make_hook!(audio_teardown_cleanup_hook, before_audio_teardown_cleanup);
+// `before_room_archive_recheck`: fires in `run_active_audio_connection` after the
+// membership check, just before the archive re-check, so a test can archive
+// the channel between the two and drive the archived-channel exit.
+make_hook!(room_archive_recheck_hook, before_room_archive_recheck);
+// `before_archived_exit_cleanup`: fires on the archived-channel exit once the
+// socket is handed off, before the lease release. Holding it stands in for a
+// stalled Redis release that must not hold the socket open.
+make_hook!(archived_exit_cleanup_hook, before_archived_exit_cleanup);
 // `before_lease_permit`: fires in `handle_active_audio_connection` immediately
 // before the effect permit that covers join-owner resolution. Cancelling here
 // proves the resolver (and its lease CAS) never runs without a permit.

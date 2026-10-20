@@ -909,8 +909,9 @@ mod postgres_tests {
         let host = format!("wf-ptag-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1060,8 +1061,9 @@ mod postgres_tests {
         let host = format!("wf-thread-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1177,8 +1179,9 @@ mod postgres_tests {
         let host = format!("wf-legacy-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1364,8 +1367,9 @@ mod postgres_tests {
         let host = format!("wf-missing-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1415,8 +1419,9 @@ mod postgres_tests {
         let host = format!("wf-unusable-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &owner_hex)
+            .create_community_with_owner(&host, &owner_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,

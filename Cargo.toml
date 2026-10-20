@@ -124,6 +124,8 @@ zeroize = "1.8"
 # Concurrent data structures
 dashmap = "6"
 moka    = { version = "0.12", features = ["sync"] }
+arc-swap = "1"
+lru     = "0.16"
 
 # Async stream utilities
 futures-util = "0.3"

@@ -276,6 +276,12 @@ class ChannelData {
   final String id;
   final String name;
   final String channelType;
+
+  /// NIP-CL labels in `t` tags after the leading channel-type tag.
+  final List<String> labels;
+
+  /// Original channel creator from the relay-authored uppercase `P` tag.
+  final String? creator;
   final String visibility;
   final String description;
   final String? topic;
@@ -291,6 +297,8 @@ class ChannelData {
     required this.visibility,
     required this.description,
     this.topic,
+    this.labels = const [],
+    this.creator,
     this.participantPubkeys = const [],
     this.ttlSeconds,
     this.ttlDeadline,
@@ -336,6 +344,12 @@ class ChannelData {
       id: id,
       name: name,
       channelType: channelType,
+      labels: event.tags
+          .where((t) => t.length >= 2 && t[0] == 't')
+          .skip(1)
+          .map((t) => t[1])
+          .toList(),
+      creator: event.getTagValue('P'),
       visibility: visibility,
       description: description,
       topic: topic,

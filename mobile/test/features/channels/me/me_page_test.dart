@@ -40,7 +40,65 @@ class FakeChannels extends ChannelsNotifier {
   ];
 }
 
+class LabeledChannels extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => [
+    for (final (id, name, owner, member) in [
+      ('filed', 'Filed labeled chat', 'owner', true),
+      ('loose', 'Unfiled labeled chat', 'owner', true),
+      ('shared', 'Someone else chat', 'other', true),
+      ('hidden', 'Inaccessible labeled chat', 'owner', false),
+    ])
+      Channel(
+        id: id,
+        name: name,
+        channelType: 'stream',
+        visibility: 'private',
+        labels: const ['buzz.solo'],
+        description: '',
+        createdBy: owner,
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        isMember: member,
+      ),
+  ];
+}
+
 void main() {
+  testWidgets('label-only desktop chats appear in projects and unfiled chats', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          myPubkeyProvider.overrideWithValue('owner'),
+          channelsProvider.overrideWith(LabeledChannels.new),
+          meGroupsProvider.overrideWith(
+            (ref) => Stream.value(
+              const MeGroups(
+                groups: [
+                  {
+                    'id': 'project',
+                    'name': 'App work',
+                    'defaultTemplateId': '',
+                  },
+                ],
+                assignments: {'filed': 'project'},
+              ),
+            ),
+          ),
+        ],
+        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Filed labeled chat'), findsOneWidget);
+    expect(find.text('Unfiled labeled chat'), findsOneWidget);
+    expect(find.text('Someone else chat'), findsNothing);
+    expect(find.text('Inaccessible labeled chat'), findsNothing);
+    expect(find.text('A place to work with your agents'), findsNothing);
+  });
+
   testWidgets('empty workspace stays centered behind the New chat keyboard', (
     tester,
   ) async {

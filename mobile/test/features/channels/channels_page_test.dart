@@ -2,14 +2,18 @@ import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
+
 import 'dart:async';
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
+
 import 'dart:math';
 import 'dart:io';
 import 'dart:ui' as ui;
+
 import 'package:buzz/shared/widgets/buzz_sheet_header.dart';
 import 'package:flutter/rendering.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
@@ -340,6 +344,43 @@ void main() {
     );
   });
 
+  testWidgets('shows channel visibility icons and excludes Solo chats', (
+    tester,
+  ) async {
+    final channels = [
+      testChannels.first,
+      for (final type in ['stream', 'solo'])
+        Channel(
+          id: 'private-$type',
+          name: 'private-$type',
+          channelType: type,
+          visibility: 'private',
+          description: '',
+          createdBy: 'aabb',
+          createdAt: DateTime(2025),
+          memberCount: 1,
+          isMember: true,
+        ),
+    ];
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final publicIcon = find.byKey(const ValueKey('channel-icon-1'));
+    final privateIcon = find.byKey(
+      const ValueKey('channel-icon-private-stream'),
+    );
+    expect(tester.widget<Icon>(publicIcon).icon, BuzzIcons.hash);
+    expect(tester.widget<Icon>(privateIcon).icon, BuzzIcons.lock);
+    expect(tester.getTopLeft(publicIcon).dx, tester.getTopLeft(privateIcon).dx);
+    expect(find.text('private-solo'), findsNothing);
+  });
+
   testWidgets('shows grouped channel list when data loads', (tester) async {
     // Valid fixture keys whose npub encodings were verified against the
     // NIP-19 codec independently of the code under test.
@@ -454,7 +495,7 @@ void main() {
         Theme.of(tester.element(find.text(label))).colorScheme.onSurface,
       );
     }
-    expect(find.byKey(const ValueKey('channel-icon-1')), findsNothing);
+    expect(find.byKey(const ValueKey('channel-icon-1')), findsOneWidget);
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w400);
@@ -679,7 +720,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final lastChannel = tester.getRect(find.text('general'));
+    final lastChannel = tester
+        .getRect(find.text('general'))
+        .expandToInclude(
+          tester.getRect(find.byKey(const ValueKey('channel-icon-1'))),
+        );
     final divider = tester.getRect(find.byType(Divider).last);
     final nextSectionHeader = tester.getRect(find.text('DMs'));
 
@@ -1183,9 +1228,11 @@ void main() {
     expect(find.text('Community'), findsNothing);
     final sectionLabelX = tester.getTopLeft(find.text('Channels')).dx;
     final rowLabelX = tester.getTopLeft(find.text('general')).dx;
-    // The community title shares the leading row with its avatar. Channel
-    // labels stay aligned below it.
-    expect(sectionLabelX, rowLabelX);
+    final rowIconX = tester
+        .getTopLeft(find.byKey(const ValueKey('channel-icon-1')))
+        .dx;
+    expect(sectionLabelX, rowIconX);
+    expect(rowLabelX, greaterThan(rowIconX));
 
     relaySession.setReconnecting();
     await tester.pump();
@@ -1202,7 +1249,7 @@ void main() {
           find.byKey(const Key('channels-skeleton-row-label-0')).first,
         )
         .dx;
-    expect(skeletonSectionLabelX, skeletonRowLabelX);
+    expect(skeletonRowLabelX, rowLabelX);
     expect(skeletonSectionLabelX, sectionLabelX);
   });
 
@@ -3737,6 +3784,7 @@ void main() {
 
     await tester.pumpWidget(
       buildTestable(
+        brightness: Brightness.dark,
         overrides: [
           channelsProvider.overrideWith(
             () => _FakeNotifier(
@@ -3761,12 +3809,29 @@ void main() {
       Theme.of(tester.element(find.text('general'))).colorScheme.onSurface,
     );
 
+    expect(
+      tester.widget<Text>(find.text('Channels')).style?.color,
+      const Color(0xFFA4A4A4),
+    );
+    final options = find.descendant(
+      of: find.byTooltip('Channels options'),
+      matching: find.byIcon(BuzzIcons.ellipsisVertical),
+    );
+    expect(tester.widget<Icon>(options).color, const Color(0xFFC7C7C7));
+    expect(
+      tester.widget<Icon>(find.byKey(const ValueKey('channel-icon-1'))).color,
+      const Color(0xFFC7C7C7),
+    );
     readState.markContextRead('1', 20);
     await tester.pump();
 
     expect(
       tester.widget<Text>(find.text('general')).style?.fontWeight,
       FontWeight.w400,
+    );
+    expect(
+      tester.widget<Text>(find.text('general')).style?.color,
+      const Color(0xFFC7C7C7),
     );
   });
 

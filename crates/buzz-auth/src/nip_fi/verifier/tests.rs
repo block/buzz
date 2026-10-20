@@ -268,7 +268,10 @@ fn valid_access_token_verifies() {
     // Spec v2: nostr_pubkey is injected by mint() and unconditionally required.
     assert!(assertion.asserted_key().is_some());
     assert!(!assertion.authority_deadlines().is_empty());
-    assert_eq!(assertion.assertion_policy_id(), access_token_policy().id());
+    assert_eq!(
+        assertion.assertion_policy_id(),
+        access_token_policy().id_for_community(AUDIENCE)
+    );
 }
 
 // ---- Token class / typ enforcement, ID-token denial ----------------------
@@ -1943,22 +1946,41 @@ fn aud_array_containing_expected_passes() {
 }
 
 #[test]
-fn assertion_policy_id_covers_community_allowlist() {
-    let base = dedicated_policy(ISSUER);
-    let a = base
-        .clone()
-        .authorized_for_communities(vec![AUDIENCE.to_owned(), COMMUNITY_B_AUD.to_owned()]);
-    let permuted = base.clone().authorized_for_communities(vec![
-        COMMUNITY_B_AUD.to_owned(),
-        AUDIENCE.to_owned(),
-        AUDIENCE.to_owned(),
-    ]);
-    let fewer = base
-        .clone()
-        .authorized_for_communities(vec![AUDIENCE.to_owned()]);
-    assert_ne!(base.id(), a.id());
-    assert_eq!(a.id(), permuted.id());
-    assert_ne!(a.id(), fewer.id());
+fn assertion_policy_id_covers_community_audience_and_issuer() {
+    let policy = dedicated_policy(ISSUER);
+    let other_issuer = dedicated_policy("https://other-issuer.example");
+    let here = policy.id_for_community(AUDIENCE);
+    // Stable for one (base policy, community, issuer) association.
+    assert_eq!(here, policy.clone().id_for_community(AUDIENCE));
+    // A different community `aud` or issuer moves the ID.
+    assert_ne!(here, policy.id_for_community(COMMUNITY_B_AUD));
+    assert_ne!(here, other_issuer.id_for_community(AUDIENCE));
+    // The per-community ID is not the bare base-policy ID.
+    assert_ne!(here, policy.id());
+}
+
+#[test]
+fn verified_assertion_carries_the_per_community_policy_id() {
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "user-123" }));
+    let assertion = verifier
+        .verify(&token, &community(AUDIENCE, &[ISSUER]))
+        .expect("verifies");
+    // An unrelated community authorizing the same issuer leaves it unchanged.
+    let unchanged = verifier
+        .verify(
+            &token,
+            &community(AUDIENCE, &[ISSUER, "https://unrelated.example"]),
+        )
+        .expect("verifies");
+    assert_eq!(
+        assertion.assertion_policy_id(),
+        dedicated_policy(ISSUER).id_for_community(AUDIENCE)
+    );
+    assert_eq!(
+        assertion.assertion_policy_id(),
+        unchanged.assertion_policy_id()
+    );
 }
 
 #[test]

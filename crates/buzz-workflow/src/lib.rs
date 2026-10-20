@@ -1909,8 +1909,9 @@ steps:
     async fn setup_channel(db: &buzz_db::Db, creator: &[u8], member: &[u8]) -> (CommunityId, Uuid) {
         let host = format!("sec006-{}.example", Uuid::new_v4().simple());
         let community = match db
-            .create_community_with_owner(&host, &hex::encode(creator))
+            .create_community_with_owner(&host, &hex::encode(creator), &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             buzz_db::CreateCommunityWithOwnerResult::Created(rec) => rec.id,
