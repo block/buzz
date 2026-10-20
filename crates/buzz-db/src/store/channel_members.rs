@@ -1321,31 +1321,6 @@ pub async fn channel_type_of(
     .await?)
 }
 
-/// The IDs in `channel_ids` that name system channels, deleted or not.
-/// Push matching uses it to skip them.
-pub async fn system_channel_ids_among(
-    pool: &PgPool,
-    community_id: CommunityId,
-    channel_ids: &[Uuid],
-) -> Result<Vec<Uuid>> {
-    if channel_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut connection = crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::Authorization,
-    )
-    .await?;
-    Ok(sqlx::query_scalar(
-        "SELECT id FROM channels \
-         WHERE community_id = $1 AND id = ANY($2) AND channel_type = 'system'",
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_ids)
-    .fetch_all(&mut *connection)
-    .await?)
-}
-
 /// The channels in `channel_ids` whose type is not a legacy type
 /// ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]), deleted or not, each with
 /// its type: system channels and any type added later. A filter reads them
@@ -2027,16 +2002,6 @@ impl Db {
         channel_id: Uuid,
     ) -> Result<Option<String>> {
         channel_type_of(&self.pool, community_id, channel_id).await
-    }
-
-    /// The IDs in `channel_ids` that name system channels, deleted or not.
-    #[datastore_span(name = "system_channel_ids_among", system = "postgresql")]
-    pub async fn system_channel_ids_among(
-        &self,
-        community_id: CommunityId,
-        channel_ids: &[Uuid],
-    ) -> Result<Vec<Uuid>> {
-        system_channel_ids_among(&self.pool, community_id, channel_ids).await
     }
 
     /// The channels in `channel_ids` whose type is not a legacy type, deleted
