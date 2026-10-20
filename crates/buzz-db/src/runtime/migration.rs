@@ -236,6 +236,66 @@ mod postgres_tests {
             .unwrap_or_default()
     }
 
+    /// Runs `bin/pgschema <command>` against `db`, which doubles as the plan
+    /// database (`--plan-*`): that avoids the embedded-Postgres download and
+    /// matches start-relay-for-tests.sh. Runs from the repository root, like
+    /// every pgschema caller, so `.pgschemaignore` applies.
+    fn pgschema(conn: &PgConn, db: &str, command: &[&str]) -> std::process::Output {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let port = conn.port.to_string();
+        std::process::Command::new(repo_root.join("bin/pgschema"))
+            .current_dir(&repo_root)
+            .args(command)
+            .args([
+                "--file",
+                "schema/schema.sql",
+                "--host",
+                &conn.host,
+                "--port",
+                &port,
+                "--user",
+                &conn.user,
+                "--password",
+                &conn.password,
+                "--db",
+                db,
+                "--plan-host",
+                &conn.host,
+                "--plan-port",
+                &port,
+                "--plan-user",
+                &conn.user,
+                "--plan-password",
+                &conn.password,
+                "--plan-db",
+                db,
+            ])
+            .output()
+            .expect("run bin/pgschema (hermit env required)")
+    }
+
+    /// Dated monthlies `schema/partitions/` declares, e.g. `events_p2026_01`.
+    fn declared_monthlies() -> BTreeSet<String> {
+        let dir = crate::test_support::desired_state_schema_dir().join("partitions");
+        let mut names = BTreeSet::new();
+        for entry in fs::read_dir(&dir).expect("read schema/partitions") {
+            let sql = fs::read_to_string(entry.expect("partition file").path())
+                .expect("read partition file");
+            names.extend(
+                sql.lines()
+                    .filter_map(|line| line.strip_prefix("CREATE TABLE "))
+                    .filter_map(|rest| rest.split_whitespace().next())
+                    .filter(|name| {
+                        name.rsplit_once("_p").is_some_and(|(_, month)| {
+                            month.starts_with(|c: char| c.is_ascii_digit())
+                        })
+                    })
+                    .map(str::to_owned),
+            );
+        }
+        names
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
         ForeignKey,
@@ -1512,6 +1572,27 @@ mod postgres_tests {
         );
     }
 
+    /// `.pgschemaignore` hides dated monthlies from pgschema so a re-apply
+    /// cannot drop the ones the relay created at runtime. Each monthly
+    /// `schema/partitions/` declares must be exempt, or pgschema would stop
+    /// creating it on a fresh database.
+    #[test]
+    fn pgschemaignore_exempts_exactly_the_declared_monthlies() {
+        let ignore =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.pgschemaignore"))
+                .expect("read .pgschemaignore");
+        let exempt: BTreeSet<String> = ignore
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("\"!")?.strip_suffix("\","))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            exempt,
+            declared_monthlies(),
+            ".pgschemaignore `!` exemptions must match the monthlies schema/partitions/ declares"
+        );
+    }
+
     #[test]
     fn workflow_run_error_codes_are_additive_and_backfilled_without_parsing_diagnostics() {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
@@ -2698,42 +2779,8 @@ mod postgres_tests {
             .expect("create migrated probe database");
 
         // Bootstrap the desired-state probe through the real pgschema binary, the
-        // same invocation the test-relay launchers use. The freshly-created probe
-        // db doubles as pgschema's plan database (--plan-*), which avoids the
-        // embedded-Postgres download and matches start-relay-for-tests.sh.
-        let pgschema = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/pgschema");
-        let schema_file =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/schema.sql");
-        let port = conn.port.to_string();
-        let apply = std::process::Command::new(&pgschema)
-            .args([
-                "apply",
-                "--auto-approve",
-                "--file",
-                schema_file.to_str().expect("schema path utf-8"),
-                "--host",
-                &conn.host,
-                "--port",
-                &port,
-                "--user",
-                &conn.user,
-                "--password",
-                &conn.password,
-                "--db",
-                &desired_db,
-                "--plan-host",
-                &conn.host,
-                "--plan-port",
-                &port,
-                "--plan-user",
-                &conn.user,
-                "--plan-password",
-                &conn.password,
-                "--plan-db",
-                &desired_db,
-            ])
-            .output()
-            .expect("run bin/pgschema apply (hermit env required)");
+        // same invocation the test-relay launchers use.
+        let apply = pgschema(&conn, &desired_db, &["apply", "--auto-approve"]);
         assert!(
             apply.status.success(),
             "pgschema apply failed: {}\n{}",
@@ -2783,6 +2830,98 @@ mod postgres_tests {
             .await
             .expect("drop probe database");
         }
+    }
+
+    /// pgschema does not compare partition bounds, so re-applying
+    /// `schema/schema.sql` to a database a relay has used plans
+    /// `DROP TABLE IF EXISTS ... CASCADE` for every monthly the partition
+    /// manager created at runtime, and their rows go with them.
+    /// `.pgschemaignore` keeps those monthlies out of pgschema's view.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn pgschema_reapply_keeps_runtime_partitions() {
+        use crate::store::partition::{
+            maintain_partitions, PartitionMaintenancePolicy, PARTITION_MANAGER_MONTHS_AHEAD,
+        };
+        use sqlx::AssertSqlSafe;
+
+        let base_url = crate::test_support::database_url();
+        let conn = parse_pg_url(&base_url);
+        let admin = PgPool::connect(&base_url)
+            .await
+            .expect("connect admin database");
+        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
+        let database = format!("buzz_pgschema_reapply_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {database}")))
+            .execute(&admin)
+            .await
+            .expect("create probe database");
+
+        let apply = pgschema(&conn, &database, &["apply", "--auto-approve"]);
+        assert!(
+            apply.status.success(),
+            "pgschema apply failed: {}\n{}",
+            String::from_utf8_lossy(&apply.stdout),
+            String::from_utf8_lossy(&apply.stderr),
+        );
+
+        // The relay's default startup pass, which advances the static layout's
+        // catch-all into dated monthlies schema/partitions/ does not declare.
+        let pool = PgPool::connect(&format!("{base_prefix}/{database}"))
+            .await
+            .expect("connect probe database");
+        maintain_partitions(
+            &pool,
+            PARTITION_MANAGER_MONTHS_AHEAD,
+            PartitionMaintenancePolicy {
+                create_enabled: true,
+                advance_enabled: true,
+            },
+        )
+        .await
+        .expect("maintain partitions");
+        let children: Vec<(String, String)> = sqlx::query_as(
+            "SELECT p.relname::text, c.relname::text FROM pg_inherits i \
+             JOIN pg_class c ON c.oid = i.inhrelid \
+             JOIN pg_class p ON p.oid = i.inhparent \
+             WHERE p.relname IN ('events', 'delivery_log')",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("list partitions");
+        pool.close().await;
+        let declared = declared_monthlies();
+        let runtime: Vec<_> = children
+            .iter()
+            .filter(|(parent, child)| {
+                child.starts_with(&format!("{parent}_p2")) && !declared.contains(child)
+            })
+            .collect();
+        for parent in ["events", "delivery_log"] {
+            assert!(
+                runtime.iter().any(|(p, _)| p == parent),
+                "maintenance created no runtime {parent} monthly: {children:?}"
+            );
+        }
+
+        let plan = pgschema(&conn, &database, &["plan", "--output-sql", "stdout"]);
+        let plan_sql = String::from_utf8_lossy(&plan.stdout);
+        assert!(
+            plan.status.success(),
+            "pgschema plan failed: {plan_sql}\n{}",
+            String::from_utf8_lossy(&plan.stderr),
+        );
+        assert!(
+            !plan_sql.contains("DROP TABLE"),
+            "re-applying schema.sql would drop tables; runtime monthlies {runtime:?}:\n{plan_sql}"
+        );
+
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP DATABASE {database} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop probe database");
     }
 
     #[tokio::test]
