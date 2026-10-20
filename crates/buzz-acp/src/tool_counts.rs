@@ -5,12 +5,22 @@
 //! `toolCallId`, because a tool's name or arguments may only appear on a later
 //! `tool_call_update`.
 //!
-//! Name resolution (first present wins): a stable harness tool name
-//! (`toolName`, `_meta.claudeCode.toolName`, `rawInput.toolName`), then `title`
-//! when it is a bare identifier (buzz-agent puts the tool name there; free-text
-//! titles like "Read src/foo.rs" are high-cardinality and rejected), then ACP
-//! `kind`. Skills: `load_skill` -> `rawInput.name` (a `/` marks a supporting-file
-//! read, not an invocation); Claude Code `Skill` -> `rawInput.skill`.
+//! Name resolution (first present wins), names kept exactly as the harness
+//! emits them, MCP server prefix included:
+//! 1. A stable harness tool name: `toolName`, `_meta.claudeCode.toolName`
+//!    (claude-agent-acp), `_meta.goose.toolCall.toolName` (goose),
+//!    `rawInput.toolName`, or codex-acp's MCP `rawInput.{server,tool}` as
+//!    `server/tool`.
+//! 2. A name parsed from `title`: codex `"Tool: x"` -> `x`, hermes
+//!    `"name: preview"` -> `name`, or a bare identifier title (buzz-agent, pi).
+//!    A bare `execute` title is skipped because pi/codex put the shell command
+//!    there. Free-text titles like "Read src/foo.rs" are high-cardinality and
+//!    rejected.
+//! 3. ACP `kind`, then `"unknown"`.
+//!
+//! Skills: `load_skill` (goose `skills__load_skill`, buzz-agent) ->
+//! `rawInput.name` (a `/` marks a supporting-file read, not an invocation);
+//! Claude Code `Skill` -> `rawInput.skill` or `_meta.claudeCode.skill`.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -45,9 +55,24 @@ fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn is_identifier(t: &str) -> bool {
-    t.len() <= 64
+    !t.is_empty()
+        && t.len() <= 64
         && t.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '/'))
+}
+
+/// Tool name parsed from an ACP `title`, or `None` when it is free text.
+fn title_name<'a>(title: &'a str, kind: Option<&str>) -> Option<&'a str> {
+    let name = if let Some(rest) = title.strip_prefix("Tool: ") {
+        rest
+    } else if let Some((prefix, _)) = title.split_once(": ") {
+        prefix
+    } else if kind == Some("execute") {
+        return None;
+    } else {
+        title
+    };
+    is_identifier(name).then_some(name)
 }
 
 impl ToolCallCounter {
@@ -66,25 +91,39 @@ impl ToolCallCounter {
         }
         let call = self.calls.entry(id.to_string()).or_default();
         let raw = update.get("rawInput").unwrap_or(&Value::Null);
-        let meta = &update["_meta"]["claudeCode"];
-        let fill = |slot: &mut Option<String>, v: Option<&str>| {
+        let claude = &update["_meta"]["claudeCode"];
+        let kind = s(update, "kind");
+        let fill = |slot: &mut Option<String>, v: Option<String>| {
             if slot.is_none() {
-                *slot = v.map(str::to_string);
+                *slot = v;
             }
         };
+        let codex_mcp = s(raw, "server")
+            .zip(s(raw, "tool"))
+            .map(|(server, tool)| format!("{server}/{tool}"));
         fill(
             &mut call.stable,
             s(update, "toolName")
-                .or_else(|| s(meta, "toolName"))
-                .or_else(|| s(raw, "toolName")),
+                .or_else(|| s(claude, "toolName"))
+                .or_else(|| s(&update["_meta"]["goose"]["toolCall"], "toolName"))
+                .or_else(|| s(raw, "toolName"))
+                .map(str::to_string)
+                .or(codex_mcp),
         );
         fill(
             &mut call.title,
-            s(update, "title").filter(|t| is_identifier(t)),
+            s(update, "title")
+                .and_then(|t| title_name(t, kind))
+                .map(str::to_string),
         );
-        fill(&mut call.kind, s(update, "kind"));
-        fill(&mut call.name_arg, s(raw, "name"));
-        fill(&mut call.skill_arg, s(raw, "skill"));
+        fill(&mut call.kind, kind.map(str::to_string));
+        fill(&mut call.name_arg, s(raw, "name").map(str::to_string));
+        fill(
+            &mut call.skill_arg,
+            s(raw, "skill")
+                .or_else(|| s(claude, "skill"))
+                .map(str::to_string),
+        );
     }
 
     /// Drain into `(tools, skills)` maps; `None` when no tool calls were seen.
@@ -204,5 +243,60 @@ mod tests {
         c.observe(&json!({"toolCallId":"1","toolName":"Read"}));
         c.begin_turn();
         assert_eq!(c.take(), (None, None));
+    }
+
+    /// Field shapes taken from each adapter's source (see the module docs).
+    #[test]
+    fn resolves_names_across_harness_wire_formats() {
+        let mut c = ToolCallCounter::default();
+        // goose: name only in `_meta.goose.toolCall.toolName`, free-text title.
+        c.observe(&json!({"toolCallId":"g1","title":"developer: shell · cargo test","kind":"other",
+            "_meta":{"goose":{"toolCall":{"toolName":"developer__shell","extensionName":"developer"}}}}));
+        c.observe(
+            &json!({"toolCallId":"g2","title":"skills: load skill · git","kind":"other",
+            "rawInput":{"name":"git"},
+            "_meta":{"goose":{"toolCall":{"toolName":"skills__load_skill"}}}}),
+        );
+        // claude-agent-acp: MCP prefix kept; skill name arrives on the update.
+        c.observe(
+            &json!({"toolCallId":"c1","title":"mcp__docs__search","kind":"other",
+            "_meta":{"claudeCode":{"toolName":"mcp__docs__search"}}}),
+        );
+        c.observe(
+            &json!({"toolCallId":"c2","title":"Load skill","rawInput":{},
+            "_meta":{"claudeCode":{"toolName":"Skill"}}}),
+        );
+        c.observe(&json!({"toolCallId":"c2","title":"Load skill: commits",
+            "_meta":{"claudeCode":{"toolName":"Skill","skill":"commits"}}}));
+        // codex-acp: MCP via rawInput server/tool; shell command title skipped.
+        c.observe(
+            &json!({"toolCallId":"x1","title":"Tool: github/create_issue","kind":"other",
+            "rawInput":{"server":"github","tool":"create_issue","arguments":{}}}),
+        );
+        c.observe(&json!({"toolCallId":"x2","title":"Tool: lookup","kind":"other","rawInput":{}}));
+        c.observe(&json!({"toolCallId":"x3","title":"ls","kind":"execute"}));
+        // hermes: "name: preview" title, no rawInput.
+        c.observe(&json!({"toolCallId":"h1","title":"terminal: ls -la","kind":"execute"}));
+        // pi: bare tool-name title.
+        c.observe(&json!({"toolCallId":"p1","title":"read","kind":"read","rawInput":{"path":"a"}}));
+        let (tools, skills) = take(&mut c);
+        assert_eq!(
+            tools,
+            BTreeMap::from([
+                ("Skill".into(), 1),
+                ("developer__shell".into(), 1),
+                ("execute".into(), 1),
+                ("github/create_issue".into(), 1),
+                ("lookup".into(), 1),
+                ("mcp__docs__search".into(), 1),
+                ("read".into(), 1),
+                ("skills__load_skill".into(), 1),
+                ("terminal".into(), 1),
+            ])
+        );
+        assert_eq!(
+            skills,
+            BTreeMap::from([("commits".into(), 1), ("git".into(), 1)])
+        );
     }
 }
