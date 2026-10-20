@@ -14,18 +14,18 @@ Line references drift; re-verify before relying on them.
 | buzz-agent | ✅ goose extension, cumulative → delta | ✅ | ✅ title = tool name, MCP `server__tool` | ✅ `load_skill` + `rawInput.name` | ❌ no window size |
 | goose | ✅ goose extension (when client advertises it) | ✅ | ✅ via `_meta.goose.toolCall.toolName` (`ext__tool`) | ✅ `skills__load_skill` + `rawInput.name` | ✅ `used` / `contextLimit` |
 | claude-agent-acp | ✅ `session/prompt` result `usage` | ✅ `usage_update.cost` | ✅ `_meta.claudeCode.toolName`, MCP `mcp__server__tool` | ✅ `Skill` + `rawInput.skill` / `_meta.claudeCode.skill` | ✅ `usage_update {used,size}` |
-| codex-acp | ❌ only context occupancy (`usage_update {used,size}`) | ❌ | ⚠️ MCP `server/tool` ✅; builtins only as ACP `kind` buckets | ❌ no skill tool call | ✅ `usage_update {used,size}` |
-| hermes | ⚠️ prompt result `usage` exists; not mapped by buzz-acp | ❌ | ⚠️ parsed from title prefix (`terminal: …` → `terminal`) | ❌ `skill_view` sends no `rawInput` | ✅ `usage_update`, but no metric published (no usage mapped) |
-| pi (`buzz-pi-acp` @ `86b201e`) | ❌ none emitted | ❌ | ✅ bare titles; bash → `execute` | ❌ skills are plain `read`s | ❌ none at pinned commit |
+| codex-acp | ❌ none; metric is usage-null | ❌ | ⚠️ MCP `server/tool` ✅; builtins only as ACP `kind` buckets (usage-null record) | ❌ no skill tool call | ✅ `usage_update {used,size}` (usage-null record) |
+| hermes | ⚠️ prompt result `usage` exists; not mapped by buzz-acp | ❌ | ⚠️ parsed from title prefix (`terminal: …` → `terminal`) | ❌ `skill_view` sends no `rawInput` | ✅ `usage_update {used,size}` |
+| pi (`buzz-pi-acp` @ `86b201e`) | ❌ none; metric is usage-null | ❌ | ✅ bare titles; bash → `execute` (usage-null record) | ❌ skills are plain `read`s | ❌ none at pinned commit |
 
 ✅ works today on this branch · ⚠️ partial · ❌ not available from the wire
 
 ## Shared gaps (all harnesses)
 
-1. **No usage → no metric.** Tool and skill counts ride on the usage record.
-   A turn whose harness reports no usage publishes no 44200 event, so its tool
-   counts are dropped (codex, hermes, pi). Fix: publish a usage-null terminal
-   record (the idea in draft PR #6169) carrying `tools`/`skills`.
+1. **Usage-null records.** A turn whose harness reports no tokens (codex, pi)
+   publishes a 44200 with no `turn`/`cumulative`/`turnSeq`, carrying only
+   `tools`/`skills`/`context` when any exist; a turn with none publishes
+   nothing. Such a record cannot show token usage, only activity.
 2. **Closed relays reject 44200 from direct-member agents** (403):
    #4223, #4937, #7077, #8246; fix in PR #5581. Affects every harness.
 3. **Unmetered turns.** Failed, timed-out, and cancelled turns may not
@@ -71,7 +71,8 @@ Line references drift; re-verify before relying on them.
   as `server/tool`. No skill tool.
 - Usage: `usage_update {used, size}` only (context occupancy). Prompt result
   has no `usage`.
-- Gaps: no per-turn tokens or cost; builtin tools only as `kind` buckets;
+- Gaps: no per-turn tokens or cost (usage-null record carries tools and
+  context); builtin tools only as `kind` buckets;
   skills uncountable. Needs upstream: prompt-result `usage` and a stable tool
   name in `_meta`.
 
@@ -82,8 +83,7 @@ Line references drift; re-verify before relying on them.
 - Usage: prompt-result `usage` (prompt/completion/total/reasoning/cache-read)
   and `usage_update {size, used}`.
 - Gaps: buzz-acp only maps prompt-result usage for Claude/Codex adapters, so
-  hermes tokens are not published (and therefore no tool counts either).
-  Skills not countable (no `rawInput.name` on `skill_view`). MCP naming
+  hermes tokens are not published. Skills not countable (no `rawInput.name` on `skill_view`). MCP naming
   unverified (believed `mcp_<server>_<tool>`).
 
 ### pi (`salman1993/buzz-pi-acp` @ `86b201e`)
@@ -91,16 +91,14 @@ Line references drift; re-verify before relying on them.
   title is the command text with no `rawInput` → counted as `execute`.
 - Usage: none at the pinned commit (upstream `svkozak/pi-acp` emits
   `usage_update`; fork `main` not checked).
-- Gaps: no tokens, so no metric is published; skills are plain `read`s of
+- Gaps: no tokens (usage-null record carries tools only); skills are plain `read`s of
   `SKILL.md`.
 
 ## Next steps (ranked)
 
-1. Publish a 44200 even when usage is absent, so `tools`/`skills` survive
-   (unblocks codex, hermes, pi).
-2. Map hermes prompt-result `usage` in buzz-acp (same path as Claude/Codex).
-3. Land PR #5581 so closed relays accept 44200 from direct members.
-4. Upstream asks: codex-acp and hermes stable tool name in `_meta` and
+1. Map hermes prompt-result `usage` in buzz-acp (same path as Claude/Codex).
+2. Land PR #5581 so closed relays accept 44200 from direct members.
+3. Upstream asks: codex-acp and hermes stable tool name in `_meta` and
    prompt-result `usage` for codex; `rawInput` on hermes `skill_view`.
-5. Live-verify goose and claude-agent-acp against a relay and decrypt the
+4. Live-verify goose and claude-agent-acp against a relay and decrypt the
    owner-side 44200 events.

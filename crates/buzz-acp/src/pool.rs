@@ -5294,7 +5294,8 @@ fn acp_stop_to_core(r: &StopReason) -> buzz_core::agent_turn_metric::StopReason 
 ///
 /// - `turn` is `None` when `delta_reliable` is false; otherwise it carries the
 ///   per-turn i/o/total/cost deltas for this turn.
-/// - `cumulative` always carries the session-aggregate i/o/cost totals.
+/// - `cumulative` carries the session-aggregate totals, and is `None` when
+///   nothing is known (usage-null record).
 ///   `total_tokens` is `Some` only when the session accumulated a genuine
 ///   provider-reported total on every turn — never derived from i/o sums
 ///   (NIP-AM MUST NOT).
@@ -5328,7 +5329,7 @@ pub(crate) fn build_turn_metric_counts(
         // accidentally publishing unreliable per-turn counts.
         None
     };
-    let cumulative_counts = Some(TokenCounts {
+    let cumulative_counts = TokenCounts {
         input_tokens: usage.cumulative_input_tokens,
         output_tokens: usage.cumulative_output_tokens,
         // Present when every turn in the session reported a genuine provider
@@ -5344,7 +5345,10 @@ pub(crate) fn build_turn_metric_counts(
         // Session-cumulative cache-write tokens; same provenance contract as
         // cache_read_tokens.
         cache_write_tokens: usage.cumulative_cache_write_tokens,
-    });
+    };
+    // A usage-null record has no cumulative series (NIP-AM: `cumulative`
+    // requires `turnSeq`), so omit it rather than emit an all-null object.
+    let cumulative_counts = (!cumulative_counts.is_empty()).then_some(cumulative_counts);
     (turn_counts, cumulative_counts)
 }
 
@@ -5378,7 +5382,7 @@ async fn publish_agent_turn_metric(
         channel_id: channel_id.map(|id| id.to_string()),
         session_id: Some(usage.session_id.clone()),
         turn_id: Some(turn_id.to_string()),
-        turn_seq: Some(usage.turn_seq),
+        turn_seq: usage.turn_seq,
         timestamp,
         turn: turn_counts,
         cumulative: cumulative_counts,
@@ -10080,7 +10084,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let ctx = make_prompt_context_no_owner();
         let usage = crate::usage::TurnUsage {
             session_id: "sess-1".to_string(),
-            turn_seq: 1,
+            turn_seq: Some(1),
             delta_reliable: true,
             turn_input_tokens: Some(100),
             turn_output_tokens: Some(50),
@@ -10112,6 +10116,44 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         .await;
     }
 
+    /// A usage-null record serializes without fabricated zeros, with no
+    /// `cumulative`/`turnSeq`, and passes NIP-AM validation.
+    #[test]
+    fn usage_null_record_payload_has_no_token_fields_and_validates() {
+        use buzz_core::agent_turn_metric::{AgentTurnMetricPayload, ContextUsage};
+        let mut usage = crate::usage::TurnUsage::tokenless("sess-1".to_string());
+        usage.tools = Some([("shell".to_string(), 2)].into());
+        usage.context = Some(ContextUsage {
+            used_tokens: 10,
+            window_tokens: 100,
+        });
+        let (turn, cumulative) = build_turn_metric_counts(&usage);
+        let payload = AgentTurnMetricPayload {
+            harness: "codex".into(),
+            model: None,
+            channel_id: None,
+            session_id: Some(usage.session_id.clone()),
+            turn_id: None,
+            turn_seq: usage.turn_seq,
+            timestamp: "2026-01-01T00:00:00.000Z".into(),
+            turn,
+            cumulative,
+            delta_reliable: usage.delta_reliable,
+            stop_reason: None,
+            pricing_identity: None,
+            tools: usage.tools.clone(),
+            skills: None,
+            context: usage.context,
+        };
+        payload.validate().expect("usage-null payload is valid");
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(json["turn"].is_null() && json["cumulative"].is_null());
+        assert!(json["turnSeq"].is_null());
+        assert_eq!(json["deltaReliable"], false);
+        assert_eq!(json["tools"]["shell"], 2);
+        assert!(!json.to_string().contains("Tokens\":0"));
+    }
+
     /// `publish_agent_turn_metric` encrypts the payload when owner is present
     /// (the HTTP submit will fail in tests, but we verify no panic and the
     /// encrypt/sign path executes).
@@ -10122,7 +10164,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
         let usage = crate::usage::TurnUsage {
             session_id: "sess-1".to_string(),
-            turn_seq: 1,
+            turn_seq: Some(1),
             delta_reliable: true,
             turn_input_tokens: Some(200),
             turn_output_tokens: Some(80),
@@ -10165,7 +10207,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
         let usage = crate::usage::TurnUsage {
             session_id: "sess-cancel".to_string(),
-            turn_seq: 2,
+            turn_seq: Some(2),
             delta_reliable: true,
             turn_input_tokens: Some(50),
             turn_output_tokens: Some(20),
@@ -10208,7 +10250,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         ctx.harness_name = "buzz-agent".to_string();
         let usage = crate::usage::TurnUsage {
             session_id: "sess-ba".to_string(),
-            turn_seq: 1,
+            turn_seq: Some(1),
             delta_reliable: false, // first turn from buzz-agent
             turn_input_tokens: None,
             turn_output_tokens: None,
@@ -10248,7 +10290,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     fn test_build_turn_metric_counts_exact_totals_map_through() {
         let usage = crate::usage::TurnUsage {
             session_id: "sess-total".to_string(),
-            turn_seq: 2,
+            turn_seq: Some(2),
             delta_reliable: true,
             turn_input_tokens: Some(100),
             turn_output_tokens: Some(30),
@@ -10303,7 +10345,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     fn test_build_turn_metric_counts_null_totals_never_derived() {
         let usage = crate::usage::TurnUsage {
             session_id: "sess-nototal".to_string(),
-            turn_seq: 1,
+            turn_seq: Some(1),
             delta_reliable: true,
             turn_input_tokens: Some(200),
             turn_output_tokens: Some(60),

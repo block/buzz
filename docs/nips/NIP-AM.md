@@ -231,7 +231,10 @@ unlabeled total.
 - Publish exactly one event per completed turn, at turn completion, including
   turns that end in cancellation or error when usage was observed.
 - Do NOT publish an event for a turn with no observed usage (all counters
-  unknown); an all-null metric carries no information.
+  unknown) unless it carries `tools`, `skills`, or `context`. Such a
+  *usage-null* record omits `turn`, `cumulative`, and `turnSeq` (never zeros)
+  and sets `deltaReliable: false`; it takes no position in the `turnSeq`
+  sequence, so token-bearing records stay contiguous.
 - `created_at` SHOULD equal the payload `timestamp` truncated to seconds.
 
 ## Relay Behavior

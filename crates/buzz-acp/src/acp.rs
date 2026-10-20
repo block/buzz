@@ -974,11 +974,22 @@ impl AcpClient {
     /// exclusive cumulative path; standard ACP prompt usage is used only when
     /// goose emitted nothing for this turn.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
+        // `take()` ends the in-flight turn, so read its session id first.
+        let in_flight_session = self.standard_usage.in_flight_session().map(str::to_owned);
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
         let (tools, skills) = self.tool_counts.take();
         let context = self.context_usage.take();
-        let mut usage = goose_usage.or(standard_usage)?;
+        let mut usage = match goose_usage.or(standard_usage) {
+            Some(usage) => usage,
+            // No tokens reported (e.g. codex-acp or pi): publish a usage-null
+            // record only when other turn data exists. It never touches the
+            // token trackers' baselines or sequence numbers.
+            None if tools.is_some() || skills.is_some() || context.is_some() => {
+                TurnUsage::tokenless(in_flight_session?)
+            }
+            None => return None,
+        };
         usage.tools = tools;
         usage.skills = skills;
         usage.context = context;
@@ -4840,7 +4851,7 @@ sleep 1"#,
         assert_eq!(stop, StopReason::EndTurn);
 
         let usage = client.take_turn_usage().expect("wire usage");
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         assert_eq!(usage.turn_input_tokens, Some(9));
         assert_eq!(usage.turn_output_tokens, Some(3));
         assert_eq!(usage.turn_cost_usd, Some(0.5));
@@ -4858,7 +4869,7 @@ sleep 1"#,
         client.handle_session_update(&standard_cost_update("cost-only-session", 0.125));
 
         let usage = client.take_turn_usage().expect("cost-only usage");
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         assert!(usage.delta_reliable);
         assert_eq!(usage.turn_input_tokens, None);
         assert_eq!(usage.turn_cost_usd, Some(0.125));
@@ -4909,7 +4920,7 @@ sleep 1"#,
             .unwrap();
         let user = client.take_turn_usage().expect("user prompt usage");
 
-        assert_eq!((initial.turn_seq, user.turn_seq), (1, 2));
+        assert_eq!((initial.turn_seq, user.turn_seq), (Some(1), Some(2)));
         assert_eq!(
             (initial.turn_input_tokens, user.turn_input_tokens),
             (Some(10), Some(20))
@@ -4989,7 +5000,7 @@ sleep 1"#,
             .take_turn_usage()
             .expect("usage should be present after notification");
         assert_eq!(usage.session_id, "s1");
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         assert!(!usage.delta_reliable, "first turn must be unreliable");
         assert_eq!(usage.cumulative_input_tokens, Some(1000));
         assert_eq!(usage.cumulative_output_tokens, Some(200));
@@ -5054,6 +5065,77 @@ sleep 1"#,
         client.handle_goose_usage_update(&goose_usage_update_msg("s1", 20, 9, None));
         let usage = client.take_turn_usage().expect("usage");
         assert!(usage.tools.is_none() && usage.skills.is_none());
+    }
+
+    fn codex_style_turn(
+        client: &mut AcpClient,
+        session: &str,
+        with_tool: bool,
+        with_context: bool,
+    ) {
+        client.goose_usage.begin_turn(session);
+        client.standard_usage.begin_turn(session);
+        client.tool_counts.begin_turn();
+        client.context_usage.begin_turn(session);
+        if with_tool {
+            client.handle_session_update(&tool_update(serde_json::json!({
+                "sessionUpdate":"tool_call","toolCallId":"a","title":"Tool: shell","kind":"execute"
+            })));
+        }
+        if with_context {
+            client.handle_session_update(&standard_context_update(session));
+        }
+    }
+
+    #[tokio::test]
+    async fn tokenless_turn_publishes_usage_null_record_with_tools_and_context() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Codex);
+        codex_style_turn(&mut client, "s1", true, true);
+        // Prompt response carries no `usage`.
+        client
+            .parse_prompt_response("s1", &serde_json::json!({"stopReason":"end_turn"}))
+            .unwrap();
+        let usage = client.take_turn_usage().expect("usage-null record");
+        assert_eq!(usage.session_id, "s1");
+        assert_eq!(usage.turn_seq, None);
+        assert!(!usage.delta_reliable);
+        assert_eq!(
+            crate::pool::build_turn_metric_counts(&usage),
+            (None, None),
+            "no fabricated token counts"
+        );
+        assert_eq!(usage.tools.unwrap(), [("shell".into(), 1)].into());
+        assert_eq!(usage.context.unwrap().used_tokens, 50_000);
+        assert!(client.take_turn_usage().is_none(), "drained");
+    }
+
+    #[tokio::test]
+    async fn turn_with_no_data_publishes_nothing() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Codex);
+        codex_style_turn(&mut client, "s1", false, false);
+        assert!(client.take_turn_usage().is_none());
+    }
+
+    #[tokio::test]
+    async fn usage_null_record_does_not_advance_goose_baseline_or_seq() {
+        let mut client = spawn_inert_client().await;
+        client.goose_usage.begin_turn("s1");
+        client.handle_goose_usage_update(&goose_usage_update_msg("s1", 1000, 200, None));
+        assert_eq!(client.take_turn_usage().unwrap().turn_seq, Some(1));
+
+        codex_style_turn(&mut client, "s1", true, false);
+        let null = client.take_turn_usage().expect("usage-null record");
+        assert_eq!(null.turn_seq, None);
+
+        client.goose_usage.begin_turn("s1");
+        client.handle_goose_usage_update(&goose_usage_update_msg("s1", 1800, 450, None));
+        let usage = client.take_turn_usage().expect("goose turn 3");
+        assert_eq!(usage.turn_seq, Some(2), "null record consumed no seq");
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, Some(800));
+        assert_eq!(usage.turn_output_tokens, Some(250));
     }
 
     fn standard_context_update(session_id: &str) -> serde_json::Value {

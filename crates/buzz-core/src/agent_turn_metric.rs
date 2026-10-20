@@ -45,6 +45,18 @@ pub struct TokenCounts {
     pub cache_write_tokens: Option<u64>,
 }
 
+impl TokenCounts {
+    /// True when no field carries a value (the harness reported nothing).
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.total_tokens.is_none()
+            && self.cost_usd.is_none()
+            && self.cache_read_tokens.is_none()
+            && self.cache_write_tokens.is_none()
+    }
+}
+
 /// Why a turn ended.
 ///
 /// NIP-AM: consumers MUST treat unrecognized `stopReason` values as `Unknown`
