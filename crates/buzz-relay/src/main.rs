@@ -1108,6 +1108,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             Arc::clone(&state),
             buzz_relay::handlers::side_effects::NIP43_RECONCILE_LOCK_KEY,
             std::time::Duration::from_secs(interval_secs),
+            buzz_relay::handlers::side_effects::NIP43_STANDBY_RETRY,
         );
     }
 
