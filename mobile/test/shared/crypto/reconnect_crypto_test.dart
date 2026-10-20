@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
@@ -14,6 +16,34 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  test('theme crypto and publishing use the normalized signing key', () async {
+    SharedPreferences.setMockInitialValues({});
+    final keys = nostr.Keys.generate();
+    final session = _Session();
+    final container = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(
+          await SharedPreferences.getInstance(),
+        ),
+        relayConfigProvider.overrideWith(() => _Config('  ${keys.nsec} \n')),
+        relaySessionProvider.overrideWith(() => session),
+      ],
+    );
+    addTearDown(container.dispose);
+    final listener = container.listen(communityThemeProvider, (_, _) {});
+    addTearDown(listener.close);
+    session.transition(SessionStatus.connected);
+    await container.pump();
+    final crypto = container.read(communityThemeCryptoProvider)!;
+    expect(crypto.decrypt(crypto.encrypt('theme')), 'theme');
+    await session.firstPublished.future.timeout(const Duration(seconds: 5));
+    expect(session.published, isNotEmpty);
+    for (final event in session.published) {
+      expect(event.pubkey, keys.public);
+      expect(nostr.Event.fromMap(event.toJson()).isValid(), isTrue);
+    }
+  });
+
   test(
     'reconnect reuses crypto but a community or key change replaces it',
     () async {
@@ -145,6 +175,8 @@ class _Config extends RelayConfigNotifier {
 }
 
 class _Session extends RelaySessionNotifier {
+  final published = <NostrEvent>[];
+  final firstPublished = Completer<void>();
   @override
   SessionState build() =>
       const SessionState(status: SessionStatus.disconnected);
@@ -164,7 +196,11 @@ class _Session extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => event;
+  }) async {
+    published.add(event);
+    if (!firstPublished.isCompleted) firstPublished.complete();
+    return event;
+  }
 }
 
 class _Lifecycle extends AppLifecycleNotifier {
