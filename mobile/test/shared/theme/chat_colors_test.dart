@@ -84,10 +84,17 @@ void main() {
       // Family names from earlier preview builds republish as the v1 value.
       expect(parse(chatColorChoices[index].name.toLowerCase()).accent, accent);
     }
-    expect(
-      emitted.map((entry) => entry['accent']),
-      contains(defaultCommunityTheme.accent),
-    );
+    // Older clients reject an unknown accent with the whole preference, so
+    // anything published without a picker action stays in their set.
+    final baseReaders = ((contract['baseReaders'] as Map)['accepted'] as List)
+        .cast<String>();
+    for (final automatic in [
+      defaultCommunityTheme.accent,
+      for (final index in [null, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8])
+        legacyAccentWireValue(index),
+    ]) {
+      expect(baseReaders, contains(automatic));
+    }
 
     final legacy = (contract['legacy'] as List).cast<Map<String, dynamic>>();
     for (final entry in [...emitted, ...legacy]) {

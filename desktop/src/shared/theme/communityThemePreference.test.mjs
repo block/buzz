@@ -78,6 +78,11 @@ test("accents follow the cross-client v1 contract", () => {
   for (const accent of contract.rejected) {
     assert.equal(parseCommunityThemePreference({ ...base, accent }), null);
   }
+  // Older clients reject an unknown accent with the whole preference, so the
+  // default published without a picker action stays in their set.
+  assert.ok(
+    contract.baseReaders.accepted.includes(DEFAULT_COMMUNITY_THEME.accent),
+  );
 });
 
 test("local preferences are isolated by pubkey and normalized relay", () => {
