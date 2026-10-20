@@ -146,9 +146,11 @@ out unless they ask for it:
   filter returns only the legacy channel types (`stream`, `forum`, `dm`,
   `workflow`), so a channel type added later is also left out.
 - A filter that names it with `#h`, or with `#d` on kinds 39000–39003, reads
-  it under the ordinary rules: the reader is a member, or it is open.
+  it under the ordinary rules: the reader is a member, or it is open. A
+  channel of a type added later is read the same way.
 - A filter on kinds 39000–39003 with `#t:["system"]` or any `#P` also
   returns the system channels the reader can read, then matches as usual.
+  It does not return channels of a type added later.
   For example, `{kinds:[39000], #P:[<creator>], #t:[<label>]}` finds one
   creator's labeled channel, system or not. Values in one tag filter
   combine with OR, so `#t:["system", <label>]` does not mean "a system

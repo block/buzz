@@ -122,17 +122,21 @@ async fn authorize_workflow_read(
         .map_err(|error| {
             internal_error(&format!("workflow channel access lookup: {error}")).into_response()
         })?;
-    // A workflow names its channel, so a readable system channel counts.
+    // A workflow names its channel, so a readable named-only channel (a
+    // system channel, or a type added later) counts.
     let readable = accessible.contains(&channel_id)
         || state
             .db
-            .get_readable_system_channel_ids(tenant.community(), &pubkey_bytes)
+            .get_readable_named_only_channels(tenant.community(), &pubkey_bytes)
             .await
             .map_err(|error| {
-                internal_error(&format!("workflow system channel access lookup: {error}"))
-                    .into_response()
+                internal_error(&format!(
+                    "workflow named-only channel access lookup: {error}"
+                ))
+                .into_response()
             })?
-            .contains(&channel_id);
+            .iter()
+            .any(|(id, _)| *id == channel_id);
     if !readable {
         return Err(not_found());
     }

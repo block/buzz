@@ -1210,8 +1210,8 @@ pub async fn get_members_bulk(
 /// Only legacy channel types are in either half
 /// ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]): this is the implicit scope
 /// of queries that do not name a channel, so system channels and any type
-/// added later stay out. A query that names a system channel, or opts in to
-/// them, adds them from [`get_readable_system_channel_ids`].
+/// added later stay out. A query that names such a channel, or opts in to
+/// system channels, adds them from [`get_readable_named_only_channels`].
 pub async fn get_accessible_channel_ids(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1253,24 +1253,30 @@ pub async fn get_accessible_channel_ids(
         .collect()
 }
 
-/// Get the system channels a pubkey can read: those where it is an active
-/// member, and every open system channel. Uncached, so a caller can trust it
-/// for a channel the request names.
-pub async fn get_readable_system_channel_ids(
+/// The channels of non-legacy types (system channels, and any type added
+/// later) that a pubkey can read: those where it is an active member, and
+/// every open one. Each comes with its type. Uncached, so a caller can trust
+/// it for a channel the request names.
+///
+/// These are the channels that [`get_accessible_channel_ids`] leaves out. A
+/// read reaches one only by naming it, or, for system channels, by opting in
+/// to them.
+pub async fn get_readable_named_only_channels(
     pool: &PgPool,
     community_id: CommunityId,
     pubkey: &[u8],
-) -> Result<Vec<Uuid>> {
+) -> Result<Vec<(Uuid, String)>> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
-    let rows = sqlx::query(
+    let sql = format!(
         r#"
-        SELECT c.id AS channel_id
+        SELECT c.id AS channel_id, c.channel_type::text AS channel_type
         FROM channels c
-        WHERE c.community_id = $1 AND c.deleted_at IS NULL AND c.channel_type = 'system'
+        WHERE c.community_id = $1 AND c.deleted_at IS NULL
+          AND NOT {legacy_types}
           AND (
             c.visibility = 'open'
             OR EXISTS (
@@ -1280,17 +1286,17 @@ pub async fn get_readable_system_channel_ids(
             )
           )
         "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(pubkey)
-    .fetch_all(&mut *connection)
-    .await?;
+        legacy_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
+    );
+    // Built only from the constant type list.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(community_id.as_uuid())
+        .bind(pubkey)
+        .fetch_all(&mut *connection)
+        .await?;
 
     rows.into_iter()
-        .map(|r| {
-            let id: Uuid = r.try_get("channel_id")?;
-            Ok(id)
-        })
+        .map(|r| Ok((r.try_get("channel_id")?, r.try_get("channel_type")?)))
         .collect()
 }
 
@@ -1340,14 +1346,15 @@ pub async fn system_channel_ids_among(
     .await?)
 }
 
-/// The IDs in `channel_ids` whose type is not a legacy type
-/// ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]), deleted or not: system
-/// channels and any type added later. A filter reads them only by naming them.
-pub async fn non_legacy_channel_ids_among(
+/// The channels in `channel_ids` whose type is not a legacy type
+/// ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]), deleted or not, each with
+/// its type: system channels and any type added later. A filter reads them
+/// only by naming them.
+pub async fn named_only_channels_among(
     pool: &PgPool,
     community_id: CommunityId,
     channel_ids: &[Uuid],
-) -> Result<Vec<Uuid>> {
+) -> Result<Vec<(Uuid, String)>> {
     if channel_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -1357,10 +1364,11 @@ pub async fn non_legacy_channel_ids_among(
     )
     .await?;
     let sql = format!(
-        "SELECT id FROM channels WHERE community_id = $1 AND id = ANY($2) AND NOT {}",
+        "SELECT id, channel_type::text FROM channels \
+         WHERE community_id = $1 AND id = ANY($2) AND NOT {}",
         crate::store::channel::legacy_channel_type_sql("channel_type")
     );
-    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
         .bind(channel_ids)
         .fetch_all(&mut *connection)
@@ -1999,14 +2007,15 @@ impl Db {
         get_accessible_channel_ids(&self.pool, community_id, pubkey).await
     }
 
-    /// Get the system channels a pubkey can read (member, or open).
-    #[datastore_span(name = "get_readable_system_channel_ids", system = "postgresql")]
-    pub async fn get_readable_system_channel_ids(
+    /// The channels of non-legacy types a pubkey can read (member, or open),
+    /// each with its type.
+    #[datastore_span(name = "get_readable_named_only_channels", system = "postgresql")]
+    pub async fn get_readable_named_only_channels(
         &self,
         community_id: CommunityId,
         pubkey: &[u8],
-    ) -> Result<Vec<Uuid>> {
-        get_readable_system_channel_ids(&self.pool, community_id, pubkey).await
+    ) -> Result<Vec<(Uuid, String)>> {
+        get_readable_named_only_channels(&self.pool, community_id, pubkey).await
     }
 
     /// The type of channel `channel_id`, deleted or not, or `None` when no
@@ -2030,15 +2039,15 @@ impl Db {
         system_channel_ids_among(&self.pool, community_id, channel_ids).await
     }
 
-    /// The IDs in `channel_ids` whose type is not a legacy type, deleted or
-    /// not.
-    #[datastore_span(name = "non_legacy_channel_ids_among", system = "postgresql")]
-    pub async fn non_legacy_channel_ids_among(
+    /// The channels in `channel_ids` whose type is not a legacy type, deleted
+    /// or not, each with its type.
+    #[datastore_span(name = "named_only_channels_among", system = "postgresql")]
+    pub async fn named_only_channels_among(
         &self,
         community_id: CommunityId,
         channel_ids: &[Uuid],
-    ) -> Result<Vec<Uuid>> {
-        non_legacy_channel_ids_among(&self.pool, community_id, channel_ids).await
+    ) -> Result<Vec<(Uuid, String)>> {
+        named_only_channels_among(&self.pool, community_id, channel_ids).await
     }
 
     /// Returns large active-channel rosters whose relay-authored snapshots differ.

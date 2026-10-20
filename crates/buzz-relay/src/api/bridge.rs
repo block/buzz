@@ -1511,10 +1511,11 @@ async fn query_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
-    // System channels are outside `accessible_channels`; a filter that names
-    // one reads it in its own scope only (see `handlers::system_channels`).
-    let mut readable_system =
-        crate::handlers::system_channels::readable_system_channels_for_filters(
+    // Named-only channels (system, and types added later) are outside
+    // `accessible_channels`; a filter that names one reads it in its own
+    // scope only (see `handlers::system_channels`).
+    let mut named_only =
+        crate::handlers::system_channels::readable_named_only_channels_for_filters(
             state,
             tenant.community(),
             &pubkey_bytes,
@@ -1523,14 +1524,14 @@ async fn query_events_authed(
             None,
         )
         .await
-        .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))?;
+        .map_err(|e| internal_error(&format!("named-only channel access lookup: {e}")))?;
     repair_requested_channel_access(
         state,
         tenant,
         &filters,
         &pubkey_bytes,
         &mut accessible_channels,
-        &mut readable_system,
+        &mut named_only,
     )
     .await?;
 
@@ -1546,7 +1547,7 @@ async fn query_events_authed(
             &raw_filters,
             &filters,
             &accessible_channels,
-            &readable_system,
+            &named_only,
             tenant,
             &authed_pubkey_hex,
             &pubkey_bytes,
@@ -1581,7 +1582,7 @@ async fn query_events_authed(
             let scope = crate::handlers::system_channels::filter_channel_scope(
                 filter,
                 &accessible_channels,
-                &readable_system,
+                &named_only,
             );
             events.extend(thread_roots::query(state, tenant, filter, &scope).await?);
             handled.insert(idx);
@@ -1602,7 +1603,7 @@ async fn query_events_authed(
             &crate::handlers::system_channels::filter_channel_scope(
                 filter,
                 &accessible_channels,
-                &readable_system,
+                &named_only,
             ),
             &pubkey_bytes,
             &mut events,
@@ -1728,7 +1729,7 @@ async fn query_events_authed(
         let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
             filter,
             &accessible_channels,
-            &readable_system,
+            &named_only,
         );
 
         if let Some(ch_id) = extract_channel_from_filter(filter) {
@@ -1822,7 +1823,7 @@ async fn query_events_authed(
         let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
             filter,
             &accessible_channels,
-            &readable_system,
+            &named_only,
         );
 
         if let Some(ch_id) = extract_channel_from_filter(filter) {
@@ -1928,7 +1929,7 @@ async fn query_events_authed(
         let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
             filter,
             &accessible_channels,
-            &readable_system,
+            &named_only,
         );
         match filter_events {
             Ok(stored_events) => {
@@ -1967,7 +1968,7 @@ pub(crate) async fn repair_requested_channel_access(
     filters: &[nostr::Filter],
     pubkey_bytes: &[u8],
     accessible_channels: &mut Vec<uuid::Uuid>,
-    readable_system: &mut Vec<uuid::Uuid>,
+    named_only: &mut crate::handlers::system_channels::NamedOnlyChannels,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let repaired_from = accessible_channels.len();
     let requested: Vec<uuid::Uuid> = filters
@@ -1984,19 +1985,19 @@ pub(crate) async fn repair_requested_channel_access(
         &requested,
         None,
         accessible_channels,
-        readable_system,
+        named_only.ids(),
     )
     .await
     .map_err(|e| internal_error(&format!("channel membership confirmation: {e}")))?;
-    crate::handlers::system_channels::keep_repaired_non_legacy_channels_named(
+    crate::handlers::system_channels::keep_repaired_named_only_channels_named(
         state,
         tenant.community(),
         accessible_channels,
         repaired_from,
-        readable_system,
+        named_only,
     )
     .await
-    .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))
+    .map_err(|e| internal_error(&format!("named-only channel access lookup: {e}")))
 }
 
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
@@ -2154,10 +2155,11 @@ async fn count_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
-    // System channels are outside `accessible_channels`; a filter that names
-    // one reads it in its own scope only (see `handlers::system_channels`).
-    let mut readable_system =
-        crate::handlers::system_channels::readable_system_channels_for_filters(
+    // Named-only channels (system, and types added later) are outside
+    // `accessible_channels`; a filter that names one reads it in its own
+    // scope only (see `handlers::system_channels`).
+    let mut named_only =
+        crate::handlers::system_channels::readable_named_only_channels_for_filters(
             state,
             tenant.community(),
             &pubkey_bytes,
@@ -2166,14 +2168,14 @@ async fn count_events_authed(
             None,
         )
         .await
-        .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))?;
+        .map_err(|e| internal_error(&format!("named-only channel access lookup: {e}")))?;
     repair_requested_channel_access(
         state,
         tenant,
         &filters,
         &pubkey_bytes,
         &mut accessible_channels,
-        &mut readable_system,
+        &mut named_only,
     )
     .await?;
 
@@ -2182,7 +2184,7 @@ async fn count_events_authed(
         let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
             filter,
             &accessible_channels,
-            &readable_system,
+            &named_only,
         );
         let needs_author_only_filtering =
             crate::handlers::req::filter_can_match_author_only_kinds(filter);
@@ -2415,7 +2417,7 @@ async fn handle_bridge_search(
     raw_filters: &[Value],
     filters: &[nostr::Filter],
     implicit_channels: &[uuid::Uuid],
-    readable_system: &[uuid::Uuid],
+    named_only: &crate::handlers::system_channels::NamedOnlyChannels,
     tenant: &buzz_core::tenant::TenantContext,
     reader_pubkey_hex: &str,
     pubkey_bytes: &[u8],
@@ -2435,12 +2437,12 @@ async fn handle_bridge_search(
         if limit == 0 {
             continue;
         }
-        // Implicit channels plus the readable system channels this filter
+        // Implicit channels plus the readable named-only channels this filter
         // names; never another filter's.
         let accessible_channels = &*crate::handlers::system_channels::filter_channel_scope(
             filter,
             implicit_channels,
-            readable_system,
+            named_only,
         );
 
         // Scope by channel — push the #h tag (intersected with accessible
