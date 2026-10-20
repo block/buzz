@@ -20,6 +20,7 @@ Before changing anything in this directory, read
   fence triggers to every `community_id` table.
 - Keep every migration safe for the relay that is currently deployed, whether
   migrations run at startup or out of band. Ship in this order: new schema,
-  then new code, then backfill, then constraints and cleanup. A contract migration fails closed if its backfill has not run, and
-  its release notes name the writer release that upgrades must not skip.
+  then new code, then backfill, then constraints and cleanup. A contract
+  migration fails closed if its backfill has not run, and its release notes
+  name the writer release that upgrades must not skip.
 - Bound every lock (`SET LOCAL lock_timeout`).
