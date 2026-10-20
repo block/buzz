@@ -35,6 +35,10 @@ const FIELDS_BY_TRIGGER: Record<TriggerType, ConditionField[]> = {
     { label: "Message text", value: "trigger_text" },
     AUTHOR_FIELD,
   ],
+  slash_command: [
+    { label: "Command arguments", value: "trigger_args" },
+    AUTHOR_FIELD,
+  ],
   diff_posted: [{ label: "Diff text", value: "trigger_text" }, AUTHOR_FIELD],
   reaction_added: [
     { label: "Reaction emoji", value: "trigger_emoji" },
