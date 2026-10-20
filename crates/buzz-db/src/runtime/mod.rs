@@ -969,17 +969,39 @@ impl Db {
     /// the reason names the mechanism rather than a diagnosis).
     const READER_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
 
+    /// Warm floor for a reader pool of `max_connections`: one fifth of the
+    /// ceiling, at least one.
+    ///
+    /// The floor exists so routed reads find an established connection
+    /// instead of dialing one inside [`Db::READER_ACQUIRE_TIMEOUT`]. A cold
+    /// dial (TCP+TLS+SCRAM) that outlasts that budget is dropped mid-handshake,
+    /// the read falls back to the writer, and the next read dials again; under
+    /// a fleet-wide burst that loop turned brief reader slowness into a writer
+    /// pool exhaustion (production, 2026-10-19 and 2026-10-20: thousands of
+    /// `could not accept SSL connection: EOF detected` per second on both
+    /// readers ahead of the writer acquire timeouts).
+    fn reader_min_connections(max_connections: u32) -> u32 {
+        (max_connections / 5).max(1).min(max_connections)
+    }
+
     /// Connect the read-replica pool **lazily** — no connection is
     /// attempted at construction, so a reader that is down at boot cannot
     /// crash the relay (it starts all-writer with the fence closed and
     /// recovers when the replica returns).
     ///
-    /// `min_connections` is pinned to 0 explicitly: sqlx's lazy pool still
-    /// spawns an eager background connect task to satisfy a nonzero
-    /// minimum, which would reintroduce boot-time reader dial attempts (and
-    /// their log noise) that "lazy" is meant to avoid. With 0, connections
-    /// are dialed only on first acquire; the ~10-minute reaper never tops
-    /// the pool back up, which is fine — routed reads re-fill it on demand.
+    /// The pool keeps a warm floor of [`Db::reader_min_connections`]. With
+    /// `max_lifetime` and `idle_timeout` both set, sqlx 0.9 does not dial
+    /// that floor at construction; it re-dials it in the background, under
+    /// sqlx's own 300s maintenance deadline rather than the 150ms request
+    /// budget, whenever a connection is reaped, closed on drop, or fails its
+    /// release check. [`Db::spawn_read_pool_boot_ping`] fills it at boot.
+    ///
+    /// `test_before_acquire(false)`: the idle-connection ping runs inside the
+    /// 150ms acquire budget, and a ping that overruns closes a healthy warm
+    /// connection instead of returning it. The routed read's first statement
+    /// (`BEGIN ... READ ONLY` in [`Db::proved_reader`]) already proves the
+    /// connection and fails closed to the writer as `reader_validation_error`,
+    /// and sqlx still pings every connection on release.
     ///
     /// No floor guard or writer-isolation assertion: replica sessions are
     /// read-only, so the commit-time trigger from migration 0021 never fires
@@ -992,7 +1014,8 @@ impl Db {
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
-            .min_connections(0)
+            .min_connections(Self::reader_min_connections(max_connections))
+            .test_before_acquire(false)
             .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
@@ -1009,13 +1032,20 @@ impl Db {
             .connect_lazy(url)?)
     }
 
-    /// Spawn a one-shot reader reachability probe that only WARNs.
+    /// Spawn a one-shot reader reachability probe that only WARNs, then
+    /// fills the reader's warm floor.
     ///
-    /// With a lazy pool and `min_connections(0)`, nothing dials the replica
-    /// until the first routed read — so a misconfigured `READ_DATABASE_URL`
-    /// would otherwise be invisible until traffic arrives and quietly falls
-    /// back to the writer. This ping is the only boot-time reader-down
-    /// visibility; it must never gate startup or [`Db::spawn_fence_probe`].
+    /// The lazy pool dials nothing at construction, so without this ping a
+    /// misconfigured `READ_DATABASE_URL` would be invisible until traffic
+    /// arrives and quietly falls back to the writer. This ping is the only
+    /// boot-time reader-down visibility; it must never gate startup or
+    /// [`Db::spawn_fence_probe`].
+    ///
+    /// On success it dials the pool up to [`Db::reader_min_connections`],
+    /// so a freshly started pod does not meet its first traffic with an
+    /// empty reader pool and pay every dial inside the 150ms request budget.
+    /// Acquires that overrun that budget are retried for
+    /// [`Db::READER_BOOT_WARM_BUDGET`].
     ///
     /// On success it also primes the Aurora identity capability cache
     /// ([`Db::reader_aurora_identity`]) on the connection it already holds,
@@ -1032,31 +1062,76 @@ impl Db {
         tokio::spawn(Self::read_pool_boot_ping_once(read_pool, aurora_identity));
     }
 
+    /// How long the boot ping keeps retrying reader acquires that overrun
+    /// [`Db::READER_ACQUIRE_TIMEOUT`] before it reports the reader
+    /// unreachable or stops warming. Off the request path, so a slow boot
+    /// dial costs a retry, not a fallback.
+    const READER_BOOT_WARM_BUDGET: Duration = Duration::from_secs(5);
+
     async fn read_pool_boot_ping_once(
         read_pool: PgPool,
         aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
     ) {
-        match observability::acquire_reader_with_legacy_metrics(
-            &read_pool,
-            observability::ReaderOperation::Bootstrap,
-        )
-        .await
-        {
-            Ok(mut conn) => {
-                tracing::info!("read replica reachable at boot");
-                match replica_fence::reader_supports_aurora_identity(&mut conn).await {
-                    Ok(supported) => {
-                        let _ = aurora_identity.set(supported);
-                    }
-                    Err(e) => tracing::debug!(
-                        error = %e,
-                        "aurora identity boot prime failed; first routed read will probe"
-                    ),
+        let deadline = tokio::time::Instant::now() + Self::READER_BOOT_WARM_BUDGET;
+        let mut conn = match Self::boot_acquire_reader(&read_pool, deadline).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::warn!(
+                    "read replica unreachable at boot; serving all-writer until it recovers: {e}"
+                );
+                return;
+            }
+        };
+        tracing::info!("read replica reachable at boot");
+        match replica_fence::reader_supports_aurora_identity(&mut conn).await {
+            Ok(supported) => {
+                let _ = aurora_identity.set(supported);
+            }
+            Err(e) => tracing::debug!(
+                error = %e,
+                "aurora identity boot prime failed; first routed read will probe"
+            ),
+        }
+
+        // Hold every checkout so each further acquire dials a new
+        // connection, then return them all to the pool idle. A partial
+        // warm-up is fine: sqlx re-dials the floor in the background
+        // whenever a connection is reaped or closed.
+        let target = read_pool.options().get_min_connections();
+        let mut held = vec![conn];
+        while read_pool.size() < target {
+            match Self::boot_acquire_reader(&read_pool, deadline).await {
+                Ok(conn) => held.push(conn),
+                Err(e) => {
+                    tracing::debug!(error = %e, "reader warm-up stopped");
+                    break;
                 }
             }
-            Err(e) => tracing::warn!(
-                "read replica unreachable at boot; serving all-writer until it recovers: {e}"
-            ),
+        }
+        drop(held);
+        tracing::info!(
+            warmed = read_pool.size(),
+            target,
+            "reader pool warm-up finished"
+        );
+    }
+
+    /// One boot-time reader checkout, retrying acquire timeouts until
+    /// `deadline`.
+    async fn boot_acquire_reader(
+        read_pool: &PgPool,
+        deadline: tokio::time::Instant,
+    ) -> sqlx::Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
+        loop {
+            match observability::acquire_reader_with_legacy_metrics(
+                read_pool,
+                observability::ReaderOperation::Bootstrap,
+            )
+            .await
+            {
+                Err(sqlx::Error::PoolTimedOut) if tokio::time::Instant::now() < deadline => {}
+                result => return result,
+            }
         }
     }
 

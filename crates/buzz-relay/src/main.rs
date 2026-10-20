@@ -538,7 +538,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         info!("Postgres connected (writer + lazy read replica pool)");
         // Reader-down at boot must not crash or block the relay; this warn-only
         // ping is the sole boot-time visibility that the replica is unreachable
-        // (the lazy pool with min_connections=0 dials nothing until first use).
+        // (the lazy pool dials nothing at construction). On success it also
+        // fills the reader's warm floor in the background.
         db.spawn_read_pool_boot_ping();
     } else {
         info!("Postgres connected");

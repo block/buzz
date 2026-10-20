@@ -1139,30 +1139,52 @@ async fn read_pool_stats_reports_reader_ceiling_not_writer() {
     );
 }
 
-/// D4 wiring: the reader pool is built lazily with `min_connections(0)`
-/// and the short reader acquire timeout — construction must succeed
-/// with no replica listening (reader-down at boot must not crash the
-/// relay), and `read_max_connections` must honour
-/// `DbConfig::read_max_connections` over the writer sizing.
+/// D4 wiring: the reader pool is built lazily with the short reader
+/// acquire timeout, a warm `min_connections` floor, and no pre-acquire
+/// ping — construction must succeed with no replica listening
+/// (reader-down at boot must not crash the relay), and
+/// `read_max_connections` must honour `DbConfig::read_max_connections`
+/// over the writer sizing.
 /// `#[tokio::test]` because `connect_lazy` spawns the pool reaper task,
 /// which needs a Tokio runtime even though nothing is dialed.
 #[tokio::test]
 async fn connect_read_pool_is_lazy_and_independently_sized() {
     let config = DbConfig {
         max_connections: 20,
-        read_max_connections: Some(7),
+        read_max_connections: Some(10),
         ..DbConfig::default()
     };
     // Unroutable per RFC 5737 TEST-NET-1: proves nothing is dialed at
     // construction time.
-    let pool = Db::connect_read_pool(&config, "postgres://user:pw@192.0.2.1:5432/none", 7)
+    let pool = Db::connect_read_pool(&config, "postgres://user:pw@192.0.2.1:5432/none", 10)
         .expect("lazy construction must not dial the replica");
-    assert_eq!(pool.options().get_max_connections(), 7);
-    assert_eq!(pool.options().get_min_connections(), 0);
+    assert_eq!(pool.options().get_max_connections(), 10);
+    assert_eq!(pool.options().get_min_connections(), 2);
+    assert!(
+        !pool.options().get_test_before_acquire(),
+        "the idle ping must not spend the 150ms reader acquire budget"
+    );
     assert_eq!(
         pool.options().get_acquire_timeout(),
         Db::READER_ACQUIRE_TIMEOUT
     );
+    // A nonzero floor must not turn construction into a dial: sqlx 0.9 only
+    // tops up the floor from the reaper or after a connection closes.
+    tokio::task::yield_now().await;
+    assert_eq!(pool.size(), 0, "construction must not dial the replica");
+}
+
+/// The reader warm floor is a fifth of the ceiling, never zero, and never
+/// above the ceiling.
+#[test]
+fn reader_min_connections_is_a_fifth_of_max_with_a_floor_of_one() {
+    for (max, min) in [(1, 1), (4, 1), (5, 1), (9, 1), (10, 2), (50, 10), (100, 20)] {
+        assert_eq!(
+            Db::reader_min_connections(max),
+            min,
+            "max_connections={max}"
+        );
+    }
 }
 
 /// Channel window: head fetch (no cursor) reads the WRITER; cursor pages
@@ -1967,7 +1989,7 @@ async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
     };
 
     // `Db::new` so the writer arms the floor guard and the reader is the
-    // real lazy `connect_read_pool` pool (min_connections=0, 150ms
+    // real lazy `connect_read_pool` pool (warm floor of 1, 150ms
     // acquire timeout). Reader is sized 1 so holding one connection
     // saturates it.
     let mut db = Db::new(&DbConfig {
@@ -2282,7 +2304,61 @@ async fn routed_reads_are_confined_to_the_requested_community() {
     drop_scratch_db(&admin, writer, &wname).await;
 }
 
-/// D4: a LAZY reader pool (connect_lazy, min_connections=0, never yet
+/// The boot ping fills the reader pool to its warm floor, so a freshly
+/// started pod meets its first routed reads with established connections
+/// instead of dialing each one inside the 150ms reader acquire budget.
+/// Without the warm-up the ping leaves exactly one connection behind.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn reader_boot_ping_warms_pool_to_min_connections() {
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (seed, wname) = create_scratch_db(&admin, "warm_r").await;
+    seed.close().await;
+    let scratch_url = {
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        format!("{}/{}", &base[..idx], wname)
+    };
+    let db = Db::new(&DbConfig {
+        database_url: scratch_url.clone(),
+        read_database_url: Some(scratch_url),
+        max_connections: 2,
+        read_max_connections: Some(15),
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect Db with lazy reader");
+    let read_pool = db.read_pool.clone().expect("reader pool configured");
+    let target = Db::reader_min_connections(15);
+    assert_eq!(
+        target, 3,
+        "fixture needs a floor above the ping's one connection"
+    );
+    assert_eq!(
+        read_pool.size(),
+        0,
+        "lazy reader dials nothing before the ping"
+    );
+
+    db.read_pool_boot_ping_for_tests().await;
+
+    assert_eq!(
+        read_pool.size(),
+        target,
+        "boot ping must dial the reader up to its warm floor, and no further"
+    );
+    assert_eq!(
+        read_pool.num_idle(),
+        target as usize,
+        "warm connections must be returned to the pool idle"
+    );
+
+    drop_scratch_db(&admin, db.pool.clone(), &wname).await;
+}
+
+/// D4: a LAZY reader pool (connect_lazy, never yet
 /// used) must still let [`Db::spawn_fence_probe`] verify the writer's
 /// floor guard and spawn — reader-down or reader-idle at boot must not
 /// disable fence probing.
