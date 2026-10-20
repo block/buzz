@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useThreadCatchUpReadHandoff } from "@/features/messages/catchUp/useThreadCatchUpReadHandoff";
 import { ProtectedGlobalOverlay } from "@protected-feature-components";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
@@ -389,6 +390,7 @@ export function AppShell() {
     unreadChannelNotificationCount,
     getEffectiveTimestamp: getChannelReadAt,
     getOwnTimestamp: getOwnReadAt,
+    isReadStateReady,
     readStateVersion,
     setContextParentResolver,
     participatedRootIds,
@@ -416,6 +418,12 @@ export function AppShell() {
     },
   );
 
+  const threadCatchUpReadHandoff = useThreadCatchUpReadHandoff({
+    getOwnReadAt,
+    isReadStateReady,
+    relayUrl: communitiesHook.activeCommunity?.relayUrl,
+    pubkey: identityQuery.data?.pubkey,
+  });
   const {
     getThreadReadAt,
     markThreadRead,
@@ -729,6 +737,9 @@ export function AppShell() {
             getMessageReadAt,
             getChannelActivityItemReadAt,
             markMessageRead,
+            getOwnReadAt,
+            isReadStateReady,
+            threadCatchUpReadHandoff,
             readStateVersion,
             setContextParentResolver,
             followThread: handleFollowThread,

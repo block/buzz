@@ -85,6 +85,7 @@ import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelOpenReadState } from "./useChannelOpenReadState";
 import { useChannelUnreadState } from "./useChannelUnreadState";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
+import { ThreadCatchUpProvider } from "@/features/messages/catchUp/ThreadCatchUpContext"; import { useThreadCatchUpController } from "@/features/messages/catchUp/useThreadCatchUp";
 import { GuardedChannelPane } from "./GuardedChannelPane"; import { useNavigationGuard } from "./useNavigationGuard"; import * as searchForwarding from "./searchTargetForwarding";
 const EMPTY_RELAY_EVENTS: RelayEvent[] = [];
 export function ChannelScreen({
@@ -121,6 +122,7 @@ export function ChannelScreen({
     recordThreadInteraction,
     isThreadMuted,
     readStateVersion,
+    getOwnReadAt, isReadStateReady, threadCatchUpReadHandoff,
   } = useAppShell();
   const {
     channelManagementOpen,
@@ -443,6 +445,8 @@ export function ChannelScreen({
     respondToLookup,
     relaySelfPubkey,
   });
+  // Freezes the pre-visit read baseline during render, before the read effects below.
+  const threadCatchUp = useThreadCatchUpController({ channel: activeChannel, isHuddleTranscript, threadHead: threadPanelData.threadHead, threadMessages: threadPanelData.messages, relayUrl: activeCommunity?.relayUrl, currentPubkey, getOwnReadAt, isReadStateReady, readHandoff: threadCatchUpReadHandoff });
   const {
     firstUnreadMessageId,
     getFirstReplyIdForMessage,
@@ -835,7 +839,7 @@ export function ChannelScreen({
             ) : (
               <React.Suspense
                 fallback={<ChannelScreenLoadingFallback {...{ isHuddleTranscript }} />}
-              >
+              ><ThreadCatchUpProvider value={threadCatchUp}>
                 {searchForwarding.renderSearchAwareChannel(
                   <GuardedChannelPane
                   activeChannel={activeChannel}
@@ -975,7 +979,7 @@ export function ChannelScreen({
                   />,
                   searchTarget,
                 )}
-              </React.Suspense>
+              </ThreadCatchUpProvider></React.Suspense>
             )
           ) : (
             <ChannelScreenEmptyState />

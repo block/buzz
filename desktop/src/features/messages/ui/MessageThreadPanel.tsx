@@ -3,6 +3,10 @@ import { ArrowDown } from "lucide-react";
 
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
 import {
+  ThreadCatchUpHeaderAction,
+  ThreadCatchUpPane,
+} from "@/features/messages/catchUp/ThreadCatchUpPane";
+import {
   buildThreadSummaryFromVisibleEntries,
   getActiveContinuationDepths,
   hasNestedThreadBranches,
@@ -795,6 +799,14 @@ export function MessageThreadPanel({
 
   const threadFooter = (
     <>
+      {isHuddleTranscript ? null : (
+        <ThreadCatchUpPane
+          columnMaxWidthPx={columnMaxWidthPx}
+          currentPubkey={currentPubkey}
+          profiles={profiles}
+          threadHeadId={threadHead.id}
+        />
+      )}
       {!isAtBottom ? (
         <div className="pointer-events-none absolute inset-x-0 bottom-36 z-50 flex justify-center px-4">
           <Button
@@ -908,6 +920,9 @@ export function MessageThreadPanel({
         header={
           isHuddleTranscript ? undefined : (
             <MessageThreadPanelHeader
+              headerActions={
+                <ThreadCatchUpHeaderAction threadHeadId={threadHead.id} />
+              }
               headerLeading={headerLeading}
               headerTitle={headerTitle}
               headerTitleAriaLabel={headerTitleAriaLabel}

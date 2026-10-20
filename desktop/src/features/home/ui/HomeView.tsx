@@ -1,4 +1,5 @@
 import * as React from "react";
+import { EMPTY_CATCH_UP_READ_HANDOFF } from "@/features/messages/catchUp/useThreadCatchUpReadHandoff";
 import { RefreshCcw } from "lucide-react";
 
 import { useAppShell } from "@/app/AppShellContext";
@@ -255,6 +256,8 @@ export function HomeView({
     markThreadRead,
     recordThreadInteraction,
     readStateVersion,
+    isReadStateReady,
+    threadCatchUpReadHandoff = EMPTY_CATCH_UP_READ_HANDOFF,
   } = useAppShell();
   const { doneSet, markDone, markUnread, undoDone, undoUnread, unreadSet } =
     feedItemState;
@@ -684,6 +687,7 @@ export function HomeView({
                     : "grid-cols-1",
           )}
           data-testid="home-inbox"
+          data-read-state-ready={isReadStateReady}
           ref={homeInboxRef}
           style={
             {
@@ -731,6 +735,20 @@ export function HomeView({
               }}
               onSelect={(itemId) => {
                 const item = findInboxItemByEventId(inboxItems, itemId);
+                if (
+                  item?.item.channelId &&
+                  (item.item.kind === 9 || item.item.kind === 40002)
+                ) {
+                  const thread = getThreadReference(item.item.tags);
+                  threadCatchUpReadHandoff.capture({
+                    channelId: item.item.channelId,
+                    rootEventId:
+                      thread.rootId ?? thread.parentId ?? item.item.id,
+                    messageIds: [item.item, ...item.groupItems].map(
+                      (message) => message.id,
+                    ),
+                  });
+                }
                 setUnreadBoundary(
                   item && !effectiveDoneSet.has(item.id)
                     ? {

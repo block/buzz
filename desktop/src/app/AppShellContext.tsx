@@ -1,4 +1,8 @@
 import * as React from "react";
+import {
+  EMPTY_CATCH_UP_READ_HANDOFF,
+  type ThreadCatchUpReadHandoff,
+} from "@/features/messages/catchUp/useThreadCatchUpReadHandoff";
 import type { ForcedUnreadSource } from "@/features/channels/forcedUnreadStore";
 import type { ContextParentResolver } from "@/features/channels/readState/readStateManager";
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
@@ -46,6 +50,14 @@ type AppShellContextValue = {
   ) => number | null;
   // Advance a single message's read marker to the given unix-seconds timestamp.
   markMessageRead: (messageId: string, timestamp: number) => void;
+  // A context's own marker (`<channelId>`, `thread:<root>`, `msg:<id>`)
+  // without parent folding, so a surface can freeze the pre-visit read
+  // position before its own mark-read effects run.
+  getOwnReadAt: (contextId: string) => number | null;
+  // False until local and relay read state have both loaded; markers read
+  // before then are not a reliable previous read position.
+  isReadStateReady: boolean;
+  threadCatchUpReadHandoff: ThreadCatchUpReadHandoff;
   // Bump-counter that invalidates whenever the read marker changes. Include
   // in memo deps that consume getChannelReadAt.
   readStateVersion: number;
@@ -96,6 +108,9 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   getMessageReadAt: () => null,
   getChannelActivityItemReadAt: () => null,
   markMessageRead: () => {},
+  getOwnReadAt: () => null,
+  isReadStateReady: false,
+  threadCatchUpReadHandoff: EMPTY_CATCH_UP_READ_HANDOFF,
   readStateVersion: 0,
   setContextParentResolver: () => {},
   followThread: () => {},

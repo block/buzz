@@ -12,6 +12,7 @@ import {
   AuxiliaryPanel,
   AuxiliaryPanelBody,
   AuxiliaryPanelHeader,
+  AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
 } from "@/shared/layout/AuxiliaryPanel";
@@ -19,6 +20,7 @@ import { Skeleton } from "@/shared/ui/skeleton";
 
 /** Shared title row so the skeleton and loaded panel keep the same chrome. */
 export function MessageThreadPanelHeader({
+  headerActions,
   headerLeading,
   headerTitle = "Thread",
   headerTitleAriaLabel,
@@ -28,6 +30,8 @@ export function MessageThreadPanelHeader({
   onHeaderTitleClick,
   showBackButton,
 }: {
+  /** Thread-scoped actions placed before the close control. */
+  headerActions?: React.ReactNode;
   headerLeading?: React.ReactNode;
   headerTitle?: string;
   headerTitleAriaLabel?: string;
@@ -68,6 +72,7 @@ export function MessageThreadPanelHeader({
       >
         <AuxiliaryPanelTitle>{title}</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
+      <AuxiliaryPanelHeaderActions>{headerActions}</AuxiliaryPanelHeaderActions>
     </AuxiliaryPanelHeader>
   );
 }

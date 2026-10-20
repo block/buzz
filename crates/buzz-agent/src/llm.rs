@@ -50,6 +50,10 @@ pub struct Llm {
     /// Databricks otherwise. Anthropic doesn't use this — it always
     /// reads `cfg.api_key` directly because the API expects `x-api-key`.
     auth: Arc<dyn TokenSource>,
+    /// Latched from `Config::local_only` at construction. A local-only client
+    /// refuses redirects and proxies, sends no credential, and re-checks the
+    /// loopback invariants on every request (see [`Llm::ensure_transport`]).
+    local_only: bool,
 }
 
 /// Connect-phase timeout applied to every outgoing LLM HTTP request.
@@ -67,13 +71,22 @@ const LLM_USER_AGENT: &str = concat!("buzz-agent/", env!("CARGO_PKG_VERSION"));
 
 impl Llm {
     pub fn new(cfg: &Config) -> Result<Self, AgentError> {
-        let http = Client::builder()
+        cfg.validate_local_only().map_err(AgentError::Llm)?;
+        let mut builder = Client::builder()
             .user_agent(LLM_USER_AGENT)
-            .connect_timeout(LLM_CONNECT_TIMEOUT)
-            // No client-level read_timeout: we apply a per-request total
-            // timeout via RequestBuilder::timeout() so that escalated budgets
-            // on slow models are not silently floored by a fixed client-level
-            // value. The connect_timeout above still bounds the handshake phase.
+            .connect_timeout(LLM_CONNECT_TIMEOUT);
+        // No client-level read_timeout: we apply a per-request total
+        // timeout via RequestBuilder::timeout() so that escalated budgets
+        // on slow models are not silently floored by a fixed client-level
+        // value. The connect_timeout above still bounds the handshake phase.
+        if cfg.local_only {
+            // A redirect or an inherited proxy would carry the request off the
+            // validated loopback endpoint. A 3xx then surfaces as an error.
+            builder = builder
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy();
+        }
+        let http = builder
             .build()
             .map_err(|e| AgentError::Llm(format!("http: {e}")))?;
         let auth = build_token_source(cfg)?;
@@ -81,7 +94,21 @@ impl Llm {
             http,
             auto_upgraded: AtomicBool::new(false),
             auth,
+            local_only: cfg.local_only,
         })
+    }
+
+    /// Fail closed when the per-call config disagrees with the transport this
+    /// client was built for. A local-only client never serves a remote config,
+    /// and a remote-capable client never serves a local-only one (its HTTP
+    /// client would still follow redirects and proxies).
+    fn ensure_transport(&self, cfg: &Config) -> Result<(), AgentError> {
+        if cfg.local_only != self.local_only {
+            return Err(AgentError::Llm(
+                "local-only transport mismatch; request not sent".into(),
+            ));
+        }
+        cfg.validate_local_only().map_err(AgentError::Llm)
     }
 
     pub async fn complete(
@@ -92,6 +119,7 @@ impl Llm {
         tools: &[ToolDef],
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
+        self.ensure_transport(cfg)?;
         let effort = cfg.thinking_effort;
         let call_start = std::time::Instant::now();
         let result = match cfg.provider {
@@ -253,6 +281,7 @@ impl Llm {
         max_output_tokens: u32,
         effective_model: &str,
     ) -> Result<String, AgentError> {
+        self.ensure_transport(cfg)?;
         let call_start = std::time::Instant::now();
         let result = (async {
             match cfg.provider {
@@ -502,6 +531,11 @@ impl Llm {
         // rejection can never suppress a later turn's legitimate retry. Both
         // statuses map to `LlmAuth` in `post`: a 403 is indistinguishable from
         // an expired-token 403 here, so we refresh once and let it propagate.
+        if self.local_only {
+            // No provider credential exists on this route, so there is
+            // nothing to send and nothing to refresh.
+            return post(&self.http, &url, body_ref, cfg.llm_timeout, |r| r).await;
+        }
         let mut bearer = self.auth.bearer().await.map_err(PostError::from)?;
         let mut refreshed = false;
         loop {
@@ -820,8 +854,18 @@ fn openai_body(
             "parameters": t.input_schema } })
         })
         .collect();
-    let mut body = json!({ "model": effective_model, "stream": false,
-        "max_completion_tokens": cfg.max_output_tokens, "messages": messages });
+    let mut body = json!({ "model": effective_model, "stream": false, "messages": messages });
+    // Local servers such as Ollama implement max_tokens; an ignored
+    // max_completion_tokens would leave generation unbounded.
+    let output_limit_key = if cfg.local_only {
+        "max_tokens"
+    } else {
+        "max_completion_tokens"
+    };
+    body[output_limit_key] = json!(cfg.max_output_tokens);
+    if cfg.local_json_output {
+        body["response_format"] = json!({"type": "json_object"});
+    }
     if let Some(e) = effort {
         body["reasoning_effort"] = json!(e.openai_effort_str());
     }
@@ -2654,6 +2698,8 @@ mod tests {
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: true,
+            local_only: false,
+            local_json_output: false,
         }
     }
 
@@ -5924,6 +5970,7 @@ mod tests {
                 .unwrap(),
             auto_upgraded: std::sync::atomic::AtomicBool::new(false),
             auth,
+            local_only: false,
         }
     }
 
@@ -8045,5 +8092,272 @@ mod tests {
             1,
             "exactly one refresh"
         );
+    }
+}
+
+#[cfg(test)]
+mod local_only_tests {
+    use super::*;
+    use crate::config::{HookServers, ThinkingSummary};
+    use crate::types::HistoryItem;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+
+    /// One recorded request: the request line plus lowercased header names
+    /// and values, so assertions can check what actually crossed the wire.
+    #[derive(Debug, Clone)]
+    struct WireRequest {
+        request_line: String,
+        headers: Vec<(String, String)>,
+        body: Option<Value>,
+    }
+
+    impl WireRequest {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        }
+    }
+
+    /// Loopback HTTP stub that answers every request with `response` (a full
+    /// raw HTTP/1.1 response) and records what it received.
+    async fn spawn_raw_stub(response: String) -> (String, Arc<Mutex<Vec<WireRequest>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_server = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut bytes = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let header_end = loop {
+                    if let Some(index) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                    match socket.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                    }
+                };
+                let text = String::from_utf8_lossy(&bytes[..header_end]).into_owned();
+                let mut lines = text.lines();
+                let request_line = lines.next().unwrap_or_default().to_string();
+                let headers: Vec<(String, String)> = lines
+                    .filter_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+                    })
+                    .collect();
+                let content_length = headers
+                    .iter()
+                    .find(|(name, _)| name == "content-length")
+                    .and_then(|(_, value)| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                while bytes.len() < header_end + content_length {
+                    match socket.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                seen_for_server.lock().await.push(WireRequest {
+                    request_line,
+                    headers,
+                    body: serde_json::from_slice(&bytes[header_end..header_end + content_length])
+                        .ok(),
+                });
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (base_url, seen)
+    }
+
+    fn json_response(body: &Value) -> String {
+        let body = body.to_string();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn chat_ok(text: &str) -> String {
+        json_response(&json!({
+            "choices": [{ "finish_reason": "stop", "message": { "content": text } }]
+        }))
+    }
+
+    fn local_cfg(base_url: &str) -> Config {
+        Config {
+            provider: Provider::OpenAi,
+            system_prompt: "system".into(),
+            max_rounds: 1,
+            max_output_tokens: 1024,
+            max_token_recoveries: 0,
+            llm_timeout: Duration::from_secs(10),
+            tool_timeout: Duration::from_secs(10),
+            mcp_init_timeout: Duration::from_secs(10),
+            mcp_max_restart_attempts: 1,
+            mcp_restart_base_ms: 1,
+            mcp_restart_max_ms: 1,
+            max_sessions: 1,
+            max_line_bytes: 1024 * 1024,
+            max_history_bytes: 16 * 1024 * 1024,
+            max_tool_result_text_bytes: 50 * 1024,
+            max_context_tokens: 200_000,
+            max_handoffs: 0,
+            max_parallel_tools: 1,
+            max_pending_permissions: 32,
+            permission_timeout: Duration::from_secs(330),
+            hook_timeout: Duration::from_secs(1),
+            stop_max_rejections: 0,
+            require_reply: false,
+            hook_servers: HookServers::None,
+            databricks_model_filter: None,
+            api_key: String::new(),
+            model: "local-model".into(),
+            base_url: base_url.into(),
+            anthropic_api_version: "2023-06-01".into(),
+            openai_api: OpenAiApi::Chat,
+            hints_enabled: false,
+            thinking_effort: None,
+            thinking_summary: ThinkingSummary::Auto,
+            prompt_caching: false,
+            local_only: true,
+            local_json_output: false,
+        }
+    }
+
+    async fn complete(llm: &Llm, cfg: &Config) -> Result<LlmResponse, AgentError> {
+        llm.complete(
+            cfg,
+            "system",
+            &[HistoryItem::User("hello".into())],
+            &[],
+            "local-model",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn local_only_request_reaches_loopback_chat_without_credentials() {
+        for json_output in [false, true] {
+            let (base_url, seen) = spawn_raw_stub(chat_ok("recap")).await;
+            let mut cfg = local_cfg(&base_url);
+            cfg.local_json_output = json_output;
+            let llm = Llm::new(&cfg).unwrap();
+
+            let response = complete(&llm, &cfg).await.unwrap();
+            assert_eq!(response.text, "recap");
+
+            let seen = seen.lock().await;
+            assert_eq!(seen.len(), 1);
+            assert!(
+                seen[0]
+                    .request_line
+                    .starts_with("POST /v1/chat/completions "),
+                "{:?}",
+                seen[0].request_line
+            );
+            assert_eq!(
+                seen[0].header("authorization"),
+                None,
+                "local-only requests must carry no provider credential"
+            );
+            let body = seen[0].body.as_ref().unwrap();
+            assert_eq!(body["max_tokens"], cfg.max_output_tokens);
+            assert!(body.get("max_completion_tokens").is_none());
+            if json_output {
+                assert_eq!(body["response_format"], json!({"type":"json_object"}));
+            } else {
+                assert!(body.get("response_format").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_only_refuses_to_follow_redirects() {
+        let (target_url, target_seen) = spawn_raw_stub(chat_ok("redirected")).await;
+        let redirect = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target_url}/chat/completions\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let (base_url, seen) = spawn_raw_stub(redirect).await;
+        let cfg = local_cfg(&base_url);
+        let llm = Llm::new(&cfg).unwrap();
+
+        let error = complete(&llm, &cfg).await.unwrap_err();
+        assert!(error.to_string().contains("307"), "{error}");
+        assert_eq!(seen.lock().await.len(), 1);
+        assert!(
+            target_seen.lock().await.is_empty(),
+            "the redirect target must never receive the conversation"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_capable_client_follows_redirects_so_the_policy_is_load_bearing() {
+        // Control for the test above: the default client does follow, so the
+        // local-only policy is what stops the hop.
+        let (target_url, target_seen) = spawn_raw_stub(chat_ok("redirected")).await;
+        let redirect = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target_url}/chat/completions\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let (base_url, _) = spawn_raw_stub(redirect).await;
+        let mut cfg = local_cfg(&base_url);
+        cfg.local_only = false;
+        cfg.api_key = "key".into();
+        let llm = Llm::new(&cfg).unwrap();
+
+        let response = complete(&llm, &cfg).await.unwrap();
+        assert_eq!(response.text, "redirected");
+        assert_eq!(target_seen.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn local_only_client_construction_rejects_non_loopback_endpoints() {
+        for base_url in [
+            "https://api.openai.com/v1",
+            "http://localhost:11434/v1",
+            "http://10.0.0.2:11434/v1",
+        ] {
+            let cfg = local_cfg(base_url);
+            assert!(Llm::new(&cfg).is_err(), "{base_url}");
+        }
+        let mut keyed = local_cfg("http://127.0.0.1:11434/v1");
+        keyed.api_key = "sk-test".into();
+        assert!(Llm::new(&keyed).is_err());
+    }
+
+    #[tokio::test]
+    async fn transport_mismatch_fails_before_any_request() {
+        let (base_url, seen) = spawn_raw_stub(chat_ok("never")).await;
+        let local = local_cfg(&base_url);
+        let mut remote = local.clone();
+        remote.local_only = false;
+        remote.api_key = "key".into();
+
+        // A local-only client asked to serve a remote-capable config.
+        let local_llm = Llm::new(&local).unwrap();
+        assert!(complete(&local_llm, &remote).await.is_err());
+        // A remote-capable client (redirects/proxies enabled) asked to serve a
+        // local-only config.
+        let remote_llm = Llm::new(&remote).unwrap();
+        assert!(complete(&remote_llm, &local).await.is_err());
+        // A local-only config mutated to a remote endpoint after construction.
+        let mut moved = local.clone();
+        moved.base_url = "https://api.openai.com/v1".into();
+        assert!(complete(&local_llm, &moved).await.is_err());
+        assert!(local_llm
+            .summarize(&moved, "system", "user", 64, "local-model")
+            .await
+            .is_err());
+
+        assert!(seen.lock().await.is_empty());
     }
 }

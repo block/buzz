@@ -14,6 +14,7 @@ import {
   handleSaveCustomHarness,
   handleDeleteCustomHarness,
 } from "./e2eBridgeCustomHarnesses.ts";
+import { handleThreadCatchUpMockCommand } from "./e2eBridgeThreadCatchUp.ts";
 
 import type {
   ObservedUnreadProjection,
@@ -15372,8 +15373,15 @@ export function maybeInstallE2eTauriMocks() {
         }
         return null;
       }
-      default:
+      default: {
+        const catchUp = await handleThreadCatchUpMockCommand(
+          command,
+          payload,
+          getMockMessageStore,
+        );
+        if (catchUp.handled) return catchUp.value;
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
+      }
     }
   };
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>

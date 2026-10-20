@@ -635,24 +635,57 @@ pub struct Config {
     /// Databricks gateway does not auto-cache, so without this the surfaced
     /// `cache_read_input_tokens` is structurally always 0.
     pub prompt_caching: bool,
+    /// Opt-in local-only transport (`BUZZ_AGENT_LOCAL_ONLY=1`). Restricts the
+    /// agent to the OpenAI-compatible Chat Completions route on a literal
+    /// numeric loopback endpoint, sends no provider credential, and makes the
+    /// HTTP client refuse redirects and proxies. See [`Config::validate_local_only`].
+    pub local_only: bool,
+    /// Request a JSON object from the local Chat Completions server.
+    /// Opt-in for structured consumers; ordinary local agents retain text output.
+    pub local_json_output: bool,
 }
+
+/// Provider credentials and endpoints that must be absent in local-only mode.
+/// Their presence means the launcher handed the agent a remote route, which
+/// local-only mode refuses rather than silently ignores.
+const LOCAL_ONLY_FORBIDDEN_ENV: [&str; 7] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_COMPAT_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_BASE_URL",
+    "DATABRICKS_HOST",
+    "DATABRICKS_TOKEN",
+];
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let databricks_host = env("DATABRICKS_HOST");
-        let databricks_model = env("DATABRICKS_MODEL");
-        let provider = resolve_provider(
-            env("BUZZ_AGENT_PROVIDER").as_deref(),
-            env("ANTHROPIC_API_KEY").as_deref(),
-            env("OPENAI_COMPAT_API_KEY").as_deref(),
-            env("OPENROUTER_API_KEY").as_deref(),
-        )?;
+        Self::from_lookup(&env)
+    }
+
+    /// [`from_env`](Self::from_env) over an explicit variable lookup, so tests
+    /// drive the production parser without mutating process environment.
+    fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let databricks_host = lookup("DATABRICKS_HOST");
+        let databricks_model = lookup("DATABRICKS_MODEL");
+        let local_only = parse_local_only(lookup("BUZZ_AGENT_LOCAL_ONLY").as_deref())?;
+        let provider = if local_only {
+            reject_local_only_conflicts(lookup)?;
+            resolve_local_only_provider(lookup("BUZZ_AGENT_PROVIDER").as_deref())?
+        } else {
+            resolve_provider(
+                lookup("BUZZ_AGENT_PROVIDER").as_deref(),
+                lookup("ANTHROPIC_API_KEY").as_deref(),
+                lookup("OPENAI_COMPAT_API_KEY").as_deref(),
+                lookup("OPENROUTER_API_KEY").as_deref(),
+            )?
+        };
 
         // Universal model override — takes priority over provider-specific model
         // env vars (ANTHROPIC_MODEL, OPENAI_COMPAT_MODEL, DATABRICKS_MODEL) when
         // present. Set by the desktop from the persona/record to express explicit
         // user intent; provider-specific vars serve as defaults for CLI/standalone use.
-        let buzz_agent_model = env("BUZZ_AGENT_MODEL");
+        let buzz_agent_model = lookup("BUZZ_AGENT_MODEL");
 
         // OPENAI_COMPAT_API is only read when provider=openai, so a stray
         // bad value can't break an Anthropic-only deployment.
@@ -661,45 +694,68 @@ impl Config {
         // hatch — empty means "use OAuth PKCE." Legacy Databricks encodes the
         // model in the URL path; Databricks v2 keeps it in the request body.
         let (api_key, model, base_url, openai_api) = match provider {
-            Provider::Anthropic => (
-                req("ANTHROPIC_API_KEY")?,
+            // Local-only: no credential, no default endpoint (the default is a
+            // hosted provider), and Chat Completions only.
+            Provider::OpenAi if local_only => (
+                String::new(),
                 resolve_model(
                     buzz_agent_model.as_deref(),
-                    env("ANTHROPIC_MODEL").as_deref(),
+                    lookup("OPENAI_COMPAT_MODEL").as_deref(),
+                )
+                .filter(|model| !model.trim().is_empty())
+                .ok_or_else(|| {
+                    "config: BUZZ_AGENT_MODEL required in local-only mode".to_string()
+                })?,
+                validate_local_only_base_url(&req_in(lookup, "OPENAI_COMPAT_BASE_URL")?)?,
+                parse_local_only_openai_api(lookup("OPENAI_COMPAT_API").as_deref())?,
+            ),
+            Provider::Anthropic => (
+                req_in(lookup, "ANTHROPIC_API_KEY")?,
+                resolve_model(
+                    buzz_agent_model.as_deref(),
+                    lookup("ANTHROPIC_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: ANTHROPIC_MODEL required".to_string())?,
-                env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+                env_or_in(lookup, "ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
                 OpenAiApi::Auto, // unused for Anthropic
             ),
             Provider::OpenAi => (
-                req("OPENAI_COMPAT_API_KEY")?,
+                req_in(lookup, "OPENAI_COMPAT_API_KEY")?,
                 resolve_model(
                     buzz_agent_model.as_deref(),
-                    env("OPENAI_COMPAT_MODEL").as_deref(),
+                    lookup("OPENAI_COMPAT_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
-                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
-                parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
+                env_or_in(
+                    lookup,
+                    "OPENAI_COMPAT_BASE_URL",
+                    "https://api.openai.com/v1",
+                ),
+                parse_openai_api(lookup("OPENAI_COMPAT_API").as_deref())?,
             ),
             Provider::Databricks | Provider::DatabricksV2 => (
-                env("DATABRICKS_TOKEN").unwrap_or_default(),
+                lookup("DATABRICKS_TOKEN").unwrap_or_default(),
                 resolve_model(buzz_agent_model.as_deref(), databricks_model.as_deref())
                     .ok_or_else(|| "config: DATABRICKS_MODEL required".to_string())?,
                 databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
                 OpenAiApi::Chat, // only read by OpenAI/legacy Databricks dispatch
             ),
             Provider::OpenRouter => (
-                req("OPENROUTER_API_KEY")?,
+                req_in(lookup, "OPENROUTER_API_KEY")?,
                 resolve_model(
                     buzz_agent_model.as_deref(),
-                    env("OPENROUTER_MODEL").as_deref(),
+                    lookup("OPENROUTER_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: OPENROUTER_MODEL required".to_string())?,
-                env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+                env_or_in(
+                    lookup,
+                    "OPENROUTER_BASE_URL",
+                    "https://openrouter.ai/api/v1",
+                ),
                 OpenAiApi::Chat, // OpenRouter uses Chat Completions only
             ),
         };
-        let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
+        let system_prompt = match (lookup("BUZZ_AGENT_SYSTEM_PROMPT"), lookup("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
             (Some(_), Some(_)) => return Err(
                 "config: BUZZ_AGENT_SYSTEM_PROMPT and BUZZ_AGENT_SYSTEM_PROMPT_FILE are mutually exclusive".into()),
             (Some(s), _) => s,
@@ -712,48 +768,79 @@ impl Config {
             api_key,
             model,
             base_url,
-            anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
+            anthropic_api_version: env_or_in(lookup, "ANTHROPIC_API_VERSION", "2023-06-01"),
             openai_api,
-            max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
-            max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 65_536)?,
-            max_token_recoveries: parse_env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", 3u32)?,
-            llm_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_LLM_TIMEOUT_SECS", 240)?),
-            tool_timeout: Duration::from_secs(parse_env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", 1_260)?),
-            mcp_init_timeout: Duration::from_secs(parse_env(
+            max_rounds: parse_env_in(lookup, "BUZZ_AGENT_MAX_ROUNDS", 0)?,
+            max_output_tokens: parse_env_in(lookup, "BUZZ_AGENT_MAX_OUTPUT_TOKENS", 65_536)?,
+            max_token_recoveries: parse_env_in(lookup, "BUZZ_AGENT_MAX_TOKEN_RECOVERIES", 3u32)?,
+            llm_timeout: Duration::from_secs(parse_env_in(
+                lookup,
+                "BUZZ_AGENT_LLM_TIMEOUT_SECS",
+                240,
+            )?),
+            tool_timeout: Duration::from_secs(parse_env_in(
+                lookup,
+                "BUZZ_AGENT_TOOL_TIMEOUT_SECS",
+                1_260,
+            )?),
+            mcp_init_timeout: Duration::from_secs(parse_env_in(
+                lookup,
                 "BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS",
                 30,
             )?),
-            mcp_max_restart_attempts: parse_env("BUZZ_AGENT_MCP_RESTART_MAX_ATTEMPTS", 3u32)?,
-            mcp_restart_base_ms: parse_env("BUZZ_AGENT_MCP_RESTART_BASE_MS", 500u64)?,
-            mcp_restart_max_ms: parse_env("BUZZ_AGENT_MCP_RESTART_MAX_MS", 30_000u64)?,
-            max_sessions: parse_env("BUZZ_AGENT_MAX_SESSIONS", usize::MAX)?,
-            max_line_bytes: parse_env("BUZZ_AGENT_MAX_LINE_BYTES", 4 * 1024 * 1024)?,
-            max_history_bytes: parse_env("BUZZ_AGENT_MAX_HISTORY_BYTES", 16 * 1024 * 1024)?,
-            max_tool_result_text_bytes: parse_env(
+            mcp_max_restart_attempts: parse_env_in(
+                lookup,
+                "BUZZ_AGENT_MCP_RESTART_MAX_ATTEMPTS",
+                3u32,
+            )?,
+            mcp_restart_base_ms: parse_env_in(lookup, "BUZZ_AGENT_MCP_RESTART_BASE_MS", 500u64)?,
+            mcp_restart_max_ms: parse_env_in(lookup, "BUZZ_AGENT_MCP_RESTART_MAX_MS", 30_000u64)?,
+            max_sessions: parse_env_in(lookup, "BUZZ_AGENT_MAX_SESSIONS", usize::MAX)?,
+            max_line_bytes: parse_env_in(lookup, "BUZZ_AGENT_MAX_LINE_BYTES", 4 * 1024 * 1024)?,
+            max_history_bytes: parse_env_in(
+                lookup,
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                16 * 1024 * 1024,
+            )?,
+            max_tool_result_text_bytes: parse_env_in(
+                lookup,
                 "BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES",
                 DEFAULT_TOOL_RESULT_TEXT_BYTES,
             )?,
-            max_context_tokens: parse_env("BUZZ_AGENT_MAX_CONTEXT_TOKENS", 200_000u64)?,
-            max_handoffs: parse_env("BUZZ_AGENT_MAX_HANDOFFS", 10)?,
-            max_parallel_tools: parse_env("BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
-            max_pending_permissions: parse_env("BUZZ_AGENT_MAX_PENDING_PERMISSIONS", 32usize)?,
-            permission_timeout: Duration::from_secs(parse_env(
+            max_context_tokens: parse_env_in(lookup, "BUZZ_AGENT_MAX_CONTEXT_TOKENS", 200_000u64)?,
+            max_handoffs: parse_env_in(lookup, "BUZZ_AGENT_MAX_HANDOFFS", 10)?,
+            max_parallel_tools: parse_env_in(lookup, "BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
+            max_pending_permissions: parse_env_in(
+                lookup,
+                "BUZZ_AGENT_MAX_PENDING_PERMISSIONS",
+                32usize,
+            )?,
+            permission_timeout: Duration::from_secs(parse_env_in(
+                lookup,
                 "BUZZ_AGENT_PERMISSION_TIMEOUT_SECS",
                 330u64,
             )?),
-            hook_timeout: Duration::from_millis(parse_env("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
-            stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
-            require_reply: parse_env("BUZZ_AGENT_REQUIRE_REPLY", 0u8)? != 0,
-            hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
+            hook_timeout: Duration::from_millis(parse_env_in(
+                lookup,
+                "BUZZ_AGENT_HOOK_TIMEOUT_MS",
+                2500u64,
+            )?),
+            stop_max_rejections: parse_env_in(lookup, "BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
+            require_reply: parse_env_in(lookup, "BUZZ_AGENT_REQUIRE_REPLY", 0u8)? != 0,
+            hook_servers: parse_hook_servers(lookup("MCP_HOOK_SERVERS").as_deref()),
             databricks_model_filter: DatabricksModelFilter::parse(
-                env("DATABRICKS_MODEL_FILTER").as_deref(),
+                lookup("DATABRICKS_MODEL_FILTER").as_deref(),
             )?,
-            hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
-            thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
+            hints_enabled: parse_env_in(lookup, "BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
+            thinking_effort: parse_thinking_effort(
+                lookup("BUZZ_AGENT_THINKING_EFFORT").as_deref(),
+            )?,
             thinking_summary: parse_thinking_summary(
-                env("BUZZ_AGENT_THINKING_SUMMARY").as_deref(),
+                lookup("BUZZ_AGENT_THINKING_SUMMARY").as_deref(),
             )?,
-            prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
+            prompt_caching: parse_env_in(lookup, "BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
+            local_only,
+            local_json_output: parse_env_in(lookup, "BUZZ_AGENT_LOCAL_JSON_OUTPUT", 0u8)? != 0,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -806,10 +893,43 @@ impl Config {
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: false,
+            local_only: false,
+            local_json_output: false,
         }
     }
 
+    /// Check the local-only transport invariants. A no-op unless
+    /// `local_only` is set. Run at startup by `validate` and again by
+    /// [`Llm`](crate::llm::Llm) before it builds a client or sends a request,
+    /// so a `Config` assembled without `from_env` cannot bypass it.
+    pub fn validate_local_only(&self) -> Result<(), String> {
+        if self.local_json_output && !self.local_only {
+            return Err("config: BUZZ_AGENT_LOCAL_JSON_OUTPUT requires local-only mode".into());
+        }
+        if !self.local_only {
+            return Ok(());
+        }
+        if self.provider != Provider::OpenAi {
+            return Err("config: local-only mode supports only BUZZ_AGENT_PROVIDER=openai".into());
+        }
+        if !self.api_key.is_empty() {
+            return Err("config: local-only mode sends no provider credential".into());
+        }
+        if self.openai_api != OpenAiApi::Chat {
+            return Err("config: local-only mode uses Chat Completions only".into());
+        }
+        if self.model.trim().is_empty() {
+            return Err("config: BUZZ_AGENT_MODEL required in local-only mode".into());
+        }
+        let canonical = validate_local_only_base_url(&self.base_url)?;
+        if canonical != self.base_url {
+            return Err("config: local-only base URL is not in canonical form".into());
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), String> {
+        self.validate_local_only()?;
         const MIN_HISTORY_BYTES: usize = 4096;
         const MIN_LINE_BYTES: usize = 1024;
         const MIN_TOOL_RESULT_TEXT_BYTES: usize = 1024;
@@ -904,12 +1024,12 @@ fn env(k: &str) -> Option<String> {
     std::env::var(k).ok()
 }
 
-fn env_or(k: &str, d: &str) -> String {
-    env(k).unwrap_or_else(|| d.into())
+fn env_or_in(lookup: &dyn Fn(&str) -> Option<String>, k: &str, d: &str) -> String {
+    lookup(k).unwrap_or_else(|| d.into())
 }
 
-fn req(k: &str) -> Result<String, String> {
-    env(k).ok_or_else(|| format!("config: {k} required"))
+fn req_in(lookup: &dyn Fn(&str) -> Option<String>, k: &str) -> Result<String, String> {
+    lookup(k).ok_or_else(|| format!("config: {k} required"))
 }
 
 /// Returns the first present value. `explicit_override` (BUZZ_AGENT_MODEL,
@@ -959,6 +1079,99 @@ fn resolve_provider(
             "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, databricks)".into(),
         ),
     }
+}
+
+/// Parse `BUZZ_AGENT_LOCAL_ONLY`. Unrecognized values are errors: a typo must
+/// not silently fall back to the remote-capable default.
+fn parse_local_only(raw: Option<&str>) -> Result<bool, String> {
+    match raw.map(str::trim).unwrap_or("") {
+        "" | "0" | "false" => Ok(false),
+        "1" | "true" => Ok(true),
+        other => Err(format!(
+            "config: BUZZ_AGENT_LOCAL_ONLY={other} not supported (use 1 or 0)"
+        )),
+    }
+}
+
+/// Local-only mode speaks only the OpenAI-compatible protocol; an unset
+/// provider selects it, any other provider is refused.
+fn resolve_local_only_provider(requested: Option<&str>) -> Result<Provider, String> {
+    match requested
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        None | Some("") | Some("openai") | Some("openai-compat") => Ok(Provider::OpenAi),
+        Some(other) => Err(format!(
+            "config: BUZZ_AGENT_PROVIDER={other} is not allowed in local-only mode"
+        )),
+    }
+}
+
+/// Refuse local-only startup when any remote provider credential or endpoint
+/// is present. Names the variable, never its value.
+fn reject_local_only_conflicts(lookup: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+    for key in LOCAL_ONLY_FORBIDDEN_ENV {
+        if present_nonempty(lookup(key).as_deref()) {
+            return Err(format!("config: {key} must not be set in local-only mode"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_local_only_openai_api(raw: Option<&str>) -> Result<OpenAiApi, String> {
+    match parse_openai_api(raw)? {
+        OpenAiApi::Chat | OpenAiApi::Auto => Ok(OpenAiApi::Chat),
+        OpenAiApi::Responses => {
+            Err("config: OPENAI_COMPAT_API=responses is not allowed in local-only mode".into())
+        }
+    }
+}
+
+/// Validate a local-only base URL and return its canonical form.
+///
+/// Accepts only `http://` with a *literal* numeric loopback host
+/// (`127.0.0.0/8` or `[::1]`), an optional port, and an optional path. Host
+/// names — including `localhost` — are refused because name resolution is
+/// outside this process's control; shorthand IPv4 forms such as `127.1` are
+/// refused because the URL parser would silently rewrite them. Userinfo,
+/// query strings, and fragments are refused. The canonical form has no
+/// trailing slash.
+pub fn validate_local_only_base_url(raw: &str) -> Result<String, String> {
+    const REQUIREMENT: &str =
+        "config: local-only base URL must be http://<numeric loopback address>[:port][/path]";
+    let Some(after_scheme) = raw.strip_prefix("http://") else {
+        return Err(REQUIREMENT.into());
+    };
+    let parsed = url::Url::parse(raw).map_err(|_| REQUIREMENT.to_string())?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(REQUIREMENT.into());
+    }
+    let loopback = match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(_)) | None => false,
+    };
+    if !loopback {
+        return Err(REQUIREMENT.into());
+    }
+    // The authority as typed must already be the canonical host, optionally
+    // followed by `:<digits>`; anything else was rewritten by the parser.
+    let host = parsed.host_str().ok_or_else(|| REQUIREMENT.to_string())?;
+    let authority = &after_scheme[..after_scheme.find('/').unwrap_or(after_scheme.len())];
+    let literal = authority.strip_prefix(host).is_some_and(|rest| {
+        rest.is_empty()
+            || rest
+                .strip_prefix(':')
+                .is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+    });
+    if !literal {
+        return Err(REQUIREMENT.into());
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
 /// Parse `OPENAI_COMPAT_API`. Pure (env-free) for testability; the
@@ -1066,11 +1279,15 @@ pub fn pricing_authority(base_url: &str) -> Option<&'static str> {
     }
 }
 
-fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> Result<T, String>
+fn parse_env_in<T: std::str::FromStr>(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    key: &str,
+    default: T,
+) -> Result<T, String>
 where
     T::Err: std::fmt::Display,
 {
-    env(key)
+    lookup(key)
         .map(|v| v.parse().map_err(|e| format!("config: {key}: {e}")))
         .unwrap_or(Ok(default))
 }
@@ -1100,10 +1317,6 @@ impl HookServers {
     pub fn is_disabled(&self) -> bool {
         matches!(self, HookServers::None)
     }
-}
-
-fn parse_hook_servers_env(key: &str) -> HookServers {
-    parse_hook_servers(env(key).as_deref())
 }
 
 /// Pure parser exposed for unit tests. `None` (env unset) and `Some("")`
@@ -2513,5 +2726,187 @@ mod tests {
                 "agent tool timeout must be >= dev-mcp shell cap (1200s)"
             );
         }
+    }
+
+    // ---- local-only transport ----
+
+    fn local_only_env(extra: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        let mut vars: std::collections::HashMap<String, String> = [
+            ("BUZZ_AGENT_LOCAL_ONLY", "1"),
+            ("BUZZ_AGENT_MODEL", "qwen3:8b"),
+            ("OPENAI_COMPAT_BASE_URL", "http://127.0.0.1:11434/v1/"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        for (key, value) in extra {
+            vars.insert((*key).to_string(), (*value).to_string());
+        }
+        vars
+    }
+
+    fn config_from(vars: &std::collections::HashMap<String, String>) -> Result<Config, String> {
+        Config::from_lookup(&|key: &str| vars.get(key).cloned())
+    }
+
+    #[test]
+    fn local_only_config_uses_loopback_chat_without_credential() {
+        let cfg = config_from(&local_only_env(&[])).unwrap();
+        assert!(cfg.local_only);
+        assert_eq!(cfg.provider, Provider::OpenAi);
+        assert_eq!(cfg.openai_api, OpenAiApi::Chat);
+        assert_eq!(cfg.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(cfg.model, "qwen3:8b");
+        assert!(cfg.api_key.is_empty());
+    }
+
+    #[test]
+    fn local_only_json_output_requires_an_explicit_local_consumer() {
+        assert!(!config_from(&local_only_env(&[])).unwrap().local_json_output);
+        let mut cfg =
+            config_from(&local_only_env(&[("BUZZ_AGENT_LOCAL_JSON_OUTPUT", "1")])).unwrap();
+        assert!(cfg.local_json_output);
+        cfg.local_only = false;
+        assert!(cfg
+            .validate_local_only()
+            .unwrap_err()
+            .contains("requires local-only"));
+    }
+
+    #[test]
+    fn local_only_is_off_unless_explicitly_enabled() {
+        let mut vars = local_only_env(&[
+            ("BUZZ_AGENT_PROVIDER", "openai"),
+            ("OPENAI_COMPAT_API_KEY", "sk-test"),
+        ]);
+        vars.remove("BUZZ_AGENT_LOCAL_ONLY");
+        assert!(!config_from(&vars).unwrap().local_only);
+        vars.insert("BUZZ_AGENT_LOCAL_ONLY".into(), "0".into());
+        assert!(!config_from(&vars).unwrap().local_only);
+        vars.insert("BUZZ_AGENT_LOCAL_ONLY".into(), "yes".into());
+        let error = config_from(&vars).unwrap_err();
+        assert!(error.contains("BUZZ_AGENT_LOCAL_ONLY"), "{error}");
+    }
+
+    #[test]
+    fn local_only_refuses_every_remote_credential_and_endpoint() {
+        for key in LOCAL_ONLY_FORBIDDEN_ENV {
+            let error = config_from(&local_only_env(&[(key, "value")])).unwrap_err();
+            assert!(error.contains(key), "{key}: {error}");
+            assert!(!error.contains("value"), "error must not echo the value");
+        }
+        // Blank values are treated as absent.
+        config_from(&local_only_env(&[("OPENAI_COMPAT_API_KEY", "  ")])).unwrap();
+    }
+
+    #[test]
+    fn local_only_refuses_other_providers_and_responses_route() {
+        for provider in [
+            "anthropic",
+            "databricks",
+            "databricks_v2",
+            "openrouter",
+            "mesh",
+        ] {
+            let error =
+                config_from(&local_only_env(&[("BUZZ_AGENT_PROVIDER", provider)])).unwrap_err();
+            assert!(
+                error.contains("not allowed in local-only"),
+                "{provider}: {error}"
+            );
+        }
+        config_from(&local_only_env(&[("BUZZ_AGENT_PROVIDER", "openai")])).unwrap();
+        let error =
+            config_from(&local_only_env(&[("OPENAI_COMPAT_API", "responses")])).unwrap_err();
+        assert!(error.contains("responses"), "{error}");
+    }
+
+    #[test]
+    fn local_only_requires_explicit_endpoint_and_model() {
+        let mut vars = local_only_env(&[]);
+        vars.remove("OPENAI_COMPAT_BASE_URL");
+        // No hosted default: the endpoint must be stated.
+        let error = config_from(&vars).unwrap_err();
+        assert!(error.contains("OPENAI_COMPAT_BASE_URL"), "{error}");
+
+        let mut vars = local_only_env(&[]);
+        vars.remove("BUZZ_AGENT_MODEL");
+        let error = config_from(&vars).unwrap_err();
+        assert!(error.contains("BUZZ_AGENT_MODEL"), "{error}");
+        let error = config_from(&local_only_env(&[("BUZZ_AGENT_MODEL", " ")])).unwrap_err();
+        assert!(error.contains("BUZZ_AGENT_MODEL"), "{error}");
+    }
+
+    #[test]
+    fn local_only_base_url_table() {
+        let accepted = [
+            ("http://127.0.0.1:11434/v1", "http://127.0.0.1:11434/v1"),
+            ("http://127.0.0.1:8080/v1/", "http://127.0.0.1:8080/v1"),
+            ("http://127.42.0.9:1234", "http://127.42.0.9:1234"),
+            ("http://[::1]:8080/v1", "http://[::1]:8080/v1"),
+            ("http://127.0.0.1", "http://127.0.0.1"),
+        ];
+        for (raw, canonical) in accepted {
+            assert_eq!(
+                validate_local_only_base_url(raw).as_deref(),
+                Ok(canonical),
+                "{raw}"
+            );
+        }
+        let rejected = [
+            "https://127.0.0.1:8080/v1",
+            "HTTP://127.0.0.1:8080",
+            "http://localhost:11434/v1",
+            "http://api.openai.com/v1",
+            "http://10.0.0.5:8080/v1",
+            "http://192.168.1.10:8080",
+            "http://0.0.0.0:8080",
+            "http://[::]:8080",
+            "http://[::ffff:127.0.0.1]:8080",
+            "http://127.1:8080",
+            "http://2130706433:8080",
+            "http://0x7f.0.0.1:8080",
+            "http://user:pass@127.0.0.1:8080",
+            "http://evil.example@127.0.0.1:8080",
+            "http://127.0.0.1\\@evil.example/v1",
+            "http://127.0.0.1:8080/v1?next=https://evil.example",
+            "http://127.0.0.1:8080/v1#frag",
+            " http://127.0.0.1:8080",
+            "http://127.0.0.1.nip.io:8080",
+            "",
+        ];
+        for raw in rejected {
+            assert!(
+                validate_local_only_base_url(raw).is_err(),
+                "{raw:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn local_only_invariants_hold_for_configs_built_without_from_env() {
+        let mut cfg = config_from(&local_only_env(&[])).unwrap();
+        cfg.validate_local_only().unwrap();
+
+        let mut remote = cfg.clone();
+        remote.base_url = "https://api.openai.com/v1".into();
+        assert!(remote.validate_local_only().is_err());
+
+        let mut keyed = cfg.clone();
+        keyed.api_key = "sk-test".into();
+        assert!(keyed.validate_local_only().is_err());
+
+        let mut responses = cfg.clone();
+        responses.openai_api = OpenAiApi::Auto;
+        assert!(responses.validate_local_only().is_err());
+
+        let mut anthropic = cfg.clone();
+        anthropic.provider = Provider::Anthropic;
+        assert!(anthropic.validate_local_only().is_err());
+
+        // Not local-only: unaffected.
+        cfg.local_only = false;
+        cfg.base_url = "https://api.openai.com/v1".into();
+        cfg.validate_local_only().unwrap();
     }
 }
