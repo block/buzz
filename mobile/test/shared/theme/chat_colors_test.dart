@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -52,59 +55,61 @@ void main() {
     }
   });
 
-  test('every choice publishes a distinct desktop v1 accent value', () {
-    // Desktop parses v1 accents against the same legacy set as accentColors;
-    // an unknown value makes it discard the whole synced preference.
-    final wireValues = chatColorChoices.map((color) => color.wireValue);
-    expect(wireValues.toSet(), hasLength(chatColorChoices.length));
-    for (final (index, color) in chatColorChoices.indexed) {
-      expect(accentIndexForWireValue(color.wireValue), isNotNull);
-      expect(chatColorIndex(color.wireValue), index);
-      // Family names from earlier preview builds parse and republish as the
-      // desktop-compatible value.
-      final preview = CommunityThemePreference.fromJson({
-        'version': 1,
-        'theme': 'buzz',
-        'accent': color.name.toLowerCase(),
-        'followSystem': true,
-      });
-      expect(preview.accent, color.wireValue);
-    }
-    expect(accentIndexForWireValue(defaultCommunityTheme.accent), isNotNull);
-  });
-
-  test(
-    'retired saved colors follow desktop aliases without losing preferences',
-    () {
-      for (final entry in {
-        '#3b82f6': 'Cobalt',
-        '#06b6d4': 'Chartreuse',
-        '#6366f1': 'Cobalt',
-        '#22c55e': 'Jade',
-        '#f97316': 'Flame',
-        '#ec4899': 'Magenta',
-        '#c0a2f1': 'Iris',
-        'neutral': 'Gray',
-        '#ef4444': 'Magenta',
-        '#a855f7': 'Iris',
-      }.entries) {
-        expect(chatColorChoices[chatColorIndex(entry.key)].name, entry.value);
-        final preference = CommunityThemePreference.fromJson({
+  test('accents follow the cross-client v1 contract', () {
+    // Desktop's parser test reads the same fixture, so both clients agree on
+    // every value either can save.
+    final contract =
+        jsonDecode(
+              File(
+                '../test-fixtures/community-theme-accents.json',
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
+    CommunityThemePreference parse(String accent) =>
+        CommunityThemePreference.fromJson({
           'version': 1,
           'theme': 'buzz-dark',
-          'accent': entry.key,
+          'accent': accent,
           'followSystem': false,
         });
-        expect(preference.mode, ThemeMode.dark);
-        expect(preference.accent, entry.key);
-        expect(
-          mobileAppearanceTheme(
-            Brightness.dark,
-            preference.accent,
-          ).extension<ChatColors>()!.outgoing,
-          chatColorChoices[chatColorIndex(entry.key)].dark,
-        );
-      }
-    },
-  );
+
+    final emitted = (contract['emitted'] as List).cast<Map<String, dynamic>>();
+    expect(
+      emitted.map((entry) => entry['family']),
+      chatColorChoices.map((color) => color.name),
+    );
+    for (final (index, entry) in emitted.indexed) {
+      final accent = entry['accent'] as String;
+      expect(chatColorChoices[index].wireValue, accent);
+      // Family names from earlier preview builds republish as the v1 value.
+      expect(parse(chatColorChoices[index].name.toLowerCase()).accent, accent);
+    }
+    expect(
+      emitted.map((entry) => entry['accent']),
+      contains(defaultCommunityTheme.accent),
+    );
+
+    final legacy = (contract['legacy'] as List).cast<Map<String, dynamic>>();
+    for (final entry in [...emitted, ...legacy]) {
+      final accent = entry['accent'] as String;
+      final preference = parse(accent);
+      expect(preference.mode, ThemeMode.dark);
+      expect(preference.accent, accent);
+      final family = chatColorChoices.firstWhere(
+        (color) => color.name == entry['family'],
+      );
+      expect(
+        mobileAppearanceTheme(
+          Brightness.dark,
+          preference.accent,
+        ).extension<ChatColors>()!.outgoing,
+        family.dark,
+        reason: accent,
+      );
+    }
+
+    for (final accent in (contract['rejected'] as List).cast<String>()) {
+      expect(() => parse(accent), throwsFormatException, reason: accent);
+    }
+  });
 }

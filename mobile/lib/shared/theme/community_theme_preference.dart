@@ -11,7 +11,7 @@ import 'theme_provider.dart' show effectiveTheme, schemeForAppearanceMode;
 const communityThemeDTag = 'community-theme';
 const defaultCommunityTheme = CommunityThemePreference(
   theme: 'buzz',
-  accent: '#06b6d4', // Chartreuse
+  accent: '#d7d72e', // Chartreuse
   followSystem: true,
 );
 

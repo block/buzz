@@ -52,6 +52,7 @@ export const ACCENT_COLORS = [
   { name: "Lilac", value: "#c0a2f1" },
   { name: "Purple", value: "#a855f7" },
   { name: "Indigo", value: "#6366f1" },
+  { name: "Chartreuse", value: "#d7d72e" },
 ] as const;
 
 const DEFAULT_ACCENT = "#3b82f6";

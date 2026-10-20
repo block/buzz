@@ -1,0 +1,18 @@
+{
+  "emitted": [
+    { "family": "Gray", "accent": "neutral", "desktop": "Neutral" },
+    { "family": "Chartreuse", "accent": "#d7d72e", "desktop": "Chartreuse" },
+    { "family": "Flame", "accent": "#f97316", "desktop": "Orange" },
+    { "family": "Magenta", "accent": "#ec4899", "desktop": "Pink" },
+    { "family": "Iris", "accent": "#c0a2f1", "desktop": "Lilac" },
+    { "family": "Cobalt", "accent": "#3b82f6", "desktop": "Blue" },
+    { "family": "Jade", "accent": "#22c55e", "desktop": "Green" }
+  ],
+  "legacy": [
+    { "accent": "#06b6d4", "desktop": "Cyan", "family": "Jade" },
+    { "accent": "#ef4444", "desktop": "Red", "family": "Magenta" },
+    { "accent": "#a855f7", "desktop": "Purple", "family": "Iris" },
+    { "accent": "#6366f1", "desktop": "Indigo", "family": "Cobalt" }
+  ],
+  "rejected": ["url(image)", "#123456", "Chartreuse", "cyan", ""]
+}

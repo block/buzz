@@ -5,9 +5,9 @@ import 'accent_colors.dart';
 /// Desktop accent families in picker order. Fills are accent-9 from buzz-app's
 /// design-system tokens (4ad00a8a).
 ///
-/// Wire values stay within desktop's v1 `community-theme` accent set so every
-/// client keeps parsing synced preferences. Desktop has no yellow-green, so
-/// Chartreuse takes the otherwise unused Cyan slot.
+/// Wire values are desktop's v1 `community-theme` accents for the same color
+/// family, so a synced preference means the same color on every client. The
+/// cross-client mapping lives in `test-fixtures/community-theme-accents.json`.
 const chatColorChoices = [
   AccentColor(
     name: 'Gray',
@@ -19,7 +19,7 @@ const chatColorChoices = [
     name: 'Chartreuse',
     light: Color(0xFFD7D72E),
     dark: Color(0xFFD7D72E),
-    wireValue: '#06b6d4',
+    wireValue: '#d7d72e',
   ),
   AccentColor(
     name: 'Flame',
@@ -58,6 +58,7 @@ const chatColorChoices = [
 /// preview builds. Anything else falls back to Chartreuse.
 int chatColorIndex(String wireValue) {
   final normalized = switch (wireValue) {
+    '#06b6d4' => '#22c55e',
     '#6366f1' => '#3b82f6',
     '#ef4444' => '#ec4899',
     '#a855f7' => '#c0a2f1',
