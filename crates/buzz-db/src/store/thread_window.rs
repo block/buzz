@@ -442,6 +442,8 @@ async fn writer_aux(
 impl ReadSession {
     /// Strict NIP-CW thread-mode auxiliary scan on the same proved snapshot, with the
     /// existing permanent writer degradation on mid-request replica failure.
+    /// Exception: a statement cancel (57014) is returned and the session stays
+    /// on the replica.
     #[datastore_span(name = "thread_window_aux", system = "postgresql")]
     pub async fn thread_window_aux(
         &mut self,
