@@ -1752,18 +1752,25 @@ mod postgres_tests {
         )
         .await
         .expect_err("a dark reader must stall the collection until its deadline");
+
+        // Still paused: only close-on-drop can free the slot now. Without it,
+        // the abandoned checkout's release ping waits on the stalled session
+        // and the slot stays held (`min_connections(0)`, so nothing redials).
+        let started = Instant::now();
+        while read_pool.size() != 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(8),
+                "slot release must be bounded by close-on-drop, still held after {:?}",
+                started.elapsed()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         proxy.set_paused(false);
 
-        let started = Instant::now();
         let mut replacement = read_pool
             .acquire()
             .await
-            .expect("the abandoned collection must release its reader slot");
-        assert!(
-            started.elapsed() < Duration::from_secs(8),
-            "slot release must be bounded by close-on-drop, took {:?}",
-            started.elapsed()
-        );
+            .expect("the released slot must accept a replacement connection");
         let one: i32 = sqlx::query_scalar("SELECT 1")
             .fetch_one(&mut *replacement)
             .await
