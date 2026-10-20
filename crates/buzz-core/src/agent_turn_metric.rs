@@ -171,6 +171,22 @@ pub struct AgentTurnMetricPayload {
     /// omission rules as `tools`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills: Option<BTreeMap<String, u32>>,
+
+    /// Context-window occupancy at the last report during this turn. Omitted
+    /// when the harness reports no window size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextUsage>,
+}
+
+/// Context-window occupancy snapshot. Percent used is
+/// `used_tokens / window_tokens`; publishers send raw values, not a percent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    /// Tokens currently occupying the context window.
+    pub used_tokens: u64,
+    /// Total context window size in tokens; always greater than zero.
+    pub window_tokens: u64,
 }
 
 /// Maximum distinct entries in `tools` / `skills`.
@@ -210,6 +226,11 @@ impl AgentTurnMetricPayload {
                     )));
                 }
             }
+        }
+        if self.context.is_some_and(|c| c.window_tokens == 0) {
+            return Err(ObserverPayloadError::InvalidPayload(
+                "context.windowTokens must be greater than zero".into(),
+            ));
         }
         if let Some(t) = &self.turn {
             check_cost(t.cost_usd, "turn.costUsd")?;
@@ -289,6 +310,7 @@ mod tests {
             pricing_identity: None,
             tools: None,
             skills: None,
+            context: None,
         }
     }
 
@@ -376,6 +398,33 @@ mod tests {
             "x".repeat(MAX_TURN_METRIC_NAME_BYTES + 1),
             1,
         )]));
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn context_optional_round_trips_and_rejects_zero_window() {
+        let old: AgentTurnMetricPayload =
+            serde_json::from_str(r#"{"harness":"goose","timestamp":"t"}"#).unwrap();
+        assert!(old.context.is_none());
+        assert!(!serde_json::to_string(&old).unwrap().contains("context"));
+
+        let mut p = sample_payload();
+        p.context = Some(ContextUsage {
+            used_tokens: 50_000,
+            window_tokens: 200_000,
+        });
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains(r#""context":{"usedTokens":50000,"windowTokens":200000}"#));
+        assert_eq!(
+            serde_json::from_str::<AgentTurnMetricPayload>(&json).unwrap(),
+            p
+        );
+        assert!(p.validate().is_ok());
+
+        p.context = Some(ContextUsage {
+            used_tokens: 1,
+            window_tokens: 0,
+        });
         assert!(p.validate().is_err());
     }
 
@@ -469,6 +518,7 @@ mod tests {
             pricing_identity: None,
             tools: None,
             skills: None,
+            context: None,
         }
     }
 
@@ -495,6 +545,7 @@ mod tests {
             pricing_identity: None,
             tools: None,
             skills: None,
+            context: None,
         }
     }
 

@@ -77,11 +77,9 @@ pub(crate) struct UsageUpdatePayload {
     /// Total tokens used (context-usage proxy). Optional — buzz-agent omits
     /// this field or sends 0 because it does not track a context window limit.
     #[serde(default)]
-    #[allow(dead_code)]
     pub used: u64,
     /// Context window size. Optional — buzz-agent omits this field.
     #[serde(default)]
-    #[allow(dead_code)]
     pub context_limit: u64,
     /// Session-cumulative inclusive input tokens.
     ///
@@ -246,6 +244,42 @@ pub struct TurnUsage {
     pub tools: Option<std::collections::BTreeMap<String, u32>>,
     /// Skill invocations by name for this turn; filled like `tools`.
     pub skills: Option<std::collections::BTreeMap<String, u32>>,
+    /// Context-window occupancy at the last report this turn; filled by
+    /// `AcpClient::take_turn_usage`.
+    pub context: Option<buzz_core::agent_turn_metric::ContextUsage>,
+}
+
+/// Latest context-window snapshot for the in-flight turn. Latest report wins
+/// (end-of-turn occupancy); reports for other sessions or without a window
+/// size are ignored.
+#[derive(Debug, Default)]
+pub(crate) struct ContextTracker {
+    in_flight_session: Option<String>,
+    latest: Option<buzz_core::agent_turn_metric::ContextUsage>,
+}
+
+impl ContextTracker {
+    /// Start a turn for `session_id`, discarding any previous snapshot.
+    pub(crate) fn begin_turn(&mut self, session_id: &str) {
+        self.in_flight_session = Some(session_id.to_string());
+        self.latest = None;
+    }
+
+    /// Record `used`/`window` for `session_id`; a zero window means unknown.
+    pub(crate) fn record(&mut self, session_id: &str, used: u64, window: u64) {
+        if window > 0 && self.in_flight_session.as_deref() == Some(session_id) {
+            self.latest = Some(buzz_core::agent_turn_metric::ContextUsage {
+                used_tokens: used,
+                window_tokens: window,
+            });
+        }
+    }
+
+    /// Drain the snapshot and end the turn.
+    pub(crate) fn take(&mut self) -> Option<buzz_core::agent_turn_metric::ContextUsage> {
+        self.in_flight_session = None;
+        self.latest.take()
+    }
 }
 
 /// Per-turn usage carried by a standard ACP `session/prompt` response.
@@ -398,6 +432,7 @@ impl StandardUsageTracker {
             pricing_identity: None,
             tools: None,
             skills: None,
+            context: None,
         })
     }
 }
@@ -757,6 +792,7 @@ impl UsageTracker {
                 pricing_identity: None,
                 tools: None,
                 skills: None,
+                context: None,
             });
         } else if self.in_flight_session.is_none() {
             // Not in-flight at all: advance the committed baseline so the next
@@ -1999,6 +2035,7 @@ mod tests {
             pricing_identity: None,
             tools: None,
             skills: None,
+            context: None,
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);
@@ -2042,6 +2079,7 @@ mod tests {
             pricing_identity: None,
             tools: None,
             skills: None,
+            context: None,
         };
 
         let (turn_counts, cumulative_counts) = build_turn_metric_counts(&usage);

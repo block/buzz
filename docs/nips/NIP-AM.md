@@ -131,7 +131,12 @@ The `content` field decrypts to a UTF-8 JSON object:
   // At most 64 distinct names, each at most 128 bytes; publishers fold any
   // overflow into the key "_other". Consumers MUST ignore them if absent.
   "tools":  { "Read": 3, "shell": 1 },
-  "skills": { "git": 1 }
+  "skills": { "git": 1 },
+
+  // Context-window occupancy at the last report during this turn. OPTIONAL;
+  // omitted when the harness reports no window size. windowTokens > 0.
+  // Percent used = usedTokens / windowTokens. Consumers MUST ignore if absent.
+  "context": { "usedTokens": 50000, "windowTokens": 200000 }
 }
 ```
 

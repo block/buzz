@@ -221,6 +221,7 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Tool calls / skill invocations seen this turn (NIP-AM `tools`/`skills`).
     tool_counts: crate::tool_counts::ToolCallCounter,
+    context_usage: crate::usage::ContextTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
     /// Ask Claude Code for summarized thinking on `session/new`. Opus omits
@@ -635,6 +636,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             tool_counts: Default::default(),
+            context_usage: Default::default(),
             standard_adapter,
             claude_thinking_summaries,
         })
@@ -876,6 +878,7 @@ impl AcpClient {
         self.goose_usage.begin_turn(session_id);
         self.standard_usage.begin_turn(session_id);
         self.tool_counts.begin_turn();
+        self.context_usage.begin_turn(session_id);
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -974,9 +977,11 @@ impl AcpClient {
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
         let (tools, skills) = self.tool_counts.take();
+        let context = self.context_usage.take();
         let mut usage = goose_usage.or(standard_usage)?;
         usage.tools = tools;
         usage.skills = skills;
+        usage.context = context;
         Some(usage)
     }
 
@@ -1944,12 +1949,9 @@ impl AcpClient {
     }
 
     /// Record the standard ACP cumulative cost notification when emitted by
-    /// Claude. Unlike Goose's payload, `used`/`size` are context occupancy and
-    /// are intentionally not mapped to token accounting.
+    /// Claude. `used`/`size` are context occupancy (any adapter) and are not
+    /// mapped to token accounting.
     fn handle_standard_usage_update(&mut self, msg: &serde_json::Value) {
-        if self.standard_adapter != Some(StandardAdapterKind::Claude) {
-            return;
-        }
         let session_id = match msg
             .pointer("/params/sessionId")
             .and_then(serde_json::Value::as_str)
@@ -1957,6 +1959,18 @@ impl AcpClient {
             Some(session_id) => session_id,
             None => return,
         };
+        // Context occupancy is reported by every standard adapter.
+        if let (Some(used), Some(size)) = (
+            msg.pointer("/params/update/used")
+                .and_then(serde_json::Value::as_u64),
+            msg.pointer("/params/update/size")
+                .and_then(serde_json::Value::as_u64),
+        ) {
+            self.context_usage.record(session_id, used, size);
+        }
+        if self.standard_adapter != Some(StandardAdapterKind::Claude) {
+            return;
+        }
         let cost = match msg
             .pointer("/params/update/cost/amount")
             .and_then(serde_json::Value::as_f64)
@@ -1999,6 +2013,11 @@ impl AcpClient {
                         // apart from "this build predates the field".
                         cached = payload.accumulated_cached_input_tokens,
                         "goose usage update"
+                    );
+                    self.context_usage.record(
+                        &notif.session_id,
+                        payload.used,
+                        payload.context_limit,
                     );
                     self.goose_usage.record(&notif.session_id, payload);
                 }
@@ -5035,6 +5054,84 @@ sleep 1"#,
         client.handle_goose_usage_update(&goose_usage_update_msg("s1", 20, 9, None));
         let usage = client.take_turn_usage().expect("usage");
         assert!(usage.tools.is_none() && usage.skills.is_none());
+    }
+
+    fn standard_context_update(session_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "usage_update",
+                    "used": 50000,
+                    "size": 200000,
+                    "cost": {"amount": 0.1, "currency": "USD"}
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn context_occupancy_flows_from_standard_and_goose_updates_and_resets() {
+        use buzz_core::agent_turn_metric::ContextUsage;
+        let want = |used| {
+            Some(ContextUsage {
+                used_tokens: used,
+                window_tokens: 200_000,
+            })
+        };
+        for adapter in [StandardAdapterKind::Claude, StandardAdapterKind::Codex] {
+            let mut client = spawn_inert_client().await;
+            client.standard_adapter = Some(adapter);
+            client.goose_usage.begin_turn("s1");
+            client.standard_usage.begin_turn("s1");
+            client.context_usage.begin_turn("s1");
+            client.handle_session_update(&standard_context_update("s1"));
+            // Another session's report is ignored.
+            client.handle_session_update(&standard_context_update("other"));
+            client.handle_goose_usage_update(&goose_usage_update_msg("s1", 10, 5, None));
+            // Latest snapshot wins: goose reported used = 15.
+            let usage = client.take_turn_usage().expect("usage");
+            assert_eq!(usage.context, want(15));
+
+            // Next turn starts clean.
+            client.goose_usage.begin_turn("s1");
+            client.context_usage.begin_turn("s1");
+            let mut next = goose_usage_update_msg("s1", 20, 9, None);
+            next["params"]["update"]
+                .as_object_mut()
+                .unwrap()
+                .remove("contextLimit");
+            client.handle_goose_usage_update(&next);
+            let usage = client.take_turn_usage().expect("usage");
+            assert!(usage.context.is_none());
+        }
+
+        // Claude: a cost-only turn still carries the standard snapshot.
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.standard_usage.begin_turn("s1");
+        client.context_usage.begin_turn("s1");
+        client.handle_session_update(&standard_context_update("s1"));
+        let usage = client.take_turn_usage().expect("cost-only usage");
+        assert_eq!(usage.context, want(50_000));
+    }
+
+    #[tokio::test]
+    async fn context_unknown_when_window_absent() {
+        let mut client = spawn_inert_client().await;
+        client.goose_usage.begin_turn("s1");
+        client.context_usage.begin_turn("s1");
+        // buzz-agent style: `used` but no `contextLimit`.
+        let mut msg = goose_usage_update_msg("s1", 10, 5, None);
+        msg["params"]["update"]
+            .as_object_mut()
+            .unwrap()
+            .remove("contextLimit");
+        client.handle_goose_usage_update(&msg);
+        let usage = client.take_turn_usage().expect("usage");
+        assert!(usage.context.is_none());
     }
 
     #[tokio::test]
