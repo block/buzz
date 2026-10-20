@@ -719,19 +719,6 @@ fn event_write_paths_include_tenant_local_chokepoint_calls() {
         "snapshot publication locks must include a tenant-local chokepoint call"
     );
 
-    let relay_members = include_str!("../src/store/relay_members.rs");
-    let publish_snapshot = relay_members
-        .split_once("pub async fn publish_nip43_membership_locked(\n")
-        .expect("relay_members must expose publish_nip43_membership_locked")
-        .1
-        .split_once("}\n\n#[cfg(test)]")
-        .expect("membership publish path must precede tests")
-        .0;
-    assert!(
-        has_any_tenant_local_chokepoint(publish_snapshot),
-        "NIP-43 membership publication must include a tenant-local chokepoint call"
-    );
-
     let push = include_str!("../src/store/push.rs");
     let accept_lease = push
         .split_once("pub async fn accept_lease_event(\n")
@@ -817,19 +804,6 @@ fn legacy_compatibility_metrics_remain_pinned_to_the_preexisting_event_write_ent
             "{label} must preserve the legacy compatibility population"
         );
     }
-
-    let relay_members = include_str!("../src/store/relay_members.rs");
-    let publish_snapshot = relay_members
-        .split_once("pub async fn publish_nip43_membership_locked(\n")
-        .expect("relay_members must expose publish_nip43_membership_locked")
-        .1
-        .split_once("}\n\n#[cfg(test)]")
-        .expect("membership publish path must precede tests")
-        .0;
-    assert!(
-        publish_snapshot.contains(COMMUNITY_CHOKEPOINT_LEGACY_MARKER),
-        "NIP-43 membership publication must preserve the legacy compatibility population"
-    );
 
     let push = include_str!("../src/store/push.rs");
     let accept_lease = push
@@ -1949,7 +1923,7 @@ fn every_production_event_insert_runs_the_follow_up_hook() {
 // of these functions would pass the policy; keep them single-purpose.
 const EVENT_INSERT_ROSTER_GUARD_EXCEPTIONS: [&str; 4] = [
     // NIP-43 membership is kind 13534 with channel_id NULL.
-    "pub async fn publish_nip43_membership_locked(",
+    "pub(crate) async fn write_nip43_membership_snapshot(",
     // Push leases are kind 30350 with channel_id NULL.
     "pub async fn accept_lease_event(",
     // Rolled-back replica-floor startup probe.
@@ -2001,7 +1975,7 @@ pub(crate) async fn quoted_guard_writer(tx: &mut AdmittedTx) {
     tracing::debug!("guard_channel_roster_event(");
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
 }
-pub async fn publish_nip43_membership_locked(tx: &mut AdmittedTx) {
+pub(crate) async fn write_nip43_membership_snapshot(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
 }
 pub async fn accept_lease_event(tx: &mut AdmittedTx) {

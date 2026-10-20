@@ -182,21 +182,6 @@ async fn event_write_transaction_preserves_legacy_acquisition_metrics() {
     assert_eq!(counters, expected);
 }
 
-#[test]
-fn nip43_reconciliation_compatibility_alias_is_preserved() {
-    #[allow(deprecated)]
-    async fn call(
-        db: &Db,
-        community_id: CommunityId,
-        relay_pubkey: &nostr::PublicKey,
-    ) -> crate::Result<bool> {
-        db.nip43_membership_snapshot_needs_reconciliation(community_id, relay_pubkey)
-            .await
-    }
-
-    let _ = call;
-}
-
 #[tokio::test]
 async fn community_write_transaction_compatibility_metrics_are_limited_to_legacy_entrypoints() {
     use metrics_util::debugging::DebuggingRecorder;
@@ -1863,12 +1848,28 @@ async fn is_relay_member_is_bounded_routed_and_fails_closed() {
     let cid = CommunityId::from_uuid(community);
     let writer_only = "aa".repeat(32);
     let replica_only = "bb".repeat(32);
-    relay_members::add_relay_member(&writer, cid, &writer_only, "member", None)
-        .await
-        .expect("seed writer member");
-    relay_members::add_relay_member(&replica, cid, &replica_only, "member", None)
-        .await
-        .expect("seed replica member");
+    relay_members::add_relay_member(
+        &writer,
+        cid,
+        &writer_only,
+        "member",
+        None,
+        &nostr::Keys::generate(),
+    )
+    .await
+    .map(|write| write.outcome)
+    .expect("seed writer member");
+    relay_members::add_relay_member(
+        &replica,
+        cid,
+        &replica_only,
+        "member",
+        None,
+        &nostr::Keys::generate(),
+    )
+    .await
+    .map(|write| write.outcome)
+    .expect("seed replica member");
 
     let mut db = Db::from_pools(writer.clone(), replica.clone());
     db.fence().force_open_for_tests(chrono::Utc::now());

@@ -4572,8 +4572,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let host = format!("owner-delete-{}.example", Uuid::new_v4().simple());
         let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let CreateCommunityWithOwnerResult::Created(created) = db
-            .create_community_with_owner(&host, &owner)
+            .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create owned community")
         else {
             panic!("expected a fresh community")
@@ -4938,8 +4939,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let replacement = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let outsider = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let CreateCommunityWithOwnerResult::Created(created) = db
-            .create_community_with_owner(&host, &owner)
+            .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         else {
             panic!("expected fresh community")
@@ -4965,8 +4967,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             OwnerDeletionAdmission::NotFoundOrNotOwner
         );
         assert_eq!(
-            db.transfer_ownership(created.id, &replacement, &owner)
+            db.transfer_ownership(created.id, &replacement, &owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("reject archived owner rotation"),
             TransferResult::LifecycleConflict
         );
@@ -5044,8 +5047,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         ));
 
         assert_eq!(
-            db.provision_owner(community, &replacement)
+            db.provision_owner(community, &replacement, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("legacy convergence result"),
             ProvisionOwnerResult::DeletionPending
         );
@@ -5093,7 +5097,12 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
                 contender_db(&format!("owner-convergence-{}", Uuid::new_v4().simple())).await;
             let converging = tokio::spawn({
                 let owner = owner.clone();
-                async move { convergence_db.provision_owner(community, &owner).await }
+                async move {
+                    convergence_db
+                        .provision_owner(community, &owner, &nostr::Keys::generate())
+                        .await
+                        .map(|write| write.outcome)
+                }
             });
             wait_for_owner_convergence_gate(&db, &gate).await;
 
@@ -5183,8 +5192,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             let replacement = replacement.clone();
             async move {
                 contender
-                    .transfer_ownership(community, &replacement, &owner)
+                    .transfer_ownership(community, &replacement, &owner, &nostr::Keys::generate())
                     .await
+                    .map(|write| write.outcome)
             }
         });
         wait_for_contender_lock(&db, &application_name).await;
@@ -5283,7 +5293,12 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let contender = contender_db(&application_name).await;
         let provision = tokio::spawn({
             let replacement = replacement.clone();
-            async move { contender.provision_owner(community, &replacement).await }
+            async move {
+                contender
+                    .provision_owner(community, &replacement, &nostr::Keys::generate())
+                    .await
+                    .map(|write| write.outcome)
+            }
         });
         wait_for_contender_lock(&db, &application_name).await;
         release_admission_insert_gate(&mut gate).await;
@@ -5401,8 +5416,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             UnarchiveCommunityResult::DeletionPending
         );
         assert_eq!(
-            db.transfer_ownership(community, &new_owner, &owner)
+            db.transfer_ownership(community, &new_owner, &owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("transfer result"),
             TransferResult::DeletionPending
         );
@@ -5451,8 +5467,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         };
         assert_eq!(request.stage, DeletionStage::Submitted);
         assert_eq!(
-            db.transfer_ownership(community, &new_owner, &owner)
+            db.transfer_ownership(community, &new_owner, &owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("fenced transfer"),
             TransferResult::DeletionPending
         );
@@ -5507,8 +5524,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         };
         assert_eq!(restored.id, community);
         assert_eq!(
-            db.transfer_ownership(community, &new_owner, &owner)
+            db.transfer_ownership(community, &new_owner, &owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("transfer after abort"),
             TransferResult::Transferred {
                 previous_owner: Some(owner.clone()),
@@ -5956,8 +5974,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("permanent tombstone lookup")
             .is_some());
         assert_eq!(
-            db.create_community_with_owner(&host, &owner)
+            db.create_community_with_owner(&host, &owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("recreate tombstoned host"),
             CreateCommunityWithOwnerResult::HostExists
         );
@@ -7781,8 +7800,10 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .create_community_with_owner(
                 &host,
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("recreate attempt");
         assert_eq!(recreated, CreateCommunityWithOwnerResult::HostExists);
         assert!(db

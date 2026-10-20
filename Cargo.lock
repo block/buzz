@@ -1214,6 +1214,7 @@ dependencies = [
  "clap",
  "deadpool-redis",
  "hex",
+ "nostr 0.44.7",
  "redis",
  "serde",
  "serde_json",

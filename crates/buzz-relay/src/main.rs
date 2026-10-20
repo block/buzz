@@ -657,8 +657,16 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // Idempotent — safe to run every startup. Must run before bootstrap_owner
     // so that existing allowlist users become relay members before the owner
     // is promoted (otherwise enabling membership locks everyone out).
+    //
+    // Both steps write the NIP-43 membership list in their own transaction.
+    // The listener isn't up yet, so there is nobody to deliver it to live;
+    // clients fetch the stored list.
     if let Some(community) = deployment_community {
-        match db.backfill_from_allowlist(community).await {
+        match db
+            .backfill_from_allowlist(community, &relay_keypair)
+            .await
+            .map(|write| write.outcome)
+        {
             Ok(0) => {}
             Ok(n) => info!("Backfilled {n} pubkey_allowlist entries into relay_members"),
             Err(e) => {
@@ -682,7 +690,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     if let (Some(community), Some(owner_pubkey)) =
         (deployment_community, config.relay_owner_pubkey.as_ref())
     {
-        match db.bootstrap_owner(community, owner_pubkey).await {
+        match db
+            .bootstrap_owner(community, owner_pubkey, &relay_keypair)
+            .await
+            .map(|write| write.outcome)
+        {
             Ok(()) => info!(pubkey = %owner_pubkey, "Relay owner bootstrapped"),
             Err(e) => {
                 if config.require_relay_membership {
@@ -1094,23 +1106,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         }
     }
     step.finish();
-
-    // NIP-43: repair event-backed rosters (`relay_members` is canonical) in
-    // the background, on the one replica holding the reconciler leader lock.
-    // It never blocks the listener; see `spawn_nip43_membership_reconciler`.
-    if config.require_relay_membership {
-        let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(60)
-            .max(1);
-        buzz_relay::handlers::side_effects::spawn_nip43_membership_reconciler(
-            Arc::clone(&state),
-            buzz_relay::handlers::side_effects::NIP43_RECONCILE_LOCK_KEY,
-            std::time::Duration::from_secs(interval_secs),
-            buzz_relay::handlers::side_effects::NIP43_STANDBY_RETRY,
-        );
-    }
 
     // Emit kind:39000/39002 discovery events for channels that exist in the DB
     // but don't have corresponding events (e.g. seeded via direct SQL inserts).

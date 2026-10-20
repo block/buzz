@@ -1967,8 +1967,9 @@ mod postgres_tests {
         let host = format!("{prefix}-{}.example", Uuid::new_v4().simple());
         let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let buzz_db::CreateCommunityWithOwnerResult::Created(community) = db
-            .create_community_with_owner(&host, &owner)
+            .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create owner preparation community")
         else {
             panic!("expected fresh owner preparation community")

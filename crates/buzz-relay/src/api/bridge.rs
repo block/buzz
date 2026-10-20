@@ -6827,11 +6827,14 @@ pub(crate) mod postgres_tests {
         // Seed the test actor as "owner" so moderation authz passes.
         let actor_keys = Keys::generate();
         let actor_hex = actor_keys.public_key().to_hex();
-        rt.block_on(
-            state
-                .db
-                .add_relay_member(community.id, &actor_hex, "owner", None),
-        )
+        rt.block_on(state.db.add_relay_member(
+            community.id,
+            &actor_hex,
+            "owner",
+            None,
+            &nostr::Keys::generate(),
+        ))
+        .map(|write| write.outcome)
         .expect("seed actor as owner");
 
         // Build headers: X-Pubkey dev-mode admission (require_auth_token=false).
@@ -8839,13 +8842,20 @@ pub(crate) mod postgres_tests {
                         &owner_hex,
                         "member",
                         None,
+                        &nostr::Keys::generate(),
                     )
                     .await
+                    .map(|write| write.outcome)
                     .expect("seed member");
                     state
                         .db
-                        .remove_relay_member(tenant.community(), &owner_hex)
+                        .remove_relay_member(
+                            tenant.community(),
+                            &owner_hex,
+                            &nostr::Keys::generate(),
+                        )
                         .await
+                        .map(|write| write.outcome)
                         .map(|_| ())
                         .expect("removal commits");
                 }
