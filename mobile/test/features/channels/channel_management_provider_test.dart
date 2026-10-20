@@ -267,6 +267,28 @@ void main() {
   });
 
   group('buildCreateChannelTags', () {
+    test(
+      'Solo creation carries its discovery label without client creator claims',
+      () {
+        final tags = buildCreateChannelTags(
+          channelId: _channelId,
+          name: 'Solo',
+          channelType: 'stream',
+          visibility: 'private',
+          labels: const ['buzz.solo'],
+        );
+        expect(tags, contains(equals(['t', 'buzz.solo'])));
+        expect(tags.where((tag) => tag.first == 'P'), isEmpty);
+        final ordinary = buildCreateChannelTags(
+          channelId: _channelId,
+          name: 'Private channel',
+          channelType: 'stream',
+          visibility: 'private',
+        );
+        expect(ordinary.where((tag) => tag.first == 't'), isEmpty);
+      },
+    );
+
     test('builds an ongoing channel without a ttl tag', () {
       final tags = buildCreateChannelTags(
         channelId: 'c8c629ae-d35c-44fa-bc39-f6c1816756cc',

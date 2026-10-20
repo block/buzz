@@ -10734,6 +10734,47 @@ void main() {
     });
   }
 
+  testWidgets(
+    'foreign Solo cannot force the personal sender through a route hint',
+    (tester) async {
+      final ordinary = _RecordingOrdinarySender(),
+          solo = _RecordingOrdinarySender();
+      final channel = Channel(
+        id: _channelId,
+        name: 'Shared Solo',
+        channelType: 'stream',
+        visibility: 'private',
+        labels: const ['buzz.solo'],
+        description: '',
+        createdBy: 'other',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [],
+          channel: channel,
+          signingPubkey: 'self',
+          personalChat: true,
+          organization: Stream.value(const MeGroups(channels: [_channelId])),
+          sender: ordinary,
+          soloSender: solo,
+          home: ChannelDetailPage(channel: channel, personalChat: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await expectLater(
+        tester
+            .widget<ComposeBar>(find.byType(ComposeBar))
+            .onSend('Rejected', []),
+        throwsStateError,
+      );
+      expect(solo.sent, isEmpty);
+      expect(ordinary.sent, isEmpty);
+    },
+  );
+
   testWidgets('identified Solo sends through the Solo sender', (tester) async {
     final ordinary = _RecordingOrdinarySender(),
         solo = _RecordingOrdinarySender();

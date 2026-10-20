@@ -669,6 +669,7 @@ List<List<String>> buildCreateChannelTags({
   required String name,
   required String channelType,
   required String visibility,
+  List<String> labels = const [],
   String? description,
   int? ttlSeconds,
 }) {
@@ -681,6 +682,7 @@ List<List<String>> buildCreateChannelTags({
     ['name', name],
     ['visibility', visibility],
     ['channel_type', channelType],
+    for (final label in labels) ['t', label],
     if (description case final about? when about.trim().isNotEmpty)
       ['about', about.trim()],
     if (ttlSeconds != null) ['ttl', ttlSeconds.toString()],
