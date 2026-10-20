@@ -6,7 +6,7 @@ mod help_tree;
 mod links;
 mod validate;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
@@ -93,7 +93,27 @@ where
     S: Into<std::ffi::OsString> + Clone,
 {
     let matches = build_command().try_get_matches_from(args)?;
-    Cli::from_arg_matches(&matches)
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    if matches.value_source("format") == Some(clap::parser::ValueSource::DefaultValue) {
+        cli.format = env_output_format(std::env::var_os("BUZZ_OUTPUT_FORMAT").as_deref());
+    }
+    Ok(cli)
+}
+
+/// `BUZZ_OUTPUT_FORMAT` only picks the default `--format`, so an empty or
+/// unknown value (e.g. one a newer harness sets) falls back to `json` rather
+/// than failing every command, writes included.
+fn env_output_format(value: Option<&std::ffi::OsStr>) -> OutputFormat {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return OutputFormat::default();
+    };
+    value
+        .to_str()
+        .and_then(|value| OutputFormat::from_str(value, false).ok())
+        .unwrap_or_else(|| {
+            eprintln!("warning: ignoring unsupported BUZZ_OUTPUT_FORMAT={value:?}; using json");
+            OutputFormat::default()
+        })
 }
 
 #[derive(Parser)]
@@ -107,6 +127,7 @@ Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+  BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
 
@@ -127,8 +148,9 @@ struct Cli {
     auth_tag: Option<String>,
 
     /// Output format: 'json' (default, full fields), 'compact' (reduced fields),
-    /// or 'agent' (event reads without signature material).
-    #[arg(long, value_enum, env = "BUZZ_OUTPUT_FORMAT", default_value = "json")]
+    /// or 'agent' (event reads without signature material). Defaults to
+    /// `BUZZ_OUTPUT_FORMAT` when that names a known format.
+    #[arg(long, value_enum, default_value = "json")]
     format: OutputFormat,
 
     #[command(subcommand)]
@@ -2276,6 +2298,24 @@ mod tests {
     }
 
     /// Smoke test: CLI definition is valid and parseable.
+    #[test]
+    fn output_format_env_is_a_lenient_default_but_the_flag_stays_strict() {
+        use std::ffi::OsStr;
+        assert!(matches!(env_output_format(None), OutputFormat::Json));
+        for ignored in ["", "agent-v2"] {
+            assert!(matches!(
+                env_output_format(Some(OsStr::new(ignored))),
+                OutputFormat::Json
+            ));
+        }
+        assert!(matches!(
+            env_output_format(Some(OsStr::new("agent"))),
+            OutputFormat::Agent
+        ));
+        assert!(parse_args(["buzz", "--format", "agent", "pack", "validate", "x"]).is_ok());
+        assert!(parse_args(["buzz", "--format", "agent-v2", "pack", "validate", "x"]).is_err());
+    }
+
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
