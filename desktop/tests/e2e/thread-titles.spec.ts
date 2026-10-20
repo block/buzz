@@ -653,10 +653,19 @@ test.describe("thread titles", () => {
         },
       );
 
+    const sidebarBadge = page.getByTestId("threads-working");
+
     // A channel-scoped turn has no thread, so no row lights up.
     await seedTurn("turn_started");
     await expect(page.getByTestId("threads-view-row-working")).toHaveCount(0);
+    await expect(sidebarBadge).toHaveCount(0);
     await seedTurn("turn_completed");
+
+    // An untitled thread isn't listed, so the sidebar entry stays dark too.
+    await seedTurn("turn_started", "c".repeat(64));
+    await expect(page.getByTestId("threads-view-row-working")).toHaveCount(0);
+    await expect(sidebarBadge).toHaveCount(0);
+    await seedTurn("turn_completed", "c".repeat(64));
 
     await seedTurn("turn_started", workedRootId);
     await expect(workedRow.getByTestId("threads-view-row-working")).toHaveText(
@@ -665,9 +674,12 @@ test.describe("thread titles", () => {
     await expect(idleRow.getByTestId("threads-view-row-working")).toHaveCount(
       0,
     );
+    await expect(sidebarBadge).toHaveText(/^\d+s$/);
+    await expect(sidebarBadge).toHaveAttribute("title", "1 thread working");
 
     await seedTurn("turn_completed", workedRootId);
     await expect(page.getByTestId("threads-view-row-working")).toHaveCount(0);
+    await expect(sidebarBadge).toHaveCount(0);
   });
 
   test("the selected Threads item shows its unread dot while a thread is open", async ({

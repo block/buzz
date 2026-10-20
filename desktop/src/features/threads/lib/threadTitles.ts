@@ -210,6 +210,34 @@ export function countUnreadByTitledRoot(
   return counts;
 }
 
+/** Agent work across the threads the Threads view lists. */
+export type WorkingTitledThreads = {
+  /** Start of the longest-running turn, on the desktop clock. */
+  anchorAt: number;
+  threadCount: number;
+};
+
+/**
+ * Rolls active thread turns up for the sidebar's Threads entry. Untitled
+ * threads are left out: the view doesn't list them, so counting them would
+ * light the entry with no row to find.
+ */
+export function summarizeWorkingTitledThreads(
+  titles: readonly ThreadTitle[] | undefined,
+  workingThreads: ReadonlyMap<string, { anchorAt: number }>,
+): WorkingTitledThreads | null {
+  if (!titles || workingThreads.size === 0) return null;
+  const titledRoots = new Set(titles.map((entry) => entry.rootId));
+  let anchorAt = Number.POSITIVE_INFINITY;
+  let threadCount = 0;
+  for (const [rootId, summary] of workingThreads) {
+    if (!titledRoots.has(rootId.toLowerCase())) continue;
+    threadCount += 1;
+    anchorAt = Math.min(anchorAt, summary.anchorAt);
+  }
+  return threadCount === 0 ? null : { anchorAt, threadCount };
+}
+
 /** The relay rejects a REQ naming more than 128 `#h` values. */
 export const MAX_LIVE_SYNC_CHANNELS_PER_FILTER = 128;
 

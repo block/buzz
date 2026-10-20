@@ -10,6 +10,7 @@ import {
   findThreadTitle,
   interpretTitleDraft,
   MAX_LIVE_SYNC_CHANNELS_PER_FILTER,
+  summarizeWorkingTitledThreads,
   THREAD_TITLES_QUERY_KEY,
   threadTitleRootQueryKey,
 } from "./threadTitles.ts";
@@ -215,6 +216,34 @@ test("countUnreadByTitledRoot is empty before titles load", () => {
   assert.equal(
     countUnreadByTitledRoot(undefined, [{ id: "r1", rootId: ROOT }]).size,
     0,
+  );
+});
+
+test("summarizeWorkingTitledThreads counts titled threads and keeps the earliest start", () => {
+  const titles = [entry(), entry({ rootId: OTHER_ROOT, title: "Other" })];
+  const summary = summarizeWorkingTitledThreads(
+    titles,
+    new Map([
+      [ROOT, { anchorAt: 2_000 }],
+      [OTHER_ROOT.toUpperCase(), { anchorAt: 1_000 }],
+      // Untitled: not in the Threads list, so it neither counts nor anchors.
+      ["c".repeat(64), { anchorAt: 500 }],
+    ]),
+  );
+  assert.deepEqual(summary, { anchorAt: 1_000, threadCount: 2 });
+});
+
+test("summarizeWorkingTitledThreads is null when no titled thread is working", () => {
+  const working = new Map([["c".repeat(64), { anchorAt: 500 }]]);
+  assert.equal(summarizeWorkingTitledThreads([entry()], working), null);
+  assert.equal(summarizeWorkingTitledThreads([entry()], new Map()), null);
+  // Before titles load there is nothing to point at yet.
+  assert.equal(
+    summarizeWorkingTitledThreads(
+      undefined,
+      new Map([[ROOT, { anchorAt: 1 }]]),
+    ),
+    null,
   );
 });
 

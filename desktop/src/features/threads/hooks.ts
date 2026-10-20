@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { useAppShell } from "@/app/AppShellContext";
+import { useActiveAgentTurnsByThread } from "@/features/agents/activeAgentTurnsStore";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import {
   applyRootTitleWrite,
@@ -11,8 +12,10 @@ import {
   countUnreadByTitledRoot,
   createThreadTitleBatcher,
   describeTitleSaveError,
+  summarizeWorkingTitledThreads,
   THREAD_TITLES_QUERY_KEY,
   threadTitleRootQueryKey,
+  type WorkingTitledThreads,
 } from "@/features/threads/lib/threadTitles";
 import { relayClient } from "@/shared/api/relayClient";
 import {
@@ -93,6 +96,16 @@ export function useTitledThreadUnreadCounts(): ReadonlyMap<string, number> {
         })),
       ),
     [query.data, unreadThreadFeedItems],
+  );
+}
+
+/** Agent work in threads the Threads view lists, for its sidebar entry. */
+export function useWorkingTitledThreads(): WorkingTitledThreads | null {
+  const query = useThreadTitlesQuery();
+  const workingThreads = useActiveAgentTurnsByThread();
+  return React.useMemo(
+    () => summarizeWorkingTitledThreads(query.data, workingThreads),
+    [query.data, workingThreads],
   );
 }
 
