@@ -12,13 +12,17 @@ use buzz_core::CommunityId;
 ///
 /// A share admits everyone when it is community-wide, or readers of its
 /// channel (open, or one they actively belong to). An unknown or unshared hash
-/// grants nothing. Shares are never withdrawn.
+/// grants nothing. Deleted or purged source events grant nothing.
 macro_rules! readable_sql {
     () => {
         "( \
     EXISTS (SELECT 1 FROM media_shares s \
+               JOIN events e ON e.community_id = s.community_id AND e.id = s.event_id \
+                 AND e.created_at = s.event_created_at AND e.deleted_at IS NULL \
                WHERE s.community_id = $1 AND s.sha256 = b.sha256 AND s.channel_id IS NULL) \
     OR EXISTS (SELECT 1 FROM media_shares s \
+               JOIN events e ON e.community_id = s.community_id AND e.id = s.event_id \
+                 AND e.created_at = s.event_created_at AND e.deleted_at IS NULL \
                JOIN channels c ON c.community_id = $1 AND c.id = s.channel_id \
                WHERE s.community_id = $1 AND s.sha256 = b.sha256 AND c.deleted_at IS NULL \
                  AND (c.visibility = 'open' \
@@ -41,10 +45,13 @@ pub(crate) async fn record_media_shares(
     event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<u64> {
+    let created_at_secs = event.created_at.as_secs() as i64;
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(crate::DbError::InvalidTimestamp(created_at_secs))?;
     let added = sqlx::query(concat!(
-        "INSERT INTO media_shares (community_id, sha256, channel_id) \
-         SELECT $1, b.sha256, $4 FROM (SELECT DISTINCT unnest($2::text[]) AS sha256) b \
-         WHERE EXISTS (SELECT 1 FROM media_uploaders u \
+        "INSERT INTO media_shares (community_id, sha256, channel_id, event_id, event_created_at) \
+         SELECT $1, b.sha256, $4, $6, $7 FROM (SELECT DISTINCT unnest($2::text[]) AS sha256) b \
+         WHERE (EXISTS (SELECT 1 FROM media_uploaders u \
                        WHERE u.community_id = $1 AND u.sha256 = b.sha256 AND u.pubkey = $3) \
             OR (b.sha256 = $5 AND EXISTS ( \
                 SELECT 1 FROM users agent JOIN media_uploaders u \
@@ -52,13 +59,18 @@ pub(crate) async fn record_media_shares(
                 WHERE agent.community_id = $1 AND agent.pubkey = $3 AND u.sha256 = b.sha256)) \
             OR ",
         readable_sql!(),
-        " ORDER BY b.sha256 ON CONFLICT DO NOTHING"
+        ") AND EXISTS (SELECT 1 FROM events e \
+                       WHERE e.community_id = $1 AND e.id = $6 AND e.created_at = $7 \
+                         AND e.deleted_at IS NULL) \
+         ORDER BY b.sha256 ON CONFLICT DO NOTHING"
     ))
     .bind(community_id.as_uuid())
     .bind(sha256s)
     .bind(event.pubkey.as_bytes().as_slice())
     .bind(channel_id)
     .bind(buzz_core::media::profile_picture_blob_hash(event))
+    .bind(event.id.as_bytes().as_slice())
+    .bind(created_at)
     .execute(conn)
     .await?
     .rows_affected();
@@ -108,8 +120,8 @@ impl Db {
         can_read_blob(&self.pool, community_id, sha256, reader).await
     }
 
-    /// Record the shares of every event already stored in an active community,
-    /// deleted events included, reading `batch_size` events at a time; returns
+    /// Record the shares of undeleted events stored in an active community,
+    /// reading `batch_size` events at a time; returns
     /// the number of shares added.
     ///
     /// Shares come from the same rule as live writes. Events received before
@@ -139,7 +151,7 @@ impl Db {
                     "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, \
                             channel_id \
                      FROM events \
-                     WHERE community_id = $1 \
+                     WHERE community_id = $1 AND deleted_at IS NULL \
                        AND ($2::timestamptz IS NULL OR (created_at, id) > ($2, $3)) \
                      ORDER BY created_at, id LIMIT $4",
                 )
@@ -158,10 +170,11 @@ impl Db {
                 cursor = Some((last.try_get("created_at")?, last.try_get("id")?));
                 let full_batch = i64::try_from(rows.len()).unwrap_or(i64::MAX) == batch_size;
 
-                let mut history: Vec<(String, Option<Uuid>)> = Vec::new();
+                let mut history = Vec::new();
                 let mut recorded_live = Vec::new();
                 for row in rows {
                     let received_at: DateTime<Utc> = row.try_get("received_at")?;
+                    let event_created_at: DateTime<Utc> = row.try_get("created_at")?;
                     let Some(stored) = crate::event::row_to_stored_event(row)? else {
                         continue;
                     };
@@ -170,7 +183,10 @@ impl Db {
                         continue;
                     }
                     if received_at < installed {
-                        history.extend(hashes.into_iter().map(|hash| (hash, stored.channel_id)));
+                        let event_id = stored.event.id.to_bytes().to_vec();
+                        history.extend(hashes.into_iter().map(|hash| {
+                            (hash, stored.channel_id, event_id.clone(), event_created_at)
+                        }));
                     } else {
                         recorded_live.push((stored.event, hashes, stored.channel_id));
                     }
@@ -180,18 +196,27 @@ impl Db {
                 history.sort();
                 history.dedup();
                 if !history.is_empty() {
-                    let (hashes, channels): (Vec<String>, Vec<Option<Uuid>>) =
-                        history.into_iter().unzip();
+                    let hashes: Vec<_> = history.iter().map(|(h, _, _, _)| h).collect();
+                    let channels: Vec<_> = history.iter().map(|(_, c, _, _)| *c).collect();
+                    let event_ids: Vec<_> = history.iter().map(|(_, _, id, _)| id).collect();
+                    let event_times: Vec<_> = history.iter().map(|(_, _, _, at)| *at).collect();
                     let mut tx = self.begin_media_share_transaction(community).await?;
                     added += sqlx::query(
-                        "INSERT INTO media_shares (community_id, sha256, channel_id) \
-                         SELECT $1, h, c FROM unnest($2::text[], $3::uuid[]) AS t(h, c) \
-                         ORDER BY h, c NULLS FIRST \
+                        "INSERT INTO media_shares \
+                             (community_id, sha256, channel_id, event_id, event_created_at) \
+                         SELECT $1, h, c, e.id, e.created_at \
+                         FROM unnest($2::text[], $3::uuid[], $4::bytea[], $5::timestamptz[]) \
+                             AS t(h, c, event_id, event_created_at) \
+                         JOIN events e ON e.community_id = $1 AND e.id = t.event_id \
+                           AND e.created_at = t.event_created_at AND e.deleted_at IS NULL \
+                         ORDER BY h, e.id \
                          ON CONFLICT DO NOTHING",
                     )
                     .bind(community.as_uuid())
                     .bind(hashes)
                     .bind(channels)
+                    .bind(event_ids)
+                    .bind(event_times)
                     .execute(tx.conn())
                     .await?
                     .rows_affected();
@@ -281,7 +306,7 @@ mod postgres_tests {
 
     async fn shares(db: &Db, community: CommunityId, sha256: &str) -> Vec<Option<Uuid>> {
         let mut shares: Vec<Option<Uuid>> = sqlx::query_scalar(
-            "SELECT channel_id FROM media_shares WHERE community_id = $1 AND sha256 = $2",
+            "SELECT DISTINCT channel_id FROM media_shares WHERE community_id = $1 AND sha256 = $2",
         )
         .bind(community.as_uuid())
         .bind(sha256)
@@ -370,10 +395,95 @@ mod postgres_tests {
         check_backfill().await;
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn deleting_a_reference_revokes_only_its_own_media_grant() {
+        let (db, community) = fixture().await;
+        let (owner, reader) = (Keys::generate(), Keys::generate());
+        let open = channel(&db, community, &owner, ChannelVisibility::Open).await;
+        for channel_id in [Some(open), None] {
+            let sha = unique_sha();
+            upload(&db, community, &owner, &sha).await;
+            let first = attachment(&owner, &sha, channel_id);
+            let last = attachment(&owner, &sha, channel_id);
+            for event in [&first, &last] {
+                db.insert_event(community, event, channel_id).await.unwrap();
+            }
+            let sources: Vec<Vec<u8>> = sqlx::query_scalar(
+                "SELECT event_id FROM media_shares WHERE community_id = $1 AND sha256 = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(&sha)
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(sources.len(), 2, "each message must retain its own grant");
+            for event in [&first, &last] {
+                assert!(sources.contains(&event.id.to_bytes().to_vec()));
+            }
+            assert!(readable_share(&db, community, &sha, &reader).await);
+            for (event, still_shared) in [(&first, true), (&last, false)] {
+                assert!(
+                    db.soft_delete_event_and_update_thread(
+                        community,
+                        event.id.as_bytes(),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                );
+                assert_eq!(
+                    readable_share(&db, community, &sha, &reader).await,
+                    still_shared,
+                    "only an undeleted source message can grant access"
+                );
+            }
+            db.insert_event(community, &attachment(&reader, &sha, None), None)
+                .await
+                .unwrap();
+            assert!(!readable_share(&db, community, &sha, &reader).await);
+            db.backfill_media_shares(1).await.unwrap();
+            assert!(!readable_share(&db, community, &sha, &reader).await);
+
+            let purged = attachment(&owner, &sha, channel_id);
+            db.insert_event(community, &purged, channel_id)
+                .await
+                .unwrap();
+            assert!(readable_share(&db, community, &sha, &reader).await);
+            let mut tx = db.begin_media_share_transaction(community).await.unwrap();
+            sqlx::query("DELETE FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(purged.id.as_bytes().as_slice())
+                .execute(tx.conn())
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            assert!(
+                !readable_share(&db, community, &sha, &reader).await,
+                "a purged source cannot leave a dangling grant"
+            );
+        }
+    }
+
+    async fn readable_share(db: &Db, community: CommunityId, sha: &str, reader: &Keys) -> bool {
+        sqlx::query_scalar(concat!(
+            "SELECT ",
+            readable_sql!(),
+            " FROM (SELECT $2::text AS sha256) b"
+        ))
+        .bind(community.as_uuid())
+        .bind(sha)
+        .bind(reader.public_key().to_bytes().to_vec())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    }
+
     async fn check_backfill() {
         let (db, community) = fixture().await;
         let (alice, bob, carol) = (Keys::generate(), Keys::generate(), Keys::generate());
-        let (sha, historical) = (unique_sha(), unique_sha());
+        let (sha, historical, deleted_history) = (unique_sha(), unique_sha(), unique_sha());
         let private = channel(&db, community, &alice, ChannelVisibility::Private).await;
         upload(&db, community, &alice, &sha).await;
         db.insert_event(
@@ -390,6 +500,11 @@ mod postgres_tests {
         db.insert_event(community, &old, None)
             .await
             .expect("carol posts before share recording");
+        let deleted = attachment(&carol, &deleted_history, None);
+        db.insert_event(community, &deleted, None).await.unwrap();
+        db.soft_delete_event_and_update_thread(community, deleted.id.as_bytes(), None, None)
+            .await
+            .unwrap();
 
         let mut tx = crate::begin_community_write_transaction(
             &db.pool,
@@ -398,12 +513,17 @@ mod postgres_tests {
         )
         .await
         .expect("admit");
-        sqlx::query("UPDATE events SET received_at = 'epoch' WHERE community_id = $1 AND id = $2")
-            .bind(community.as_uuid())
-            .bind(old.id.as_bytes().as_slice())
-            .execute(tx.conn())
-            .await
-            .expect("age carol's event");
+        sqlx::query(
+            "UPDATE events SET received_at = 'epoch' WHERE community_id = $1 AND id = ANY($2)",
+        )
+        .bind(community.as_uuid())
+        .bind(vec![
+            old.id.to_bytes().to_vec(),
+            deleted.id.to_bytes().to_vec(),
+        ])
+        .execute(tx.conn())
+        .await
+        .expect("age carol's event");
         sqlx::query("DELETE FROM media_shares WHERE community_id = $1")
             .bind(community.as_uuid())
             .execute(tx.conn())
@@ -419,6 +539,10 @@ mod postgres_tests {
             "a reference live recording refused must stay unshared"
         );
         assert_eq!(shares(&db, community, &historical).await, vec![None]);
+        assert!(
+            shares(&db, community, &deleted_history).await.is_empty(),
+            "legacy deleted messages must never gain a share"
+        );
     }
 
     #[tokio::test]
