@@ -2,9 +2,9 @@
 //!
 //! Manages per-channel event queues with per-channel in-flight tracking.
 //! When the harness is ready to prompt the agent, it flushes the channel with
-//! the oldest pending event, draining ALL events for that channel into a single
-//! batch. Multiple channels can be in-flight simultaneously; each channel is
-//! independent.
+//! the oldest pending event, draining events from one thread into a single
+//! batch. Unrelated top-level requests each define their own thread. Multiple
+//! channels can be in-flight simultaneously; each channel is independent.
 //!
 //! ## Dedup modes
 //!
@@ -118,7 +118,7 @@ pub struct FlushBatch {
 ///                  AND (no retry_after OR retry_after[c] <= now)
 ///     if candidates empty: return None
 ///     channel = pick candidate with oldest head event (min received_at)
-///     events = drain up to MAX_BATCH_EVENTS from queues[channel]
+///     events = drain up to MAX_BATCH_EVENTS for the oldest reply thread
 ///     in_flight_channels.insert(channel)
 ///     in_flight_deadlines.insert(channel, now + in_flight_deadline)
 ///     return Some(FlushBatch { channel, events })
@@ -137,6 +137,8 @@ pub struct FlushBatch {
 pub struct EventQueue {
     queues: HashMap<Uuid, VecDeque<QueuedEvent>>,
     in_flight_channels: HashSet<Uuid>,
+    /// Reply root of the current turn; unrelated threads must not steer it.
+    in_flight_reply_roots: HashMap<Uuid, String>,
     /// Per-channel deadline for auto-expiring stuck in-flight entries.
     in_flight_deadlines: HashMap<Uuid, Instant>,
     /// Number of events in each in-flight batch (for expiry logging).
@@ -180,6 +182,7 @@ impl EventQueue {
         Self {
             queues: HashMap::new(),
             in_flight_channels: HashSet::new(),
+            in_flight_reply_roots: HashMap::new(),
             in_flight_deadlines: HashMap::new(),
             in_flight_batch_sizes: HashMap::new(),
             retry_after: HashMap::new(),
@@ -255,7 +258,7 @@ impl EventQueue {
     ///
     /// Returns `None` if all non-in-flight, non-throttled queues are empty.
     /// Otherwise picks the channel with the oldest pending event (FIFO fairness
-    /// across channels), drains ALL events for that channel into a single batch,
+    /// across channels), drains events from one reply thread into a single batch,
     /// inserts into `in_flight_channels`, and returns the batch.
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
         let now = Instant::now();
@@ -277,6 +280,7 @@ impl EventQueue {
                  auto-releasing; {lost_events} dispatched event(s) orphaned"
             );
             self.in_flight_channels.remove(&id);
+            self.in_flight_reply_roots.remove(&id);
             self.in_flight_deadlines.remove(&id);
             // Recover any withheld goose-native steer events for the expired
             // channel back to the queue front so normal dispatch delivers
@@ -316,6 +320,10 @@ impl EventQueue {
                         // No new events to merge — re-dispatch the original batch.
                         let cancelled = self.cancelled_batches.remove(&id).unwrap_or_default();
                         let cancel_reason = self.cancel_reasons.remove(&id);
+                        if let Some(event) = cancelled.last() {
+                            self.in_flight_reply_roots
+                                .insert(id, reply_root(&event.event));
+                        }
                         self.in_flight_channels.insert(id);
                         self.in_flight_deadlines
                             .insert(id, now + self.in_flight_deadline);
@@ -332,17 +340,40 @@ impl EventQueue {
             }
         };
 
-        // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
+        // A cancelled turn must resume in its own thread even if an unrelated
+        // request reached the channel first. Otherwise select the oldest event's
+        // thread, leaving all other threads queued for their own turn.
         let queue = self.queues.entry(channel_id).or_default();
-        let drain_count = MAX_BATCH_EVENTS.min(queue.len());
-        let mut events: Vec<BatchEvent> = queue
-            .drain(..drain_count)
-            .map(|qe| BatchEvent {
-                event: qe.event,
-                prompt_tag: qe.prompt_tag,
-                received_at: qe.received_at,
-            })
-            .collect();
+        let scope = self
+            .cancelled_batches
+            .get(&channel_id)
+            .and_then(|events| events.last())
+            .map(|event| reply_root(&event.event))
+            .or_else(|| queue.front().map(|event| reply_root(&event.event)))?;
+        let mut events = Vec::new();
+        let mut remaining = VecDeque::new();
+        for event in queue.drain(..) {
+            if events.len() < MAX_BATCH_EVENTS && reply_root(&event.event) == scope {
+                events.push(BatchEvent {
+                    event: event.event,
+                    prompt_tag: event.prompt_tag,
+                    received_at: event.received_at,
+                });
+            } else {
+                remaining.push_back(event);
+            }
+        }
+        *queue = remaining;
+        // Explicit cancellation without a same-thread follow-up resumes the
+        // original request; unrelated queued work must not become its anchor.
+        let resumed_without_followup = events.is_empty();
+        if resumed_without_followup {
+            events = self
+                .cancelled_batches
+                .remove(&channel_id)
+                .unwrap_or_default();
+        }
+        self.in_flight_reply_roots.insert(channel_id, scope);
         // Relay replay delivers stored events newest-first (`ORDER BY
         // created_at DESC`), but batch consumers — `format_prompt` scope and
         // reply-anchor selection — require the LAST event to be the newest.
@@ -364,7 +395,7 @@ impl EventQueue {
             .cancelled_batches
             .remove(&channel_id)
             .unwrap_or_default();
-        let cancel_reason = if cancelled_events.is_empty() {
+        let cancel_reason = if cancelled_events.is_empty() && !resumed_without_followup {
             self.cancel_reasons.remove(&channel_id);
             None
         } else {
@@ -391,6 +422,7 @@ impl EventQueue {
     /// Also cleans up any already-expired `retry_after` entry.
     pub fn mark_complete(&mut self, channel_id: Uuid) {
         self.in_flight_channels.remove(&channel_id);
+        self.in_flight_reply_roots.remove(&channel_id);
         self.in_flight_deadlines.remove(&channel_id);
         self.in_flight_batch_sizes.remove(&channel_id);
         let now = Instant::now();
@@ -573,6 +605,7 @@ impl EventQueue {
                  auto-releasing; {lost_events} dispatched event(s) orphaned"
             );
             self.in_flight_channels.remove(&id);
+            self.in_flight_reply_roots.remove(&id);
             self.in_flight_deadlines.remove(&id);
             // Symmetric with the flush_next expiry block: recover withheld
             // goose-native steer events for the expired channel so they are
@@ -644,6 +677,31 @@ impl EventQueue {
     /// Whether a prompt is currently in-flight for the given channel.
     pub fn is_channel_in_flight(&self, channel_id: Uuid) -> bool {
         self.in_flight_channels.contains(&channel_id)
+    }
+
+    /// Whether an event belongs to the active turn's reply thread.
+    ///
+    /// Cross-thread traffic stays queued even when the configured handling mode
+    /// would otherwise steer or interrupt the current turn.
+    pub fn is_event_in_flight_thread(&self, channel_id: Uuid, event: &Event) -> bool {
+        self.is_channel_in_flight(channel_id)
+            && self
+                .in_flight_reply_roots
+                .get(&channel_id)
+                .is_some_and(|root| *root == reply_root(event))
+    }
+
+    /// Whether a pending native steer still targets the active reply thread.
+    ///
+    /// A delayed acknowledgement may arrive after another thread has started
+    /// on the same channel. Its fallback must not interrupt that newer turn.
+    pub fn is_native_steer_in_flight_thread(&self, channel_id: Uuid, event_id: &str) -> bool {
+        self.withheld_native_steer
+            .get(&channel_id)
+            .into_iter()
+            .flatten()
+            .find(|queued| queued.event.id.to_hex() == event_id)
+            .is_some_and(|queued| self.is_event_in_flight_thread(channel_id, &queued.event))
     }
 
     /// Whether any channel currently has a turn in flight.
@@ -827,6 +885,12 @@ impl Default for EventQueue {
     fn default() -> Self {
         Self::new(DedupMode::Drop)
     }
+}
+
+fn reply_root(event: &Event) -> String {
+    parse_thread_tags(event)
+        .root_event_id
+        .unwrap_or_else(|| event.id.to_hex())
 }
 
 /// Parsed thread relationship from NIP-10 `e` tags.
@@ -1674,7 +1738,7 @@ mod tests {
         let keys = Keys::generate();
         let event = EventBuilder::new(Kind::Custom(9), content)
             .custom_created_at(Timestamp::from(created_at_secs))
-            .tags([])
+            .tags([nostr::Tag::parse(["e", &"a".repeat(64), "", "reply"]).unwrap()])
             .sign_with_keys(&keys)
             .unwrap();
         QueuedEvent {
@@ -1683,6 +1747,145 @@ mod tests {
             received_at: Instant::now(),
             prompt_tag: "test".into(),
         }
+    }
+
+    fn make_thread_queued(channel: Uuid, content: &str, root: &str) -> QueuedEvent {
+        let mut queued = make_queued(channel, content);
+        queued.event = EventBuilder::new(Kind::Custom(9), content)
+            .tags([nostr::Tag::parse(["e", root, "", "reply"]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        queued
+    }
+
+    #[test]
+    fn unrelated_top_level_requests_get_separate_reply_anchors() {
+        let channel = Uuid::new_v4();
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let first = make_queued(channel, "Thread A request");
+        let first_id = first.event.id.to_hex();
+        let second = make_queued(channel, "Thread B request");
+        let second_id = second.event.id.to_hex();
+        queue.push(first);
+        queue.push(second);
+
+        let batch = queue.flush_next().unwrap();
+        assert_eq!(batch.events.len(), 1);
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n");
+        assert!(prompt.contains(&format!("--reply-to {first_id}")));
+        assert!(!prompt.contains("Thread B request"));
+        queue.mark_complete(channel);
+        let batch = queue.flush_next().unwrap();
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n");
+        assert!(prompt.contains(&format!("--reply-to {second_id}")));
+    }
+
+    #[test]
+    fn thread_batches_preserve_unrelated_queued_requests() {
+        let channel = Uuid::new_v4();
+        let root_a = "a".repeat(64);
+        let root_b = "b".repeat(64);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        queue.push(make_thread_queued(channel, "Thread A first", &root_a));
+        queue.push(make_thread_queued(channel, "Thread B", &root_b));
+        queue.push(make_thread_queued(channel, "Thread A followup", &root_a));
+
+        let batch = queue.flush_next().unwrap();
+        assert_eq!(batch.events.len(), 2);
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n");
+        assert!(prompt.contains(&format!("--reply-to {root_a}")));
+        assert!(!prompt.contains("Thread B"));
+        assert_eq!(queue.queued_event_count(&channel), 1);
+        assert!(queue.is_event_in_flight_thread(
+            channel,
+            &make_thread_queued(channel, "same", &root_a).event
+        ));
+        assert!(!queue.is_event_in_flight_thread(
+            channel,
+            &make_thread_queued(channel, "other", &root_b).event
+        ));
+        assert!(
+            !queue.is_event_in_flight_thread(channel, &make_queued(channel, "new request").event)
+        );
+        queue.mark_complete(channel);
+        let next = queue.flush_next().unwrap();
+        assert_eq!(next.events[0].event.content, "Thread B");
+    }
+
+    #[test]
+    fn cancellation_merges_only_followups_from_the_interrupted_thread() {
+        let channel = Uuid::new_v4();
+        let root_a = "a".repeat(64);
+        let root_b = "b".repeat(64);
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        queue.push(make_thread_queued(channel, "Thread A original", &root_a));
+        let original = queue.flush_next().unwrap();
+        queue.push(make_thread_queued(channel, "Thread B", &root_b));
+        queue.push(make_thread_queued(channel, "Thread A followup", &root_a));
+        queue.requeue_as_cancelled(original, CancelReason::Steer);
+        queue.mark_complete(channel);
+
+        let resumed = queue.flush_next().unwrap();
+        assert_eq!(resumed.events[0].event.content, "Thread A followup");
+        assert_eq!(
+            resumed.cancelled_events[0].event.content,
+            "Thread A original"
+        );
+        let prompt = format_prompt(&resumed, &FormatPromptArgs::default()).join("\n");
+        assert!(prompt.contains(&format!("--reply-to {root_a}")));
+        assert!(!prompt.contains("Thread B"));
+        queue.mark_complete(channel);
+        assert_eq!(
+            queue.flush_next().unwrap().events[0].event.content,
+            "Thread B"
+        );
+    }
+
+    #[test]
+    fn cancelled_thread_resumes_without_consuming_another_threads_request() {
+        let channel = Uuid::new_v4();
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        queue.push(make_thread_queued(channel, "original", &"a".repeat(64)));
+        let original = queue.flush_next().unwrap();
+        queue.push(make_thread_queued(channel, "unrelated", &"b".repeat(64)));
+        queue.requeue_as_cancelled(original, CancelReason::Steer);
+        queue.mark_complete(channel);
+
+        let resumed = queue.flush_next().unwrap();
+        assert_eq!(resumed.events[0].event.content, "original");
+        assert_eq!(resumed.cancel_reason, Some(CancelReason::Steer));
+        assert!(resumed.cancelled_events.is_empty());
+        queue.mark_complete(channel);
+        assert!(!queue.is_event_in_flight_thread(channel, &resumed.events[0].event));
+        assert_eq!(
+            queue.flush_next().unwrap().events[0].event.content,
+            "unrelated"
+        );
+    }
+
+    #[test]
+    fn late_native_steer_ack_does_not_target_another_thread() {
+        let channel = Uuid::new_v4();
+        let mut queue = EventQueue::new(DedupMode::Queue);
+        let root_a = "a".repeat(64);
+        queue.push(make_thread_queued(channel, "Thread A", &root_a));
+        queue.flush_next().unwrap();
+        let followup = make_thread_queued(channel, "A followup", &root_a);
+        let event_id = followup.event.id.to_hex();
+        queue.push(followup);
+        assert!(queue.mark_native_steer_pending(channel, &event_id));
+        assert!(queue.is_native_steer_in_flight_thread(channel, &event_id));
+
+        queue.mark_complete(channel);
+        queue.push(make_thread_queued(channel, "Thread B", &"b".repeat(64)));
+        queue.flush_next().unwrap();
+        assert!(!queue.is_native_steer_in_flight_thread(channel, &event_id));
+        queue.release_native_steer(channel, &event_id);
+        queue.mark_complete(channel);
+        assert_eq!(
+            queue.flush_next().unwrap().events[0].event.content,
+            "A followup"
+        );
     }
 
     fn pending_count(q: &EventQueue) -> usize {
@@ -1761,13 +1964,13 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_drain_all_events() {
+    fn test_batch_drains_same_thread_events() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
 
-        q.push(make_queued(ch, "msg1"));
-        q.push(make_queued(ch, "msg2"));
-        q.push(make_queued(ch, "msg3"));
+        q.push(make_thread_queued(ch, "msg1", &"a".repeat(64)));
+        q.push(make_thread_queued(ch, "msg2", &"a".repeat(64)));
+        q.push(make_thread_queued(ch, "msg3", &"a".repeat(64)));
 
         assert_eq!(pending_count(&q), 3);
 
@@ -1801,13 +2004,13 @@ mod tests {
         assert_eq!(batch.events[0].event.content, "oldest");
         assert_eq!(batch.events[1].event.content, "newest");
 
-        // The rendered prompt's reply anchor must cite the newest event, so
-        // the agent's reply threads under the message it is responding to.
-        let newest_id = batch.events[1].event.id.to_hex();
+        // The rendered prompt's reply anchor must retain the shared root, so
+        // replayed follow-ups remain in their originating thread.
+        let root_id = "a".repeat(64);
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {newest_id}")),
-            "reply anchor must target the newest event; prompt was:\n{prompt}"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "reply anchor must target the thread root; prompt was:\n{prompt}"
         );
     }
 
@@ -1987,12 +2190,20 @@ mod tests {
         let ch = Uuid::new_v4();
 
         // Original turn is in flight: push the work, flush it into a batch.
-        q.push(make_queued(ch, "draft the migration plan"));
+        q.push(make_thread_queued(
+            ch,
+            "draft the migration plan",
+            &"a".repeat(64),
+        ));
         let batch = q.flush_next().unwrap();
         assert!(any_in_flight(&q));
 
         // A steering-eligible mention arrives mid-turn.
-        q.push(make_queued(ch, "actually scope it to v2 only"));
+        q.push(make_thread_queued(
+            ch,
+            "actually scope it to v2 only",
+            &"a".repeat(64),
+        ));
 
         // The mode gate fires Steer → cancel → requeue as cancelled, carrying
         // the steer reason (exactly the lib.rs requeue path).
@@ -2130,8 +2341,8 @@ mod tests {
     fn test_requeue_preserves_events() {
         let mut queue = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
-        queue.push(make_queued(ch, "msg1"));
-        queue.push(make_queued(ch, "msg2"));
+        queue.push(make_thread_queued(ch, "msg1", &"a".repeat(64)));
+        queue.push(make_thread_queued(ch, "msg2", &"a".repeat(64)));
 
         let batch = queue.flush_next().unwrap();
         assert_eq!(batch.events.len(), 2);
@@ -3681,13 +3892,13 @@ mod tests {
         let ch = Uuid::new_v4();
 
         // Push 2 events, flush into a batch.
-        q.push(make_queued(ch, "old-1"));
-        q.push(make_queued(ch, "old-2"));
+        q.push(make_thread_queued(ch, "old-1", &"a".repeat(64)));
+        q.push(make_thread_queued(ch, "old-2", &"a".repeat(64)));
         let batch = q.flush_next().unwrap();
         assert_eq!(batch.events.len(), 2);
 
         // Push 1 new event while channel is in-flight.
-        q.push(make_queued(ch, "new-1"));
+        q.push(make_thread_queued(ch, "new-1", &"a".repeat(64)));
 
         // Cancel the original batch and release the channel.
         q.requeue_as_cancelled(batch, CancelReason::Interrupt);
@@ -3709,9 +3920,9 @@ mod tests {
         let ch = Uuid::new_v4();
 
         // Merge path (new event present): reason rides on FlushBatch.
-        q.push(make_queued(ch, "old"));
+        q.push(make_thread_queued(ch, "old", &"a".repeat(64)));
         let batch = q.flush_next().unwrap();
-        q.push(make_queued(ch, "new"));
+        q.push(make_thread_queued(ch, "new", &"a".repeat(64)));
         q.requeue_as_cancelled(batch, CancelReason::Steer);
         q.mark_complete(ch);
         let merged = q.flush_next().unwrap();
@@ -3723,7 +3934,7 @@ mod tests {
         q.mark_complete(ch);
 
         // Fallback path (no new event): reason still rides through.
-        q.push(make_queued(ch, "only"));
+        q.push(make_thread_queued(ch, "only", &"a".repeat(64)));
         let batch = q.flush_next().unwrap();
         q.requeue_as_cancelled(batch, CancelReason::Interrupt);
         q.mark_complete(ch);
@@ -3736,7 +3947,7 @@ mod tests {
         q.mark_complete(ch);
 
         // A normal (non-cancel) flush carries no reason.
-        q.push(make_queued(ch, "plain"));
+        q.push(make_thread_queued(ch, "plain", &"a".repeat(64)));
         let plain = q.flush_next().unwrap();
         assert_eq!(plain.cancel_reason, None);
     }
@@ -3745,15 +3956,15 @@ mod tests {
     fn test_double_cancel_latest_reason_wins() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
-        q.push(make_queued(ch, "orig"));
+        q.push(make_thread_queued(ch, "orig", &"a".repeat(64)));
         let batch1 = q.flush_next().unwrap();
-        q.push(make_queued(ch, "new-1"));
+        q.push(make_thread_queued(ch, "new-1", &"a".repeat(64)));
         q.requeue_as_cancelled(batch1, CancelReason::Interrupt);
         q.mark_complete(ch);
         let batch2 = q.flush_next().unwrap();
         // Second cancel with a different reason — the latest reason wins.
         q.requeue_as_cancelled(batch2, CancelReason::Steer);
-        q.push(make_queued(ch, "new-2"));
+        q.push(make_thread_queued(ch, "new-2", &"a".repeat(64)));
         q.mark_complete(ch);
         let batch3 = q.flush_next().unwrap();
         assert_eq!(batch3.cancel_reason, Some(CancelReason::Steer));
@@ -3832,13 +4043,13 @@ mod tests {
         let ch = Uuid::new_v4();
 
         // First flush: 2 events.
-        q.push(make_queued(ch, "orig-1"));
-        q.push(make_queued(ch, "orig-2"));
+        q.push(make_thread_queued(ch, "orig-1", &"a".repeat(64)));
+        q.push(make_thread_queued(ch, "orig-2", &"a".repeat(64)));
         let batch1 = q.flush_next().unwrap();
         assert_eq!(batch1.events.len(), 2);
 
         // Push 1 new event while in-flight.
-        q.push(make_queued(ch, "new-1"));
+        q.push(make_thread_queued(ch, "new-1", &"a".repeat(64)));
 
         // First cancel: store 2 cancelled events.
         q.requeue_as_cancelled(batch1, CancelReason::Interrupt);
@@ -3854,7 +4065,7 @@ mod tests {
         q.requeue_as_cancelled(batch2, CancelReason::Interrupt);
 
         // Push 1 more new event and release channel.
-        q.push(make_queued(ch, "new-2"));
+        q.push(make_thread_queued(ch, "new-2", &"a".repeat(64)));
         q.mark_complete(ch);
 
         // Third flush: events=[new-2], cancelled_events=[orig-1, orig-2, new-1].
@@ -4314,9 +4525,9 @@ mod tests {
 
         // Three events arrive in order: e1, e2 (already queued), then e3
         // (the latest mid-turn mention being steered).
-        let e1 = make_queued_at(ch, "e1", Duration::from_millis(30));
-        let e2 = make_queued_at(ch, "e2", Duration::from_millis(20));
-        let e3 = make_queued_at(ch, "e3", Duration::from_millis(10));
+        let e1 = make_thread_queued(ch, "e1", &"a".repeat(64));
+        let e2 = make_thread_queued(ch, "e2", &"a".repeat(64));
+        let e3 = make_thread_queued(ch, "e3", &"a".repeat(64));
         let e1_id = e1.event.id.to_hex();
         let e2_id = e2.event.id.to_hex();
         let e3_id = e3.event.id.to_hex();

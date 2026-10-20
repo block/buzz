@@ -2518,7 +2518,12 @@ async fn tokio_main() -> Result<()> {
                             // Event is already queued. If mode requires it AND
                             // the channel has an in-flight task, fire cancel —
                             // OR take the non-cancelling (ACP steer) fork for Steer signals.
-                            if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
+                            if accepted
+                                && queue.is_event_in_flight_thread(
+                                    buzz_event.channel_id,
+                                    &event_for_steer,
+                                )
+                            {
                                 // Author eligibility (owner ∪ allowlist ∪ siblings)
                                 // is already enforced by the inbound author gate
                                 // above, so the mid-turn signal fires for every
@@ -2854,7 +2859,9 @@ async fn tokio_main() -> Result<()> {
                     signal_fallback,
                     "non-cancelling steer ack received"
                 );
-                if matches!(ack, Ok(pool::SteerAck::Success)) {
+                let targets_active_thread =
+                    queue.is_native_steer_in_flight_thread(channel_id, &event_id);
+                if targets_active_thread && matches!(ack, Ok(pool::SteerAck::Success)) {
                     queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
                 }
                 if drop_withheld {
@@ -2863,7 +2870,7 @@ async fn tokio_main() -> Result<()> {
                 if release_withheld {
                     queue.release_native_steer(channel_id, &event_id);
                 }
-                if signal_fallback {
+                if signal_fallback && targets_active_thread {
                     // Universal cancel+merge fallback. Note: the
                     // queued event has already been released to the
                     // front of `queues[channel_id]`, so the cancel
@@ -7113,6 +7120,7 @@ mod error_outcome_emission_tests {
             .sign_with_keys(&keys)
             .unwrap();
         let new_event = EventBuilder::new(Kind::Custom(9), "new")
+            .tags([nostr::Tag::parse(["e", &original_event.id.to_hex(), "", "reply"]).unwrap()])
             .sign_with_keys(&keys)
             .unwrap();
         assert_ne!(
