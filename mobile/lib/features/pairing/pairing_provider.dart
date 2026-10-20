@@ -119,7 +119,9 @@ class PairingNotifier extends Notifier<PairingState> {
       return false;
     }
 
-    _identityExportCommunity = community;
+    // Keep the authorized snapshot and exported payload in the same key
+    // representation used by RelayConfig for authentication.
+    _identityExportCommunity = community.copyWith(nsec: community.nsec?.trim());
     _identityExportBiometricOnly = biometricOnly;
     _identityExportAuthorizedAt = ref.read(identityExportClockProvider)();
     state = state.copyWith(authorizationInProgress: false);
