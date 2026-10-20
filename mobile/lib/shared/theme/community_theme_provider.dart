@@ -63,7 +63,7 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
         relaySession: ref.read(relaySessionProvider.notifier),
         signedEventRelay: SignedEventRelay(
           session: ref.read(relaySessionProvider.notifier),
-          nsec: config.nsec!.trim(),
+          nsec: config.nsec!,
         ),
         crypto: ref.watch(communityThemeCryptoProvider)!,
         onRemote: (remote) => _applyRemote(manager, remote),
@@ -221,7 +221,7 @@ final communityThemeCryptoProvider = Provider<CommunityThemeCrypto?>((ref) {
   final config = ref.watch(relayConfigProvider);
   final pubkey = ref.watch(myPubkeyProvider);
   if (pubkey == null || config.nsec == null) return null;
-  final privateHex = nostr.Nip19.decode(payload: config.nsec!.trim()).data;
+  final privateHex = nostr.Nip19.decode(payload: config.nsec!).data;
   final key = getConversationKey(privateHex, pubkey);
   return CommunityThemeCrypto(
     encrypt: (plaintext) => nip44Encrypt(key, plaintext),

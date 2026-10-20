@@ -11,13 +11,17 @@ import 'relay_client.dart';
 ///   - `baseUrl` — where the relay lives (used for WS + media upload)
 ///   - `nsec`    — the user's signing key (drives NIP-42 AUTH and event sigs)
 class RelayConfig {
-  const RelayConfig({required String baseUrl, this.nsec}) : _baseUrl = baseUrl;
+  const RelayConfig({required String baseUrl, String? nsec})
+    : _baseUrl = baseUrl,
+      _nsec = nsec;
 
   /// Relay origin exactly as the active community stored it.
   final String _baseUrl;
 
-  /// Nostr secret key (bech32 nsec) for signing events and NIP-42 AUTH.
-  final String? nsec;
+  /// Normalized Nostr secret key shared by identity, signing, and NIP-42 AUTH.
+  String? get nsec => _nsec?.trim();
+
+  final String? _nsec;
 
   /// The origin as persisted, before scheme canonicalization.
   ///
@@ -123,7 +127,7 @@ String? pubkeyFromNsec(String? nsec) {
 /// The current user's hex pubkey, derived from the active community nsec.
 final myPubkeyProvider = Provider<String?>((ref) {
   final config = ref.watch(relayConfigProvider);
-  return pubkeyFromNsec(config.nsec?.trim());
+  return pubkeyFromNsec(config.nsec);
 });
 
 /// Provides a [RelayClient] that reacts to config changes.
