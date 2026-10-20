@@ -1,3 +1,4 @@
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -57,7 +58,7 @@ void main() {
             icon: Icons.palette,
             title: 'Theme',
             value: 'Buzz',
-            trailing: Icon(Icons.chevron_right, key: Key('chevron')),
+            trailing: Icon(BuzzIcons.chevronRight, key: Key('chevron')),
           ),
         ),
       );
@@ -93,7 +94,7 @@ void main() {
       final scheme = AppTheme.light().colorScheme;
       // Derived from the text color, not the scheme's border tokens — those sit
       // within a few levels of the card fill and vanish.
-      expect(divider.color, scheme.onSurface.withValues(alpha: 0.12));
+      expect(divider.color, scheme.onSurface.withValues(alpha: 0.07));
 
       // The indent is painted inside the divider's box, so the line starts at
       // the box's left edge plus the indent — level with the row titles.

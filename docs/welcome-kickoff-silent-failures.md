@@ -68,8 +68,8 @@ prompt fix in §2 and the closer fix in §1 are the same change in two places.
 ## 1. Wrong story: the closer speaks on a timer
 
 **Status: fixed on this branch. Observed 2026-07-18, 14:26.** Opener at 2:26. At 2:26+15s Fizz
-posted *"Honey and Bumble are taking longer than expected. I'm still here to
-help."* Honey and Bumble posted good intros at 2:27. The false story was never
+posted *"Honey and Pollen are taking longer than expected. I'm still here to
+help."* Honey and Pollen posted good intros at 2:27. The false story was never
 corrected, because it was already stamped final.
 
 ### Mechanism
@@ -79,7 +79,7 @@ corrected, because it was already stamped final.
 2. It fires. `classifyWelcomeKickoffResolution` (`:292`) splits teammates into
    `failed` (fact-based, via `failedAfterKickoff`) and `unresolved` (**merely
    no intro seen yet**).
-3. `unresolved.length > 0` → `buildWelcomeKickoffCloser([], ["Honey","Bumble"])`
+3. `unresolved.length > 0` → `buildWelcomeKickoffCloser([], ["Honey","Pollen"])`
    → the "taking longer" text + the CTA (`:253`).
 4. It posts **with `closerMarker`** (`sendWelcomeKickoffCloser`, `:443`). That
    marker is **terminal**: every later pass early-returns on it (`:703`) and the
@@ -158,9 +158,9 @@ Codex specifically.
 Observed on the Codex runtime (`codex-acp`), never reproduced on Claude Code.
 21+ replies deep, each an acknowledgement of the previous acknowledgement:
 
-> **Bumble:** `@Fizz` parked; no further replies from me until there's work.
+> **Pollen:** `@Fizz` parked; no further replies from me until there's work.
 > **Honey:** `@Fizz` understood. I won't reply again unless there's a task for me.
-> **Fizz:** `@Honey` `@Bumble` acknowledged — stay parked until `@morgan` brings a real task.
+> **Fizz:** `@Honey` `@Pollen` acknowledged — stay parked until `@morgan` brings a real task.
 
 **The content was the tell: every agent was trying to end the conversation, and
 announcing it is what kept it alive.** The agents were not malfunctioning — they
@@ -298,7 +298,7 @@ All hard-coded client-side; only teammate intro replies are LLM-generated.
 |---|---|---|---|
 | 1 | Provider fallback ("connect to an AI provider in Settings…") | Readiness check fails before kickoff | Fizz (`provider-required.v1`) |
 | 2 | Happy-path opener | Team online | Fizz (`opener.v1`) |
-| 3 | Degraded opener ("I'm here with Honey and Bumble…") | Fizz online, zero teammates online within 60s | Fizz (opener + closer markers) |
+| 3 | Degraded opener ("I'm here with Honey and Pollen…") | Fizz online, zero teammates online within 60s | Fizz (opener + closer markers) |
 | 4 | Closer variants (clean / failed / slow) | 3s beat after intros resolve, **or the 120s intro backstop** — see [§1](#1-wrong-story-the-closer-speaks-on-a-timer) | Fizz (`closer.v1`) |
 | 5 | Setup-mode nudge ("here's what you still need to configure") | Agent spawns but requirements check fails (e.g. missing API key) | The agent process itself (buzz-acp setup-listener mode) |
 
@@ -447,7 +447,7 @@ the human:
 
 | Turn | Trigger | `p` tags | Classified |
 |---|---|---|---|
-| Honey/Bumble | Fizz: *"…until `@morgan` brings a real task"* | Honey, Bumble, **morgan** | **human → MUST reply** |
+| Honey/Pollen | Fizz: *"…until `@morgan` brings a real task"* | Honey, Pollen, **morgan** | **human → MUST reply** |
 | Fizz | Honey: *"@Fizz understood"* | Fizz | agent → optional |
 
 It exempts only the leg that happens not to name the human — cutting 1 of 3 legs

@@ -6,6 +6,6 @@ export function showAgentProfileSyncWarning(
 ) {
   if (!profileSyncError) return;
   toast.warning(
-    `${agentName} was saved, but relay profile sync failed: ${profileSyncError}. The relay may still show the old name — restart the agent to retry the sync.`,
+    `${agentName} was saved locally, but relay sync failed: ${profileSyncError}. Remote users may still see the previous name or access policy until Buzz retries the sync.`,
   );
 }

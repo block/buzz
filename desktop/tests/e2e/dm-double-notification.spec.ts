@@ -111,7 +111,7 @@ test("an incoming DM produces exactly one desktop notification", async ({
     `expected exactly one notification for a single DM, got: ${JSON.stringify(notifications)}`,
   ).toHaveLength(1);
 
-  // The survivor must be the live WebSocket DM toast (titled with the DM
-  // channel name), not the home-feed mention duplicate ("… mentioned you in …").
-  expect(notifications[0].title).toBe("alice-tyler");
+  // The survivor must be the live WebSocket DM toast (titled with the
+  // sender name), not the home-feed mention duplicate ("… mentioned you in …").
+  expect(notifications[0].title).toBe("alice");
 });

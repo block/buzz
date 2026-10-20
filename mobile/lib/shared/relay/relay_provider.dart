@@ -1,6 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../hosted/hosted_relay_auth.dart';
 import '../community/community_provider.dart';
 import 'relay_client.dart';
 
@@ -62,7 +63,8 @@ class RelayConfig {
 /// Compile-time environment config via --dart-define.
 ///
 /// Run with:
-///   flutter run --dart-define=BUZZ_RELAY_URL=http://localhost:3000
+///   flutter run --dart-define=BUZZ_RELAY_URL=http://localhost:3000 \
+///     --dart-define=BUZZ_PUSH_GATEWAY_URL=http://localhost:8080
 ///
 /// Or create a `.env.json` and use --dart-define-from-file=.env.json
 class Env {
@@ -70,17 +72,27 @@ class Env {
     'BUZZ_RELAY_URL',
     defaultValue: 'http://localhost:3000',
   );
+
+  /// Optional gateway origin. Without it this artifact has no push capability.
+  static const pushGatewayUrl = String.fromEnvironment('BUZZ_PUSH_GATEWAY_URL');
+
+  /// Whether this artifact can offer push notification enrollment.
+  static const pushGatewayConfigured = pushGatewayUrl != '';
 }
 
 class RelayConfigNotifier extends Notifier<RelayConfig> {
   @override
   RelayConfig build() {
-    // Watch the active community so that when it changes (community switch),
-    // the config rebuilds, triggering the full provider cascade.
-    final activeAsync = ref.watch(activeCommunityProvider);
-    final active = activeAsync.value;
-    if (active != null) {
-      return RelayConfig(baseUrl: active.relayUrl, nsec: active.nsec);
+    // Push lease bookkeeping updates the community while using its live
+    // session. Only connection-context changes may restart that session.
+    final context = ref.watch(
+      activeCommunityProvider.select((value) {
+        final active = value.value;
+        return (id: active?.id, relayUrl: active?.relayUrl, nsec: active?.nsec);
+      }),
+    );
+    if (context.relayUrl != null) {
+      return RelayConfig(baseUrl: context.relayUrl!, nsec: context.nsec);
     }
 
     // Fallback to compile-time env config (dev mode).
@@ -120,7 +132,10 @@ final myPubkeyProvider = Provider<String?>((ref) {
 /// through the relay WebSocket session.
 final relayClientProvider = Provider<RelayClient>((ref) {
   final config = ref.watch(relayConfigProvider);
-  final client = RelayClient(baseUrl: config.baseUrl);
+  final client = RelayClient(
+    baseUrl: config.baseUrl,
+    httpClient: ref.watch(hostedHttpClientFactoryProvider)(),
+  );
   ref.onDispose(client.dispose);
   return client;
 });

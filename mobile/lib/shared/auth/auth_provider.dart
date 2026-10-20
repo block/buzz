@@ -1,8 +1,10 @@
+import '../hosted/hosted_relay_auth.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../hosted/community_entry_requirements.dart';
 
 enum AuthStatus { unknown, unauthenticated, authenticated }
 
@@ -24,6 +26,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     final storage = ref.read(communityStorageProvider);
     final communities = await storage.loadAll();
     if (communities.isEmpty) {
+      await syncCommunitySnapshot(ref, communities);
       return const AuthState(status: AuthStatus.unauthenticated);
     }
 
@@ -36,6 +39,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       await storage.saveActiveId(active.id);
 
       if (_hasValidNsec(active.nsec)) {
+        await syncCommunitySnapshot(ref, communities);
         return AuthState(status: AuthStatus.authenticated, community: active);
       }
 
@@ -47,51 +51,63 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     }
 
     await storage.clearActiveId();
+    await syncCommunitySnapshot(ref, communities);
     return const AuthState(status: AuthStatus.unauthenticated);
   }
 
   /// Authenticate with a community. Saves it and switches to it.
   /// Writes to storage directly to avoid circular dependency with community
   /// providers.
-  Future<void> authenticateWithCommunity(Community community) async {
-    final storage = ref.read(communityStorageProvider);
-    await storage.save(community);
-    await storage.saveActiveId(community.id);
+  Future<void> authenticateWithCommunity(
+    Community community, {
+    bool Function()? shouldContinue,
+    bool activate = true,
+  }) {
+    return ref.read(communityTransitionProvider).runExclusive(() async {
+      if (shouldContinue != null && !shouldContinue()) return;
+      await CommunityEntryRequirements.verify(
+        community,
+        ref.read(builderlabAccountProvider),
+      );
+      if (shouldContinue != null && !shouldContinue()) return;
+      if (activate) await ref.read(communityTransitionProvider).run();
+      if (shouldContinue != null && !shouldContinue()) return;
+      final storage = ref.read(communityStorageProvider);
+      await storage.save(community);
+      if (activate) await storage.saveActiveId(community.id);
+      await syncStoredCommunitySnapshot(ref);
 
-    // Invalidate community providers so other consumers pick up the new data.
-    ref.invalidate(communityListProvider);
-    ref.invalidate(activeCommunityProvider);
+      // Invalidate community providers so other consumers pick up the new data.
+      ref.invalidate(communityListProvider);
+      ref.invalidate(activeCommunityProvider);
 
-    state = AsyncData(
-      AuthState(status: AuthStatus.authenticated, community: community),
-    );
+      if (activate) {
+        state = AsyncData(
+          AuthState(status: AuthStatus.authenticated, community: community),
+        );
+      }
+    });
   }
 
-  Future<void> signOut() async {
-    final storage = ref.read(communityStorageProvider);
-    final activeId = await storage.loadActiveId();
-    if (activeId != null) {
-      await storage.remove(activeId);
-      await storage.clearActiveId();
-    }
+  Future<void> signOut() {
+    return () async {
+      final storage = ref.read(communityStorageProvider);
+      await ref
+          .read(communityListProvider.notifier)
+          .removeActiveCommunityForSignOut();
 
-    // Check if other communities remain — switch to the next one instead of
-    // forcing the user back to the pairing screen.
-    final remaining = await storage.loadAll();
-
-    // Invalidate community providers so other consumers pick up the change.
-    ref.invalidate(communityListProvider);
-    ref.invalidate(activeCommunityProvider);
-
-    if (remaining.isNotEmpty) {
-      final next = remaining.first;
-      await storage.saveActiveId(next.id);
-      // Re-run build() to validate the next community's credentials.
+      // Community removal already persisted the outbox, deleted credentials,
+      // selected the next active community, and removed NSE state. Authentication
+      // only needs to publish the truthful resulting account state.
+      final remaining = await storage.loadAll();
+      ref.invalidate(activeCommunityProvider);
+      if (remaining.isEmpty) {
+        state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
+        return;
+      }
       ref.invalidateSelf();
       await future;
-    } else {
-      state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
-    }
+    }();
   }
 }
 

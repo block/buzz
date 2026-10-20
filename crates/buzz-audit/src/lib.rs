@@ -14,8 +14,8 @@
 //! advisory lock, so the chain stays consistent across relay processes without one
 //! global lock serializing (and timing-coupling) every tenant.
 //!
-//! The `audit_log` table is owned by the consolidated `0001` migration — this crate
-//! is pure chain logic and ships no DDL.
+//! The `audit_log` table is owned by `migrations/` — this crate is pure chain
+//! logic and ships no DDL.
 
 /// Audit action types recorded in the log.
 pub mod action;

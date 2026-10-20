@@ -1,0 +1,265 @@
+name: CI / Clients
+on:
+  workflow_call:
+    inputs:
+      web:
+        required: true
+        type: boolean
+      mobile:
+        required: true
+        type: boolean
+      lane:
+        required: true
+        type: string
+    outputs:
+      web_result:
+        value: ${{ jobs.results.outputs.web_result }}
+      mobile_result:
+        value: ${{ jobs.results.outputs.mobile_result }}
+
+env:
+  CARGO_TERM_COLOR: always
+  BUZZ_TEST_POSTGRES_PASSWORD: buzz_dev
+  PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
+
+jobs:
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.web)
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 2
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Web lint and format
+        run: just web-check
+      - name: Web build
+        run: just web-build
+      - name: Save pnpm store cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+  # Mobile lanes run in parallel; the required check reads the combined
+  # matrix result. Test shards split files, so each compiles only its own.
+  mobile:
+    name: Mobile (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.mobile)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Checks
+            lane: checks
+          - name: Tests 1/3
+            lane: test
+            shard: 0
+          - name: Tests 2/3
+            lane: test
+            shard: 1
+          - name: Tests 3/3
+            lane: test
+            shard: 2
+          - name: Android
+            lane: android
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 2
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Compute Hermit cache key
+        id: hermit-bin-hash
+        run: |
+          hash="$(find ./bin ! -type d | sort | xargs openssl sha256 | openssl sha256 -r | cut -d' ' -f1)"
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+      - name: Restore Hermit package cache
+        id: hermit-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/hermit/pkg
+          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
+          restore-keys: ${{ runner.os }}-hermit-cache-
+      - name: Prime Flutter SDK
+        run: flutter --version
+      - name: Save Hermit package cache
+        if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        continue-on-error: true
+        with:
+          path: ~/.cache/hermit/pkg
+          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
+      - name: Restore pub cache
+        id: pub-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-
+      - name: Install dependencies
+        run: cd mobile && flutter pub get
+      - name: Save pub cache
+        if: always() && steps.pub-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        continue-on-error: true
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
+      - name: Format check
+        if: matrix.lane == 'checks'
+        run: cd mobile && dart format --output=none --set-exit-if-changed .
+      - name: Analyze
+        if: matrix.lane == 'checks'
+        run: cd mobile && flutter analyze
+      - name: Test
+        if: matrix.lane == 'test'
+        run: /bin/bash scripts/mobile-test-shard.sh ${{ matrix.shard }} 3 --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+      - name: Test configured authentication domains
+        if: matrix.lane == 'checks'
+        run: >-
+          cd mobile && flutter test
+          --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+          --dart-define=BUZZ_AUTH_DOMAINS=buzz.xyz,builderlab.xyz,builderlabstaging.xyz
+          test/shared/auth/community_entry_requirements_test.dart
+          test/features/invites/invite_join_provider_test.dart
+          test/features/onboarding/onboarding_entry_routes_test.dart
+          test/shared/hosted/hosted_environment_test.dart
+          test/shared/hosted/self_hosted_entry_test.dart
+          test/features/onboarding/hosted_app_gate_environment_test.dart
+          test/features/onboarding/hosted_journeys_test.dart
+          test/features/onboarding/hosted_communities_test.dart
+          test/features/pairing/pairing_hosted_handoff_test.dart
+      - name: Test mobile without push configuration
+        if: matrix.lane == 'checks'
+        run: cd mobile && flutter test test/shared/push/push_unconfigured_build_test.dart
+      - name: Test mobile recipe argument forwarding
+        if: matrix.lane == 'checks'
+        run: /bin/bash scripts/test-mobile-gateway-recipes.sh
+      - name: Restore Gradle cache
+        if: matrix.lane == 'android'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle*', 'mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/pubspec.lock') }}
+          restore-keys: gradle-${{ runner.os }}-
+      # SDK component and plugin downloads intermittently fail on hosted
+      # runners; retry once only for those, so real build failures still fail.
+      - name: Build Android debug APK
+        if: matrix.lane == 'android'
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/android-build.log"
+          if ! just mobile-build-android 2>&1 | tee "$log"; then
+            grep -qE 'InstallFailedException|Could not (resolve|GET|download)' "$log"
+            just mobile-build-android
+          fi
+      - name: Test Android JVM units
+        if: matrix.lane == 'android'
+        run: cd mobile/android && ./gradlew :app:testDebugUnitTest --console=plain
+      - name: Save Gradle cache
+        if: matrix.lane == 'android' && github.event_name == 'push'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle*', 'mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/pubspec.lock') }}
+
+  # The unsigned release build needs nothing from the native lane, so it runs
+  # beside it instead of after the simulator tests.
+  mobile-swift:
+    name: Mobile Swift (${{ matrix.name }})
+    runs-on: macos-latest
+    timeout-minutes: 45
+    if: inputs.lane == 'mobile-swift' && inputs.mobile
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Native
+            lane: native
+          - name: Release
+            lane: release
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Install Flutter dependencies
+        run: cd mobile && flutter pub get
+      # `swift test` builds BuzzPushKit; the Release lane covers its release build.
+      - name: Test
+        if: matrix.lane == 'native'
+        run: swift test --package-path mobile/ios/BuzzPushKit
+      - name: Test native pagination geometry
+        if: matrix.lane == 'native'
+        run: /bin/bash scripts/test-mobile-pagination.sh
+      - name: Generate iOS build configuration
+        if: matrix.lane == 'native'
+        run: cd mobile && flutter build ios --simulator --debug --no-pub --config-only
+      # Build the complete simulator app and RunnerTests once, in the
+      # background, while the simulator boots and runs the native-control
+      # scripts. The build also guards Apple Silicon simulator linking (#7646).
+      - name: Test native controls and Runner unit tests
+        if: matrix.lane == 'native'
+        run: |
+          device=$(xcrun simctl create "Native tests" "iPhone 16")
+          trap 'xcrun simctl shutdown "$device"; xcrun simctl delete "$device"' EXIT
+          xcode=(xcodebuild -workspace mobile/ios/Runner.xcworkspace -scheme Runner
+            -configuration Debug -destination "platform=iOS Simulator,id=$device"
+            CODE_SIGNING_ALLOWED=NO)
+          build_log="$RUNNER_TEMP/runner-build.log"
+          "${xcode[@]}" build-for-testing > "$build_log" 2>&1 &
+          build=$!
+          xcrun simctl boot "$device"
+          xcrun simctl bootstatus "$device" -b
+          /bin/bash scripts/test-mobile-pagination-accessibility.sh "$device"
+          /bin/bash scripts/test-mobile-carousel.sh "$device"
+          /bin/bash scripts/test-mobile-member-picker.sh "$device"
+          /bin/bash scripts/test-mobile-me-agent-accessibility.sh "$device"
+          if ! wait "$build"; then
+            cat "$build_log"
+            exit 1
+          fi
+          tail -n 5 "$build_log"
+          "${xcode[@]}" -parallel-testing-enabled NO -only-testing:RunnerTests \
+            test-without-building
+      - name: Build complete unsigned iOS release
+        if: matrix.lane == 'release'
+        run: |
+          /bin/bash scripts/test-mobile-gateway-recipes.sh
+          cd mobile && flutter build ios --release --no-codesign --no-pub
+
+  results:
+    name: Results
+    if: ${{ always() }}
+    needs: [web, mobile, mobile-swift]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      web_result: ${{ needs.web.result }}
+      mobile_result: ${{ needs.mobile.result }}
+    steps:
+      - run: echo "Captured client job results"

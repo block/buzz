@@ -27,7 +27,18 @@ pub async fn upload_media_bytes(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<BlobDescriptor, String> {
-    upload_media_bytes_inner(data, filename, progress_id, app, state, None).await
+    let cancellation = begin_media_upload(progress_id.as_deref());
+    let result = upload_media_bytes_inner(
+        data,
+        filename,
+        progress_id.clone(),
+        app,
+        state,
+        cancellation.as_ref(),
+    )
+    .await;
+    finish_media_upload(progress_id.as_deref());
+    result
 }
 
 fn decode_raw_upload_header(value: &str) -> Result<String, String> {
@@ -54,6 +65,12 @@ fn optional_raw_upload_header(request: &Request<'_>, name: &str) -> Result<Optio
 #[tauri::command]
 pub fn cancel_media_upload(progress_id: String) {
     cancel_registered_media_upload(&progress_id);
+}
+
+/// Release the renderer's ownership after its upload promise settles.
+#[tauri::command]
+pub fn release_media_upload(progress_id: String) {
+    finish_media_upload(Some(&progress_id));
 }
 
 /// Upload raw IPC bytes without expanding a large browser File into JSON.

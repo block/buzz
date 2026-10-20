@@ -169,7 +169,7 @@ test("presents project work with its canonical subject and project filter", () =
 
   assert.equal(item.subject, "Add project work items to Inbox");
   assert.deepEqual(getInboxTypeLabel(item), {
-    text: "Pull request",
+    text: "Review",
     channelLabel: null,
   });
   assert.equal(matchesInboxFilter(item, "project"), true);

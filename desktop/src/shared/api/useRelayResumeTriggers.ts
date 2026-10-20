@@ -2,11 +2,46 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { shouldTriggerResumeReconnect } from "@/shared/api/relayResumeTriggerPolicy";
+import { scheduleAfterForegroundReady } from "@/shared/lib/foregroundReady";
+
+type ScheduleForegroundWork = (callback: () => void) => () => void;
+
+export function installRelayResumeTriggers(
+  attempt: () => void,
+  schedule: ScheduleForegroundWork = scheduleAfterForegroundReady,
+): () => void {
+  let cancelPendingResume: (() => void) | null = null;
+  const scheduleAttempt = () => {
+    if (cancelPendingResume) return;
+    cancelPendingResume = schedule(() => {
+      cancelPendingResume = null;
+      attempt();
+    });
+  };
+  const onVisibilityChange = () => {
+    if (document.visibilityState === "visible") scheduleAttempt();
+    else {
+      cancelPendingResume?.();
+      cancelPendingResume = null;
+    }
+  };
+
+  window.addEventListener("online", scheduleAttempt);
+  window.addEventListener("focus", scheduleAttempt);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+
+  return () => {
+    cancelPendingResume?.();
+    window.removeEventListener("online", scheduleAttempt);
+    window.removeEventListener("focus", scheduleAttempt);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+  };
+}
 
 /**
  * Event-driven reconnect triggers: network `online`, window `focus`, and
- * visibility→visible each attempt an immediate `resumeReconnect()` when the
- * relay session is degraded (reconnecting/stalled), rate-limited by
+ * visibility→visible coalesce a foreground-ready `resumeReconnect()` attempt
+ * when the relay session is degraded (reconnecting/stalled), rate-limited by
  * `RESUME_TRIGGER_MIN_INTERVAL_MS`.
  *
  * Rationale (CMD+R gap audit G1): without these, recovery rides solely on
@@ -43,18 +78,6 @@ export function useRelayResumeTriggers(): void {
       void relayClient.resumeReconnect().catch(() => {});
     };
 
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") attempt();
-    };
-
-    window.addEventListener("online", attempt);
-    window.addEventListener("focus", attempt);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-
-    return () => {
-      window.removeEventListener("online", attempt);
-      window.removeEventListener("focus", attempt);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
+    return installRelayResumeTriggers(attempt);
   }, []);
 }

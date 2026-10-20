@@ -17,6 +17,11 @@ cat > "$bin/gh" <<'GH'
 set -euo pipefail
 case "${1:-}:${2:-}" in
   --version:*) printf 'gh version %s (test)\n' "${GH_VERSION:-2.94.0}" ;;
+  api:repos/block/buzz/rulesets/19321162)
+    [[ "${GH_BRANCH_POLICY_FAIL:-}" != 1 ]] || exit 1
+    policy='{"target":"branch","enforcement":"active","current_user_can_bypass":"never","conditions":{"ref_name":{"include":["refs/heads/mobile-v*"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true,"require_last_push_approval":true,"required_review_thread_resolution":true}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"Mobile"},{"context":"DCO Check"}]}}]}'
+    printf '%s\n' "${GH_BRANCH_POLICY:-$policy}" | jq -r "$4"
+    ;;
   api:repos/block/buzz/rulesets/14378754)
     case "$*" in
       *'.enforcement'*) printf '%s\n' "${GH_TAG_RULESET_STATE:-active}" ;;
@@ -27,7 +32,13 @@ case "${1:-}:${2:-}" in
       *) exit 2 ;;
     esac
     ;;
+  api:repos/block/buzz/compare/*)
+    [[ "${GH_COMPARE_FAIL:-}" != 1 ]] || exit 1
+    pair="${2##*/}"
+    git --git-dir="$GH_REMOTE" merge-base "${pair%%...*}" "${pair##*...}"
+    ;;
   workflow:run)
+    printf '%s\n' attempted >> "$GH_WORKFLOW_ATTEMPTS"
     if [[ "${GH_WORKFLOW_DISPATCH_FAIL:-}" == "1" ]]; then
       printf '%s\n' "${GH_WORKFLOW_DISPATCH_ERROR:-dispatch failed}" >&2
       exit 1
@@ -42,15 +53,18 @@ case "${1:-}:${2:-}" in
     version=""
     number=""
     sha=""
+    source_branch=""
     while [[ "$#" -gt 0 ]]; do
       case "$1" in
         version=*) version="${1#version=}" ;;
         candidate_number=*) number="${1#candidate_number=}" ;;
+        source_branch=*) source_branch="${1#source_branch=}" ;;
         target_sha=*) sha="${1#target_sha=}" ;;
       esac
       shift
     done
-    [[ -n "$version" && -n "$number" && -n "$sha" ]]
+    [[ -n "$version" && -n "$number" && -n "$sha" && -n "$source_branch" ]] || exit 1
+    git --git-dir="$GH_REMOTE" merge-base --is-ancestor "$sha" "refs/heads/$source_branch" || exit 1
     printf '%s\t%s\t%s\n' "$version" "$number" "$sha" >> "$GH_WORKFLOW_CAPTURE"
     if [[ "${GH_WORKFLOW_NO_URL:-}" == "1" ]]; then
       exit 0
@@ -85,7 +99,9 @@ chmod +x "$bin/gh"
 
 export PATH="$bin:$PATH"
 export GH_WORKFLOW_CAPTURE="$tmp/workflow-dispatches"
+export GH_WORKFLOW_ATTEMPTS="$tmp/workflow-attempts"
 export GH_WORKTREE="$work"
+export GH_REMOTE="$remote"
 
 run_release() {
   local repo="$1"
@@ -106,7 +122,7 @@ fail() {
 assert_no_removed_mobile_release_behavior() {
   local status
 
-  grep -Eq 'gh[[:space:]]+release|mobile-release/|finalize' "$@" && \
+  grep -Eq 'gh[[:space:]]+release|finalize' "$@" && \
     fail "removed branch/finalization/GitHub Release behavior remains"
   status="$?"
   [[ "$status" -eq 1 ]] || \
@@ -141,13 +157,44 @@ if git -C "$operator" cat-file -e "$remote_main_sha^{commit}" 2>/dev/null; then
   fail "stale-clone fixture already contains the remote-only commit"
 fi
 run_release "$operator" candidate 1.2.3 > "$tmp/stale-output" 2> "$tmp/stale-error"
-grep -Fq "Note: local HEAD is $(git -C "$operator" rev-parse HEAD); candidate source is current origin/main $remote_main_sha." \
+grep -Fq "Note: local HEAD is $(git -C "$operator" rev-parse HEAD); candidate source is pinned from origin/main $remote_main_sha." \
   "$tmp/stale-error"
 cat "$tmp/stale-output"
 [[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.3-rc.1^{commit}')" == \
    "$remote_main_sha" ]]
 [[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v1.2.3-rc.1)" == tag ]]
 grep -Fq $'1.2.3\t1\t' "$GH_WORKFLOW_CAPTURE"
+
+# A stable branch may diverge from main, including an empty release-only commit.
+git -C "$work" switch -q -c mobile-v1.2
+git -C "$work" commit -q --allow-empty -m stable-only
+git -C "$work" push -q origin mobile-v1.2
+stable_sha="$(git -C "$work" rev-parse HEAD)"
+git -C "$work" switch -q main
+if GH_BRANCH_POLICY_FAIL=1 run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2 > "$tmp/policy-error" 2>&1; then
+  fail "operator accepted unavailable stable-branch policy"
+fi
+grep -Fq 'Could not verify mobile stable-branch protection' "$tmp/policy-error"
+if GH_BRANCH_POLICY='{}' run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2 > "$tmp/policy-error" 2>&1; then
+  fail "operator accepted missing stable-branch policy"
+fi
+run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2
+[[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.4-rc.1^{commit}')" == "$stable_sha" ]]
+# Existing mismatched refs must be rejected by the guard, not missing-ref errors.
+for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary; do
+  git -C "$work" switch -q -c "$source"
+  git -C "$work" commit -q --allow-empty -m "$source"
+  git -C "$work" push -q origin "$source"
+done
+git -C "$work" switch -q main
+for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary ''; do
+  if run_release "$operator" candidate 1.2.4 --source-branch "$source" >/dev/null 2>&1; then
+    fail "accepted mismatched source '$source'"
+  fi
+done
+if run_release "$operator" candidate 8.8.0 --source-branch mobile-v8.8 >/dev/null 2>&1; then
+  fail "missing stable branch fell back to main"
+fi
 
 # Existing remote identities remain unchanged. Later candidates sequence
 # monotonically and target the then-current remote main commit.
@@ -222,19 +269,40 @@ if GH_TAG_VERIFY_LIGHTWEIGHT=1 run_release "$operator" candidate 9.9.2 >/dev/nul
 fi
 [[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v9.9.2-rc.1)" == commit ]]
 
-# The publisher and operator both reject a main-tip race. The immutable tag may
-# already exist at the prior tip, but the operator must not report it as a
-# current-main candidate.
+# Advancing main during publication must not invalidate the pinned tag.
 pre_race_main_sha="$(git --git-dir="$remote" rev-parse refs/heads/main)"
-if GH_MAIN_MOVE_DURING_WORKFLOW=1 run_release "$operator" candidate 9.9.3 > "$tmp/main-race-output" 2>&1; then
-  fail "candidate succeeded after main moved during publication"
-fi
+GH_MAIN_MOVE_DURING_WORKFLOW=1 run_release "$operator" candidate 9.9.3 > "$tmp/main-race-output" 2>&1
 post_race_main_sha="$(git --git-dir="$remote" rev-parse refs/heads/main)"
 [[ "$pre_race_main_sha" != "$post_race_main_sha" ]]
-[[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v9.9.3-rc.1^{commit}')" == \
-   "$pre_race_main_sha" ]]
-grep -Fq "origin/main moved from requested commit $pre_race_main_sha to $post_race_main_sha during publication" \
-  "$tmp/main-race-output"
+[[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v9.9.3-rc.1^{commit}')" == "$pre_race_main_sha" ]]
+grep -Fq 'Published mobile-v9.9.3-rc.1' "$tmp/main-race-output"
+
+# Explicit historical source remains pinned even when the source branch advances.
+run_release "$operator" candidate 7.7.0 --commit "$remote_main_sha"
+[[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v7.7.0-rc.1^{commit}')" == "$remote_main_sha" ]]
+run_release "$operator" candidate 1.2.5 --commit "$remote_main_sha" --source-branch mobile-v1.2
+[[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.5-rc.1^{commit}')" == "$remote_main_sha" ]]
+before_attempts="$(wc -l < "$GH_WORKFLOW_ATTEMPTS")"
+before_dispatches="$(wc -l < "$GH_WORKFLOW_CAPTURE")"
+if run_release "$operator" candidate 7.7.1 --commit "$stable_sha" >/dev/null 2>&1; then
+  fail "accepted a commit outside main history"
+fi
+if run_release "$operator" candidate 1.2.6 --source-branch mobile-v1.2 --commit "$new_main_sha" >/dev/null 2>&1; then
+  fail "accepted a main-only commit outside stable history"
+fi
+for invalid_sha in main HEAD deadbeef 9999999999999999999999999999999999999999 ''; do
+  if run_release "$operator" candidate 7.7.1 --commit "$invalid_sha" >/dev/null 2>&1; then
+    fail "accepted invalid or absent commit '$invalid_sha'"
+  fi
+done
+if GH_COMPARE_FAIL=1 run_release "$operator" candidate 7.7.1 --commit "$remote_main_sha" >/dev/null 2>&1; then
+  fail "accepted unavailable ancestry evidence"
+fi
+if run_release "$operator" candidate 7.7.1 --commit "$remote_main_sha" --commit "$new_main_sha" >/dev/null 2>&1; then
+  fail "accepted duplicate commit options"
+fi
+[[ "$(wc -l < "$GH_WORKFLOW_ATTEMPTS")" == "$before_attempts" ]]
+[[ "$(wc -l < "$GH_WORKFLOW_CAPTURE")" == "$before_dispatches" ]]
 
 # Publishing through a fork is rejected and unsupported gh versions fail before
 # dispatching any candidate publication.

@@ -2,15 +2,24 @@
 
 ## Reporting a Vulnerability
 
-**Please do not report security vulnerabilities through public GitHub issues.**
+**Do not report security vulnerabilities through a public GitHub issue, pull
+request, discussion, or other public channel.**
 
-If you discover a security vulnerability in Buzz, please report it by emailing
-**buzz@block.xyz**. Include as much detail as possible:
+Use GitHub's private vulnerability reporting form instead:
+
+**[Report a vulnerability privately](https://github.com/block/buzz/security/advisories/new)**
+
+Submitting the form starts a private security advisory with the Buzz
+maintainers. Use that advisory for vulnerability details, follow-up questions,
+and coordinated remediation. Include as much detail as possible:
 
 - A description of the vulnerability and its potential impact
 - Steps to reproduce or a proof-of-concept (if available)
 - The affected version(s) or commit range
 - Any suggested mitigations you've identified
+
+If GitHub's private reporting form is unavailable to you, email
+**buzz@block.xyz** and do not include vulnerability details in a public issue.
 
 You will receive an acknowledgment within **48 hours**. We aim to provide a
 full response — including a timeline for a fix — within **7 days** of initial
@@ -121,6 +130,6 @@ We use `cargo audit` in CI to scan for known vulnerabilities in dependencies.
 ## Disclosure Policy
 
 We follow [coordinated disclosure](https://en.wikipedia.org/wiki/Coordinated_vulnerability_disclosure).
-Once a fix is ready and released, we will publish a security advisory on
-GitHub describing the vulnerability, its impact, and the fix. Reporters will
-be credited unless they request anonymity.
+We use the private advisory to coordinate validation, remediation, and
+disclosure with the reporter. Reporters will be credited unless they request
+anonymity.

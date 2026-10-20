@@ -51,7 +51,7 @@ export function useProjectRepoSyncStatusQuery(
     },
     staleTime: 10_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: false,
     retry: 1,
   });
 }
@@ -99,7 +99,7 @@ export function usePushProjectLocalRepositoryMutation(
             error:
               error instanceof Error
                 ? error.message
-                : "The pull request update could not be published.",
+                : "The review update could not be published.",
           };
         }
       }

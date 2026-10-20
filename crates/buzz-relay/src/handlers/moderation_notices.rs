@@ -53,31 +53,40 @@ pub enum ModerationNotice {
     ContentActioned {
         /// The audit action row.
         action_id: Uuid,
-        /// Sanitized reason (mirrors the tombstone's `public_reason`).
+        /// The operator-authored public reason (mirrors the tombstone's
+        /// `public_reason`); the resolve API documents this text is public.
         public_reason: String,
     },
     /// To a banned/timed-out user: terms of the restriction.
     Restriction {
         /// The audit action row.
         action_id: Uuid,
-        /// `ban` | `timeout` (with expiry rendered into the message).
+        /// `ban` | `timeout`.
         kind: String,
-        /// Sanitized reason.
+        /// The operator-authored public reason; the resolve API documents this
+        /// text is public.
         public_reason: String,
+        /// For `timeout`: when the restriction lifts. `None` for `ban`
+        /// (indefinite) — rendered as "until <RFC3339>" in the timeout body.
+        timeout_until: Option<chrono::DateTime<chrono::Utc>>,
     },
 }
 
 /// Deliver a moderation notice to `recipient` in this community's
 /// relay-authored DM thread (created on first use, reused after).
 ///
-/// Crash-retry safe per (action/report id, recipient): a retry after a
-/// committed insert is a no-op; concurrent duplicate sends are not serialized
-/// in v1.
+/// Idempotent and concurrency-safe: the notice event is constructed
+/// deterministically from `idempotency_ts` (the outbox row's `created_at`) so
+/// that two workers racing on the same outbox row produce byte-identical Nostr
+/// events. The `insert_event` ON CONFLICT DO NOTHING constraint then ensures
+/// exactly one row is durably persisted. Pass `row.created_at` as
+/// `idempotency_ts`.
 pub async fn send_moderation_notice(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     recipient_pubkey: &[u8],
     notice: ModerationNotice,
+    idempotency_ts: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<()> {
     if recipient_pubkey.len() != 32 {
         anyhow::bail!(
@@ -127,20 +136,6 @@ pub async fn send_moderation_notice(
         .unhide_dm(tenant.community(), dm_channel_id, recipient_pubkey)
         .await?;
 
-    // Idempotency: a notice for this source id already exists in this DM ⇒ no-op.
-    // The source (report/action) row id is carried in a `moderation_source` tag
-    // (NOT `e` — `e` is reserved for 32-byte event ids; this is an opaque row
-    // UUID). Keyed on it, a retry after a crash between insert and fan-out is a
-    // safe no-op. Note: this is query-then-insert, so it is crash-retry safe but
-    // not concurrency-safe — two simultaneous deliveries for the same source can
-    // both miss the pre-query. Callers invoke this once per action from
-    // already-serialized side-effect paths; hard per-source serialization is a
-    // noted follow-up, not done here.
-    let source_id = notice.source_id();
-    if notice_already_sent(state, tenant, dm_channel_id, &relay_pubkey_bytes, source_id).await? {
-        return Ok(());
-    }
-
     // 2. Ensure the relay's "{host} Moderation" kind:0 profile exists, and 3.
     //    the DM's kind:39000 discovery (with `hidden` / `t=dm` / `p`). Both are
     //    replaceable events, so we emit them on EVERY send rather than gating on
@@ -157,15 +152,25 @@ pub async fn send_moderation_notice(
     // 4. Insert the relay-signed kind:9 notice with `h=<dm_channel_id>` and a
     //    `moderation_source` tag naming the source row id (idempotency +
     //    client linking).
+    //
+    //    Concurrency-safe idempotency: the event is constructed deterministically
+    //    from `idempotency_ts` (the outbox row's immutable `created_at`). Two
+    //    workers racing on the same outbox row produce byte-identical Nostr events
+    //    (same pubkey + created_at + kind + tags + content = same SHA256 event ID).
+    //    `insert_event`'s ON CONFLICT DO NOTHING ensures exactly one row is
+    //    durably persisted regardless of how many workers reach this point.
+    let source_id = notice.source_id();
     let tags = vec![
         Tag::parse(["h", &dm_channel_id.to_string()])?,
         Tag::parse([MODERATION_SOURCE_TAG, &source_id.to_string()])?,
     ];
+    let ts = nostr::Timestamp::from(idempotency_ts.timestamp() as u64);
     let event = EventBuilder::new(
         Kind::Custom(KIND_STREAM_MESSAGE as u16),
         notice.body(tenant),
     )
     .tags(tags)
+    .custom_created_at(ts)
     .sign_with_keys(&state.relay_keypair)
     .map_err(|e| anyhow::anyhow!("failed to sign moderation notice: {e}"))?;
 
@@ -212,45 +217,6 @@ async fn publish_moderation_profile(
     Ok(())
 }
 
-/// True if a relay-authored notice for `source_id` already exists in this DM.
-///
-/// Idempotency scan scoped to the recipient's single moderation DM thread
-/// (kind:9, relay-authored) — bounded by that user's own notice history, so no
-/// unbounded read. Matches the opaque `moderation_source` tag in Rust because
-/// `EventQuery` only pushes down standardized `e`/`d`/`p` tags and this row id
-/// is intentionally not an `e` tag (see `MODERATION_SOURCE_TAG`).
-///
-/// `limit` is set to the query clamp (1000): matching is post-query in Rust so
-/// `Some(1)` would be wrong, and the default 100-row window could let an old
-/// source id fall out of view and re-send a duplicate on crash-retry. 1000
-/// moderation notices to one user in one community is a practical ceiling.
-async fn notice_already_sent(
-    state: &Arc<AppState>,
-    tenant: &TenantContext,
-    dm_channel_id: Uuid,
-    relay_pubkey_bytes: &[u8],
-    source_id: Uuid,
-) -> anyhow::Result<bool> {
-    let existing = state
-        .db
-        .query_events(&buzz_db::event::EventQuery {
-            kinds: Some(vec![KIND_STREAM_MESSAGE as i32]),
-            channel_id: Some(dm_channel_id),
-            authors: Some(vec![relay_pubkey_bytes.to_vec()]),
-            limit: Some(1000),
-            ..buzz_db::event::EventQuery::for_community(tenant.community())
-        })
-        .await?;
-
-    let source_str = source_id.to_string();
-    Ok(existing.iter().any(|stored| {
-        stored.event.tags.iter().any(|t| {
-            let parts = t.as_slice();
-            parts.len() >= 2 && parts[0] == MODERATION_SOURCE_TAG && parts[1] == source_str
-        })
-    }))
-}
-
 impl ModerationNotice {
     /// The source row id this notice is derived from — the idempotency key and
     /// the `moderation_source` tag value that lets a client link the notice back
@@ -266,9 +232,11 @@ impl ModerationNotice {
     /// Render the recipient-facing message body.
     ///
     /// Privacy invariant (module docs): these strings are built only from the
-    /// notice's own sanitized fields — a report/action status, a summary, and a
-    /// `public_reason` that already mirrors the tombstone. They never carry
-    /// reporter identities, other reporters, or raw report notes.
+    /// notice's own fields — a report/action status, a summary, and a
+    /// `public_reason` that mirrors the tombstone. `public_reason` is the
+    /// operator-authored public reason (documented public at the resolve API),
+    /// not report-private context: these bodies never carry reporter
+    /// identities, other reporters, or raw report notes.
     fn body(&self, tenant: &TenantContext) -> String {
         let community = tenant.host();
         match self {
@@ -293,6 +261,7 @@ impl ModerationNotice {
             ModerationNotice::Restriction {
                 kind,
                 public_reason,
+                timeout_until,
                 ..
             } => {
                 let action = match kind.as_str() {
@@ -300,7 +269,14 @@ impl ModerationNotice {
                     "timeout" => "You have been timed out in",
                     other => other,
                 };
-                format!("{action} {community}.\n\nReason: {public_reason}")
+                // A timeout tells the user when it lifts; a ban is indefinite.
+                let terms = match (kind.as_str(), timeout_until) {
+                    ("timeout", Some(until)) => {
+                        format!(" until {}", until.to_rfc3339())
+                    }
+                    _ => String::new(),
+                };
+                format!("{action} {community}{terms}.\n\nReason: {public_reason}")
             }
         }
     }
@@ -343,6 +319,7 @@ mod tests {
                 action_id: action,
                 kind: "ban".into(),
                 public_reason: String::new(),
+                timeout_until: None,
             }
             .source_id(),
             action
@@ -370,18 +347,30 @@ mod tests {
             action_id: Uuid::new_v4(),
             kind: "ban".into(),
             public_reason: "Repeated spam.".into(),
+            timeout_until: None,
         }
         .body(&t);
         assert!(ban.contains("banned from example.org"));
         assert!(ban.contains("Repeated spam."));
+        // A ban is indefinite: no "until" clause.
+        assert!(!ban.contains("until"));
 
+        let until = chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
         let timeout = ModerationNotice::Restriction {
             action_id: Uuid::new_v4(),
             kind: "timeout".into(),
             public_reason: "Cool off.".into(),
+            timeout_until: Some(until),
         }
         .body(&t);
         assert!(timeout.contains("timed out in example.org"));
+        // The timeout notice must tell the user for how long (VISION_MODERATION).
+        assert!(
+            timeout.contains("until 2026-09-01T12:00:00+00:00"),
+            "timeout body must carry the expiry term; got: {timeout}"
+        );
     }
 
     #[test]

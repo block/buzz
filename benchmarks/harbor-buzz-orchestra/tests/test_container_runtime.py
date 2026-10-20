@@ -1,8 +1,10 @@
 """The container runtime must launch the production stack, unmodified."""
 
+import asyncio
 import hashlib
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,13 +12,20 @@ from harbor.environments.base import ExecResult
 
 from harbor_buzz_orchestra.container_runtime import (
     REMOTE_BIN,
+    REMOTE_EVIDENCE,
     REMOTE_LOGS,
+    THINKING_EFFORT,
     BuzzContainerRuntime,
     EndpointLaunchConfig,
     RuntimeLaunchError,
 )
 from harbor_buzz_orchestra.manifest import ExperimentManifest
-from harbor_buzz_orchestra.provisioning import AgentCredential, TrialHandle
+from harbor_buzz_orchestra.provisioning import (
+    AgentCredential,
+    FixtureActor,
+    TrialHandle,
+)
+from harbor_buzz_orchestra.task_fixtures import fixture_for
 
 
 def write_manifest(tmp_path: Path) -> ExperimentManifest:
@@ -173,6 +182,51 @@ def test_user_relay_url_prefers_host_view(tmp_path):
     )
     # pre-v1.2 handles fall back to deriving http from the agents' ws view.
     assert rt._user_relay_url(trial_handle(())) == "http://host.docker.internal:3600"
+
+
+async def test_collects_task_declared_channel_membership(tmp_path, monkeypatch):
+    rt = runtime(tmp_path)
+    trial = replace(
+        trial_handle((credential("orch-1", "orchestrator", "orch-model"),)),
+        task_name="create-channel-invite-users",
+    )
+    calls = []
+
+    async def buzz_json(credential_arg, trial_arg, *args):
+        calls.append((credential_arg, trial_arg, args))
+        if args[:2] == ("channels", "search"):
+            return [
+                {
+                    "channel_id": "created-channel",
+                    "name": "fix-pr-1234",
+                    "channel_type": "stream",
+                    "visibility": "private",
+                    "archived": False,
+                    "ttl_seconds": 3600,
+                }
+            ]
+        return [{"pubkey": "member", "role": "member"}]
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+
+    observed = await rt._collect_observed_channels(trial)
+
+    assert observed[0]["members"] == [{"pubkey": "member", "role": "member"}]
+    assert calls[0][0].agent_id == "orch-1"
+    assert calls[0][2] == (
+        "channels",
+        "search",
+        "--query",
+        "fix-pr-1234",
+        "--exact",
+        "--include-archived",
+    )
+    assert calls[1][2] == (
+        "channels",
+        "members",
+        "--channel",
+        "created-channel",
+    )
     with pytest.raises(RuntimeLaunchError, match="ws://"):
         rt._cli_relay_url("http://relay")
 
@@ -290,6 +344,56 @@ async def test_launch_wires_the_desktop_environment(tmp_path, configured, expect
     )
 
 
+def test_memory_task_disables_auto_memory_injection(tmp_path):
+    manifest = write_manifest(tmp_path)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = replace(trial_handle((orch,)), task_name="memory-retrieval")
+
+    env = runtime(tmp_path)._agent_env(
+        trial=trial,
+        credential=orch,
+        agent_class=manifest.roster[0],
+        endpoint=EndpointLaunchConfig("anthropic", "ANTHROPIC_API_KEY"),
+        remote_prompt="/prompt.md",
+    )
+
+    assert env["BUZZ_ACP_CHANNELS"] == "channel"
+    assert env["BUZZ_ACP_NO_MEMORY"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_memory_seed_uses_agent_credentials_and_stdin(tmp_path, monkeypatch):
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = replace(trial_handle((orch,)), task_name="memory-retrieval")
+    captured = []
+
+    class Process:
+        def __init__(self, invocation):
+            self.invocation = invocation
+
+        returncode = 0
+
+        async def communicate(self, value):
+            self.invocation["value"] = value
+            return b"", b"wrote memory"
+
+    async def create_subprocess_exec(*args, **kwargs):
+        invocation = {"args": args, "env": kwargs["env"]}
+        captured.append(invocation)
+        return Process(invocation)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+
+    await runtime(tmp_path)._seed_memories(orch, trial)
+
+    seeds = fixture_for("memory-retrieval").memory_seeds
+    assert len(captured) == len(seeds)
+    for invocation, seed in zip(captured, seeds, strict=True):
+        assert invocation["args"][1:] == ("mem", "set", seed.slug, "-")
+        assert invocation["env"]["BUZZ_PRIVATE_KEY"] == orch.nostr_secret_key
+        assert invocation["value"] == seed.value.encode()
+
+
 def test_runtime_validates_construction_bounds(tmp_path):
     # 0 is legal and means unbounded (BUZZ_AGENT_MAX_ROUNDS=0); the trial
     # budget is the clock. Only negatives are rejected.
@@ -375,9 +479,7 @@ async def test_m1_output_probe_matches_grader_and_is_condition_scoped(
     assert bool(probed) == (condition == "M1-hello-world")
 
 
-async def test_send_mentions_by_pubkey_so_task_text_stays_inert(
-    tmp_path, monkeypatch
-):
+async def test_send_mentions_by_pubkey_so_task_text_stays_inert(tmp_path, monkeypatch):
     """Task text is untrusted payload: `:%normal! @a` in a task statement must
     not be fed to member-name resolution (it would fail and kill the trial).
     An explicit --mention pins delivery to the orchestrator's pubkey."""
@@ -406,6 +508,70 @@ async def test_send_mentions_by_pubkey_so_task_text_stays_inert(
     assert calls[-1][-2:] == ("--content", "plain content")
 
 
+async def test_sends_task_declared_actor_messages_and_records_event_ids(
+    tmp_path, monkeypatch
+):
+    rt = runtime(tmp_path)
+    orch = credential("solo-1", "orchestrator", "orch-model")
+    reporters = tuple(
+        FixtureActor(name, credential(name, "bot", ""))
+        for name in ("Ledger Scout", "Risk Sentinel", "Ops Forecaster")
+    )
+    trial = replace(
+        trial_handle((orch,)),
+        task_name="interleaved-agent-reports",
+        fixture_actors=reporters,
+    )
+    calls = []
+
+    async def send(actor, trial_arg, content, **kwargs):
+        calls.append((actor.agent_id, trial_arg, content, kwargs))
+        return {"event_id": f"event-{len(calls)}"}
+
+    monkeypatch.setattr(rt, "_send", send)
+
+    events = await rt._send_scripted_messages(
+        trial=trial, orchestrator=orch, task_event_id="task-root"
+    )
+
+    assert [event["label"] for event in events] == [
+        "ledger-report",
+        "risk-report",
+        "operations-report",
+    ]
+    assert [event["event_id"] for event in events] == [
+        "event-1",
+        "event-2",
+        "event-3",
+    ]
+    assert {call[0] for call in calls} == {
+        "Ledger Scout",
+        "Risk Sentinel",
+        "Ops Forecaster",
+    }
+    assert all(call[3]["mention"] == orch.nostr_pubkey for call in calls)
+    assert all(call[3]["reply_to"] == "task-root" for call in calls)
+
+
+async def test_scripted_message_requires_an_event_id(tmp_path, monkeypatch):
+    rt = runtime(tmp_path)
+    orch = credential("solo-1", "orchestrator", "orch-model")
+    trial = replace(
+        trial_handle((orch,)),
+        task_name="cross-thread-requests",
+    )
+
+    async def send(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(rt, "_send", send)
+
+    with pytest.raises(RuntimeLaunchError, match="did not return an event ID"):
+        await rt._send_scripted_messages(
+            trial=trial, orchestrator=orch, task_event_id="task-root"
+        )
+
+
 async def test_wait_for_done_requires_orchestrator_authorship(tmp_path, monkeypatch):
     rt = runtime(tmp_path, poll_seconds=0)
     orch = credential("orch-1", "orchestrator", "orch-model")
@@ -427,6 +593,215 @@ async def test_wait_for_done_requires_orchestrator_authorship(tmp_path, monkeypa
     assert json.dumps(result).find("real") > 0
     # observation happens as the trial user, never as an agent identity
     assert set(observers) == {"user"}
+
+
+async def test_solo_turn_end_completes_without_done_message(tmp_path, monkeypatch):
+    from harbor_buzz_orchestra.container_runtime import _Agent
+
+    rt = runtime(tmp_path, poll_seconds=0)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    solo = _Agent(orch, 7, "stdout.log", "stderr.log")
+    environment = Environment(
+        responses={
+            "cat ": ExecResult(
+                stdout="turn complete for channel: end_turn\n",
+                stderr="",
+                return_code=0,
+            )
+        }
+    )
+
+    async def buzz_json(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    assert await rt._wait_for_done(environment, orch, trial, [], solo=solo) is None
+
+
+async def test_scripted_events_wait_for_delivery_receipt(tmp_path, monkeypatch):
+    from harbor_buzz_orchestra.container_runtime import _Agent
+
+    rt = runtime(tmp_path, poll_seconds=0)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    solo = _Agent(orch, 7, "stdout.log", "stderr.log")
+    alpha = {"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"}
+    beta = {"id": "beta", "pubkey": orch.nostr_pubkey, "content": "BETA"}
+    scripted_event_id = "b" * 64
+    message_rounds = iter([[alpha]] * 8 + [[alpha, beta]] * 2)
+    turn_rounds = iter(
+        [(1, 1, set())] * 8 + [(2, 1, set()), (2, 2, {scripted_event_id})]
+    )
+    polls = 0
+
+    async def buzz_json(*args, **kwargs):
+        nonlocal polls
+        polls += 1
+        return next(message_rounds)
+
+    async def turn_status(*args, **kwargs):
+        return next(turn_rounds)
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    monkeypatch.setattr(rt, "_turn_status", turn_status)
+
+    result = await rt._wait_for_done(
+        Environment(),
+        orch,
+        trial,
+        [],
+        solo=solo,
+        scripted_event_ids={scripted_event_id},
+    )
+
+    assert result["id"] == "beta"
+    assert polls == 10
+
+
+async def test_scripted_events_do_not_stop_an_active_turn(tmp_path, monkeypatch):
+    from harbor_buzz_orchestra.container_runtime import _Agent
+
+    rt = runtime(tmp_path, poll_seconds=0)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    solo = _Agent(orch, 7, "stdout.log", "stderr.log")
+    messages = [
+        {"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"},
+        {"id": "beta", "pubkey": orch.nostr_pubkey, "content": "DONE: BETA"},
+    ]
+    scripted_event_id = "b" * 64
+    turn_rounds = iter([(2, 1, {scripted_event_id}), (2, 2, {scripted_event_id})])
+    polls = 0
+
+    async def buzz_json(*args, **kwargs):
+        nonlocal polls
+        polls += 1
+        return messages
+
+    async def turn_status(*args, **kwargs):
+        return next(turn_rounds)
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    monkeypatch.setattr(rt, "_turn_status", turn_status)
+
+    result = await rt._wait_for_done(
+        Environment(),
+        orch,
+        trial,
+        [],
+        solo=solo,
+        scripted_event_ids={scripted_event_id},
+    )
+
+    assert result["id"] == "beta"
+    assert polls == 2
+
+
+def test_turn_status_parses_completed_batch_and_successful_steer_receipts():
+    batch_event_id = "a" * 64
+    steer_event_id = "b" * 64
+    rejected_event_id = "c" * 64
+    output = "\n".join(
+        [
+            "turn starting for channel test",
+            f"turn delivered Buzz events for channel test: {batch_event_id}",
+            "turn complete for channel test: end_turn",
+            (
+                "non-cancelling steer ack received "
+                f"event_id={steer_event_id} ack=Ok(Success {{ session_id: session }})"
+            ),
+            (
+                "non-cancelling steer ack received "
+                f"event_id={rejected_event_id} ack=Ok(Err(OutcomeRejected))"
+            ),
+        ]
+    )
+
+    assert BuzzContainerRuntime._parse_turn_status(output) == (
+        1,
+        1,
+        {batch_event_id, steer_event_id},
+    )
+
+
+async def test_collect_evidence_uploads_verifier_artifact(tmp_path, monkeypatch):
+    rt = runtime(tmp_path)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    root_id = "root-event"
+    reply_id = "reply-event"
+    messages = [
+        {
+            "id": root_id,
+            "kind": 9,
+            "created_at": 1,
+            "pubkey": trial.user.nostr_pubkey,
+            "content": "question",
+            "tags": [["h", trial.channel_id], ["p", orch.nostr_pubkey]],
+        },
+        {
+            "id": reply_id,
+            "kind": 9,
+            "created_at": 2,
+            "pubkey": orch.nostr_pubkey,
+            "content": "answer",
+            "tags": [["h", trial.channel_id], ["e", root_id, "", "reply"]],
+        },
+    ]
+
+    async def buzz_json(*args, **kwargs):
+        return messages
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    environment = Environment()
+    trial_dir = tmp_path / "trial"
+    trial_dir.mkdir()
+
+    assert await rt._collect_evidence(
+        environment=environment,
+        trial=trial,
+        trial_dir=trial_dir,
+        task_event_id=root_id,
+        completion_message_id=reply_id,
+    )
+    assert environment.uploads[-1][1] == REMOTE_EVIDENCE
+    evidence = json.loads((trial_dir / "buzz-evidence.json").read_text())
+    assert evidence["messages"][-1]["reply_to_event_id"] == root_id
+    assert (trial_dir / "transcript.json").is_file()
+
+
+async def test_failed_evidence_snapshot_records_the_reason(tmp_path, monkeypatch):
+    rt = runtime(tmp_path)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+
+    async def buzz_json(*args, **kwargs):
+        raise RuntimeError("relay unreachable")
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    trial_dir = tmp_path / "trial"
+    trial_dir.mkdir()
+
+    assert not await rt._collect_evidence(
+        environment=Environment(),
+        trial=trial,
+        trial_dir=trial_dir,
+        task_event_id="root-event",
+        completion_message_id=None,
+    )
+    # The caller only sees a bool, so the cause has to survive as an artifact —
+    # otherwise a failed export is indistinguishable from a quiet relay.
+    assert "relay unreachable" in (trial_dir / "buzz-evidence-error.txt").read_text()
+    assert not (trial_dir / "buzz-evidence.json").exists()
+
+
+def test_runtime_logging_keeps_readiness_and_turn_completion_signals(tmp_path):
+    rt = runtime(tmp_path)
+    assert rt._rust_log(None) == "buzz_acp=info,pool::prompt=info"
+    assert rt._rust_log("custom=debug") == (
+        "custom=debug,buzz_acp=info,pool::prompt=info"
+    )
 
 
 def test_composed_system_prompt_carries_persona_and_team_roster(tmp_path):
@@ -466,3 +841,43 @@ async def test_stop_agents_sweeps_the_uploaded_stack(tmp_path):
     sweeps = [cmd for cmd, _ in environment.commands if REMOTE_BIN in cmd]
     assert len(sweeps) == 2
     assert "kill -TERM" in sweeps[0] and "kill -KILL" in sweeps[1]
+
+
+def test_only_evidence_grading_tasks_fail_on_a_missing_snapshot():
+    # Terminal-Bench tasks share this runtime but are graded by their own
+    # tests, so a snapshot hiccup must not turn a real result into an error.
+    assert fixture_for("reply-to-thread").requires_evidence
+    assert fixture_for("user-mention").requires_evidence
+    assert fixture_for("read-named-path-outside-workspace").requires_evidence
+    assert fixture_for("create-channel-invite-users").requires_evidence
+    assert not fixture_for("cobol-modernization").requires_evidence
+    assert not fixture_for(None).requires_evidence
+
+
+@pytest.mark.parametrize(
+    ("pinned", "expected"), [(None, THINKING_EFFORT), ("high", "high")]
+)
+async def test_thinking_effort_reaches_the_agent(tmp_path, pinned, expected):
+    manifest = write_manifest(tmp_path)
+    agent_class = manifest.roster[0]
+    if pinned is not None:
+        agent_class = agent_class.model_copy(
+            update={
+                "generation": agent_class.generation.model_copy(
+                    update={"thinking_effort": pinned}
+                )
+            }
+        )
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    environment = Environment(
+        responses={"buzz-acp": ExecResult(stdout="4242\n", stderr="", return_code=0)}
+    )
+    await runtime(tmp_path)._launch_agent(
+        environment=environment,
+        trial=trial_handle((orch,)),
+        credential=orch,
+        agent_class=agent_class,
+        trial_dir=tmp_path,
+    )
+    _, env = environment.commands[-1]
+    assert env["BUZZ_AGENT_THINKING_EFFORT"] == expected

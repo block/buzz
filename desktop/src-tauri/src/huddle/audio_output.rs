@@ -97,3 +97,70 @@ pub(crate) fn open_output_sink_by_name(
 
     rodio::DeviceSinkBuilder::open_default_sink().map_err(|e| format!("audio output: {e}"))
 }
+
+fn device_type_is_isolated(device_type: rodio::cpal::DeviceType) -> bool {
+    use rodio::cpal::DeviceType;
+    matches!(
+        device_type,
+        DeviceType::Headphones
+            | DeviceType::Headset
+            | DeviceType::Earpiece
+            | DeviceType::HearingAid
+    )
+}
+
+/// Conservative route-isolation query using cpal's safe structured device
+/// description. This is intentionally re-evaluated at confirmed local onset,
+/// so a route change cannot leave a stale isolated capability behind.
+pub(crate) fn output_route_is_isolated(preferred: Option<&str>) -> bool {
+    use rodio::cpal::traits::HostTrait;
+    use rodio::DeviceTrait;
+
+    let host = rodio::cpal::default_host();
+    let device = match preferred.filter(|name| !name.is_empty()) {
+        Some(name) => {
+            let Ok(devices) = host.output_devices() else {
+                return false;
+            };
+            let mut matches = devices.filter(|device| {
+                device
+                    .description()
+                    .ok()
+                    .map(|description| description.name().to_owned())
+                    == Some(name.to_owned())
+            });
+            let Some(device) = matches.next() else {
+                return false;
+            };
+            if matches.next().is_some() {
+                return false;
+            }
+            device
+        }
+        None => match host.default_output_device() {
+            Some(device) => device,
+            None => return false,
+        },
+    };
+
+    device
+        .description()
+        .is_ok_and(|description| device_type_is_isolated(description.device_type()))
+}
+
+#[cfg(test)]
+mod route_isolation_tests {
+    use super::device_type_is_isolated;
+    use rodio::cpal::DeviceType;
+
+    #[test]
+    fn only_positive_isolated_terminal_types_are_accepted() {
+        assert!(device_type_is_isolated(DeviceType::Headphones));
+        assert!(device_type_is_isolated(DeviceType::Headset));
+        assert!(device_type_is_isolated(DeviceType::Earpiece));
+        assert!(device_type_is_isolated(DeviceType::HearingAid));
+        assert!(!device_type_is_isolated(DeviceType::Speaker));
+        assert!(!device_type_is_isolated(DeviceType::Virtual));
+        assert!(!device_type_is_isolated(DeviceType::Unknown));
+    }
+}

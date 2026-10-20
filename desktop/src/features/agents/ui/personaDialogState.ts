@@ -46,6 +46,7 @@ export function createPersonaDialogState(): PersonaDialogState {
       displayName: "",
       avatarUrl: "",
       systemPrompt: "",
+      acpCommand: "buzz-acp",
       runtime: undefined,
       model: undefined,
     },
@@ -63,7 +64,9 @@ export function duplicatePersonaDialogState(
     initialValues: {
       displayName: `${persona.displayName} copy`,
       avatarUrl: persona.avatarUrl ?? "",
+      description: persona.description ?? undefined,
       systemPrompt: persona.systemPrompt,
+      acpCommand: persona.acpCommand || "buzz-acp",
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,
       provider: persona.provider ?? undefined,
@@ -87,7 +90,11 @@ export function duplicatePersonaDialogState(
 function behaviorEntry(
   persona: AgentPersona,
 ): { behavior: PersonaBehaviorInput } | Record<string, never> {
-  if (persona.respondTo == null && persona.parallelism == null) {
+  if (
+    persona.respondTo == null &&
+    persona.parallelism == null &&
+    (persona.sessionPolicy ?? "channel") === "channel"
+  ) {
     return {};
   }
   return {
@@ -98,13 +105,22 @@ function behaviorEntry(
           ? persona.respondToAllowlist
           : undefined,
       parallelism: persona.parallelism ?? undefined,
+      sessionPolicy: persona.sessionPolicy ?? "channel",
     },
   };
 }
 
 export function editPersonaDialogState(
   persona: AgentPersona,
+  accessSource?: Pick<AgentPersona, "respondTo" | "respondToAllowlist">,
 ): PersonaDialogState {
+  const behaviorSource = accessSource
+    ? {
+        ...persona,
+        respondTo: accessSource.respondTo,
+        respondToAllowlist: accessSource.respondToAllowlist,
+      }
+    : persona;
   return {
     title: "Edit agent",
     description: "",
@@ -113,7 +129,9 @@ export function editPersonaDialogState(
       id: persona.id,
       displayName: persona.displayName,
       avatarUrl: persona.avatarUrl ?? "",
+      description: persona.description ?? undefined,
       systemPrompt: persona.systemPrompt,
+      acpCommand: persona.acpCommand || "buzz-acp",
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,
       provider: persona.provider ?? undefined,
@@ -123,7 +141,7 @@ export function editPersonaDialogState(
       // the dialog must therefore round-trip the existing values.)
       namePool: persona.namePool ?? [],
       envVars: persona.envVars ?? {},
-      ...behaviorEntry(persona),
+      ...behaviorEntry(behaviorSource),
     },
   };
 }

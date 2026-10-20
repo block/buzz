@@ -10,23 +10,23 @@ import 'package:uuid/uuid.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../features/age_gate/age_signal_provider.dart';
 import '../auth/auth.dart';
+import '../hosted/hosted_relay_auth.dart';
+import '../hosted/builderlab_account.dart';
+import 'nostr_filters.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
 import 'relay_closed_policy.dart';
+import 'relay_http_query_client.dart';
 import 'relay_provider.dart';
 import 'relay_rate_limit_gate.dart';
+import 'relay_session_types.dart';
 import 'relay_socket.dart';
 
-enum SessionStatus { disconnected, connecting, connected, reconnecting }
+export 'relay_session_types.dart';
 
-@immutable
-class SessionState {
-  final SessionStatus status;
-  final int reconnectAttempt;
-
-  const SessionState({required this.status, this.reconnectAttempt = 0});
-}
+part 'relay_session_auth.dart';
 
 class _HistorySubscription {
   final List<NostrEvent> events = [];
@@ -40,6 +40,7 @@ class _LiveSubscription {
   final NostrFilter filter;
   final void Function(NostrEvent) onEvent;
   final void Function(String message)? onClosed;
+  final void Function(RelaySubscriptionStatus status)? onStatusChanged;
   Completer<void>? readyCompleter;
   int? lastSeenCreatedAt;
   int closedRetryAttempt = 0;
@@ -49,6 +50,7 @@ class _LiveSubscription {
     required this.filter,
     required this.onEvent,
     this.onClosed,
+    this.onStatusChanged,
     this.readyCompleter,
   });
 }
@@ -56,7 +58,6 @@ class _LiveSubscription {
 class _ClosedRetry {
   final _LiveSubscription subscription;
   final int generation;
-
   _ClosedRetry({required this.subscription, required this.generation});
 }
 
@@ -74,33 +75,26 @@ class _BufferedEvent {
   _BufferedEvent(this.subId, this.event);
 }
 
-/// Manages websocket subscriptions, event batching, reconnection with replay,
-/// and pending event tracking. Equivalent to the desktop's RelayClientSession.
-typedef RelaySocketFactory =
-    RelaySocket Function({
-      required String wsUrl,
-      required String? nsec,
-      required void Function(List<dynamic> message) onMessage,
-      required void Function() onConnected,
-      required void Function(Object? error) onDisconnected,
-    });
-
 class RelaySessionNotifier extends Notifier<SessionState> {
   RelaySessionNotifier({
     http.Client? httpClient,
+    http.Client Function()? httpClientFactory,
     RelaySocketFactory socketFactory = RelaySocket.new,
     DateTime Function()? now,
     RelayRateLimitGate? rateLimitGate,
     RelayTimerFactory retryTimerFactory = Timer.new,
     Future<void> Function(Duration) replayDelay = Future.delayed,
-  }) : _httpClient = httpClient,
+  }) : _httpQueryClient = RelayHttpQueryClient(
+         client: httpClient,
+         clientFactory: httpClientFactory,
+       ),
        _socketFactory = socketFactory,
        _now = now ?? DateTime.now,
        _rateLimitGate = rateLimitGate ?? RelayRateLimitGate(),
        _retryTimerFactory = retryTimerFactory,
        _replayDelay = replayDelay;
 
-  final http.Client? _httpClient;
+  final RelayHttpQueryClient _httpQueryClient;
   final RelaySocketFactory _socketFactory;
   final DateTime Function() _now;
   final RelayRateLimitGate _rateLimitGate;
@@ -130,17 +124,31 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
+  bool _ageRestricted = false;
   bool _paused = false;
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
+  int _contextGeneration = 0;
   final Map<Object, String> _visibleChannelsByOwner = {};
+  final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
   bool _socketConnected = false;
   bool _closedRetryReplayScheduled = false;
+  String? _relayUrl;
+
+  /// The relay origin this session serves. Switching community rebuilds the
+  /// session in place, so work begun for another community compares this
+  /// before reading from or publishing through it.
+  String? get relayUrl => _relayUrl;
+
+  @visibleForTesting
+  set debugRelayUrl(String? value) => _relayUrl = value;
 
   @override
   SessionState build() {
     final config = ref.watch(relayConfigProvider);
+    _relayUrl = config.baseUrl;
     final authState = ref.watch(authProvider);
+    _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
 
     // Reset disposed flag — build() may re-run on the same Notifier instance
     // after a provider dependency changes (e.g. auth completing).
@@ -150,7 +158,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     // Auto-connect when authenticated and we have a signing key (NIP-42 AUTH).
     final isAuthenticated = authState.value?.status == AuthStatus.authenticated;
-    if (isAuthenticated && config.nsec != null) {
+    if (!_ageRestricted && isAuthenticated && config.nsec != null) {
       // Schedule connection after build completes.
       Future.microtask(() => _connect(config));
     }
@@ -162,32 +170,108 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
+  }) => _postForEvents(
+    '/query',
+    filters.map((filter) => filter.toJson()).toList(),
+    timeout: timeout,
+  );
+
+  /// Finds people by profile name, for typeahead surfaces.
+  ///
+  /// NIP-50 search over kind:0 matches the whole profile JSON, so text in
+  /// avatar data URLs, `about` or `nip05` can fill every result page and hide
+  /// a real name match. The relay's `POST /profiles/search` applies the same
+  /// prefix rule to just `name` and `display_name` and puts exact and prefix
+  /// name matches first.
+  ///
+  /// A relay without that endpoint answers 404 or 405. The search then uses
+  /// NIP-50 ([NostrFilters.searchUsers]), and so do later searches on that
+  /// relay for [profileSearchRetry]; after that the endpoint is tried again.
+  /// A query or limit the endpoint does not accept also uses NIP-50.
+  Future<List<NostrEvent>> searchProfiles(
+    String query, {
+    int limit = 50,
+    Duration timeout = const Duration(seconds: 8),
   }) async {
+    final text = query.trim();
+    final relay = ref.read(relayConfigProvider).baseUrl;
+    final fallback = _profileSearchFallback;
+    if (text.isNotEmpty &&
+        text.runes.length <= _profileSearchQueryMax &&
+        limit >= 1 &&
+        limit <= _profileSearchLimitMax &&
+        (fallback == null ||
+            fallback.relay != relay ||
+            !_now().isBefore(fallback.until))) {
+      try {
+        final events = await _postForEvents('/profiles/search', {
+          'query': text,
+          'limit': limit,
+        }, timeout: timeout);
+        return [
+          for (final event in events)
+            if (event.kind == 0) event,
+        ];
+      } on RelayException catch (error) {
+        if (error.statusCode != 404 && error.statusCode != 405) rethrow;
+        _profileSearchFallback = (
+          relay: relay,
+          until: _now().add(profileSearchRetry),
+        );
+      }
+    }
+    return queryRelay([
+      NostrFilters.searchUsers(text, limit: limit),
+    ], timeout: timeout);
+  }
+
+  /// How long a relay's 404 or 405 keeps [searchProfiles] on NIP-50.
+  static const profileSearchRetry = Duration(minutes: 5);
+  static const _profileSearchQueryMax = 100;
+  static const _profileSearchLimitMax = 100;
+  ({String relay, DateTime until})? _profileSearchFallback;
+
+  /// POSTs [payload] as JSON to relay [path] with NIP-98 auth and decodes
+  /// the event array it answers.
+  Future<List<NostrEvent>> _postForEvents(
+    String path,
+    Object payload, {
+    required Duration timeout,
+  }) async {
+    if (_disposed || _ageRestricted) {
+      throw StateError('Relay session is unavailable');
+    }
+    final generation = _contextGeneration;
     final config = ref.read(relayConfigProvider);
-    final url = Uri.parse(config.baseUrl).resolve('/query').toString();
-    final bodyBytes = utf8.encode(
-      jsonEncode(filters.map((filter) => filter.toJson()).toList()),
+    final url = Uri.parse(config.baseUrl).resolve(path).toString();
+    final bodyBytes = utf8.encode(jsonEncode(payload));
+    // Reuse the session transport on success. A timeout rotates immediately
+    // for new queries, then closes the retired client after its peers finish.
+    final response = await _httpQueryClient.post(
+      Uri.parse(url),
+      headers: {
+        'Authorization': buildNip98AuthHeader(
+          method: 'POST',
+          url: url,
+          bodyBytes: bodyBytes,
+          nsec: config.nsec,
+          pubkey: ref.read(myPubkeyProvider),
+        ),
+        'Content-Type': 'application/json',
+      },
+      body: bodyBytes,
+      timeout: timeout,
+      decorate: (client, active) => HostedRelayHttpClient(
+        ref.read(hostedRelayAuthProvider),
+        config,
+        inner: client,
+        canSend: () =>
+            active() && !_disposed && generation == _contextGeneration,
+      ),
     );
-    final client = _httpClient ?? http.Client();
-    final shouldCloseClient = _httpClient == null;
-    final response = await client
-        .post(
-          Uri.parse(url),
-          headers: {
-            'Authorization': buildNip98AuthHeader(
-              method: 'POST',
-              url: url,
-              bodyBytes: bodyBytes,
-              nsec: config.nsec,
-            ),
-            'Content-Type': 'application/json',
-          },
-          body: bodyBytes,
-        )
-        .timeout(timeout)
-        .whenComplete(() {
-          if (shouldCloseClient) client.close();
-        });
+    if (_disposed || _ageRestricted || generation != _contextGeneration) {
+      throw StateError('Relay query belongs to a retired session');
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       _activateRateLimitGateFromHttpError(response.body);
       throw RelayException(response.statusCode, response.body);
@@ -256,13 +340,38 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return completer.future;
   }
 
-  /// Subscribe to live events matching [filter]. Returns an unsubscribe
-  /// function. Live subscriptions survive reconnects — they are replayed with
-  /// `since: lastSeenCreatedAt - 5s` on reconnect.
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
+  }) => _subscribe(filter, onEvent, onClosed: onClosed);
+
+  /// Subscribe to a live stream and observe its recovery lifecycle.
+  ///
+  /// The returned future completes after initial EOSE (or the existing
+  /// fallback timeout) and yields a cleanup callback. [onStatusChanged] emits
+  /// [RelaySubscriptionStatus.ready] at each EOSE after buffered replay events
+  /// have been delivered, and [RelaySubscriptionStatus.retrying] immediately
+  /// when a retryable or rate-limited CLOSED begins backoff. Terminal CLOSED
+  /// invokes [onClosed] and removes the subscription instead of retrying it.
+  /// Calling the cleanup callback cancels pending retries and sends CLOSE.
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+  }) => _subscribe(
+    filter,
+    onEvent,
+    onClosed: onClosed,
+    onStatusChanged: onStatusChanged,
+  );
+
+  Future<void Function()> _subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    void Function(RelaySubscriptionStatus status)? onStatusChanged,
   }) async {
     if (_disposed) throw StateError('Relay session is disposed');
     final subId = _nextSubId('l');
@@ -272,12 +381,12 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       filter: filter,
       onEvent: onEvent,
       onClosed: onClosed,
+      onStatusChanged: onStatusChanged,
       readyCompleter: readyCompleter,
     );
 
     _sendReq(subId, filter);
 
-    // Wait for EOSE or a short fallback timeout.
     try {
       await readyCompleter.future.timeout(
         const Duration(milliseconds: 500),
@@ -296,11 +405,16 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return () => _unsubscribe(subId);
   }
 
-  /// Publish an event and wait for the relay's OK confirmation.
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-  }) {
+  }) async {
+    final generation = _connectionGeneration;
+    if (_rateLimitGate.isActive) await _rateLimitGate.wait();
+    if (!_isActiveConnection(generation) || !_socketConnected) {
+      throw StateError('Relay session is not connected');
+    }
+
     final completer = Completer<NostrEvent>();
 
     final timer = Timer(timeout, () {
@@ -323,8 +437,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return completer.future;
   }
 
-  /// Send a raw message over the WebSocket without waiting for acknowledgement.
-  /// Used for ephemeral events like typing indicators.
   void sendRaw(List<dynamic> payload) {
     _socket?.send(payload);
   }
@@ -397,11 +509,30 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     await _connect(config);
   }
 
+  /// Registers work that must settle before the background grace disconnect.
+  void Function() registerBeforePause(Future<void> Function() callback) {
+    final owner = Object();
+    _beforePauseCallbacks[owner] = callback;
+    return () => _beforePauseCallbacks.remove(owner);
+  }
+
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
     _backgroundedAt = _now();
     _backgroundGraceTimer?.cancel();
-    _backgroundGraceTimer = Timer(_backgroundGraceDuration, _pauseNow);
+    _backgroundGraceTimer = Timer(_backgroundGraceDuration, () {
+      unawaited(_pauseAfterCallbacks());
+    });
+  }
+
+  Future<void> _pauseAfterCallbacks() async {
+    final callbacks = _beforePauseCallbacks.values.toList();
+    try {
+      await Future.wait(callbacks.map((callback) => callback()));
+    } catch (error) {
+      debugPrint('Background cleanup failed: $error');
+    }
+    if (_backgroundedAt != null) _pauseNow();
   }
 
   void _pauseNow() {
@@ -438,8 +569,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _connect(config);
   }
 
-  Future<void> _connect(RelayConfig config) async {
-    if (_disposed) return;
+  Future<void> _connect(RelayConfig config, {bool renewed = false}) async {
+    if (_disposed || _ageRestricted) return;
 
     final generation = ++_connectionGeneration;
     state = SessionState(
@@ -450,23 +581,48 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     );
 
     _socket?.dispose();
-    final socket = _socketFactory(
+    late final RelaySocket socket;
+    socket = _socketFactory(
       wsUrl: config.wsUrl,
       nsec: config.nsec,
       onMessage: (message) {
         if (generation == _connectionGeneration) _handleMessage(message);
       },
       onConnected: () => _handleConnected(generation),
-      onDisconnected: (error) => _handleDisconnected(generation, error),
+      onDisconnected: (error) {
+        if (_disposed || generation != _connectionGeneration) return;
+        final auth = ref.read(hostedRelayAuthProvider);
+        if (auth.protects(config) && relayUpgradeRefused(error)) {
+          auth.rejected(
+            config,
+            socket.headers['Nostr-Federated-Identity'],
+            terminal: renewed,
+          );
+          if (!renewed) {
+            unawaited(_connect(config, renewed: true));
+            return;
+          }
+          error = AccountFailure.denied;
+        }
+        _handleDisconnected(generation, error);
+      },
     );
     _socket = socket;
 
-    await socket.connect();
+    try {
+      final auth = ref.read(hostedRelayAuthProvider);
+      if (auth.protects(config)) socket.headers = await auth.headers(config);
+      if (_disposed || generation != _connectionGeneration) return;
+      await socket.connect();
+    } on AccountFailure catch (error) {
+      _handleDisconnected(generation, error);
+    }
   }
 
   Future<void> _handleConnected(int generation) async {
     if (_disposed || generation != _connectionGeneration) return;
     _socketConnected = true;
+    ref.read(hostedRelayAuthProvider).connected(ref.read(relayConfigProvider));
     _hasConnectedOnce = true;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
@@ -482,7 +638,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _eventBuffer.clear();
     _flushTimer?.cancel();
     _flushTimer = null;
-    if (error is RelayAuthRejectedException) {
+    if (error is RelayAuthRejectedException ||
+        (error is AccountFailure && error != AccountFailure.unavailable)) {
       _reconnectTimer?.cancel();
       state = const SessionState(status: SessionStatus.disconnected);
       return;
@@ -615,7 +772,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       return;
     }
 
-    // Live subscriptions get batched.
+    // Live subscriptions get batched. An EVENT proves the stream is active,
+    // but not that a retry replay is complete; only EOSE is that boundary.
     final liveSub = _liveSubscriptions[subId];
     if (liveSub != null) {
       _resetClosedRetry(liveSub);
@@ -644,19 +802,18 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       return;
     }
 
-    // Live subscription: signal ready.
+    // Live subscription: flush replay callbacks before signaling ready. This
+    // ordering matters for retry replays, whose original ready completer has
+    // already been released.
     final liveSub = _liveSubscriptions[subId];
     if (liveSub != null) {
       _resetClosedRetry(liveSub);
+      _flushBufferedEventsNow();
+      liveSub.onStatusChanged?.call(RelaySubscriptionStatus.ready);
     }
     if (liveSub != null &&
         liveSub.readyCompleter != null &&
         !liveSub.readyCompleter!.isCompleted) {
-      // EOSE is the boundary between replay and live delivery. Flush any
-      // replay events before resolving subscribe(), so callers that begin a
-      // one-shot query immediately afterwards cannot classify a delayed batch
-      // callback as having arrived during that query.
-      _flushBufferedEventsNow();
       liveSub.readyCompleter!.complete();
       liveSub.readyCompleter = null;
     }
@@ -685,7 +842,12 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final liveSub = _liveSubscriptions[subId];
     if (liveSub == null) return;
     final readyCompleter = liveSub.readyCompleter;
-    if (closedClass == RelayClosedClass.terminal) {
+    // A deadline is terminal for one-shot history, but a live subscription
+    // retries it: same filter under backoff, which can keep retrying at the
+    // cap. `since` is not advanced, so events missed while closed aren't
+    // skipped.
+    if (closedClass == RelayClosedClass.terminal &&
+        !isRelayDeadlineError(message)) {
       if (readyCompleter != null && !readyCompleter.isCompleted) {
         readyCompleter.completeError(Exception(message));
       }
@@ -697,6 +859,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       readyCompleter.complete();
       liveSub.readyCompleter = null;
     }
+    liveSub.onStatusChanged?.call(RelaySubscriptionStatus.retrying);
     if (liveSub.closedRetryTimer != null) return;
 
     final attempt = liveSub.closedRetryAttempt;
@@ -708,7 +871,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       final retrySeconds = parseRateLimitRetrySeconds(message);
       _rateLimitGate.activate(retrySeconds);
       final fallbackMs =
-          (retrySeconds != null && retrySeconds > 0
+          (retrySeconds != null
               ? min(retrySeconds, RelayRateLimitGate.maxRetrySeconds)
               : RelayRateLimitGate.defaultRetrySeconds) *
           1000;
@@ -795,6 +958,13 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         );
       }
     } else {
+      // Back-pressure now arrives here rather than as a NOTICE: the relay
+      // rejects an over-quota EVENT on the OK channel so this pending publish
+      // can be settled at all. Without arming the gate the send would fail
+      // without ever backing off.
+      if (message.startsWith('rate-limited:')) {
+        _rateLimitGate.activate(parseRateLimitRetrySeconds(message));
+      }
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
           Exception(message.isNotEmpty ? message : 'Event rejected'),
@@ -916,6 +1086,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _dispose() {
     _disposed = true;
+    _contextGeneration++;
+    _beforePauseCallbacks.clear();
     _connectionGeneration++;
     _reconnectTimer?.cancel();
     _flushTimer?.cancel();
@@ -936,7 +1108,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _recentDeliveryKeys.clear();
     _socket?.dispose();
     _socket = null;
-    _httpClient?.close();
+    _httpQueryClient.close();
   }
 }
 
@@ -944,35 +1116,3 @@ final relaySessionProvider =
     NotifierProvider<RelaySessionNotifier, SessionState>(
       RelaySessionNotifier.new,
     );
-
-String buildNip98AuthHeader({
-  required String method,
-  required String url,
-  required List<int> bodyBytes,
-  required String? nsec,
-}) {
-  if (nsec == null || nsec.isEmpty) {
-    throw Exception('Cannot query relay: no signing key available');
-  }
-  final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-  if (privkeyHex.isEmpty) {
-    throw Exception('Invalid nsec');
-  }
-  final payloadHash = SHA256Digest()
-      .process(Uint8List.fromList(bodyBytes))
-      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-      .join();
-  final event = nostr.Event.from(
-    kind: 27235,
-    content: '',
-    tags: [
-      ['u', url],
-      ['method', method.toUpperCase()],
-      ['payload', payloadHash],
-      ['nonce', const Uuid().v4()],
-    ],
-    secretKey: privkeyHex,
-    verify: false,
-  );
-  return 'Nostr ${base64.encode(utf8.encode(event.toJson()))}';
-}

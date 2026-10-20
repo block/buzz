@@ -8,6 +8,7 @@ export async function editMessage(
   emojiTags?: string[][],
   mentionPubkeys?: string[],
   suppressLinkPreviews?: boolean,
+  mentionTags?: string[][],
 ): Promise<void> {
   await invokeTauri("edit_message", {
     input: {
@@ -18,6 +19,7 @@ export async function editMessage(
       emojiTags: emojiTags ?? [],
       mentionPubkeys: mentionPubkeys ?? [],
       suppressLinkPreviews: suppressLinkPreviews ?? false,
+      mentionTags: mentionTags ?? null,
     },
   });
 }

@@ -16,7 +16,7 @@ build-backend = "hatchling.build"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.4",
-    "ruff>=0.15",
+    "ruff==0.16.3",
 ]
 
 [tool.uv.sources]

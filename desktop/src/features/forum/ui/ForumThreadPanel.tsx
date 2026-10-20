@@ -1,6 +1,7 @@
 import { ArrowLeft, MessageSquare } from "lucide-react";
 import * as React from "react";
 
+import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -27,6 +28,7 @@ type ForumThreadPanelProps = {
   isLoading: boolean;
   isSendingReply: boolean;
   channelId: string;
+  postId: string;
   currentPubkey?: string;
   profiles?: UserProfileLookup;
   onBack: () => void;
@@ -41,6 +43,8 @@ type ForumThreadPanelProps = {
   canDeletePost?: boolean;
   isDeletingPost?: boolean;
   targetEventId?: string | null;
+  targetSearchMessageId?: string;
+  targetSearchQuery?: string;
 };
 
 function canDeleteReply(
@@ -57,12 +61,14 @@ function ReplyRow({
   profiles,
   channelNames,
   onDelete,
+  searchQuery,
 }: {
   reply: ThreadReply;
   currentPubkey?: string;
   profiles?: UserProfileLookup;
   channelNames?: string[];
   onDelete?: (eventId: string) => void;
+  searchQuery?: string;
 }) {
   const replyAuthorLabel = resolveUserLabel({
     pubkey: reply.pubkey,
@@ -72,11 +78,13 @@ function ReplyRow({
   });
   const replyAvatarUrl =
     profiles?.[reply.pubkey.toLowerCase()]?.avatarUrl ?? null;
+  const replyAuthorIsAgent =
+    profiles?.[reply.pubkey.toLowerCase()]?.isAgent === true;
   const showDelete = onDelete && canDeleteReply(reply, currentPubkey);
   const {
     mentionNames: replyMentionNames,
     mentionPubkeysByName: replyMentionPubkeysByName,
-  } = resolveMentionProps(reply.tags, profiles);
+  } = resolveMentionProps(reply.tags, profiles, reply.content);
 
   return (
     <div
@@ -84,14 +92,19 @@ function ReplyRow({
       data-forum-event-id={reply.eventId}
     >
       <div className="flex items-center gap-2">
-        <UserProfilePopover pubkey={reply.pubkey}>
+        <UserProfilePopover
+          pubkey={reply.pubkey}
+          role={replyAuthorIsAgent ? "bot" : undefined}
+        >
           <button
             className="flex items-center gap-2 rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             type="button"
           >
             <UserAvatar
+              accent={replyAuthorIsAgent}
               avatarUrl={replyAvatarUrl}
               displayName={replyAuthorLabel}
+              shape={replyAuthorIsAgent ? "squircle" : "circle"}
               size="sm"
             />
             <span className="text-sm font-medium text-foreground hover:underline">
@@ -122,6 +135,7 @@ function ReplyRow({
           imetaByUrl={parseImetaTags(reply.tags)}
           mentionNames={replyMentionNames}
           mentionPubkeysByName={replyMentionPubkeysByName}
+          searchQuery={searchQuery}
         />
       </div>
     </div>
@@ -133,6 +147,7 @@ export function ForumThreadPanel({
   isLoading,
   isSendingReply,
   channelId,
+  postId,
   currentPubkey,
   profiles,
   onBack,
@@ -143,6 +158,8 @@ export function ForumThreadPanel({
   canDeletePost,
   isDeletingPost,
   targetEventId,
+  targetSearchMessageId,
+  targetSearchQuery,
 }: ForumThreadPanelProps) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const { channels } = useChannelNavigation();
@@ -195,7 +212,7 @@ export function ForumThreadPanel({
   const {
     mentionNames: postMentionNames,
     mentionPubkeysByName: postMentionPubkeysByName,
-  } = resolveMentionProps(post.tags, profiles);
+  } = resolveMentionProps(post.tags, profiles, post.content);
   const postAuthorLabel = resolveUserLabel({
     pubkey: post.pubkey,
     currentPubkey,
@@ -204,6 +221,8 @@ export function ForumThreadPanel({
   });
   const postAvatarUrl =
     profiles?.[post.pubkey.toLowerCase()]?.avatarUrl ?? null;
+  const postAuthorIsAgent =
+    profiles?.[post.pubkey.toLowerCase()]?.isAgent === true;
 
   return (
     <div className={cn("flex h-full flex-col", channelChrome.contentPadding)}>
@@ -222,6 +241,7 @@ export function ForumThreadPanel({
       <div
         className="flex-1 overflow-y-auto"
         data-scroll-restoration-id={`forum-thread:${channelId}`}
+        onCopy={handleTimelineMentionCopy}
         ref={scrollRef}
       >
         <div
@@ -232,14 +252,19 @@ export function ForumThreadPanel({
           data-forum-event-id={post.eventId}
         >
           <div className="flex items-center gap-2">
-            <UserProfilePopover pubkey={post.pubkey}>
+            <UserProfilePopover
+              pubkey={post.pubkey}
+              role={postAuthorIsAgent ? "bot" : undefined}
+            >
               <button
                 className="flex items-center gap-2 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                 type="button"
               >
                 <UserAvatar
+                  accent={postAuthorIsAgent}
                   avatarUrl={postAvatarUrl}
                   displayName={postAuthorLabel}
+                  shape={postAuthorIsAgent ? "squircle" : "circle"}
                 />
                 <span className="text-sm font-semibold text-foreground hover:underline">
                   {postAuthorLabel}
@@ -268,6 +293,11 @@ export function ForumThreadPanel({
               imetaByUrl={parseImetaTags(post.tags)}
               mentionNames={postMentionNames}
               mentionPubkeysByName={postMentionPubkeysByName}
+              searchQuery={
+                targetSearchMessageId === post.eventId
+                  ? targetSearchQuery
+                  : undefined
+              }
             />
           </div>
         </div>
@@ -286,6 +316,11 @@ export function ForumThreadPanel({
               onDelete={onDeleteReply}
               profiles={profiles}
               reply={reply}
+              searchQuery={
+                targetSearchMessageId === reply.eventId
+                  ? targetSearchQuery
+                  : undefined
+              }
             />
           ))}
 
@@ -301,6 +336,7 @@ export function ForumThreadPanel({
         <ForumComposer
           channelId={channelId}
           channelType="forum"
+          draftKey={`thread:${postId}`}
           isSending={isSendingReply}
           onSubmit={onReply}
           placeholder="Reply to this post..."

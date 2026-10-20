@@ -30,11 +30,11 @@ tests:
           path: kind
           value: Service
         template: templates/service.yaml
-      - notContains:
+      - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: BUZZ_S3_REGION
-          any: true
+            value: "us-east-1"
         template: templates/deployment.yaml
       - contains:
           path: spec.template.spec.containers[0].env
@@ -193,6 +193,24 @@ tests:
         template: templates/deployment.yaml
       - notExists:
           path: spec.template.spec.containers[0].args
+        template: templates/deployment.yaml
+
+  - it: renders an immutable digest instead of a configured tag
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      image.repository: ghcr.io/block/buzz
+      image.tag: sha-deadbee
+      image.digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/block/buzz@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         template: templates/deployment.yaml
 
   - it: appends generic Pod extensions and overrides the relay command

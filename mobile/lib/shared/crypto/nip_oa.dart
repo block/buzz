@@ -3,6 +3,35 @@ import 'dart:typed_data';
 
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
+import '../relay/nostr_models.dart';
+
+/// Verify the signed profile and all owner-attestation conditions against it.
+String? verifiedProfileOaOwnerPubkey(NostrEvent event) {
+  if (event.kind != 0) return null;
+  final tags = event.tags
+      .where((tag) => tag.isNotEmpty && tag[0] == 'auth')
+      .toList();
+  if (tags.length != 1 || tags.single.length != 4) return null;
+  try {
+    nostr.Event.fromJson(jsonEncode(event.toJson()));
+  } catch (_) {
+    return null;
+  }
+  final owner = verifiedOaOwnerPubkey(event.tags, event.pubkey);
+  if (owner == null) return null;
+  final conditions = tags.single[2];
+  for (final clause
+      in conditions.isEmpty ? <String>[] : conditions.split('&')) {
+    if (clause.startsWith('kind=')) {
+      if (int.parse(clause.substring(5)) != event.kind) return null;
+    } else if (clause.startsWith('created_at<')) {
+      if (event.createdAt >= int.parse(clause.substring(11))) return null;
+    } else if (clause.startsWith('created_at>')) {
+      if (event.createdAt <= int.parse(clause.substring(11))) return null;
+    }
+  }
+  return owner;
+}
 
 /// NIP-OA (Owner Attestation) — verify the `auth` tag on a kind:0 profile
 /// that proves an owner key authorized an agent key.
@@ -15,15 +44,23 @@ import 'package:pointycastle/digests/sha256.dart';
 /// verified against the profile event author, so a forged or stale marker
 /// cannot turn a person into an agent.
 ///
-/// Returns the owner pubkey (lowercase hex) for the first valid auth tag,
+/// Low-level tag verification. Use verifiedProfileOaOwnerPubkey for admission.
+/// Returns the owner pubkey (lowercase hex) for exactly one valid auth tag,
 /// or null if none verifies.
 String? verifiedOaOwnerPubkey(List<List<String>> tags, String agentPubkey) {
   final agent = agentPubkey.toLowerCase();
+  if (tags.where((tag) => tag.isNotEmpty && tag[0] == 'auth').length != 1) {
+    return null;
+  }
 
   for (final tag in tags) {
     if (tag.length != 4 || tag[0] != 'auth') continue;
 
-    final owner = tag[1].toLowerCase();
+    final owner = tag[1];
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(owner) ||
+        !RegExp(r'^[0-9a-f]{128}$').hasMatch(tag[3])) {
+      continue;
+    }
     final conditions = tag[2];
     final sig = tag[3];
 

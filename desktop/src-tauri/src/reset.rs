@@ -104,6 +104,11 @@ pub(crate) struct ResetContext<'a> {
     pub keychain: &'a dyn ResetKeychain,
     pub home_dir: Option<PathBuf>,
     pub is_dev: bool,
+    /// Build-owned config root for demos. Production leaves this unset.
+    pub demo_config_dir: Option<PathBuf>,
+    /// Demo builds own only build-scoped state and must never delete shared
+    /// production or legacy agent roots.
+    pub is_demo: bool,
 }
 
 /// Entry point called from `lib.rs` setup (before migrations).
@@ -126,6 +131,16 @@ pub(crate) fn run_boot_reset(app_data_dir: &Path) -> ResetOutcome {
     let legacy_dir = crate::migration::legacy_app_data_dir(app_data_dir);
     let nest_dir = crate::managed_agents::nest_dir();
 
+    let demo_config_dir = match crate::build_identity::demo_config_home() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("buzz-desktop reset: {error}");
+            return ResetOutcome {
+                completed: false,
+                failed: true,
+            };
+        }
+    };
     let ctx = ResetContext {
         app_data_dir,
         legacy_app_data_dir: legacy_dir,
@@ -133,6 +148,8 @@ pub(crate) fn run_boot_reset(app_data_dir: &Path) -> ResetOutcome {
         keychain: &store,
         home_dir,
         is_dev,
+        demo_config_dir,
+        is_demo: crate::build_identity::is_demo_build(),
     };
 
     run_boot_reset_with_keychain(ctx)
@@ -166,6 +183,15 @@ fn rename_to_trash(src: &Path) -> Result<PathBuf, String> {
 
 /// Core wipe logic — separated for testing.
 pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcome {
+    // An unknown demo credential root is not evidence of an absent root. Refuse
+    // before any destructive work and retain reset intent for the next boot.
+    if ctx.is_demo && ctx.demo_config_dir.is_none() {
+        eprintln!("buzz-desktop reset: cannot resolve demo credential directory");
+        return ResetOutcome {
+            completed: false,
+            failed: true,
+        };
+    }
     let app_data_dir = ctx.app_data_dir;
 
     // ── Step 1: rename app-data dir (atomic — sentinel survives the parent) ──
@@ -211,13 +237,34 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
         None
     };
 
-    // ── Step 3: remove nest, ~/.sprout, ~/.config/buzz-agent, CLI symlink ────
+    // ── Step 3: remove build-owned nest and CLI symlink ──────────────────────
+    // Production and dev preserve their existing legacy/global cleanup. A demo
+    // never owns these shared roots, so signing out of one must leave them
+    // available to production and every other demo.
     if let Some(ref nest) = ctx.nest_dir {
         let _ = std::fs::remove_dir_all(nest);
     }
+    // A demo owns credentials here. Failure to remove them must keep the reset
+    // pending, even if the app data and keychain were successfully wiped.
+    let demo_config_removed =
+        ctx.demo_config_dir
+            .as_ref()
+            .is_none_or(|path| match std::fs::remove_dir_all(path) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => {
+                    eprintln!(
+                        "buzz-desktop reset: remove demo config {}: {error}",
+                        path.display()
+                    );
+                    false
+                }
+            });
     if let Some(ref home) = ctx.home_dir {
-        let _ = std::fs::remove_dir_all(home.join(".sprout"));
-        let _ = std::fs::remove_dir_all(home.join(".config").join("buzz-agent"));
+        if !ctx.is_demo {
+            let _ = std::fs::remove_dir_all(home.join(".sprout"));
+            let _ = std::fs::remove_dir_all(home.join(".config").join("buzz-agent"));
+        }
         let link_name = crate::managed_agents::cli_link_name(ctx.is_dev);
         let _ = std::fs::remove_file(home.join(".local").join("bin").join(link_name));
     }
@@ -273,6 +320,11 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
         .map(|p| !p.exists())
         .unwrap_or(true);
     let nest_gone = ctx.nest_dir.as_ref().map(|n| !n.exists()).unwrap_or(true);
+    // `exists()` treats metadata errors as absence. Only NotFound establishes
+    // that credentials are gone; a dangling symlink is not an absent root.
+    let demo_config_gone = ctx.demo_config_dir.as_ref().is_none_or(|path| {
+        matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    });
     let trash_app_gone = !trash_app.exists();
     let trash_legacy_gone = trash_legacy.as_ref().map(|p| !p.exists()).unwrap_or(true);
     let trash_webkit_gone = trash_webkit.as_ref().map(|p| !p.exists()).unwrap_or(true);
@@ -281,6 +333,8 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
         || !app_data_gone
         || !legacy_gone
         || !nest_gone
+        || !demo_config_removed
+        || !demo_config_gone
         || !trash_app_gone
         || !trash_legacy_gone
         || !trash_webkit_gone
@@ -288,6 +342,7 @@ pub(crate) fn run_boot_reset_with_keychain(ctx: ResetContext<'_>) -> ResetOutcom
         eprintln!(
             "buzz-desktop reset: verification failed (keychain_wiped={keychain_ok}, \
              app_data_gone={app_data_gone}, legacy_gone={legacy_gone}, nest_gone={nest_gone}, \
+             demo_config_removed={demo_config_removed}, demo_config_gone={demo_config_gone}, \
              trash_app_gone={trash_app_gone}, trash_legacy_gone={trash_legacy_gone}, \
              trash_webkit_gone={trash_webkit_gone})"
         );
@@ -317,6 +372,10 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use tempfile::TempDir;
+
+    mod demo {
+        include!("reset_demo_tests.rs");
+    }
 
     // ── Fake keychain ─────────────────────────────────────────────────────────
 
@@ -408,6 +467,8 @@ mod tests {
             keychain,
             home_dir: None, // skip nest/sprout/CLI ops in unit tests
             is_dev,
+            demo_config_dir: None,
+            is_demo: false,
         }
     }
 
@@ -451,6 +512,8 @@ mod tests {
             keychain: &kc,
             home_dir: None,
             is_dev: false,
+            demo_config_dir: None,
+            is_demo: false,
         };
 
         let outcome = run_boot_reset_with_keychain(ctx);
@@ -584,6 +647,8 @@ mod tests {
             keychain: &kc,
             home_dir: None,
             is_dev: true,
+            demo_config_dir: None,
+            is_demo: false,
         };
 
         let outcome = run_boot_reset_with_keychain(ctx);
@@ -620,6 +685,8 @@ mod tests {
             keychain: &kc,
             home_dir: None,
             is_dev: false,
+            demo_config_dir: None,
+            is_demo: false,
         };
 
         let outcome = run_boot_reset_with_keychain(ctx);
@@ -653,6 +720,8 @@ mod tests {
             keychain: &kc,
             home_dir: None,
             is_dev: false,
+            demo_config_dir: None,
+            is_demo: false,
         };
 
         let outcome = run_boot_reset_with_keychain(ctx);
@@ -736,6 +805,8 @@ mod tests {
             keychain: &kc,
             home_dir: None,
             is_dev: true,
+            demo_config_dir: None,
+            is_demo: false,
         };
         let outcome = run_boot_reset_with_keychain(ctx);
         assert!(outcome.completed, "reset must complete");
@@ -830,6 +901,8 @@ mod tests {
             keychain: &kc1,
             home_dir: Some(tmp.path().to_path_buf()),
             is_dev: false,
+            demo_config_dir: None,
+            is_demo: false,
         };
         let first = run_boot_reset_with_keychain(ctx1);
         assert!(first.failed, "first attempt must fail");
@@ -853,6 +926,8 @@ mod tests {
             keychain: &kc2,
             home_dir: Some(tmp.path().to_path_buf()),
             is_dev: false,
+            demo_config_dir: None,
+            is_demo: false,
         };
         let second = run_boot_reset_with_keychain(ctx2);
         assert!(second.completed, "second attempt must complete");

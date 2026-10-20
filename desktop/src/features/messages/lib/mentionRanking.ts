@@ -1,8 +1,9 @@
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 
 export type MentionCandidateForRanking = {
   displayName: string | null;
   isAgent: boolean;
+  isActiveAgent?: boolean;
   isMember: boolean;
   kind: "identity" | "persona" | "team";
   personaId?: string | null;
@@ -51,6 +52,58 @@ function scoreMentionCandidateLabel(
   return null;
 }
 
+export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
+  candidates: readonly T[],
+  activePersonaIds: ReadonlySet<string> = new Set(),
+  recentMentionPubkeys: readonly string[] = [],
+): T | null {
+  const recentMentionRankByPubkey = new Map(
+    recentMentionPubkeys.map((pubkey, index) => [
+      normalizePubkey(pubkey),
+      index,
+    ]),
+  );
+  return (
+    candidates
+      .filter((candidate) => candidate.isAgent && Boolean(candidate.pubkey))
+      .sort((left, right) => {
+        const leftRecentRank = left.pubkey
+          ? recentMentionRankByPubkey.get(normalizePubkey(left.pubkey))
+          : undefined;
+        const rightRecentRank = right.pubkey
+          ? recentMentionRankByPubkey.get(normalizePubkey(right.pubkey))
+          : undefined;
+        const recentDiff =
+          (leftRecentRank ?? recentMentionPubkeys.length) -
+          (rightRecentRank ?? recentMentionPubkeys.length);
+        if (recentDiff !== 0) return recentDiff;
+        const activeDiff =
+          Number(right.isActiveAgent === true) -
+          Number(left.isActiveAgent === true);
+        if (activeDiff !== 0) return activeDiff;
+        const memberDiff = Number(right.isMember) - Number(left.isMember);
+        if (memberDiff !== 0) return memberDiff;
+        const runnableDiff =
+          Number(
+            Boolean(right.personaId) &&
+              activePersonaIds.has(right.personaId ?? ""),
+          ) -
+          Number(
+            Boolean(left.personaId) &&
+              activePersonaIds.has(left.personaId ?? ""),
+          );
+        if (runnableDiff !== 0) return runnableDiff;
+        const labelDiff = (left.displayName ?? "").localeCompare(
+          right.displayName ?? "",
+          undefined,
+          { sensitivity: "base" },
+        );
+        if (labelDiff !== 0) return labelDiff;
+        return (left.pubkey ?? "").localeCompare(right.pubkey ?? "");
+      })[0] ?? null
+  );
+}
+
 export function rankMentionCandidates<T extends MentionCandidateForRanking>(
   candidates: readonly T[],
   query: string,
@@ -65,7 +118,7 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
         : "";
       const label =
         candidate.displayName ??
-        (candidate.pubkey ? truncatePubkey(candidate.pubkey) : "agent");
+        (candidate.pubkey ? truncateNpub(candidate.pubkey) : "agent");
       const groupRank = getMentionCandidateGroupRank(
         candidate,
         activePersonaIds,

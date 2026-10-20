@@ -4,6 +4,7 @@ import {
   subscribeAgentObserverStore,
   getAgentObserverSnapshot,
   compareObserverEvents,
+  type AgentObserverStoreUpdate,
 } from "@/features/agents/observerRelayStore";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
@@ -631,19 +632,40 @@ export function syncActiveAgentTurnsFromObserver(
 }
 
 /**
- * Bridge hook: processes observer events into the active-turns store.
- * Should be called by a parent component that has access to the observer events.
+ * Build the steady-state observer listener once per agent-list revision. Observer
+ * publications carry only newly admitted events for one agent, so this callback
+ * does not revisit unrelated agents or their retained journals.
  */
+export function createActiveAgentTurnsObserverListener(
+  agents: readonly { pubkey: string; status: string }[],
+): (update?: AgentObserverStoreUpdate) => void {
+  const activeAgentPubkeys = new Set(
+    agents
+      .filter(
+        (agent) => agent.status === "running" || agent.status === "deployed",
+      )
+      .map((agent) => normalizePubkey(agent.pubkey)),
+  );
+
+  return (update?: AgentObserverStoreUpdate) => {
+    if (
+      !update ||
+      !activeAgentPubkeys.has(normalizePubkey(update.agentPubkey))
+    ) {
+      return;
+    }
+    syncAgentTurnsFromEvents(update.agentPubkey, [...update.events]);
+  };
+}
+
 export function useActiveAgentTurnsBridge(
   agents: readonly { pubkey: string; status: string }[],
 ) {
   React.useEffect(() => {
-    function syncAll() {
-      syncActiveAgentTurnsFromObserver(agents);
-    }
-
-    syncAll();
-    return subscribeAgentObserverStore(syncAll);
+    syncActiveAgentTurnsFromObserver(agents);
+    return subscribeAgentObserverStore(
+      createActiveAgentTurnsObserverListener(agents),
+    );
   }, [agents]);
 }
 

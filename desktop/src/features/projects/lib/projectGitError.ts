@@ -1,3 +1,5 @@
+import type { ProjectRepoUnavailableReason } from "./projectRepoAvailability";
+
 export type ProjectGitErrorPresentation = {
   title: string;
   description: string;
@@ -19,10 +21,18 @@ function isGitHubUrl(cloneUrl: string | null | undefined) {
 export function projectCloneErrorPresentation(
   error: unknown,
   cloneUrl?: string | null,
+  unavailableReason?: ProjectRepoUnavailableReason,
 ): ProjectGitErrorPresentation {
   const message = errorText(error);
   const github = isGitHubUrl(cloneUrl);
 
+  if (unavailableReason === "access") {
+    return {
+      title: "Repository access restricted",
+      description:
+        "You need access to the repository’s channel before you can clone it.",
+    };
+  }
   if (
     /\b(?:401|403)\b|authenticat|authoriz|permission denied|access denied|ssh certificate/.test(
       message,

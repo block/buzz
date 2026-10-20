@@ -1,200 +1,188 @@
 part of '../channel_detail_page.dart';
 
 double _scaledTextHeight(BuildContext context, TextStyle style) {
-  final scaledFontSize = MediaQuery.textScalerOf(
-    context,
-  ).scale(style.fontSize ?? 0);
-  return scaledFontSize * (style.height ?? 1);
+  return MediaQuery.textScalerOf(context).scale(style.fontSize ?? 0) *
+      (style.height ?? 1);
 }
 
-double _dmAppBarTitleContentHeight(BuildContext context) {
-  const titleStyle = channelTitleTextStyle;
-  final presenceStyle = context.textTheme.bodySmall;
-  if (presenceStyle == null) {
-    return 30;
-  }
-  final textHeight =
-      _scaledTextHeight(context, titleStyle) +
-      _scaledTextHeight(context, presenceStyle);
-  return textHeight > 30 ? textHeight : 30;
+double _twoLineAppBarTitleContentHeight(BuildContext context) {
+  final titleStyle = context.textTheme.titleSmall;
+  final subtitleStyle = context.textTheme.bodySmall;
+  if (titleStyle == null || subtitleStyle == null) return 40;
+  return max(
+    40,
+    _scaledTextHeight(context, titleStyle) +
+        _scaledTextHeight(context, subtitleStyle),
+  );
 }
 
-class _MembersButton extends ConsumerWidget {
-  final String channelId;
-  final Channel channel;
-  final String? currentPubkey;
-
-  const _MembersButton({
-    required this.channelId,
+class _ConversationAppBarTitle extends StatelessWidget {
+  const _ConversationAppBarTitle({
     required this.channel,
-    required this.currentPubkey,
+    required this.label,
+    required this.subtitle,
+    required this.presence,
+    required this.onTap,
   });
 
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hasWorkingBot = ref
-        .watch(workingBotPubkeysProvider(channelId))
-        .isNotEmpty;
+  final Channel channel;
+  final String label;
+  final String subtitle;
+  final String? presence;
+  final VoidCallback onTap;
 
-    return IconButton(
-      color: context.colors.primary,
-      onPressed: () {
-        showBuzzModalBottomSheet<void>(
-          context: context,
-          isScrollControlled: true,
-          showDragHandle: true,
-          builder: (_) =>
-              MembersSheet(channel: channel, currentPubkey: currentPubkey),
-        );
-      },
-      tooltip: 'View members',
-      icon: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          const Icon(LucideIcons.users, size: 22),
-          if (hasWorkingBot)
-            Positioned(
-              top: -2,
-              right: -2,
-              child: Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: context.appColors.success,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: context.colors.surface, width: 1.5),
+  @override
+  Widget build(BuildContext context) {
+    final prefix = channel.isDm ? 'dm' : 'channel';
+    return Semantics(
+      button: true,
+      child: Tooltip(
+        message: channel.isDm
+            ? 'Open conversation details'
+            : 'Open channel settings',
+        child: InkWell(
+          key: ValueKey('$prefix-header-settings-trigger'),
+          borderRadius: BorderRadius.circular(Radii.md),
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Column(
+              key: ValueKey('$prefix-header-text-stack'),
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (!channel.isDm && channel.visibility == 'private') ...[
+                      Icon(
+                        BuzzIcons.lock,
+                        size: 14,
+                        color: context.colors.onSurfaceVariant,
+                        semanticLabel: 'Private channel',
+                      ),
+                      const SizedBox(width: Grid.quarter),
+                    ],
+                    Flexible(
+                      child: Text(
+                        label,
+                        key: ValueKey('$prefix-header-name'),
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    if (channel.isEphemeral) ...[
+                      const SizedBox(width: Grid.quarter),
+                      _HeaderEphemeralBadge(channel: channel),
+                    ],
+                  ],
                 ),
-              ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (presence != null) ...[
+                      ExcludeSemantics(
+                        child: Container(
+                          key: const ValueKey('dm-header-presence-dot'),
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: switch (presence) {
+                              'online' => context.appColors.success,
+                              'away' => context.appColors.warning,
+                              _ => context.colors.outline,
+                            },
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: Grid.quarter),
+                    ],
+                    Flexible(
+                      child: Text(
+                        subtitle,
+                        key: ValueKey(
+                          channel.isDm
+                              ? 'dm-header-presence'
+                              : 'channel-header-member-count',
+                        ),
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.textTheme.bodySmall?.copyWith(
+                          color: context.colors.onSurface.withValues(
+                            alpha: 0.65,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
-        ],
+          ),
+        ),
       ),
     );
   }
 }
 
-class _DmAppBarTitle extends ConsumerWidget {
-  final Channel channel;
-  final String? currentPubkey;
+// Both renderers subscribe to the same counterpart identity and presence.
+({String label, String? presence, String presenceLabel}) _watchDmHeader(
+  WidgetRef ref,
+  Channel channel,
+  String? currentPubkey,
+) {
+  final normalizedCurrent = currentPubkey?.toLowerCase();
 
-  const _DmAppBarTitle({required this.channel, required this.currentPubkey});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final profiles = ref.watch(userCacheProvider);
-    final presenceMap = ref.watch(presenceCacheProvider);
-    final normalizedCurrent = currentPubkey?.toLowerCase();
-
-    String? otherPubkey;
-    for (final pk in channel.participantPubkeys) {
-      if (pk.toLowerCase() != normalizedCurrent) {
-        otherPubkey = pk.toLowerCase();
-        break;
-      }
+  String? otherPubkey;
+  for (final pk in channel.participantPubkeys) {
+    if (pk.toLowerCase() != normalizedCurrent) {
+      otherPubkey = pk.toLowerCase();
+      break;
     }
-
-    final profile = otherPubkey != null ? profiles[otherPubkey] : null;
-
-    if (otherPubkey != null) {
-      if (profile == null) {
-        ref.read(userCacheProvider.notifier).preload([otherPubkey]);
-      }
-      ref.read(presenceCacheProvider.notifier).track([otherPubkey]);
-    }
-
-    final avatarUrl = profile?.avatarUrl;
-    final initial =
-        profile?.initial ??
-        (channel.participants.isNotEmpty
-            ? channel.participants.first[0].toUpperCase()
-            : '?');
-    final presence = otherPubkey != null
-        ? (presenceMap[otherPubkey] ?? 'offline')
-        : 'offline';
-    final presenceLabel = switch (presence) {
-      'online' => 'Online',
-      'away' => 'Away',
-      _ => 'Offline',
-    };
-
-    return Row(
-      children: [
-        SizedBox(
-          width: 30,
-          height: 30,
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              AvatarImage(
-                imageUrl: avatarUrl,
-                radius: 14,
-                backgroundColor: context.colors.primaryContainer,
-                fallback: Text(
-                  initial,
-                  style: context.textTheme.labelSmall?.copyWith(
-                    color: context.colors.onPrimaryContainer,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              Positioned(
-                right: -1,
-                bottom: -1,
-                child: Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    color: switch (presence) {
-                      'online' => context.appColors.success,
-                      'away' => context.appColors.warning,
-                      _ => context.colors.outline,
-                    },
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: context.colors.surface,
-                      width: 1.5,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(width: Grid.xxs),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Flexible(
-                    child: Text(
-                      resolveDmChannelDisplayLabel(
-                        channel,
-                        currentPubkey: currentPubkey,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: channelTitleTextStyle,
-                    ),
-                  ),
-                  if (channel.isEphemeral) ...[
-                    const SizedBox(width: Grid.quarter),
-                    _HeaderEphemeralBadge(channel: channel),
-                  ],
-                ],
-              ),
-              Text(
-                presenceLabel,
-                style: context.textTheme.bodySmall?.copyWith(
-                  color: context.colors.onSurfaceVariant,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
   }
+
+  final profile = ref.watch(
+    userCacheProvider.select(
+      (profiles) => otherPubkey == null ? null : profiles[otherPubkey],
+    ),
+  );
+  final presence = ref.watch(
+    presenceCacheProvider.select(
+      (presenceMap) => otherPubkey == null ? null : presenceMap[otherPubkey],
+    ),
+  );
+
+  if (otherPubkey != null) {
+    if (profile == null) {
+      ref.read(userCacheProvider.notifier).preload([otherPubkey]);
+    }
+    ref.read(presenceCacheProvider.notifier).track([otherPubkey]);
+  }
+
+  final presenceLabel = switch (presence) {
+    'online' => 'Online',
+    'away' => 'Away',
+    'offline' => 'Offline',
+    _ => 'Unknown',
+  };
+
+  return (
+    label: ref.watch(
+      identityNameSourcesProvider.select(
+        (names) => resolveDmChannelDisplayLabel(
+          channel,
+          currentPubkey: currentPubkey,
+          names: names,
+        ),
+      ),
+    ),
+    presence: presence,
+    presenceLabel: presenceLabel,
+  );
 }

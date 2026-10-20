@@ -244,6 +244,158 @@ pub struct TurnUsage {
     pub pricing_identity: Option<buzz_core::agent_turn_metric::PricingIdentity>,
 }
 
+/// Per-turn usage carried by a standard ACP `session/prompt` response.
+/// Adapter input excludes cache reads and writes, so NIP-AM input must add
+/// those subsets with checked arithmetic.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PromptResponseUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_read_tokens: Option<u64>,
+    pub cached_write_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StandardAdapterKind {
+    Claude,
+    Codex,
+}
+
+#[derive(Debug, Default)]
+struct StandardSessionState {
+    published_seq: u64,
+    last_cost: Option<f64>,
+    cost_poisoned: bool,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct StandardUsageTracker {
+    sessions: HashMap<String, StandardSessionState>,
+    in_flight_session: Option<String>,
+    pending_cost: Option<(String, f64)>,
+    pending_prompt: Option<(String, PromptResponseUsage, StandardAdapterKind)>,
+}
+
+impl StandardUsageTracker {
+    pub(crate) fn seed_zero_baseline(&mut self, session_id: &str) {
+        self.sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| StandardSessionState {
+                published_seq: 0,
+                last_cost: Some(0.0),
+                cost_poisoned: false,
+            });
+    }
+
+    pub(crate) fn begin_turn(&mut self, session_id: &str) {
+        self.in_flight_session = Some(session_id.to_string());
+        self.pending_cost = None;
+        self.pending_prompt = None;
+    }
+
+    /// Claude's `usage_update.cost.amount` is a raw session-cumulative total.
+    pub(crate) fn record_cost(&mut self, session_id: &str, cost: f64) {
+        if cost.is_finite() && cost >= 0.0 && self.in_flight_session.as_deref() == Some(session_id)
+        {
+            self.pending_cost = Some((session_id.to_string(), cost));
+        }
+    }
+
+    pub(crate) fn record_prompt_usage(
+        &mut self,
+        session_id: &str,
+        usage: PromptResponseUsage,
+        adapter: StandardAdapterKind,
+    ) {
+        if self.in_flight_session.as_deref() == Some(session_id) {
+            self.pending_prompt = Some((session_id.to_string(), usage, adapter));
+        }
+    }
+
+    pub(crate) fn take(&mut self) -> Option<TurnUsage> {
+        self.in_flight_session = None;
+        let prompt = self.pending_prompt.take();
+        let cost = self.pending_cost.take();
+        let session_id = prompt
+            .as_ref()
+            .map(|(session_id, _, _)| session_id.clone())
+            .or_else(|| cost.as_ref().map(|(session_id, _)| session_id.clone()))?;
+
+        let (inclusive_input, output_tokens, total_tokens, cache_read, cache_write) = match prompt {
+            Some((_, usage, adapter)) => {
+                let inclusive_input = usage
+                    .input_tokens
+                    .checked_add(usage.cached_read_tokens.unwrap_or(0))
+                    .and_then(|input| input.checked_add(usage.cached_write_tokens.unwrap_or(0)));
+                let total_tokens =
+                    (adapter == StandardAdapterKind::Codex).then_some(usage.total_tokens);
+                (
+                    inclusive_input,
+                    inclusive_input.map(|_| usage.output_tokens),
+                    inclusive_input.and(total_tokens),
+                    inclusive_input.and(usage.cached_read_tokens),
+                    inclusive_input.and(usage.cached_write_tokens),
+                )
+            }
+            None => (None, None, None, None, None),
+        };
+
+        let state = self.sessions.entry(session_id.clone()).or_default();
+        let cumulative_cost = cost.map(|(_, cost)| cost);
+        let turn_cost = match (state.cost_poisoned, state.last_cost, cumulative_cost) {
+            (false, Some(previous), Some(current)) if current >= previous => {
+                let delta = current - previous;
+                delta.is_finite().then_some(delta)
+            }
+            _ => None,
+        };
+        if let Some(current) = cumulative_cost {
+            // A decrease means the cumulative series restarted or is corrupt.
+            // Poison the baseline rather than deriving a later delta across the
+            // discontinuity. The raw cumulative value still remains observable.
+            if state.last_cost.is_some_and(|previous| current < previous) {
+                state.cost_poisoned = true;
+                state.last_cost = None;
+            } else if !state.cost_poisoned {
+                state.last_cost = Some(current);
+            }
+        }
+
+        // Input overflow invalidates the standard prompt counters. Emit only if
+        // another valid signal (normally Claude cost) remains; NIP-AM forbids an
+        // otherwise all-null usage record.
+        if inclusive_input.is_none() && cumulative_cost.is_none() {
+            return None;
+        }
+
+        state.published_seq += 1;
+        Some(TurnUsage {
+            session_id,
+            turn_seq: state.published_seq,
+            // Standard prompt counters are per-turn already. A cost-only record
+            // is reliable only when a seeded/previous cumulative baseline made
+            // the cost delta provable.
+            delta_reliable: inclusive_input.is_some() || turn_cost.is_some(),
+            turn_input_tokens: inclusive_input,
+            turn_output_tokens: output_tokens,
+            turn_total_tokens: total_tokens,
+            turn_cost_usd: turn_cost,
+            turn_cache_read_tokens: cache_read,
+            turn_cache_write_tokens: cache_write,
+            cumulative_input_tokens: None,
+            cumulative_output_tokens: None,
+            cumulative_total_tokens: None,
+            cumulative_cost_usd: cumulative_cost,
+            cumulative_cache_read_tokens: None,
+            cumulative_cache_write_tokens: None,
+            model: None,
+            pricing_identity: None,
+        })
+    }
+}
+
 /// Tracks per-session cumulative usage state across turns.
 ///
 /// Cheap to construct. Usage lifecycle per turn:

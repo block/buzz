@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { scheduleAfterForegroundReady } from "@/shared/lib/foregroundReady";
+
 export function isDocumentVisible(): boolean {
   if (typeof document === "undefined") return true;
   return document.visibilityState === "visible";
@@ -35,11 +37,25 @@ export function subscribeAppFocus(
     return () => {};
   }
 
-  const handleFocusChange = () => listener(isAppFocused());
+  let cancelPendingResume: (() => void) | null = null;
+  const handleFocusChange = () => {
+    cancelPendingResume?.();
+    cancelPendingResume = null;
+    const focused = isAppFocused();
+    if (!focused) {
+      listener(false);
+      return;
+    }
+    cancelPendingResume = scheduleAfterForegroundReady(() => {
+      cancelPendingResume = null;
+      if (isAppFocused()) listener(true);
+    });
+  };
   document.addEventListener("visibilitychange", handleFocusChange);
   window.addEventListener("focus", handleFocusChange);
   window.addEventListener("blur", handleFocusChange);
   return () => {
+    cancelPendingResume?.();
     document.removeEventListener("visibilitychange", handleFocusChange);
     window.removeEventListener("focus", handleFocusChange);
     window.removeEventListener("blur", handleFocusChange);
@@ -54,12 +70,36 @@ export function useDocumentVisible(): boolean {
   return visible;
 }
 
+const appFocusStoreListeners = new Set<() => void>();
+let appFocusStoreSnapshot = isAppFocused();
+let stopAppFocusStore: (() => void) | null = null;
+
+function subscribeAppFocusStore(listener: () => void): () => void {
+  appFocusStoreListeners.add(listener);
+  if (!stopAppFocusStore) {
+    appFocusStoreSnapshot = isAppFocused();
+    stopAppFocusStore = subscribeAppFocus((focused) => {
+      if (appFocusStoreSnapshot === focused) return;
+      appFocusStoreSnapshot = focused;
+      for (const storeListener of appFocusStoreListeners) storeListener();
+    });
+  }
+
+  return () => {
+    appFocusStoreListeners.delete(listener);
+    if (appFocusStoreListeners.size === 0) {
+      stopAppFocusStore?.();
+      stopAppFocusStore = null;
+    }
+  };
+}
+
 export function useAppFocused(): boolean {
-  const [focused, setFocused] = React.useState(isAppFocused);
-
-  React.useEffect(() => subscribeAppFocus(setFocused), []);
-
-  return focused;
+  return React.useSyncExternalStore(
+    subscribeAppFocusStore,
+    () => appFocusStoreSnapshot,
+    () => true,
+  );
 }
 
 export function useFocusedRefetchInterval(

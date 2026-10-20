@@ -108,3 +108,35 @@ test("test_pair_restart_strict_stop_clear_start_ordering", async () => {
     "operations must fire in stop → clear → start order",
   );
 });
+
+test("a pair restart whose relay is removed during its stop never starts, even after a re-add", async () => {
+  const { markRelayRemoved } = await import("./managedAgentRelayCleanup.ts");
+  const relay = "wss://removed-during-restart.example";
+  let releaseStop;
+  let started = 0;
+  const run = () =>
+    restartManagedAgentPair(
+      PUBKEY,
+      relay,
+      () =>
+        new Promise((resolve) => (releaseStop = () => resolve(makeStatus()))),
+      () => {},
+      async () => {
+        started += 1;
+        return makeStatus();
+      },
+    );
+
+  const stale = run();
+  // Remove, then re-add: the re-add never resets the removal counter.
+  markRelayRemoved(relay);
+  releaseStop();
+  await assert.rejects(stale, /relay was removed from this device/);
+  assert.equal(started, 0);
+
+  // Positive control: a restart begun after the re-add starts.
+  const fresh = run();
+  releaseStop();
+  await fresh;
+  assert.equal(started, 1);
+});

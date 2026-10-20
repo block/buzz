@@ -15,17 +15,30 @@ import type {
   UpdateChannelTemplateInput,
 } from "@/shared/api/types";
 
+/** Keeps focused polling at the established 30-second cadence. */
+export const CHANNEL_TEMPLATES_REFETCH_INTERVAL_MS = 30_000;
+/** Suppresses the focus refetch until channel template data is genuinely stale.
+ * Templates change rarely; mutations cover all writes with push-invalidation. */
+export const CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/** Focus-refetch policy for the channel templates query; consumed by focusRefetchPolicy.test.mjs. */
+export const channelTemplatesFocusRefetchPolicy = {
+  staleTime: CHANNEL_TEMPLATES_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: false,
+} as const;
+
 export const channelTemplatesQueryKey = ["channel-templates"] as const;
 
 export function useChannelTemplatesQuery() {
-  const refetchInterval = useFocusedRefetchInterval(30_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    CHANNEL_TEMPLATES_REFETCH_INTERVAL_MS,
+  );
 
   return useQuery({
     queryKey: channelTemplatesQueryKey,
     queryFn: listChannelTemplates,
-    staleTime: 30_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...channelTemplatesFocusRefetchPolicy,
   });
 }
 

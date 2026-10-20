@@ -22,6 +22,7 @@ export function AddProjectRepositoryDialog({
   onOpenChange,
   open,
   project,
+  projects,
 }: {
   accessChannelId?: string;
   channels: Channel[];
@@ -29,37 +30,51 @@ export function AddProjectRepositoryDialog({
   onAdd: (input: AddProjectRepositoryInput) => Promise<void>;
   onOpenChange: (open: boolean) => void;
   open: boolean;
-  project: Project;
+  project?: Project;
+  projects?: Project[];
 }) {
+  const projectOptions = React.useMemo(
+    () => projects ?? (project ? [project] : []),
+    [project, projects],
+  );
+  const [selectedProjectId, setSelectedProjectId] = React.useState(
+    project?.id ?? projectOptions[0]?.id ?? "",
+  );
+  const selectedProject =
+    projectOptions.find((candidate) => candidate.id === selectedProjectId) ??
+    projectOptions[0];
   const [name, setName] = React.useState("");
   const [cloneUrl, setCloneUrl] = React.useState("");
   const [selectedChannelId, setSelectedChannelId] = React.useState("");
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const nameInputRef = React.useRef<HTMLInputElement>(null);
+  const projectSelectRef = React.useRef<HTMLSelectElement>(null);
 
   React.useEffect(() => {
     if (!open) return;
     setName("");
     setCloneUrl("");
+    setSelectedProjectId(project?.id ?? projectOptions[0]?.id ?? "");
     setSelectedChannelId(accessChannelId ?? "");
     setErrorMessage(null);
     const timerId = globalThis.setTimeout(
-      () => nameInputRef.current?.focus(),
+      () =>
+        (projects ? projectSelectRef.current : nameInputRef.current)?.focus(),
       50,
     );
     return () => globalThis.clearTimeout(timerId);
-  }, [accessChannelId, open]);
+  }, [accessChannelId, open, project?.id, projectOptions, projects]);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!name.trim() || !selectedChannelId) return;
+    if (!name.trim() || !selectedChannelId || !selectedProject) return;
     setErrorMessage(null);
     try {
       await onAdd({
         accessChannelId: selectedChannelId,
         cloneUrl: cloneUrl.trim() || undefined,
         name: name.trim(),
-        project,
+        project: selectedProject,
       });
       onOpenChange(false);
     } catch (error) {
@@ -81,11 +96,20 @@ export function AddProjectRepositoryDialog({
         className="max-w-lg"
         contentClassName="pt-3"
         data-testid="add-project-repository-dialog"
-        description={`Add another repository to ${project.name}.`}
+        description={
+          selectedProject
+            ? `Add another repository to ${selectedProject.name}.`
+            : "Choose a project for this repository."
+        }
         footer={
           <Button
             data-testid="add-project-repository-submit"
-            disabled={isCreating || !name.trim() || !selectedChannelId}
+            disabled={
+              isCreating ||
+              !name.trim() ||
+              !selectedChannelId ||
+              !selectedProject
+            }
             form="add-project-repository-form"
             type="submit"
           >
@@ -101,6 +125,37 @@ export function AddProjectRepositoryDialog({
           id="add-project-repository-form"
           onSubmit={(event) => void handleSubmit(event)}
         >
+          {projects ? (
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="add-project-repository-project"
+              >
+                Project
+              </label>
+              <div className={FIELD_SHELL_CLASS}>
+                <select
+                  className={cn(FIELD_CONTROL_CLASS, "w-full")}
+                  data-testid="add-project-repository-project"
+                  disabled={isCreating}
+                  id="add-project-repository-project"
+                  onChange={(event) => {
+                    setSelectedProjectId(event.target.value);
+                    setErrorMessage(null);
+                  }}
+                  ref={projectSelectRef}
+                  required
+                  value={selectedProject?.id ?? ""}
+                >
+                  {projectOptions.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          ) : null}
           <div className="space-y-1.5">
             <label
               className="text-sm font-medium text-foreground"

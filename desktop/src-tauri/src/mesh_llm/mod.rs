@@ -34,9 +34,9 @@ mod usage;
 pub use usage::{serving_usage_from_payload, MeshServingUsage};
 
 mod transport_policy;
+use transport_policy::{iroh_relay_mode, sdk_iroh_relay_config, validate_advertised_endpoint};
 #[cfg(test)]
-use transport_policy::iroh_relay_mode_from;
-use transport_policy::{iroh_relay_mode, validate_advertised_endpoint, IrohRelayMode};
+use transport_policy::{iroh_relay_mode_from, IrohRelayMode};
 
 use mesh_llm_sdk::{client, serve, EmbeddedNodeHandle, MeshDiscoveryMode, TrustPolicy};
 use serde::{Deserialize, Serialize};
@@ -376,13 +376,10 @@ impl DesktopMeshRuntime {
                 if let Some(mesh_name) = request.mesh_name.as_deref() {
                     builder = builder.mesh_name(mesh_name);
                 }
-                builder = match iroh_relay_mode()? {
-                    IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
-                    IrohRelayMode::Default => builder.disable_iroh_relays(false),
-                    IrohRelayMode::Custom(urls) => builder
-                        .disable_iroh_relays(false)
-                        .iroh_relays(urls.into_iter().map(|url| url.to_string())),
-                };
+                let (disable_iroh_relays, iroh_relays) = sdk_iroh_relay_config(iroh_relay_mode()?);
+                builder = builder
+                    .disable_iroh_relays(disable_iroh_relays)
+                    .iroh_relays(iroh_relays);
                 if let Some(max_vram_gb) = request.max_vram_gb {
                     builder = builder.max_vram_gb(max_vram_gb as f64);
                 }
@@ -416,13 +413,10 @@ impl DesktopMeshRuntime {
                 if let Some(mesh_name) = request.mesh_name.as_deref() {
                     builder = builder.mesh_name(mesh_name);
                 }
-                builder = match iroh_relay_mode()? {
-                    IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
-                    IrohRelayMode::Default => builder.disable_iroh_relays(false),
-                    IrohRelayMode::Custom(urls) => builder
-                        .disable_iroh_relays(false)
-                        .iroh_relays(urls.into_iter().map(|url| url.to_string())),
-                };
+                let (disable_iroh_relays, iroh_relays) = sdk_iroh_relay_config(iroh_relay_mode()?);
+                builder = builder
+                    .disable_iroh_relays(disable_iroh_relays)
+                    .iroh_relays(iroh_relays);
                 if let Some(join_token) = request.join_token.as_deref() {
                     builder = builder.join_token(join_token);
                 }

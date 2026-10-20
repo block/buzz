@@ -118,3 +118,91 @@ export function addThreadActivityItems(
 
   return { didAdd: true, items: capped };
 }
+
+/**
+ * One-time removal of the orphaned pre-relay-scoping key
+ * `buzz-thread-activity.v1:<pubkey>`. The legacy pubkey-only writer was dropped
+ * when the key became relay-scoped, but the old ~400 KB blob is never read and
+ * is absent from the quota-sweep whitelist, so it lingers as dead weight.
+ * removeItem on an absent key is a no-op, so running this on every identity
+ * load is idempotent and self-terminating.
+ */
+export function removeLegacyThreadActivityKey(pubkey: string): void {
+  try {
+    window.localStorage.removeItem(`${ACTIVITY_STORAGE_PREFIX}:${pubkey}`);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+// ─── Coalesced persistence writer (first-writer-wins + flush) ─────────────────
+//
+// The full item list is one ~600 KB JSON.stringify+setItem. Writing it on every
+// incoming reply drives the renderer stall this coalescing exists to fix, so the
+// scheduler collapses a burst of writes into one setItem ~1 s later. The live
+// buffer (itemsRef) stays the source of truth between flushes; the timer reads
+// it at fire time, so the persisted blob is always the burst's final state.
+
+const WRITE_DEBOUNCE_MS = 1_000;
+
+export type ThreadActivityRefs = {
+  itemsRef: { current: ThreadActivityItem[] };
+  scopeLoadedRef: { current: string };
+  timerRef: { current: ReturnType<typeof setTimeout> | null };
+};
+
+/**
+ * Inverse of activityScopeKey: split "pubkey:normalizedRelayUrl" back into its
+ * parts. The pubkey is colon-free, so the first colon is the boundary. Returns
+ * null for an empty or malformed scope.
+ */
+function decomposeScope(
+  scope: string,
+): { pubkey: string; relayUrl: string } | null {
+  if (!scope) return null;
+  const colonIdx = scope.indexOf(":");
+  if (colonIdx === -1) return null;
+  const pubkey = scope.slice(0, colonIdx);
+  const relayUrl = scope.slice(colonIdx + 1);
+  return pubkey && relayUrl ? { pubkey, relayUrl } : null;
+}
+
+/**
+ * Arm a trailing-edge write for `scope`, first-writer-wins: a pending timer is
+ * NOT reset, so a burst of N writes still fires once. The timer reads itemsRef
+ * at fire time and re-checks the loaded scope, so a write that outlives a scope
+ * switch can neither land under the new key nor persist the wrong buffer.
+ */
+export function scheduleThreadActivityWrite(
+  scope: string,
+  refs: ThreadActivityRefs,
+): void {
+  if (!scope || refs.scopeLoadedRef.current !== scope) return;
+  if (refs.timerRef.current !== null) return;
+
+  const parts = decomposeScope(scope);
+  if (!parts) return;
+  const { pubkey, relayUrl } = parts;
+
+  refs.timerRef.current = setTimeout(() => {
+    refs.timerRef.current = null;
+    if (refs.scopeLoadedRef.current !== scope) return;
+    writeActivityToStorage(pubkey, relayUrl, refs.itemsRef.current);
+  }, WRITE_DEBOUNCE_MS);
+}
+
+/**
+ * Synchronously persist a pending write and cancel the timer. A no-op when no
+ * write is pending (the buffer is already durable), so flushing on hidden or
+ * pagehide costs a setItem only when there is unsaved state. Callers MUST flush
+ * before reseeding on a scope switch so the old scope's buffer lands under the
+ * old key.
+ */
+export function flushThreadActivityWrite(refs: ThreadActivityRefs): void {
+  if (refs.timerRef.current === null) return;
+  clearTimeout(refs.timerRef.current);
+  refs.timerRef.current = null;
+  const parts = decomposeScope(refs.scopeLoadedRef.current);
+  if (!parts) return;
+  writeActivityToStorage(parts.pubkey, parts.relayUrl, refs.itemsRef.current);
+}

@@ -1,0 +1,32 @@
+{
+  "channel_id": "6a178caa-07de-4594-9296-1f130b3f32e2",
+  "message_count": 2,
+  "truncated": false,
+  "messages": [
+    {
+      "id": "585eeddbd9c1384696a615faeafdca5c00ff806276c8c6c66b654e7bbb40e167",
+      "author": "user",
+      "pubkey": "779c3f730c638f67cc06c7e7d55d31720c85c9eb74cec2050d0ac5fdabaafea8",
+      "content": "@solo-1 Complete the requested task.",
+      "created_at": 1786995079,
+      "kind": 9,
+      "tags": [
+        ["h", "6a178caa-07de-4594-9296-1f130b3f32e2"],
+        ["p", "ed8ce3ee42988114b5940d9dd0023d576649e06c47bc018ef74933b2472e4854"]
+      ]
+    },
+    {
+      "id": "220c6ac96cf28a995cc14ff8b72d5ec7d968c0a859eeaa0d2ec354670def60e5",
+      "author": "solo-1",
+      "pubkey": "ed8ce3ee42988114b5940d9dd0023d576649e06c47bc018ef74933b2472e4854",
+      "content": "DONE: Completed the requested task.",
+      "created_at": 1786995113,
+      "kind": 9,
+      "tags": [
+        ["h", "6a178caa-07de-4594-9296-1f130b3f32e2"],
+        ["e", "585eeddbd9c1384696a615faeafdca5c00ff806276c8c6c66b654e7bbb40e167", "", "reply"],
+        ["p", "779c3f730c638f67cc06c7e7d55d31720c85c9eb74cec2050d0ac5fdabaafea8"]
+      ]
+    }
+  ]
+}

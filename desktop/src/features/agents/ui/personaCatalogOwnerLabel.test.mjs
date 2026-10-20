@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
-import { resolveCatalogOwnerLabel } from "./PersonaCatalogDialog.tsx";
+import { AgentInstructionReview } from "./CommunityCatalogDialog.tsx";
+import { resolveCatalogOwnerLabel } from "./catalogOwnerLabel.ts";
 
 // ── null / undefined summary ──────────────────────────────────────────────────
 
@@ -74,4 +77,27 @@ test("test_display_name_null_name_present_returns_name", () => {
     resolveCatalogOwnerLabel({ displayName: null, name: "alice" }),
     "alice",
   );
+});
+
+test("agent instruction review renders markdown concealment syntax literally", () => {
+  const instructions = [
+    "Review changes.",
+    "||Hidden spoiler instruction.||",
+    "[Benign label](https://example.com/hidden-instruction)",
+    "![Image label](https://example.com/hidden-image-source)",
+  ].join("\n");
+  const html = renderToStaticMarkup(
+    React.createElement(AgentInstructionReview, { instructions }),
+  );
+
+  assert.ok(html.includes("||Hidden spoiler instruction.||"));
+  assert.ok(
+    html.includes("[Benign label](https://example.com/hidden-instruction)"),
+  );
+  assert.ok(
+    html.includes("![Image label](https://example.com/hidden-image-source)"),
+  );
+  assert.ok(!html.includes("buzz-spoiler"));
+  assert.ok(!html.includes("<a"));
+  assert.ok(!html.includes("<img"));
 });

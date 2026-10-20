@@ -15,23 +15,29 @@ path = "src/lib.rs"
 name = "buzz-push-gateway"
 path = "src/main.rs"
 
+[features]
+# Personal device development only. Production builds remain production-only.
+personal-dev-app-attest = []
+
 [dependencies]
 aes-gcm = "0.10"
-appattest = { version = "0.1.1", default-features = false }
+aws-lc-rs = { version = "1", default-features = false }
+minicbor = { version = "0.25", features = ["std", "half"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+webpki = { package = "rustls-webpki", version = "0.103.9", default-features = false, features = ["aws-lc-rs", "alloc"] }
+x509-parser = { version = "0.18.1", default-features = false }
 axum = { workspace = true }
 async-trait = "0.1"
 base64 = "0.22"
-byteorder = "1.5"
-minicbor = "0.25"
 chrono = { workspace = true }
 hex = { workspace = true }
 getrandom = "0.4"
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 nostr = { workspace = true }
-p256 = { version = "0.14", features = ["ecdsa", "pem", "pkcs8"] }
 rand = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["http2"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
@@ -46,5 +52,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+ciborium = "0.2"
 proptest = { workspace = true }
 reqwest = { workspace = true }

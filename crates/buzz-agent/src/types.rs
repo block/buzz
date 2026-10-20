@@ -215,9 +215,10 @@ pub struct LlmResponse {
     ///
     /// Empty string when the provider returned no reasoning content.
     pub reasoning: String,
-    /// Raw `reasoning_details` array from an OpenRouter response, if present.
-    /// Replayed on subsequent turns so the model can continue its chain-of-thought.
-    /// `None` for all non-OpenRouter providers.
+    /// Provider-owned replay state: OpenRouter's raw `reasoning_details` array,
+    /// or an `anthropic_content` object holding ordered native content blocks.
+    /// Kept opaque so signed thinking survives tool-result continuation. Each
+    /// serializer consumes only its own shape, including after model switches.
     pub reasoning_details: Option<Value>,
     /// The model id that was actually sent in the request body — the
     /// actually-requested model after any auto/mesh resolution. Populated by
@@ -687,11 +688,11 @@ mod tests {
         // Regression: a single ~3.1M-base64-byte `view_image` result on an
         // otherwise-empty history must NOT exceed the default pre-usage
         // handoff cap. The gate's byte-fallback threshold with the shipped
-        // defaults (max_context_tokens=200_000, max_output_tokens=32_768) is
-        // min(200_000*9/10, 200_000-32_768) = 167_232 "bytes". Before the fix
+        // defaults (max_context_tokens=200_000) is 200_000*9/10 = 180_000
+        // "bytes". Before the fix
         // this item counted ~3.1M and tripped instantly.
         let item = image_item(3_118_884);
-        const DEFAULT_PRE_USAGE_THRESHOLD: usize = 167_232;
+        const DEFAULT_PRE_USAGE_THRESHOLD: usize = 180_000;
         assert!(
             item.context_pressure_bytes() <= DEFAULT_PRE_USAGE_THRESHOLD,
             "one image charged {} bytes of context pressure, over the {} threshold",

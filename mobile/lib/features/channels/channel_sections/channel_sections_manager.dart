@@ -33,6 +33,7 @@ class ChannelSectionsCrypto {
 
 class ChannelSectionsManager {
   final String pubkey;
+  final String relayUrl;
   final ChannelSectionsStorage _storage;
   final ChannelSectionsCrypto _crypto;
   final RelaySessionNotifier? _relaySession;
@@ -56,9 +57,12 @@ class ChannelSectionsManager {
   Future<void>? _syncInFlight;
   bool _syncAgain = false;
   int _subscriptionGeneration = 0;
+  int _localRevision = 0;
+  bool _publishPending = false;
 
   ChannelSectionsManager({
     required this.pubkey,
+    required this.relayUrl,
     required SharedPreferences prefs,
     required ChannelSectionsCrypto crypto,
     required RelaySessionNotifier? relaySession,
@@ -74,7 +78,7 @@ class ChannelSectionsManager {
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay,
-       _store = ChannelSectionsStorage(prefs).read(pubkey);
+       _store = ChannelSectionsStorage(prefs).read(pubkey, relayUrl);
 
   ChannelSectionStore get store => _store;
 
@@ -88,6 +92,19 @@ class ChannelSectionsManager {
 
     await _syncWithRelay();
     _onChanged();
+  }
+
+  /// Re-reads the retained head once, e.g. on app foreground resume, to catch
+  /// an EVENT a healthy socket never delivered. Skipped while a local edit is
+  /// pending and discarded if one lands before the read returns.
+  void refreshFromRelay() {
+    if (_disposed || !_remoteEnabled || _publishPending) return;
+    final revision = _localRevision;
+    unawaited(
+      _fetchAndMerge(
+        isCurrent: () => revision == _localRevision && !_publishPending,
+      ),
+    );
   }
 
   /// One startup-sync attempt: fetch the remote blob, then start the live
@@ -287,16 +304,25 @@ class ChannelSectionsManager {
 
   void markDirty() {
     if (!_remoteEnabled || _disposed) return;
+    _localRevision++;
+    _publishPending = true;
     _publishDebounce?.cancel();
     _publishDebounce = Timer(const Duration(seconds: 5), () {
       _publishDebounce = null;
-      unawaited(_publish());
+      unawaited(
+        _publish().whenComplete(
+          () => _publishPending = _publishDebounce != null,
+        ),
+      );
     });
   }
 
   /// Returns whether the fetch reached the relay (regardless of whether a
   /// remote blob exists).
-  Future<bool> _fetchAndMerge({bool allowDisposed = false}) async {
+  Future<bool> _fetchAndMerge({
+    bool allowDisposed = false,
+    bool Function()? isCurrent,
+  }) async {
     if (_relaySession == null) return false;
     try {
       final events = await _relaySession.fetchHistory(
@@ -310,6 +336,7 @@ class ChannelSectionsManager {
         ),
       );
       if (_disposed && !allowDisposed) return false;
+      if (isCurrent != null && !isCurrent()) return false;
       _mergeEvents(events);
       _persist();
       if (!_disposed) _onChanged();
@@ -375,6 +402,8 @@ class ChannelSectionsManager {
   }
 
   void _mergeEvent(NostrEvent event) {
+    // Another community's groups must never reach this community's store.
+    if (!_servesThisCommunity) return;
     // Only process channel-sections d-tag events.
     final dTag = event.getTagValue('d');
     if (dTag != 'channel-sections') return;
@@ -386,22 +415,25 @@ class ChannelSectionsManager {
 
       final incoming = ChannelSectionStore.fromJson(parsed);
 
-      // Last-write-wins: newer createdAt wins; tie-break by event ID.
-      final isNewer =
-          event.createdAt > _lastRemoteCreatedAt ||
-          (event.createdAt == _lastRemoteCreatedAt &&
-              event.id.compareTo(_lastRemoteEventId ?? '') > 0);
-
-      if (isNewer) {
+      if (_isAfterCursor(event.createdAt, event.id)) {
         _lastRemoteCreatedAt = event.createdAt;
         _lastRemoteEventId = event.id;
         _store = incoming;
         _persist();
+        // A pending debounce stays armed: its republish re-converges an OK
+        // that later wins the cursor after this head replaced the store.
       }
     } catch (_) {
       // Decryption failure or parse error — keep existing state.
     }
   }
+
+  /// Last-write-wins. Relay retains `ORDER BY created_at DESC, id ASC`: at
+  /// equal second the lower event ID wins.
+  bool _isAfterCursor(int createdAt, String id) =>
+      createdAt > _lastRemoteCreatedAt ||
+      (createdAt == _lastRemoteCreatedAt &&
+          id.compareTo(_lastRemoteEventId ?? '') < 0);
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed) return;
@@ -433,7 +465,8 @@ class ChannelSectionsManager {
   Future<void> _publish({bool allowDisposed = false}) async {
     if ((!allowDisposed && _disposed) ||
         !_remoteEnabled ||
-        _signedEventRelay == null) {
+        _signedEventRelay == null ||
+        !_servesThisCommunity) {
       return;
     }
 
@@ -441,13 +474,16 @@ class ChannelSectionsManager {
     await _fetchAndMerge(allowDisposed: allowDisposed);
 
     // No-op suppression: skip if nothing changed
-    if (_isIdenticalToLastPublished()) return;
+    if (_isIdenticalToLastPublished() || !_servesThisCommunity) return;
 
+    final submitted = _store;
+    final revision = _localRevision;
     try {
-      final payload = jsonEncode(_store.toJson());
+      final payload = jsonEncode(submitted.toJson());
       final ciphertext = _crypto.encrypt(payload);
       final createdAt = max(currentUnixSeconds(), _lastRemoteCreatedAt + 1);
 
+      String? signedId;
       await _signedEventRelay.submit(
         kind: EventKind.readState,
         content: ciphertext,
@@ -456,20 +492,43 @@ class ChannelSectionsManager {
           ['t', 'channel-sections'],
         ],
         createdAt: createdAt,
+        onSigned: (event) => signedId = event.id,
       );
 
-      _lastRemoteCreatedAt = max(_lastRemoteCreatedAt, createdAt);
+      // Keep the cursor a coherent (created_at, id) pair so an OK that beats
+      // its own echo cannot make later same-second heads compare against a
+      // stale ID. A newer head learned during the await stays.
+      if (signedId != null && _isAfterCursor(createdAt, signedId!)) {
+        _lastRemoteCreatedAt = createdAt;
+        _lastRemoteEventId = signedId;
+        // A same-second loser merged during the await must not strand the
+        // device on content the relay did not keep.
+        if (revision == _localRevision && !identical(_store, submitted)) {
+          _store = submitted;
+          _persist();
+          if (!_disposed) _onChanged();
+        }
+      }
       _lastPublishedStore = ChannelSectionStore(
-        sections: List.of(_store.sections),
-        assignments: Map.of(_store.assignments),
+        sections: List.of(submitted.sections),
+        assignments: Map.of(submitted.assignments),
       );
     } catch (error) {
       debugPrint('[ChannelSectionsManager] publish failed: $error');
     }
   }
 
+  /// Switching community rebuilds the session in place before this manager
+  /// is retired, so in between it must neither take in nor publish data.
+  bool get _servesThisCommunity {
+    final served = _relaySession?.relayUrl;
+    return served == null || served == relayUrl;
+  }
+
+  /// A retired manager never writes the prefs key its successor now owns.
   void _persist() {
-    _storage.write(pubkey, _store);
+    if (_disposed) return;
+    _storage.write(pubkey, relayUrl, _store);
   }
 
   List<ChannelSection> _sortedSections() {

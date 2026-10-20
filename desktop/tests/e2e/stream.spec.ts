@@ -139,10 +139,10 @@ async function sendChannelMessage(
         throw new Error("Tauri invoke bridge is unavailable.");
       }
 
-      const channels = (await invoke("get_channels")) as Array<{
-        id: string;
-        name: string;
-      }>;
+      const payload = (await invoke("get_channels")) as {
+        channels: Array<{ id: string; name: string }> | null;
+      };
+      const channels = payload.channels ?? [];
       const channel = channels.find(({ name }) => name === targetChannelName);
       if (!channel) {
         throw new Error(`Channel not found: ${targetChannelName}`);

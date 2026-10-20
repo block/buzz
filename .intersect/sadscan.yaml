@@ -2,3 +2,18 @@
 exclude_rules_for_files:
   sq.pii.cc.visa:
     - Cargo.lock
+  # Self-signed test fixture generated solely to exercise reqwest identity parsing.
+  kingfisher.privkey.2:
+    # Published upstream synthetic CA key, compiled only under cfg(test).
+    # The gateway pins Apple's root and cannot trust this fixture CA.
+    - "*appattest-test-ca-key.pem"
+    - "*apns-test-identity.pem"
+    - "*apns-test-key-only.pem"
+    - "*apns-test-encrypted-identity.pem"
+    - "*apns-test-mismatched-identity.pem"
+  np.pem.1:
+    - "*appattest-test-ca-key.pem"
+    - "*apns-test-identity.pem"
+    - "*apns-test-key-only.pem"
+    - "*apns-test-encrypted-identity.pem"
+    - "*apns-test-mismatched-identity.pem"

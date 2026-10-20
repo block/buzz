@@ -12,7 +12,12 @@ import {
   isPositiveEmojiParticle,
   useEmojiBurst,
 } from "@/shared/ui/EmojiBurstProvider";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import {
+  DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const REACTION_PILL_BASE_CLASSES =
@@ -379,7 +384,10 @@ function ReactionPill({
   const handleMouseEnter = React.useCallback(() => {
     if (reaction.users.length === 0) return;
     clearTimers();
-    openTimeout.current = setTimeout(() => setOpen(true), 200);
+    openTimeout.current = setTimeout(
+      () => setOpen(true),
+      DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
+    );
   }, [reaction.users.length, clearTimers]);
 
   const scheduleClose = React.useCallback(() => {

@@ -79,6 +79,9 @@ pub const KIND_AUTH: u32 = 22242;
 pub const KIND_BLOSSOM_AUTH: u32 = 24242;
 /// Buzz custom one-time identity binding proof (ephemeral, not stored).
 pub const KIND_NOSTR_IDENTITY_BINDING: u32 = 24243;
+/// Operator-listener registration proof: a target pubkey consents to mention
+/// delivery to the listener in its `p` tag (HTTP body only, not stored).
+pub const KIND_OPERATOR_LISTENER_REGISTRATION: u32 = 24245;
 /// NIP-98: HTTP auth event (used in nip98.rs, not stored).
 pub const KIND_HTTP_AUTH: u32 = 27235;
 
@@ -132,14 +135,54 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
     KIND_PRIVATE_MANAGED_AGENT,
 ];
 
+/// Returns `true` if the event is readable only by its author: an
+/// [`AUTHOR_ONLY_KINDS`] event, or a NIP-09 deletion whose `k` tag names one.
+///
+/// A deletion request reveals its targets' ids and deletion timing, so it
+/// inherits the target's privacy. It is classified by its own `k` tag, not by
+/// a target lookup, so it stays private after the target is gone; ingest
+/// rejects a deletion of a stored author-only event without that tag.
+pub fn is_author_only_event_kind(event: &nostr::Event) -> bool {
+    let kind = event_kind_u32(event);
+    if AUTHOR_ONLY_KINDS.contains(&kind) {
+        return true;
+    }
+    kind == KIND_DELETION && k_tag_kinds(event).any(|k| AUTHOR_ONLY_KINDS.contains(&k))
+}
+
+/// Kinds named by an event's well-formed `["k", "<kind>"]` tags.
+///
+/// Only canonical decimal values count (`"30300"`, not `"030300"` or
+/// `"+30300"`), so this agrees with SQL that matches the tag value as text.
+pub fn k_tag_kinds(event: &nostr::Event) -> impl Iterator<Item = u32> + '_ {
+    event.tags.iter().filter_map(|tag| match tag.as_slice() {
+        [name, value, ..] if name == "k" => value
+            .parse::<u32>()
+            .ok()
+            .filter(|kind| kind.to_string() == *value),
+        _ => None,
+    })
+}
+
 /// Kinds that require a result-level read gate beyond the filter-layer
 /// `#p` check: even a reader who knows an event id MUST match the event's
 /// `#p` tag to receive the event. This closes the kindless `{ids:[…]}` read
 /// path for events whose existence must not be leaked.
 ///
-/// Used by `filter_can_match_result_gated_kinds` to force the per-event
-/// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+/// Membership notices (44100/44101) are here because the relay signs them, so
+/// their id is not author-bound, and they name the target, the channel and
+/// the actor. A system channel's notice must not reach anyone but its target.
+///
+/// This is the one list every delivery surface reads: the filter-level `ids`
+/// exemption, `reader_authorized_for_event` (WS/HTTP history, push), live
+/// fan-out (same pod and Redis), and the COUNT fallback
+/// (`filter_can_match_result_gated_kinds`).
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -437,6 +480,8 @@ pub const KIND_THREAD_SUMMARY: u32 = 39005;
 /// content = `{has_more, next_cursor}`. The only authority on exhaustion —
 /// clients must not infer `has_more` from row counts.
 pub const KIND_WINDOW_BOUNDS: u32 = 39006;
+/// NIP-CW thread-mode query-time bounds, bound to a normalized newest-first thread request.
+pub const KIND_THREAD_WINDOW_BOUNDS: u32 = 39007;
 
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
@@ -465,6 +510,9 @@ pub const KIND_PRESENCE_UPDATE: u32 = 20001;
 pub const KIND_PAIRING: u32 = 24134;
 /// Ephemeral: typing indicator for a channel.
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
+/// Ephemeral: an owner's presence for its agents. Content is the status, each
+/// `p` tag names one agent the signer owns. Never the signer's own presence.
+pub const KIND_AGENT_PRESENCE: u32 = 20003;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
@@ -548,6 +596,10 @@ pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
 pub const KIND_FORUM_POST: u32 = 45001;
+/// NIP-AR complete artifact revision.
+pub const KIND_ARTIFACT: u32 = 45010;
+/// Relay-authenticated artifact removal.
+pub const KIND_ARTIFACT_REMOVAL: u32 = 45011;
 /// A vote on a forum post.
 pub const KIND_FORUM_VOTE: u32 = 45002;
 /// A comment reply on a forum post.
@@ -594,6 +646,8 @@ pub const KIND_HUDDLE_PARTICIPANT_JOINED: u32 = 48101;
 pub const KIND_HUDDLE_PARTICIPANT_LEFT: u32 = 48102;
 /// A huddle ended.
 pub const KIND_HUDDLE_ENDED: u32 = 48103;
+/// Relay-synthesized authoritative liveness for an active huddle session.
+pub const KIND_HUDDLE_LIVENESS: u32 = 48104;
 /// Huddle channel guidelines/rules document.
 pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 
@@ -692,10 +746,13 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP29_GROUP_ROLES,
     KIND_THREAD_SUMMARY,
     KIND_WINDOW_BOUNDS,
+    KIND_THREAD_WINDOW_BOUNDS,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
+    KIND_AGENT_PRESENCE,
     KIND_HUDDLE_REACTION,
     KIND_BLOSSOM_AUTH,
+    KIND_OPERATOR_LISTENER_REGISTRATION,
     KIND_PAIRING,
     KIND_AGENT_OBSERVER_FRAME,
     KIND_HTTP_AUTH,
@@ -730,6 +787,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_USER_STATUS,
     KIND_READ_STATE,
     KIND_FORUM_POST,
+    KIND_ARTIFACT,
+    KIND_ARTIFACT_REMOVAL,
     KIND_FORUM_VOTE,
     KIND_FORUM_COMMENT,
     KIND_WORKFLOW_TRIGGER,
@@ -750,6 +809,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT,
     KIND_HUDDLE_ENDED,
+    KIND_HUDDLE_LIVENESS,
     KIND_HUDDLE_GUIDELINES,
     KIND_MEDIA_UPLOAD,
     KIND_GIT_REPO_ANNOUNCEMENT,
@@ -830,12 +890,14 @@ pub const fn is_command_kind(kind: u32) -> bool {
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_NIP43_MEMBERSHIP_LIST
+        KIND_ARTIFACT_REMOVAL
+            | KIND_NIP43_MEMBERSHIP_LIST
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
+            | KIND_THREAD_WINDOW_BOUNDS
     )
 }
 
@@ -914,6 +976,12 @@ mod tests {
     }
 
     #[test]
+    fn thread_window_bounds_is_relay_only() {
+        assert_eq!(KIND_THREAD_WINDOW_BOUNDS, 39007);
+        assert!(is_relay_only_kind(KIND_THREAD_WINDOW_BOUNDS));
+    }
+
+    #[test]
     fn parameterized_replaceable_range() {
         assert!(!is_parameterized_replaceable(29999));
         assert!(is_parameterized_replaceable(30000));
@@ -946,6 +1014,41 @@ mod tests {
             .tags(tag_vec)
             .sign_with_keys(&keys)
             .unwrap()
+    }
+
+    #[test]
+    fn deletion_privacy_follows_its_k_tag() {
+        for &kind in AUTHOR_ONLY_KINDS {
+            let k = kind.to_string();
+            assert!(is_author_only_event_kind(&make_event_of_kind(kind, &[])));
+            assert!(is_author_only_event_kind(&make_event_of_kind(
+                KIND_DELETION,
+                &[&["e", &"ab".repeat(32)], &["k", &k]]
+            )));
+            assert!(is_author_only_event_kind(&make_event_of_kind(
+                KIND_DELETION,
+                &[&["k", "1"], &["k", &k]]
+            )));
+        }
+        for tags in [
+            &[][..],
+            &[&["k", "1"][..]][..],
+            &[&["k", "not-a-kind"][..]][..],
+            // Non-canonical spellings are not markers; SQL matches text.
+            &[&["k", "030300"][..]][..],
+            &[&["k", "+30300"][..]][..],
+            &[&["k", " 30300"][..]][..],
+        ] {
+            assert!(!is_author_only_event_kind(&make_event_of_kind(
+                KIND_DELETION,
+                tags
+            )));
+        }
+        // A `k` tag classifies only deletions.
+        assert!(!is_author_only_event_kind(&make_event_of_kind(
+            1,
+            &[&["k", &KIND_EVENT_REMINDER.to_string()]]
+        )));
     }
 
     fn make_persona_event(tags: &[&[&str]]) -> nostr::Event {

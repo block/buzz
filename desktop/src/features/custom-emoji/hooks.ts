@@ -23,22 +23,39 @@ import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
  * live event is missed. Mirrors `user-status/hooks.ts`.
  */
 
+/** Poll backstop cadence. The live subscription (invalidate on any member's
+ * new 30030) and the reconnect invalidation are the freshness paths; this
+ * poll exists only to cover a silently dropped live event, so it can be
+ * rare. At the previous 2-minute cadence it refetched every member's full
+ * set (~300 KB burst) often enough to dominate desktop relay traffic. */
+export const CUSTOM_EMOJI_REFETCH_INTERVAL_MS = 20 * 60_000;
+/** Suppresses the focus refetch until emoji data is genuinely stale.
+ * The live subscription (invalidateQueries) is the primary freshness path. */
+export const CUSTOM_EMOJI_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/** Focus-refetch policy for the custom emoji query; consumed by focusRefetchPolicy.test.mjs. */
+export const customEmojiFocusRefetchPolicy = {
+  staleTime: CUSTOM_EMOJI_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: false,
+} as const;
+
 export const customEmojiQueryKey = ["custom-emoji"] as const;
 
 /** Query key for the caller's OWN editable 30030 set (distinct from the union). */
 export const ownCustomEmojiQueryKey = ["custom-emoji-own"] as const;
 
 export function useCustomEmojiQuery() {
-  const refetchInterval = useFocusedRefetchInterval(120_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    CUSTOM_EMOJI_REFETCH_INTERVAL_MS,
+  );
 
   return useQuery<CustomEmoji[]>({
     queryKey: customEmojiQueryKey,
     queryFn: listCustomEmoji,
     // The palette changes rarely; avoid refetch storms while the picker is open,
     // but poll every 2 minutes as a backstop for any missed live event.
-    staleTime: 60_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...customEmojiFocusRefetchPolicy,
   });
 }
 

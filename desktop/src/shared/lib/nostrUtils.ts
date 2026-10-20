@@ -31,7 +31,13 @@ const HEX_PUBKEY_REGEX = /^[0-9a-f]{64}$/;
  * anything else (does NOT throw — intended for live form validation).
  *
  * The input is trimmed first; surrounding whitespace from copy-paste is
- * tolerated.
+ * tolerated. It is also case-normalized before matching and decoding —
+ * preexisting behavior — so a hex key in any casing resolves, and a
+ * mixed-case npub (invalid Bech32 as written) is accepted via its
+ * lowercased form. The identity payload itself stays strict: it must
+ * decode to exactly a 64-char hex identity key, because `npubEncode` also
+ * encodes degenerate short payloads (even `""`), which are never valid
+ * identities.
  */
 export function parsePubkeyInput(input: string): string | null {
   const trimmed = input.trim().toLowerCase();
@@ -41,7 +47,7 @@ export function parsePubkeyInput(input: string): string | null {
   if (trimmed.startsWith("npub1")) {
     try {
       const decoded = decode(trimmed);
-      if (decoded.type === "npub") {
+      if (decoded.type === "npub" && HEX_PUBKEY_REGEX.test(decoded.data)) {
         return decoded.data;
       }
     } catch {
@@ -49,6 +55,28 @@ export function parsePubkeyInput(input: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Parse a user-entered event reference — 64-char hex, `note1…` or
+ * `nevent1…` — into a lowercase hex event id. Relay hints in an `nevent`
+ * are ignored. Returns null for anything else (does NOT throw).
+ */
+export function parseEventIdInput(input: string): string | null {
+  const trimmed = input.trim().toLowerCase();
+  if (HEX_PUBKEY_REGEX.test(trimmed)) return trimmed;
+  try {
+    const decoded = decode(trimmed);
+    const id =
+      decoded.type === "note"
+        ? decoded.data
+        : decoded.type === "nevent"
+          ? decoded.data.id
+          : null;
+    return id && HEX_PUBKEY_REGEX.test(id) ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

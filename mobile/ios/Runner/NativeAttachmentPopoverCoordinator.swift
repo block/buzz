@@ -265,7 +265,7 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
 }
 
 enum NativeAttachmentMenuLayout {
-  static let itemCount: CGFloat = 4
+  static let itemCount: CGFloat = 5
   static let contentPadding: CGFloat = 16
   static let minimumItemHeight: CGFloat = 52
   static let itemSpacing: CGFloat = 8
@@ -381,15 +381,8 @@ func makeNativeAttachmentMenuButton(
   )
   button.accessibilityLabel = title
 
-  let symbolConfiguration = UIImage.SymbolConfiguration(
-    pointSize: 18,
-    weight: .regular
-  )
   let iconView = UIImageView(
-    image: UIImage(
-      systemName: symbol,
-      withConfiguration: symbolConfiguration
-    )
+    image: NativeTabler.image(symbol, size: 18)
   )
   iconView.tintColor = .label
   iconView.contentMode = .center

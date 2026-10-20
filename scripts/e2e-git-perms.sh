@@ -336,6 +336,7 @@ export BUZZ_GIT_HOOK_HMAC_SECRET="${HMAC_SECRET}"
 export BUZZ_BIND_ADDR="${RELAY_HOST}:${RELAY_PORT}"
 export RELAY_URL="${RELAY_WS}"
 export RUST_LOG="buzz_relay=warn"
+export BUZZ_RELAY_PRIVATE_KEY="${BUZZ_RELAY_PRIVATE_KEY:-$(openssl rand -hex 32)}"
 export BUZZ_REQUIRE_AUTH_TOKEN=false
 
 # Clean repos dir (isolated test state)

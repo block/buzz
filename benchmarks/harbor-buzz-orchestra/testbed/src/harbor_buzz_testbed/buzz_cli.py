@@ -81,7 +81,7 @@ class BuzzCli:
             raise BuzzCliError(f"channel create returned no channel_id: {response}")
         return channel_id
 
-    def add_member(self, channel_id: str, pubkey: str) -> None:
+    def add_member(self, channel_id: str, pubkey: str, role: str = "member") -> None:
         self.run(
             "channels",
             "add-member",
@@ -90,8 +90,22 @@ class BuzzCli:
             "--pubkey",
             pubkey,
             "--role",
-            "member",
+            role,
         )
+
+    def profiles(self, pubkeys: list[str]) -> list[dict[str, Any]]:
+        """Return the profiles currently published for the given pubkeys."""
+        args = ["users", "get"]
+        for pubkey in pubkeys:
+            args.extend(("--pubkey", pubkey))
+        response = self.run(*args)
+        return response if isinstance(response, list) else []
+
+    def set_profile(self, name: str, about: str | None = None) -> None:
+        args = ["users", "set-profile", "--name", name]
+        if about is not None:
+            args.extend(("--about", about))
+        self.run(*args)
 
     def archive_channel(self, channel_id: str) -> None:
         self.run("channels", "archive", "--channel", channel_id)

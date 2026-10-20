@@ -15,19 +15,36 @@ import {
 import type { AgentPersona, UpdatePersonaInput } from "@/shared/api/types";
 import { KIND_PERSONA } from "@/shared/constants/kinds";
 
+/** Poll backstop cadence. The live subscription (invalidate on any new
+ * 30175) and the reconnect invalidation are the freshness paths; this poll
+ * exists only to cover a silently dropped live event, so it can be rare. At
+ * the previous 2-minute cadence it re-walked the entire persona catalog
+ * (~150 KB burst) often enough to be a top-three desktop traffic source. */
+export const PERSONA_CATALOG_REFETCH_INTERVAL_MS = 20 * 60_000;
+/** Suppresses the focus refetch until persona catalog data is genuinely stale.
+ * The live subscription (invalidateQueries) is the primary freshness path. */
+export const PERSONA_CATALOG_FOCUS_STALE_TIME_MS = 5 * 60_000;
+
+/** Focus-refetch policy for the persona catalog query; consumed by focusRefetchPolicy.test.mjs. */
+export const personaCatalogFocusRefetchPolicy = {
+  staleTime: PERSONA_CATALOG_FOCUS_STALE_TIME_MS,
+  refetchOnWindowFocus: false,
+} as const;
+
 export function personaCatalogQueryKey(communityId: string | null) {
   return ["persona-catalog", communityId] as const;
 }
 
 export function usePersonaCatalogQuery(communityId: string | null) {
-  const refetchInterval = useFocusedRefetchInterval(120_000);
+  const refetchInterval = useFocusedRefetchInterval(
+    PERSONA_CATALOG_REFETCH_INTERVAL_MS,
+  );
   return useQuery<PersonaCatalogPublication[]>({
     enabled: communityId !== null,
     queryKey: personaCatalogQueryKey(communityId),
     queryFn: fetchPersonaCatalogPublications,
-    staleTime: 30_000,
     refetchInterval,
-    refetchOnWindowFocus: true,
+    ...personaCatalogFocusRefetchPolicy,
   });
 }
 

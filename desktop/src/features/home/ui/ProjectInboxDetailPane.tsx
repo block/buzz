@@ -4,11 +4,7 @@ import * as React from "react";
 import { useCommunities } from "@/features/communities/useCommunities";
 import type { ProjectInboxWorkItem } from "@/features/home/lib/projectInbox";
 import { ProjectIssueDetail } from "@/features/projects/ui/ProjectIssuesPanel";
-import {
-  ProjectPullRequestDetail,
-  PullRequestDetailHeader,
-  PullRequestMetaRail,
-} from "@/features/projects/ui/ProjectPullRequestsPanel";
+import { ProjectPullRequestDetail } from "@/features/projects/ui/ProjectPullRequestsPanel";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -16,7 +12,6 @@ import {
 import { openProjectMergeRecoveryTerminal } from "@/shared/api/projectGit";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
-import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -40,7 +35,7 @@ export function ProjectInboxDetailPane({
   const { activeCommunity } = useCommunities();
   const [detailContentRef, detailContentWidth] =
     useElementWidth<HTMLDivElement>();
-  const showSideRail = detailContentWidth >= 760;
+  const showWideActions = detailContentWidth >= 760;
   const authorPubkey =
     workItem.type === "pull-request"
       ? workItem.pullRequest.author
@@ -48,9 +43,15 @@ export function ProjectInboxDetailPane({
   const authorLabel = resolveUserLabel({ profiles, pubkey: authorPubkey });
   const authorAvatarUrl =
     profiles?.[normalizePubkey(authorPubkey)]?.avatarUrl ?? null;
+  const authorIsAgent =
+    profiles?.[normalizePubkey(authorPubkey)]?.isAgent === true;
   const inboxTitle = `${authorLabel} sent you ${
-    workItem.type === "pull-request" ? "a pull request" : "an issue"
+    workItem.type === "pull-request" ? "a review" : "a task"
   }`;
+  // The action deep-links to this specific work item in the project view,
+  // so the label names the entity, not the project.
+  const openLabel =
+    workItem.type === "pull-request" ? "Open review" : "Open task";
   const handleOpenMergeRecoveryTerminal = React.useCallback(
     async (input: {
       expectedCommit: string;
@@ -59,7 +60,7 @@ export function ProjectInboxDetailPane({
       targetBranch: string;
     }) => {
       if (workItem.type !== "pull-request") {
-        throw new Error("Merge recovery is only available for pull requests.");
+        throw new Error("Merge recovery is only available for reviews.");
       }
       const targetCloneUrl = workItem.repository.cloneUrls[0];
       if (!targetCloneUrl) {
@@ -99,6 +100,7 @@ export function ProjectInboxDetailPane({
                 avatarUrl={authorAvatarUrl}
                 className="shrink-0"
                 displayName={authorLabel}
+                shape={authorIsAgent ? "squircle" : "circle"}
                 size="sm"
                 testId="project-inbox-author-avatar"
               />
@@ -110,16 +112,16 @@ export function ProjectInboxDetailPane({
               </h2>
             </div>
             <Button
-              aria-label="Open project"
+              aria-label={openLabel}
               className="shrink-0"
               onClick={onOpenProject}
-              size={showSideRail ? "sm" : "icon"}
-              title="Open project"
+              size={showWideActions ? "sm" : "icon"}
+              title={openLabel}
               type="button"
               variant="ghost"
             >
               <ExternalLink className="h-4 w-4" />
-              {showSideRail ? "Open project" : null}
+              {showWideActions ? openLabel : null}
             </Button>
           </div>
         </div>
@@ -134,42 +136,22 @@ export function ProjectInboxDetailPane({
             className="overflow-hidden rounded-xl border border-border/60 bg-card"
             data-testid="project-inbox-work-item-card"
           >
-            {workItem.type === "pull-request" ? (
-              <div
-                className={cn(
-                  "grid",
-                  showSideRail && "grid-cols-[minmax(0,1fr)_18rem]",
-                )}
-                data-testid="project-inbox-work-item-layout"
-              >
-                <div className="min-w-0">
-                  <PullRequestDetailHeader
-                    profiles={profiles}
-                    pullRequest={workItem.pullRequest}
-                  />
-                  <ProjectPullRequestDetail
-                    mode="conversation"
-                    onOpenTerminal={handleOpenMergeRecoveryTerminal}
-                    profiles={profiles}
-                    project={workItem.repository}
-                    pullRequest={workItem.pullRequest}
-                  />
-                </div>
-                <PullRequestMetaRail
+            <div data-testid="project-inbox-work-item-layout">
+              {workItem.type === "pull-request" ? (
+                <ProjectPullRequestDetail
+                  onOpenTerminal={handleOpenMergeRecoveryTerminal}
                   profiles={profiles}
                   project={workItem.repository}
                   pullRequest={workItem.pullRequest}
-                  stacked={!showSideRail}
                 />
-              </div>
-            ) : (
-              <ProjectIssueDetail
-                issue={workItem.issue}
-                profiles={profiles}
-                project={workItem.repository}
-                stackMetaRail={!showSideRail}
-              />
-            )}
+              ) : (
+                <ProjectIssueDetail
+                  issue={workItem.issue}
+                  profiles={profiles}
+                  project={workItem.repository}
+                />
+              )}
+            </div>
           </div>
         </div>
       </div>

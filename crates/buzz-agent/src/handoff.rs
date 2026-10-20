@@ -59,8 +59,7 @@ impl RunCtx<'_> {
         }
         if *handoff_attempts >= self.cfg.max_handoffs {
             let projected = self.projected_handoff_input_tokens();
-            let threshold =
-                token_threshold(self.cfg.max_context_tokens, self.cfg.max_output_tokens);
+            let threshold = token_threshold(self.cfg.max_context_tokens);
             tracing::warn!(
                 session_id = self.session_id,
                 reason = "preflight",
@@ -246,7 +245,7 @@ impl RunCtx<'_> {
         match *self.last_request_input_tokens {
             Some(_) => {
                 self.projected_handoff_input_tokens()
-                    >= token_threshold(self.cfg.max_context_tokens, self.cfg.max_output_tokens)
+                    >= token_threshold(self.cfg.max_context_tokens)
             }
             None => {
                 let bytes: usize = self
@@ -257,7 +256,6 @@ impl RunCtx<'_> {
                 bytes
                     > byte_fallback_threshold(
                         self.cfg.max_context_tokens,
-                        self.cfg.max_output_tokens,
                         self.cfg.max_history_bytes,
                     )
             }
@@ -495,28 +493,20 @@ fn estimate_tokens_from_bytes(bytes: usize) -> u64 {
     (bytes as u64).div_ceil(CONSERVATIVE_BYTES_PER_TOKEN)
 }
 
-/// Input-token count at which to hand off. Caps at the configured fraction of
-/// the window and also leaves room for `max_output_tokens`, so input + output
-/// can't together exceed the window. Free function so the policy math is unit
-/// testable without constructing a [`RunCtx`].
-fn token_threshold(max_context_tokens: u64, max_output_tokens: u32) -> u64 {
+/// Input-token count at which to hand off. Uses 90% of the configured context
+/// window, independent of the request's output allowance. Free function so the
+/// policy math is unit testable without constructing a [`RunCtx`].
+fn token_threshold(max_context_tokens: u64) -> u64 {
     // Integer math: handoff threshold is 90%, i.e. window * 9 / 10.
-    let fractional = max_context_tokens / 10 * 9;
-    let output_reserved = max_context_tokens.saturating_sub(u64::from(max_output_tokens));
-    fractional.min(output_reserved)
+    max_context_tokens / 10 * 9
 }
 
 /// Conservative byte cap used only before any usage is known. Maps the token
 /// threshold to bytes at the conservative bytes/token ratio (so the cap is
 /// small and the handoff fires early), clamped to the configured byte budget
 /// so it can only ever be more conservative than the old byte-only behavior.
-fn byte_fallback_threshold(
-    max_context_tokens: u64,
-    max_output_tokens: u32,
-    max_history_bytes: usize,
-) -> usize {
-    let derived = token_threshold(max_context_tokens, max_output_tokens)
-        .saturating_mul(CONSERVATIVE_BYTES_PER_TOKEN);
+fn byte_fallback_threshold(max_context_tokens: u64, max_history_bytes: usize) -> usize {
+    let derived = token_threshold(max_context_tokens).saturating_mul(CONSERVATIVE_BYTES_PER_TOKEN);
     let byte_cap = max_history_bytes / 10 * 9;
     usize::try_from(derived).unwrap_or(usize::MAX).min(byte_cap)
 }
@@ -605,36 +595,23 @@ mod tests {
     }
 
     #[test]
-    fn token_threshold_uses_fraction_when_output_is_small() {
-        // 200k window, 1k output. fractional = 0.9*200000 = 180000;
-        // output_reserved = 200000-1000 = 199000; min = 180000.
-        assert_eq!(token_threshold(200_000, 1_000), 180_000);
-    }
-
-    #[test]
-    fn token_threshold_reserves_output_headroom() {
-        // Large output relative to window: the output-reserve term dominates,
-        // keeping input+output within the window.
-        // 100k window, 40k output: fractional=90k, reserved=60k -> 60k.
-        assert_eq!(token_threshold(100_000, 40_000), 60_000);
-    }
-
-    #[test]
-    fn token_threshold_saturates_when_output_exceeds_window() {
-        // Degenerate (config validation forbids this, but math must not panic):
-        // reserved saturates to 0, so threshold is 0 -> always hand off.
-        assert_eq!(token_threshold(1000, 5000), 0);
+    fn token_threshold_is_independent_of_output_allowance() {
+        // Handoff always begins at 90% of the input context budget, including
+        // when the request's output allowance grows or exceeds the window.
+        assert_eq!(token_threshold(200_000), 180_000);
+        assert_eq!(token_threshold(100_000), 90_000);
+        assert_eq!(token_threshold(1_000), 900);
     }
 
     #[test]
     fn byte_fallback_is_conservative_and_capped() {
         // Derived = token_threshold * 1 (1 byte/token upper bound). For
-        // 200k/1k: 180000 bytes, well under a 16 MiB byte budget, so derived
-        // wins (early handoff).
-        let t = byte_fallback_threshold(200_000, 1_000, 16 * 1024 * 1024);
+        // 200k window: 180000 bytes, well under a 16 MiB byte budget, so the
+        // derived threshold wins (early handoff).
+        let t = byte_fallback_threshold(200_000, 16 * 1024 * 1024);
         assert_eq!(t, 180_000);
         // With a tiny byte budget the cap wins -> never exceeds it (window*90%).
-        let capped = byte_fallback_threshold(200_000, 1_000, 8192);
+        let capped = byte_fallback_threshold(200_000, 8192);
         assert_eq!(capped, 8192 / 10 * 9);
     }
 

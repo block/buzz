@@ -1,3 +1,5 @@
+import java.net.URI
+import java.util.Base64
 import java.util.Properties
 
 plugins {
@@ -20,6 +22,44 @@ val uploadSigningValues =
     )
 val missingUploadSigningValues = uploadSigningValues.filterValues { it.isNullOrBlank() }.keys
 val hasUploadSigning = missingUploadSigningValues.isEmpty()
+val dartDefines = providers.gradleProperty("dart-defines").orNull.orEmpty()
+val pushGatewayDefinePrefix = "BUZZ_PUSH_GATEWAY_URL="
+val pushGatewayOrigins =
+    dartDefines.split(',').mapNotNull { encoded ->
+        val define = runCatching { String(Base64.getDecoder().decode(encoded)) }.getOrNull()
+        define
+            ?.takeIf { it.startsWith(pushGatewayDefinePrefix) }
+            ?.removePrefix(pushGatewayDefinePrefix)
+    }
+fun isValidPushGatewayOrigin(value: String, requireHttps: Boolean): Boolean {
+    val uri = runCatching { URI(value) }.getOrNull() ?: return false
+    val scheme = uri.scheme?.lowercase()
+    return (scheme == "https" || (!requireHttps && scheme == "http")) &&
+        !uri.host.isNullOrBlank() &&
+        uri.rawUserInfo == null &&
+        (uri.rawPath.isNullOrEmpty() || uri.rawPath == "/") &&
+        uri.rawQuery == null &&
+        uri.rawFragment == null &&
+        (if (requireHttps) uri.port == -1 else uri.port == -1 || uri.port in 1..65535)
+}
+
+tasks.matching { it.name.startsWith("compileFlutterBuild") }.configureEach {
+    doFirst {
+        val requireHttps = !name.endsWith("Debug", ignoreCase = true)
+        val hasValidPushGatewayOrigin =
+            pushGatewayOrigins.isEmpty() ||
+                (pushGatewayOrigins.size == 1 &&
+                    isValidPushGatewayOrigin(pushGatewayOrigins.single(), requireHttps))
+        if (!hasValidPushGatewayOrigin) {
+            throw GradleException(
+                "When supplied, BUZZ_PUSH_GATEWAY_URL must be an " +
+                    (if (requireHttps) "HTTPS" else "HTTP(S)") +
+                    " origin without " + (if (requireHttps) "an explicit port, " else "") +
+                    "credentials, path, query, or fragment.",
+            )
+        }
+    }
+}
 
 // Worktree-aware debug identity (gitignored, written by
 // scripts/mobile-worktree-overrides.sh): debug builds from a git worktree get a
@@ -30,6 +70,15 @@ val worktreeProps =
     Properties().apply {
         if (worktreePropsFile.isFile) worktreePropsFile.inputStream().use { load(it) }
     }
+// Optional gitignored developer overrides are loaded after the generated
+// worktree values. They are consumed only by the debug build type below, so a
+// long-lived device test build can keep a stable, descriptive local identity
+// without changing release/profile or being overwritten by the worktree script.
+val appOverridesFile = rootProject.file("AppOverrides.properties")
+val appOverrides =
+    Properties().apply {
+        if (appOverridesFile.isFile) appOverridesFile.inputStream().use { load(it) }
+    }
 val worktreeLabel = worktreeProps.getProperty("label")?.takeIf { it.isNotBlank() }
 if (worktreeLabel != null && !worktreeLabel.matches(Regex("""[A-Za-z0-9._-]+"""))) {
     throw GradleException(
@@ -37,12 +86,31 @@ if (worktreeLabel != null && !worktreeLabel.matches(Regex("""[A-Za-z0-9._-]+""")
             "resources), got: " + worktreeLabel,
     )
 }
+val worktreeAppName = worktreeProps.getProperty("appName")?.takeIf { it.isNotBlank() }
+if (worktreeAppName != null && !worktreeAppName.matches(Regex("""[A-Za-z0-9._() \-]+"""))) {
+    throw GradleException(
+        "worktree.properties appName must contain only letters, numbers, spaces, ., _, -, or " +
+            "parentheses, got: " + worktreeAppName,
+    )
+}
 val worktreeIdSuffix =
     worktreeProps.getProperty("applicationIdSuffix")?.takeIf { it.isNotBlank() }
-if (worktreeIdSuffix != null && !worktreeIdSuffix.matches(Regex("""\.[a-z][a-z0-9_]*"""))) {
+val debugIdSuffix =
+    appOverrides.getProperty("applicationIdSuffix")?.takeIf { it.isNotBlank() }
+        ?: worktreeIdSuffix
+if (debugIdSuffix != null && !debugIdSuffix.matches(Regex("""\.[a-z][a-z0-9_]*"""))) {
     throw GradleException(
-        "worktree.properties applicationIdSuffix must match \\.[a-z][a-z0-9_]*, got: " +
-            worktreeIdSuffix,
+        "debug applicationIdSuffix must match \\.[a-z][a-z0-9_]*, got: " +
+            debugIdSuffix,
+    )
+}
+val debugAppName = appOverrides.getProperty("appName")?.takeIf { it.isNotBlank() }
+if (
+    debugAppName != null &&
+        !debugAppName.matches(Regex("""[A-Za-z0-9][A-Za-z0-9 ._()\-]{0,39}"""))
+) {
+    throw GradleException(
+        "debug appName must be 1-40 resource-safe characters, got: " + debugAppName,
     )
 }
 
@@ -109,11 +177,15 @@ android {
         debug {
             // Only debug builds take the worktree identity; release/profile
             // keep the production applicationId and label.
-            if (worktreeIdSuffix != null) {
-                applicationIdSuffix = worktreeIdSuffix
+            if (debugIdSuffix != null) {
+                applicationIdSuffix = debugIdSuffix
             }
-            if (worktreeLabel != null) {
-                resValue("string", "app_name", "Buzz ($worktreeLabel)")
+            val resolvedAppName =
+                debugAppName
+                    ?: worktreeAppName
+                    ?: worktreeLabel?.let { "Buzz ($it)" }
+            if (resolvedAppName != null) {
+                resValue("string", "app_name", resolvedAppName)
             }
         }
         release {
@@ -125,6 +197,9 @@ android {
 }
 
 dependencies {
+    implementation("com.google.android.play:age-signals:0.0.4")
+    implementation("androidx.appcompat:appcompat:1.6.1")
+
     testImplementation(kotlin("test"))
 
     androidTestImplementation(kotlin("test"))

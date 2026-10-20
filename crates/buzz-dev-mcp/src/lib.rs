@@ -2,7 +2,7 @@
 #![cfg_attr(windows, deny(unsafe_code))]
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ServerCapabilities, ServerConfig},
     tool, tool_handler, tool_router,
     transport::stdio,
     ErrorData, ServerHandler, ServiceExt,
@@ -39,7 +39,7 @@ impl DevMcp {
 
     #[tool(
         name = "shell",
-        description = "Run a shell command (bash by default; set `BUZZ_SHELL` to use cmd, PowerShell, or another shell). Ephemeral process per call. Output tail-truncated to ~8KB for the LLM; full output (first 10MB) saved to artifact file. timeout_ms defaults to 120000 (2 min) if omitted; capped at 600000 (10 min). For long-running commands (git push with hooks, cargo build, test suites), use 300000+. On PATH: rg (prefer over grep; flags: -n -i -l -g <glob> -C <n> --files), tree (flags: -d <depth>; shows line counts), and buzz (Buzz relay CLI — run buzz --help for commands)."
+        description = "Run a shell command (bash by default; set `BUZZ_SHELL` to use cmd, PowerShell, or another shell). Ephemeral process per call. Output tail-truncated to ~8KB for the LLM; full output (first 10MB) saved to artifact file. timeout_ms defaults to 120000 (2 min) if omitted; capped at 1,200,000 (20 min). For long-running commands (git push with hooks, cargo build, test suites), use 300000+. On PATH: rg (prefer over grep; flags: -n -i -l -g <glob> -C <n> --files), tree (flags: -d <depth>; shows line counts), and buzz (Buzz relay CLI — run buzz --help for commands)."
     )]
     async fn shell(
         &self,
@@ -84,7 +84,7 @@ impl DevMcp {
 
     #[tool(
         name = "todo",
-        description = "Session task list. Omit `todos` to read current state. Provide a full replacement array to update. Items are {text, done}. Open items removed without being marked done will trigger a warning. If the operator enables hooks for this server, the agent's _Stop hook will advise against ending the turn while items are open."
+        description = "Session checklist only for work that must continue across turns or survive context compaction. Do not use for work you can finish in the current turn. Omit `todos` to read; provide the full {text, done} list to replace it. Open items let the _Stop hook advise against ending."
     )]
     async fn todo(
         &self,
@@ -125,8 +125,8 @@ impl DevMcp {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for DevMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::new(
                 "buzz-dev-mcp",
                 env!("CARGO_PKG_VERSION"),
@@ -148,8 +148,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     match cmd.as_str() {
         "rg" => std::process::exit(rg::run(std::env::args().skip(1).collect())),
         "tree" => std::process::exit(tree::run(std::env::args().skip(1).collect())),
-        "git-credential-nostr" => std::process::exit(git_credential_nostr::run()),
-        "git-sign-nostr" => std::process::exit(git_sign_nostr::run()),
         _ => {}
     }
 

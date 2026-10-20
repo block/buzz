@@ -5,220 +5,16 @@
 //!   - cancellation leaves history valid for the next prompt
 //!   - empty-content assistant turn doesn't poison OpenAI history
 
-use std::collections::VecDeque;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 
-struct CapturingLlm {
-    url: String,
-    captured: Arc<Mutex<Vec<Value>>>,
-}
-
-async fn spawn_capturing_llm(responses: Vec<Value>) -> CapturingLlm {
-    spawn_capturing_llm_with_status(responses.into_iter().map(|v| (200u16, v)).collect()).await
-}
-
-/// Like `spawn_capturing_llm` but each canned response carries its own HTTP
-/// status, so a test can serve a real provider rejection (e.g. a context-window
-/// 400) instead of only success bodies.
-async fn spawn_capturing_llm_with_status(responses: Vec<(u16, Value)>) -> CapturingLlm {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
-    let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let cap2 = captured.clone();
-    tokio::spawn(async move {
-        loop {
-            let (mut sock, _) = match listener.accept().await {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-            let queue = queue.clone();
-            let captured = cap2.clone();
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut tmp = [0u8; 8192];
-                // Read until headers complete.
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match sock.read(&mut tmp).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    }
-                    if buf.len() > 4_000_000 {
-                        return;
-                    }
-                }
-                // Parse Content-Length and read body.
-                let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-                let headers = &buf[..header_end];
-                let mut body_len = 0usize;
-                for line in headers.split(|b| *b == b'\n') {
-                    let line = std::str::from_utf8(line).unwrap_or("");
-                    if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        body_len = rest.trim().trim_end_matches('\r').parse().unwrap_or(0);
-                    }
-                }
-                while buf.len() < header_end + body_len {
-                    match sock.read(&mut tmp).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    }
-                }
-                if let Ok(req) = serde_json::from_slice::<Value>(&buf[header_end..]) {
-                    captured.lock().await.push(req);
-                }
-                let (status, body) = queue
-                    .lock()
-                    .await
-                    .pop_front()
-                    .unwrap_or_else(|| (200, json!({ "error": "no canned response" })));
-                let body_s = serde_json::to_string(&body).unwrap();
-                let reason = match status {
-                    200 => "OK",
-                    400 => "Bad Request",
-                    _ => "Error",
-                };
-                let resp = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body_s.len(), body_s,
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            });
-        }
-    });
-    CapturingLlm { url, captured }
-}
-
-struct Harness {
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    stdout: BufReader<tokio::process::ChildStdout>,
-    stderr: Arc<StdMutex<String>>,
-    next_id: i64,
-}
-
-impl Harness {
-    async fn spawn_with_env(base_url: &str, extra: &[(&str, &str)]) -> Self {
-        let bin = env!("CARGO_BIN_EXE_buzz-agent");
-        let mut cmd = tokio::process::Command::new(bin);
-        cmd.env("BUZZ_AGENT_PROVIDER", "openai")
-            .env("OPENAI_COMPAT_API_KEY", "test")
-            .env("OPENAI_COMPAT_MODEL", "fake-model")
-            .env("OPENAI_COMPAT_BASE_URL", base_url)
-            .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
-            .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
-            .env("BUZZ_AGENT_MAX_ROUNDS", "8")
-            .env("BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS", "2");
-        for (k, v) in extra {
-            cmd.env(k, v);
-        }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = cmd.spawn().expect("spawn buzz-agent");
-        let stdin = child.stdin.take().unwrap();
-        let stdout = BufReader::new(child.stdout.take().unwrap());
-        let stderr = child.stderr.take().unwrap();
-        let stderr_buf = Arc::new(StdMutex::new(String::new()));
-        let stderr_out = Arc::clone(&stderr_buf);
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                let n = match reader.read_line(&mut line).await {
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                if n == 0 {
-                    break;
-                }
-                if let Ok(mut out) = stderr_out.lock() {
-                    out.push_str(&line);
-                }
-            }
-        });
-        Self {
-            child,
-            stdin,
-            stdout,
-            stderr: stderr_buf,
-            next_id: 1,
-        }
-    }
-
-    async fn spawn(base_url: &str) -> Self {
-        Self::spawn_with_env(base_url, &[]).await
-    }
-
-    async fn send(&mut self, method: &str, params: Value) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.write(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
-            .await;
-        id
-    }
-
-    async fn notify(&mut self, method: &str, params: Value) {
-        self.write(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
-            .await;
-    }
-
-    async fn write(&mut self, msg: Value) {
-        let mut s = serde_json::to_string(&msg).unwrap();
-        s.push('\n');
-        self.stdin.write_all(s.as_bytes()).await.unwrap();
-        self.stdin.flush().await.unwrap();
-    }
-
-    async fn recv(&mut self) -> Value {
-        let mut line = String::new();
-        let n = tokio::time::timeout(Duration::from_secs(15), self.stdout.read_line(&mut line))
-            .await
-            .expect("recv timeout")
-            .expect("read line");
-        assert!(n > 0, "agent EOF");
-        serde_json::from_str(&line).expect("non-JSON line")
-    }
-
-    async fn recv_until<F: FnMut(&Value) -> bool>(&mut self, mut pred: F) -> Value {
-        loop {
-            let v = self.recv().await;
-            if pred(&v) {
-                return v;
-            }
-        }
-    }
-
-    async fn shutdown(mut self) {
-        drop(self.stdin);
-        let _ = tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await;
-        let _ = self.child.start_kill();
-    }
-
-    fn stderr_text(&self) -> String {
-        self.stderr.lock().map(|s| s.clone()).unwrap_or_default()
-    }
-}
-
-fn openai_text(content: &str) -> Value {
-    json!({
-        "id": "cc-1", "object": "chat.completion", "model": "fake-model",
-        "choices": [{
-            "index": 0,
-            "message": { "role": "assistant", "content": content },
-            "finish_reason": "stop",
-        }],
-    })
-}
+mod common;
+use common::{
+    approve_permission, openai_text, openai_tool_call, spawn_capturing_llm,
+    spawn_capturing_llm_with_status, Harness,
+};
 
 /// Like [`openai_text`] but attaches a `usage` block so tests can drive the
 /// token-based handoff gate. `prompt_tokens` is the input-token count the
@@ -250,23 +46,6 @@ fn openai_max_tokens(content: &str, tool_calls: Value) -> Value {
             "completion_tokens": 100,
             "total_tokens": 110,
         },
-    })
-}
-
-fn openai_tool_call(id: &str, name: &str, args: Value) -> Value {
-    json!({
-        "id": "cc-2", "object": "chat.completion", "model": "fake-model",
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant", "content": null,
-                "tool_calls": [{
-                    "id": id, "type": "function",
-                    "function": { "name": name, "arguments": args.to_string() },
-                }],
-            },
-            "finish_reason": "tool_calls",
-        }],
     })
 }
 
@@ -676,13 +455,7 @@ async fn per_turn_tool_call_cap_enforced() {
     loop {
         let v = h.recv().await;
         if v.get("method") == Some(&json!("session/request_permission")) {
-            let id = v["id"].clone();
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&v)).await;
             continue;
         }
         if v.get("method") == Some(&json!("session/update"))
@@ -858,7 +631,7 @@ async fn hook_stop_blocks_premature_end() {
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
         )
         .await;
-    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    let r = h.recv_until_approving(|v| v["id"] == json!(p)).await;
     assert!(r.get("result").is_some(), "errored: {r}");
     assert_eq!(r["result"]["stopReason"], "end_turn");
 
@@ -936,7 +709,7 @@ async fn hook_stop_budget_exhausted() {
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
         )
         .await;
-    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    let r = h.recv_until_approving(|v| v["id"] == json!(p)).await;
     assert!(r.get("result").is_some(), "errored: {r}");
     assert_eq!(r["result"]["stopReason"], "end_turn");
 
@@ -1517,7 +1290,7 @@ async fn stale_usage_plus_history_growth_triggers_handoff() {
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
         )
         .await;
-    let _ = h.recv_until(|v| v["id"] == json!(p)).await;
+    let _ = h.recv_until_approving(|v| v["id"] == json!(p)).await;
     // req1 (tool_call) + summarize (handoff) + req2 (done) = 3. Without the
     // growth estimate we'd see only 2 (stale 8500 < 9000, no handoff).
     let captured = llm.captured.lock().await.len();
@@ -1671,8 +1444,8 @@ async fn cancel_kills_inflight_tool_via_mcp_notification() {
         )
         .await;
 
-    // Wait for the tool call to be in-progress.
-    h.recv_until(|v| {
+    // Approve the tool so this test reaches execution before cancelling it.
+    h.recv_until_approving(|v| {
         v.get("params")
             .and_then(|p| p.get("update"))
             .and_then(|u| u.get("status"))
@@ -1788,7 +1561,7 @@ async fn cancel_sends_notifications_cancelled_to_any_mcp_server() {
         .await;
 
     // Wait for tool call to be in-progress.
-    h.recv_until(|v| {
+    h.recv_until_approving(|v| {
         v.get("params")
             .and_then(|p| p.get("update"))
             .and_then(|u| u.get("status"))
@@ -1903,13 +1676,7 @@ async fn prompt_to_completion(h: &mut Harness, sid: &str) -> Value {
     loop {
         let v = h.recv().await;
         if v.get("method") == Some(&json!("session/request_permission")) {
-            let id = v["id"].clone();
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&v)).await;
             continue;
         }
         if v["id"] == json!(p) {
@@ -2314,6 +2081,27 @@ fn reply_guard_rejects_unparseable_toggle() {
     );
 }
 
+#[test]
+fn max_token_recoveries_rejects_unparseable_value() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_buzz-agent"))
+        .env("BUZZ_AGENT_PROVIDER", "openai")
+        .env("OPENAI_COMPAT_API_KEY", "test")
+        .env("OPENAI_COMPAT_MODEL", "fake-model")
+        .env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", "unbounded")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run buzz-agent");
+    assert!(
+        !out.status.success(),
+        "invalid recovery budget was accepted"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("BUZZ_AGENT_MAX_TOKEN_RECOVERIES"),
+        "expected offending key in config error: {stderr}"
+    );
+}
+
 /// A prompt large enough that the recovery ladder's halving stays above
 /// `HANDOFF_MIN_PROMPT_BUDGET_BYTES` (4 KiB) for all three rungs.
 ///
@@ -2494,9 +2282,11 @@ async fn max_tokens_recovers_in_turn_without_running_partial_tool_call() {
     );
     assert!(
         serialized.contains("output token limit")
-            && serialized.contains("smaller steps")
-            && serialized.contains("tool call"),
-        "retry lacks actionable truncation feedback: {retry}"
+            && serialized.contains("Stop prolonged internal reasoning")
+            && serialized.contains("Use the available tools immediately")
+            && serialized.contains("write a script or artifact")
+            && serialized.contains("small, verifiable steps"),
+        "retry lacks the tool-first truncation directive: {retry}"
     );
     assert!(
         !serialized.contains("partial-call") && !serialized.contains("tool_call_id"),
@@ -2542,7 +2332,14 @@ async fn repeated_max_tokens_is_bounded() {
         .map(|_| openai_max_tokens("still truncated", json!([])))
         .collect();
     let llm = spawn_capturing_llm(responses).await;
-    let mut h = Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_MAX_ROUNDS", "0")]).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_ROUNDS", "0"),
+            ("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", "2"),
+        ],
+    )
+    .await;
     let sid = init_session(&mut h, json!([])).await;
     let prompt_id = h
         .send(
@@ -2558,6 +2355,95 @@ async fn repeated_max_tokens_is_bounded() {
     .expect("max-token recovery must be bounded");
     assert_eq!(reply["result"]["stopReason"], "max_tokens", "{reply}");
     assert_eq!(llm.captured.lock().await.len(), 3);
+    h.shutdown().await;
+}
+
+/// The default value is the exact number of retries: three recoveries produce
+/// four truncating requests, then surface `max_tokens` without another call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_max_tokens_recovery_budget_is_exact() {
+    let responses = (0..5)
+        .map(|_| openai_max_tokens("truncated", json!([])))
+        .collect();
+    let llm = spawn_capturing_llm(responses).await;
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session(&mut h, json!([])).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let reply = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+    assert_eq!(reply["result"]["stopReason"], "max_tokens", "{reply}");
+    let requests = llm.captured.lock().await;
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0]["max_completion_tokens"], 65_536,
+        "default output ceiling must be carried on the actual request path"
+    );
+    drop(requests);
+    h.shutdown().await;
+}
+
+/// Zero means disabled, not unlimited: the first truncated response is terminal
+/// and no recovery directive is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_max_token_recoveries_disables_retry() {
+    let llm = spawn_capturing_llm(vec![
+        openai_max_tokens("truncated", json!([])),
+        openai_text("must not be requested"),
+    ])
+    .await;
+    let mut h =
+        Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", "0")]).await;
+    let sid = init_session(&mut h, json!([])).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let reply = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+    assert_eq!(reply["result"]["stopReason"], "max_tokens", "{reply}");
+    assert_eq!(llm.captured.lock().await.len(), 1);
+    h.shutdown().await;
+}
+
+/// A successful recovery may proceed directly to a real tool call. This pins
+/// that only tool calls from the truncated response are discarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_tokens_recovery_can_proceed_to_tool_call() {
+    let llm = spawn_capturing_llm(vec![
+        openai_max_tokens(
+            "partial",
+            json!([{"id":"discard-me","type":"function","function":{"name":"dev__shell","arguments":"{\"command\":\"false\"}"}}]),
+        ),
+        openai_tool_call("kept-call", "fake__tool_0", json!({})),
+        openai_text("done"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session_with_fake_mcp(&mut h, &[("FAKE_MCP_TOOL_COUNT", "1")]).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let reply = h
+        .recv_until_approving(|v| v["id"] == json!(prompt_id))
+        .await;
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+    let requests = llm.captured.lock().await;
+    assert_eq!(requests.len(), 3);
+    let wire = requests[1].to_string();
+    assert!(
+        !wire.contains("discard-me"),
+        "discarded call leaked: {wire}"
+    );
+    assert!(requests[2].to_string().contains("kept-call"));
+    drop(requests);
     h.shutdown().await;
 }
 
@@ -2820,6 +2706,30 @@ async fn ordinary_400_stays_terminal_and_triggers_no_recovery() {
 /// part of the assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn context_recovery_budget_exhaustion_surfaces_the_error() {
+    assert_context_recovery_budget_exhaustion(false).await;
+}
+
+/// The same real provider/ACP scenario with stderr collection held until after
+/// the stdout response. The old immediate snapshot cannot observe the budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_recovery_budget_exhaustion_waits_for_delayed_stderr() {
+    assert_context_recovery_budget_exhaustion(true).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "timed out waiting for stderr diagnostic")]
+async fn stderr_diagnostic_wait_is_bounded_when_absent() {
+    let llm = spawn_capturing_llm(vec![]).await;
+    let h = Harness::spawn(&llm.url).await;
+    h.wait_for_stderr(
+        "diagnostic that is never emitted",
+        Duration::from_millis(20),
+    )
+    .await;
+}
+
+async fn assert_context_recovery_budget_exhaustion(delay_stderr: bool) {
+    let (release_stderr, stderr_gate) = tokio::sync::oneshot::channel();
     // Enough canned 400s that the queue is never the thing that stops the loop;
     // the fallback response is also a 400-shaped body under this helper only if
     // queued, so keep the queue generously long.
@@ -2827,7 +2737,7 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
         .map(|_| (400, openai_context_length_error()))
         .collect();
     let llm = spawn_capturing_llm_with_status(responses).await;
-    let mut h = Harness::spawn_with_env(
+    let mut h = Harness::spawn_with_stderr_gate(
         &llm.url,
         &[
             ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
@@ -2837,6 +2747,7 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
             ),
             ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
         ],
+        delay_stderr.then_some(stderr_gate),
     )
     .await;
     let sid = init_session(&mut h, json!([])).await;
@@ -2865,8 +2776,27 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
     // floor produce a surfaced error, so the assertion above passes either way
     // — and the floor can fire on the first rung without the budget ever being
     // consumed, which would make this test silently exercise a different
-    // mechanism than its name claims. Pin the budget explicitly.
-    let stderr = h.stderr_text();
+    // mechanism than its name claims. Pin the budget explicitly. Stdout is not
+    // a barrier for the independent stderr collector.
+    let stderr = {
+        let wait = h.wait_for_stderr("context recovery budget spent", Duration::from_secs(5));
+        tokio::pin!(wait);
+        if delay_stderr {
+            assert!(
+                !h.stderr_text().contains("context recovery budget spent"),
+                "the old immediate snapshot must miss the held diagnostic"
+            );
+            // Prove the actual wait stays pending before releasing the collector,
+            // without a sleep or depending on how quickly either task runs.
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(wait.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            release_stderr.send(()).expect("release stderr collection");
+        }
+        wait.await
+    };
     assert!(
         stderr.contains("context recovery budget spent"),
         "the per-run recovery BUDGET must be what stops the loop here, not the prompt floor; \
@@ -2880,6 +2810,15 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
         rungs, 3,
         "expected all 3 recovery rungs to be attempted before giving up, saw {rungs} — \
          stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("context recovery would shrink"),
+        "the prompt floor must not stop this fixture: {stderr}"
+    );
+    assert_eq!(
+        llm.captured.lock().await.len(),
+        4,
+        "expected the rejected completion plus exactly three failed summaries"
     );
     h.shutdown().await;
 }
@@ -2930,7 +2869,9 @@ async fn small_history_context_400_refuses_rescue_at_the_prompt_floor() {
         r0.get("error").is_some(),
         "a context 400 with no shrinkable history must surface the error, got: {r0}"
     );
-    let stderr = h.stderr_text();
+    let stderr = h
+        .wait_for_stderr("context recovery would shrink", Duration::from_secs(5))
+        .await;
     assert!(
         stderr.contains("below the") && stderr.contains("floor"),
         "the prompt-budget FLOOR must be what stops this, not the recovery budget; got: {stderr}"
@@ -3397,16 +3338,16 @@ async fn handoff_cap_binds_within_a_single_turn() {
     //  req 1: turn 1 complete()            → usage=950 (over threshold=900)
     //  req 2: turn 2 round 0 summarize()   → summary (handoff_attempts: 0→1)
     //  req 3: turn 2 round 0 complete()    → tool_call + usage=950 (re-arms gate)
-    //         [fake-mcp tool executes; steer queued while run is active]
-    //  req 4: turn 2 round 1 preflight     → 950 >= 900 AND attempts=1 >= max=1
+    //         [steer accepted while fake-mcp tool waits for approval]
+    //         turn 2 round 1 preflight     → 950 >= 900 AND attempts=1 >= max=1
     //                                         → WARN, skip (cap exhausted for this turn)
-    //  req 5: turn 2 round 1 complete()    → end_turn (steer text folded into messages)
+    //  req 4: turn 2 round 1 complete()    → end_turn (steer text folded into messages)
     let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
     // Build a tool-call response that also carries usage so the gate re-arms
     // on round 1's preflight (without usage, last_request_input_tokens is None
     // after the handoff clears it, and the byte-fallback won't fire on tiny history).
     let tool_call_with_usage = {
-        let mut v = openai_tool_call("tc-1", "test_tool", json!({}));
+        let mut v = openai_tool_call("tc-1", "cap_test__tool_0", json!({}));
         v["usage"] = json!({
             "prompt_tokens": 950u64,
             "completion_tokens": 5,
@@ -3436,7 +3377,7 @@ async fn handoff_cap_binds_within_a_single_turn() {
     )
     .await;
 
-    // Init with the fake MCP server so test_tool is available.
+    // Init with the fake MCP server so cap_test__tool_0 is available.
     h.send(
         "initialize",
         json!({"protocolVersion":1,"clientCapabilities":{}}),
@@ -3480,82 +3421,59 @@ async fn handoff_cap_binds_within_a_single_turn() {
         )
         .await;
 
-    // Drain until the final response, approving tool-permission requests,
-    // capturing the activeRunId once it is broadcast, sending one steer,
-    // and verifying that it is accepted in the live run.
-    let mut run_id: Option<String> = None;
-    let mut steer_id: i64 = -1;
-    let mut steer_accepted = false;
-    loop {
-        let v = h.recv().await;
+    let update = h
+        .recv_until(|v| v["params"]["update"]["_meta"]["goose"]["activeRunId"].is_string())
+        .await;
+    let run_id = update["params"]["update"]["_meta"]["goose"]["activeRunId"]
+        .as_str()
+        .unwrap();
 
-        // Capture the run id from the first session/update that carries it,
-        // then immediately queue a steer.  This must happen before round 1 so
-        // the steer text is present but the cap check still fires — proving
-        // the counter is not reset by the steer path.
-        if run_id.is_none() {
-            if let Some(rid) = v["params"]["update"]["_meta"]["goose"]["activeRunId"].as_str() {
-                run_id = Some(rid.to_owned());
-                steer_id = h
-                    .send(
-                        "_goose/unstable/session/steer",
-                        json!({
-                            "sessionId": sid,
-                            "expectedRunId": rid,
-                            "prompt": [{"type":"text","text":"STEER-CANARY: also consider the edge case"}],
-                        }),
-                    )
-                    .await;
-            }
-        }
-
-        // Steer response: assert it was accepted in the live run.
-        if steer_id >= 0 && v["id"] == json!(steer_id) {
-            assert!(
-                v.get("result").is_some(),
-                "steer must be accepted while the run is active; got: {v}"
-            );
-            assert_eq!(
-                v["result"]["runId"].as_str(),
-                run_id.as_deref(),
-                "steer must reference the live run id"
-            );
-            steer_accepted = true;
-            continue;
-        }
-
-        if v.get("method") == Some(&json!("session/request_permission")) {
-            let id = v["id"].clone();
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
-            continue;
-        }
-        if v["id"] == json!(p2) {
-            assert!(
-                v.get("result").is_some(),
-                "turn 2 must succeed even when cap blocks round-1 handoff; got: {v}"
-            );
-            break;
-        }
-    }
-
+    // Hold tool approval after the first handoff so the steer is accepted
+    // before round 1, regardless of how the agent and test are scheduled.
+    let permission = h
+        .recv_until(|v| v["method"] == "session/request_permission" || v["id"] == json!(p2))
+        .await;
+    assert_eq!(permission["method"], "session/request_permission");
+    let steer_id = h
+        .send(
+            "_goose/unstable/session/steer",
+            json!({
+                "sessionId": sid,
+                "expectedRunId": run_id,
+                "prompt": [{"type":"text","text":"STEER-CANARY: also consider the edge case"}],
+            }),
+        )
+        .await;
+    let steer = h.recv_until(|v| v["id"] == json!(steer_id)).await;
+    assert_eq!(
+        steer["result"]["runId"].as_str(),
+        Some(run_id),
+        "steer must be accepted in the live run; got: {steer}"
+    );
+    h.write(approve_permission(&permission)).await;
+    let response = h.recv_until(|v| v["id"] == json!(p2)).await;
     assert!(
-        steer_accepted,
-        "steer was never accepted during turn 2; the steer arm is missing coverage"
+        response.get("result").is_some(),
+        "turn 2 must succeed even when cap blocks round-1 handoff; got: {response}"
     );
 
     // 4 LLM requests: seed + summarize + tool-call-with-usage + final-complete.
-    let count = llm.captured.lock().await.len();
+    let requests = llm.captured.lock().await;
+    let count = requests.len();
     assert_eq!(
         count, 4,
         "expected 4 LLM requests (seed + summarize + tool-call + final); got {count}"
     );
 
-    let stderr = h.stderr_text();
+    assert!(
+        requests[3]["messages"].to_string().contains("STEER-CANARY"),
+        "the final request must include the accepted steer"
+    );
+    drop(requests);
+
+    let stderr = h
+        .wait_for_stderr("handoff cap reached", Duration::from_secs(5))
+        .await;
     assert!(
         stderr.contains("handoff cap reached"),
         "expected cap-reached WARN in stderr; got: {stderr}"
@@ -3678,13 +3596,7 @@ async fn failed_summarize_burns_handoff_attempt_budget() {
     loop {
         let v = h.recv().await;
         if v.get("method") == Some(&json!("session/request_permission")) {
-            let id = v["id"].clone();
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&v)).await;
             continue;
         }
         if v["id"] == json!(p2) {

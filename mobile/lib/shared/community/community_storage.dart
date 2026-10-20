@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../storage/secure_storage.dart';
+
 import 'community.dart';
 
 class CommunityStorage {
@@ -19,7 +21,7 @@ class CommunityStorage {
   final FlutterSecureStorage _secure;
 
   CommunityStorage({FlutterSecureStorage? secure})
-    : _secure = secure ?? const FlutterSecureStorage();
+    : _secure = secure ?? communitySecureStorage;
 
   /// Load all communities. On first call, migrates legacy single-community
   /// credentials if present.
@@ -51,6 +53,7 @@ class CommunityStorage {
         relayUrl: legacyUrl,
         pubkey: legacyPubkey,
         nsec: legacyNsec,
+        sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
       );
 
       await _saveList([community]);
@@ -78,6 +81,9 @@ class CommunityStorage {
     }
     await _saveList(all);
   }
+
+  /// Replaces the complete stored community list in one secure-storage write.
+  Future<void> saveAll(List<Community> communities) => _saveList(communities);
 
   Future<void> remove(String id) async {
     final all = await loadAll();

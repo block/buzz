@@ -9,7 +9,10 @@ import type { AgentModelsResponse, ManagedAgent } from "@/shared/api/types";
 import { getAgentModels, updateManagedAgent } from "@/shared/api/tauri";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { awaitLiveSwitchOutcome } from "@/features/agents/lib/liveSwitchOutcome";
-import { subscribeControlResults } from "@/features/agents/observerRelayStore";
+import {
+  ensureRelayObserverSubscription,
+  subscribeControlResults,
+} from "@/features/agents/observerRelayStore";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import {
   useAgentConfigSurface,
@@ -23,6 +26,10 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import {
+  disambiguateModelLabels,
+  resolveModelLabel,
+} from "@/features/agents/lib/formatAgentModelLabel";
 
 export function ModelPicker({
   agent,
@@ -82,13 +89,27 @@ export function ModelPicker({
   );
 
   const currentValue = agent.model ?? modelsData?.agentDefaultModel ?? "";
-  const displayLabel =
-    agent.model ??
-    (modelsData?.agentDefaultModel
-      ? `${modelsData.agentDefaultModel} (default)`
+  const modelRows = React.useMemo(
+    () =>
+      disambiguateModelLabels(
+        (modelsData?.models ?? []).map((model) => ({
+          id: model.id,
+          label: resolveModelLabel(model.id, model.name, agent.provider),
+        })),
+        agent.provider,
+      ),
+    [modelsData, agent.provider],
+  );
+  const rowLabel = (id: string) =>
+    modelRows.find((row) => row.id === id)?.label ??
+    resolveModelLabel(id, null, agent.provider);
+  const displayLabel = agent.model
+    ? rowLabel(agent.model)
+    : modelsData?.agentDefaultModel
+      ? `${rowLabel(modelsData.agentDefaultModel)} (default)`
       : hasRequestedModels && loading
         ? "Loading..."
-        : "Auto");
+        : "Auto";
 
   // Provenance label shown only for post-spawn agents where the model origin
   // is known from the config surface and the source is not a user-explicit
@@ -108,26 +129,40 @@ export function ModelPicker({
   }, [configSurface]);
 
   // Send a live `switch_model` frame to each channel the agent is working in
-  // and wait for the harness to acknowledge. Any single `unsupported_model`
-  // result rejects the whole pick immediately; all other statuses must arrive
-  // from every channel before resolving success.
+  // and wait for the harness to acknowledge. A single `unsupported_model`
+  // (model unavailable) or `failure` (adapter refused) result rejects the whole
+  // pick immediately. The busy-path `sent` ack is provisional (the adapter
+  // isn't consulted until the requeued session); success is confirmed only by a
+  // real positive terminal frame from every channel, and if none arrives before
+  // the timeout the pick resolves `"pending"` (accepted, apply deferred).
   const sendLiveSwitch = React.useCallback(
     (modelId: string) => {
       const channelIds = activeTurns.map((turn) => turn.channelId);
+      // Opaque per-pick correlator. The harness echoes it on the immediate ack
+      // and the late terminal frame, so a five-minute reconnect replay of an
+      // earlier pick's result cannot settle this one.
+      const requestId = crypto.randomUUID();
       return awaitLiveSwitchOutcome({
-        channelCount: channelIds.length,
-        modelId,
+        requestId,
+        channelIds,
         subscribe: (listener) =>
           subscribeControlResults(agent.pubkey, listener),
         sendSwitches: async () => {
+          await ensureRelayObserverSubscription();
           await Promise.all(
             channelIds.map((channelId) =>
-              switchManagedAgentModel(agent.pubkey, channelId, modelId),
+              switchManagedAgentModel(
+                agent.pubkey,
+                channelId,
+                modelId,
+                requestId,
+              ),
             ),
           );
         },
-        // No reply in time: treat as sent. The override still rides the
-        // requeued/next session; we just can't confirm synchronously.
+        // No positive terminal in time: resolve `"pending"`. The override still
+        // rides the requeued/next session; we just can't confirm synchronously,
+        // and must not claim a success that hasn't happened.
         scheduleTimeout: (onTimeout) => {
           const timeout = window.setTimeout(onTimeout, 8_000);
           return () => window.clearTimeout(timeout);
@@ -143,8 +178,39 @@ export function ModelPicker({
     try {
       if (isLiveSwitch) {
         const outcome = await sendLiveSwitch(modelId);
+        if (outcome === "ambiguous") {
+          toast.error(
+            "Couldn't switch all sessions — a channel has multiple agent sessions. Stop and restart the agent with the new model.",
+          );
+          return;
+        }
         if (outcome === "unsupported") {
           toast.error("That model isn't available for this agent.");
+          return;
+        }
+        if (outcome === "failed") {
+          toast.error(
+            "Couldn't switch models — the agent kept its current model.",
+          );
+          return;
+        }
+        if (outcome === "not_delivered") {
+          // The switch never reached a session: the turn was already ending, or
+          // no active turn remained by the time the harness received it. Nothing
+          // was applied and nothing rides a later session — tell the truth.
+          toast.error(
+            "Couldn't switch models — the agent wasn't running a turn to switch.",
+          );
+          return;
+        }
+        if (outcome === "pending") {
+          // The switch was accepted but its apply is deferred to the next
+          // session (the agent is mid-turn) and didn't confirm before the
+          // fallback timeout. Tell the truth instead of claiming success.
+          toast.info(
+            "Model switch pending — applies when the current turn finishes.",
+          );
+          onModelChanged?.();
           return;
         }
         toast.success("Model switched for this session.");
@@ -221,7 +287,9 @@ export function ModelPicker({
             <div className="px-3 py-2 text-sm text-muted-foreground">
               {agent.model ? (
                 <>
-                  <p className="font-medium text-foreground">{agent.model}</p>
+                  <p className="font-medium text-foreground">
+                    {resolveModelLabel(agent.model, null, agent.provider)}
+                  </p>
                   <p className="mt-0.5 text-xs">
                     This runtime does not support switching models.
                   </p>
@@ -235,9 +303,9 @@ export function ModelPicker({
               onValueChange={handleModelChange}
               value={currentValue}
             >
-              {modelsData.models.map((model) => (
-                <DropdownMenuRadioItem key={model.id} value={model.id}>
-                  {model.name ?? model.id}
+              {modelRows.map((row) => (
+                <DropdownMenuRadioItem key={row.id} value={row.id}>
+                  {row.label}
                 </DropdownMenuRadioItem>
               ))}
             </DropdownMenuRadioGroup>

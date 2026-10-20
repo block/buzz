@@ -1,4 +1,5 @@
 import 'package:buzz/shared/read_state/message_read_state.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -55,6 +56,53 @@ void main() {
           messageId: messageId,
         ),
         isNull,
+      );
+    });
+  });
+
+  group('catch-up markers', () {
+    test('activity: reads only when channel catch-up applies', () {
+      final readState = _state(const {'activity:$channelId': 200});
+      bool unread({required bool channelCatchUp}) => isMessageUnread(
+        readState,
+        channelId: channelId,
+        messageId: messageId,
+        createdAt: 150,
+        channelCatchUp: channelCatchUp,
+      );
+      expect(unread(channelCatchUp: true), isFalse);
+      expect(unread(channelCatchUp: false), isTrue);
+    });
+
+    test('thread-activity: reads replies in its thread', () {
+      final readState = _state(const {'thread-activity:root-1': 200});
+      expect(
+        effectiveMessageReadAt(
+          readState,
+          channelId: channelId,
+          messageId: messageId,
+          threadRootId: 'root-1',
+        ),
+        200,
+      );
+    });
+
+    test('readByChannelCatchUp covers ordinary top-level messages only', () {
+      expect(
+        readByChannelCatchUp(isDm: false, isReply: false, highPriority: false),
+        isTrue,
+      );
+      expect(
+        readByChannelCatchUp(isDm: true, isReply: false, highPriority: false),
+        isFalse,
+      );
+      expect(
+        readByChannelCatchUp(isDm: false, isReply: true, highPriority: false),
+        isFalse,
+      );
+      expect(
+        readByChannelCatchUp(isDm: false, isReply: false, highPriority: true),
+        isFalse,
       );
     });
   });

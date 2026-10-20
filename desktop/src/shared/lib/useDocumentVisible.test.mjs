@@ -38,6 +38,8 @@ function installVisibilityStub() {
   let focused = true;
   const documentListeners = new Map();
   const windowListeners = new Map();
+  const tasks = [];
+  const frames = [];
   globalThis.document = {
     get visibilityState() {
       return visibilityState;
@@ -65,10 +67,29 @@ function installVisibilityStub() {
       listeners?.delete(listener);
       if (listeners?.size === 0) windowListeners.delete(type);
     },
+    setTimeout(callback) {
+      tasks.push(callback);
+      return tasks.length;
+    },
+    clearTimeout() {},
+    requestAnimationFrame(callback) {
+      frames.push(callback);
+      return frames.length;
+    },
+    cancelAnimationFrame() {},
   };
   return {
     documentListeners,
     windowListeners,
+    flushLeadingTask() {
+      tasks.shift()?.();
+    },
+    flushFrame() {
+      frames.shift()?.(0);
+    },
+    flushTrailingTask() {
+      tasks.shift()?.();
+    },
     setFocused(value) {
       focused = value;
     },
@@ -105,6 +126,18 @@ describe("document visibility", () => {
 
     stub.setFocused(true);
     for (const listener of stub.windowListeners.get("focus")) listener();
+    assert.deepEqual(
+      focusedStates,
+      [false],
+      "focus resume must not notify inside the activation turn",
+    );
+    stub.flushLeadingTask();
+    assert.deepEqual(focusedStates, [false]);
+    stub.flushFrame();
+    assert.deepEqual(focusedStates, [false]);
+    stub.flushTrailingTask();
+    assert.deepEqual(focusedStates, [false, true]);
+
     stub.setVisibility("hidden");
     for (const listener of stub.documentListeners.get("visibilitychange"))
       listener();
@@ -164,7 +197,61 @@ describe("visibility-gated hooks", () => {
     dom.window.close();
   });
 
-  it("focused polling pauses on blur and refreshes immediately on focus", async () => {
+  it("useNow consumers with the same interval share one timer", async () => {
+    mock.timers.enable({ apis: ["Date", "setInterval"], now: 1_000 });
+    const dom = new JSDOM(
+      "<!doctype html><html><body><div id='root'></div></body></html>",
+    );
+    Object.defineProperty(dom.window.document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    Object.assign(globalThis, {
+      document: dom.window.document,
+      HTMLElement: dom.window.HTMLElement,
+      IS_REACT_ACT_ENVIRONMENT: true,
+      window: dom.window,
+    });
+    const setIntervalSpy = mock.method(globalThis, "setInterval");
+    const observed = [];
+    function Clock({ id }) {
+      const now = useNow(1_000);
+      React.useEffect(() => {
+        observed.push([id, now]);
+      }, [id, now]);
+      return null;
+    }
+    const root = createRoot(document.getElementById("root"));
+
+    await act(async () =>
+      root.render(
+        React.createElement(
+          React.Fragment,
+          null,
+          React.createElement(Clock, { id: "a" }),
+          React.createElement(Clock, { id: "b" }),
+          React.createElement(Clock, { id: "c" }),
+        ),
+      ),
+    );
+    assert.equal(setIntervalSpy.mock.callCount(), 1);
+
+    await act(async () => mock.timers.tick(1_000));
+    assert.deepEqual(observed.filter(([, now]) => now === 2_000).length, 3);
+
+    // Last unmount releases the shared timer; a fresh mount recreates it.
+    await act(async () => root.unmount());
+    const secondRoot = createRoot(document.getElementById("root"));
+    await act(async () =>
+      secondRoot.render(React.createElement(Clock, { id: "d" })),
+    );
+    assert.equal(setIntervalSpy.mock.callCount(), 2);
+
+    await act(async () => secondRoot.unmount());
+    dom.window.close();
+  });
+
+  it("focused polling pauses on blur and resumes after activation yields", async () => {
     const dom = new JSDOM(
       "<!doctype html><html><body><div id='root'></div></body></html>",
     );
@@ -199,6 +286,10 @@ describe("visibility-gated hooks", () => {
     assert.deepEqual(observed, [1_000, false]);
     focused = true;
     await act(async () => window.dispatchEvent(new window.Event("focus")));
+    assert.deepEqual(observed, [1_000, false]);
+    await act(
+      async () => new Promise((resolve) => window.setTimeout(resolve, 10)),
+    );
     assert.deepEqual(observed, [1_000, false, 1_000]);
 
     await act(async () => root.unmount());

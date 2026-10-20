@@ -18,7 +18,28 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_RELAY_RECONNECT_CMD");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_DEMO_SLUG");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
+
+    if let Ok(slug) = std::env::var("BUZZ_BUILD_DEMO_SLUG") {
+        let valid = !slug.is_empty()
+            && slug.len() <= 48
+            && slug
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            && slug
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && slug
+                .bytes()
+                .last()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+        if !valid {
+            panic!("BUZZ_BUILD_DEMO_SLUG must be a lowercase ASCII slug");
+        }
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_DEMO_SLUG={slug}");
+    }
 
     // Explicit owner-only agent-access capability. Release packaging sets this
     // presence-only marker; OSS/custom builds leave agent access configurable.

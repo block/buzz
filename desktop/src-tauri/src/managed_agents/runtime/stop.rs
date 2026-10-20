@@ -37,8 +37,8 @@ pub(crate) fn managed_agent_runtime_relay_urls<T>(
 /// runtime is reinserted so the pair stays visible and stoppable instead of
 /// becoming an invisible orphan. Touches no other pair for the agent and
 /// does no record-level stop bookkeeping — callers own that.
-fn stop_managed_agent_pair(
-    app: &AppHandle,
+fn stop_managed_agent_pair<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     key: &ManagedAgentRuntimeKey,
@@ -94,7 +94,10 @@ fn stop_managed_agent_pair(
 
 /// Terminate a legacy scalar-PID child (pre-pair records) and remove the
 /// agent-scoped pid file. Pair receipts are restored separately.
-fn stop_legacy_scalar_pid(app: &AppHandle, record: &mut ManagedAgentRecord) -> Result<(), String> {
+fn stop_legacy_scalar_pid<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    record: &mut ManagedAgentRecord,
+) -> Result<(), String> {
     if let Some(pid) = record.runtime_pid.take() {
         if process_is_running(pid)
             && process_belongs_to_us(pid)
@@ -150,8 +153,8 @@ pub fn stop_managed_agent_workspace_pair(
     Ok(())
 }
 
-pub fn stop_managed_agent_process(
-    app: &AppHandle,
+pub fn stop_managed_agent_process<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
 ) -> Result<(), String> {
