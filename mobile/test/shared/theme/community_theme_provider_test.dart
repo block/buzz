@@ -112,7 +112,7 @@ void main() {
       notifier.setTheme('dracula');
       const local = CommunityThemePreference(
         theme: 'dracula',
-        accent: 'chartreuse',
+        accent: '#06b6d4',
         followSystem: true,
       );
       expect(container.read(communityThemeProvider), local);

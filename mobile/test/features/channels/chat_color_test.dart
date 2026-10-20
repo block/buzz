@@ -85,7 +85,8 @@ void main() {
                     child: MessageContent(
                       content:
                           '# Heading\n\n[Link](https://example.com) and `code`\n\n'
-                          '> Quote\n\n| Header |\n| --- |\n| Cell |',
+                          '> Quote\n\n| Header |\n| --- |\n| Cell |\n\n'
+                          '```dart\nfinal x = 1;\n```',
                       bubble: true,
                       ownMessage: true,
                     ),
@@ -102,12 +103,11 @@ void main() {
         expect(data.h1?.color, ink);
         expect(data.linkColor, expectedLink);
         expect(data.inlineCode.color, ink);
-        expect(data.inlineCode.backgroundColor, ink.withValues(alpha: 0.18));
         expect(Theme.of(context).colorScheme.primary, expectedLink);
         final sheet = tester.widget<GptMarkdown>(markdown).styleSheet!;
         expect(sheet.blockQuote?.barColor, ink);
         expect(sheet.table?.headerTextStyle?.color, ink);
-        // Inline code keeps the white ink on a translucent chip over the accent.
+        // Code ink must stay readable on the composited tint, not just the fill.
         final codes = <CodeTextSpan>[];
         for (final rich in tester.widgetList<RichText>(
           find.byWidgetPredicate((widget) => widget is RichText),
@@ -141,10 +141,44 @@ void main() {
         }
         expect(codes, hasLength(1));
         expect(codes.single.style?.color, ink);
+        final fill = theme.extension<ChatColors>()!.outgoing;
         expect(
-          codes.single.codeStyle.backgroundColor,
-          ink.withValues(alpha: 0.18),
+          _contrast(
+            ink,
+            Color.alphaBlend(codes.single.codeStyle.backgroundColor!, fill),
+          ),
+          greaterThanOrEqualTo(4.5),
+          reason: 'inline code',
         );
+        final label = find.text('dart');
+        final block = tester.widget<Container>(
+          find
+              .ancestor(
+                of: label,
+                matching: find.byWidgetPredicate(
+                  (widget) =>
+                      widget is Container &&
+                      widget.decoration is BoxDecoration &&
+                      (widget.decoration! as BoxDecoration).borderRadius !=
+                          null,
+                ),
+              )
+              .first,
+        );
+        final blockSurface = Color.alphaBlend(
+          (block.decoration! as BoxDecoration).color!,
+          fill,
+        );
+        for (final (name, color) in [
+          ('code block', ink),
+          ('language label', tester.widget<Text>(label).style!.color!),
+        ]) {
+          expect(
+            _contrast(Color.alphaBlend(color, blockSurface), blockSurface),
+            greaterThanOrEqualTo(4.5),
+            reason: name,
+          );
+        }
         expect(tester.takeException(), isNull);
       });
     }
@@ -178,4 +212,10 @@ void main() {
       expect(bubble, expected.extension<ChatColors>()!.outgoing);
     }
   });
+}
+
+double _contrast(Color a, Color b) {
+  final la = a.computeLuminance();
+  final lb = b.computeLuminance();
+  return la > lb ? (la + .05) / (lb + .05) : (lb + .05) / (la + .05);
 }

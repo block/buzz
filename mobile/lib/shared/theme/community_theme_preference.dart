@@ -11,7 +11,7 @@ import 'theme_provider.dart' show effectiveTheme, schemeForAppearanceMode;
 const communityThemeDTag = 'community-theme';
 const defaultCommunityTheme = CommunityThemePreference(
   theme: 'buzz',
-  accent: 'chartreuse',
+  accent: '#06b6d4', // Chartreuse
   followSystem: true,
 );
 
@@ -34,15 +34,15 @@ class CommunityThemePreference {
         findTheme(json['theme'] as String) == null ||
         json['accent'] is! String ||
         (accentIndexForWireValue(json['accent'] as String) == null &&
-            !chatColorChoices.any(
-              (color) => color.wireValue == json['accent'],
-            )) ||
+            previewFamilyWireValue(json['accent'] as String) == null) ||
         json['followSystem'] is! bool) {
       throw const FormatException('Invalid community theme preference');
     }
     return CommunityThemePreference(
       theme: json['theme'] as String,
-      accent: json['accent'] as String,
+      accent:
+          previewFamilyWireValue(json['accent'] as String) ??
+          json['accent'] as String,
       followSystem: json['followSystem'] as bool,
     );
   }

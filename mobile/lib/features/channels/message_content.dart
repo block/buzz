@@ -463,8 +463,9 @@ class MessageContent extends HookConsumerWidget {
                               inlineCode: ownMessage
                                   ? markdownTheme.inlineCode.copyWith(
                                       color: ownTextColor,
-                                      backgroundColor: ownTextColor.withValues(
-                                        alpha: 0.18,
+                                      backgroundColor: chatCodeTint(
+                                        ownTextColor,
+                                        0.18,
                                       ),
                                       borderColor: ownTextColor.withValues(
                                         alpha: 0.3,
@@ -939,7 +940,6 @@ class _MessageCodeBlock extends HookWidget {
           : [TextSpan(text: shownCode)],
       [code, name, isDark, ink],
     );
-    final mutedInk = ink?.withValues(alpha: 0.7);
     return Container(
       // In a bubble, the vertical margin brings the bubble's 8px vertical
       // padding up to its 16px side padding, so the block is inset evenly and
@@ -948,9 +948,9 @@ class _MessageCodeBlock extends HookWidget {
           ? const EdgeInsets.symmetric(vertical: Grid.xs - Grid.xxs)
           : const EdgeInsets.only(top: Grid.half),
       decoration: BoxDecoration(
-        color:
-            ink?.withValues(alpha: 0.14) ??
-            CodeStyle.background(context.colors),
+        color: ink == null
+            ? CodeStyle.background(context.colors)
+            : chatCodeTint(ink, 0.14),
         borderRadius: BorderRadius.circular(
           bubble ? Radii.container - Grid.xs : 12,
         ),
@@ -979,7 +979,7 @@ class _MessageCodeBlock extends HookWidget {
                     child: Text(
                       name,
                       style: context.textTheme.labelSmall?.copyWith(
-                        color: mutedInk ?? context.colors.onSurfaceVariant,
+                        color: ink ?? context.colors.onSurfaceVariant,
                       ),
                     ),
                   ),

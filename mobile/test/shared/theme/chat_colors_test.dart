@@ -52,18 +52,39 @@ void main() {
     }
   });
 
+  test('every choice publishes a distinct desktop v1 accent value', () {
+    // Desktop parses v1 accents against the same legacy set as accentColors;
+    // an unknown value makes it discard the whole synced preference.
+    final wireValues = chatColorChoices.map((color) => color.wireValue);
+    expect(wireValues.toSet(), hasLength(chatColorChoices.length));
+    for (final (index, color) in chatColorChoices.indexed) {
+      expect(accentIndexForWireValue(color.wireValue), isNotNull);
+      expect(chatColorIndex(color.wireValue), index);
+      // Family names from earlier preview builds parse and republish as the
+      // desktop-compatible value.
+      final preview = CommunityThemePreference.fromJson({
+        'version': 1,
+        'theme': 'buzz',
+        'accent': color.name.toLowerCase(),
+        'followSystem': true,
+      });
+      expect(preview.accent, color.wireValue);
+    }
+    expect(accentIndexForWireValue(defaultCommunityTheme.accent), isNotNull);
+  });
+
   test(
     'retired saved colors follow desktop aliases without losing preferences',
     () {
       for (final entry in {
         '#3b82f6': 'Cobalt',
-        '#06b6d4': 'Cobalt',
+        '#06b6d4': 'Chartreuse',
         '#6366f1': 'Cobalt',
         '#22c55e': 'Jade',
         '#f97316': 'Flame',
         '#ec4899': 'Magenta',
         '#c0a2f1': 'Iris',
-        'neutral': 'Chartreuse',
+        'neutral': 'Gray',
         '#ef4444': 'Magenta',
         '#a855f7': 'Iris',
       }.entries) {
