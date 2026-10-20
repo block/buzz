@@ -295,6 +295,8 @@ docker compose exec relay buzz-admin add-member --pubkey npub1abc...
 docker compose exec relay buzz-admin add-member --pubkey npub1abc... --role admin
 docker compose exec relay buzz-admin remove-member --pubkey npub1abc...
 docker compose exec relay buzz-admin list-members
+# Rewrite the kind:13534 member list from the stored members (repairs a missing or stale list)
+docker compose exec relay buzz-admin republish-members
 ```
 
 **Exit codes:**

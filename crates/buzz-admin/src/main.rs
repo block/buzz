@@ -81,6 +81,13 @@ enum Command {
         #[arg(long)]
         role: Option<String>,
     },
+    /// Rewrite the community's kind:13534 membership list from the stored
+    /// members and push it to live clients.
+    ///
+    /// Membership changes write the list themselves; this repairs a list that
+    /// is missing or stale (membership turned on after running without it, a
+    /// manual `relay_members` edit, a restore).
+    RepublishMembers,
     /// List all relay members.
     ListMembers,
     /// Generate a new Nostr keypair (for bootstrapping).
@@ -189,6 +196,7 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::PartitionAudit { months_ahead } => cmd_partition_audit(months_ahead).await,
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
+        Command::RepublishMembers => cmd_republish_members().await,
         Command::ListMembers => cmd_list_members().await,
         Command::ProductFeedback {
             command: ProductFeedbackCommand::List { limit },
@@ -530,6 +538,26 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
     Ok(0)
 }
 
+async fn cmd_republish_members() -> Result<i32> {
+    let (db, pubsub, relay_keypair) = connect_member_services().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    let write = match db
+        .rewrite_nip43_membership_list(tenant.community(), &relay_keypair)
+        .await
+    {
+        Ok(write) => write,
+        Err(e) => {
+            eprintln!("error: DB write failed: {e}");
+            return Ok(5);
+        }
+    };
+    if let Some(stored) = &write.snapshot {
+        println!("republished membership list {}", stored.event.id.to_hex());
+    }
+    fan_out_membership_list(&pubsub, &tenant, write.snapshot).await;
+    Ok(0)
+}
+
 async fn cmd_list_product_feedback(limit: u16) -> Result<i32> {
     let db = connect_db().await?;
     let feedback = db.list_product_feedback(i64::from(limit)).await?;
@@ -616,7 +644,7 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
     let relay_keypair = {
         let hex = std::env::var("BUZZ_RELAY_PRIVATE_KEY").map_err(|_| {
             anyhow::anyhow!(
-                "BUZZ_RELAY_PRIVATE_KEY is required for add-member/remove-member.\n\
+                "BUZZ_RELAY_PRIVATE_KEY is required for add-member/remove-member/republish-members.\n\
                  The relay must have a stable signing key to publish kind:13534 events."
             )
         })?;

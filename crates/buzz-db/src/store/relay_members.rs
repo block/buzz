@@ -1061,7 +1061,8 @@ impl<T> MembershipWrite<T> {
 /// change and no new lock order appears. `created_at` is at least one second
 /// past every earlier list's, so the id is new and a client replacing by
 /// timestamp never keeps an older list from the same second. A burst of
-/// changes can run the timestamp a few seconds ahead of the clock.
+/// changes runs the timestamp ahead of the clock by up to one second per
+/// change; it falls back to the clock once the burst ends.
 pub(crate) async fn write_nip43_membership_snapshot(
     tx: &mut crate::AdmittedTx,
     relay_keypair: &nostr::Keys,
@@ -1175,6 +1176,26 @@ pub(crate) async fn write_nip43_membership_snapshot(
         None,
         true,
     ))
+}
+
+/// Rewrite `community`'s kind:13534 list from the committed `relay_members`
+/// rows, whether or not it already matches.
+///
+/// The operator repair path for a list that is missing or stale (a
+/// deployment that turned on membership after running without it, a manual
+/// `relay_members` edit, a restore). Ordinary membership changes never need it.
+pub async fn rewrite_nip43_membership_list(
+    pool: &PgPool,
+    community: CommunityId,
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<()>> {
+    let tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
+    )
+    .await?;
+    commit_membership_write(tx, (), true, relay_keypair).await
 }
 
 impl Db {
@@ -1399,6 +1420,17 @@ impl Db {
         relay_keypair: &nostr::Keys,
     ) -> Result<MembershipWrite<u64>> {
         backfill_from_allowlist(&self.pool, community, relay_keypair).await
+    }
+
+    /// Rewrite `community`'s kind:13534 list from `relay_members`. See
+    /// [`rewrite_nip43_membership_list`].
+    #[datastore_span(name = "rewrite_nip43_membership_list", system = "postgresql")]
+    pub async fn rewrite_nip43_membership_list(
+        &self,
+        community: CommunityId,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<()>> {
+        rewrite_nip43_membership_list(&self.pool, community, relay_keypair).await
     }
 }
 
@@ -2250,6 +2282,30 @@ mod postgres_tests {
             .expect("bootstrap owner");
         assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
 
+        // A restart with the owner in place changes nothing and writes no list.
+        let live = live_list_id(&pool, community, &keys).await;
+        let write = bootstrap_owner(&pool, community, &owner, &keys)
+            .await
+            .expect("re-bootstrap owner");
+        assert!(write.snapshot.is_none(), "no-op bootstrap writes no list");
+        assert_eq!(live_list_id(&pool, community, &keys).await, live);
+
+        // Demoting a legacy co-owner alone still rewrites the list.
+        let legacy_owner = test_pubkey();
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'owner')",
+        )
+        .bind(community.as_uuid())
+        .bind(&legacy_owner)
+        .execute(&pool)
+        .await
+        .expect("seed legacy co-owner");
+        let write = bootstrap_owner(&pool, community, &owner, &keys)
+            .await
+            .expect("bootstrap demotes co-owner");
+        assert!(write.snapshot.is_some(), "a demotion writes a list");
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+
         let write = add_relay_member(&pool, community, &member, "member", Some(&owner), &keys)
             .await
             .expect("add member");
@@ -2320,6 +2376,56 @@ mod postgres_tests {
             .expect("backfill allowlist");
         assert_eq!(write.outcome, 1);
         assert_membership_list_matches(&pool, backfilled, &keys, write.snapshot.as_ref()).await;
+    }
+
+    /// The operator repair rewrites a missing or stale list from the stored
+    /// members.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn rewrite_repairs_a_missing_or_stale_list() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let member = test_pubkey();
+        let _ = bootstrap_owner(&pool, community, &test_pubkey(), &keys)
+            .await
+            .expect("bootstrap owner");
+        let _ = add_relay_member(&pool, community, &member, "member", None, &keys)
+            .await
+            .expect("add member");
+
+        // Stale: a role edited behind the list's back.
+        sqlx::query(
+            "UPDATE relay_members SET role = 'admin' WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&member)
+        .execute(&pool)
+        .await
+        .expect("edit role by hand");
+        let write = db
+            .rewrite_nip43_membership_list(community, &keys)
+            .await
+            .expect("repair stale list");
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+
+        // Missing: no live list at all.
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 \
+             AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
+        .execute(&pool)
+        .await
+        .expect("retire the live list");
+        assert!(live_list_id(&pool, community, &keys).await.is_none());
+        let write = db
+            .rewrite_nip43_membership_list(community, &keys)
+            .await
+            .expect("repair missing list");
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
     }
 
     /// The list write is part of the membership transaction: when it fails,
