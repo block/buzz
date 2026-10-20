@@ -1661,12 +1661,14 @@ fn inserts_events_row(source: &str) -> bool {
 
 /// An events insert must run both follow-ups: the push enqueue and the
 /// pre-commit TTL refresh. `after_admitted_insert` does both; a writer that
-/// inserts inside a savepoint calls the two halves separately.
+/// inserts inside a savepoint records media there and stages delivery after it.
 ///
 /// Only real calls count: a hook in a comment or a string literal does not.
 fn runs_event_follow_ups(function_source: &str) -> bool {
     let code = mask_comments_and_literals(function_source);
     code.contains("event_follow_up::after_admitted_insert(")
+        || (code.contains("event_follow_up::record_admitted_media(")
+            && code.contains("event_follow_up::stage_admitted_insert("))
         || (code.contains("event_follow_up::enqueue_push_match(")
             && code.contains(".record_channel_event("))
 }
@@ -1713,6 +1715,12 @@ pub(crate) async fn hooked_writer(tx: &mut AdmittedTx) {
     crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
         .await
         .expect("follow up");
+}
+pub(crate) async fn media_savepoint_writer(tx: &mut AdmittedTx) {
+    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
+        .execute(tx.conn()).await.expect("write");
+    crate::store::event_follow_up::record_admitted_media(tx, event, channel).await.expect("media");
+    crate::store::event_follow_up::stage_admitted_insert(tx, event, channel);
 }
 pub(crate) async fn savepoint_writer(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")

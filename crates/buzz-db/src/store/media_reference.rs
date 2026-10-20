@@ -480,6 +480,71 @@ mod postgres_tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replacement_preserves_only_the_media_it_continues_to_reference() {
+        let (db, community) = fixture().await;
+        let viewer = Keys::generate();
+        for kind in [Kind::Metadata, Kind::from(30030)] {
+            let (uploader, publisher) = (Keys::generate(), Keys::generate());
+            let sha = unique_sha();
+            upload(&db, community, &uploader, &sha).await;
+            let base = nostr::Timestamp::now().as_secs();
+            let make = |keys: &Keys, kind: Kind, step: u64, picture: bool| {
+                let url = if picture {
+                    format!("/media/{sha}.jpg")
+                } else {
+                    String::new()
+                };
+                let mut tags = Vec::new();
+                let content = if kind == Kind::Metadata {
+                    serde_json::json!({"picture": url, "name": format!("profile-{step}")})
+                        .to_string()
+                } else {
+                    tags.push(Tag::parse(["d", "media-continuity"]).unwrap());
+                    if picture {
+                        tags.push(Tag::parse(["emoji", "sample", &url]).unwrap());
+                    }
+                    String::new()
+                };
+                EventBuilder::new(kind, content)
+                    .tags(tags)
+                    .custom_created_at(nostr::Timestamp::from_secs(base + step))
+                    .sign_with_keys(keys)
+                    .unwrap()
+            };
+            let publish = async |event: &nostr::Event| {
+                if event.kind == Kind::Metadata {
+                    db.replace_addressable_event(community, event, None)
+                        .await
+                        .unwrap()
+                        .1
+                } else {
+                    db.replace_parameterized_event(community, event, "media-continuity", None)
+                        .await
+                        .unwrap()
+                        .1
+                }
+            };
+            assert!(publish(&make(&uploader, Kind::Metadata, 0, true)).await);
+            assert!(publish(&make(&publisher, kind, 0, true)).await);
+            assert!(publish(&make(&uploader, Kind::Metadata, 1, false)).await);
+            assert!(readable_share(&db, community, &sha, &viewer).await);
+            assert!(publish(&make(&publisher, kind, 1, true)).await);
+            assert!(
+                readable_share(&db, community, &sha, &viewer).await,
+                "a replacement must carry forward an authorized reference"
+            );
+            assert!(publish(&make(&publisher, kind, 2, false)).await);
+            assert!(!readable_share(&db, community, &sha, &viewer).await);
+            assert!(publish(&make(&publisher, kind, 3, true)).await);
+            assert!(
+                !readable_share(&db, community, &sha, &viewer).await,
+                "a later replacement cannot revive a previously removed grant"
+            );
+        }
+    }
+
     async fn check_backfill() {
         let (db, community) = fixture().await;
         let (alice, bob, carol) = (Keys::generate(), Keys::generate(), Keys::generate());
