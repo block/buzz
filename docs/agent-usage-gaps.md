@@ -15,7 +15,7 @@ Line references drift; re-verify before relying on them.
 | goose | ✅ goose extension (when client advertises it) | ✅ | ✅ via `_meta.goose.toolCall.toolName` (`ext__tool`) | ✅ `skills__load_skill` + `rawInput.name` | ✅ `used` / `contextLimit` |
 | claude-agent-acp | ✅ `session/prompt` result `usage` | ✅ `usage_update.cost` | ✅ `_meta.claudeCode.toolName`, MCP `mcp__server__tool` | ✅ `Skill` + `rawInput.skill` / `_meta.claudeCode.skill` | ✅ `usage_update {used,size}` |
 | codex-acp | ❌ none; metric is usage-null | ❌ | ⚠️ MCP `server/tool` ✅; builtins only as ACP `kind` buckets (usage-null record) | ❌ no skill tool call | ✅ `usage_update {used,size}` (usage-null record) |
-| hermes | ⚠️ prompt result `usage` exists; not mapped by buzz-acp | ❌ | ⚠️ parsed from title prefix (`terminal: …` → `terminal`) | ❌ `skill_view` sends no `rawInput` | ✅ `usage_update {used,size}` |
+| hermes | ✅ prompt result `usage`, session-cumulative → delta | ❌ | ⚠️ parsed from title prefix (`terminal: …` → `terminal`) | ❌ `skill_view` sends no `rawInput` | ✅ `usage_update {used,size}` |
 | pi (`buzz-pi-acp` @ `86b201e`) | ❌ none; metric is usage-null | ❌ | ✅ bare titles; bash → `execute` (usage-null record) | ❌ skills are plain `read`s | ❌ none at pinned commit |
 
 ✅ works today on this branch · ⚠️ partial · ❌ not available from the wire
@@ -81,9 +81,11 @@ Line references drift; re-verify before relying on them.
   no `_meta`; `rawInput` omitted for polished tools (`terminal`, `read_file`,
   `skill_view`, …).
 - Usage: prompt-result `usage` (prompt/completion/total/reasoning/cache-read)
-  and `usage_update {size, used}`.
-- Gaps: buzz-acp only maps prompt-result usage for Claude/Codex adapters, so
-  hermes tokens are not published. Skills not countable (no `rawInput.name` on `skill_view`). MCP naming
+  and `usage_update {size, used}`. The `usage` values are SESSION-CUMULATIVE
+  (`agent.session_*`) and `inputTokens` already includes cache reads; buzz-acp
+  derives per-turn deltas (see `StandardUsageTracker::take_hermes`). No cost.
+- Gaps: a cache-read of 0 is indistinguishable from unreported, so it is
+  omitted. Skills not countable (no `rawInput.name` on `skill_view`). MCP naming
   unverified (believed `mcp_<server>_<tool>`).
 
 ### pi (`salman1993/buzz-pi-acp` @ `86b201e`)
@@ -96,9 +98,8 @@ Line references drift; re-verify before relying on them.
 
 ## Next steps (ranked)
 
-1. Map hermes prompt-result `usage` in buzz-acp (same path as Claude/Codex).
-2. Land PR #5581 so closed relays accept 44200 from direct members.
-3. Upstream asks: codex-acp and hermes stable tool name in `_meta` and
+1. Land PR #5581 so closed relays accept 44200 from direct members.
+2. Upstream asks: codex-acp and hermes stable tool name in `_meta` and
    prompt-result `usage` for codex; `rawInput` on hermes `skill_view`.
-4. Live-verify goose and claude-agent-acp against a relay and decrypt the
+3. Live-verify goose and claude-agent-acp against a relay and decrypt the
    owner-side 44200 events.

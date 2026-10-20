@@ -595,6 +595,7 @@ impl AcpClient {
                     Some(StandardAdapterKind::Claude)
                 }
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
+                "hermes" | "hermes-agent" | "hermes-acp" => Some(StandardAdapterKind::Hermes),
                 _ => None,
             };
         cmd.envs(launch_env.iter().cloned());
@@ -5136,6 +5137,74 @@ sleep 1"#,
         assert!(usage.delta_reliable);
         assert_eq!(usage.turn_input_tokens, Some(800));
         assert_eq!(usage.turn_output_tokens, Some(250));
+    }
+
+    #[tokio::test]
+    async fn hermes_session_cumulative_usage_becomes_inclusive_turn_deltas() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Hermes);
+        client.notify_session_spawned("h1");
+
+        // Hermes: inputTokens = prompt_tokens (already includes cache reads),
+        // all counters session-cumulative.
+        client.standard_usage.begin_turn("h1");
+        client
+            .parse_prompt_response(
+                "h1",
+                &prompt_response_usage(1000, 200, 1200, Some(300), None),
+            )
+            .unwrap();
+        let t1 = client.take_turn_usage().expect("turn 1");
+        assert_eq!(t1.turn_seq, Some(1));
+        assert!(t1.delta_reliable, "spawned session starts from zero");
+        assert_eq!(t1.turn_input_tokens, Some(1000), "no cache added on top");
+        assert_eq!(t1.turn_output_tokens, Some(200));
+        assert_eq!(t1.turn_cache_read_tokens, Some(300));
+        assert_eq!(t1.turn_total_tokens, None, "hermes total is a derived sum");
+        assert_eq!(t1.turn_cost_usd, None);
+        assert_eq!(t1.cumulative_input_tokens, Some(1000));
+
+        client.standard_usage.begin_turn("h1");
+        client
+            .parse_prompt_response(
+                "h1",
+                &prompt_response_usage(1700, 260, 1960, Some(300), None),
+            )
+            .unwrap();
+        let t2 = client.take_turn_usage().expect("turn 2");
+        assert_eq!(t2.turn_seq, Some(2));
+        assert_eq!(t2.turn_input_tokens, Some(700));
+        assert_eq!(t2.turn_output_tokens, Some(60));
+        assert_eq!(
+            t2.turn_cache_read_tokens, None,
+            "zero cache delta is omitted"
+        );
+        assert_eq!(t2.cumulative_input_tokens, Some(1700));
+        assert_eq!(t2.cumulative_cache_read_tokens, Some(300));
+
+        // Counter reset (agent restart): delta unknown, never negative.
+        client.standard_usage.begin_turn("h1");
+        client
+            .parse_prompt_response("h1", &prompt_response_usage(50, 5, 55, Some(0), None))
+            .unwrap();
+        let t3 = client.take_turn_usage().expect("turn 3");
+        assert!(!t3.delta_reliable);
+        assert_eq!(t3.turn_input_tokens, None);
+        assert_eq!(t3.cumulative_cache_read_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn hermes_unseeded_session_first_turn_is_cumulative_only() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Hermes);
+        client.standard_usage.begin_turn("h2");
+        client
+            .parse_prompt_response("h2", &prompt_response_usage(900, 90, 990, Some(0), None))
+            .unwrap();
+        let t = client.take_turn_usage().expect("turn");
+        assert!(!t.delta_reliable);
+        assert_eq!(t.turn_input_tokens, None);
+        assert_eq!(t.cumulative_input_tokens, Some(900));
     }
 
     fn standard_context_update(session_id: &str) -> serde_json::Value {

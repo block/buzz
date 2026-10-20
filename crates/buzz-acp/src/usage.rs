@@ -332,6 +332,17 @@ pub(crate) struct PromptResponseUsage {
 pub(crate) enum StandardAdapterKind {
     Claude,
     Codex,
+    /// Hermes reports session-cumulative counters in the prompt response, with
+    /// input already inclusive of cache reads. See `StandardUsageTracker::take_hermes`.
+    Hermes,
+}
+
+/// Last session-cumulative Hermes counters, used to derive per-turn deltas.
+#[derive(Debug, Clone, Copy, Default)]
+struct HermesCounters {
+    input: u64,
+    output: u64,
+    cache_read: u64,
 }
 
 #[derive(Debug, Default)]
@@ -339,6 +350,9 @@ struct StandardSessionState {
     published_seq: u64,
     last_cost: Option<f64>,
     cost_poisoned: bool,
+    /// Baseline for Hermes cumulative counters; `None` until first observed
+    /// (or seeded at zero for a session buzz-acp created).
+    hermes_last: Option<HermesCounters>,
 }
 
 #[derive(Debug, Default)]
@@ -357,6 +371,7 @@ impl StandardUsageTracker {
                 published_seq: 0,
                 last_cost: Some(0.0),
                 cost_poisoned: false,
+                hermes_last: Some(HermesCounters::default()),
             });
     }
 
@@ -400,9 +415,13 @@ impl StandardUsageTracker {
             .map(|(session_id, _, _)| session_id.clone())
             .or_else(|| cost.as_ref().map(|(session_id, _)| session_id.clone()))?;
 
+        if let Some((_, usage, StandardAdapterKind::Hermes)) = &prompt {
+            return Some(self.take_hermes(session_id, usage));
+        }
+
         let (inclusive_input, output_tokens, total_tokens, cache_read, cache_write) = match prompt {
             Some((_, usage, adapter)) => {
-                // Adapter input excludes cache reads and writes.
+                // Claude/Codex `input` excludes cache; Hermes returned above.
                 let inclusive_input = usage
                     .input_tokens
                     .checked_add(usage.cached_read_tokens.unwrap_or(0))
@@ -474,6 +493,57 @@ impl StandardUsageTracker {
             skills: None,
             context: None,
         })
+    }
+}
+
+impl StandardUsageTracker {
+    /// Map a Hermes prompt-response `usage` to a record.
+    ///
+    /// Evidence (NousResearch/hermes-agent @ 3166d61):
+    /// - `acp_adapter/server.py` builds `Usage(input_tokens=result["prompt_tokens"],
+    ///   output_tokens=result["completion_tokens"], cached_read_tokens=
+    ///   result["cache_read_tokens"])`.
+    /// - `agent/turn_finalizer.py` fills those result keys from
+    ///   `agent.session_<key>`: SESSION-CUMULATIVE counters on a persistent
+    ///   agent, not per-turn values. Per-turn counts are therefore the delta
+    ///   between consecutive responses.
+    /// - `agent/usage_pricing.py` defines `prompt_tokens = input_tokens +
+    ///   cache_read_tokens + cache_write_tokens`, so the wire `inputTokens` is
+    ///   already inclusive (unlike Claude/Codex); nothing is added to it.
+    /// - Hermes always sends `cachedReadTokens` (0 when the provider reports no
+    ///   cache), so 0 is indistinguishable from "unreported" and is omitted.
+    /// - No cost and no provider total are sent (its `total_tokens` is a sum).
+    fn take_hermes(&mut self, session_id: String, usage: &PromptResponseUsage) -> TurnUsage {
+        let current = HermesCounters {
+            input: usage.input_tokens,
+            output: usage.output_tokens,
+            cache_read: usage.cached_read_tokens.unwrap_or(0),
+        };
+        let state = self.sessions.entry(session_id.clone()).or_default();
+        let previous = state.hermes_last.replace(current);
+        // A decrease means the agent restarted or the series is corrupt: the
+        // turn delta is unknown, and the new value becomes the baseline.
+        let delta = previous
+            .filter(|p| current.input >= p.input && current.output >= p.output)
+            .map(|p| {
+                (
+                    current.input - p.input,
+                    current.output - p.output,
+                    current.cache_read.checked_sub(p.cache_read),
+                )
+            });
+        state.published_seq += 1;
+        let nonzero = |n: u64| (n > 0).then_some(n);
+        let mut record = TurnUsage::tokenless(session_id);
+        record.turn_seq = Some(state.published_seq);
+        record.delta_reliable = delta.is_some();
+        record.turn_input_tokens = delta.map(|d| d.0);
+        record.turn_output_tokens = delta.map(|d| d.1);
+        record.turn_cache_read_tokens = delta.and_then(|d| d.2).and_then(nonzero);
+        record.cumulative_input_tokens = Some(current.input);
+        record.cumulative_output_tokens = Some(current.output);
+        record.cumulative_cache_read_tokens = nonzero(current.cache_read);
+        record
     }
 }
 
