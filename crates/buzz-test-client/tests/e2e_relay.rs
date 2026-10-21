@@ -4216,7 +4216,12 @@ async fn test_nip29_announce_channel_wire_workflow_commands_need_write_role() {
         }
     }
 
-    async fn define(http: &str, keys: &Keys, channel_id: &str) -> (bool, String) {
+    async fn define(
+        http: &str,
+        keys: &Keys,
+        channel_id: &str,
+        workflow_id: &str,
+    ) -> (bool, String) {
         let yaml = "name: announce-manual\n\
              description: announce write-role probe\n\
              trigger:\n\
@@ -4229,6 +4234,7 @@ async fn test_nip29_announce_channel_wire_workflow_commands_need_write_role() {
         let def = EventBuilder::new(Kind::Custom(30620), yaml)
             .tags([
                 Tag::parse(["h", channel_id]).unwrap(),
+                Tag::parse(["d", workflow_id]).unwrap(),
                 Tag::parse(["name", "announce-manual"]).unwrap(),
             ])
             .sign_with_keys(keys)
@@ -4266,18 +4272,12 @@ async fn test_nip29_announce_channel_wire_workflow_commands_need_write_role() {
             (true, String::new())
         );
 
-        let (accepted, msg) = define(&http, &author, &channel_id).await;
+        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let (accepted, msg) = define(&http, &author, &channel_id, &workflow_id).await;
         assert!(
             accepted,
             "join_role={join_role}: a member saves a workflow: {msg}"
         );
-        let workflow_id = serde_json::from_str::<serde_json::Value>(
-            msg.strip_prefix("response:").expect("response prefix"),
-        )
-        .expect("response json")["workflow_id"]
-            .as_str()
-            .expect("workflow_id")
-            .to_string();
         let (accepted, msg) = trigger(&http, &author, &workflow_id).await;
         assert!(
             accepted,
@@ -4294,7 +4294,8 @@ async fn test_nip29_announce_channel_wire_workflow_commands_need_write_role() {
             !accepted,
             "join_role={join_role}: a guest must not trigger its saved workflow: {msg}"
         );
-        let (accepted, msg) = define(&http, &author, &channel_id).await;
+        let other_workflow_id = uuid::Uuid::new_v4().to_string();
+        let (accepted, msg) = define(&http, &author, &channel_id, &other_workflow_id).await;
         assert!(
             !accepted && msg.starts_with("restricted:"),
             "join_role={join_role}: a guest must not save a workflow, got: {msg}"
