@@ -2876,12 +2876,19 @@ mod postgres_tests {
         }
     }
 
-    /// Re-applying `schema/schema.sql` to a database a relay has used plans
-    /// `DROP TABLE IF EXISTS ... CASCADE` for every monthly the partition
-    /// manager created at runtime, and their rows go with them.
-    /// `.pgschemaignore` keeps those monthlies out of pgschema's view, and
-    /// pgschema does not compare partition bounds, so the advanced catch-all
-    /// is left alone too.
+    /// Re-applying `schema/schema.sql` to a database bootstrapped the way every
+    /// caller does it (pgschema apply, then the reconcile script) and then used
+    /// by a relay plans nothing. pgschema does not compare partition bounds, so
+    /// the advanced catch-alls do not show up in the plan. Two things keep the
+    /// rest of it empty:
+    ///
+    /// - `.pgschemaignore` hides the monthlies the partition manager created
+    ///   at runtime, which pgschema would otherwise drop, rows included, with
+    ///   `DROP TABLE IF EXISTS ... CASCADE`.
+    /// - The reconcile script rebuilds `events_pkey` in its declared order.
+    ///   pgschema creates it with the partition key first, then plans to drop
+    ///   and re-add it and every declared child's key, which fails once the
+    ///   children are attached.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn pgschema_reapply_keeps_runtime_partitions() {
@@ -2902,24 +2909,27 @@ mod postgres_tests {
             .await
             .expect("create probe database");
 
-        let apply = pgschema(&conn, &database, &["apply", "--auto-approve"]);
-        assert!(
-            apply.status.success(),
-            "pgschema apply failed: {}\n{}",
-            String::from_utf8_lossy(&apply.stdout),
-            String::from_utf8_lossy(&apply.stderr),
-        );
-
         let pool = PgPool::connect(&format!("{base_prefix}/{database}"))
             .await
             .expect("connect probe database");
-        // Every pgschema caller attaches the declared children this way.
-        sqlx::raw_sql(include_str!(
-            "../../../../scripts/reconcile-schema-after-pgschema.sql"
-        ))
-        .execute(&pool)
-        .await
-        .expect("reconcile schema after pgschema");
+        // The bootstrap every pgschema caller runs; the reconcile script
+        // attaches the declared children.
+        let bootstrap = |round: &str| {
+            let apply = pgschema(&conn, &database, &["apply", "--auto-approve"]);
+            assert!(
+                apply.status.success(),
+                "{round} pgschema apply failed: {}\n{}",
+                String::from_utf8_lossy(&apply.stdout),
+                String::from_utf8_lossy(&apply.stderr),
+            );
+            sqlx::raw_sql(include_str!(
+                "../../../../scripts/reconcile-schema-after-pgschema.sql"
+            ))
+            .execute(&pool)
+        };
+        bootstrap("first")
+            .await
+            .expect("first post-apply reconciliation");
         async fn catch_all_bounds(pool: &PgPool) -> Vec<(String, Option<String>)> {
             sqlx::query_as(
                 "SELECT relname::text, pg_get_expr(relpartbound, oid) FROM pg_class \
@@ -2949,6 +2959,10 @@ mod postgres_tests {
         .await
         .expect("maintain partitions");
         let advanced_bounds = catch_all_bounds(&pool).await;
+        assert!(
+            advanced_bounds.len() == 2 && advanced_bounds.iter().all(|(_, bound)| bound.is_some()),
+            "maintenance dropped or detached a catch-all: {advanced_bounds:?}"
+        );
         for (declared, advanced) in declared_bounds.iter().zip(&advanced_bounds) {
             assert_ne!(declared, advanced, "catch-all did not advance");
         }
@@ -2961,7 +2975,6 @@ mod postgres_tests {
         .fetch_all(&pool)
         .await
         .expect("list partitions");
-        pool.close().await;
         let declared = declared_monthlies();
         let runtime: Vec<_> = children
             .iter()
@@ -2969,9 +2982,18 @@ mod postgres_tests {
                 child.starts_with(&format!("{parent}_p2")) && !declared.contains(child)
             })
             .collect();
-        for parent in ["events", "delivery_log"] {
-            // The first month the declared catch-all served.
-            let first = format!("{parent}_p2026_07");
+        for (catch_all, bound) in &declared_bounds {
+            // The first month the declared catch-all served, from its
+            // `FOR VALUES FROM ('YYYY-MM-01 ...')` lower bound.
+            let parent = catch_all
+                .strip_suffix("_p_future")
+                .expect("catch-all is named <parent>_p_future");
+            let month = bound
+                .as_deref()
+                .and_then(|bound| bound.split_once("FROM ('"))
+                .and_then(|(_, rest)| rest.get(..7))
+                .expect("declared catch-all has a dated lower bound");
+            let first = format!("{parent}_p{}", month.replace('-', "_"));
             assert!(
                 runtime.iter().any(|(_, child)| *child == first),
                 "maintenance did not advance into {first}: {children:?}"
@@ -2986,15 +3008,14 @@ mod postgres_tests {
             String::from_utf8_lossy(&plan.stderr),
         );
         assert!(
-            !plan_sql.contains("DROP TABLE"),
-            "re-applying schema.sql would drop tables:\n{plan_sql}"
+            plan_sql.trim().is_empty(),
+            "re-applying schema.sql to a reconciled database must plan nothing; \
+             runtime monthlies {runtime:?}:\n{plan_sql}"
         );
-        for (_, child) in &runtime {
-            assert!(
-                !plan_sql.contains(child.as_str()),
-                "re-applying schema.sql would change runtime monthly {child}:\n{plan_sql}"
-            );
-        }
+        bootstrap("second")
+            .await
+            .expect("second post-apply reconciliation");
+        pool.close().await;
 
         sqlx::query(AssertSqlSafe(format!(
             "DROP DATABASE {database} WITH (FORCE)"
