@@ -11266,6 +11266,54 @@ void main() {
   });
 
   group('App bar', () {
+    for (final (name, description, topic, purpose, expected) in [
+      ('description wins', ' Description ', 'Topic', 'Purpose', 'Description'),
+      ('topic fallback', '', ' Topic ', 'Purpose', 'Topic'),
+      ('purpose fallback', '', null, ' Purpose ', 'Purpose'),
+      ('blank values skipped', ' \t\n', ' \n ', ' Purpose ', 'Purpose'),
+      ('empty metadata', '', '', '', ''),
+      ('blank metadata', ' \t', ' \n', ' \t ', ''),
+    ]) {
+      testWidgets('Channel details metadata: $name', (tester) async {
+        final channel = Channel(
+          id: _channelId,
+          name: 'general',
+          channelType: 'stream',
+          visibility: 'open',
+          description: description,
+          topic: topic,
+          purpose: purpose,
+          createdBy: 'owner',
+          createdAt: DateTime(2025),
+          memberCount: 0,
+          isMember: true,
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            channel: channel,
+            messages: const [],
+            home: ChannelDetailsPage(
+              channel: channel,
+              currentPubkey: null,
+              onMemberTap: (_, _) {},
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final summary = find.byKey(
+          const ValueKey('channel-details-description'),
+        );
+        if (expected.isEmpty) {
+          expect(summary, findsNothing);
+        } else {
+          expect(summary, findsOneWidget);
+          expect(tester.widget<Text>(summary).data, expected);
+        }
+        expect(tester.takeException(), isNull);
+      });
+    }
+
     testWidgets('aligns the Channel Details iOS back control with channels', (
       tester,
     ) async {

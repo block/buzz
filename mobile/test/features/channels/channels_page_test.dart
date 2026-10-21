@@ -3020,6 +3020,56 @@ void main() {
     expect(find.text('Message one or more people'), findsNothing);
   });
 
+  for (final (name, description, topic, purpose, expected) in [
+    ('description wins', ' Description ', 'Topic', 'Purpose', 'Description'),
+    ('topic fallback', '', ' Topic ', 'Purpose', 'Topic'),
+    ('purpose fallback', '', null, ' Purpose ', 'Purpose'),
+    ('blank values skipped', ' \t\n', ' \n ', ' Purpose ', 'Purpose'),
+    ('empty metadata', '', '', '', ''),
+    ('blank metadata', ' \t', ' \n', ' \t ', ''),
+  ]) {
+    testWidgets('Browse channel metadata: $name', (tester) async {
+      final channel = Channel(
+        id: 'metadata',
+        name: 'general',
+        channelType: 'stream',
+        visibility: 'open',
+        description: description,
+        topic: topic,
+        purpose: purpose,
+        createdBy: 'owner',
+        createdAt: DateTime(2025),
+        memberCount: 0,
+      );
+      await tester.pumpWidget(
+        buildTestable(
+          disableAnimations: true,
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier([channel])),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Create or start conversation'));
+      await tester.pump();
+      await tester.tap(
+        find.byKey(const Key('quick-action-browse-channels-card')),
+      );
+      await tester.pumpAndSettle();
+
+      final tile = find.byKey(const Key('browse-channel-metadata'));
+      if (expected.isEmpty) {
+        expect(tester.widget<ListTile>(tile).subtitle, isNull);
+      } else {
+        expect(
+          find.descendant(of: tile, matching: find.text(expected)),
+          findsOneWidget,
+        );
+      }
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('browse action lists only channels eligible to join', (
     tester,
   ) async {

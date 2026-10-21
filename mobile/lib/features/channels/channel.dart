@@ -103,6 +103,15 @@ class Channel {
   bool get isPrivate => visibility == 'private';
   bool get canJoin => visibility == 'open' && !isArchived && !isMember && !isDm;
 
+  /// First nonblank description, topic, or purpose for channel summaries.
+  String get displayDescription {
+    for (final value in [description, topic, purpose]) {
+      final text = value?.trim() ?? '';
+      if (text.isNotEmpty) return text;
+    }
+    return '';
+  }
+
   /// Whether [selfRole] may add *another* identity here, mirroring the relay's
   /// kind:9000 authority (`validate_admin_event` + `add_member`): DMs never,
   /// open channels always, private channels for any active member. Elevated
