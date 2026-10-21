@@ -93,13 +93,141 @@ Relays MUST reject kind-5 deletion requests targeting artifact revisions with an
 
 ## Current state and queries
 
-An artifact's current state is its latest accepted revision, as determined by the `prev` rules above. Current-state queries MUST return only that revision and omit deleted artifacts. For example, a task whose current revision belongs to Project B no longer appears in Project A's list, even if an earlier revision belonged there. Revision history is queried separately. This NIP does not define a public acceptance order or history pagination; relays record the order in which they accept revisions, and a later sync specification defines how clients observe it.
+An artifact's current state is its latest accepted revision, as determined by the `prev` rules above. Current-state queries MUST return only that revision and omit deleted artifacts. For example, a task whose current revision belongs to Project B no longer appears in Project A's list, even if an earlier revision belonged there. Revision history is queried separately. This NIP does not define a public acceptance order or history pagination. Relays record the order in which they accept revisions; clients observe the resulting current state through sync (see Sync), not through timestamps or `prev` chains.
 
 Relays MUST support querying current artifacts across channels the reader can access using exact tag-name/value matches, including multi-character tag names. Conditions on different tag names are combined with AND; requested values for one name are combined with OR. A match compares the tag name and its first value in the same tag. Access checks and tag matching apply before pagination and any counts. Older revisions do not contribute matches.
 
 Relays MUST advertise and enforce limits on tag-name/value sizes, total tag bytes, query predicates and values, and page size. Queries MUST run within an enforced execution budget. Unsupported or over-limit requests fail explicitly; predicates MUST NOT be silently ignored or incomplete results presented as complete.
 
 Artifact revisions are state changes, not conversation messages. Receiving one MUST NOT increase chat or reply counts, add a chat unread, mark a conversation read, or repeat mention or push notifications for tags carried over from the previous revision.
+
+## Sync
+
+Sync lets a client hold an exact local copy of a set of artifacts and keep it current. The relay owns the order of changes: the relay already decides which revision is current (the `prev` check above), and sync only reports those decisions by always sending the current head. Clients do not order changes by `created_at`, which the signer chooses, or by walking `prev` chains, which needs every revision.
+
+Sync is additive. A client that does not use it keeps working unchanged, and a relay advertises each part separately (see Relay information document). A reader receives through sync only artifacts that it can already read with a current-state query, under the same channel read permission.
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant R as Relay
+  C->>R: REQ sub {"artifact":"sync", "#h":[...], "#type":[...]}
+  Note over R: Register live interest first,<br/>then read all matching heads<br/>in one snapshot
+  R-->>C: EVENT sub head  (0..n)
+  R-->>C: EOSE sub  (the set is complete at one cut)
+  Note over C: Replace local set only here
+  loop live
+    R-->>C: EVENT sub head or kind 45011 removal
+  end
+  R-->>C: CLOSED sub "resync: ..."  (access changed, or a change could not be delivered)
+```
+
+### Sync subscription
+
+**Request.** Sync is a NIP-01 `REQ` whose single filter has `"artifact": "sync"`:
+
+```json
+["REQ", "s1", {"artifact": "sync", "#h": ["<channel>"], "#type": ["buzz.task"]}]
+```
+
+The filter MUST include `#h` with 1 or more channels. It accepts the same `#name` predicates and limits as a NIP-AR current-state query, with the same AND/OR rules, and also `kinds: [45010]`. It accepts no `limit` or `offset`. A relay rejects a filter without `#h`, or with an unknown key, with `CLOSED`.
+
+**Scope.** The sync's scope is the set of artifacts that a NIP-AR current-state query with the same filter returns to this reader at that time. The rules below use this one definition for access, matching and system channels.
+
+**Response.** The relay answers with ordinary NIP-01 messages. Only the meaning of `EOSE` is stronger: for a sync, it means "this is the complete set at one point in time", not only "end of stored events".
+
+| Message | Meaning |
+|---|---|
+| `["EVENT", sub, <kind 45010 event>]` | This revision is the artifact's current head. If it is a deletion, or it no longer matches the filter, the client removes the artifact from its set. |
+| `["EVENT", sub, <kind 45011 event>]` | Live only. A move removed the artifact from a channel the reader can read. The client removes it. |
+| `["EOSE", sub]` | Sent once, after the initial set. The set has been delivered in full, as one consistent cut (rule 2). |
+| `["CLOSED", sub, "resync: <reason>"]` | The relay can no longer keep this subscription exact. The client starts a new sync. |
+| `["CLOSED", sub, "restricted: <reason>"]` | The reader cannot read a channel that `#h` names, or the channel does not exist. The message does not say which. |
+| `["CLOSED", sub, "error: <reason>"]` | The sync failed. The client keeps its last complete set and treats it as possibly stale. |
+
+Rules:
+
+1. **Live before stored.** The relay MUST register live interest, and wait until it is active, before it opens the snapshot of rule 2. Live interest is active only when the pub/sub server has confirmed the subscription (for Redis, the reply to `SUBSCRIBE`) and the node's pub/sub connection is still up. While that connection is down or reconnecting, a new sync waits, or gets `CLOSED "error: ..."`. Then every change that commits after the snapshot causes a live entry, or a resync when the relay detects that the entry was lost (rule 5). This is the order that `REQ` already uses. The relay MUST NOT send a live entry before `EOSE`. During the read it holds the `d` of each changed artifact. After `EOSE` it reads and sends their heads as in rule 3. A held change can already be in the snapshot; then the relay sends the same head again, a newer one, or nothing (rule 4). The held list is bounded: if it grows past `max_events` distinct `d`, the relay sends `CLOSED "resync: ..."` and no `EOSE`.
+2. **Initial set: one consistent cut, read in pages.** The relay reads the set inside one read-only transaction that has one database snapshot (Postgres `REPEATABLE READ`). It opens the transaction after it receives the `REQ` and after rule 1, on the writer database or on a replica proven at least as fresh. So every change that the relay accepted with `OK` before it received the `REQ` is in the set. Inside the transaction it reads pages ordered by `d`. Each page starts after the last `d` of the page before it (keyset pages, not offset pages). All pages see the same snapshot. So the set at `EOSE` is the exact set at one point in time: a combination of heads that existed together, never a mix of earlier and later states. This is the complete-set read. The relay sends one `EVENT` for each artifact in scope as it reads it, then `EOSE`. The client sees one stream; it never joins pages. A snapshot does not need the whole set in one result, so there is no byte limit on the whole set. The relay bounds how long it holds a snapshot open, with a budget that it defines. It MAY copy pages into a bounded buffer so that it can close the snapshot before a slow reader has received them. If the read fails, the snapshot is lost, or the budget runs out (for example, the reader is too slow), the relay sends `CLOSED "error: ..."` and no `EOSE` (rule 8). It MUST NOT continue the read on another snapshot. If the reader cannot read a channel that `#h` names, the relay sends `CLOSED "restricted: ..."` and no `EOSE`, whether or not the channel exists.
+3. **Live changes.** After `EOSE`, when an artifact in scope changes, the relay reads its current head. If the reader can read the head's channel, it sends the head, even when the head is a deletion or no longer matches. If the artifact moved to a channel the reader cannot read, it sends the kind 45011 removal stored in the source. It never sends anything about an artifact the reader cannot read. A change is an accepted revision (any `op`), or a move's removal from the source. An artifact is in scope for a change when it was in scope before the change or is in scope after it. The client decides "no longer matches" with the NIP-AR match rule: the tag name and its first value in the same tag.
+4. **Heads only, never older.** The relay sends the current head, never an older revision. It MAY skip intermediate revisions and MAY repeat a head the reader already has. For any one `d`, it MUST NOT send a head that it read before the head it last sent for that `d`. To keep this, for each sync the relay reads the head of one `d` one read at a time, starts each read only after the result of the read before it (a head, a kind 45011 removal or nothing) is in the outbound queue, and reads from the writer database or a replica proven at least as fresh. Clients that need every revision use the NIP-AR history view.
+5. **No silent loss.** Live fan-out can lose entries: a publish can fail, a node's pub/sub connection can drop for seconds, and a node's local fan-out can lag. Pub/sub does not replay any of these. A sync MUST NOT lose a change silently. So:
+   - A node MUST send `CLOSED "resync: ..."` to every sync it serves that a loss on that node can affect: its pub/sub connection dropped or reconnected; its local fan-out lagged or dropped entries, including a message that it could not decode; or the connection's own send queue was full and dropped an entry for that sync. One drop is enough: the slow-client grace limit does not apply to a sync. It MAY resync every sync it serves.
+   - If the node cannot queue the `CLOSED "resync: ..."` itself (for example, because the same send queue is full), it MUST close the connection. A client starts a new sync on any disconnect (rule 7), so a resync is never lost.
+   - A node MUST retry a failed publish until it succeeds or the node stops. Delivery order does not matter. For a sync, a live entry is only a signal that one `d` changed. The reader's node never sends the published event itself to a sync; it reads the current head (rule 3). So a late retry of an older change sends the current head or nothing, never an older one (rule 4).
+
+   So a sync that is open and has had no resync has received every change, except when a node crashes after it commits a change and before it publishes it. A client that must bound that window can sync again on its own schedule. The relay does not read the set again on a timer.
+6. **Retirement.** A moderation redaction that retires the current revision of an artifact in scope makes the relay send `CLOSED "resync: ..."`. The relay withholds the redacted head, so a new sync is the only way the client learns that the artifact left the set.
+7. **Commit point.** A client MUST replace its local set only when it receives `EOSE`. If the connection drops before `EOSE`, it discards what it received. After `EOSE`, it applies each live entry as it arrives. On any disconnect it starts a new sync; there is no resume. Before a new sync after a resync, an error or a dropped connection, the client waits a random delay that grows after each failure in a row (backoff with jitter).
+8. **No partial success.** If the relay cannot deliver the full set within its limits or budget, it MUST send `CLOSED` and MUST NOT send `EOSE`. A closed connection without `EOSE` is never proof of an empty set. The relay bounds its buffers for a sync in bytes as well as in count, and it ends the snapshot and its reads as soon as the client disconnects or sends `CLOSE`.
+9. **Resync.** The relay MUST send `CLOSED "resync: ..."` when the reader's access to a channel that `#h` names changes: membership, channel visibility or channel deletion. This closes the whole sync, also when `#h` names other channels. An ordinary `REQ` can keep its other channels; a sync cannot, because its set is no longer exact. Archive does not change reads (see Home channel lifecycle), so it does not cause a resync.
+
+**Short-lived clients.** A CLI that needs the set one time sends the same `REQ`, waits for `EOSE`, then sends `CLOSE`. It gets the cut of rule 2: a complete set that includes every change the relay accepted before it received the `REQ`. It does not see changes after the cut. A writer catches those with `prev` (NIP-AR compare-and-set). There is no separate one-shot request.
+
+**Set digest.** `set_digest` is the lowercase hex SHA-256 of the UTF-8 bytes `nip-ar-set-v1`, a zero byte, and then `<d>:<head event ID>\n` for each artifact in the set, sorted by `d`. It is a content identifier. It is not a counter, not a `prev` precondition and not a live-delivery cursor. An unchanged set has the same digest. A client can compute it over the set that it holds, or over any part of that set, and get the same value as any other client with the same heads.
+
+The relay does not send the digest. A client computes it over the set that it holds at `EOSE` or later.
+
+**Offset pages are views.** The existing `/query` offset pages stay for display and browsing. This section states that they are not evidence of a complete set.
+
+### Head lookup, including deletions
+
+Retries and "add or restore" flows need the current revision of one artifact even when it is deleted. Today a current-state query omits deleted artifacts, and history returns every revision.
+
+Relays that support sync also support the query view `"artifact": "head"`. It requires `#d` and returns the current revision of each named artifact the reader can read, **including** a deletion. It returns nothing for an unknown `d`, or for one the reader cannot read; it does not say which.
+
+### Deterministic identity and the ensure flow
+
+Clients MAY derive `d`. This section defines one standard derivation, so that independent clients compute the same `d` for the same logical record:
+
+```
+d = UUIDv8( first 16 bytes of SHA-256("nip-ar-artifact\0" + h + "\0" + type + "\0" + key) )
+```
+
+`h` is the home channel at creation, `type` is the artifact type, and `key` is a client-chosen name, unique within that type and channel (for example a config entry name). Version and variant bits are set as in RFC 9562.
+
+A derived `d` is a name, not a proof of authorship. Anyone who can write in `h` can create it first. Readers decide which authors to trust, as with every artifact.
+
+**Ensure (create or restore, safe to retry).** To make "this record exists with this content" true, a client:
+
+1. Sends `create`. If accepted or a duplicate of an accepted event, it is done.
+2. On `conflict`, reads the head (see Head lookup).
+   - If the head is a deletion, sends `restore` with `prev` set to it.
+   - If the head is live with the same content and tags, it is done.
+   - Otherwise sends `update` with `prev` set to the head, or reports the conflict, as the client's type requires.
+3. Repeats step 2 on a further conflict, up to a client-defined limit.
+
+The relay changes nothing for this flow except the head view. A deleted `d` stays reserved (see Identity and edits).
+
+### Home channel lifecycle
+
+| Home channel event | Writes | Current-state reads and sync |
+|---|---|---|
+| Archived | Rejected with the kind-9 archive reason. | Unchanged. Readers keep reading. To keep editing, unarchive or `move` the artifacts out first. |
+| Unarchived | Allowed again. | Unchanged. |
+| Deleted | Rejected. | Its artifacts leave every current-state result. Each live sync that covered the channel gets `resync`. A later channel with a different ID does not inherit them. |
+
+### Client guidance (non-normative)
+
+- **Type is the record family.** `type` cannot change. Put variants that can change (for example watch vs timer) in `content` under one type. If a family must change type, create new artifacts and delete the old ones.
+- **Version the content.** Put `"version": n` in `content`. Ship readers that accept `n+1` before writers that produce it. Editors already keep unknown fields or decline the edit (see Client behavior).
+- **Titles are visible to every reader of the channel.** Put no secrets in `title`.
+- **Conflicts are normal.** On `conflict`, reload with the head view, reapply the user's change to the new head, and show the user when that is not possible. Do not resubmit with only `prev` replaced.
+
+### Relay information document
+
+The NIP-11 relay information document has an `artifacts` object. A relay that supports sync adds:
+
+```json
+"sync": {"version": 1, "max_events": 4096},
+"modes": ["current", "history", "head"]
+```
+
+`max_events` is the largest set that a sync serves. It bounds each initial read and the held list (rule 1). There is no byte limit on the whole set: the relay reads and sends it in pages from one snapshot, and the relay's existing event size limit bounds each event. The relay does not advertise its snapshot time budget (rule 2); a reader that is too slow gets `CLOSED`.
+
+and sets `websocket_query_extensions` to `true`.
+
+Relays advertise `sync` and `head` only when every backend that can serve the connection runs them.
 
 ## Client behavior
 
