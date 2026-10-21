@@ -25,7 +25,7 @@ pub enum ClientMessage {
         /// Optional per-filter composite cursor tiebreaks from raw extension fields.
         before_ids: Vec<Option<Vec<u8>>>,
     },
-    /// A REQ whose single filter is a NIP-AR sync (`"artifact":"sync"`).
+    /// A REQ whose single filter is a NIP-AR sync (`"artifact":"current"`).
     /// An invalid sync filter is answered with `CLOSED`, so the parse error
     /// travels to the handler.
     ArtifactSync {
@@ -47,8 +47,8 @@ pub enum ClientMessage {
     Auth(Event),
 }
 
-/// Artifact queries are HTTP-only; reject rather than silently drop their
-/// predicates on the generic WebSocket path.
+/// Artifact views other than `current` (a sync on `REQ`) are HTTP-only;
+/// reject rather than silently drop their predicates on the generic path.
 fn reject_artifact_query_filters(filters: &[serde_json::Value]) -> Result<()> {
     use buzz_core::artifact::{route_filter, FilterRoute};
     for filter in filters {
@@ -56,7 +56,7 @@ fn reject_artifact_query_filters(filters: &[serde_json::Value]) -> Result<()> {
             FilterRoute::Generic => {}
             FilterRoute::Artifact => {
                 return Err(RelayError::InvalidMessage(
-                    "artifact queries require HTTP /query or /count".into(),
+                    "only artifact \"current\" has a REQ form; other views require HTTP /query or /count".into(),
                 ))
             }
             FilterRoute::Rejected(reason) => return Err(RelayError::InvalidMessage(reason.into())),
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn sync_filters_route_to_artifact_sync() {
         let h = uuid::Uuid::new_v4();
-        let sync = format!(r##"{{"artifact":"sync","#h":["{h}"]}}"##);
+        let sync = format!(r##"{{"artifact":"current","#h":["{h}"]}}"##);
         let parsed = super::ClientMessage::parse(&format!(r#"["REQ","s",{sync}]"#)).unwrap();
         assert!(matches!(
             parsed,
@@ -336,7 +336,7 @@ mod tests {
         ));
         for request in [
             format!(r#"["REQ","s",{sync},{{"kinds":[1]}}]"#),
-            r#"["REQ","s",{"artifact":"sync"}]"#.to_owned(),
+            r#"["REQ","s",{"artifact":"current"}]"#.to_owned(),
         ] {
             assert!(
                 matches!(

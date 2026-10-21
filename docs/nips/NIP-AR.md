@@ -111,7 +111,7 @@ Sync is additive. A client that does not use it keeps working unchanged, and a r
 sequenceDiagram
   participant C as Client
   participant R as Relay
-  C->>R: REQ sub {"artifact":"sync", "#h":[...], "#type":[...]}
+  C->>R: REQ sub {"artifact":"current", "#h":[...], "#type":[...]}
   Note over R: Register live interest first,<br/>then read all matching heads<br/>in one snapshot
   R-->>C: EVENT sub head  (0..n)
   R-->>C: EOSE sub  (the set is complete at one cut)
@@ -124,10 +124,10 @@ sequenceDiagram
 
 ### Sync subscription
 
-**Request.** Sync is a NIP-01 `REQ` whose single filter has `"artifact": "sync"`:
+**Request.** Sync is a NIP-01 `REQ` whose single filter has `"artifact": "current"`. It is the current-state filter of HTTP `/query`; the `REQ` transport adds the complete set, `EOSE` and live heads. The client does not page: the relay streams the whole set until `EOSE`. Other views (`history`, `head`) have no `REQ` form and stay HTTP-only:
 
 ```json
-["REQ", "s1", {"artifact": "sync", "#h": ["<channel>"], "#type": ["buzz.task"]}]
+["REQ", "s1", {"artifact": "current", "#h": ["<channel>"], "#type": ["buzz.task"]}]
 ```
 
 The filter MUST include `#h` with 1 or more channels. It accepts the same `#name` predicates and limits as a NIP-AR current-state query, with the same AND/OR rules, and also `kinds: [45010]`. It accepts no `limit` or `offset`. A relay rejects a filter without `#h`, or with an unknown key, with `CLOSED`.

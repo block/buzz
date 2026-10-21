@@ -183,7 +183,7 @@ async fn no_frame(rx: &mut mpsc::Receiver<WsMessage>) {
 const PRIVATE: &[&[&str]] = &[&["visibility", "private"]];
 
 fn sync_filter(channels: &[Uuid]) -> Value {
-    json!({"artifact": "sync", "#h": channels, "#type": ["buzz.task"]})
+    json!({"artifact": "current", "#h": channels, "#type": ["buzz.task"]})
 }
 
 /// Rules 2–4 over the real pipeline: the initial set in `d` order, `EOSE`,

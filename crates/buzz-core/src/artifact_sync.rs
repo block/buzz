@@ -1,4 +1,6 @@
-//! NIP-AR sync filter: `{"artifact":"sync", "#h":[...], ...}` on a `REQ`.
+//! NIP-AR sync filter: `{"artifact":"current", "#h":[...], ...}` on a `REQ`.
+//! The same current-state filter as HTTP `/query`; the `REQ` transport makes
+//! it a sync (complete set, `EOSE`, then live heads).
 use crate::artifact::{canonical_uuid, parse_predicates};
 use uuid::Uuid;
 
@@ -16,9 +18,10 @@ pub struct ArtifactSyncFilter {
     pub tags: Vec<(String, Vec<String>)>,
 }
 
-/// Whether a raw filter asks for sync rather than a one-shot artifact view.
+/// Whether a raw `REQ` filter is a sync: the current-state view. Other
+/// artifact views have no live form and stay HTTP-only.
 pub fn is_sync_filter(value: &serde_json::Value) -> bool {
-    value.get("artifact").and_then(|v| v.as_str()) == Some("sync")
+    value.get("artifact").and_then(|v| v.as_str()) == Some("current")
 }
 
 /// Parse a sync filter. It requires `#h` with canonical channel UUIDs and
@@ -29,7 +32,7 @@ pub fn parse_sync(value: &serde_json::Value) -> Result<ArtifactSyncFilter, &'sta
         .as_object()
         .ok_or("artifact filter must be an object")?;
     if !is_sync_filter(value) {
-        return Err("artifact must be \"sync\"");
+        return Err("artifact must be \"current\"");
     }
     let tags = parse_predicates(object, &["artifact", "kinds"])?;
     let mut channels = Vec::new();
@@ -56,20 +59,20 @@ mod tests {
     fn sync_filter_requires_channels_and_rejects_paging() {
         let a = Uuid::new_v4().to_string();
         let parsed = parse_sync(
-            &json!({"artifact":"sync","#h":[a, a],"#type":["buzz.task"],"kinds":[45010]}),
+            &json!({"artifact":"current","#h":[a, a],"#type":["buzz.task"],"kinds":[45010]}),
         )
         .unwrap();
         assert_eq!(parsed.channels.len(), 1);
         assert_eq!(parsed.tags.len(), 2);
         for invalid in [
-            json!({"artifact":"sync"}),
-            json!({"artifact":"sync","#type":["buzz.task"]}),
-            json!({"artifact":"sync","#h":[a],"limit":10}),
-            json!({"artifact":"sync","#h":[a],"offset":0}),
-            json!({"artifact":"sync","#h":[a],"kinds":[45011]}),
-            json!({"artifact":"sync","#h":["not-a-uuid"]}),
-            json!({"artifact":"sync","#h":[a],"since":1}),
-            json!({"artifact":"current","#h":[a]}),
+            json!({"artifact":"current"}),
+            json!({"artifact":"current","#type":["buzz.task"]}),
+            json!({"artifact":"current","#h":[a],"limit":10}),
+            json!({"artifact":"current","#h":[a],"offset":0}),
+            json!({"artifact":"current","#h":[a],"kinds":[45011]}),
+            json!({"artifact":"current","#h":["not-a-uuid"]}),
+            json!({"artifact":"current","#h":[a],"since":1}),
+            json!({"artifact":"history","#h":[a]}),
         ] {
             assert!(parse_sync(&invalid).is_err(), "{invalid}");
         }
