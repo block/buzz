@@ -3152,18 +3152,12 @@ async fn ingest_event_inner(
                 None
             }
         });
-        if create_name
-            .as_ref()
-            .map(|n| {
-                buzz_core::channel::canonical_channel_name(n)
-                    .trim()
-                    .is_empty()
-            })
-            .unwrap_or(true)
-        {
-            return Err(IngestError::Rejected(
-                "invalid: channel name is required".into(),
-            ));
+        let name_error = match create_name.as_deref() {
+            Some(n) => buzz_core::channel::channel_name_error(n),
+            None => Some("channel name is required"),
+        };
+        if let Some(error) = name_error {
+            return Err(IngestError::Rejected(format!("invalid: {error}")));
         }
 
         // Validate visibility/channel_type for ALL kind:9007 events (with or without h-tag).

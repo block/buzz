@@ -17,6 +17,24 @@ pub fn canonical_channel_name(name: &str) -> &str {
         .trim_end()
 }
 
+/// Maximum length of a canonical channel name, in characters. Matches
+/// `channels.name VARCHAR(255)`, so the relay can refuse a longer name before
+/// it stores the command event instead of failing when it applies it.
+pub const MAX_CHANNEL_NAME_CHARS: usize = 255;
+
+/// Whether `name` is a storable channel name: nonempty and at most
+/// [`MAX_CHANNEL_NAME_CHARS`] characters after [`canonical_channel_name`].
+pub fn channel_name_error(name: &str) -> Option<&'static str> {
+    let name = canonical_channel_name(name);
+    if name.is_empty() {
+        Some("channel name is required")
+    } else if name.chars().count() > MAX_CHANNEL_NAME_CHARS {
+        Some("channel name is longer than 255 characters")
+    } else {
+        None
+    }
+}
+
 /// Maximum number of labels on one channel.
 pub const MAX_CHANNEL_LABELS: usize = 8;
 
@@ -530,10 +548,21 @@ impl FromStr for MemberRole {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_channel_name, channel_type_from_group_state_tags, group_state_identity_tags,
-        parse_channel_labels, ChannelJoinRole, ChannelLabelError, ChannelType, MemberRole,
-        LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
+        canonical_channel_name, channel_name_error, channel_type_from_group_state_tags,
+        group_state_identity_tags, parse_channel_labels, ChannelJoinRole, ChannelLabelError,
+        ChannelType, MemberRole, LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
     };
+
+    #[test]
+    fn channel_name_error_matches_the_column_limit() {
+        assert_eq!(
+            channel_name_error("  ## "),
+            Some("channel name is required")
+        );
+        assert_eq!(channel_name_error(&"é".repeat(255)), None);
+        assert_eq!(channel_name_error(&format!("# {}", "a".repeat(255))), None);
+        assert!(channel_name_error(&"a".repeat(256)).is_some());
+    }
 
     #[test]
     fn only_the_types_from_before_nip_cl_are_legacy() {

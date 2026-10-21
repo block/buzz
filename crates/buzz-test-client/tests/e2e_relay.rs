@@ -4121,3 +4121,185 @@ async fn test_nip29_announce_channel_wire_workflow_send_needs_write_role() {
 
     owner_client.disconnect().await.ok();
 }
+
+/// A kind:9002 is stored before its updates run, so a value the database cannot
+/// hold must be refused first. Otherwise a name longer than the column fails
+/// after the event is acknowledged, and the `join_role` in the same event is
+/// never applied.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_announce_channel_wire_overlong_name_is_refused_before_storage() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+    let long_name = "n".repeat(256);
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", channel_id.as_str()]).unwrap(),
+            Tag::parse(["name", long_name.as_str()]).unwrap(),
+            Tag::parse(["join_role", "guest"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let mut client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect owner");
+    let ok = client.send_event(event).await.expect("send kind:9002");
+    client.disconnect().await.ok();
+    assert!(
+        !ok.accepted && ok.message.starts_with("invalid:"),
+        "an overlong name must be refused, got: {} {}",
+        ok.accepted,
+        ok.message
+    );
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(
+        tags.iter()
+            .any(|t| t.len() >= 2 && t[0] == "join_role" && t[1] == "member"),
+        "the refused event must not change join_role: {tags:?}"
+    );
+
+    // The longest storable name, with join_role, applies in full.
+    let max_name = "m".repeat(255);
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", channel_id.as_str()]).unwrap(),
+            Tag::parse(["name", max_name.as_str()]).unwrap(),
+            Tag::parse(["join_role", "guest"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let mut client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect owner");
+    let ok = client.send_event(event).await.expect("send kind:9002");
+    client.disconnect().await.ok();
+    assert!(ok.accepted, "a 255-character name is valid: {}", ok.message);
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(
+        tags.iter()
+            .any(|t| t.len() >= 2 && t[0] == "join_role" && t[1] == "guest"),
+        "join_role applies with a valid name: {tags:?}"
+    );
+}
+
+/// Workflow commands skip the generic write gate, so they check the role
+/// themselves. A writing member can save and manually trigger a workflow. A
+/// guest can do neither, and a workflow saved while its owner could write
+/// cannot be triggered after the owner is made a guest. Roles mean the same in
+/// every channel, so this holds in a normal channel too.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_announce_channel_wire_workflow_commands_need_write_role() {
+    let url = relay_url();
+    let http = relay_http_url();
+
+    async fn submit(http: &str, keys: &Keys, event: nostr::Event) -> (bool, String) {
+        let resp = reqwest::Client::new()
+            .post(format!("{http}/events"))
+            .header("X-Pubkey", keys.public_key().to_hex())
+            .header("Content-Type", "application/json")
+            .body(serde_json::to_string(&event).unwrap())
+            .send()
+            .await
+            .expect("submit event");
+        let body: serde_json::Value = resp.json().await.expect("parse response");
+        match body["accepted"].as_bool() {
+            Some(accepted) => (
+                accepted,
+                body["message"].as_str().unwrap_or_default().to_string(),
+            ),
+            None => (
+                false,
+                body["error"].as_str().unwrap_or_default().to_string(),
+            ),
+        }
+    }
+
+    async fn define(http: &str, keys: &Keys, channel_id: &str) -> (bool, String) {
+        let yaml = "name: announce-manual\n\
+             description: announce write-role probe\n\
+             trigger:\n\
+             \x20 on: webhook\n\
+             steps:\n\
+             \x20 - id: step1\n\
+             \x20   name: Notify\n\
+             \x20   action: send_message\n\
+             \x20   text: \"manual\"\n";
+        let def = EventBuilder::new(Kind::Custom(30620), yaml)
+            .tags([
+                Tag::parse(["h", channel_id]).unwrap(),
+                Tag::parse(["name", "announce-manual"]).unwrap(),
+            ])
+            .sign_with_keys(keys)
+            .expect("sign workflow def");
+        submit(http, keys, def).await
+    }
+
+    async fn trigger(http: &str, keys: &Keys, workflow_id: &str) -> (bool, String) {
+        let event = EventBuilder::new(Kind::Custom(46020), "")
+            .tags([Tag::parse(["d", workflow_id]).unwrap()])
+            .sign_with_keys(keys)
+            .expect("sign trigger");
+        submit(http, keys, event).await
+    }
+
+    for join_role in ["guest", "member"] {
+        let owner = Keys::generate();
+        let author = Keys::generate();
+        let author_hex = author.public_key().to_hex();
+        let channel_id = create_test_channel(&owner).await;
+        let mut owner_client = BuzzTestClient::connect(&url, &owner)
+            .await
+            .expect("connect owner");
+        let (accepted, msg) = add_member_with_role_ws(
+            &mut owner_client,
+            &channel_id,
+            &author_hex,
+            "member",
+            &owner,
+        )
+        .await;
+        assert!(accepted, "owner adds the workflow author: {msg}");
+        assert_eq!(
+            set_join_role_ws(&url, &channel_id, &owner, join_role).await,
+            (true, String::new())
+        );
+
+        let (accepted, msg) = define(&http, &author, &channel_id).await;
+        assert!(
+            accepted,
+            "join_role={join_role}: a member saves a workflow: {msg}"
+        );
+        let workflow_id = serde_json::from_str::<serde_json::Value>(
+            msg.strip_prefix("response:").expect("response prefix"),
+        )
+        .expect("response json")["workflow_id"]
+            .as_str()
+            .expect("workflow_id")
+            .to_string();
+        let (accepted, msg) = trigger(&http, &author, &workflow_id).await;
+        assert!(
+            accepted,
+            "join_role={join_role}: a member triggers its workflow: {msg}"
+        );
+
+        let (accepted, msg) =
+            add_member_with_role_ws(&mut owner_client, &channel_id, &author_hex, "guest", &owner)
+                .await;
+        assert!(accepted, "owner makes the workflow author a guest: {msg}");
+
+        let (accepted, msg) = trigger(&http, &author, &workflow_id).await;
+        assert!(
+            !accepted,
+            "join_role={join_role}: a guest must not trigger its saved workflow: {msg}"
+        );
+        let (accepted, msg) = define(&http, &author, &channel_id).await;
+        assert!(
+            !accepted && msg.starts_with("restricted:"),
+            "join_role={join_role}: a guest must not save a workflow, got: {msg}"
+        );
+
+        owner_client.disconnect().await.ok();
+    }
+}

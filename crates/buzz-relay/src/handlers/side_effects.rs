@@ -725,17 +725,17 @@ pub async fn validate_admin_event(
             }
 
             // Validate channel names before storage. A name made entirely of
-            // display-prefix hashes becomes empty after canonicalization.
+            // display-prefix hashes becomes empty after canonicalization, and
+            // a name the column cannot hold would fail only after the command
+            // is stored, skipping the rest of the update (join_role included).
             for t in event.tags.iter() {
                 if t.kind().to_string() == "name" {
-                    match t.content() {
-                        Some(v)
-                            if !buzz_core::channel::canonical_channel_name(v)
-                                .trim()
-                                .is_empty() => {}
-                        _ => {
-                            return Err(anyhow::anyhow!("channel name is required"));
-                        }
+                    let error = match t.content() {
+                        Some(v) => buzz_core::channel::channel_name_error(v),
+                        None => Some("channel name is required"),
+                    };
+                    if let Some(error) = error {
+                        return Err(anyhow::anyhow!(error));
                     }
                 }
             }
