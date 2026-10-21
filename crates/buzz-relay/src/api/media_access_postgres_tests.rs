@@ -161,9 +161,15 @@ async fn rollout_and_report_review_preserve_private_file_boundaries() {
         );
         assert!(check(&state, &tenant, &owner, &hash).await.is_ok());
     }
-    state
+    let _ = state
         .db
-        .add_relay_member(community, &reviewer.public_key().to_hex(), "admin", None)
+        .add_relay_member(
+            community,
+            &reviewer.public_key().to_hex(),
+            "admin",
+            None,
+            &state.relay_keypair,
+        )
         .await
         .unwrap();
     assert!(
@@ -225,9 +231,14 @@ async fn rollout_and_report_review_preserve_private_file_boundaries() {
         "a raw reported hash grants nothing"
     );
     for role in ["member", "owner", "admin"] {
-        state
+        let _ = state
             .db
-            .update_relay_member_role(community, &reviewer.public_key().to_hex(), role)
+            .update_relay_member_role(
+                community,
+                &reviewer.public_key().to_hex(),
+                role,
+                &state.relay_keypair,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -242,9 +253,15 @@ async fn rollout_and_report_review_preserve_private_file_boundaries() {
         .await
         .unwrap();
     let other_tenant = TenantContext::resolved(other.id, other.host);
-    state
+    let _ = state
         .db
-        .add_relay_member(other.id, &reviewer.public_key().to_hex(), "admin", None)
+        .add_relay_member(
+            other.id,
+            &reviewer.public_key().to_hex(),
+            "admin",
+            None,
+            &state.relay_keypair,
+        )
         .await
         .unwrap();
     assert!(matches!(
