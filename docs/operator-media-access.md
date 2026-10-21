@@ -29,6 +29,13 @@ It counts requests, not distinct files, and includes thumbnail requests checked 
 Use controlled client smoke tests to investigate counts; hashes, keys, and URLs are not metric labels.
 Log-only evaluations create no shares and do not grant future access.
 
+Backfill reevaluates references received after recording began using their authors' current permissions.
+It does not remember earlier refusals: a rerun can grant an old reference after its author gains access.
+For a community-wide note, that grant can survive removal of the author's channel access and deletion of the original private post.
+The grant remains tied to the note and ends when that note is deleted.
+This migration limitation is accepted for recording and log-only rollout; before enabling enforcement, explicitly accept it or prevent reevaluation.
+Reruns deduplicate rows but do not preserve earlier authorization decisions.
+
 Previously unshared uploads without uploader proof still need an upload of the exact bytes before they can be shared.
 Historical uploader backfill and unparsed-reference recovery remain separate work.
 To roll back file denials, set `off` or `log-only` and restart every pod.

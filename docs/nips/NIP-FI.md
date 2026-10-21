@@ -719,9 +719,9 @@ rejected as `evidence_rejected`.
 > **Named residual:** within a window of at most 60 seconds from minting (plus
 > a bounded 5-second future-skew allowance), a captured full header set allows
 > impersonating the signing key for media reads on exactly one tenant host.
-> With `BUZZ_MEDIA_READ_MODE=enforce`, reads are limited to files that key may
-> access through a live share, upload proof, or an audited open-report review.
-> In `off` or `log-only`, community membership remains the read-access gate.
+> Where the relay enforces its file-share policy, reads are limited to files
+> that key may access through a live share, upload proof, or an audited
+> open-report review; otherwise community membership is the read-access gate.
 > This access is read-only and revocable via assertion expiry or deny-map
 > enforcement; it does not cross tenant boundaries.
 
