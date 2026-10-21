@@ -85,8 +85,9 @@ impl Db {
     /// Shares come from the same rule as live writes. Events received before
     /// share recording was installed predate the readability check, so their
     /// references are recorded as they stand; later events get the live,
-    /// checked recording, so the backfill never shares what live recording
-    /// refused. Idempotent and resumable: rerunning only fills missing shares.
+    /// checked recording using the author's current permissions. Earlier refusals
+    /// are not remembered: reruns can grant old references after access changes.
+    /// Rows are deduplicated, but authorization decisions are not preserved.
     #[datastore_span(name = "backfill_media_shares", system = "postgresql")]
     pub async fn backfill_media_shares(&self, batch_size: i64) -> Result<u64> {
         if batch_size <= 0 {
