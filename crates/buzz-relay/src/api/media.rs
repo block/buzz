@@ -4347,7 +4347,9 @@ mod tests {
                 &keys.public_key().to_hex(),
                 "member",
                 None,
+                &nostr::Keys::generate(),
             ))
+            .map(|write| write.outcome)
             .expect("add relay member");
             let assertion = signed_assertion(&keys.public_key().to_hex());
             let proof = blossom_get_auth_value(&keys, &host, &"a".repeat(64));

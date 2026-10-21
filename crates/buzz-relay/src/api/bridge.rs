@@ -1511,10 +1511,11 @@ async fn query_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
-    // System channels are outside `accessible_channels`; a filter that names
-    // one reads it in its own scope only (see `handlers::system_channels`).
-    let mut readable_system =
-        crate::handlers::system_channels::readable_system_channels_for_filters(
+    // Named-only channels (system, and types added later) are outside
+    // `accessible_channels`; a filter that names one reads it in its own
+    // scope only (see `handlers::system_channels`).
+    let mut named_only =
+        crate::handlers::system_channels::readable_named_only_channels_for_filters(
             state,
             tenant.community(),
             &pubkey_bytes,
@@ -1523,14 +1524,14 @@ async fn query_events_authed(
             None,
         )
         .await
-        .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))?;
+        .map_err(|e| internal_error(&format!("named-only channel access lookup: {e}")))?;
     repair_requested_channel_access(
         state,
         tenant,
         &filters,
         &pubkey_bytes,
         &mut accessible_channels,
-        &mut readable_system,
+        &mut named_only,
     )
     .await?;
 
@@ -1546,7 +1547,7 @@ async fn query_events_authed(
             &raw_filters,
             &filters,
             &accessible_channels,
-            &readable_system,
+            &named_only,
             tenant,
             &authed_pubkey_hex,
             &pubkey_bytes,
@@ -1581,7 +1582,7 @@ async fn query_events_authed(
             let scope = crate::handlers::system_channels::filter_channel_scope(
                 filter,
                 &accessible_channels,
-                &readable_system,
+                &named_only,
             );
             events.extend(thread_roots::query(state, tenant, filter, &scope).await?);
             handled.insert(idx);
@@ -1602,7 +1603,7 @@ async fn query_events_authed(
             &crate::handlers::system_channels::filter_channel_scope(
                 filter,
                 &accessible_channels,
-                &readable_system,
+                &named_only,
             ),
             &pubkey_bytes,
             &mut events,
@@ -1728,7 +1729,7 @@ async fn query_events_authed(
         let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
             filter,
             &accessible_channels,
-            &readable_system,
+            &named_only,
         );
 
         if let Some(ch_id) = extract_channel_from_filter(filter) {
@@ -1822,7 +1823,7 @@ async fn query_events_authed(
         let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
             filter,
             &accessible_channels,
-            &readable_system,
+            &named_only,
         );
 
         if let Some(ch_id) = extract_channel_from_filter(filter) {
@@ -1928,7 +1929,7 @@ async fn query_events_authed(
         let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
             filter,
             &accessible_channels,
-            &readable_system,
+            &named_only,
         );
         match filter_events {
             Ok(stored_events) => {
@@ -1967,7 +1968,7 @@ pub(crate) async fn repair_requested_channel_access(
     filters: &[nostr::Filter],
     pubkey_bytes: &[u8],
     accessible_channels: &mut Vec<uuid::Uuid>,
-    readable_system: &mut Vec<uuid::Uuid>,
+    named_only: &mut crate::handlers::system_channels::NamedOnlyChannels,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let repaired_from = accessible_channels.len();
     let requested: Vec<uuid::Uuid> = filters
@@ -1984,19 +1985,19 @@ pub(crate) async fn repair_requested_channel_access(
         &requested,
         None,
         accessible_channels,
-        readable_system,
+        named_only.ids(),
     )
     .await
     .map_err(|e| internal_error(&format!("channel membership confirmation: {e}")))?;
-    crate::handlers::system_channels::keep_repaired_system_channels_named(
+    crate::handlers::system_channels::keep_repaired_named_only_channels_named(
         state,
         tenant.community(),
         accessible_channels,
         repaired_from,
-        readable_system,
+        named_only,
     )
     .await
-    .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))
+    .map_err(|e| internal_error(&format!("named-only channel access lookup: {e}")))
 }
 
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
@@ -2154,10 +2155,11 @@ async fn count_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
-    // System channels are outside `accessible_channels`; a filter that names
-    // one reads it in its own scope only (see `handlers::system_channels`).
-    let mut readable_system =
-        crate::handlers::system_channels::readable_system_channels_for_filters(
+    // Named-only channels (system, and types added later) are outside
+    // `accessible_channels`; a filter that names one reads it in its own
+    // scope only (see `handlers::system_channels`).
+    let mut named_only =
+        crate::handlers::system_channels::readable_named_only_channels_for_filters(
             state,
             tenant.community(),
             &pubkey_bytes,
@@ -2166,14 +2168,14 @@ async fn count_events_authed(
             None,
         )
         .await
-        .map_err(|e| internal_error(&format!("system channel access lookup: {e}")))?;
+        .map_err(|e| internal_error(&format!("named-only channel access lookup: {e}")))?;
     repair_requested_channel_access(
         state,
         tenant,
         &filters,
         &pubkey_bytes,
         &mut accessible_channels,
-        &mut readable_system,
+        &mut named_only,
     )
     .await?;
 
@@ -2182,7 +2184,7 @@ async fn count_events_authed(
         let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
             filter,
             &accessible_channels,
-            &readable_system,
+            &named_only,
         );
         let needs_author_only_filtering =
             crate::handlers::req::filter_can_match_author_only_kinds(filter);
@@ -2415,7 +2417,7 @@ async fn handle_bridge_search(
     raw_filters: &[Value],
     filters: &[nostr::Filter],
     implicit_channels: &[uuid::Uuid],
-    readable_system: &[uuid::Uuid],
+    named_only: &crate::handlers::system_channels::NamedOnlyChannels,
     tenant: &buzz_core::tenant::TenantContext,
     reader_pubkey_hex: &str,
     pubkey_bytes: &[u8],
@@ -2435,12 +2437,12 @@ async fn handle_bridge_search(
         if limit == 0 {
             continue;
         }
-        // Implicit channels plus the readable system channels this filter
+        // Implicit channels plus the readable named-only channels this filter
         // names; never another filter's.
         let accessible_channels = &*crate::handlers::system_channels::filter_channel_scope(
             filter,
             implicit_channels,
-            readable_system,
+            named_only,
         );
 
         // Scope by channel — push the #h tag (intersected with accessible
@@ -4506,8 +4508,15 @@ pub(crate) mod postgres_tests {
     ///
     /// Returns `None` when local Postgres is not reachable.
     pub(crate) async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+        bridge_handler_test_state_on(&crate::test_support::database_url()).await
+    }
+
+    /// [`bridge_handler_test_state`] on the database at `database_url`.
+    pub(crate) async fn bridge_handler_test_state_on(
+        database_url: &str,
+    ) -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
-        config.database_url = crate::test_support::database_url();
+        config.database_url = database_url.to_string();
         // Use the real local Redis so enforce_http_admission can pass.
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -4515,9 +4524,7 @@ pub(crate) mod postgres_tests {
         config.require_auth_token = false;
         config.require_relay_membership = false;
 
-        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
-            .await
-            .ok()?;
+        let pool = sqlx::PgPool::connect(database_url).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -6827,11 +6834,14 @@ pub(crate) mod postgres_tests {
         // Seed the test actor as "owner" so moderation authz passes.
         let actor_keys = Keys::generate();
         let actor_hex = actor_keys.public_key().to_hex();
-        rt.block_on(
-            state
-                .db
-                .add_relay_member(community.id, &actor_hex, "owner", None),
-        )
+        rt.block_on(state.db.add_relay_member(
+            community.id,
+            &actor_hex,
+            "owner",
+            None,
+            &nostr::Keys::generate(),
+        ))
+        .map(|write| write.outcome)
         .expect("seed actor as owner");
 
         // Build headers: X-Pubkey dev-mode admission (require_auth_token=false).
@@ -8701,7 +8711,8 @@ pub(crate) mod postgres_tests {
             // A schema whose `users` table can be taken away after the link,
             // so only the owner-to-agent lookup fails at revoke time. It
             // carries `communities` and the deletion lock key so writes pass
-            // community write admission.
+            // community write admission, and `events` for the member list
+            // each membership change writes.
             let db_url = crate::test_support::database_url();
             let schema = format!("late_owner_{}", uuid::Uuid::new_v4().simple());
             sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
@@ -8712,6 +8723,7 @@ pub(crate) mod postgres_tests {
                  CREATE TABLE {schema}.join_policy_acceptances \
                      (LIKE public.join_policy_acceptances INCLUDING ALL); \
                  CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
+                 CREATE TABLE {schema}.events (LIKE public.events INCLUDING ALL); \
                  CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
                  LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT public.community_deletion_lock_key(target)';"
             )))
@@ -8839,13 +8851,20 @@ pub(crate) mod postgres_tests {
                         &owner_hex,
                         "member",
                         None,
+                        &nostr::Keys::generate(),
                     )
                     .await
+                    .map(|write| write.outcome)
                     .expect("seed member");
                     state
                         .db
-                        .remove_relay_member(tenant.community(), &owner_hex)
+                        .remove_relay_member(
+                            tenant.community(),
+                            &owner_hex,
+                            &nostr::Keys::generate(),
+                        )
                         .await
+                        .map(|write| write.outcome)
                         .map(|_| ())
                         .expect("removal commits");
                 }

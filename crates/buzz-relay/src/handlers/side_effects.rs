@@ -400,16 +400,20 @@ async fn may_delete_channel_event(
     author: &[u8],
     actor: &[u8],
 ) -> anyhow::Result<bool> {
+    // An author deleting their own event re-passes the channel write gate, so a
+    // removed private-channel member cannot mutate old messages after access is
+    // revoked, and a guest cannot delete either.
     if author_delete_can_use_self_delete_path(author, actor, event)
-        && (state
-            .is_member_cached(tenant.community(), channel_id, actor)
-            .await?
-            || state
-                .db
-                .get_channel_for_event_write(tenant.community(), channel_id)
-                .await
-                .map(|ch| ch.visibility == "open")
-                .unwrap_or(false))
+        && super::ingest::check_channel_membership(
+            tenant.community(),
+            state,
+            channel_id,
+            actor,
+            None,
+            super::ingest::ChannelWrite::Post,
+        )
+        .await
+        .is_ok()
     {
         return Ok(true);
     }
@@ -575,7 +579,8 @@ pub async fn validate_admin_event(
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
     // Reject mutations on archived channels — except kind:9002 with archived=false
-    // (unarchive), which must be allowed through so the channel can be restored.
+    // (unarchive), which must be allowed through so the channel can be restored,
+    // and a member leaving by themselves (still subject to the last-owner rule).
     let channel = state
         .db
         .get_channel_for_event_write(tenant.community(), channel_id)
@@ -586,7 +591,7 @@ pub async fn validate_admin_event(
             let parts = t.as_slice();
             parts.len() >= 2 && parts[0] == "archived" && parts[1] == "false"
         });
-    if channel.archived_at.is_some() && !is_unarchive_request {
+    if channel.archived_at.is_some() && !is_unarchive_request && !is_self_departure(event) {
         return Err(anyhow::anyhow!("channel is archived"));
     }
 
@@ -613,12 +618,16 @@ pub async fn validate_admin_event(
             let target_pubkey =
                 extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
 
+            let join_role =
+                buzz_db::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
+
             // Authorization policy — visibility gate, elevated-grant gate,
             // active-member role-change gate, and last-owner demotion — lives in
             // `channel_authz`, which is pure and table-tested. The database reads
             // it depends on stay here.
             match channel_authz::decide_put_user(
                 &channel.visibility,
+                join_role,
                 actor_role,
                 requested_role,
                 &members,
@@ -686,6 +695,7 @@ pub async fn validate_admin_event(
                 "visibility",
                 "ttl",
                 "t",
+                "join_role",
             ];
             let has_recognized = event
                 .tags
@@ -693,7 +703,7 @@ pub async fn validate_admin_event(
                 .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role)"
                 ));
             }
 
@@ -715,17 +725,17 @@ pub async fn validate_admin_event(
             }
 
             // Validate channel names before storage. A name made entirely of
-            // display-prefix hashes becomes empty after canonicalization.
+            // display-prefix hashes becomes empty after canonicalization, and
+            // a name the column cannot hold would fail only after the command
+            // is stored, skipping the rest of the update (join_role included).
             for t in event.tags.iter() {
                 if t.kind().to_string() == "name" {
-                    match t.content() {
-                        Some(v)
-                            if !buzz_core::channel::canonical_channel_name(v)
-                                .trim()
-                                .is_empty() => {}
-                        _ => {
-                            return Err(anyhow::anyhow!("channel name is required"));
-                        }
+                    let error = match t.content() {
+                        Some(v) => buzz_core::channel::channel_name_error(v),
+                        None => Some("channel name is required"),
+                    };
+                    if let Some(error) = error {
+                        return Err(anyhow::anyhow!(error));
                     }
                 }
             }
@@ -742,6 +752,25 @@ pub async fn validate_admin_event(
                         }
                         None => {
                             return Err(anyhow::anyhow!("visibility tag must have a value"));
+                        }
+                    }
+                }
+            }
+
+            // Validate join_role values before storage. NIP-29 9002 is a full
+            // replace, but Buzz's is a partial update: an absent tag leaves the
+            // setting unchanged, so going back to `member` must be explicit.
+            for t in event.tags.iter() {
+                if t.kind().to_string() == "join_role" {
+                    match t.content() {
+                        Some(v) if v.parse::<buzz_db::channel::ChannelJoinRole>().is_ok() => {}
+                        Some(v) => {
+                            return Err(anyhow::anyhow!(
+                                "invalid join_role value: {v} (must be \"member\" or \"guest\")"
+                            ));
+                        }
+                        None => {
+                            return Err(anyhow::anyhow!("join_role tag must have a value"));
                         }
                     }
                 }
@@ -777,8 +806,8 @@ pub async fn validate_admin_event(
                 labels.map_err(|e| anyhow::anyhow!("{e}"))?;
             }
 
-            // name/about/archived/visibility/ttl/labels require owner/admin;
-            // topic/purpose allow any member.
+            // name/about/archived/visibility/ttl/labels/join_role require owner/admin;
+            // topic/purpose allow any member who may post.
             let has_privileged_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
                 k == "name"
@@ -787,6 +816,7 @@ pub async fn validate_admin_event(
                     || k == "visibility"
                     || k == "ttl"
                     || k == "t"
+                    || k == "join_role"
             });
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
@@ -808,19 +838,36 @@ pub async fn validate_admin_event(
                             return Ok(());
                         }
                         Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl/label changes"
+                            "actor not authorized for name/about/archived/visibility/ttl/label/join_role changes"
                         ))
                     }
                 }
             } else {
-                // topic/purpose: any member
+                // topic/purpose: any member whose role may post (never a
+                // guest).
                 let is_member = state
                     .is_member_cached(tenant.community(), channel_id, &actor_bytes)
                     .await?;
-                if is_member {
+                if !is_member {
+                    return Err(anyhow::anyhow!("not a member"));
+                }
+                let channel = state
+                    .db
+                    .get_channel_for_event_write(tenant.community(), channel_id)
+                    .await?;
+                if super::ingest::may_post(
+                    state,
+                    tenant.community(),
+                    channel_id,
+                    &actor_bytes,
+                    &channel,
+                    true,
+                )
+                .await?
+                {
                     Ok(())
                 } else {
-                    Err(anyhow::anyhow!("not a member"))
+                    Err(anyhow::anyhow!("only members can change topic or purpose"))
                 }
             }
         }
@@ -1329,67 +1376,10 @@ pub async fn emit_group_discovery_events(
     let group_id = channel_id.to_string();
 
     {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        tags.push(Tag::parse(["name", &channel.name])?);
-        if let Some(ref desc) = channel.description {
-            if !desc.is_empty() {
-                tags.push(Tag::parse(["about", desc])?);
-            }
-        }
-        if channel.visibility == "private" {
-            tags.push(Tag::parse(["private"])?);
-        } else {
-            // Explicit "public" tag complements NIP-29's absence-of-"private" convention,
-            // making channel visibility self-describing for clients.
-            tags.push(Tag::parse(["public"])?);
-        }
-        // NIP-29 hidden tag: hide metadata from non-members. Set for DMs and
-        // for private system channels. Not a security boundary — access
-        // control is handled by channel-scoped storage.
-        if channel.channel_type == "system" && channel.visibility == "private" {
-            tags.push(Tag::parse(["hidden"])?);
-        }
-        if channel.channel_type == "dm" {
-            tags.push(Tag::parse(["hidden"])?);
-            // Include participant pubkeys in kind:39000 for DMs so clients can
-            // resolve display names without a separate kind:39002 fetch.
-            for m in &members {
-                let pubkey_hex = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pubkey_hex])?);
-            }
-        }
-        // Buzz channels always require explicit membership
-        tags.push(Tag::parse(["closed"])?);
-        // Channel type tag so clients can distinguish stream/forum/dm without
-        // inference, then the creator. The same tags lead 39001 and 39002.
-        tags.extend(group_state_identity_tags(&channel.identity())?);
-        // Creation time, so readers can pick the oldest of two channels. The
-        // event's own created_at changes on every edit.
-        tags.push(buzz_core::channel::channel_created_at_tag(
-            channel.created_at.timestamp(),
-        )?);
-        // Optional topic / purpose for richer client UX
-        if let Some(ref topic) = channel.topic {
-            if !topic.is_empty() {
-                tags.push(Tag::parse(["topic", topic])?);
-            }
-        }
-        if let Some(ref purpose) = channel.purpose {
-            if !purpose.is_empty() {
-                tags.push(Tag::parse(["purpose", purpose])?);
-            }
-        }
-        // Archived state — clients use this to hide channels from the sidebar.
-        if channel.archived_at.is_some() {
-            tags.push(Tag::parse(["archived", "true"])?);
-        }
-        // Ephemeral channel TTL — clients use this to show countdown timers.
-        if let Some(ttl) = channel.ttl_seconds {
-            tags.push(Tag::parse(["ttl", &ttl.to_string()])?);
-        }
-        if let Some(ref deadline) = channel.ttl_deadline {
-            tags.push(Tag::parse(["ttl_deadline", &deadline.to_rfc3339()])?);
-        }
+        let tags = buzz_db::channel::group_metadata_tags(&channel, &members)
+            .into_iter()
+            .map(Tag::parse)
+            .collect::<Result<Vec<_>, _>>()?;
         emit_addressable_discovery_event(
             tenant,
             state,
@@ -1570,32 +1560,27 @@ async fn handle_put_user(
     let channel_id =
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
-    // No role tag = no role change: preserve an existing member's current role and
-    // fall back to Member only for a new member. Unconditionally defaulting to
-    // Member let a bare PUT_USER silently demote an existing owner/admin.
-    let role: MemberRole = match extract_tag_value(event, "role") {
-        Some(role_str) => role_str
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid role: {role_str}"))?,
-        None => state
-            .db
-            .get_members_for_event_write(tenant.community(), channel_id)
-            .await?
-            .iter()
-            .find(|m| m.pubkey == target_pubkey)
-            .and_then(|m| m.role.parse().ok())
-            .unwrap_or(MemberRole::Member),
-    };
-
     let actor_bytes = event.pubkey.to_bytes().to_vec();
+
+    // No role tag = no role change: an existing member keeps their current
+    // role, and a new member gets the channel's `join_role`, whether they add
+    // themselves or someone else adds them. `put_member` resolves that under
+    // the channel's membership lock, together with every admission rule.
+    let requested: Option<MemberRole> = extract_tag_value(event, "role")
+        .map(|role_str| {
+            role_str
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid role: {role_str}"))
+        })
+        .transpose()?;
 
     state
         .db
-        .add_member(
+        .put_member(
             tenant.community(),
             channel_id,
             &target_pubkey,
-            role,
+            requested,
             Some(&actor_bytes),
         )
         .await?;
@@ -1813,6 +1798,33 @@ async fn handle_edit_metadata(
                         channel_id,
                         serde_json::json!({
                             "type": "visibility_changed", "actor": actor_hex, "visibility": val
+                        }),
+                        chrono::Utc::now(),
+                    )
+                    .await?;
+                }
+                "join_role" => {
+                    // Validated during authorization; parse again so a bad
+                    // value can never reach the column.
+                    let join_role: buzz_db::channel::ChannelJoinRole =
+                        val.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+                    state
+                        .db
+                        .update_channel(
+                            tenant.community(),
+                            channel_id,
+                            buzz_db::channel::ChannelUpdate {
+                                join_role: Some(join_role.as_str().to_string()),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    emit_system_message(
+                        tenant,
+                        state,
+                        channel_id,
+                        serde_json::json!({
+                            "type": "join_role_changed", "actor": actor_hex, "join_role": join_role.as_str()
                         }),
                         chrono::Utc::now(),
                     )
@@ -2342,16 +2354,12 @@ async fn handle_join_request(
         return Ok(());
     }
 
-    // Add as member (idempotent — add_member handles duplicates).
+    // A self-join gets the channel's `join_role`, read by `put_member` under
+    // the membership lock: member in a normal channel, guest in an announce
+    // channel, where a member must then make them a member.
     state
         .db
-        .add_member(
-            tenant.community(),
-            channel_id,
-            &actor_bytes,
-            buzz_db::channel::MemberRole::Member,
-            None,
-        )
+        .put_member(tenant.community(), channel_id, &actor_bytes, None, None)
         .await?;
     state.invalidate_membership(tenant, channel_id, &actor_bytes);
 
@@ -2769,6 +2777,17 @@ fn extract_h_tag_channel(event: &Event) -> Option<Uuid> {
 }
 
 /// Extract target pubkey from first `p` tag.
+/// A member leaving a channel by themselves: kind:9022, or kind:9001 naming
+/// its own author. An archived channel still allows this, so nobody is held
+/// in a channel they cannot write in. The last-owner rule still applies.
+pub(crate) fn is_self_departure(event: &Event) -> bool {
+    match event.kind.as_u16() {
+        9022 => true,
+        9001 => extract_p_tag(event).is_some_and(|p| p == event.pubkey.to_bytes()),
+        _ => false,
+    }
+}
+
 fn extract_p_tag(event: &Event) -> Option<Vec<u8>> {
     for tag in event.tags.iter() {
         if tag.kind().to_string() == "p" {
@@ -3350,21 +3369,6 @@ async fn emit_initial_ref_state(
     Ok(())
 }
 
-/// Reconcile every community's event-backed NIP-43 membership view.
-///
-/// `relay_members` is canonical. A snapshot is rebuilt only when it is absent
-/// or its member/role set differs from the canonical rows. This makes the sweep
-/// safe to run at startup and periodically without producing an event stream
-/// when nothing changed. A failure in one community is logged and counted but
-/// does not prevent the remaining communities from being repaired.
-#[derive(Clone, Copy)]
-pub enum Nip43ReconciliationPurpose {
-    /// Before listener admission opens.
-    Bootstrap,
-    /// Periodic background repair after startup.
-    Maintenance,
-}
-
 /// Per-item counts from one snapshot reconciliation sweep.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReconcileSummary {
@@ -3374,167 +3378,29 @@ pub struct ReconcileSummary {
     pub failed: usize,
 }
 
-/// Preserve the original maintenance reconciliation API for downstream callers.
-#[deprecated(note = "use reconcile_nip43_membership_snapshots_with_purpose")]
-pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyhow::Result<usize> {
-    reconcile_nip43_membership_snapshots_with_purpose(
-        state,
-        Nip43ReconciliationPurpose::Maintenance,
-    )
-    .await
-    .map(|summary| summary.repaired)
-}
-
-/// Reconcile NIP-43 snapshots with explicit startup or maintenance attribution.
-pub async fn reconcile_nip43_membership_snapshots_with_purpose(
+/// Fan a committed NIP-43 membership list (kind:13534) out to live subscribers.
+///
+/// Membership mutations write the list in their own transaction (see
+/// `buzz_db::relay_members::MembershipWrite`), so this only delivers it; a
+/// missed delivery delays live updates and the next fetch is still correct.
+pub async fn fan_out_nip43_membership_list(
+    tenant: &TenantContext,
     state: &Arc<AppState>,
-    purpose: Nip43ReconciliationPurpose,
-) -> anyhow::Result<ReconcileSummary> {
-    let communities = match purpose {
-        Nip43ReconciliationPurpose::Bootstrap => state.db.bootstrap_community_hosts().await?,
-        Nip43ReconciliationPurpose::Maintenance => state.db.active_community_hosts().await?,
+    snapshot: Option<buzz_core::StoredEvent>,
+) {
+    let Some(stored) = snapshot else {
+        return;
     };
-    let mut reconciled = 0usize;
-    let mut failed = 0usize;
-    let total = communities.len();
-    let started = std::time::Instant::now();
-
-    for (index, community) in communities.into_iter().enumerate() {
-        if nip43_progress_due(purpose, index, total) {
-            info!(
-                done = index,
-                total,
-                republished = reconciled,
-                failed,
-                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                "NIP-43 startup reconciliation progress"
-            );
-        }
-        let community_id = buzz_core::CommunityId::from_uuid(community.id);
-        let host = community.host;
-        let result = async {
-            let needs_reconciliation = match purpose {
-                Nip43ReconciliationPurpose::Bootstrap => {
-                    state
-                        .db
-                        .nip43_membership_snapshot_needs_reconciliation_for_bootstrap(
-                            community_id,
-                            &state.relay_keypair.public_key(),
-                        )
-                        .await?
-                }
-                Nip43ReconciliationPurpose::Maintenance => {
-                    state
-                        .db
-                        .nip43_membership_snapshot_needs_reconciliation_for_maintenance(
-                            community_id,
-                            &state.relay_keypair.public_key(),
-                        )
-                        .await?
-                }
-            };
-            if !needs_reconciliation {
-                return Ok::<bool, anyhow::Error>(false);
-            }
-
-            let tenant = TenantContext::resolved(community_id, host.clone());
-            publish_nip43_membership_list(&tenant, state).await?;
-            Ok::<bool, anyhow::Error>(true)
-        }
-        .await;
-
-        match result {
-            Ok(true) => reconciled += 1,
-            Ok(false) => {}
-            Err(error) => {
-                failed += 1;
-                metrics::counter!("buzz_nip43_membership_reconciliation_failures_total")
-                    .increment(1);
-                warn!(%community_id, %host, %error, "NIP-43 membership reconciliation failed");
-            }
-        }
-    }
-
-    metrics::counter!("buzz_nip43_membership_reconciliations_total").increment(reconciled as u64);
-    Ok(ReconcileSummary {
-        repaired: reconciled,
-        failed,
-    })
-}
-
-/// Communities between startup NIP-43 reconciliation progress logs.
-const NIP43_BOOTSTRAP_PROGRESS_INTERVAL: usize = 5_000;
-
-/// Whether a sweep logs progress before processing community `done` of
-/// `total`. Only the startup sweep logs (the 60 s maintenance sweep stays
-/// quiet): every [`NIP43_BOOTSTRAP_PROGRESS_INTERVAL`] communities, never at
-/// the start (nothing done yet) and never past the end.
-fn nip43_progress_due(purpose: Nip43ReconciliationPurpose, done: usize, total: usize) -> bool {
-    matches!(purpose, Nip43ReconciliationPurpose::Bootstrap)
-        && done > 0
-        && done < total
-        && done.is_multiple_of(NIP43_BOOTSTRAP_PROGRESS_INTERVAL)
-}
-
-/// Publish a kind:13534 relay membership list event (NIP-43).
-///
-/// Queries all current relay members and emits a relay-signed, NIP-70-protected
-/// addressable event listing every member pubkey. Replaces any previous list.
-///
-/// The member query, event construction, and replacement all happen inside
-/// the same per-community advisory lock held by
-/// `publish_nip43_membership_locked`. This prevents a stale snapshot from
-/// overwriting a newer one when two publications race: the lock serializes
-/// the entire read-build-write cycle, not just the write.
-pub async fn publish_nip43_membership_list(
-    tenant: &TenantContext,
-    state: &Arc<AppState>,
-) -> anyhow::Result<()> {
-    let started_at = std::time::Instant::now();
-    metrics::counter!("buzz_nip43_membership_publications_total", "result" => "attempted")
-        .increment(1);
-    let result = publish_nip43_membership_list_inner(tenant, state).await;
-    metrics::histogram!("buzz_nip43_membership_publication_seconds")
-        .record(started_at.elapsed().as_secs_f64());
-    metrics::counter!(
-        "buzz_nip43_membership_publications_total",
-        "result" => if result.is_ok() { "succeeded" } else { "failed" }
-    )
-    .increment(1);
-    result
-}
-
-async fn publish_nip43_membership_list_inner(
-    tenant: &TenantContext,
-    state: &Arc<AppState>,
-) -> anyhow::Result<()> {
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
-    let community = tenant.community();
-
-    // The DB method acquires the per-community snapshot lock BEFORE reading
-    // members, so that the entire read-build-write cycle is serialized. A
-    // concurrent publication that reads newer state will block until our
-    // replacement commits, then read the updated membership. This prevents a
-    // stale snapshot from winning by arrival order.
-    let (stored, was_inserted, member_count) = state
-        .db
-        .publish_nip43_membership_locked(community, &state.relay_keypair)
-        .await?;
-
-    if was_inserted {
-        dispatch_persistent_event(
-            tenant,
-            state,
-            &stored,
-            KIND_NIP43_MEMBERSHIP_LIST,
-            &relay_pubkey_hex,
-            None,
-        )
-        .await;
-    }
-
-    info!(member_count, "NIP-43 membership list published");
-    Ok(())
+    dispatch_persistent_event(
+        tenant,
+        state,
+        &stored,
+        KIND_NIP43_MEMBERSHIP_LIST,
+        &relay_pubkey_hex,
+        None,
+    )
+    .await;
 }
 
 /// Shared helper: publish a NIP-43 membership delta event (kind 8000 or 8001).
@@ -4149,37 +4015,6 @@ mod tests {
     }
 
     #[test]
-    fn nip43_progress_logs_every_interval_inside_the_startup_sweep_only() {
-        use Nip43ReconciliationPurpose::{Bootstrap, Maintenance};
-        const STEP: usize = NIP43_BOOTSTRAP_PROGRESS_INTERVAL;
-        let total = 79_942;
-        let due: Vec<usize> = (0..total)
-            .filter(|&done| nip43_progress_due(Bootstrap, done, total))
-            .collect();
-        assert_eq!(due.first(), Some(&STEP));
-        assert_eq!(due.len(), total / STEP);
-        assert!(due.iter().all(|done| done.is_multiple_of(STEP)));
-
-        // (purpose, done, total, expected)
-        for (purpose, done, total, expected) in [
-            (Bootstrap, STEP, total, true),
-            (Maintenance, STEP, total, false),
-            (Bootstrap, 0, total, false),
-            (Bootstrap, STEP - 1, total, false),
-            (Bootstrap, STEP, STEP, false),
-            (Bootstrap, STEP, STEP + 1, true),
-        ] {
-            assert_eq!(
-                nip43_progress_due(purpose, done, total),
-                expected,
-                "done={done} total={total} bootstrap={}",
-                matches!(purpose, Bootstrap)
-            );
-        }
-        assert!(!(0..total).any(|done| nip43_progress_due(Maintenance, done, total)));
-    }
-
-    #[test]
     fn workflow_deletion_retry_matches_authorized_dispatch() {
         let keys = nostr::Keys::generate();
         let workflow = format!("30620:{}:workflow", keys.public_key());
@@ -4224,16 +4059,6 @@ mod tests {
                 .expect("sign");
             assert_eq!(is_workflow_deletion(&event), expected, "{:?}", event.tags);
         }
-    }
-
-    #[test]
-    fn nip43_reconciliation_compatibility_alias_is_preserved() {
-        #[allow(deprecated)]
-        async fn call(state: &Arc<AppState>) -> anyhow::Result<usize> {
-            reconcile_nip43_membership_snapshots(state).await
-        }
-
-        let _ = call;
     }
 
     #[test]
@@ -4351,137 +4176,5 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
-    }
-
-    mod postgres_tests {
-        use super::*;
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-
-        async fn insert_community(pool: &sqlx::PgPool) -> Uuid {
-            let id = Uuid::new_v4();
-            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-                .bind(id)
-                .bind(format!("nip43-sweep-{}.example", id.simple()))
-                .execute(pool)
-                .await
-                .expect("insert community fixture");
-            id
-        }
-
-        async fn set_deletion_state(pool: &sqlx::PgPool, id: Uuid, state: &str) {
-            let mut tx = pool.begin().await.expect("begin lifecycle fixture");
-            sqlx::query(
-                "SELECT set_config('buzz.deletion_executor_community', $1, true), \
-                        set_config('buzz.deletion_fence_generation', '0', true)",
-            )
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await
-            .expect("authorize lifecycle fixture");
-            sqlx::query(
-                "UPDATE communities SET deletion_state = $2, \
-                        deleted_at = CASE WHEN $2 = 'tombstone' THEN now() END \
-                 WHERE id = $1",
-            )
-            .bind(id)
-            .bind(state)
-            .execute(&mut *tx)
-            .await
-            .expect("set lifecycle state");
-            tx.commit().await.expect("commit lifecycle fixture");
-        }
-
-        async fn membership_snapshots(pool: &sqlx::PgPool, id: Uuid) -> i64 {
-            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2")
-                .bind(id)
-                .bind(KIND_NIP43_MEMBERSHIP_LIST as i32)
-                .fetch_one(pool)
-                .await
-                .expect("count membership snapshots")
-        }
-
-        fn reconciliation_failures(recorder: &DebuggingRecorder) -> u64 {
-            recorder
-                .snapshotter()
-                .snapshot()
-                .into_vec()
-                .into_iter()
-                .filter(|(key, _, _, _)| {
-                    key.key().name() == "buzz_nip43_membership_reconciliation_failures_total"
-                })
-                .map(|(_, _, _, value)| match value {
-                    DebugValue::Counter(value) => value,
-                    other => panic!("reconciliation failures must be a counter: {other:?}"),
-                })
-                .sum()
-        }
-
-        /// Regression for #7558 on the worker path: repeated NIP-43
-        /// maintenance sweeps reconcile the active community once and never
-        /// hand archived, quiescing, fenced, or tombstoned communities to the
-        /// publisher, so the fence never rejects a write and nothing warns.
-        #[tokio::test]
-        #[ignore = "requires Postgres"]
-        async fn maintenance_sweep_skips_archived_and_deleted_communities() {
-            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
-                .await
-                .expect("connect to test DB");
-            let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
-
-            let active = insert_community(&pool).await;
-            let archived = insert_community(&pool).await;
-            let quiescing = insert_community(&pool).await;
-            let fenced = insert_community(&pool).await;
-            let tombstone = insert_community(&pool).await;
-            sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
-                .bind(archived)
-                .execute(&pool)
-                .await
-                .expect("archive fixture");
-            set_deletion_state(&pool, quiescing, "quiescing").await;
-            set_deletion_state(&pool, fenced, "fenced").await;
-            set_deletion_state(&pool, tombstone, "tombstone").await;
-
-            let recorder = DebuggingRecorder::new();
-            let _guard = metrics::set_default_local_recorder(&recorder);
-            for sweep in 0..3 {
-                reconcile_nip43_membership_snapshots_with_purpose(
-                    &state,
-                    Nip43ReconciliationPurpose::Maintenance,
-                )
-                .await
-                .unwrap_or_else(|e| panic!("maintenance sweep {sweep}: {e}"));
-            }
-
-            assert_eq!(
-                reconciliation_failures(&recorder),
-                0,
-                "no community may fail reconciliation on any sweep"
-            );
-            assert_eq!(
-                membership_snapshots(&pool, active).await,
-                1,
-                "the active community is reconciled once and then left alone"
-            );
-            for (label, id) in [
-                ("archived", archived),
-                ("quiescing", quiescing),
-                ("fenced", fenced),
-                ("tombstone", tombstone),
-            ] {
-                assert_eq!(
-                    membership_snapshots(&pool, id).await,
-                    0,
-                    "{label} community must not receive a maintenance write"
-                );
-            }
-            let tombstone_state: String =
-                sqlx::query_scalar("SELECT deletion_state FROM communities WHERE id = $1")
-                    .bind(tombstone)
-                    .fetch_one(&pool)
-                    .await
-                    .expect("tombstone row is retained");
-            assert_eq!(tombstone_state, "tombstone");
-        }
     }
 }

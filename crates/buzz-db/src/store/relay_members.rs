@@ -149,7 +149,8 @@ pub async fn add_relay_member(
     pubkey: &str,
     role: &str,
     added_by: Option<&str>,
-) -> Result<bool> {
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<bool>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
@@ -166,8 +167,25 @@ pub async fn add_relay_member(
     .bind(added_by)
     .execute(tx.conn())
     .await?;
+    let added = result.rows_affected() > 0;
+    commit_membership_write(tx, added, added, relay_keypair).await
+}
+
+/// Commit a membership transaction, first writing the NIP-43 snapshot when
+/// it `changed` `relay_members`.
+pub(crate) async fn commit_membership_write<T>(
+    mut tx: crate::AdmittedTx,
+    outcome: T,
+    changed: bool,
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<T>> {
+    let snapshot = if changed {
+        Some(write_nip43_membership_snapshot(&mut tx, relay_keypair).await?)
+    } else {
+        None
+    };
     tx.commit().await?;
-    Ok(result.rows_affected() > 0)
+    Ok(MembershipWrite { outcome, snapshot })
 }
 
 /// Claims relay membership via an invite and atomically persists policy evidence.
@@ -181,7 +199,8 @@ pub async fn claim_relay_membership(
     pubkey: &str,
     role: &str,
     policy_version: Option<&str>,
-) -> Result<bool> {
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<bool>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
@@ -213,8 +232,7 @@ pub async fn claim_relay_membership(
         .await?;
     }
 
-    tx.commit().await?;
-    Ok(inserted)
+    commit_membership_write(tx, inserted, inserted, relay_keypair).await
 }
 
 /// Returns whether a member has persisted acceptance evidence for a policy version.
@@ -300,7 +318,8 @@ pub async fn remove_relay_member(
     pool: &PgPool,
     community: CommunityId,
     pubkey: &str,
-) -> Result<RemoveResult> {
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<RemoveResult>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
@@ -308,8 +327,7 @@ pub async fn remove_relay_member(
     )
     .await?;
     if delete_member_with_acceptances(&mut tx, pubkey, None).await? {
-        tx.commit().await?;
-        return Ok(RemoveResult::Removed);
+        return commit_membership_write(tx, RemoveResult::Removed, true, relay_keypair).await;
     }
 
     // Nothing was locked: either not found or is owner. One cheap read to
@@ -321,11 +339,11 @@ pub async fn remove_relay_member(
         .await?;
 
     tx.commit().await?;
-    if exists.is_some() {
-        Ok(RemoveResult::IsOwner)
+    Ok(MembershipWrite::unchanged(if exists.is_some() {
+        RemoveResult::IsOwner
     } else {
-        Ok(RemoveResult::NotFound)
-    }
+        RemoveResult::NotFound
+    }))
 }
 
 /// Removes a relay member only if their current role matches `expected_role`.
@@ -345,7 +363,8 @@ pub async fn remove_relay_member_if_role(
     community: CommunityId,
     pubkey: &str,
     expected_role: &str,
-) -> Result<RemoveResult> {
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<RemoveResult>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
@@ -353,8 +372,7 @@ pub async fn remove_relay_member_if_role(
     )
     .await?;
     if delete_member_with_acceptances(&mut tx, pubkey, Some(expected_role)).await? {
-        tx.commit().await?;
-        return Ok(RemoveResult::Removed);
+        return commit_membership_write(tx, RemoveResult::Removed, true, relay_keypair).await;
     }
 
     // Nothing was locked: either not found or role changed. One cheap read to
@@ -366,20 +384,21 @@ pub async fn remove_relay_member_if_role(
         .await?;
 
     tx.commit().await?;
-    match row {
-        None => Ok(RemoveResult::NotFound),
+    let outcome = match row {
+        None => RemoveResult::NotFound,
         Some(r) => {
             let role: String = r.try_get("role")?;
             if role == "owner" {
-                Ok(RemoveResult::IsOwner)
+                RemoveResult::IsOwner
             } else {
                 // Role changed between the caller's check and this delete
                 // (e.g., target was promoted to admin). Signal that the
                 // caller no longer has authority to remove this target.
-                Ok(RemoveResult::RoleMismatch)
+                RemoveResult::RoleMismatch
             }
         }
-    }
+    };
+    Ok(MembershipWrite::unchanged(outcome))
 }
 
 /// Updates the role of an existing relay member in `community`. Returns `true`
@@ -389,7 +408,8 @@ pub async fn update_relay_member_role(
     community: CommunityId,
     pubkey: &str,
     new_role: &str,
-) -> Result<bool> {
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<bool>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
@@ -405,8 +425,8 @@ pub async fn update_relay_member_role(
     .bind(pubkey)
     .execute(tx.conn())
     .await?;
-    tx.commit().await?;
-    Ok(result.rows_affected() > 0)
+    let updated = result.rows_affected() > 0;
+    commit_membership_write(tx, updated, updated, relay_keypair).await
 }
 
 /// Ensures the configured owner pubkey holds the `"owner"` role *in
@@ -430,16 +450,21 @@ pub async fn bootstrap_owner(
     pool: &PgPool,
     community: CommunityId,
     owner_pubkey: &str,
-) -> Result<()> {
-    match bootstrap_owner_with_operation(
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<()>> {
+    let write = bootstrap_owner_with_operation(
         pool,
         community,
         owner_pubkey,
+        relay_keypair,
         observability::WriterOperation::Bootstrap,
     )
-    .await?
-    {
-        ProvisionOwnerResult::Applied => Ok(()),
+    .await?;
+    match write.outcome {
+        ProvisionOwnerResult::Applied => Ok(MembershipWrite {
+            outcome: (),
+            snapshot: write.snapshot,
+        }),
         ProvisionOwnerResult::LifecycleConflict => Err(DbError::AccessDenied(
             "community lifecycle freezes owner rotation".to_string(),
         )),
@@ -469,9 +494,14 @@ async fn lock_owner_mutation_admission(
     mode: OwnerMutationMode,
 ) -> Result<OwnerMutationAdmission> {
     crate::deletion::lock_community_deletion_shared(tx, community).await?;
+    // `FOR NO KEY UPDATE` still serializes with archive (`FOR NO KEY UPDATE`),
+    // unarchive and deletion admission (`FOR UPDATE`), but not with the
+    // `FOR KEY SHARE` that every foreign-key child insert takes. A membership
+    // writer holding a member row or the list lock inserts its kind:13534
+    // list into `events` last, so `FOR UPDATE` here would deadlock with it.
     let target = sqlx::query(
         "SELECT archived_at, deletion_state, deleted_at FROM communities \
-         WHERE id = $1 FOR UPDATE",
+         WHERE id = $1 FOR NO KEY UPDATE",
     )
     .bind(community.as_uuid())
     .fetch_optional(&mut **tx)
@@ -532,18 +562,21 @@ async fn bootstrap_owner_with_operation(
     pool: &PgPool,
     community: CommunityId,
     owner_pubkey: &str,
+    relay_keypair: &nostr::Keys,
     operation: observability::WriterOperation,
-) -> Result<ProvisionOwnerResult> {
+) -> Result<MembershipWrite<ProvisionOwnerResult>> {
     let pubkey = owner_pubkey.to_ascii_lowercase();
     let connection = observability::acquire_writer(pool, operation).await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
     if let Err(error) = crate::deletion::guard_community_write(&mut tx, community).await {
         return match error {
-            DbError::AccessDenied(_) if deletion_pending(&mut tx, community).await? => {
-                Ok(ProvisionOwnerResult::DeletionPending)
-            }
-            DbError::AccessDenied(_) => Ok(ProvisionOwnerResult::LifecycleConflict),
+            DbError::AccessDenied(_) if deletion_pending(&mut tx, community).await? => Ok(
+                MembershipWrite::unchanged(ProvisionOwnerResult::DeletionPending),
+            ),
+            DbError::AccessDenied(_) => Ok(MembershipWrite::unchanged(
+                ProvisionOwnerResult::LifecycleConflict,
+            )),
             other => Err(other),
         };
     }
@@ -554,37 +587,56 @@ async fn bootstrap_owner_with_operation(
         OwnerMutationAdmission::Allowed(_) => {}
         OwnerMutationAdmission::NotFound | OwnerMutationAdmission::LifecycleConflict => {
             tx.rollback().await?;
-            return Ok(ProvisionOwnerResult::LifecycleConflict);
+            return Ok(MembershipWrite::unchanged(
+                ProvisionOwnerResult::LifecycleConflict,
+            ));
         }
         OwnerMutationAdmission::DeletionPending => {
             tx.rollback().await?;
-            return Ok(ProvisionOwnerResult::DeletionPending);
+            return Ok(MembershipWrite::unchanged(
+                ProvisionOwnerResult::DeletionPending,
+            ));
         }
     }
 
-    // 1. Upsert the configured owner for this community.
-    sqlx::query(
+    // 1. Upsert the configured owner for this community. An owner that is
+    //    already in place is left untouched, so a no-op startup writes nothing.
+    let upserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, 'owner', NULL) \
-         ON CONFLICT (community_id, pubkey) DO UPDATE SET role = 'owner', updated_at = now()",
+         ON CONFLICT (community_id, pubkey) DO UPDATE SET role = 'owner', updated_at = now() \
+         WHERE relay_members.role <> 'owner'",
     )
     .bind(community.as_uuid())
     .bind(&pubkey)
     .execute(&mut *tx)
-    .await?;
+    .await?
+    .rows_affected();
 
     // 2. Demote any other owners in this community to admin.
-    sqlx::query(
+    let demoted = sqlx::query(
         "UPDATE relay_members SET role = 'admin', updated_at = now() \
          WHERE community_id = $1 AND role = 'owner' AND pubkey <> $2",
     )
     .bind(community.as_uuid())
     .bind(&pubkey)
     .execute(&mut *tx)
-    .await?;
+    .await?
+    .rows_affected();
 
-    tx.commit().await?;
-    Ok(ProvisionOwnerResult::Applied)
+    let tx = crate::AdmittedTx::admit(
+        tx,
+        &crate::deletion::DeletionStore::new(pool.clone()),
+        community,
+    )
+    .await?;
+    commit_membership_write(
+        tx,
+        ProvisionOwnerResult::Applied,
+        upserted + demoted > 0,
+        relay_keypair,
+    )
+    .await
 }
 
 /// The result of a transfer-ownership attempt.
@@ -764,7 +816,8 @@ pub async fn transfer_ownership(
     community: CommunityId,
     new_owner_pubkey: &str,
     expected_owner_pubkey: &str,
-) -> Result<TransferResult> {
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<TransferResult>> {
     let pubkey = new_owner_pubkey.to_ascii_lowercase();
     let expected_owner = expected_owner_pubkey.to_ascii_lowercase();
     let connection =
@@ -774,7 +827,7 @@ pub async fn transfer_ownership(
     if let Err(error) = crate::deletion::guard_community_write(&mut tx, community).await {
         return match error {
             DbError::AccessDenied(_) if deletion_pending(&mut tx, community).await? => {
-                Ok(TransferResult::DeletionPending)
+                Ok(MembershipWrite::unchanged(TransferResult::DeletionPending))
             }
             DbError::AccessDenied(_) => {
                 let exists: bool =
@@ -782,11 +835,11 @@ pub async fn transfer_ownership(
                         .bind(community.as_uuid())
                         .fetch_one(&mut *tx)
                         .await?;
-                if exists {
-                    Ok(TransferResult::LifecycleConflict)
+                Ok(MembershipWrite::unchanged(if exists {
+                    TransferResult::LifecycleConflict
                 } else {
-                    Ok(TransferResult::NoOwner)
-                }
+                    TransferResult::NoOwner
+                }))
             }
             other => Err(other),
         };
@@ -813,34 +866,36 @@ pub async fn transfer_ownership(
         OwnerMutationAdmission::Allowed(existing_owners) => existing_owners,
         OwnerMutationAdmission::NotFound => {
             tx.rollback().await?;
-            return Ok(TransferResult::NoOwner);
+            return Ok(MembershipWrite::unchanged(TransferResult::NoOwner));
         }
         OwnerMutationAdmission::LifecycleConflict => {
             tx.rollback().await?;
-            return Ok(TransferResult::LifecycleConflict);
+            return Ok(MembershipWrite::unchanged(
+                TransferResult::LifecycleConflict,
+            ));
         }
         OwnerMutationAdmission::DeletionPending => {
             tx.rollback().await?;
-            return Ok(TransferResult::DeletionPending);
+            return Ok(MembershipWrite::unchanged(TransferResult::DeletionPending));
         }
     };
 
     if existing_owners.is_empty() {
         tx.rollback().await?;
-        return Ok(TransferResult::NoOwner);
+        return Ok(MembershipWrite::unchanged(TransferResult::NoOwner));
     }
 
     // Stale-owner guard: if the current owner doesn't match the expected
     // owner, a concurrent transfer or rotation has already changed hands.
     if !existing_owners.iter().any(|p| p == &expected_owner) {
         tx.rollback().await?;
-        return Ok(TransferResult::OwnerConflict);
+        return Ok(MembershipWrite::unchanged(TransferResult::OwnerConflict));
     }
 
     // Already the sole owner — no transfer needed.
     if existing_owners.len() == 1 && existing_owners[0] == pubkey {
         tx.rollback().await?;
-        return Ok(TransferResult::AlreadyOwner);
+        return Ok(MembershipWrite::unchanged(TransferResult::AlreadyOwner));
     }
 
     let previous_owner = if existing_owners.len() == 1 {
@@ -854,7 +909,7 @@ pub async fn transfer_ownership(
     //    check — kgoose's preflight count is advisory only.
     if !owner_quota_in_transaction(&mut tx, &pubkey).await?.admits() {
         tx.rollback().await?;
-        return Ok(TransferResult::LimitReached);
+        return Ok(MembershipWrite::unchanged(TransferResult::LimitReached));
     }
 
     // 5. Upsert the new owner.
@@ -878,8 +933,19 @@ pub async fn transfer_ownership(
     .execute(&mut *tx)
     .await?;
 
-    tx.commit().await?;
-    Ok(TransferResult::Transferred { previous_owner })
+    let tx = crate::AdmittedTx::admit(
+        tx,
+        &crate::deletion::DeletionStore::new(pool.clone()),
+        community,
+    )
+    .await?;
+    commit_membership_write(
+        tx,
+        TransferResult::Transferred { previous_owner },
+        true,
+        relay_keypair,
+    )
+    .await
 }
 
 /// Migrates existing `pubkey_allowlist` entries into `relay_members` for
@@ -894,7 +960,11 @@ pub async fn transfer_ownership(
 ///
 /// The empty-table guard prevents re-adding members that were intentionally
 /// removed by an admin after the initial backfill.
-pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> Result<u64> {
+pub async fn backfill_from_allowlist(
+    pool: &PgPool,
+    community: CommunityId,
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<u64>> {
     // The common startup case writes nothing: the legacy table is gone, it
     // has no rows for this community, or the community already has members.
     // Answer those with plain reads so a startup with nothing to backfill
@@ -909,7 +979,7 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
     .fetch_one(&mut *connection)
     .await?;
     if !exists || community_has_members(&mut connection, community).await? {
-        return Ok(0);
+        return Ok(MembershipWrite::unchanged(0));
     }
     let has_allowlist_rows: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pubkey_allowlist WHERE community_id = $1)",
@@ -918,7 +988,7 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
     .fetch_one(&mut *connection)
     .await?;
     if !has_allowlist_rows {
-        return Ok(0);
+        return Ok(MembershipWrite::unchanged(0));
     }
     drop(connection);
 
@@ -931,7 +1001,7 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
     // Re-check under admission: another pod may have backfilled meanwhile.
     if community_has_members(tx.conn(), community).await? {
         tx.commit().await?;
-        return Ok(0);
+        return Ok(MembershipWrite::unchanged(0));
     }
     let result = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by, created_at) \
@@ -943,8 +1013,8 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
     .bind(community.as_uuid())
     .execute(tx.conn())
     .await?;
-    tx.commit().await?;
-    Ok(result.rows_affected())
+    let inserted = result.rows_affected();
+    commit_membership_write(tx, inserted, inserted > 0, relay_keypair).await
 }
 
 /// Whether `community` has any `relay_members` row. Once it does (from a
@@ -960,6 +1030,174 @@ async fn community_has_members(
             .fetch_one(conn)
             .await?,
     )
+}
+
+/// A membership mutation's outcome and the NIP-43 snapshot it committed.
+///
+/// `snapshot` is `Some` exactly when the mutation changed `relay_members`; the
+/// kind:13534 list was written in the same transaction, so a committed change
+/// always has a matching list. Callers fan the snapshot out to live
+/// subscribers after commit.
+#[derive(Debug)]
+#[must_use = "fan out `snapshot` to live subscribers"]
+pub struct MembershipWrite<T> {
+    /// What the mutation did.
+    pub outcome: T,
+    /// The kind:13534 list committed with the change, if anything changed.
+    pub snapshot: Option<StoredEvent>,
+}
+
+impl<T> MembershipWrite<T> {
+    pub(crate) fn unchanged(outcome: T) -> Self {
+        Self {
+            outcome,
+            snapshot: None,
+        }
+    }
+}
+
+/// Write the relay-signed NIP-43 membership list (kind:13534) for the
+/// transaction's community, replacing the live one.
+///
+/// Call it as the last statement before commit of any transaction that
+/// changes `relay_members`, so the list commits or rolls back with the change.
+/// The per-community list lock is the last explicit lock: every other lock a
+/// membership transaction takes comes first, so the final writer reads every
+/// committed change. The list insert then takes `FOR KEY SHARE` on the
+/// community row through `events.community_id`'s foreign key; owner mutations
+/// lock that row `FOR NO KEY UPDATE`, which doesn't conflict, so no lock cycle
+/// forms. `created_at` is at least one second
+/// past every earlier list's, so the id is new and a client replacing by
+/// timestamp never keeps an older list from the same second. A burst of
+/// changes runs the timestamp ahead of the clock by up to one second per
+/// change; it falls back to the clock once the burst ends.
+pub(crate) async fn write_nip43_membership_snapshot(
+    tx: &mut crate::AdmittedTx,
+    relay_keypair: &nostr::Keys,
+) -> Result<StoredEvent> {
+    use nostr::{EventBuilder, Kind, Tag, Timestamp};
+
+    let community_id = tx.community();
+    let kind_i32 = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
+    let pubkey_bytes = relay_keypair.public_key().to_bytes();
+    let lock_key = replaceable::event_replacement_lock_key(
+        community_id,
+        kind_i32,
+        pubkey_bytes.as_slice(),
+        None,
+    );
+    observability::observe_advisory_lock(
+        observability::LockType::Membership,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(tx.conn()),
+    )
+    .await?;
+
+    let rows = sqlx::query(
+        "SELECT pubkey, role FROM relay_members \
+         WHERE community_id = $1 ORDER BY created_at ASC",
+    )
+    .bind(community_id.as_uuid())
+    .fetch_all(tx.conn())
+    .await?;
+    // Retired lists count too: a list newer than every prior one can't
+    // repeat an earlier list's id.
+    let newest_created_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT max(created_at) FROM events \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind_i32)
+    .bind(pubkey_bytes.as_slice())
+    .fetch_one(tx.conn())
+    .await?;
+
+    let mut tags: Vec<Tag> = Vec::with_capacity(rows.len() + 1);
+    // NIP-70 protected-event marker.
+    tags.push(
+        Tag::parse(["-"])
+            .map_err(|e| DbError::InvalidData(format!("failed to build '-' tag: {e}")))?,
+    );
+    for row in &rows {
+        let pubkey: String = row.try_get("pubkey")?;
+        let role: String = row.try_get("role")?;
+        tags.push(
+            Tag::parse(["member", &pubkey, &role])
+                .map_err(|e| DbError::InvalidData(format!("failed to build member tag: {e}")))?,
+        );
+    }
+    let now = Timestamp::now().as_secs();
+    let created_at_secs = newest_created_at
+        .map(|newest| (newest.timestamp() as u64 + 1).max(now))
+        .unwrap_or(now);
+    let event = EventBuilder::new(Kind::Custom(kind_i32 as u16), "")
+        .tags(tags)
+        .custom_created_at(Timestamp::from(created_at_secs))
+        .sign_with_keys(relay_keypair)
+        .map_err(|e| DbError::InvalidData(format!("failed to sign kind:13534: {e}")))?;
+
+    let created_at = DateTime::from_timestamp(created_at_secs as i64, 0)
+        .ok_or(DbError::InvalidTimestamp(created_at_secs as i64))?;
+    let received_at = Utc::now();
+    let d_tag = crate::event::extract_d_tag(&event);
+
+    // The relay is authoritative: retire every prior list unconditionally.
+    sqlx::query(
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+         AND channel_id IS NULL AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind_i32)
+    .bind(pubkey_bytes.as_slice())
+    .execute(tx.conn())
+    .await?;
+    sqlx::query(
+        "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event.id.as_bytes().as_slice())
+    .bind(pubkey_bytes.as_slice())
+    .bind(created_at)
+    .bind(kind_i32)
+    .bind(serde_json::to_value(&event.tags)?)
+    .bind(&event.content)
+    .bind(event.sig.serialize().as_slice())
+    .bind(received_at)
+    .bind::<Option<Uuid>>(None)
+    .bind(d_tag.as_deref())
+    .execute(tx.conn())
+    .await?;
+    crate::store::event_follow_up::after_admitted_insert(tx, &event, None).await?;
+
+    Ok(StoredEvent::with_received_at(
+        event,
+        received_at,
+        None,
+        true,
+    ))
+}
+
+/// Rewrite `community`'s kind:13534 list from the committed `relay_members`
+/// rows, whether or not it already matches.
+///
+/// The operator repair path for a list that is missing or stale (a
+/// deployment that turned on membership after running without it, a manual
+/// `relay_members` edit, a restore). Ordinary membership changes never need it.
+pub async fn rewrite_nip43_membership_list(
+    pool: &PgPool,
+    community: CommunityId,
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<()>> {
+    let tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        observability::WriterOperation::Authorization,
+    )
+    .await?;
+    commit_membership_write(tx, (), true, relay_keypair).await
 }
 
 impl Db {
@@ -987,6 +1225,12 @@ impl Db {
                     Ok(is_member) => {
                         Self::record_route(path, "replica", reason);
                         Ok(is_member)
+                    }
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
                     }
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
@@ -1038,8 +1282,9 @@ impl Db {
         pubkey: &str,
         role: &str,
         added_by: Option<&str>,
-    ) -> Result<bool> {
-        add_relay_member(&self.pool, community, pubkey, role, added_by).await
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<bool>> {
+        add_relay_member(&self.pool, community, pubkey, role, added_by, relay_keypair).await
     }
 
     /// Claims relay membership via an invite and atomically persists the
@@ -1051,8 +1296,17 @@ impl Db {
         pubkey: &str,
         role: &str,
         policy_version: Option<&str>,
-    ) -> Result<bool> {
-        claim_relay_membership(&self.pool, community, pubkey, role, policy_version).await
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<bool>> {
+        claim_relay_membership(
+            &self.pool,
+            community,
+            pubkey,
+            role,
+            policy_version,
+            relay_keypair,
+        )
+        .await
     }
 
     /// Returns whether a member has persisted acceptance evidence for a policy version.
@@ -1072,8 +1326,9 @@ impl Db {
         &self,
         community: CommunityId,
         pubkey: &str,
-    ) -> Result<RemoveResult> {
-        remove_relay_member(&self.pool, community, pubkey).await
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<RemoveResult>> {
+        remove_relay_member(&self.pool, community, pubkey, relay_keypair).await
     }
 
     /// Removes a relay member from `community` only if their current role matches `expected_role`.
@@ -1086,8 +1341,10 @@ impl Db {
         community: CommunityId,
         pubkey: &str,
         expected_role: &str,
-    ) -> Result<RemoveResult> {
-        remove_relay_member_if_role(&self.pool, community, pubkey, expected_role).await
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<RemoveResult>> {
+        remove_relay_member_if_role(&self.pool, community, pubkey, expected_role, relay_keypair)
+            .await
     }
 
     /// Updates the role of an existing relay member in `community`. Returns `true` if updated.
@@ -1097,14 +1354,20 @@ impl Db {
         community: CommunityId,
         pubkey: &str,
         new_role: &str,
-    ) -> Result<bool> {
-        update_relay_member_role(&self.pool, community, pubkey, new_role).await
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<bool>> {
+        update_relay_member_role(&self.pool, community, pubkey, new_role, relay_keypair).await
     }
 
     /// Ensures the owner pubkey exists with role `"owner"` in `community`. Called at startup.
     #[datastore_span(name = "bootstrap_owner", system = "postgresql")]
-    pub async fn bootstrap_owner(&self, community: CommunityId, owner_pubkey: &str) -> Result<()> {
-        bootstrap_owner(&self.pool, community, owner_pubkey).await
+    pub async fn bootstrap_owner(
+        &self,
+        community: CommunityId,
+        owner_pubkey: &str,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<()>> {
+        bootstrap_owner(&self.pool, community, owner_pubkey, relay_keypair).await
     }
 
     /// Ensure an owner during operator-driven community provisioning.
@@ -1113,11 +1376,13 @@ impl Db {
         &self,
         community: CommunityId,
         owner_pubkey: &str,
-    ) -> Result<ProvisionOwnerResult> {
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<ProvisionOwnerResult>> {
         bootstrap_owner_with_operation(
             &self.pool,
             community,
             owner_pubkey,
+            relay_keypair,
             observability::WriterOperation::Authorization,
         )
         .await
@@ -1140,12 +1405,14 @@ impl Db {
         community: CommunityId,
         new_owner_pubkey: &str,
         expected_owner_pubkey: &str,
-    ) -> Result<TransferResult> {
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<TransferResult>> {
         transfer_ownership(
             &self.pool,
             community,
             new_owner_pubkey,
             expected_owner_pubkey,
+            relay_keypair,
         )
         .await
     }
@@ -1155,263 +1422,70 @@ impl Db {
     /// Idempotent — uses `ON CONFLICT DO NOTHING`. Returns the number of rows
     /// inserted, or 0 if the `pubkey_allowlist` table doesn't exist.
     #[datastore_span(name = "backfill_from_allowlist", system = "postgresql")]
-    pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
-        backfill_from_allowlist(&self.pool, community).await
-    }
-
-    /// Returns whether the relay-authored NIP-43 snapshot is absent or differs
-    /// from the canonical membership rows for `community_id`.
-    ///
-    /// Snapshot and canonical rows are compared directly rather than by
-    /// timestamp: relay membership events use whole-second Nostr timestamps,
-    /// and multiple mutations within one second must still be repaired.
-    #[datastore_span(
-        name = "nip43_membership_snapshot_needs_reconciliation",
-        system = "postgresql"
-    )]
-    #[deprecated(
-        note = "use nip43_membership_snapshot_needs_reconciliation_for_bootstrap or nip43_membership_snapshot_needs_reconciliation_for_maintenance"
-    )]
-    pub async fn nip43_membership_snapshot_needs_reconciliation(
+    pub async fn backfill_from_allowlist(
         &self,
-        community_id: CommunityId,
-        relay_pubkey: &nostr::PublicKey,
-    ) -> Result<bool> {
-        self.nip43_membership_snapshot_needs_reconciliation_with_operation(
-            community_id,
-            relay_pubkey,
-            observability::WriterOperation::Maintenance,
-        )
-        .await
-    }
-
-    /// Startup-attributed variant of the NIP-43 snapshot comparison.
-    #[datastore_span(
-        name = "nip43_membership_snapshot_needs_reconciliation_for_bootstrap",
-        system = "postgresql"
-    )]
-    pub async fn nip43_membership_snapshot_needs_reconciliation_for_bootstrap(
-        &self,
-        community_id: CommunityId,
-        relay_pubkey: &nostr::PublicKey,
-    ) -> Result<bool> {
-        self.nip43_membership_snapshot_needs_reconciliation_with_operation(
-            community_id,
-            relay_pubkey,
-            observability::WriterOperation::Bootstrap,
-        )
-        .await
-    }
-
-    /// Periodic maintenance variant of the NIP-43 snapshot comparison.
-    #[datastore_span(
-        name = "nip43_membership_snapshot_needs_reconciliation_for_maintenance",
-        system = "postgresql"
-    )]
-    pub async fn nip43_membership_snapshot_needs_reconciliation_for_maintenance(
-        &self,
-        community_id: CommunityId,
-        relay_pubkey: &nostr::PublicKey,
-    ) -> Result<bool> {
-        self.nip43_membership_snapshot_needs_reconciliation_with_operation(
-            community_id,
-            relay_pubkey,
-            observability::WriterOperation::Maintenance,
-        )
-        .await
-    }
-
-    async fn nip43_membership_snapshot_needs_reconciliation_with_operation(
-        &self,
-        community_id: CommunityId,
-        relay_pubkey: &nostr::PublicKey,
-        operation: observability::WriterOperation,
-    ) -> Result<bool> {
-        let snapshot = crate::event::query_events_with_operation(
-            &self.pool,
-            &crate::event::EventQuery {
-                kinds: Some(vec![buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32]),
-                pubkey: Some(relay_pubkey.to_bytes().to_vec()),
-                global_only: true,
-                limit: Some(1),
-                ..crate::event::EventQuery::for_community(community_id)
-            },
-            operation,
-        )
-        .await?
-        .into_iter()
-        .next();
-        let members =
-            list_relay_members_with_operation(&self.pool, community_id, operation).await?;
-
-        let Some(snapshot) = snapshot else {
-            return Ok(true);
-        };
-        let mut snapshot_members = snapshot
-            .event
-            .tags
-            .iter()
-            .filter_map(|tag| {
-                let parts = tag.as_slice();
-                (parts.first().map(String::as_str) == Some("member") && parts.len() >= 3)
-                    .then(|| (parts[1].to_ascii_lowercase(), parts[2].clone()))
-            })
-            .collect::<Vec<_>>();
-        let mut canonical_members = members
-            .into_iter()
-            .map(|member| (member.pubkey.to_ascii_lowercase(), member.role))
-            .collect::<Vec<_>>();
-        snapshot_members.sort_unstable();
-        canonical_members.sort_unstable();
-
-        Ok(snapshot_members != canonical_members)
-    }
-
-    /// Atomically publish a NIP-43 membership snapshot under a single
-    /// transaction-scoped advisory lock.
-    ///
-    /// This method acquires the per-community snapshot lock, reads the
-    /// current membership, builds the event, and replaces the prior snapshot
-    /// — all inside one transaction on one database connection. This
-    /// prevents the stale-snapshot race where a concurrent publication reads
-    /// older state and overwrites a newer snapshot by arrival order.
-    #[datastore_span(name = "publish_nip43_membership_locked", system = "postgresql")]
-    pub async fn publish_nip43_membership_locked(
-        &self,
-        community_id: CommunityId,
+        community: CommunityId,
         relay_keypair: &nostr::Keys,
-    ) -> Result<(StoredEvent, bool, usize)> {
-        use nostr::{EventBuilder, Kind, Tag};
-
-        let kind_i32 = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
-        let pubkey_bytes = relay_keypair.public_key().to_bytes();
-
-        let lock_key = replaceable::event_replacement_lock_key(
-            community_id,
-            kind_i32,
-            pubkey_bytes.as_slice(),
-            None,
-        );
-
-        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
-            &self.pool,
-            community_id,
-            observability::WriterOperation::EventWrite,
-        )
-        .await?;
-        let transaction_timer = observability::TransactionTimer::start(
-            observability::TransactionOperation::PublishNip43MembershipLocked,
-        );
-        let (event, received_at, was_inserted, member_count) = transaction_timer
-            .observe(async {
-
-        // Acquire the per-community snapshot lock BEFORE reading members.
-        // This serializes the entire read-build-write cycle: a concurrent
-        // publication will block here until our transaction commits, then
-        // read the updated membership state.
-        observability::observe_advisory_lock(
-            observability::LockType::Membership,
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(lock_key)
-                .execute(tx.conn()),
-        )
-        .await?;
-
-        // Read current members inside the locked transaction.
-        let rows = sqlx::query(
-            "SELECT pubkey, role FROM relay_members \
-             WHERE community_id = $1 ORDER BY created_at ASC",
-        )
-        .bind(community_id.as_uuid())
-        .fetch_all(tx.conn())
-        .await?;
-
-        let member_count = rows.len();
-
-        // Build the NIP-43 event from the locked member rows.
-        let mut tags: Vec<Tag> = Vec::with_capacity(member_count + 1);
-        // NIP-70 protected-event marker.
-        tags.push(Tag::parse(["-"]).map_err(|e| {
-            crate::error::DbError::InvalidData(format!("failed to build '-' tag: {e}"))
-        })?);
-        for row in &rows {
-            let pubkey: String = row.try_get("pubkey")?;
-            let role: String = row.try_get("role")?;
-            tags.push(Tag::parse(["member", &pubkey, &role]).map_err(|e| {
-                crate::error::DbError::InvalidData(format!("failed to build member tag: {e}"))
-            })?);
-        }
-
-        let event = EventBuilder::new(Kind::Custom(kind_i32 as u16), "")
-            .tags(tags)
-            .sign_with_keys(relay_keypair)
-            .map_err(|e| {
-                crate::error::DbError::InvalidData(format!("failed to sign kind:13534: {e}"))
-            })?;
-
-        let created_at_secs = event.created_at.as_secs() as i64;
-        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
-            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
-        let sig_bytes = event.sig.serialize();
-        let tags_json = serde_json::to_value(&event.tags)?;
-        let received_at = chrono::Utc::now();
-        let d_tag = crate::event::extract_d_tag(&event);
-
-        // Soft-delete prior snapshots — unconditional, the relay is authoritative.
-        sqlx::query(
-            "UPDATE events SET deleted_at = NOW() \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-             AND channel_id IS NULL \
-             AND deleted_at IS NULL",
-        )
-        .bind(community_id.as_uuid())
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .execute(tx.conn())
-        .await?;
-
-        let insert_result = sqlx::query(
-            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(community_id.as_uuid())
-        .bind(event.id.as_bytes().as_slice())
-        .bind(pubkey_bytes.as_slice())
-        .bind(created_at)
-        .bind(kind_i32)
-        .bind(&tags_json)
-        .bind(&event.content)
-        .bind(sig_bytes.as_slice())
-        .bind(received_at)
-        .bind::<Option<Uuid>>(None)
-        .bind(d_tag.as_deref())
-        .execute(tx.conn())
-        .await?;
-
-        let was_inserted = insert_result.rows_affected() > 0;
-        if was_inserted {
-            crate::store::event_follow_up::after_admitted_insert(&mut tx, &event, None).await?;
-            tx.commit().await?;
-        } else {
-            tx.rollback().await?;
-        }
-        Ok::<_, DbError>((event, received_at, was_inserted, member_count))
-            })
-            .await?;
-
-        if was_inserted {
-            if let Err(e) = crate::insert_mentions(&self.pool, community_id, &event, None).await {
-                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
-            }
-        }
-
-        Ok((
-            StoredEvent::with_received_at(event, received_at, None, was_inserted),
-            was_inserted,
-            member_count,
-        ))
+    ) -> Result<MembershipWrite<u64>> {
+        backfill_from_allowlist(&self.pool, community, relay_keypair).await
     }
+
+    /// Rewrite `community`'s kind:13534 list from `relay_members`. See
+    /// [`rewrite_nip43_membership_list`].
+    #[datastore_span(name = "rewrite_nip43_membership_list", system = "postgresql")]
+    pub async fn rewrite_nip43_membership_list(
+        &self,
+        community: CommunityId,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<()>> {
+        rewrite_nip43_membership_list(&self.pool, community, relay_keypair).await
+    }
+}
+
+/// Assert that `community` has exactly one live kind:13534 list signed by
+/// `relay_keypair`, that it is `snapshot`, and that it lists exactly the
+/// committed `relay_members` rows.
+#[cfg(test)]
+pub(crate) async fn assert_membership_list_matches(
+    pool: &PgPool,
+    community: CommunityId,
+    relay_keypair: &nostr::Keys,
+    snapshot: Option<&StoredEvent>,
+) {
+    let live: Vec<(Vec<u8>, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, tags FROM events \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+         AND channel_id IS NULL AND deleted_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
+    .bind(relay_keypair.public_key().to_bytes().as_slice())
+    .fetch_all(pool)
+    .await
+    .expect("read live membership lists");
+    assert_eq!(live.len(), 1, "exactly one live membership list");
+    let (id, tags) = &live[0];
+    let snapshot = snapshot.expect("a membership change returns its list");
+    assert_eq!(
+        id.as_slice(),
+        snapshot.event.id.as_bytes().as_slice(),
+        "the returned list is the stored one"
+    );
+    let tags: Vec<Vec<String>> = serde_json::from_value(tags.clone()).expect("list tags");
+    let mut listed: Vec<(String, String)> = tags
+        .into_iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("member"))
+        .map(|tag| (tag[1].clone(), tag[2].clone()))
+        .collect();
+    listed.sort();
+    let mut members: Vec<(String, String)> = list_relay_members(pool, community)
+        .await
+        .expect("list relay members")
+        .into_iter()
+        .map(|member| (member.pubkey, member.role))
+        .collect();
+    members.sort();
+    assert_eq!(listed, members, "the list names every committed member");
 }
 
 #[cfg(test)]
@@ -1532,38 +1606,62 @@ mod postgres_tests {
         let member = test_pubkey();
         let admin = test_pubkey();
         for (pubkey, role) in [(&member, "member"), (&admin, "admin")] {
-            claim_relay_membership(&pool, community, pubkey, role, Some(&version))
-                .await
-                .expect("claim membership");
+            claim_relay_membership(
+                &pool,
+                community,
+                pubkey,
+                role,
+                Some(&version),
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("claim membership");
             assert_eq!(acceptances(&pool, community, pubkey).await, 1);
         }
 
         assert_eq!(
-            remove_relay_member(&pool, community, &owner)
+            remove_relay_member(&pool, community, &owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("owner removal"),
             RemoveResult::IsOwner
         );
         assert_eq!(acceptances(&pool, community, &owner).await, 1);
         assert_eq!(
-            remove_relay_member_if_role(&pool, community, &admin, "member")
-                .await
-                .expect("mismatched removal"),
+            remove_relay_member_if_role(
+                &pool,
+                community,
+                &admin,
+                "member",
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("mismatched removal"),
             RemoveResult::RoleMismatch
         );
         assert_eq!(acceptances(&pool, community, &admin).await, 1);
 
         assert_eq!(
-            remove_relay_member(&pool, community, &member)
+            remove_relay_member(&pool, community, &member, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("member removal"),
             RemoveResult::Removed
         );
         assert_eq!(acceptances(&pool, community, &member).await, 0);
         assert_eq!(
-            remove_relay_member_if_role(&pool, community, &admin, "admin")
-                .await
-                .expect("role removal"),
+            remove_relay_member_if_role(
+                &pool,
+                community,
+                &admin,
+                "admin",
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("role removal"),
             RemoveResult::Removed
         );
         assert_eq!(acceptances(&pool, community, &admin).await, 0);
@@ -1580,9 +1678,17 @@ mod postgres_tests {
         crate::test_support::retire_foreign_key_delete_actions(&pool).await;
         let (community, _owner) = owned_community(&pool).await;
         let member = test_pubkey();
-        claim_relay_membership(&pool, community, &member, "member", Some(&"a".repeat(64)))
-            .await
-            .expect("claim membership");
+        claim_relay_membership(
+            &pool,
+            community,
+            &member,
+            "member",
+            Some(&"a".repeat(64)),
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("claim membership");
 
         let mut inserter = pool.begin().await.expect("begin acceptance insert");
         sqlx::query(
@@ -1600,7 +1706,11 @@ mod postgres_tests {
         let remover = crate::test_support::named_pool(&name).await;
         let removal = tokio::spawn({
             let member = member.clone();
-            async move { remove_relay_member(&remover, community, &member).await }
+            async move {
+                remove_relay_member(&remover, community, &member, &nostr::Keys::generate())
+                    .await
+                    .map(|write| write.outcome)
+            }
         });
         crate::test_support::wait_for_lock_wait(&pool, &name).await;
         inserter
@@ -1621,8 +1731,9 @@ mod postgres_tests {
     async fn owned_community(pool: &PgPool) -> (CommunityId, String) {
         let community = make_test_community(pool).await;
         let owner = test_pubkey();
-        bootstrap_owner(pool, community, &owner)
+        bootstrap_owner(pool, community, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("bootstrap owner");
         (community, owner)
     }
@@ -1636,22 +1747,34 @@ mod postgres_tests {
         let legacy_member = test_pubkey();
         let version = "a".repeat(64);
 
-        assert!(
-            claim_relay_membership(&pool, community, &policy_member, "member", Some(&version),)
-                .await
-                .expect("claim membership with policy")
-        );
+        assert!(claim_relay_membership(
+            &pool,
+            community,
+            &policy_member,
+            "member",
+            Some(&version),
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("claim membership with policy"));
         assert!(
             has_join_policy_acceptance(&pool, community, &policy_member, &version)
                 .await
                 .expect("policy acceptance lookup")
         );
 
-        assert!(
-            claim_relay_membership(&pool, community, &legacy_member, "member", None)
-                .await
-                .expect("legacy claim membership")
-        );
+        assert!(claim_relay_membership(
+            &pool,
+            community,
+            &legacy_member,
+            "member",
+            None,
+            &nostr::Keys::generate()
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("legacy claim membership"));
         assert!(
             !has_join_policy_acceptance(&pool, community, &legacy_member, &version)
                 .await
@@ -1674,9 +1797,17 @@ mod postgres_tests {
         // 64-char lowercase hex, unique per run so reruns don't collide.
         let pubkey = test_pubkey();
 
-        let inserted = add_relay_member(&pool, community_a, &pubkey, "member", None)
-            .await
-            .expect("add member to community A");
+        let inserted = add_relay_member(
+            &pool,
+            community_a,
+            &pubkey,
+            "member",
+            None,
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("add member to community A");
         assert!(inserted, "first insert into A should report inserted");
 
         // is_relay_member: member of A, NOT of B.
@@ -1738,8 +1869,9 @@ mod postgres_tests {
         let community_b = make_test_community(&pool).await;
         let owner = test_pubkey();
 
-        bootstrap_owner(&pool, community_a, &owner)
+        bootstrap_owner(&pool, community_a, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("bootstrap owner in A");
 
         let in_a = get_relay_member(&pool, community_a, &owner)
@@ -1765,9 +1897,16 @@ mod postgres_tests {
         let (community, old_owner) = owned_community(&pool).await;
         let new_owner = test_pubkey();
 
-        let result = transfer_ownership(&pool, community, &new_owner, &old_owner)
-            .await
-            .expect("transfer ownership");
+        let result = transfer_ownership(
+            &pool,
+            community,
+            &new_owner,
+            &old_owner,
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("transfer ownership");
 
         assert_eq!(
             result,
@@ -1787,8 +1926,9 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let (community, owner) = owned_community(&pool).await;
 
-        let result = transfer_ownership(&pool, community, &owner, &owner)
+        let result = transfer_ownership(&pool, community, &owner, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("transfer ownership to self");
 
         assert_eq!(result, TransferResult::AlreadyOwner);
@@ -1808,9 +1948,16 @@ mod postgres_tests {
             .await
             .expect("archive community");
 
-        let result = transfer_ownership(&pool, community, &replacement, &owner)
-            .await
-            .expect("transfer archived community");
+        let result = transfer_ownership(
+            &pool,
+            community,
+            &replacement,
+            &owner,
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("transfer archived community");
 
         assert_eq!(result, TransferResult::LifecycleConflict);
         assert_role(&pool, community, &owner, "owner").await;
@@ -1832,8 +1979,9 @@ mod postgres_tests {
         let db = Db::from_pool(pool.clone());
 
         assert_eq!(
-            db.provision_owner(community, &owner)
+            db.provision_owner(community, &owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("provision initial owner"),
             ProvisionOwnerResult::Applied
         );
@@ -1851,9 +1999,16 @@ mod postgres_tests {
 
         // No bootstrap — community exists but has no owner row.
 
-        let result = transfer_ownership(&pool, community, &new_owner, &expected)
-            .await
-            .expect("transfer ownership on empty community");
+        let result = transfer_ownership(
+            &pool,
+            community,
+            &new_owner,
+            &expected,
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("transfer ownership on empty community");
 
         assert_eq!(result, TransferResult::NoOwner);
     }
@@ -1870,16 +2025,25 @@ mod postgres_tests {
         let owner_b = test_pubkey();
         let new_owner = test_pubkey();
 
-        bootstrap_owner(&pool, community_a, &owner_a)
+        bootstrap_owner(&pool, community_a, &owner_a, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("bootstrap owner A");
-        bootstrap_owner(&pool, community_b, &owner_b)
+        bootstrap_owner(&pool, community_b, &owner_b, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("bootstrap owner B");
 
-        transfer_ownership(&pool, community_a, &new_owner, &owner_a)
-            .await
-            .expect("transfer A");
+        transfer_ownership(
+            &pool,
+            community_a,
+            &new_owner,
+            &owner_a,
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("transfer A");
 
         assert_role(&pool, community_a, &new_owner, "owner").await;
         assert_role(&pool, community_a, &owner_a, "member").await;
@@ -1902,16 +2066,32 @@ mod postgres_tests {
         let old_owner = test_pubkey();
         let existing_member = test_pubkey();
 
-        bootstrap_owner(&pool, community, &old_owner)
+        bootstrap_owner(&pool, community, &old_owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("bootstrap owner");
-        add_relay_member(&pool, community, &existing_member, "member", None)
-            .await
-            .expect("add member");
+        add_relay_member(
+            &pool,
+            community,
+            &existing_member,
+            "member",
+            None,
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("add member");
 
-        let result = transfer_ownership(&pool, community, &existing_member, &old_owner)
-            .await
-            .expect("transfer to existing member");
+        let result = transfer_ownership(
+            &pool,
+            community,
+            &existing_member,
+            &old_owner,
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("transfer to existing member");
 
         assert!(matches!(result, TransferResult::Transferred { .. }));
 
@@ -1945,14 +2125,22 @@ mod postgres_tests {
         let new_owner = test_pubkey();
         let wrong_expected = test_pubkey();
 
-        bootstrap_owner(&pool, community, &old_owner)
+        bootstrap_owner(&pool, community, &old_owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("bootstrap initial owner");
 
         // expected_owner_pubkey doesn't match the actual owner — should conflict.
-        let result = transfer_ownership(&pool, community, &new_owner, &wrong_expected)
-            .await
-            .expect("transfer ownership with wrong expected");
+        let result = transfer_ownership(
+            &pool,
+            community,
+            &new_owner,
+            &wrong_expected,
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("transfer ownership with wrong expected");
 
         assert_eq!(result, TransferResult::OwnerConflict);
 
@@ -1989,19 +2177,28 @@ mod postgres_tests {
         // fifty-first is rejected by the same transaction-side admission.
         for _ in 0..(MAX_COMMUNITIES_PER_OWNER - 1) {
             let c = make_test_community(&pool).await;
-            bootstrap_owner(&pool, c, &transferee)
+            bootstrap_owner(&pool, c, &transferee, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("bootstrap transferee community");
         }
 
         let fiftieth = make_test_community(&pool).await;
-        bootstrap_owner(&pool, fiftieth, &owner)
+        bootstrap_owner(&pool, fiftieth, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("bootstrap owner");
         assert!(matches!(
-            transfer_ownership(&pool, fiftieth, &transferee, &owner)
-                .await
-                .expect("fiftieth transfer"),
+            transfer_ownership(
+                &pool,
+                fiftieth,
+                &transferee,
+                &owner,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("fiftieth transfer"),
             TransferResult::Transferred { .. }
         ));
         assert_eq!(
@@ -2022,13 +2219,21 @@ mod postgres_tests {
         );
 
         let fifty_first = make_test_community(&pool).await;
-        bootstrap_owner(&pool, fifty_first, &owner)
+        bootstrap_owner(&pool, fifty_first, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("bootstrap owner");
         assert_eq!(
-            transfer_ownership(&pool, fifty_first, &transferee, &owner)
-                .await
-                .expect("fifty-first transfer"),
+            transfer_ownership(
+                &pool,
+                fifty_first,
+                &transferee,
+                &owner,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("fifty-first transfer"),
             TransferResult::LimitReached
         );
         assert_eq!(
@@ -2046,5 +2251,487 @@ mod postgres_tests {
                 .is_none(),
             "rejected transfer must not add transferee"
         );
+    }
+
+    /// Id of the live kind:13534 list, if any.
+    async fn live_list_id(
+        pool: &PgPool,
+        community: CommunityId,
+        keys: &nostr::Keys,
+    ) -> Option<Vec<u8>> {
+        sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+             AND channel_id IS NULL AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
+        .bind(keys.public_key().to_bytes().as_slice())
+        .fetch_optional(pool)
+        .await
+        .expect("read live list id")
+    }
+
+    /// Every `relay_members` writer commits the matching list with its change,
+    /// and a call that changes nothing writes no list.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn every_membership_write_commits_its_list() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let member = test_pubkey();
+        let joiner = test_pubkey();
+        let new_owner = test_pubkey();
+
+        let write = bootstrap_owner(&pool, community, &owner, &keys)
+            .await
+            .expect("bootstrap owner");
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+
+        // A restart with the owner in place changes nothing and writes no list.
+        let live = live_list_id(&pool, community, &keys).await;
+        let write = bootstrap_owner(&pool, community, &owner, &keys)
+            .await
+            .expect("re-bootstrap owner");
+        assert!(write.snapshot.is_none(), "no-op bootstrap writes no list");
+        assert_eq!(live_list_id(&pool, community, &keys).await, live);
+
+        // Demoting a legacy co-owner alone still rewrites the list.
+        let legacy_owner = test_pubkey();
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'owner')",
+        )
+        .bind(community.as_uuid())
+        .bind(&legacy_owner)
+        .execute(&pool)
+        .await
+        .expect("seed legacy co-owner");
+        let write = bootstrap_owner(&pool, community, &owner, &keys)
+            .await
+            .expect("bootstrap demotes co-owner");
+        assert!(write.snapshot.is_some(), "a demotion writes a list");
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+
+        let write = add_relay_member(&pool, community, &member, "member", Some(&owner), &keys)
+            .await
+            .expect("add member");
+        assert!(write.outcome);
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+        let live = live_list_id(&pool, community, &keys).await;
+
+        let write = add_relay_member(&pool, community, &member, "member", Some(&owner), &keys)
+            .await
+            .expect("re-add member");
+        assert!(!write.outcome);
+        assert!(write.snapshot.is_none(), "no change writes no list");
+        assert_eq!(live_list_id(&pool, community, &keys).await, live);
+
+        let write = claim_relay_membership(&pool, community, &joiner, "member", None, &keys)
+            .await
+            .expect("claim membership");
+        assert!(write.outcome);
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+
+        let write = update_relay_member_role(&pool, community, &member, "admin", &keys)
+            .await
+            .expect("promote member");
+        assert!(write.outcome);
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+
+        let write = remove_relay_member_if_role(&pool, community, &member, "member", &keys)
+            .await
+            .expect("role-mismatched removal");
+        assert_eq!(write.outcome, RemoveResult::RoleMismatch);
+        assert!(write.snapshot.is_none(), "no change writes no list");
+
+        let write = remove_relay_member_if_role(&pool, community, &member, "admin", &keys)
+            .await
+            .expect("remove admin");
+        assert_eq!(write.outcome, RemoveResult::Removed);
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+
+        let write = remove_relay_member(&pool, community, &joiner, &keys)
+            .await
+            .expect("remove joiner");
+        assert_eq!(write.outcome, RemoveResult::Removed);
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+
+        let write = transfer_ownership(&pool, community, &new_owner, &owner, &keys)
+            .await
+            .expect("transfer ownership");
+        assert!(matches!(write.outcome, TransferResult::Transferred { .. }));
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+
+        let provisioned = make_test_community(&pool).await;
+        let write = db
+            .provision_owner(provisioned, &owner, &keys)
+            .await
+            .expect("provision owner");
+        assert_eq!(write.outcome, ProvisionOwnerResult::Applied);
+        assert_membership_list_matches(&pool, provisioned, &keys, write.snapshot.as_ref()).await;
+
+        let backfilled = make_test_community(&pool).await;
+        sqlx::query("INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, $2)")
+            .bind(backfilled.as_uuid())
+            .bind(vec![0x5a_u8; 32])
+            .execute(&pool)
+            .await
+            .expect("seed legacy allowlist row");
+        let write = backfill_from_allowlist(&pool, backfilled, &keys)
+            .await
+            .expect("backfill allowlist");
+        assert_eq!(write.outcome, 1);
+        assert_membership_list_matches(&pool, backfilled, &keys, write.snapshot.as_ref()).await;
+    }
+
+    /// The operator repair rewrites a missing or stale list from the stored
+    /// members.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn rewrite_repairs_a_missing_or_stale_list() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let member = test_pubkey();
+        let _ = bootstrap_owner(&pool, community, &test_pubkey(), &keys)
+            .await
+            .expect("bootstrap owner");
+        let _ = add_relay_member(&pool, community, &member, "member", None, &keys)
+            .await
+            .expect("add member");
+
+        // Stale: a role edited behind the list's back.
+        sqlx::query(
+            "UPDATE relay_members SET role = 'admin' WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&member)
+        .execute(&pool)
+        .await
+        .expect("edit role by hand");
+        let write = db
+            .rewrite_nip43_membership_list(community, &keys)
+            .await
+            .expect("repair stale list");
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+
+        // Missing: no live list at all.
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 \
+             AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
+        .execute(&pool)
+        .await
+        .expect("retire the live list");
+        assert!(live_list_id(&pool, community, &keys).await.is_none());
+        let write = db
+            .rewrite_nip43_membership_list(community, &keys)
+            .await
+            .expect("repair missing list");
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+    }
+
+    /// The list write is part of the membership transaction: when it fails,
+    /// the membership change rolls back and the previous list stays live.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_failed_list_write_rolls_back_the_membership_change() {
+        let pool = setup_pool().await;
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let bootstrapped = bootstrap_owner(&pool, community, &test_pubkey(), &keys)
+            .await
+            .expect("bootstrap owner");
+        assert!(bootstrapped.snapshot.is_some(), "bootstrap writes a list");
+        let before = live_list_id(&pool, community, &keys).await;
+        let joiner = test_pubkey();
+
+        // Hold the community's list lock, so the join blocks on its final
+        // statement, then cancel that statement to fail the list write.
+        let lock_key = replaceable::event_replacement_lock_key(
+            community,
+            buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+            keys.public_key().to_bytes().as_slice(),
+            None,
+        );
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *holder)
+            .await
+            .expect("hold list lock");
+
+        let join = tokio::spawn({
+            let pool = pool.clone();
+            let keys = keys.clone();
+            let joiner = joiner.clone();
+            async move { add_relay_member(&pool, community, &joiner, "member", None, &keys).await }
+        });
+        let (classid, objid) = (
+            (lock_key as u64 >> 32) as i64,
+            (lock_key as u64 & 0xffff_ffff) as i64,
+        );
+        let mut cancelled = false;
+        for _ in 0..200 {
+            cancelled = sqlx::query_scalar(
+                "SELECT coalesce(bool_or(pg_cancel_backend(pid)), false) FROM pg_locks \
+                 WHERE locktype = 'advisory' AND NOT granted \
+                 AND classid = $1::bigint::oid AND objid = $2::bigint::oid AND objsubid = 1",
+            )
+            .bind(classid)
+            .bind(objid)
+            .fetch_one(&pool)
+            .await
+            .expect("cancel blocked list write");
+            if cancelled {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(cancelled, "the join must block on the list lock");
+        let result = join.await.expect("join task");
+        holder.rollback().await.expect("release list lock");
+
+        assert!(result.is_err(), "a failed list write fails the join");
+        assert!(
+            !is_relay_member(&pool, community, &joiner)
+                .await
+                .expect("joiner membership"),
+            "the join rolled back with its list"
+        );
+        assert_eq!(live_list_id(&pool, community, &keys).await, before);
+    }
+
+    /// Concurrent joins serialize on the list lock, so the final list names
+    /// every member that committed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_joins_all_land_in_the_list() {
+        let pool = setup_pool().await;
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let mut joins = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            let keys = keys.clone();
+            joins.spawn(async move {
+                add_relay_member(&pool, community, &test_pubkey(), "member", None, &keys).await
+            });
+        }
+        let mut newest: Option<StoredEvent> = None;
+        while let Some(joined) = joins.join_next().await {
+            let write = joined.expect("join task").expect("concurrent join");
+            assert!(write.outcome);
+            let snapshot = write.snapshot.expect("each join writes a list");
+            if newest
+                .as_ref()
+                .is_none_or(|prior| snapshot.event.created_at > prior.event.created_at)
+            {
+                newest = Some(snapshot);
+            }
+        }
+        assert_eq!(
+            list_relay_members(&pool, community)
+                .await
+                .expect("members")
+                .len(),
+            8
+        );
+        assert_membership_list_matches(&pool, community, &keys, newest.as_ref()).await;
+    }
+
+    /// Wait until some backend is blocked behind `holder_pid`.
+    async fn wait_until_blocked_by(pool: &PgPool, holder_pid: i32) {
+        for _ in 0..400 {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(holder_pid)
+            .fetch_one(pool)
+            .await
+            .expect("read blocked backends");
+            if blocked {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("nothing blocked behind backend {holder_pid}");
+    }
+
+    /// Run `transfer_ownership` in the background.
+    fn spawn_transfer(
+        pool: &PgPool,
+        community: CommunityId,
+        new_owner: &str,
+        owner: &str,
+        keys: &nostr::Keys,
+    ) -> tokio::task::JoinHandle<Result<MembershipWrite<TransferResult>>> {
+        let (pool, keys) = (pool.clone(), keys.clone());
+        let (new_owner, owner) = (new_owner.to_owned(), owner.to_owned());
+        tokio::spawn(async move {
+            transfer_ownership(&pool, community, &new_owner, &owner, &keys).await
+        })
+    }
+
+    /// A list repair that holds the list lock while a transfer waits on it
+    /// still inserts its list: the transfer's community row lock doesn't
+    /// block the insert's foreign-key `FOR KEY SHARE`, so both commit.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_transfer_and_list_repair_both_commit() {
+        let pool = setup_pool().await;
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let new_owner = test_pubkey();
+        let _ = bootstrap_owner(&pool, community, &owner, &keys)
+            .await
+            .expect("bootstrap owner");
+
+        let mut repair = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await
+        .expect("begin repair");
+        let repair_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(repair.conn())
+            .await
+            .expect("repair pid");
+        let lock_key = replaceable::event_replacement_lock_key(
+            community,
+            buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+            keys.public_key().to_bytes().as_slice(),
+            None,
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(repair.conn())
+            .await
+            .expect("hold list lock");
+
+        // The transfer locks the community row, then waits on the list lock.
+        let transfer = spawn_transfer(&pool, community, &new_owner, &owner, &keys);
+        wait_until_blocked_by(&pool, repair_pid).await;
+
+        let repaired = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            write_nip43_membership_snapshot(&mut repair, &keys).await?;
+            repair.commit().await
+        })
+        .await
+        .expect("repair finishes");
+        repaired.expect("repair commits alongside the transfer");
+        let write = tokio::time::timeout(std::time::Duration::from_secs(30), transfer)
+            .await
+            .expect("transfer finishes")
+            .expect("transfer task")
+            .expect("transfer commits alongside the repair");
+        assert!(matches!(write.outcome, TransferResult::Transferred { .. }));
+        assert_role(&pool, community, &new_owner, "owner").await;
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+    }
+
+    /// Removing the transferee while a transfer waits on its member row:
+    /// the removal's list insert doesn't wait on the transfer's community
+    /// row lock, so the removal commits and the transfer then re-adds the
+    /// transferee as owner.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_transfer_and_member_removal_both_commit() {
+        let pool = setup_pool().await;
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let member = test_pubkey();
+        let _ = bootstrap_owner(&pool, community, &owner, &keys)
+            .await
+            .expect("bootstrap owner");
+        let _ = add_relay_member(&pool, community, &member, "member", None, &keys)
+            .await
+            .expect("add member");
+
+        let mut removal = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await
+        .expect("begin removal");
+        let removal_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(removal.conn())
+            .await
+            .expect("removal pid");
+        assert!(delete_member_with_acceptances(&mut removal, &member, None)
+            .await
+            .expect("delete member"));
+
+        // The transfer locks the community row, then waits on the member row.
+        let transfer = spawn_transfer(&pool, community, &member, &owner, &keys);
+        wait_until_blocked_by(&pool, removal_pid).await;
+
+        let removed = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            commit_membership_write(removal, RemoveResult::Removed, true, &keys),
+        )
+        .await
+        .expect("removal finishes")
+        .expect("removal commits alongside the transfer");
+        assert!(removed.snapshot.is_some());
+        let write = tokio::time::timeout(std::time::Duration::from_secs(30), transfer)
+            .await
+            .expect("transfer finishes")
+            .expect("transfer task")
+            .expect("transfer commits alongside the removal");
+        assert!(matches!(write.outcome, TransferResult::Transferred { .. }));
+        assert_role(&pool, community, &member, "owner").await;
+        assert_role(&pool, community, &owner, "member").await;
+        assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+    }
+
+    /// Returning to an earlier membership within the same second yields a new
+    /// list with a later `created_at`, never the earlier list's id.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn same_second_return_to_an_earlier_membership_writes_a_new_list() {
+        let pool = setup_pool().await;
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let guest = test_pubkey();
+
+        let mut lists = vec![bootstrap_owner(&pool, community, &owner, &keys)
+            .await
+            .expect("bootstrap owner")
+            .snapshot
+            .expect("owner list")];
+        for _ in 0..2 {
+            let added = add_relay_member(&pool, community, &guest, "member", None, &keys)
+                .await
+                .expect("add guest");
+            lists.push(added.snapshot.expect("add list"));
+            let removed = remove_relay_member(&pool, community, &guest, &keys)
+                .await
+                .expect("remove guest");
+            assert_eq!(removed.outcome, RemoveResult::Removed);
+            lists.push(removed.snapshot.expect("remove list"));
+        }
+        for pair in lists.windows(2) {
+            assert!(
+                pair[1].event.created_at > pair[0].event.created_at,
+                "each list is newer than the one it replaces"
+            );
+        }
+        let mut ids: Vec<_> = lists.iter().map(|list| list.event.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), lists.len(), "no list repeats an earlier id");
+        assert_membership_list_matches(&pool, community, &keys, lists.last()).await;
     }
 }

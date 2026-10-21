@@ -617,7 +617,7 @@ mod postgres_tests {
         let pool = PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to migration DB");
-        crate::migration::run_migrations_through(&pool, 67)
+        crate::migration::run_migrations_through(&pool, 68)
             .await
             .expect("migrate");
         pool.close().await;

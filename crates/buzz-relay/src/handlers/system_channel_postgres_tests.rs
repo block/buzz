@@ -79,10 +79,15 @@ async fn group_state_id(f: &Fixture, channel: Uuid, kind: i32) -> String {
 /// Run one historical REQ and return the event IDs sent before EOSE. A
 /// CLOSED reply counts as no events.
 async fn req(f: &Fixture, reader: &Keys, filter: Value) -> Vec<String> {
+    req_all(f, reader, json!([filter])).await
+}
+
+/// [`req`] with several filters in one REQ.
+async fn req_all(f: &Fixture, reader: &Keys, filters: Value) -> Vec<String> {
     let (conn, mut rx) = test_conn(&f.tenant, reader);
-    let filter: nostr::Filter = serde_json::from_value(filter).expect("filter");
-    crate::handlers::req::handle_req("s".into(), vec![filter], vec![None], conn, f.state.clone())
-        .await;
+    let filters: Vec<nostr::Filter> = serde_json::from_value(filters).expect("filters");
+    let before = vec![None; filters.len()];
+    crate::handlers::req::handle_req("s".into(), filters, before, conn, f.state.clone()).await;
     let mut ids = Vec::new();
     while let Ok(frame) = rx.try_recv() {
         let axum::extract::ws::Message::Text(text) = frame else {
@@ -100,9 +105,14 @@ async fn req(f: &Fixture, reader: &Keys, filter: Value) -> Vec<String> {
 
 /// Run one WebSocket COUNT and return the count. A CLOSED reply counts as 0.
 async fn count(f: &Fixture, reader: &Keys, filter: Value) -> u64 {
+    count_all(f, reader, json!([filter])).await
+}
+
+/// [`count`] with several filters in one COUNT.
+async fn count_all(f: &Fixture, reader: &Keys, filters: Value) -> u64 {
     let (conn, mut rx) = test_conn(&f.tenant, reader);
-    let filter: nostr::Filter = serde_json::from_value(filter).expect("filter");
-    crate::handlers::count::handle_count("c".into(), vec![filter], conn, f.state.clone()).await;
+    let filters: Vec<nostr::Filter> = serde_json::from_value(filters).expect("filters");
+    crate::handlers::count::handle_count("c".into(), filters, conn, f.state.clone()).await;
     while let Ok(frame) = rx.try_recv() {
         let axum::extract::ws::Message::Text(text) = frame else {
             continue;
@@ -341,7 +351,7 @@ async fn system_channels_are_read_only_by_name() {
 /// re-check then confirms membership. The channel must stay in the scope of
 /// the filter that names it, not the request-wide implicit set, so a sibling
 /// filter that never names it cannot read it.
-/// Mutation: drop `keep_repaired_system_channels_named` from
+/// Mutation: drop `keep_repaired_named_only_channels_named` from
 /// `repair_requested_channel_access` → RED (the sibling filter's scope gets
 /// the channel).
 #[tokio::test]
@@ -365,7 +375,7 @@ async fn a_system_channel_joined_mid_request_stays_in_its_named_filter() {
         .expect("implicit channels");
     assert_eq!(implicit, [ordinary]);
     // The request's system-channel lookup ran before the join.
-    let mut readable_system = Vec::new();
+    let mut named_only = crate::handlers::system_channels::NamedOnlyChannels::default();
 
     crate::api::bridge::repair_requested_channel_access(
         &f.state,
@@ -373,19 +383,289 @@ async fn a_system_channel_joined_mid_request_stays_in_its_named_filter() {
         &filters,
         &owner.public_key().to_bytes(),
         &mut implicit,
-        &mut readable_system,
+        &mut named_only,
     )
     .await
     .expect("repair");
 
     assert_eq!(implicit, [ordinary], "implicit set stays ordinary");
-    assert_eq!(readable_system, [system]);
+    assert_eq!(named_only.ids(), [system]);
     let scope = |filter| {
-        crate::handlers::system_channels::filter_channel_scope(filter, &implicit, &readable_system)
+        crate::handlers::system_channels::filter_channel_scope(filter, &implicit, &named_only)
             .into_owned()
     };
     assert_eq!(scope(&filters[0]), [ordinary, system], "naming filter");
     assert_eq!(scope(&filters[1]), [ordinary], "sibling filter");
+}
+
+/// A [`Fixture`] on a migrated scratch database with a `future_type` value in
+/// `channel_type`, as a later migration would add, so the shared test
+/// database keeps its schema.
+struct LaterTypeFixture {
+    f: Fixture,
+    pool: sqlx::PgPool,
+    admin: sqlx::PgPool,
+    name: String,
+}
+
+impl LaterTypeFixture {
+    async fn new() -> Self {
+        let url = crate::test_support::database_url();
+        let admin = sqlx::PgPool::connect(&url).await.expect("connect admin");
+        let name = format!("later_type_{}", Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .expect("create scratch db");
+        let scratch_url = format!("{}/{name}", &url[..url.rfind('/').expect("db url path")]);
+        let pool = sqlx::PgPool::connect(&scratch_url)
+            .await
+            .expect("connect scratch db");
+        buzz_db::migration::run_migrations(&pool)
+            .await
+            .expect("migrate scratch db");
+        sqlx::query("ALTER TYPE channel_type ADD VALUE 'future_type'")
+            .execute(&pool)
+            .await
+            .expect("add future channel type");
+        let state = crate::api::bridge::postgres_tests::bridge_handler_test_state_on(&scratch_url)
+            .await
+            .expect("scratch Postgres and local Redis");
+        let host = format!("later-type-{}.local", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = TenantContext::resolved(community, &host);
+        Self {
+            f: Fixture {
+                state,
+                tenant,
+                host,
+            },
+            pool,
+            admin,
+            name,
+        }
+    }
+
+    /// Give `channel` the later type, and drop cached access sets built
+    /// while it was a stream.
+    async fn retype(&self, channel: Uuid) {
+        sqlx::query("UPDATE channels SET channel_type = 'future_type' WHERE id = $1")
+            .bind(channel)
+            .execute(&self.pool)
+            .await
+            .expect("retype channel");
+        self.f
+            .state
+            .invalidate_all_accessible_channels_local(self.f.tenant.community());
+    }
+
+    async fn drop_database(self) {
+        drop(self.f);
+        self.pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+            self.name
+        )))
+        .execute(&self.admin)
+        .await;
+    }
+}
+
+/// A filter that names a channel of a type added later reads it under the
+/// ordinary rules (member, or open), by `#h` on any kinds or by `#d` on
+/// group-state kinds, on every read path. No sibling filter in the same
+/// request gains it, including a group-state filter that opts in to system
+/// channels with `#P` or `#t:["system", <label>]` (NIP-CL).
+/// Mutation: load only `system` channels in
+/// `get_readable_named_only_channels` → RED (an open channel's non-member,
+/// and `#d`, read nothing). Add every named-only channel on opt-in in
+/// `filter_channel_scope` → RED (the `#P` and `#t` siblings list it).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn channels_of_a_later_type_are_read_only_by_name() {
+    let later = LaterTypeFixture::new().await;
+    let f = &later.f;
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let label = "shared-label";
+
+    let private = create_channel(
+        &f.state,
+        &f.tenant,
+        &owner,
+        &[&["visibility", "private"], &["t", label]],
+    )
+    .await;
+    let open = create_channel(&f.state, &f.tenant, &owner, &[&["visibility", "open"]]).await;
+    let ordinary = create_channel(&f.state, &f.tenant, &owner, &[&["t", label]]).await;
+    let mut message = std::collections::HashMap::new();
+    for channel in [private, open, ordinary] {
+        let id = publish(f, &owner, 9, "hello", &[&["h", &channel.to_string()]]).await;
+        message.insert(channel, id);
+    }
+    let ordinary_meta = group_state_id(f, ordinary, 39000).await;
+    later.retype(private).await;
+    later.retype(open).await;
+
+    // A read that names no channel leaves both out.
+    assert_eq!(
+        req(f, &owner, json!({"kinds": [9]})).await,
+        vec![message[&ordinary].clone()],
+        "REQ without #h"
+    );
+
+    for reader in [&owner, &outsider] {
+        let who = if std::ptr::eq(reader, &owner) {
+            "member"
+        } else {
+            "outsider"
+        };
+        for (channel, readable) in [(private, std::ptr::eq(reader, &owner)), (open, true)] {
+            let h = channel.to_string();
+            let expected_message = if readable {
+                vec![message[&channel].clone()]
+            } else {
+                Vec::new()
+            };
+            let expected_count = u64::from(readable);
+            let by_h = json!({"kinds": [9], "#h": [h]});
+            assert_eq!(
+                req(f, reader, by_h.clone()).await,
+                expected_message,
+                "{who}: REQ #h {channel}"
+            );
+            assert_eq!(
+                count(f, reader, by_h.clone()).await,
+                expected_count,
+                "{who}: COUNT #h {channel}"
+            );
+            assert_eq!(
+                bridge_ids(bridge(f, reader, "/query", json!([by_h])).await),
+                expected_message,
+                "{who}: bridge /query #h {channel}"
+            );
+            assert_eq!(
+                bridge_count(bridge(f, reader, "/count", json!([by_h])).await),
+                expected_count,
+                "{who}: bridge /count #h {channel}"
+            );
+            let expected_meta = if readable {
+                vec![group_state_id(f, channel, 39000).await]
+            } else {
+                Vec::new()
+            };
+            let by_d = json!({"kinds": [39000], "#d": [h]});
+            assert_eq!(
+                req(f, reader, by_d.clone()).await,
+                expected_meta,
+                "{who}: REQ #d {channel}"
+            );
+            assert_eq!(
+                bridge_ids(bridge(f, reader, "/query", json!([by_d])).await),
+                expected_meta,
+                "{who}: bridge /query #d {channel}"
+            );
+        }
+    }
+
+    // A sibling that opts in to system channels finds the creator's or the
+    // label's ordinary channel, but not the later-type one that the first
+    // filter names.
+    for sibling in [
+        json!({"kinds": [39000], "#P": [owner_hex]}),
+        json!({"kinds": [39000], "#t": ["system", label]}),
+    ] {
+        let filters = json!([{"kinds": [9], "#h": [private.to_string()]}, sibling]);
+        let expected = sorted(vec![message[&private].clone(), ordinary_meta.clone()]);
+        assert_eq!(
+            sorted(req_all(f, &owner, filters.clone()).await),
+            expected,
+            "REQ with {sibling}"
+        );
+        assert_eq!(
+            count_all(f, &owner, filters.clone()).await,
+            2,
+            "COUNT with {sibling}"
+        );
+        assert_eq!(
+            sorted(bridge_ids(
+                bridge(f, &owner, "/query", filters.clone()).await
+            )),
+            expected,
+            "bridge /query with {sibling}"
+        );
+        assert_eq!(
+            bridge_count(bridge(f, &owner, "/count", filters).await),
+            2,
+            "bridge /count with {sibling}"
+        );
+    }
+
+    later.drop_database().await;
+}
+
+/// A reader can join a channel of a type added later after the request loads
+/// its named-only channels and before it re-checks a named channel. The
+/// re-check must keep it in the scope of the filter that names it: a sibling
+/// that names no channel reads only the legacy types, and a sibling that opts
+/// in to system channels (`#P`) does not gain it either (NIP-CL).
+/// Mutation: classify the repaired tail as legacy in
+/// `keep_repaired_named_only_channels_named` → RED (the plain sibling gets
+/// it); count every repaired named-only channel as system → RED (the `#P`
+/// sibling gets it).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_named_channel_of_a_later_type_stays_in_its_named_filter() {
+    let later_type = LaterTypeFixture::new().await;
+    let (state, tenant) = (&later_type.f.state, &later_type.f.tenant);
+    let community = tenant.community();
+
+    let owner = Keys::generate();
+    let ordinary = create_channel(state, tenant, &owner, &[]).await;
+    let later = create_channel(state, tenant, &owner, &[]).await;
+    later_type.retype(later).await;
+
+    let filters: Vec<nostr::Filter> = serde_json::from_value(json!([
+        {"kinds": [9], "#h": [later.to_string()]},
+        {"kinds": [39000]},
+        {"kinds": [39000], "#P": [owner.public_key().to_hex()]},
+    ]))
+    .expect("filters");
+    let mut implicit = state
+        .db
+        .get_accessible_channel_ids(community, &owner.public_key().to_bytes())
+        .await
+        .expect("implicit channels");
+    assert_eq!(implicit, [ordinary]);
+    let mut named_only = crate::handlers::system_channels::NamedOnlyChannels::default();
+
+    crate::api::bridge::repair_requested_channel_access(
+        state,
+        tenant,
+        &filters,
+        &owner.public_key().to_bytes(),
+        &mut implicit,
+        &mut named_only,
+    )
+    .await
+    .expect("repair");
+
+    assert_eq!(implicit, [ordinary], "implicit set stays legacy");
+    let scope = |filter| {
+        crate::handlers::system_channels::filter_channel_scope(filter, &implicit, &named_only)
+            .into_owned()
+    };
+    assert_eq!(scope(&filters[0]), [ordinary, later], "naming filter");
+    assert_eq!(scope(&filters[1]), [ordinary], "sibling filter");
+    assert_eq!(scope(&filters[2]), [ordinary], "system opt-in sibling");
+
+    later_type.drop_database().await;
 }
 
 /// A request that names channels the cached access set lacks confirms them
@@ -411,7 +691,7 @@ async fn named_channels_missing_from_the_cache_are_confirmed_together() {
     .expect("filters");
     // The request's cached lookup ran before the reader joined either channel.
     let mut implicit = Vec::new();
-    let mut readable_system = Vec::new();
+    let mut named_only = crate::handlers::system_channels::NamedOnlyChannels::default();
 
     crate::api::bridge::repair_requested_channel_access(
         &f.state,
@@ -419,13 +699,13 @@ async fn named_channels_missing_from_the_cache_are_confirmed_together() {
         &filters,
         &reader.public_key().to_bytes(),
         &mut implicit,
-        &mut readable_system,
+        &mut named_only,
     )
     .await
     .expect("repair");
 
     assert_eq!(implicit, [second, first]);
-    assert!(readable_system.is_empty());
+    assert!(named_only.is_empty());
 }
 
 /// Every membership notice is a stored kind:44100/44101 tagged with its
@@ -935,4 +1215,108 @@ async fn system_channels_are_found_by_type_or_creator() {
         1,
         "bridge /count outsider #t:system"
     );
+}
+
+/// GET a workflow's runs as `reader`, returning the response status.
+async fn workflow_runs_status(f: &Fixture, reader: &Keys, workflow: Uuid) -> u16 {
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use tower::ServiceExt;
+
+    crate::router::build_router(f.state.clone())
+        .oneshot(
+            Request::get(format!("/workflows/{workflow}/runs"))
+                .header(header::HOST, &f.host)
+                .header("x-pubkey", reader.public_key().to_hex())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("router")
+        .status()
+        .as_u16()
+}
+
+/// A workflow names its channel, so the workflows API reads a workflow in a
+/// system channel under the ordinary rules: members read it, outsiders read
+/// it only when the channel is open, and a private one answers 404 like a
+/// missing workflow.
+/// Mutation: drop the `get_readable_named_only_channels` check from
+/// `authorize_workflow_read` → RED (members get 404 for their own system
+/// channel's workflow).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn workflows_in_system_channels_follow_channel_access() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+
+    let private = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    let open = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    edit_channel(
+        &f.state,
+        &f.tenant,
+        &owner,
+        open,
+        &[&["visibility", "open"]],
+    )
+    .await
+    .expect("open the system channel");
+    let ordinary = create_channel(&f.state, &f.tenant, &owner, &[&["visibility", "private"]]).await;
+
+    let owner_bytes = owner.public_key().to_bytes();
+    f.state
+        .db
+        .ensure_user(f.tenant.community(), &owner_bytes)
+        .await
+        .expect("workflow owner user");
+    let workflow = |channel: Uuid| {
+        let state = f.state.clone();
+        let community = f.tenant.community();
+        async move {
+            state
+                .db
+                .create_workflow(
+                    community,
+                    Some(channel),
+                    &owner_bytes,
+                    &format!("wf-{}", channel.simple()),
+                    "{}",
+                    &[0; 32],
+                )
+                .await
+                .expect("create workflow")
+        }
+    };
+    let (private_wf, open_wf, ordinary_wf) = (
+        workflow(private).await,
+        workflow(open).await,
+        workflow(ordinary).await,
+    );
+
+    let cases = [
+        (&owner, private_wf, 200, "member, private system channel"),
+        (&owner, open_wf, 200, "member, open system channel"),
+        (&owner, ordinary_wf, 200, "member, ordinary channel"),
+        (
+            &outsider,
+            private_wf,
+            404,
+            "outsider, private system channel",
+        ),
+        (&outsider, open_wf, 200, "outsider, open system channel"),
+        (
+            &outsider,
+            ordinary_wf,
+            404,
+            "outsider, private ordinary channel",
+        ),
+    ];
+    for (reader, workflow, expected, case) in cases {
+        assert_eq!(
+            workflow_runs_status(&f, reader, workflow).await,
+            expected,
+            "{case}"
+        );
+    }
 }

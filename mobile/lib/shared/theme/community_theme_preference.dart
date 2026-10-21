@@ -4,13 +4,15 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'accent_colors.dart';
+import 'chat_colors.dart';
 import 'theme_catalog.dart';
 import 'theme_provider.dart' show effectiveTheme, schemeForAppearanceMode;
 
 const communityThemeDTag = 'community-theme';
 const defaultCommunityTheme = CommunityThemePreference(
   theme: 'buzz',
-  accent: '#3b82f6',
+  // Seeded without a picker action, so it must stay readable by older clients.
+  accent: '#3b82f6', // Cobalt
   followSystem: true,
 );
 
@@ -32,13 +34,16 @@ class CommunityThemePreference {
         json['theme'] is! String ||
         findTheme(json['theme'] as String) == null ||
         json['accent'] is! String ||
-        accentIndexForWireValue(json['accent'] as String) == null ||
+        (accentIndexForWireValue(json['accent'] as String) == null &&
+            previewFamilyWireValue(json['accent'] as String) == null) ||
         json['followSystem'] is! bool) {
       throw const FormatException('Invalid community theme preference');
     }
     return CommunityThemePreference(
       theme: json['theme'] as String,
-      accent: json['accent'] as String,
+      accent:
+          previewFamilyWireValue(json['accent'] as String) ??
+          json['accent'] as String,
       followSystem: json['followSystem'] as bool,
     );
   }
@@ -157,7 +162,9 @@ class CommunityThemeStorage {
     };
     return CommunityThemePreference(
       theme: resolvedTheme,
-      accent: legacyAccentWireValue(legacyAccent),
+      accent: legacyAccent == null
+          ? defaultCommunityTheme.accent
+          : legacyAccentWireValue(legacyAccent),
       followSystem: mode == ThemeMode.system,
     );
   }

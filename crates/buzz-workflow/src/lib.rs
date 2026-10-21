@@ -138,7 +138,8 @@ impl WorkflowEngine {
     /// the definition was saved, so every run-creation door must recheck the
     /// owner's *current* channel authority immediately before creating a run:
     ///
-    /// - the owner must still be an active member of the workflow's channel;
+    /// - the owner must still be an active member of the workflow's channel,
+    ///   in a role that can write (a guest cannot);
     /// - if the definition contains an exfiltration-capable action
     ///   (`call_webhook`), the owner must currently hold the `owner` or
     ///   `admin` role.
@@ -1024,13 +1025,18 @@ fn event_is_reply(event: &nostr::Event) -> bool {
 ///
 /// Rules:
 /// - not a member ⇒ deny, always;
-/// - member ⇒ allowed for ordinary definitions;
+/// - a role that cannot write (`guest`, or a role this build does not
+///   know) ⇒ deny: a run acts as its owner, and a guest cannot write;
+/// - member or bot ⇒ allowed for ordinary definitions;
 /// - elevated definitions ⇒ only `owner` / `admin` roles.
 fn owner_authority_allows(role: Option<&str>, needs_elevated: bool) -> bool {
-    match role {
-        None => false,
-        Some(r) if needs_elevated => matches!(r, "owner" | "admin"),
-        Some(_) => true,
+    let Some(role) = role.and_then(|r| r.parse::<buzz_core::channel::MemberRole>().ok()) else {
+        return false;
+    };
+    if needs_elevated {
+        role.is_elevated()
+    } else {
+        role.can_post()
     }
 }
 
@@ -1855,8 +1861,18 @@ steps:
     #[test]
     fn owner_authority_allows_any_member_for_ordinary_definitions() {
         assert!(owner_authority_allows(Some("member"), false));
+        assert!(owner_authority_allows(Some("bot"), false));
         assert!(owner_authority_allows(Some("admin"), false));
         assert!(owner_authority_allows(Some("owner"), false));
+    }
+
+    #[test]
+    fn owner_authority_denies_roles_that_cannot_write() {
+        for elevated in [false, true] {
+            assert!(!owner_authority_allows(None, elevated));
+            assert!(!owner_authority_allows(Some("guest"), elevated));
+            assert!(!owner_authority_allows(Some("superuser"), elevated));
+        }
     }
 
     #[test]
@@ -1909,8 +1925,9 @@ steps:
     async fn setup_channel(db: &buzz_db::Db, creator: &[u8], member: &[u8]) -> (CommunityId, Uuid) {
         let host = format!("sec006-{}.example", Uuid::new_v4().simple());
         let community = match db
-            .create_community_with_owner(&host, &hex::encode(creator))
+            .create_community_with_owner(&host, &hex::encode(creator), &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             buzz_db::CreateCommunityWithOwnerResult::Created(rec) => rec.id,

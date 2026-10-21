@@ -121,15 +121,6 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
           if (opened != null && context.mounted) {
             await openChannel(opened);
           }
-        case _QuickAction.browseChannels:
-          await showBuzzModalBottomSheet<void>(
-            context: context,
-            title: 'Browse channels',
-            constraints: _quickActionSheetConstraints(context),
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) => const _BrowseChannelsSheet(),
-          );
       }
     }
 

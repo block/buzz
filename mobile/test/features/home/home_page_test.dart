@@ -165,7 +165,10 @@ void main() {
     expect(tester.getSize(launcherGlass).width, greaterThan(56));
     expect(find.text('Create channel').hitTestable(), findsOneWidget);
     expect(find.text('New direct message').hitTestable(), findsOneWidget);
-    expect(find.text('Browse channels').hitTestable(), findsOneWidget);
+    expect(
+      find.byKey(const Key('quick-action-browse-channels-card')),
+      findsNothing,
+    );
     await tester.tapAt(const Offset(8, 8));
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
@@ -270,7 +273,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Create channel'), findsOneWidget);
     expect(find.text('New direct message'), findsOneWidget);
-    expect(find.text('Browse channels'), findsOneWidget);
+    expect(
+      find.byKey(const Key('quick-action-browse-channels-card')),
+      findsNothing,
+    );
   });
 
   testWidgets('keeps the Buzz backdrop behind the scalable Home screen', (

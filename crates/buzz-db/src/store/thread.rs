@@ -929,6 +929,12 @@ impl Db {
                     // discarded, so counting it would overstate offload.
                     Self::record_route("thread_eof", "writer", "stale");
                 }
+                // Surface a cancel instead of re-running it on the writer; see
+                // `DbError::is_statement_cancelled` for the trade-off.
+                Err(e) if e.is_statement_cancelled() => {
+                    Self::record_route(path, "replica", "statement_cancelled");
+                    return Err(e);
+                }
                 Err(e) => {
                     // Mid-request replica failure (e.g. a hot-standby
                     // recovery conflict) fails closed to the writer.
@@ -1059,8 +1065,9 @@ impl Db {
     ///   `BUZZ_REPLICA_HEAD_MAX_AGE_SECS` until it has, proven by a
     ///   post-then-immediately-refetch test.
     ///
-    /// Every failure fails closed to the writer and is recorded in
-    /// `buzz_db_route_decision`.
+    /// Every replica failure except a cancelled statement (57014, which the
+    /// writer would only repeat) fails closed to the writer and is recorded
+    /// in `buzz_db_route_decision`.
     #[datastore_span(name = "get_channel_window", system = "postgresql")]
     pub async fn get_channel_window_with_session(
         &self,
@@ -1105,6 +1112,12 @@ impl Db {
                                 },
                             },
                         ));
+                    }
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        return Err(e);
                     }
                     Err(e) => {
                         // A mid-request replica failure (e.g. a hot-standby

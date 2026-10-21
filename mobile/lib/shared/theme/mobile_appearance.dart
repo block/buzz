@@ -51,7 +51,7 @@ ThemeData mobileAppearanceTheme(Brightness brightness, String chatColor) {
       ...theme.extensions.values,
       ChatColors(
         outgoing: chatColorForScheme(theme.colorScheme, index),
-        foreground: index == 0 ? theme.colorScheme.onSurface : Colors.white,
+        foreground: chatForegroundForScheme(theme.colorScheme, index),
       ),
     ],
   );

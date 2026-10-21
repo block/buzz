@@ -2493,7 +2493,84 @@ async fn test_nip29_departure_wire_kind_9022_co_owner_allowed() {
     assert_eq!(result, (true, String::new()));
 }
 
-/// Any active member can add any ordinary role to a private channel.
+/// An archived channel refuses changes, but a member may still leave it by
+/// themselves, with either departure kind. The last-owner rule still applies,
+/// and removing someone else is still refused.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_departure_wire_archived_channel_allows_self_leave() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let guest = Keys::generate();
+    let member = Keys::generate();
+    let other = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect channel owner");
+    for (keys, role) in [(&guest, "guest"), (&member, "member"), (&other, "member")] {
+        let (accepted, msg) = add_member_with_role_ws(
+            &mut owner_client,
+            &channel_id,
+            &keys.public_key().to_hex(),
+            role,
+            &owner,
+        )
+        .await;
+        assert!(accepted, "owner adds a {role}: {msg}");
+    }
+    let archive = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["archived", "true"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ok = owner_client.send_event(archive).await.expect("archive");
+    assert!(ok.accepted, "archive: {}", ok.message);
+
+    // Removing someone else is still a change to an archived channel.
+    let remove_other = EventBuilder::new(Kind::Custom(9001), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &other.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ok = owner_client
+        .send_event(remove_other)
+        .await
+        .expect("remove other");
+    assert!(!ok.accepted, "removing another member must stay refused");
+    assert!(ok.message.contains("archived"), "{}", ok.message);
+    owner_client.disconnect().await.ok();
+
+    assert_eq!(
+        self_departure_ws(&url, &channel_id, &guest, 9022).await,
+        (true, String::new()),
+        "a guest leaves an archived channel"
+    );
+    assert_eq!(
+        self_departure_ws(&url, &channel_id, &member, 9001).await,
+        (true, String::new()),
+        "a member removes themselves from an archived channel"
+    );
+    for (keys, who) in [(&guest, "guest"), (&member, "member")] {
+        assert_eq!(
+            member_role(&url, &owner, &channel_id, &keys.public_key().to_hex()).await,
+            None,
+            "the departed {who} is off the roster"
+        );
+    }
+
+    let (accepted, msg) = self_departure_ws(&url, &channel_id, &owner, 9022).await;
+    assert!(!accepted, "the last owner must not leave");
+    assert!(msg.contains("last owner"), "{msg}");
+}
+
+/// Any active member who may write can add any ordinary role to a private
+/// channel. A guest cannot add anyone.
 #[tokio::test]
 #[ignore]
 async fn test_private_channel_any_member_can_invite() {
@@ -2525,7 +2602,8 @@ async fn test_private_channel_any_member_can_invite() {
     }
 
     // Exercise the full ordinary-role target matrix. Relay and DB authorization
-    // both run here, unlike the Desktop/mobile policy-unit-test mirrors.
+    // both run here, unlike the Desktop/mobile policy-unit-test mirrors. Any
+    // member who may write can add people; a guest cannot.
     for (actor_role, actor_keys) in &actors {
         let mut actor_client = BuzzTestClient::connect(&url, actor_keys)
             .await
@@ -2542,6 +2620,23 @@ async fn test_private_channel_any_member_can_invite() {
                 actor_keys,
             )
             .await;
+            // Adding people is a write: a guest may not, in any channel.
+            if *actor_role == "guest" {
+                assert!(
+                    !accepted,
+                    "private-channel guest must not add {target_role}"
+                );
+                assert!(
+                    msg.contains("only members can add people"),
+                    "private-channel guest add refusal: {msg}"
+                );
+                assert_eq!(
+                    member_role(&url, &owner_keys, &channel_id, &target_pubkey_hex).await,
+                    None,
+                    "a refused guest add must not store a row"
+                );
+                continue;
+            }
             assert!(
                 accepted,
                 "private-channel {actor_role} should add {target_role}, got: {msg}"
@@ -2942,6 +3037,532 @@ async fn member_role(url: &str, keys: &Keys, channel_id: &str, pubkey_hex: &str)
             (p.len() >= 4 && p[0] == "p" && p[1] == pubkey_hex).then(|| p[3].clone())
         })
     })
+}
+
+/// Submit a kind:9002 `join_role` change and return the OK frame.
+async fn set_join_role_ws(
+    url: &str,
+    channel_id: &str,
+    signer: &Keys,
+    join_role: &str,
+) -> (bool, String) {
+    // The nonce keeps a repeated setting within one second from signing the
+    // same event id as the earlier one, which the relay drops as a duplicate.
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", channel_id]).unwrap(),
+            Tag::parse(["join_role", join_role]).unwrap(),
+            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+        ])
+        .sign_with_keys(signer)
+        .unwrap();
+    let mut client = BuzzTestClient::connect(url, signer)
+        .await
+        .expect("connect join_role actor");
+    let ok = client.send_event(event).await.expect("send kind:9002");
+    client.disconnect().await.ok();
+    (ok.accepted, ok.message)
+}
+
+/// The latest kind:39000 tags for a channel.
+async fn group_metadata_tags(url: &str, keys: &Keys, channel_id: &str) -> Vec<Vec<String>> {
+    let mut ws = BuzzTestClient::connect(url, keys).await.expect("connect");
+    let sid = sub_id("metadata");
+    let filter = Filter::new()
+        .kind(Kind::Custom(39000))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [channel_id]);
+    ws.subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe 39000");
+    let events = ws
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("39000 EOSE");
+    ws.disconnect().await.ok();
+    events
+        .iter()
+        .max_by_key(|e| e.created_at)
+        .map(|e| e.tags.iter().map(|t| t.as_slice().to_vec()).collect())
+        .unwrap_or_default()
+}
+
+/// Send a kind:9021 join and return the OK frame.
+async fn join_ws(url: &str, channel_id: &str, signer: &Keys) -> (bool, String) {
+    let join = EventBuilder::new(Kind::Custom(9021), "")
+        .tags([Tag::parse(["h", channel_id]).unwrap()])
+        .sign_with_keys(signer)
+        .unwrap();
+    let mut client = BuzzTestClient::connect(url, signer)
+        .await
+        .expect("connect joiner");
+    let ok = client.send_event(join).await.expect("send join");
+    client.disconnect().await.ok();
+    (ok.accepted, ok.message)
+}
+
+/// Send a kind:9 post and return the OK frame.
+async fn post_ws(url: &str, channel_id: &str, signer: &Keys, text: &str) -> (bool, String) {
+    let mut client = BuzzTestClient::connect(url, signer)
+        .await
+        .expect("connect poster");
+    let ok = client
+        .send_text_message(signer, channel_id, text, 9)
+        .await
+        .expect("send post");
+    client.disconnect().await.ok();
+    (ok.accepted, ok.message)
+}
+
+/// Record `owner` as the NIP-OA owner of `agent`, by authenticating once.
+async fn record_agent_owner(url: &str, agent: &Keys, owner: &Keys) {
+    let auth_tag = buzz_sdk::nip_oa::parse_auth_tag(
+        &buzz_sdk::nip_oa::compute_auth_tag(owner, &agent.public_key(), "kind=9")
+            .expect("compute auth tag"),
+    )
+    .expect("parse auth tag");
+    let mut agent_client = BuzzTestClient::connect_unauthenticated(url)
+        .await
+        .expect("connect agent");
+    agent_client
+        .authenticate_with_nip_oa(agent, &auth_tag)
+        .await
+        .expect("NIP-OA auth");
+    agent_client.disconnect().await.ok();
+}
+
+/// Announce channel (`join_role = guest` on an open channel) through the real
+/// relay: joining gives guest, guests and non-members cannot write or add
+/// people, members can, only owners/admins change the setting, and changing
+/// it back to `member` gives new joiners member without changing any
+/// existing role.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_announce_channel_wire() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let outsider = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect owner");
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut owner_client,
+        &channel_id,
+        &member.public_key().to_hex(),
+        "member",
+        &owner,
+    )
+    .await;
+    assert!(accepted, "owner adds member: {msg}");
+    owner_client.disconnect().await.ok();
+
+    // Only owners/admins may change the setting; unknown values are refused.
+    let (accepted, msg) = set_join_role_ws(&url, &channel_id, &member, "guest").await;
+    assert!(!accepted, "member must not change join_role");
+    assert!(msg.contains("not authorized"), "{msg}");
+    let (accepted, msg) = set_join_role_ws(&url, &channel_id, &owner, "members").await;
+    assert!(!accepted, "unknown join_role value must be refused");
+    assert!(msg.contains("invalid join_role value"), "{msg}");
+    assert_eq!(
+        set_join_role_ws(&url, &channel_id, &owner, "guest").await,
+        (true, String::new())
+    );
+
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(tags.contains(&vec!["restricted".to_string()]), "{tags:?}");
+    assert!(tags.contains(&vec!["join_role".to_string(), "guest".to_string()]));
+    assert!(tags.contains(&vec!["public".to_string()]));
+    assert!(
+        !tags.contains(&vec!["closed".to_string()]),
+        "open channels accept kind:9021 joins: {tags:?}"
+    );
+
+    // A non-member of an open announce channel cannot write, and cannot
+    // self-add as a member.
+    let (accepted, msg) = post_ws(&url, &channel_id, &outsider, "outsider post").await;
+    assert!(!accepted, "non-member must not post");
+    assert!(msg.contains("only members can post"), "{msg}");
+    let mut outsider_client = BuzzTestClient::connect(&url, &outsider)
+        .await
+        .expect("connect outsider");
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut outsider_client,
+        &channel_id,
+        &outsider.public_key().to_hex(),
+        "member",
+        &outsider,
+    )
+    .await;
+    assert!(!accepted, "non-member must not self-add as member");
+    assert!(msg.contains("gives the guest role"), "{msg}");
+    outsider_client.disconnect().await.ok();
+
+    // Join makes a guest. A guest cannot post or add people.
+    let (accepted, msg) = join_ws(&url, &channel_id, &outsider).await;
+    assert!(accepted, "join: {msg}");
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &outsider.public_key().to_hex())
+            .await
+            .as_deref(),
+        Some("guest")
+    );
+    let (accepted, msg) = post_ws(&url, &channel_id, &outsider, "guest post").await;
+    assert!(!accepted, "guest must not post");
+    assert!(msg.contains("only members can post"), "{msg}");
+    let mut outsider_client = BuzzTestClient::connect(&url, &outsider)
+        .await
+        .expect("connect guest");
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut outsider_client,
+        &channel_id,
+        &Keys::generate().public_key().to_hex(),
+        "member",
+        &outsider,
+    )
+    .await;
+    assert!(!accepted, "guest must not add a member");
+    assert!(msg.contains("only members can add people"), "{msg}");
+    outsider_client.disconnect().await.ok();
+
+    // A member can still post.
+    let mut member_client = BuzzTestClient::connect(&url, &member)
+        .await
+        .expect("connect member");
+    let ok = member_client
+        .send_text_message(&member, &channel_id, "member post", 9)
+        .await
+        .expect("send member post");
+    assert!(ok.accepted, "member post: {}", ok.message);
+    member_client.disconnect().await.ok();
+    let member_post_id = ok.event_id;
+
+    // A reaction is a write: a guest cannot react to the member's post. A
+    // reaction derives its channel from its target, so the relay reports
+    // every channel-gate refusal as a missing target.
+    let reaction = EventBuilder::new(Kind::Custom(7), "+")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["e", &member_post_id]).unwrap(),
+        ])
+        .sign_with_keys(&outsider)
+        .unwrap();
+    let mut guest_client = BuzzTestClient::connect(&url, &outsider)
+        .await
+        .expect("connect guest");
+    let ok = guest_client
+        .send_event(reaction)
+        .await
+        .expect("send guest reaction");
+    assert!(!ok.accepted, "guest must not react");
+    assert!(
+        ok.message.contains("reaction target event not found"),
+        "{}",
+        ok.message
+    );
+    guest_client.disconnect().await.ok();
+
+    // Back to `member`: roles do not change with the setting, so the guest
+    // stays read-only, but a new joiner becomes a member and can post.
+    assert_eq!(
+        set_join_role_ws(&url, &channel_id, &owner, "member").await,
+        (true, String::new())
+    );
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(!tags.contains(&vec!["restricted".to_string()]), "{tags:?}");
+    assert!(tags.contains(&vec!["join_role".to_string(), "member".to_string()]));
+    let (accepted, msg) = post_ws(&url, &channel_id, &outsider, "guest post after").await;
+    assert!(!accepted, "a guest stays read-only after join_role=member");
+    assert!(msg.contains("only members can post"), "{msg}");
+    let late = Keys::generate();
+    let (accepted, msg) = join_ws(&url, &channel_id, &late).await;
+    assert!(accepted, "late join: {msg}");
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &late.public_key().to_hex())
+            .await
+            .as_deref(),
+        Some("member")
+    );
+    let (accepted, msg) = post_ws(&url, &channel_id, &late, "late post").await;
+    assert!(accepted, "late joiner post: {msg}");
+
+    // A member (not only an admin) can make a guest person a member.
+    let mut member_client = BuzzTestClient::connect(&url, &member)
+        .await
+        .expect("reconnect member");
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut member_client,
+        &channel_id,
+        &outsider.public_key().to_hex(),
+        "member",
+        &member,
+    )
+    .await;
+    assert!(accepted, "member promotes the guest: {msg}");
+    member_client.disconnect().await.ok();
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &outsider.public_key().to_hex())
+            .await
+            .as_deref(),
+        Some("member")
+    );
+    let (accepted, msg) = post_ws(&url, &channel_id, &outsider, "promoted post").await;
+    assert!(accepted, "promoted member post: {msg}");
+
+    // Anyone can always leave.
+    assert_eq!(
+        self_departure_ws(&url, &channel_id, &outsider, 9022).await,
+        (true, String::new())
+    );
+}
+
+/// Roles mean the same for agents and people: an agent that joins an
+/// announce channel by itself is a guest, and any member can make it a
+/// member, as for a person. Owner-only raising belongs to the later
+/// restricted-agent level (Channels for IFC), not to this rule.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_member_raises_guest_agent() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let human = Keys::generate();
+    let agent = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+    record_agent_owner(&url, &agent, &human).await;
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect owner");
+    for pk in [&member, &human] {
+        let (accepted, msg) = add_member_with_role_ws(
+            &mut owner_client,
+            &channel_id,
+            &pk.public_key().to_hex(),
+            "member",
+            &owner,
+        )
+        .await;
+        assert!(accepted, "owner adds member: {msg}");
+    }
+    owner_client.disconnect().await.ok();
+    assert_eq!(
+        set_join_role_ws(&url, &channel_id, &owner, "guest").await,
+        (true, String::new())
+    );
+
+    let (accepted, msg) = join_ws(&url, &channel_id, &agent).await;
+    assert!(accepted, "agent join: {msg}");
+    let agent_hex = agent.public_key().to_hex();
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &agent_hex)
+            .await
+            .as_deref(),
+        Some("guest"),
+        "an agent that joins by itself gets join_role"
+    );
+
+    let mut member_client = BuzzTestClient::connect(&url, &member)
+        .await
+        .expect("connect member");
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut member_client,
+        &channel_id,
+        &agent_hex,
+        "member",
+        &member,
+    )
+    .await;
+    assert!(accepted, "a member raises a guest agent: {msg}");
+    member_client.disconnect().await.ok();
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &agent_hex)
+            .await
+            .as_deref(),
+        Some("member")
+    );
+    let (accepted, msg) = post_ws(&url, &channel_id, &agent, "agent post").await;
+    assert!(accepted, "raised agent post: {msg}");
+}
+
+/// In an announce channel, the human owner of an agent keeps the existing
+/// owner authority over that agent's messages: they can edit (kind:40003) and
+/// delete (kind:9005) them while not a member and while a guest, although
+/// they cannot post themselves. An ordinary guest cannot edit them.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_announce_channel_wire_agent_owner_exception() {
+    let url = relay_url();
+    let agent = Keys::generate();
+    let human = Keys::generate();
+    let stranger = Keys::generate();
+    let channel_id = create_test_channel(&agent).await;
+    record_agent_owner(&url, &agent, &human).await;
+
+    assert_eq!(
+        set_join_role_ws(&url, &channel_id, &agent, "guest").await,
+        (true, String::new())
+    );
+    let mut agent_client = BuzzTestClient::connect(&url, &agent)
+        .await
+        .expect("reconnect agent");
+    let first = agent_client
+        .send_text_message(&agent, &channel_id, "agent post one", 9)
+        .await
+        .expect("send agent post");
+    assert!(first.accepted, "agent post: {}", first.message);
+    let second = agent_client
+        .send_text_message(&agent, &channel_id, "agent post two", 9)
+        .await
+        .expect("send agent post");
+    assert!(second.accepted, "agent post: {}", second.message);
+    agent_client.disconnect().await.ok();
+
+    let edit = |signer: &Keys, target: &str, content: &str| {
+        EventBuilder::new(Kind::Custom(40003), content)
+            .tags([
+                Tag::parse(["e", target]).unwrap(),
+                Tag::parse(["h", &channel_id]).unwrap(),
+            ])
+            .sign_with_keys(signer)
+            .unwrap()
+    };
+
+    // An ordinary guest cannot edit the agent's message.
+    let (accepted, msg) = join_ws(&url, &channel_id, &stranger).await;
+    assert!(accepted, "stranger join: {msg}");
+    let mut stranger_client = BuzzTestClient::connect(&url, &stranger)
+        .await
+        .expect("connect stranger");
+    let ok = stranger_client
+        .send_event(edit(&stranger, &first.event_id, "stranger edit"))
+        .await
+        .expect("send stranger edit");
+    assert!(
+        !ok.accepted,
+        "an ordinary guest must not edit an agent message"
+    );
+    stranger_client.disconnect().await.ok();
+
+    // The owner edits while not a member, then joins as a guest. As a guest
+    // they still cannot post, but can edit and delete the agent's messages.
+    let mut human_client = BuzzTestClient::connect(&url, &human)
+        .await
+        .expect("connect owner");
+    let ok = human_client
+        .send_event(edit(&human, &first.event_id, "edited by owner"))
+        .await
+        .expect("send owner edit");
+    assert!(ok.accepted, "non-member owner edit: {}", ok.message);
+    human_client.disconnect().await.ok();
+    let (accepted, msg) = join_ws(&url, &channel_id, &human).await;
+    assert!(accepted, "owner join: {msg}");
+    assert_eq!(
+        member_role(&url, &agent, &channel_id, &human.public_key().to_hex())
+            .await
+            .as_deref(),
+        Some("guest")
+    );
+    let (accepted, msg) = post_ws(&url, &channel_id, &human, "owner post").await;
+    assert!(!accepted, "a guest owner must not post");
+    assert!(msg.contains("only members can post"), "{msg}");
+    let mut human_client = BuzzTestClient::connect(&url, &human)
+        .await
+        .expect("reconnect owner");
+    let ok = human_client
+        .send_event(edit(&human, &first.event_id, "edited again by owner"))
+        .await
+        .expect("send guest owner edit");
+    assert!(ok.accepted, "guest owner edit: {}", ok.message);
+    let delete = EventBuilder::new(Kind::Custom(9005), "")
+        .tags([
+            Tag::parse(["e", &second.event_id]).unwrap(),
+            Tag::parse(["h", &channel_id]).unwrap(),
+        ])
+        .sign_with_keys(&human)
+        .unwrap();
+    let ok = human_client.send_event(delete).await.expect("send delete");
+    assert!(ok.accepted, "guest owner delete: {}", ok.message);
+    human_client.disconnect().await.ok();
+}
+
+/// Roles mean the same thing in every channel. In a normal channel
+/// (`join_role = member`) a self-join gives member, as today, and a bare
+/// self-add does too; but a guest that an owner adds still cannot post.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_guest_is_read_only_in_normal_channel() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let joiner = Keys::generate();
+    let self_adder = Keys::generate();
+    let guest = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+
+    let (accepted, msg) = join_ws(&url, &channel_id, &joiner).await;
+    assert!(accepted, "join: {msg}");
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &joiner.public_key().to_hex())
+            .await
+            .as_deref(),
+        Some("member"),
+        "kind:9021 join must give join_role (member)"
+    );
+    let (accepted, msg) = post_ws(&url, &channel_id, &joiner, "joiner post").await;
+    assert!(accepted, "a joiner can post in a normal channel: {msg}");
+
+    let self_hex = self_adder.public_key().to_hex();
+    let mut self_client = BuzzTestClient::connect(&url, &self_adder)
+        .await
+        .expect("connect self-adder");
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut self_client,
+        &channel_id,
+        &self_hex,
+        "admin",
+        &self_adder,
+    )
+    .await;
+    assert!(!accepted, "non-member must not self-add as admin: {msg}");
+    let bare = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &self_hex]).unwrap(),
+        ])
+        .sign_with_keys(&self_adder)
+        .unwrap();
+    let ok = self_client
+        .send_event(bare)
+        .await
+        .expect("send bare self-add");
+    assert!(ok.accepted, "bare self-add: {}", ok.message);
+    self_client.disconnect().await.ok();
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &self_hex)
+            .await
+            .as_deref(),
+        Some("member"),
+        "a self-add with no role tag must give join_role (member)"
+    );
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect owner");
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut owner_client,
+        &channel_id,
+        &guest.public_key().to_hex(),
+        "guest",
+        &owner,
+    )
+    .await;
+    assert!(accepted, "owner adds a guest: {msg}");
+    owner_client.disconnect().await.ok();
+    let (accepted, msg) = post_ws(&url, &channel_id, &guest, "guest post").await;
+    assert!(!accepted, "a guest must not post, also in a normal channel");
+    assert!(msg.contains("only members can post"), "{msg}");
 }
 
 /// SECURITY REPRO (Dawn): can an unprivileged NON-MEMBER demote the owner of an
@@ -3351,4 +3972,335 @@ async fn test_nip29_relay_rejects_last_owner_self_demotion() {
         Some("owner"),
         "the last owner must keep their role"
     );
+}
+
+/// A workflow posts as its owner, so in an announce channel its `send_message`
+/// needs the same write role a post does: it replies while the owner is a
+/// member, and stops once the owner is made a guest.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_announce_channel_wire_workflow_send_needs_write_role() {
+    let url = relay_url();
+    let http = relay_http_url();
+    let owner = Keys::generate();
+    let author = Keys::generate();
+    let author_hex = author.public_key().to_hex();
+    let channel_id = create_test_channel(&owner).await;
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect owner");
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut owner_client,
+        &channel_id,
+        &author_hex,
+        "member",
+        &owner,
+    )
+    .await;
+    assert!(accepted, "owner adds the workflow author: {msg}");
+    assert_eq!(
+        set_join_role_ws(&url, &channel_id, &owner, "guest").await,
+        (true, String::new())
+    );
+
+    // Replies only to top-level messages, so it cannot trigger itself.
+    let yaml = "name: announce-reply\n\
+         description: announce write-role probe\n\
+         trigger:\n\
+         \x20 on: message_posted\n\
+         \x20 filter: \"trigger_is_reply == false\"\n\
+         steps:\n\
+         \x20 - id: step1\n\
+         \x20   name: Reply\n\
+         \x20   action: send_message\n\
+         \x20   text: \"auto-reply\"\n\
+         \x20   reply_in_thread: true\n"
+        .to_string();
+    let def = EventBuilder::new(Kind::Custom(30620), yaml)
+        .tags([
+            Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
+            Tag::parse(["h", channel_id.as_str()]).unwrap(),
+            Tag::parse(["name", "announce-reply"]).unwrap(),
+        ])
+        .sign_with_keys(&author)
+        .expect("sign workflow def");
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(format!("{http}/events"))
+        .header("X-Pubkey", &author_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&def).unwrap())
+        .send()
+        .await
+        .expect("submit workflow def")
+        .json()
+        .await
+        .expect("parse def response");
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "workflow def not accepted: {body}"
+    );
+
+    let sid = sub_id("announce-wf");
+    let filter = Filter::new().kind(Kind::Custom(9)).custom_tags(
+        SingleLetterTag::lowercase(Alphabet::H),
+        [channel_id.as_str()],
+    );
+    owner_client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    owner_client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    // Post a top-level message, then report whether a workflow reply to it
+    // arrives within `wait`.
+    async fn trigger_gets_reply(
+        client: &mut BuzzTestClient,
+        owner: &Keys,
+        channel_id: &str,
+        wait: Duration,
+    ) -> bool {
+        let root = EventBuilder::new(Kind::Custom(9), "trigger me")
+            .tags([Tag::parse(["h", channel_id]).unwrap()])
+            .sign_with_keys(owner)
+            .expect("sign root");
+        let root_hex = root.id.to_hex();
+        let ok = client.send_event(root).await.expect("send root");
+        assert!(ok.accepted, "owner's post rejected: {}", ok.message);
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let Some(remaining) = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .filter(|d| !d.is_zero())
+            else {
+                return false;
+            };
+            match client.recv_event(remaining).await {
+                Ok(RelayMessage::Event { event, .. })
+                    if event.content == "auto-reply"
+                        && event.tags.iter().any(|t| {
+                            let p = t.as_slice();
+                            p.len() >= 2 && p[0] == "e" && p[1] == root_hex
+                        }) =>
+                {
+                    return true
+                }
+                Ok(_) => continue,
+                Err(_) => return false,
+            }
+        }
+    }
+
+    assert!(
+        trigger_gets_reply(
+            &mut owner_client,
+            &owner,
+            &channel_id,
+            Duration::from_secs(10)
+        )
+        .await,
+        "control: the member's workflow replies"
+    );
+
+    let (accepted, msg) =
+        add_member_with_role_ws(&mut owner_client, &channel_id, &author_hex, "guest", &owner).await;
+    assert!(accepted, "owner makes the workflow author a guest: {msg}");
+    assert!(
+        !trigger_gets_reply(
+            &mut owner_client,
+            &owner,
+            &channel_id,
+            Duration::from_secs(5)
+        )
+        .await,
+        "a guest's workflow must not post in the announce channel"
+    );
+
+    owner_client.disconnect().await.ok();
+}
+
+/// A kind:9002 is stored before its updates run, so a value the database cannot
+/// hold must be refused first. Otherwise a name longer than the column fails
+/// after the event is acknowledged, and the `join_role` in the same event is
+/// never applied.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_announce_channel_wire_overlong_name_is_refused_before_storage() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let channel_id = create_test_channel(&owner).await;
+    let long_name = "n".repeat(256);
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", channel_id.as_str()]).unwrap(),
+            Tag::parse(["name", long_name.as_str()]).unwrap(),
+            Tag::parse(["join_role", "guest"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let mut client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect owner");
+    let ok = client.send_event(event).await.expect("send kind:9002");
+    client.disconnect().await.ok();
+    assert!(
+        !ok.accepted && ok.message.starts_with("invalid:"),
+        "an overlong name must be refused, got: {} {}",
+        ok.accepted,
+        ok.message
+    );
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(
+        tags.iter()
+            .any(|t| t.len() >= 2 && t[0] == "join_role" && t[1] == "member"),
+        "the refused event must not change join_role: {tags:?}"
+    );
+
+    // The longest storable name, with join_role, applies in full.
+    let max_name = "m".repeat(255);
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", channel_id.as_str()]).unwrap(),
+            Tag::parse(["name", max_name.as_str()]).unwrap(),
+            Tag::parse(["join_role", "guest"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let mut client = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect owner");
+    let ok = client.send_event(event).await.expect("send kind:9002");
+    client.disconnect().await.ok();
+    assert!(ok.accepted, "a 255-character name is valid: {}", ok.message);
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(
+        tags.iter()
+            .any(|t| t.len() >= 2 && t[0] == "join_role" && t[1] == "guest"),
+        "join_role applies with a valid name: {tags:?}"
+    );
+}
+
+/// Workflow commands skip the generic write gate, so they check the role
+/// themselves. A writing member can save and manually trigger a workflow. A
+/// guest can do neither, and a workflow saved while its owner could write
+/// cannot be triggered after the owner is made a guest. Roles mean the same in
+/// every channel, so this holds in a normal channel too.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_announce_channel_wire_workflow_commands_need_write_role() {
+    let url = relay_url();
+    let http = relay_http_url();
+
+    async fn submit(http: &str, keys: &Keys, event: nostr::Event) -> (bool, String) {
+        let resp = reqwest::Client::new()
+            .post(format!("{http}/events"))
+            .header("X-Pubkey", keys.public_key().to_hex())
+            .header("Content-Type", "application/json")
+            .body(serde_json::to_string(&event).unwrap())
+            .send()
+            .await
+            .expect("submit event");
+        let body: serde_json::Value = resp.json().await.expect("parse response");
+        match body["accepted"].as_bool() {
+            Some(accepted) => (
+                accepted,
+                body["message"].as_str().unwrap_or_default().to_string(),
+            ),
+            None => (
+                false,
+                body["error"].as_str().unwrap_or_default().to_string(),
+            ),
+        }
+    }
+
+    async fn define(
+        http: &str,
+        keys: &Keys,
+        channel_id: &str,
+        workflow_id: &str,
+    ) -> (bool, String) {
+        let yaml = "name: announce-manual\n\
+             description: announce write-role probe\n\
+             trigger:\n\
+             \x20 on: webhook\n\
+             steps:\n\
+             \x20 - id: step1\n\
+             \x20   name: Notify\n\
+             \x20   action: send_message\n\
+             \x20   text: \"manual\"\n";
+        let def = EventBuilder::new(Kind::Custom(30620), yaml)
+            .tags([
+                Tag::parse(["h", channel_id]).unwrap(),
+                Tag::parse(["d", workflow_id]).unwrap(),
+                Tag::parse(["name", "announce-manual"]).unwrap(),
+            ])
+            .sign_with_keys(keys)
+            .expect("sign workflow def");
+        submit(http, keys, def).await
+    }
+
+    async fn trigger(http: &str, keys: &Keys, workflow_id: &str) -> (bool, String) {
+        let event = EventBuilder::new(Kind::Custom(46020), "")
+            .tags([Tag::parse(["d", workflow_id]).unwrap()])
+            .sign_with_keys(keys)
+            .expect("sign trigger");
+        submit(http, keys, event).await
+    }
+
+    for join_role in ["guest", "member"] {
+        let owner = Keys::generate();
+        let author = Keys::generate();
+        let author_hex = author.public_key().to_hex();
+        let channel_id = create_test_channel(&owner).await;
+        let mut owner_client = BuzzTestClient::connect(&url, &owner)
+            .await
+            .expect("connect owner");
+        let (accepted, msg) = add_member_with_role_ws(
+            &mut owner_client,
+            &channel_id,
+            &author_hex,
+            "member",
+            &owner,
+        )
+        .await;
+        assert!(accepted, "owner adds the workflow author: {msg}");
+        assert_eq!(
+            set_join_role_ws(&url, &channel_id, &owner, join_role).await,
+            (true, String::new())
+        );
+
+        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let (accepted, msg) = define(&http, &author, &channel_id, &workflow_id).await;
+        assert!(
+            accepted,
+            "join_role={join_role}: a member saves a workflow: {msg}"
+        );
+        let (accepted, msg) = trigger(&http, &author, &workflow_id).await;
+        assert!(
+            accepted,
+            "join_role={join_role}: a member triggers its workflow: {msg}"
+        );
+
+        let (accepted, msg) =
+            add_member_with_role_ws(&mut owner_client, &channel_id, &author_hex, "guest", &owner)
+                .await;
+        assert!(accepted, "owner makes the workflow author a guest: {msg}");
+
+        let (accepted, msg) = trigger(&http, &author, &workflow_id).await;
+        assert!(
+            !accepted,
+            "join_role={join_role}: a guest must not trigger its saved workflow: {msg}"
+        );
+        let other_workflow_id = uuid::Uuid::new_v4().to_string();
+        let (accepted, msg) = define(&http, &author, &channel_id, &other_workflow_id).await;
+        assert!(
+            !accepted && msg.starts_with("restricted:"),
+            "join_role={join_role}: a guest must not save a workflow, got: {msg}"
+        );
+
+        owner_client.disconnect().await.ok();
+    }
 }
