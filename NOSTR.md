@@ -156,10 +156,11 @@ out unless they ask for it:
   combine with OR, so `#t:["system", <label>]` does not mean "a system
   channel with this label".
 
-Push notifications skip system channels. Every kind:44100/44101 membership
-notification carries its channel type as `t`, and a filter without `#t` sees
-only the legacy types, so system channel notices reach only a filter with
-`#t:["system"]` (see NIP-CL).
+Push notifications use the same rule: a lease filter pushes events from a
+system channel only when its `#h` names that channel. Every kind:44100/44101
+membership notification carries its channel type as `t`, and a filter without
+`#t` sees only the legacy types, so system channel notices reach only a filter
+with `#t:["system"]` (see NIP-CL).
 
 Events are stored **channel-scoped** so access control applies — private channel member lists are
 only visible to members. Discover groups via historical REQ:

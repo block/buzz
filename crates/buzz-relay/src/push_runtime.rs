@@ -360,8 +360,7 @@ fn match_job(
 /// REQ: a legacy-type channel is in every filter's scope (membership is
 /// checked separately), and a named-only channel is in scope only when the
 /// filter names it (see [`crate::handlers::system_channels`]). Lease filters
-/// cannot carry `#t` or `#P`, so for push "names it" means `#h`. The one
-/// exception: NIP-CL forbids push for system channels, even when named.
+/// cannot carry `#t` or `#P`, so for push "names it" means `#h`.
 fn push_filter_reads_channel(
     filter: &Filter,
     channel: Option<uuid::Uuid>,
@@ -372,9 +371,6 @@ fn push_filter_reads_channel(
     };
     if !named_only.ids().contains(&channel) {
         return true;
-    }
-    if named_only.is_system(&channel) {
-        return false;
     }
     filter_channel_scope(filter, &[], named_only).contains(&channel)
 }
@@ -853,17 +849,22 @@ mod tests {
         );
         assert_eq!(wakes(&member, broad, Some(future)), 0, "unnamed later type");
 
-        // Naming a later-type channel by #h reads it, as in REQ.
+        // Naming a named-only channel by #h reads it, as in REQ: a system
+        // channel and a later-type channel alike.
         assert_eq!(
             wakes(&member, names(future), Some(future)),
             1,
             "named later type"
         );
-        // NIP-CL: a system channel never pushes, even when named.
         assert_eq!(
             wakes(&member, names(system), Some(system)),
-            0,
+            1,
             "named system"
+        );
+        assert_eq!(
+            wakes(&outsider, names(system), Some(system)),
+            0,
+            "non-member system"
         );
         // Naming one channel does not widen the filter to another.
         let other = uuid::Uuid::new_v4();

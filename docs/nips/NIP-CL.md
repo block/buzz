@@ -198,7 +198,11 @@ a system channel stays an ordinary NIP-29 group.
 The relay decides this for each filter. A filter that names a channel does
 not add it to another filter in the same request.
 
-The relay MUST NOT send push notifications for system channels.
+Push notifications (NIP-PL) use the same rule. A lease filter wakes its
+author for an event in a system channel or a channel of a type added later
+only when the filter names that channel. A lease filter cannot have `#t` or
+`#P`, so here "names" means `#h`. The relay still checks that the author can
+read the event, as for every other channel.
 
 ### Membership notices carry the channel type
 

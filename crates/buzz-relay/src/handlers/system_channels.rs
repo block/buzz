@@ -67,11 +67,6 @@ impl NamedOnlyChannels {
         &self.ids
     }
 
-    /// Whether `id` is a system channel.
-    pub(crate) fn is_system(&self, id: &Uuid) -> bool {
-        self.system.contains(id)
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
