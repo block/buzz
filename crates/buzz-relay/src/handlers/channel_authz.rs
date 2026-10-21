@@ -17,7 +17,7 @@
 //! appliers. The *rule* is defined once in [`is_sole_owner`]; only the wording
 //! differs per call site.
 
-use buzz_db::channel::{MemberRecord, MemberRole};
+use buzz_db::channel::{ChannelJoinRole, MemberRecord, MemberRole, RoleChangeTarget};
 
 /// A membership-authority denial. `Display` is the client-visible reason.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -31,6 +31,10 @@ pub enum ChannelAuthzError {
     /// Actor tried to change an active member's role without being elevated.
     #[error("only owners/admins may change an active member's role")]
     RoleChangeDenied,
+    /// A non-elevated member tried to make another person's guest agent a
+    /// member. Only the agent's owner raises an agent.
+    #[error("only the agent's owner or a channel owner/admin may raise an agent's role")]
+    AgentRaiseDenied,
     /// Demoting the channel's only owner would orphan it.
     #[error("cannot demote the last owner — transfer ownership first")]
     LastOwnerDemotion,
@@ -52,6 +56,14 @@ pub enum ChannelAuthzError {
     /// `nobody` policy — the agent has opted out of third-party adds.
     #[error("policy:nobody — this agent has disabled external channel additions")]
     PolicyNobody,
+    /// A guest, or a non-member of an announce channel, tried to add someone
+    /// else. Adding people is a write.
+    #[error("only members can add people in this channel")]
+    GuestCannotAdd,
+    /// A non-member adding themselves asked for a role above the channel's
+    /// `join_role`.
+    #[error("joining this channel gives the guest role; ask a member to make you a member")]
+    SelfJoinAboveJoinRole,
 }
 
 /// Whether `pubkey` is the channel's only remaining `owner`.
@@ -104,17 +116,23 @@ pub enum PutUserDecision {
 /// `actor_role` and `members` must come from an *active* membership read;
 /// `requested_role` is `None` when the event carries no `role` tag, which
 /// means "no role change requested" rather than "demote to member".
+/// `target_kind` classifies the target's recorded agent owner against the
+/// actor ([`RoleChangeTarget::from_agent_owner`]); it only matters when a
+/// non-elevated member raises a guest.
 ///
 /// The database read for the target's agent channel-add policy stays with the
 /// caller: this returns [`PutUserDecision::CheckAddPolicy`] when that read is
 /// still required.
+#[allow(clippy::too_many_arguments)]
 pub fn decide_put_user(
     visibility: &str,
+    join_role: ChannelJoinRole,
     actor_role: Option<MemberRole>,
     requested_role: Option<MemberRole>,
     members: &[MemberRecord],
     target: &[u8],
     actor: &[u8],
+    target_kind: RoleChangeTarget,
 ) -> Result<PutUserDecision, ChannelAuthzError> {
     // Open channels allow any authenticated user; private channels require the
     // actor to be an existing active member. Any active member may add an
@@ -132,12 +150,38 @@ pub fn decide_put_user(
         }
     }
 
+    // Adding someone else is a write. A guest never may, in any channel. A
+    // non-member may only where joining would make them a member (an open
+    // channel with `join_role = member`, today's rule); in an announce channel
+    // they may only add themselves.
+    if target != actor {
+        let may_add = match actor_role {
+            Some(role) => role.can_post(),
+            None => join_role == ChannelJoinRole::Member,
+        };
+        if !may_add {
+            return Err(ChannelAuthzError::GuestCannotAdd);
+        }
+    }
+
+    // A non-member adding themselves (possible only in an open channel;
+    // private ones refused above) may ask for `join_role` or a lower role. No
+    // role tag means `join_role`, which the applier resolves.
+    if target == actor
+        && actor_role.is_none()
+        && requested_role.is_some_and(|role| !join_role.allows_self_join_as(role))
+    {
+        return Err(ChannelAuthzError::SelfJoinAboveJoinRole);
+    }
+
     // Changing an ACTIVE existing member's role is privileged in both
-    // directions, on every visibility. `members` comes from a `removed_at IS
-    // NULL` read, so a soft-removed row is deliberately not an "existing
-    // member" here: its stored role is history, not live authority, and
-    // reactivation is governed by the elevated-granter check above rather than
-    // by the role the row remembers.
+    // directions, on every visibility, except that any member who may post can
+    // make a guest a member ([`MemberRole::may_change_role`]), unless the guest
+    // is someone else's agent. `members` comes from a `removed_at IS NULL`
+    // read, so a soft-removed row is deliberately not an "existing member"
+    // here: its stored role is history, not live authority, and reactivation
+    // is governed by the elevated-granter check above rather than by the role
+    // the row remembers.
     //
     // `add_member` is the authority (it also covers the desktop/admin callers
     // that skip this validator); rejecting here too means the client gets a
@@ -150,8 +194,28 @@ pub fn decide_put_user(
         .zip(requested_role)
         .filter(|(m, role)| m.role != role.as_str())
     {
-        if !actor_role.is_some_and(|r| r.is_elevated()) {
-            return Err(ChannelAuthzError::RoleChangeDenied);
+        // A stored role this build does not know is changed only by an
+        // elevated actor. Name the agent rule when it is the only reason.
+        let denial = match existing.role.parse::<MemberRole>() {
+            Ok(current) if MemberRole::may_change_role(actor_role, current, role, target_kind) => {
+                None
+            }
+            Ok(current)
+                if MemberRole::may_change_role(
+                    actor_role,
+                    current,
+                    role,
+                    RoleChangeTarget::Person,
+                ) =>
+            {
+                Some(ChannelAuthzError::AgentRaiseDenied)
+            }
+            Ok(_) => Some(ChannelAuthzError::RoleChangeDenied),
+            Err(_) if actor_role.is_some_and(|r| r.is_elevated()) => None,
+            Err(_) => Some(ChannelAuthzError::RoleChangeDenied),
+        };
+        if let Some(denial) = denial {
+            return Err(denial);
         }
         if existing.role == "owner" && role != MemberRole::Owner && is_sole_owner(members, target) {
             return Err(ChannelAuthzError::LastOwnerDemotion);
@@ -330,7 +394,7 @@ mod tests {
     #[test]
     fn put_user_table() {
         use ChannelAuthzError as E;
-        use MemberRole::{Admin, Member, Owner};
+        use MemberRole::{Admin, Bot, Guest, Member, Owner};
         use PutUserDecision::{Allow, CheckAddPolicy};
 
         // (visibility, roster, actor, actor_role, target, requested_role, expected)
@@ -535,7 +599,91 @@ mod tests {
                 Ok(CheckAddPolicy),
             ),
             // ── Self-add short-circuits the agent channel-add policy ──
+            ("open", &[(1, "owner")], 9, None, 9, Some(Guest), Ok(Allow)),
+            ("open", &[(1, "owner")], 9, None, 9, None, Ok(Allow)),
+            // ── A joiner may ask for `join_role` (here `member`) or lower ──
             ("open", &[(1, "owner")], 9, None, 9, Some(Member), Ok(Allow)),
+            ("open", &[(1, "owner")], 9, None, 9, Some(Bot), Ok(Allow)),
+            (
+                "open",
+                &[(1, "owner")],
+                9,
+                None,
+                9,
+                Some(Admin),
+                Err(E::SelfJoinAboveJoinRole),
+            ),
+            // A non-member may still add someone else with an ordinary role.
+            (
+                "open",
+                &[(1, "owner")],
+                9,
+                None,
+                5,
+                Some(Member),
+                Ok(CheckAddPolicy),
+            ),
+            // A guest cannot promote themselves.
+            (
+                "open",
+                &[(1, "owner"), (2, "guest")],
+                2,
+                Some(Guest),
+                2,
+                Some(Member),
+                Err(E::RoleChangeDenied),
+            ),
+            // A member may promote a guest to member, as they may add a new
+            // member, on both visibilities.
+            (
+                "open",
+                &[(1, "owner"), (2, "guest"), (3, "member")],
+                3,
+                Some(Member),
+                2,
+                Some(Member),
+                Ok(CheckAddPolicy),
+            ),
+            (
+                "private",
+                &[(1, "owner"), (2, "guest"), (3, "member")],
+                3,
+                Some(Member),
+                2,
+                Some(Member),
+                Ok(CheckAddPolicy),
+            ),
+            // ...but not to admin, and a guest cannot promote another guest
+            // or add anyone.
+            (
+                "open",
+                &[(1, "owner"), (2, "guest"), (3, "member")],
+                3,
+                Some(Member),
+                2,
+                Some(Admin),
+                Err(E::RoleChangeDenied),
+            ),
+            (
+                "open",
+                &[(1, "owner"), (2, "guest"), (3, "guest")],
+                3,
+                Some(Guest),
+                2,
+                Some(Member),
+                Err(E::GuestCannotAdd),
+            ),
+            // A non-member cannot promote a guest, although they may add a
+            // new member to an open channel.
+            (
+                "open",
+                &[(1, "owner"), (2, "guest")],
+                9,
+                None,
+                2,
+                Some(Member),
+                Err(E::RoleChangeDenied),
+            ),
             (
                 "open",
                 &[(1, "owner"), (2, "member")],
@@ -561,15 +709,168 @@ mod tests {
             assert_eq!(
                 decide_put_user(
                     visibility,
+                    ChannelJoinRole::Member,
                     *actor_role,
                     *requested_role,
                     &members,
                     &pk(*target),
                     &pk(*actor),
+                    RoleChangeTarget::Person,
                 ),
                 *expected,
                 "visibility {visibility} roster {entries:?} actor {actor} target {target} requested {requested_role:?}"
             );
+        }
+    }
+
+    /// Adding someone else is a write: guests never may, and non-members
+    /// may only where joining gives `member`. A joiner may ask for
+    /// `join_role` or lower.
+    #[test]
+    fn join_role_put_user_table() {
+        use ChannelAuthzError as E;
+        use ChannelJoinRole as J;
+        use MemberRole::*;
+        use PutUserDecision::{Allow, CheckAddPolicy};
+        // (join_role, actor_role, target, requested, expected); actor is 9,
+        // and the roster is an owner (1) plus the actor's own row, if any.
+        type Case = (
+            ChannelJoinRole,
+            Option<MemberRole>,
+            u8,
+            Option<MemberRole>,
+            Result<PutUserDecision, ChannelAuthzError>,
+        );
+        let cases: &[Case] = &[
+            // Writers add people in both kinds of channel.
+            (J::Guest, Some(Member), 5, Some(Member), Ok(CheckAddPolicy)),
+            (J::Guest, Some(Bot), 5, None, Ok(CheckAddPolicy)),
+            (J::Member, Some(Member), 5, Some(Guest), Ok(CheckAddPolicy)),
+            // A guest cannot add anyone, in any channel.
+            (
+                J::Guest,
+                Some(Guest),
+                5,
+                Some(Guest),
+                Err(E::GuestCannotAdd),
+            ),
+            (
+                J::Member,
+                Some(Guest),
+                5,
+                Some(Member),
+                Err(E::GuestCannotAdd),
+            ),
+            (J::Member, Some(Guest), 5, None, Err(E::GuestCannotAdd)),
+            // A non-member may add others only where joining gives member.
+            (J::Member, None, 5, Some(Member), Ok(CheckAddPolicy)),
+            (J::Guest, None, 5, Some(Guest), Err(E::GuestCannotAdd)),
+            (J::Guest, None, 5, None, Err(E::GuestCannotAdd)),
+            // A non-member joining an announce channel gets guest only.
+            (J::Guest, None, 9, None, Ok(Allow)),
+            (J::Guest, None, 9, Some(Guest), Ok(Allow)),
+            (
+                J::Guest,
+                None,
+                9,
+                Some(Member),
+                Err(E::SelfJoinAboveJoinRole),
+            ),
+            (J::Guest, None, 9, Some(Bot), Err(E::SelfJoinAboveJoinRole)),
+            (
+                J::Guest,
+                None,
+                9,
+                Some(Admin),
+                Err(E::SelfJoinAboveJoinRole),
+            ),
+            // A guest cannot promote themselves; re-adding at guest is a no-op.
+            (
+                J::Guest,
+                Some(Guest),
+                9,
+                Some(Member),
+                Err(E::RoleChangeDenied),
+            ),
+            (
+                J::Member,
+                Some(Guest),
+                9,
+                Some(Member),
+                Err(E::RoleChangeDenied),
+            ),
+            (J::Guest, Some(Guest), 9, Some(Guest), Ok(Allow)),
+        ];
+        for (join_role, actor_role, target, requested, expected) in cases {
+            let mut entries = vec![(1, "owner")];
+            if let Some(role) = actor_role {
+                entries.push((9, role.as_str()));
+            }
+            let members = roster(&entries);
+            assert_eq!(
+                decide_put_user(
+                    "open",
+                    *join_role,
+                    *actor_role,
+                    *requested,
+                    &members,
+                    &pk(*target),
+                    &pk(9),
+                    RoleChangeTarget::Person,
+                ),
+                *expected,
+                "join_role {join_role} actor {actor_role:?} target {target} requested {requested:?}"
+            );
+        }
+    }
+
+    /// A member may make a guest person a member, but only the agent's owner
+    /// (or an owner/admin) raises a guest agent.
+    #[test]
+    fn agent_raise_table() {
+        use ChannelAuthzError as E;
+        use MemberRole::*;
+        use PutUserDecision::CheckAddPolicy;
+        use RoleChangeTarget::*;
+        // (actor_role, target_kind, requested, expected); actor 3, target 2.
+        type Case = (
+            MemberRole,
+            RoleChangeTarget,
+            MemberRole,
+            Result<PutUserDecision, ChannelAuthzError>,
+        );
+        let cases: &[Case] = &[
+            (Member, Person, Member, Ok(CheckAddPolicy)),
+            (Member, OwnAgent, Member, Ok(CheckAddPolicy)),
+            (Member, OtherAgent, Member, Err(E::AgentRaiseDenied)),
+            (Bot, OtherAgent, Bot, Err(E::AgentRaiseDenied)),
+            (Admin, OtherAgent, Member, Ok(CheckAddPolicy)),
+            (Owner, OtherAgent, Member, Ok(CheckAddPolicy)),
+            // Elevated grants stay elevated-only, for agents too.
+            (Member, OwnAgent, Admin, Err(E::RoleChangeDenied)),
+        ];
+        for visibility in ["open", "private"] {
+            for (actor_role, target_kind, requested, expected) in cases {
+                let members = roster(&[(1, "owner"), (2, "guest"), (3, actor_role.as_str())]);
+                let expected = match (visibility, requested, expected) {
+                    ("private", Admin, _) => Err(E::ElevatedRoleGrantDenied),
+                    _ => expected.clone(),
+                };
+                assert_eq!(
+                    decide_put_user(
+                        visibility,
+                        ChannelJoinRole::Guest,
+                        Some(*actor_role),
+                        Some(*requested),
+                        &members,
+                        &pk(2),
+                        &pk(3),
+                        *target_kind,
+                    ),
+                    expected,
+                    "{visibility}: {actor_role} raises {target_kind:?} to {requested}"
+                );
+            }
         }
     }
 
@@ -684,6 +985,18 @@ mod tests {
             (
                 ChannelAuthzError::PolicyNobody,
                 "policy:nobody — this agent has disabled external channel additions",
+            ),
+            (
+                ChannelAuthzError::AgentRaiseDenied,
+                "only the agent's owner or a channel owner/admin may raise an agent's role",
+            ),
+            (
+                ChannelAuthzError::GuestCannotAdd,
+                "only members can add people in this channel",
+            ),
+            (
+                ChannelAuthzError::SelfJoinAboveJoinRole,
+                "joining this channel gives the guest role; ask a member to make you a member",
             ),
         ];
 

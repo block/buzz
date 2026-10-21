@@ -13,7 +13,7 @@ use crate::{AdmittedTx, Db};
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
-pub use buzz_core::channel::MemberRole;
+pub use buzz_core::channel::{MemberRole, RoleChangeTarget};
 
 /// A channel membership row as returned from the database.
 #[derive(Debug, Clone)]
@@ -606,8 +606,8 @@ pub async fn lock_member_snapshot(
 /// Add a member to a channel.
 ///
 /// Role enforcement:
-/// - Open channels: `invited_by` is optional; role is forced to `Member` regardless of
-///   what the caller passes — callers cannot self-assign elevated roles.
+/// - Open channels: `invited_by` is optional, and the caller's ordinary role is kept.
+///   Callers cannot self-assign elevated roles (see below).
 /// - Private channels: requires an `invited_by` who is an active member, or the channel
 ///   creator bootstrapping their own first membership. Any active member may add an
 ///   ordinary member, guest, or bot; only owners/admins may grant elevated roles.
@@ -676,7 +676,7 @@ pub async fn add_member(
         role
     } else {
         // Open channel: anyone may join, but only existing owners/admins may grant
-        // elevated roles. Self-join always gets Member.
+        // elevated roles. A kind:9021 self-join passes the channel's `join_role`.
         if role.is_elevated() {
             let granter_role = match invited_by {
                 Some(inv) => get_active_role_tx(tx.conn(), community_id, channel_id, inv).await?,
@@ -706,11 +706,11 @@ pub async fn add_member(
     // Deliberately keyed on the *active* role. A soft-removed row's stored role
     // is history, not live authority: `removed_at` says it is no longer in
     // force. Reactivation therefore lands at whatever `effective_role` the
-    // checks above already authorized — `Member` for any unprivileged caller,
+    // checks above already authorized — an ordinary role for any unprivileged caller,
     // elevated only when a currently-elevated granter asked for it. Inferring
     // current authority from a removed row would make soft-deleted ownership a
     // resurrection token: an owner removed by another owner could self-rejoin
-    // via kind:9021 (`Member, None`) and silently regain ownership.
+    // via kind:9021 (`join_role, None`) and silently regain ownership.
     let current_role = get_active_role_tx(tx.conn(), community_id, channel_id, pubkey).await?;
     if let Some(current_role) = current_role.filter(|r| r != effective_role.as_str()) {
         let actor_role = match invited_by {
@@ -720,7 +720,36 @@ pub async fn add_member(
             None => None,
         };
         let actor_role: Option<MemberRole> = actor_role.and_then(|r| r.parse().ok());
-        if !actor_role.is_some_and(|r| r.is_elevated()) {
+        // Owners and admins may change any role; any member who may post may
+        // make a guest a member, except a guest agent, which only its owner
+        // raises. A stored role this build does not know is changed only by an
+        // elevated actor.
+        let may_change = match current_role.parse::<MemberRole>() {
+            Ok(current) => {
+                let target = if current == MemberRole::Guest
+                    && !actor_role.is_some_and(|r| r.is_elevated())
+                {
+                    let agent_owner: Option<Vec<u8>> = sqlx::query_scalar(
+                        "SELECT agent_owner_pubkey FROM users \
+                         WHERE community_id = $1 AND pubkey = $2",
+                    )
+                    .bind(community_id.as_uuid())
+                    .bind(pubkey)
+                    .fetch_optional(tx.conn())
+                    .await?
+                    .flatten();
+                    RoleChangeTarget::from_agent_owner(
+                        agent_owner.as_deref(),
+                        invited_by.unwrap_or_default(),
+                    )
+                } else {
+                    RoleChangeTarget::Person
+                };
+                MemberRole::may_change_role(actor_role, current, effective_role, target)
+            }
+            Err(_) => actor_role.is_some_and(|r| r.is_elevated()),
+        };
+        if !may_change {
             return Err(DbError::AccessDenied(
                 "only owners/admins may change an active member's role".to_string(),
             ));
@@ -1496,7 +1525,7 @@ async fn get_channel_tx(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels
+               ttl_seconds, ttl_deadline, labels, join_role
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -1592,7 +1621,7 @@ pub async fn get_accessible_channels(
                c.nip29_group_id, c.topic_required, c.max_members,
                c.topic, c.topic_set_by, c.topic_set_at,
                c.purpose, c.purpose_set_by, c.purpose_set_at,
-               c.ttl_seconds, c.ttl_deadline, c.labels,
+               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role,
                (cm.channel_id IS NOT NULL) AS is_member
         FROM channels c
         LEFT JOIN channel_members cm
@@ -3011,6 +3040,150 @@ mod postgres_tests {
             "owner role must survive"
         );
         assert_eq!(owners, 1, "channel must still have its owner");
+    }
+
+    /// A member may promote a guest to member, as they may add a new member.
+    /// They still cannot grant an elevated role, and a guest or non-member
+    /// cannot promote anyone.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn member_may_promote_a_guest_to_member_only() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let member = random_pubkey();
+        let guest = random_pubkey();
+        let other_guest = random_pubkey();
+        let outsider = random_pubkey();
+        for pk in [&owner, &member, &guest, &other_guest, &outsider] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "member-promotes-guest",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &member,
+            MemberRole::Member,
+            Some(&owner),
+        )
+        .await
+        .expect("add member");
+        for pk in [&guest, &other_guest] {
+            add_member(&pool, community, channel.id, pk, MemberRole::Guest, None)
+                .await
+                .expect("join as guest");
+        }
+
+        for (actor, role) in [
+            (&other_guest, MemberRole::Member),
+            (&outsider, MemberRole::Member),
+            (&member, MemberRole::Admin),
+        ] {
+            let err = add_member(&pool, community, channel.id, &guest, role, Some(actor))
+                .await
+                .expect_err("promotion must be refused");
+            assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+        }
+
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &guest,
+            MemberRole::Member,
+            Some(&member),
+        )
+        .await
+        .expect("a member may promote a guest");
+        let role = get_member_role(&pool, community, channel.id, &guest)
+            .await
+            .expect("read role");
+        assert_eq!(role.as_deref(), Some("member"));
+
+        // Promotion is one way: the member cannot demote them again.
+        let err = add_member(
+            &pool,
+            community,
+            channel.id,
+            &guest,
+            MemberRole::Guest,
+            Some(&member),
+        )
+        .await
+        .expect_err("a member cannot demote a member");
+        assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+
+        // A guest agent is raised only by its owner (or an owner/admin).
+        let agent = random_pubkey();
+        let agent_owner = random_pubkey();
+        for pk in [&agent, &agent_owner] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+        set_agent_owner(&pool, community, &agent, &agent_owner)
+            .await
+            .expect("set agent owner");
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &agent_owner,
+            MemberRole::Member,
+            Some(&owner),
+        )
+        .await
+        .expect("add agent owner");
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &agent,
+            MemberRole::Guest,
+            None,
+        )
+        .await
+        .expect("agent joins as guest");
+        let err = add_member(
+            &pool,
+            community,
+            channel.id,
+            &agent,
+            MemberRole::Member,
+            Some(&member),
+        )
+        .await
+        .expect_err("another member cannot raise someone else's agent");
+        assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &agent,
+            MemberRole::Member,
+            Some(&agent_owner),
+        )
+        .await
+        .expect("the agent's owner may raise it");
+        let role = get_member_role(&pool, community, channel.id, &agent)
+            .await
+            .expect("read role");
+        assert_eq!(role.as_deref(), Some("member"));
     }
 
     /// The fix must not break legitimate role management: an owner demoting a

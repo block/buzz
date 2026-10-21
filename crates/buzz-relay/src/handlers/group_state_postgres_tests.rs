@@ -920,11 +920,12 @@ async fn system_channel_without_h_tag_defaults_private() {
     let stranger_bytes = stranger.public_key().to_bytes().to_vec();
     assert!(
         crate::handlers::ingest::check_channel_membership(
-            &tenant,
+            tenant.community(),
             &state,
             channel_id,
             &stranger_bytes,
-            None
+            None,
+            crate::handlers::ingest::ChannelWrite::Membership,
         )
         .await
         .is_err(),

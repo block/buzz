@@ -171,6 +171,98 @@ impl FromStr for ChannelVisibility {
     }
 }
 
+/// The role a person gets in a channel when nobody picks one
+/// (`channels.join_role`): a self-join (kind:9021, or a kind:9000 self-add),
+/// or a kind:9000 add with no `role` tag.
+///
+/// This never changes what a role can do. [`MemberRole`] permissions are the
+/// same in every channel; this setting only decides admission. An open channel
+/// with `Guest` is an **announce channel**: anyone can follow and read it, but
+/// only people a member, admin or owner makes a member can write. In NIP-29
+/// terms, `Guest` on an open channel is the `restricted` flag of kind:39000.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelJoinRole {
+    /// New people become members. The default, and today's behavior.
+    Member,
+    /// New people become guests: they can read and leave, not write.
+    Guest,
+}
+
+impl ChannelJoinRole {
+    /// Canonical string representation (matches the DB column and Nostr tags).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Member => "member",
+            Self::Guest => "guest",
+        }
+    }
+
+    /// Parse a stored value for an authorization decision. An unknown value
+    /// is treated as [`ChannelJoinRole::Guest`], so it can never widen access.
+    pub fn parse_fail_closed(value: &str) -> Self {
+        value.parse().unwrap_or(Self::Guest)
+    }
+
+    /// The [`MemberRole`] this setting gives a new person.
+    pub fn member_role(&self) -> MemberRole {
+        match self {
+            Self::Member => MemberRole::Member,
+            Self::Guest => MemberRole::Guest,
+        }
+    }
+
+    /// Whether a non-member who adds themselves may ask for `requested`.
+    /// A joiner may ask for `join_role` or a lower role, never a higher one.
+    /// `Bot` has member permissions, so it counts as `Member` here.
+    pub fn allows_self_join_as(&self, requested: MemberRole) -> bool {
+        match requested {
+            MemberRole::Guest => true,
+            MemberRole::Member | MemberRole::Bot => *self == Self::Member,
+            MemberRole::Owner | MemberRole::Admin => false,
+        }
+    }
+}
+
+impl fmt::Display for ChannelJoinRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ChannelJoinRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "member" => Ok(Self::Member),
+            "guest" => Ok(Self::Guest),
+            other => Err(format!("unknown channel join role: {other:?}")),
+        }
+    }
+}
+
+/// Who the target of a role change is, for [`MemberRole::may_change_role`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleChangeTarget {
+    /// A key with no recorded agent owner.
+    Person,
+    /// An agent whose recorded owner is the actor.
+    OwnAgent,
+    /// An agent whose recorded owner is someone else.
+    OtherAgent,
+}
+
+impl RoleChangeTarget {
+    /// Classify a target from its recorded agent owner (`users.agent_owner_pubkey`).
+    pub fn from_agent_owner(agent_owner: Option<&[u8]>, actor: &[u8]) -> Self {
+        match agent_owner {
+            None => Self::Person,
+            Some(owner) if owner == actor => Self::OwnAgent,
+            Some(_) => Self::OtherAgent,
+        }
+    }
+}
+
 /// The functional type of a channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelType {
@@ -281,6 +373,38 @@ impl MemberRole {
         matches!(self, Self::Owner | Self::Admin)
     }
 
+    /// Whether this role may write in a channel: post, react, edit, change
+    /// topic, add people, push to git. The same in every channel: every role
+    /// except [`MemberRole::Guest`] may, and a bot counts as a member.
+    pub fn can_post(&self) -> bool {
+        !matches!(self, Self::Guest)
+    }
+
+    /// Whether an actor whose active role is `actor` may change another
+    /// active member's role from `current` to `requested`.
+    ///
+    /// Owners and admins may make any change (the last-owner rule is checked
+    /// separately). Any other active member who may post may make a guest a
+    /// member: the same authority they have to add a new member. A guest
+    /// agent is the exception: only its owner raises it, so that other people
+    /// cannot widen where an agent can write. Nobody else may change a role;
+    /// a guest cannot promote anyone, including themselves.
+    pub fn may_change_role(
+        actor: Option<MemberRole>,
+        current: MemberRole,
+        requested: MemberRole,
+        target: RoleChangeTarget,
+    ) -> bool {
+        let Some(actor) = actor else {
+            return false;
+        };
+        actor.is_elevated()
+            || (actor.can_post()
+                && current == Self::Guest
+                && matches!(requested, Self::Member | Self::Bot)
+                && target != RoleChangeTarget::OtherAgent)
+    }
+
     /// Numeric permission level for authorization comparisons.
     ///
     /// Higher = more privileged. Bot returns 0 (must use explicit grants).
@@ -328,8 +452,8 @@ impl FromStr for MemberRole {
 mod tests {
     use super::{
         canonical_channel_name, channel_type_from_group_state_tags, group_state_identity_tags,
-        parse_channel_labels, ChannelLabelError, ChannelType, LEGACY_CHANNEL_TYPES,
-        MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
+        parse_channel_labels, ChannelJoinRole, ChannelLabelError, ChannelType, MemberRole,
+        RoleChangeTarget, LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
     };
 
     #[test]
@@ -482,6 +606,107 @@ mod tests {
             parse_channel_labels(["", "workspace"]),
             Err(ChannelLabelError::ClearWithOthers)
         );
+    }
+
+    #[test]
+    fn join_role_parses_known_values_and_fails_closed() {
+        assert_eq!("member".parse(), Ok(ChannelJoinRole::Member));
+        assert_eq!("guest".parse(), Ok(ChannelJoinRole::Guest));
+        assert!("announce".parse::<ChannelJoinRole>().is_err());
+        assert_eq!(
+            ChannelJoinRole::parse_fail_closed("member"),
+            ChannelJoinRole::Member
+        );
+        for unknown in ["", "Member", "everyone", "bot", "member "] {
+            assert_eq!(
+                ChannelJoinRole::parse_fail_closed(unknown),
+                ChannelJoinRole::Guest,
+                "{unknown:?}"
+            );
+        }
+        assert_eq!(ChannelJoinRole::Member.member_role(), MemberRole::Member);
+        assert_eq!(ChannelJoinRole::Guest.member_role(), MemberRole::Guest);
+    }
+
+    #[test]
+    fn a_joiner_may_ask_for_join_role_or_lower() {
+        use MemberRole::*;
+        for (join_role, requested, allowed) in [
+            (ChannelJoinRole::Member, Guest, true),
+            (ChannelJoinRole::Member, Member, true),
+            (ChannelJoinRole::Member, Bot, true),
+            (ChannelJoinRole::Member, Admin, false),
+            (ChannelJoinRole::Member, Owner, false),
+            (ChannelJoinRole::Guest, Guest, true),
+            (ChannelJoinRole::Guest, Member, false),
+            (ChannelJoinRole::Guest, Bot, false),
+            (ChannelJoinRole::Guest, Admin, false),
+            (ChannelJoinRole::Guest, Owner, false),
+        ] {
+            assert_eq!(
+                join_role.allows_self_join_as(requested),
+                allowed,
+                "{join_role} {requested}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_guests_cannot_post() {
+        for role in [
+            MemberRole::Owner,
+            MemberRole::Admin,
+            MemberRole::Member,
+            MemberRole::Bot,
+        ] {
+            assert!(role.can_post(), "{role}");
+        }
+        assert!(!MemberRole::Guest.can_post());
+    }
+
+    #[test]
+    fn only_elevated_roles_change_roles_except_promoting_a_guest() {
+        use MemberRole::*;
+        use RoleChangeTarget::*;
+        const ALL: [MemberRole; 5] = [Owner, Admin, Member, Guest, Bot];
+        const TARGETS: [RoleChangeTarget; 3] = [Person, OwnAgent, OtherAgent];
+        for target in TARGETS {
+            for actor in [Owner, Admin] {
+                for current in ALL {
+                    for requested in ALL {
+                        assert!(MemberRole::may_change_role(
+                            Some(actor),
+                            current,
+                            requested,
+                            target
+                        ));
+                    }
+                }
+            }
+            for actor in [Member, Bot] {
+                for current in ALL {
+                    for requested in ALL {
+                        let promotes_guest = current == Guest
+                            && matches!(requested, Member | Bot)
+                            && target != OtherAgent;
+                        assert_eq!(
+                            MemberRole::may_change_role(Some(actor), current, requested, target),
+                            promotes_guest,
+                            "{actor}: {current} -> {requested} ({target:?})"
+                        );
+                    }
+                }
+            }
+            for actor in [None, Some(Guest)] {
+                for current in ALL {
+                    for requested in ALL {
+                        assert!(!MemberRole::may_change_role(
+                            actor, current, requested, target
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

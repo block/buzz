@@ -16,7 +16,9 @@ use buzz_datastore_tracing::datastore_span;
 // Re-export the canonical enum definitions from buzz-core.
 // These live in core (zero I/O deps) so the SDK can share them
 // without pulling in sqlx/tokio.
-pub use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+pub use buzz_core::channel::{
+    ChannelJoinRole, ChannelType, ChannelVisibility, MemberRole, RoleChangeTarget,
+};
 
 // Keep the established channel module paths compatible while membership SQL
 // and invariants live in their dedicated store module.
@@ -78,6 +80,9 @@ pub struct ChannelRecord {
     pub ttl_deadline: Option<DateTime<Utc>>,
     /// Labels published as `["t", <label>]` after the channel type tag.
     pub labels: Vec<String>,
+    /// The role a new person gets (`"member"` or `"guest"`). Parse with
+    /// [`buzz_core::channel::ChannelJoinRole::parse_fail_closed`].
+    pub join_role: String,
 }
 
 impl ChannelRecord {
@@ -169,7 +174,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels
+               ttl_seconds, ttl_deadline, labels, join_role
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -231,7 +236,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels
+               ttl_seconds, ttl_deadline, labels, join_role
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -470,7 +475,7 @@ async fn get_channel_with_operation(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels
+               ttl_seconds, ttl_deadline, labels, join_role
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -559,7 +564,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels
+                   ttl_seconds, ttl_deadline, labels, join_role
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -579,7 +584,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels
+                   ttl_seconds, ttl_deadline, labels, join_role
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -644,7 +649,101 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         ttl_seconds,
         ttl_deadline,
         labels: row.try_get("labels")?,
+        // Selected by every channel-record query. A missing column is an
+        // error, never a silent `member`: the write gate depends on it.
+        join_role: row.try_get("join_role")?,
     })
+}
+
+/// The tags of a channel's relay-signed NIP-29 kind:39000 metadata event.
+///
+/// This is the single builder for kind:39000: the relay's discovery emitter
+/// and the `buzz-admin` backfill both call it, so the published flags cannot
+/// drift apart. `members` is used only for DM participant `p` tags.
+///
+/// The NIP-29 access flags follow the channel's settings:
+/// - `private` (members-only read), or Buzz's explicit `public`;
+/// - `restricted` (only a writing role may write) for private channels and
+///   for open channels with `join_role = guest`; an unknown `join_role` fails
+///   closed to `guest`;
+/// - `closed` (join requests ignored) only when kind:9021 cannot self-join,
+///   which is every non-open channel.
+///
+/// Buzz also publishes the explicit `["join_role", ...]` value, so clients
+/// can tell what joining gives (show Join or Follow) without inferring it
+/// from the flags.
+pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) -> Vec<Vec<String>> {
+    let tag = |parts: &[&str]| parts.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+    let mut tags = vec![
+        tag(&["d", &channel.id.to_string()]),
+        tag(&["name", &channel.name]),
+    ];
+    if let Some(desc) = channel.description.as_deref().filter(|d| !d.is_empty()) {
+        tags.push(tag(&["about", desc]));
+    }
+    let open = channel.visibility == ChannelVisibility::Open.as_str();
+    if open {
+        // Explicit "public" tag complements NIP-29's absence-of-"private"
+        // convention, making channel visibility self-describing for clients.
+        tags.push(tag(&["public"]));
+    } else {
+        tags.push(tag(&["private"]));
+    }
+    let join_role = ChannelJoinRole::parse_fail_closed(&channel.join_role);
+    if !open || join_role == ChannelJoinRole::Guest {
+        tags.push(tag(&["restricted"]));
+    }
+    // NIP-29 hidden tag: hide metadata from non-members. Set for DMs and
+    // for private system channels. Not a security boundary — access control
+    // is handled by channel-scoped storage.
+    if channel.channel_type == ChannelType::System.as_str() && !open {
+        tags.push(tag(&["hidden"]));
+    }
+    if channel.channel_type == ChannelType::Dm.as_str() {
+        tags.push(tag(&["hidden"]));
+        // Include participant pubkeys in kind:39000 for DMs so clients can
+        // resolve display names without a separate kind:39002 fetch.
+        for m in members {
+            tags.push(tag(&["p", &hex::encode(&m.pubkey)]));
+        }
+    }
+    if !open {
+        tags.push(tag(&["closed"]));
+    }
+    // Channel type tag so clients can distinguish stream/forum/dm without
+    // inference, then one `t` per label, then the creator. The same tags lead
+    // 39001 and 39002 (see `buzz_core::channel::group_state_identity_tags`).
+    tags.push(tag(&["t", &channel.channel_type]));
+    for label in &channel.labels {
+        tags.push(tag(&["t", label]));
+    }
+    tags.push(tag(&["P", &hex::encode(&channel.created_by)]));
+    // Creation time, so readers can pick the oldest of two channels. The
+    // event's own created_at changes on every edit.
+    tags.push(tag(&[
+        buzz_core::channel::CHANNEL_CREATED_AT_TAG,
+        &channel.created_at.timestamp().to_string(),
+    ]));
+    tags.push(tag(&["join_role", join_role.as_str()]));
+    // Optional topic / purpose for richer client UX
+    if let Some(topic) = channel.topic.as_deref().filter(|t| !t.is_empty()) {
+        tags.push(tag(&["topic", topic]));
+    }
+    if let Some(purpose) = channel.purpose.as_deref().filter(|p| !p.is_empty()) {
+        tags.push(tag(&["purpose", purpose]));
+    }
+    // Archived state — clients use this to hide channels from the sidebar.
+    if channel.archived_at.is_some() {
+        tags.push(tag(&["archived", "true"]));
+    }
+    // Ephemeral channel TTL — clients use this to show countdown timers.
+    if let Some(ttl) = channel.ttl_seconds {
+        tags.push(tag(&["ttl", &ttl.to_string()]));
+    }
+    if let Some(deadline) = channel.ttl_deadline {
+        tags.push(tag(&["ttl_deadline", &deadline.to_rfc3339()]));
+    }
+    tags
 }
 
 /// Partial update for channel metadata. Every field is `None` to leave the
@@ -664,6 +763,8 @@ pub struct ChannelUpdate {
     /// Replacement label set (empty clears it), or `None` to leave unchanged.
     /// Callers validate with `buzz_core::channel::parse_channel_labels`.
     pub labels: Option<Vec<String>>,
+    /// New join role (`"member"`/`"guest"`), or `None` to leave unchanged.
+    pub join_role: Option<String>,
 }
 
 /// Updates channel metadata dynamically.
@@ -681,6 +782,7 @@ pub async fn update_channel(
         && updates.visibility.is_none()
         && updates.ttl_seconds.is_none()
         && updates.labels.is_none()
+        && updates.join_role.is_none()
     {
         return Err(DbError::InvalidData(
             "at least one field must be provided for update".to_string(),
@@ -708,6 +810,10 @@ pub async fn update_channel(
     }
     if updates.visibility.is_some() {
         set_parts.push(format!("visibility = ${param_idx}::channel_visibility"));
+        param_idx += 1;
+    }
+    if updates.join_role.is_some() {
+        set_parts.push(format!("join_role = ${param_idx}"));
         param_idx += 1;
     }
     if let Some(ref ttl) = updates.ttl_seconds {
@@ -741,6 +847,9 @@ pub async fn update_channel(
     }
     if let Some(ref vis) = updates.visibility {
         q = q.bind(vis);
+    }
+    if let Some(ref join_role) = updates.join_role {
+        q = q.bind(join_role);
     }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
@@ -1310,6 +1419,133 @@ pub(crate) fn channel_ttl_lock_key(community: CommunityId, channel: Uuid) -> Str
 }
 
 #[cfg(test)]
+mod group_metadata_tag_tests {
+    use super::*;
+
+    fn channel(visibility: &str, join_role: &str) -> ChannelRecord {
+        let now = Utc::now();
+        ChannelRecord {
+            id: Uuid::nil(),
+            name: "news".into(),
+            channel_type: "stream".into(),
+            visibility: visibility.into(),
+            description: None,
+            canvas: None,
+            created_by: vec![1; 32],
+            created_at: now,
+            updated_at: now,
+            archived_at: None,
+            deleted_at: None,
+            nip29_group_id: None,
+            topic_required: false,
+            max_members: None,
+            topic: None,
+            topic_set_by: None,
+            topic_set_at: None,
+            purpose: None,
+            purpose_set_by: None,
+            purpose_set_at: None,
+            ttl_seconds: None,
+            ttl_deadline: None,
+            labels: Vec::new(),
+            join_role: join_role.into(),
+        }
+    }
+
+    fn flags(channel: &ChannelRecord) -> Vec<&'static str> {
+        let tags = group_metadata_tags(channel, &[]);
+        ["private", "public", "restricted", "closed"]
+            .into_iter()
+            .filter(|flag| tags.iter().any(|t| t == &vec![flag.to_string()]))
+            .collect()
+    }
+
+    /// The NIP-29 access flags follow visibility and join_role. Open channels
+    /// never publish `closed`: kind:9021 self-join works there.
+    #[test]
+    fn access_flags_follow_settings() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            ("open", "member", &["public"]),
+            ("open", "guest", &["public", "restricted"]),
+            ("private", "member", &["private", "restricted", "closed"]),
+            ("private", "guest", &["private", "restricted", "closed"]),
+            // An unknown join_role value fails closed to `guest`.
+            ("open", "bogus", &["public", "restricted"]),
+        ];
+        for (visibility, join_role, expected) in cases {
+            assert_eq!(
+                flags(&channel(visibility, join_role)),
+                *expected,
+                "{visibility}/{join_role}"
+            );
+        }
+    }
+
+    #[test]
+    fn publishes_the_explicit_join_role_value() {
+        let tags = group_metadata_tags(&channel("open", "guest"), &[]);
+        assert!(tags.contains(&vec!["join_role".to_string(), "guest".to_string()]));
+        let tags = group_metadata_tags(&channel("open", "member"), &[]);
+        assert!(tags.contains(&vec!["join_role".to_string(), "member".to_string()]));
+        // An unknown stored value is published as the value the relay enforces.
+        let tags = group_metadata_tags(&channel("open", "bogus"), &[]);
+        assert!(tags.contains(&vec!["join_role".to_string(), "guest".to_string()]));
+    }
+
+    /// The type `t` tag comes first among `t` tags, then the creator `P`,
+    /// as on 39001 and 39002; kind:39000 also carries the creation time.
+    #[test]
+    fn publishes_the_type_creator_and_creation_time() {
+        let channel = channel("open", "member");
+        let tags = group_metadata_tags(&channel, &[]);
+        let at = |name: &str| tags.iter().position(|t| t[0] == name).expect(name);
+        assert_eq!(tags[at("t")], vec!["t", "stream"]);
+        assert_eq!(at("P"), at("t") + 1);
+        assert_eq!(tags[at("P")], vec!["P".to_string(), "01".repeat(32)]);
+        assert_eq!(
+            tags[at("created_at")],
+            vec![
+                "created_at".to_string(),
+                channel.created_at.timestamp().to_string()
+            ]
+        );
+    }
+
+    /// Labels follow the type `t` tag and come before the creator `P`, the
+    /// same order as `buzz_core::channel::group_state_identity_tags`.
+    #[test]
+    fn publishes_labels_between_the_type_and_the_creator() {
+        let mut channel = channel("open", "member");
+        channel.labels = vec!["workspace".into(), "agent-attention".into()];
+        let tags = group_metadata_tags(&channel, &[]);
+        let identity: Vec<&Vec<String>> =
+            tags.iter().filter(|t| t[0] == "t" || t[0] == "P").collect();
+        let expected = buzz_core::channel::group_state_identity_tags(
+            &channel.channel_type,
+            &channel.labels,
+            &channel.created_by,
+        )
+        .expect("identity tags")
+        .into_iter()
+        .map(|tag| tag.to_vec())
+        .collect::<Vec<_>>();
+        assert_eq!(identity, expected.iter().collect::<Vec<_>>());
+    }
+
+    /// Private system channels are hidden, like DMs; open ones are not.
+    #[test]
+    fn hides_private_system_channels() {
+        let hidden = |visibility: &str| {
+            let mut channel = channel(visibility, "member");
+            channel.channel_type = "system".into();
+            group_metadata_tags(&channel, &[]).contains(&vec!["hidden".to_string()])
+        };
+        assert!(hidden("private"));
+        assert!(!hidden("open"));
+    }
+}
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
     use crate::user::ensure_user;
@@ -1457,6 +1693,64 @@ mod postgres_tests {
         assert!(!listed_a
             .iter()
             .any(|row| row.id == channel_id && row.name == "community-b-channel"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn join_role_defaults_to_member_and_updates_round_trip() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner_pk = random_pubkey();
+        ensure_user(&pool, community, &owner_pk)
+            .await
+            .expect("ensure owner");
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "test-join-role-round-trip",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner_pk,
+            None,
+        )
+        .await
+        .expect("create channel");
+        assert_eq!(channel.join_role, "member");
+
+        let updated = update_channel(
+            &pool,
+            community,
+            channel.id,
+            ChannelUpdate {
+                join_role: Some("guest".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("set join_role");
+        assert_eq!(updated.join_role, "guest");
+        assert_eq!(
+            get_channel(&pool, community, channel.id)
+                .await
+                .expect("reload")
+                .join_role,
+            "guest"
+        );
+
+        // The column CHECK rejects values the relay does not know.
+        assert!(update_channel(
+            &pool,
+            community,
+            channel.id,
+            ChannelUpdate {
+                join_role: Some("admin".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]

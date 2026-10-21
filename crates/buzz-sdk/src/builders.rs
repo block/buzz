@@ -823,7 +823,7 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, SdkError> {
     Ok(EventBuilder::new(Kind::Custom(9022), "").tags(tags))
 }
 
-/// Build a NIP-29 edit-metadata event for name/about/visibility/ttl (kind 9002).
+/// Build a NIP-29 edit-metadata event for name/about/visibility/ttl/join_role (kind 9002).
 ///
 /// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
 /// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
@@ -833,10 +833,16 @@ pub fn build_update_channel(
     about: Option<&str>,
     visibility: Option<&str>,
     ttl: Option<Option<i32>>,
+    join_role: Option<buzz_core::channel::ChannelJoinRole>,
 ) -> Result<EventBuilder, SdkError> {
-    if name.is_none() && about.is_none() && visibility.is_none() && ttl.is_none() {
+    if name.is_none()
+        && about.is_none()
+        && visibility.is_none()
+        && ttl.is_none()
+        && join_role.is_none()
+    {
         return Err(SdkError::InvalidTag(
-            "at least one of name, about, visibility, or ttl must be provided".into(),
+            "at least one of name, about, visibility, ttl, or join_role must be provided".into(),
         ));
     }
     if let Some(v) = visibility {
@@ -870,6 +876,11 @@ pub fn build_update_channel(
             Some(secs) => tags.push(tag(&["ttl", &secs.to_string()])?),
             None => tags.push(tag(&["ttl", ""])?),
         }
+    }
+    // Always explicit: kind:9002 is a partial update, so an absent tag
+    // leaves the setting unchanged and going back needs `member`.
+    if let Some(join_role) = join_role {
+        tags.push(tag(&["join_role", join_role.as_str()])?);
     }
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }
@@ -3631,7 +3642,8 @@ mod tests {
     fn update_channel_name_and_about() {
         let cid = uuid();
         let ev = sign(
-            build_update_channel(cid, Some("new-name"), Some("new about"), None, None).unwrap(),
+            build_update_channel(cid, Some("new-name"), Some("new about"), None, None, None)
+                .unwrap(),
         );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "name", "new-name"));
@@ -3640,15 +3652,16 @@ mod tests {
 
     #[test]
     fn update_channel_strips_all_leading_hashes_from_name() {
-        let ev =
-            sign(build_update_channel(uuid(), Some("  ###new-name  "), None, None, None).unwrap());
+        let ev = sign(
+            build_update_channel(uuid(), Some("  ###new-name  "), None, None, None, None).unwrap(),
+        );
         assert!(has_tag(&ev, "name", "new-name"));
     }
 
     #[test]
     fn update_channel_rejects_hash_only_name() {
         assert!(matches!(
-            build_update_channel(uuid(), Some("  ###  "), None, None, None),
+            build_update_channel(uuid(), Some("  ###  "), None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -3656,8 +3669,9 @@ mod tests {
     #[test]
     fn update_channel_visibility_and_ttl() {
         let cid = uuid();
-        let ev =
-            sign(build_update_channel(cid, None, None, Some("private"), Some(Some(3600))).unwrap());
+        let ev = sign(
+            build_update_channel(cid, None, None, Some("private"), Some(Some(3600)), None).unwrap(),
+        );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "visibility", "private"));
         assert!(has_tag(&ev, "ttl", "3600"));
@@ -3666,7 +3680,7 @@ mod tests {
     #[test]
     fn update_channel_clears_ttl() {
         let cid = uuid();
-        let ev = sign(build_update_channel(cid, None, None, None, Some(None)).unwrap());
+        let ev = sign(build_update_channel(cid, None, None, None, Some(None), None).unwrap());
         assert!(has_tag(&ev, "ttl", ""));
     }
 
@@ -3674,16 +3688,37 @@ mod tests {
     fn update_channel_invalid_visibility_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, Some("secret"), None),
+            build_update_channel(cid, None, None, Some("secret"), None, None),
             Err(SdkError::InvalidTag(_))
         ));
+    }
+
+    #[test]
+    fn update_channel_join_role_is_always_explicit() {
+        use buzz_core::channel::ChannelJoinRole;
+        let cid = uuid();
+        let on = sign(
+            build_update_channel(cid, None, None, None, None, Some(ChannelJoinRole::Guest))
+                .unwrap(),
+        );
+        assert!(has_tag(&on, "join_role", "guest"));
+        let off = sign(
+            build_update_channel(cid, None, None, None, None, Some(ChannelJoinRole::Member))
+                .unwrap(),
+        );
+        assert!(has_tag(&off, "join_role", "member"));
+        let other = sign(build_update_channel(cid, Some("n"), None, None, None, None).unwrap());
+        assert!(!other
+            .tags
+            .iter()
+            .any(|t| t.kind().to_string() == "join_role"));
     }
 
     #[test]
     fn update_channel_no_fields_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, None, None),
+            build_update_channel(cid, None, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
