@@ -908,18 +908,28 @@ pub(crate) async fn may_post(
     channel: &buzz_db::channel::ChannelRecord,
     is_member: bool,
 ) -> Result<bool, buzz_db::DbError> {
-    use buzz_db::channel::{ChannelJoinRole, MemberRole};
     if !is_member {
-        return Ok(channel.visibility == "open"
-            && ChannelJoinRole::parse_fail_closed(&channel.join_role) == ChannelJoinRole::Member);
+        return Ok(non_member_may_post(&channel.visibility, &channel.join_role));
     }
     let role = state
         .db
         .get_member_role(community_id, ch_id, pubkey_bytes)
         .await?;
-    Ok(role
-        .and_then(|r| r.parse::<MemberRole>().ok())
-        .is_some_and(|r| r.can_post()))
+    Ok(role_may_post(role.as_deref()))
+}
+
+/// [`may_post`] for an active member whose stored role is `role`. A missing
+/// or unknown role cannot post.
+pub(crate) fn role_may_post(role: Option<&str>) -> bool {
+    role.and_then(|r| r.parse::<buzz_db::channel::MemberRole>().ok())
+        .is_some_and(|r| r.can_post())
+}
+
+/// [`may_post`] for a non-member: only an open channel whose `join_role`
+/// (failing closed to `guest`) is `member`.
+pub(crate) fn non_member_may_post(visibility: &str, join_role: &str) -> bool {
+    use buzz_db::channel::ChannelJoinRole;
+    visibility == "open" && ChannelJoinRole::parse_fail_closed(join_role) == ChannelJoinRole::Member
 }
 
 /// The kind-9 channel write gates (token scope, membership or open channel,

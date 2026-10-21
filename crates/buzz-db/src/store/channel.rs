@@ -861,6 +861,31 @@ pub async fn update_channel(
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);
 
+    // Every writer that takes more than one of a channel's locks takes them
+    // in this order: membership lock, then TTL lock, then the channel row.
+    // Roster publication holds the membership lock and then refreshes the
+    // TTL (TTL lock, row update) at commit; a huddle join takes the
+    // membership lock before it locks the row. Taking the row first here
+    // would let either of them wait on this transaction while it waits on
+    // them.
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    // Visibility and `join_role` decide admission, which `put_member` and a
+    // huddle join decide under the channel's membership lock. Take that lock
+    // too, so an admission either sees the old setting and commits first, or
+    // sees the new one.
+    if updates.visibility.is_some() || updates.join_role.is_some() {
+        crate::channel_members::acquire_channel_membership_lock(
+            tx.conn(),
+            community_id,
+            channel_id,
+        )
+        .await?;
+    }
     // T1a repair: a TTL change can flip this channel's event-commit fast
     // path (`event_follow_up::refresh_channel_ttls` reads ttl_seconds under
     // a SHARED per-channel advisory lock). Take the same key EXCLUSIVE
@@ -868,12 +893,6 @@ pub async fn update_channel(
     // or strictly precedes this transition — whose own deadline reset is
     // then the latest word. Non-TTL updates don't touch the fast path and
     // skip the lock.
-    let mut tx = crate::begin_community_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
     if updates.ttl_seconds.is_some() {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(channel_ttl_lock_key(community_id, channel_id))
@@ -883,19 +902,6 @@ pub async fn update_channel(
     let result = q.execute(tx.conn()).await?;
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
-    }
-    // Visibility and `join_role` decide admission, which `put_member` decides
-    // under the channel's membership lock. Take that lock too, so an admission
-    // either sees the old setting and commits first, or sees the new one.
-    // Take it AFTER the row update: a huddle join holds the channel row and
-    // then waits for this lock, so the opposite order could deadlock with it.
-    if updates.visibility.is_some() || updates.join_role.is_some() {
-        crate::channel_members::acquire_channel_membership_lock(
-            tx.conn(),
-            community_id,
-            channel_id,
-        )
-        .await?;
     }
     tx.commit().await?;
 

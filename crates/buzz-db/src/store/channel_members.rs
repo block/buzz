@@ -328,6 +328,48 @@ pub async fn lock_channel_archived_at_in_transaction(
     Ok(archived_at.flatten())
 }
 
+/// Take the shared TTL lock of `channel_id` on a caller-owned transaction.
+///
+/// An event in an ephemeral channel refreshes the channel's TTL at commit,
+/// which takes this lock and then updates the channel row. A transaction that
+/// locks that row earlier takes this lock first, so the order stays
+/// membership lock, TTL lock, row against a TTL change in `update_channel`.
+/// The commit-time refresh takes the same lock again, which is a no-op.
+pub async fn lock_channel_ttl_shared_in_transaction(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+) -> Result<()> {
+    let community_id = tx.community();
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))")
+        .bind(crate::channel::channel_ttl_lock_key(
+            community_id,
+            channel_id,
+        ))
+        .execute(tx.conn())
+        .await?;
+    Ok(())
+}
+
+/// The live channel's `(visibility, join_role)` on a caller-owned transaction,
+/// or `None` when the channel is missing or deleted. Both settings change only
+/// under the channel's membership lock, so a caller holding that lock reads
+/// the value that stays in force until it commits.
+pub async fn channel_write_settings_in_transaction(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+) -> Result<Option<(String, String)>> {
+    let community_id = tx.community();
+    let settings: Option<(String, String)> = sqlx::query_as(
+        "SELECT visibility::text, join_role FROM channels \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?;
+    Ok(settings)
+}
+
 /// Check whether a pubkey is an active channel member on a caller-owned transaction.
 ///
 /// Runs the same query as `is_member` but within the caller's transaction so
@@ -3296,17 +3338,17 @@ mod postgres_tests {
         .await
         .expect("create channel");
 
-        // The same steps as `update_channel`: the row update, then the lock.
+        // The same lock order as `update_channel`: the lock, then the row update.
         let mut tx = pool.begin().await.expect("begin");
+        acquire_channel_membership_lock(&mut tx, community, channel.id)
+            .await
+            .expect("lock");
         sqlx::query("UPDATE channels SET join_role = 'guest' WHERE community_id = $1 AND id = $2")
             .bind(community_id)
             .bind(channel.id)
             .execute(&mut *tx)
             .await
             .expect("change join_role");
-        acquire_channel_membership_lock(&mut tx, community, channel.id)
-            .await
-            .expect("lock");
 
         let join = tokio::spawn({
             let pool = pool.clone();
@@ -3375,6 +3417,97 @@ mod postgres_tests {
             .await
             .expect("update task")
             .expect("join_role change");
+    }
+
+    /// A `join_role` change on an ephemeral channel and a roster publication
+    /// take the channel's locks in one order. The roster holds the membership
+    /// lock and refreshes the channel's TTL (TTL lock, then row) at commit. A
+    /// settings change that locked the row first and then waited for the
+    /// membership lock would deadlock with it, or make the refresh time out
+    /// and be dropped.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn join_role_change_waits_for_a_roster_publication_on_an_ephemeral_channel() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "roster-join-role-lock-order",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            Some(3600),
+        )
+        .await
+        .expect("create ephemeral channel");
+        let deadline_before = channel.ttl_deadline.expect("ephemeral deadline");
+
+        let snapshot_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(1))
+            .connect(&crate::test_support::database_url())
+            .await
+            .expect("connect one-connection pool");
+        let relay_keys = Keys::generate();
+        let mut snapshot = lock_member_snapshot(
+            &snapshot_pool,
+            community,
+            channel.id,
+            &relay_keys.public_key().to_bytes(),
+        )
+        .await
+        .expect("capture locked roster");
+
+        let update = tokio::spawn({
+            let pool = pool.clone();
+            let channel_id = channel.id;
+            async move {
+                crate::channel::update_channel(
+                    &pool,
+                    community,
+                    channel_id,
+                    crate::channel::ChannelUpdate {
+                        join_role: Some("guest".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !update.is_finished(),
+            "the join_role change must wait for the roster publication"
+        );
+
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(39002), "")
+            .tags(vec![
+                nostr::Tag::parse(["d", &channel.id.to_string()]).expect("d tag"),
+                nostr::Tag::parse(["p", &hex::encode(&owner), "", "owner"]).expect("p tag"),
+            ])
+            .sign_with_keys(&relay_keys)
+            .expect("sign roster");
+        let (_, inserted) = snapshot
+            .replace_member_event(&event)
+            .await
+            .expect("replace roster");
+        assert!(inserted);
+        snapshot.release().await.expect("publish roster");
+
+        let updated = update
+            .await
+            .expect("update task")
+            .expect("join_role change after the roster");
+        assert_eq!(updated.join_role, "guest");
+        let deadline_after = updated.ttl_deadline.expect("ephemeral deadline");
+        assert!(
+            deadline_after > deadline_before,
+            "the roster's TTL refresh must not be dropped: {deadline_before} -> {deadline_after}"
+        );
     }
 
     /// The fix must not break legitimate role management: an owner demoting a

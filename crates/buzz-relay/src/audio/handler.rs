@@ -1875,9 +1875,9 @@ async fn run_active_audio_connection(
             .await;
             return;
         }
-        Err(refusal @ (JoinCommitError::ParentMembershipLost | JoinCommitError::WriteRoleLost)) => {
-            // Parent membership revoked (IMPORTANT 4), or the joiner made a
-            // guest, between pre-join check and commit.
+        Err(refusal @ (JoinCommitError::MembershipLost | JoinCommitError::WriteRoleLost)) => {
+            // Membership revoked (IMPORTANT 4), or the channel's write rule no
+            // longer lets the joiner write, between pre-join check and commit.
             // No `joined` frame was sent — commit-won invariant holds.
             warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "{refusal} (join refused)");
             let message = match refusal {
@@ -3122,8 +3122,10 @@ pub(crate) enum JoinCommitError {
     Expired,
     /// Channel was archived between pre-join check and commit (IMPORTANT 4).
     Archived,
-    /// Parent membership was revoked between pre-join check and commit (IMPORTANT 4).
-    ParentMembershipLost,
+    /// The joiner lost the membership the pre-join check relied on, in the
+    /// huddle or its lifecycle parent, between pre-join check and commit
+    /// (IMPORTANT 4).
+    MembershipLost,
     /// The joiner's role in the huddle or its lifecycle parent no longer
     /// allows writing (for example, they were made a guest) between the
     /// pre-join check and commit.
@@ -3139,8 +3141,8 @@ impl std::fmt::Display for JoinCommitError {
             JoinCommitError::Db(e) => write!(f, "db error: {e}"),
             JoinCommitError::Expired => write!(f, "session expired before commit"),
             JoinCommitError::Archived => write!(f, "channel archived before commit"),
-            JoinCommitError::ParentMembershipLost => {
-                write!(f, "parent membership revoked before commit")
+            JoinCommitError::MembershipLost => {
+                write!(f, "membership revoked before commit")
             }
             JoinCommitError::WriteRoleLost => {
                 write!(f, "write role lost before commit")
@@ -3164,20 +3166,20 @@ impl From<buzz_db::DbError> for JoinCommitError {
 /// Ordering (per B1 contract [e5bc0382], corrected for IMPORTANT 4 and 5):
 /// 1. Sign the `48101` event synchronously.
 /// 2. Begin a caller-owned DB transaction.
-/// 3. Archive re-check (ALL paths): `SELECT archived_at … FOR UPDATE` inside
-///    the transaction. Taking a row-level write lock serializes this join
-///    against concurrent `archive_channel` calls on both the `Existing` and
-///    `AutoAddRequired` paths — `archive_channel`'s UPDATE blocks until this
+/// 3. Take the membership locks of the huddle and its lifecycle parent, the
+///    parent's TTL lock, then the huddle's row (`FOR NO KEY UPDATE`), in the
+///    order every multi-lock channel writer uses. Re-check archive under the
+///    row lock (ALL paths): `archive_channel`'s UPDATE blocks until this
 ///    transaction completes. Closes the READ COMMITTED race.
-/// 4. Under the channel membership lock (AutoAddRequired only):
-///    a. Re-read channel archive state again — fail `Archived` if still needed.
-///    (IMPORTANT 4: defence-in-depth behind the FOR UPDATE above.)
-///    b. Re-read parent membership — fail `ParentMembershipLost` if gone.
-///    c. Re-read creator-signed huddle_started link — fail `HuddleLinkGone`
+/// 4. Under those locks (AutoAddRequired only):
+///    a. Re-read parent membership — fail `MembershipLost` if gone.
+///    b. Re-read creator-signed huddle_started link — fail `HuddleLinkGone`
 ///    if the link was deleted between pre-join check and commit.
 ///    (IMPORTANT 4 residual: third carried fact, alongside archive + parent.)
-///    d. Re-read child membership — skip auto-add insert if a concurrent
+///    c. Re-read child membership — skip auto-add insert if a concurrent
 ///    legitimate add is already present (concurrent-add preservation).
+///    d. (ALL paths) Apply the pre-join write rule again in the huddle and
+///    its parent — fail `WriteRoleLost` or `MembershipLost`.
 /// 5. Insert kind `48101` in the same transaction (uncommitted).
 /// 6. Acquire a session effect permit (or rollback + return `Err(Expired)`).
 /// 7. Commit the transaction while holding the permit.
@@ -3264,19 +3266,47 @@ async fn commit_participant_join(
         .begin_event_write_transaction(tenant.community())
         .await?;
 
-    // 3. Archive re-check (ALL paths): re-read archived_at inside the
-    //    transaction before any write, taking a row-level write lock
-    //    (`FOR NO KEY UPDATE`) on the channels row. This serializes all join
-    //    commits against archive: `archive_channel`'s
-    //    `UPDATE channels SET archived_at = NOW()` must wait until this
-    //    transaction commits or rolls back before it can proceed — closing the
-    //    READ COMMITTED race on both the `Existing` and `AutoAddRequired` paths.
+    // 3. Lock order. Every writer that takes more than one of a channel's
+    //    locks takes them as: membership lock, then TTL lock, then the
+    //    channel row (see `buzz_db::channel::update_channel`). This join
+    //    takes the membership lock of the huddle and of its lifecycle parent,
+    //    so a settings change, a membership change or a role change in
+    //    either scope commits before this check or after this join. Then it
+    //    takes the parent's TTL lock, which the 48101's commit-time TTL
+    //    refresh needs, and only then the huddle's row.
     //
-    //    The channels row is a single row identified by primary key; the lock
-    //    is held only for the duration of the join transaction (typically
-    //    sub-millisecond). See `lock_channel_archived_at_in_transaction` for why
-    //    the lock is `FOR NO KEY UPDATE` rather than `FOR UPDATE`.
-    let channel_archived_early =
+    // Test hook: fires immediately before the channel membership locks are
+    // acquired. A test can change membership externally here to prove the
+    // re-reads below observe it.
+    // [nip_fi_test_hooks::audio_membership_lock_hook]
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_membership_lock(tenant.community()).await;
+
+    buzz_db::channel_members::acquire_channel_membership_lock_in_transaction(&mut tx, channel_id)
+        .await?;
+    if parent_channel_id != channel_id {
+        buzz_db::channel_members::acquire_channel_membership_lock_in_transaction(
+            &mut tx,
+            parent_channel_id,
+        )
+        .await?;
+    }
+    buzz_db::channel_members::lock_channel_ttl_shared_in_transaction(&mut tx, parent_channel_id)
+        .await?;
+
+    // Archive re-check (ALL paths): re-read archived_at inside the
+    // transaction before any write, taking a row-level write lock
+    // (`FOR NO KEY UPDATE`) on the channels row. This serializes all join
+    // commits against archive: `archive_channel`'s
+    // `UPDATE channels SET archived_at = NOW()` must wait until this
+    // transaction commits or rolls back before it can proceed — closing the
+    // READ COMMITTED race on both the `Existing` and `AutoAddRequired` paths.
+    //
+    // The channels row is a single row identified by primary key; the lock
+    // is held only for the duration of the join transaction (typically
+    // sub-millisecond). See `lock_channel_archived_at_in_transaction` for why
+    // the lock is `FOR NO KEY UPDATE` rather than `FOR UPDATE`.
+    let channel_archived =
         buzz_db::channel_members::lock_channel_archived_at_in_transaction(&mut tx, channel_id)
             .await?;
 
@@ -3287,7 +3317,7 @@ async fn commit_participant_join(
     #[cfg(test)]
     crate::nip_fi_test_hooks::before_archive_recheck(tenant.community()).await;
 
-    if channel_archived_early.is_some() {
+    if channel_archived.is_some() {
         retire_shadow();
         #[cfg(test)]
         crate::nip_fi_test_hooks::before_join_refusal_rollback(tenant.community()).await;
@@ -3295,42 +3325,16 @@ async fn commit_participant_join(
         return Err(JoinCommitError::Archived);
     }
 
-    // 4. Under the channel membership lock: re-validate authority + auto-add if
+    // 4. Under the membership locks: re-validate authority + auto-add if
     //    still absent. The AutoAddRequired path carries stale authority from
-    //    check_membership_for_admission; the lock serialises all membership writes
-    //    for this channel so the re-reads observe the most recent committed state.
+    //    check_membership_for_admission; the locks serialise all membership
+    //    writes for both scopes so the re-reads observe the most recent
+    //    committed state.
     if let MembershipAdmission::AutoAddRequired {
         parent_channel_id: parent_id,
         channel_created_by,
     } = membership_admission
     {
-        // Test hook: fires immediately before the channel membership lock is
-        // acquired. A test can insert a membership row externally here to prove
-        // the concurrent-add case is handled (re-read observes it → still_absent
-        // = false → auto-add insert is skipped → membership preserved).
-        // [nip_fi_test_hooks::audio_membership_lock_hook]
-        #[cfg(test)]
-        crate::nip_fi_test_hooks::before_membership_lock(tenant.community()).await;
-
-        buzz_db::channel_members::acquire_channel_membership_lock_in_transaction(
-            &mut tx, channel_id,
-        )
-        .await?;
-
-        // IMPORTANT 4a: Re-read channel archive state under the lock. A channel
-        // could be archived in the window between check_membership_for_admission
-        // and now; committing a join into an archived channel violates the
-        // "no admission after archive" invariant.
-        let channel_archived =
-            buzz_db::channel_members::lock_channel_archived_at_in_transaction(&mut tx, channel_id)
-                .await?;
-
-        if channel_archived.is_some() {
-            retire_shadow();
-            let _ = tx.rollback().await;
-            return Err(JoinCommitError::Archived);
-        }
-
         // IMPORTANT 4b: Re-read parent membership under the lock. A parent
         // membership revocation in the same window would make the auto-add
         // unjustified; reject rather than grant access from stale authority.
@@ -3341,7 +3345,7 @@ async fn commit_participant_join(
         if !parent_still_member {
             retire_shadow();
             let _ = tx.rollback().await;
-            return Err(JoinCommitError::ParentMembershipLost);
+            return Err(JoinCommitError::MembershipLost);
         }
 
         // IMPORTANT 4 residual: Re-read the creator-signed huddle_started link
@@ -3382,11 +3386,12 @@ async fn commit_participant_join(
         // If not still_absent: concurrent add observed — membership preserved.
     }
 
-    // 4e. A guest cannot join a huddle. Re-read the joiner's role in the huddle
-    //     and in its lifecycle parent in this transaction, so a demotion
-    //     committed since the pre-join check refuses the join. An absent role
-    //     keeps the rules above: an open channel, or the parent-membership
-    //     re-read on the auto-add path.
+    // 4e. Joining is a write. Apply the pre-join write rule again, to the
+    //     state these locks hold: in the huddle and in its lifecycle parent,
+    //     an active member needs a role that may post, and a non-member needs
+    //     an open channel whose `join_role` is `member`. A non-member of a
+    //     private scope has lost the membership the pre-join check saw (the
+    //     auto-add above already made a private huddle's joiner a member).
     let scopes = if parent_channel_id == channel_id {
         vec![channel_id]
     } else {
@@ -3396,14 +3401,34 @@ async fn commit_participant_join(
         let role =
             buzz_db::channel_members::active_role_in_transaction(&mut tx, scope, pubkey_bytes)
                 .await?;
-        let may_write = role.as_deref().is_none_or(|role| {
-            role.parse::<buzz_db::channel::MemberRole>()
-                .is_ok_and(|role| role.can_post())
-        });
-        if !may_write {
+        let refusal = match role.as_deref() {
+            Some(role) => (!crate::handlers::ingest::role_may_post(Some(role)))
+                .then_some(JoinCommitError::WriteRoleLost),
+            None => {
+                let settings =
+                    buzz_db::channel_members::channel_write_settings_in_transaction(&mut tx, scope)
+                        .await?;
+                match settings {
+                    Some((visibility, _)) if visibility != "open" => {
+                        Some(JoinCommitError::MembershipLost)
+                    }
+                    Some((visibility, join_role))
+                        if crate::handlers::ingest::non_member_may_post(
+                            &visibility,
+                            &join_role,
+                        ) =>
+                    {
+                        None
+                    }
+                    Some(_) => Some(JoinCommitError::WriteRoleLost),
+                    None => Some(JoinCommitError::MembershipLost),
+                }
+            }
+        };
+        if let Some(refusal) = refusal {
             retire_shadow();
             let _ = tx.rollback().await;
-            return Err(JoinCommitError::WriteRoleLost);
+            return Err(refusal);
         }
     }
 
@@ -7638,6 +7663,55 @@ mod tests {
                 "a member of the announce parent joins"
             );
 
+            let commit = |channel: Uuid, parent: Uuid, admission: MembershipAdmission| {
+                let state = state.clone();
+                let tenant = tenant.clone();
+                let joiner = joiner.clone();
+                let joiner_hex = joiner_hex.clone();
+                async move {
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    let gate = crate::nip_fi_gate::SessionAdmissionGate::new(
+                        Utc::now() + Duration::hours(1),
+                        cancel,
+                    );
+                    commit_participant_join(
+                        &state,
+                        &tenant,
+                        channel,
+                        parent,
+                        &joiner_hex,
+                        &joiner,
+                        Uuid::new_v4(),
+                        0,
+                        0,
+                        1,
+                        "1",
+                        &admission,
+                        &gate,
+                        &Arc::new(crate::audio::room::Room::new(tenant.community(), channel)),
+                        None,
+                        None,
+                    )
+                    .await
+                }
+            };
+            let set_parent_settings = |visibility: &'static str, join_role: &'static str| {
+                let pool = pool.clone();
+                async move {
+                    sqlx::query(
+                        "UPDATE channels SET visibility = $3::channel_visibility, join_role = $4 \
+                         WHERE community_id = $1 AND id = $2",
+                    )
+                    .bind(community_uuid)
+                    .bind(parent_id)
+                    .bind(visibility)
+                    .bind(join_role)
+                    .execute(&pool)
+                    .await
+                    .expect("set parent settings");
+                }
+            };
+
             // A demotion in either scope after the pre-join check refuses the
             // commit.
             for demoted in [child_id, parent_id] {
@@ -7647,30 +7721,7 @@ mod tests {
                     panic!("admitted before the demotion");
                 };
                 set_role(demoted, Some("guest")).await;
-                let cancel = tokio_util::sync::CancellationToken::new();
-                let gate = crate::nip_fi_gate::SessionAdmissionGate::new(
-                    Utc::now() + Duration::hours(1),
-                    cancel,
-                );
-                let result = commit_participant_join(
-                    &state,
-                    &tenant,
-                    child_id,
-                    parent_id,
-                    &joiner_hex,
-                    &joiner,
-                    Uuid::new_v4(),
-                    0,
-                    0,
-                    1,
-                    "1",
-                    &admission,
-                    &gate,
-                    &Arc::new(crate::audio::room::Room::new(tenant.community(), child_id)),
-                    None,
-                    None,
-                )
-                .await;
+                let result = commit(child_id, parent_id, admission).await;
                 assert!(
                     matches!(result, Err(JoinCommitError::WriteRoleLost)),
                     "demoted in {}: {result:?}",
@@ -7681,6 +7732,74 @@ mod tests {
                     }
                 );
             }
+
+            // The commit applies the whole pre-join write rule, not only the
+            // stored role. A non-member of an open parent passes the
+            // pre-join check while its `join_role` is `member`; a change to
+            // `guest` before the commit refuses the join, in the parent's own
+            // call and in its huddle.
+            set_parent_settings("open", "member").await;
+            set_role(parent_id, None).await;
+            set_role(child_id, Some("member")).await;
+            for (channel, parent) in [(parent_id, parent_id), (child_id, parent_id)] {
+                let admission = if channel == parent {
+                    check_membership_for_admission(&state, &tenant, channel, &joiner, None).await
+                } else {
+                    admit().await
+                };
+                let Ok(admission) = admission else {
+                    panic!("a non-member of an open member-join channel is admitted");
+                };
+                set_parent_settings("open", "guest").await;
+                let result = commit(channel, parent, admission).await;
+                set_parent_settings("open", "member").await;
+                assert!(
+                    matches!(result, Err(JoinCommitError::WriteRoleLost)),
+                    "join_role changed to guest, joining {}: {result:?}",
+                    if channel == parent {
+                        "the channel"
+                    } else {
+                        "its huddle"
+                    }
+                );
+            }
+
+            // A member of a private parent who loses that membership before
+            // the commit is refused, in the parent's own call and in its
+            // huddle.
+            set_parent_settings("private", "member").await;
+            for (channel, parent) in [(parent_id, parent_id), (child_id, parent_id)] {
+                set_role(parent_id, Some("member")).await;
+                let admission = if channel == parent {
+                    check_membership_for_admission(&state, &tenant, channel, &joiner, None).await
+                } else {
+                    admit().await
+                };
+                let Ok(admission) = admission else {
+                    panic!("a member of the private parent is admitted");
+                };
+                set_role(parent_id, None).await;
+                let result = commit(channel, parent, admission).await;
+                assert!(
+                    matches!(result, Err(JoinCommitError::MembershipLost)),
+                    "parent membership lost, joining {}: {result:?}",
+                    if channel == parent {
+                        "the channel"
+                    } else {
+                        "its huddle"
+                    }
+                );
+            }
+            let rows: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM events \
+                 WHERE community_id = $1 AND channel_id = $2 AND kind = 48101",
+            )
+            .bind(community_uuid)
+            .bind(parent_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count joins");
+            assert_eq!(rows, 0, "a refused commit stores no 48101");
         }
 
         // A paired, deny-clean audio AUTH refused by ordinary policy, relay
@@ -10880,37 +10999,35 @@ mod tests {
             );
         }
 
-        // ── F2 (continued): `FOR NO KEY UPDATE` is compatible with concurrent
-        // membership add — no deadlock ────────────────────────────────────────────
+        // ── F2 (continued): the join's lock order ─────────────────────────────────
         //
-        // The lock-order fix (F2): join uses `FOR NO KEY UPDATE` on the channel row.
-        // `add_member` holds the advisory membership lock and then needs
-        // `KEY SHARE` on channels (FK back-reference). `FOR NO KEY UPDATE` is
-        // compatible with `KEY SHARE`, so they cannot deadlock.
+        // A join takes the channel's membership lock, then its TTL lock, then
+        // `FOR NO KEY UPDATE` on the channel row: the order every multi-lock
+        // channel writer uses. While it holds them:
+        //   - a membership write (`add_member`) and a `join_role` change
+        //     (`update_channel`) wait for it, and then succeed (no deadlock);
+        //   - a `KEY SHARE` reader (any foreign-key insert that names the
+        //     channel, such as an event) is not blocked, because
+        //     `FOR NO KEY UPDATE` is compatible with `KEY SHARE`.
         //
-        // With the old `FOR UPDATE` the combination would deadlock: join takes
-        // `FOR UPDATE` (exclusive), then tries the advisory lock; meanwhile
-        // `add_member` holds the advisory lock and tries `KEY SHARE` (upgrade path
-        // of the FK check) — which blocks on `FOR UPDATE` → circular wait.
+        // This test pauses `commit_participant_join` at the
+        // `before_archive_recheck` hook, after all three locks, and checks each.
         //
-        // This test: pause `commit_participant_join` inside the `FOR NO KEY UPDATE`
-        // hold via the `before_archive_recheck` hook, then fire `add_member` on a
-        // second connection. `add_member` must complete before the hook is released
-        // (no deadlock, no 55P03). Then release the hook and verify both the
-        // 48101 event and the new membership row are committed.
-        //
-        // Mutation oracle:
-        //   Change `FOR NO KEY UPDATE` back to `FOR UPDATE` in
-        //   `buzz_db::channel_members::lock_channel_archived_at_in_transaction`
-        //   → `add_member`'s FK KEY SHARE blocks on
-        //   FOR UPDATE → the 3-second tokio::time::timeout fires → synthesized
-        //   error → `add_member_completed` is false → assertion panics.
+        // Mutation oracles:
+        //   - `FOR NO KEY UPDATE` → `FOR UPDATE` in
+        //     `lock_channel_archived_at_in_transaction`: the KEY SHARE probe
+        //     hits its lock_timeout → assertion panics.
+        //   - Take the membership locks after the row lock in the join, as
+        //     before: the hook fires before the join holds the membership
+        //     lock → `add_member` does not wait → assertion panics. (In
+        //     production, `update_channel` would hold the membership lock and
+        //     wait on the row while the join waits on that lock: a deadlock.)
 
-        /// F2 (lock-order fix witness): `FOR NO KEY UPDATE` allows concurrent
-        /// `add_member` to proceed — no deadlock between join and membership-add.
+        /// F2 (lock-order witness): membership and settings writers wait for a
+        /// join and then succeed; a `KEY SHARE` reader does not wait.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-        async fn f2d_for_no_key_update_allows_concurrent_add_member() {
+        async fn f2d_join_lock_order_serializes_membership_and_settings_writers() {
             use chrono::{Duration, Utc};
             use std::sync::Arc;
             use uuid::Uuid;
@@ -10936,7 +11053,7 @@ mod tests {
 
             let room = Arc::new(crate::audio::room::Room::new(community_id, channel_id));
 
-            // Arm the hook — fires after FOR NO KEY UPDATE is taken.
+            // Arm the hook — fires after the membership, TTL and row locks.
             let (arrived_rx, release) =
                 crate::nip_fi_test_hooks::audio_archive_recheck_hook::arm(community_id);
 
@@ -10968,62 +11085,98 @@ mod tests {
                 .await
             });
 
-            // Wait for join to hold the FOR NO KEY UPDATE lock.
+            // Wait for join to hold its locks.
             tokio::time::timeout(std::time::Duration::from_secs(10), arrived_rx)
                 .await
                 .expect("F2d: commit_participant_join must reach before_archive_recheck within 10s")
                 .expect("arrived channel closed");
 
-            // ── Fire add_member while join holds FOR NO KEY UPDATE ────────────────
-            // Fix F2d witness: `add_member` checks out its own connection from
-            // the pool, so setting lock_timeout on `conn_b` governs nothing.
-            // Wrap the call in tokio::time::timeout instead — if FOR NO KEY
-            // UPDATE accidentally deadlocks with add_member's FK KEY SHARE
-            // (the pre-fix `FOR UPDATE` scenario), the timeout fires and the
-            // assertion below catches it via the Err branch.
-            // [F2D-WITNESS-FIX]
-            let add_result = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                buzz_db::channel_members::add_member(
-                    &pool,
-                    community_id,
-                    channel_id,
-                    &new_member_bytes,
-                    buzz_db::channel_members::MemberRole::Member,
-                    None,
-                ),
+            // ── KEY SHARE is not blocked by the join's row lock ───────────────────
+            let mut probe = pool.begin().await.expect("F2d: begin KEY SHARE probe");
+            sqlx::query("SET LOCAL lock_timeout = '2s'")
+                .execute(&mut *probe)
+                .await
+                .expect("F2d: set lock_timeout");
+            let key_share = sqlx::query(
+                "SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 FOR KEY SHARE",
             )
-            .await
-            .unwrap_or_else(|_| {
-                Err(buzz_db::DbError::Sqlx(sqlx::Error::Protocol(
-                    "F2d: add_member did not complete within 3s — \
-                 possible deadlock with commit_participant_join's lock"
-                        .to_string(),
-                )))
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .execute(&mut *probe)
+            .await;
+            probe.rollback().await.expect("F2d: end KEY SHARE probe");
+            assert!(
+                key_share.is_ok(),
+                "F2d: a KEY SHARE reader must not wait for the join's row lock: {key_share:?}"
+            );
+
+            // ── Membership and settings writers wait for the join ─────────────────
+            let add = tokio::spawn({
+                let pool = pool.clone();
+                let new_member_bytes = new_member_bytes.clone();
+                async move {
+                    buzz_db::channel_members::add_member(
+                        &pool,
+                        community_id,
+                        channel_id,
+                        &new_member_bytes,
+                        buzz_db::channel_members::MemberRole::Member,
+                        None,
+                    )
+                    .await
+                }
             });
+            let update = tokio::spawn({
+                let pool = pool.clone();
+                async move {
+                    buzz_db::channel::update_channel(
+                        &pool,
+                        community_id,
+                        channel_id,
+                        buzz_db::channel::ChannelUpdate {
+                            join_role: Some("guest".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(
+                !add.is_finished(),
+                "F2d: add_member must wait for the join's membership lock"
+            );
+            assert!(
+                !update.is_finished(),
+                "F2d: a join_role change must wait for the join's membership lock"
+            );
 
-            let add_member_completed = add_result.is_ok();
-
-            // ── Release the hook — join commits ───────────────────────────────────
+            // ── Release the hook — join commits, then the writers ─────────────────
             release.notify_one();
 
             let join_result = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
                 .await
                 .expect("F2d: commit_participant_join must return within 10s")
                 .expect("task must not panic");
-
-            assert!(
-                add_member_completed,
-                "F2d: add_member must complete while join holds FOR NO KEY UPDATE — \
-                 got {add_result:?}\n\
-                 Mutation oracle: change FOR NO KEY UPDATE to FOR UPDATE → \
-                 add_member's FK KEY SHARE blocks until join releases → \
-                 tokio::time::timeout fires (3s) → synthesized error → \
-                 this assertion panics"
-            );
             assert!(
                 join_result.is_ok(),
                 "F2d: commit_participant_join must succeed after hook release; got: {join_result:?}"
+            );
+            let add_result = tokio::time::timeout(std::time::Duration::from_secs(10), add)
+                .await
+                .expect("F2d: add_member must finish after the join")
+                .expect("add task must not panic");
+            assert!(
+                add_result.is_ok(),
+                "F2d: add_member after the join: {add_result:?}"
+            );
+            let update_result = tokio::time::timeout(std::time::Duration::from_secs(10), update)
+                .await
+                .expect("F2d: update_channel must finish after the join")
+                .expect("update task must not panic");
+            assert!(
+                update_result.is_ok(),
+                "F2d: join_role change after the join: {update_result:?}"
             );
 
             // Both rows must be committed.
@@ -13269,11 +13422,11 @@ mod tests {
             let _ = server.await;
         }
 
-        // ── F4b ParentMembershipLost transactional denial wire frame ──────────
+        // ── F4b MembershipLost transactional denial wire frame ──────────
         //
         // When `commit_participant_join` detects that the parent membership was
         // revoked between `check_membership_for_admission` and the transaction
-        // lock, it returns `JoinCommitError::ParentMembershipLost`. With an FI
+        // lock, it returns `JoinCommitError::MembershipLost`. With an FI
         // assertion present the handler sends the exact canonical restricted frame
         // via `ws_send` (not the ordinary control or terminal channels).
         //
@@ -13286,14 +13439,14 @@ mod tests {
         //      membership-lock acquisition inside the joint transaction.
         //   4. While paused: DELETE the parent membership row externally.
         //   5. Release the hook. `is_member_in_transaction(parent_channel_id)`
-        //      returns false → `ParentMembershipLost`.
+        //      returns false → `MembershipLost`.
         //   6. The handler sends `{"type":"restricted",...}` via `ws_send`.
         //
         // `run_auto_add_commit_race` drives that schedule and applies `race`
         // at step 4, so each commit-time refusal is exercised through the
         // production handler. It returns the first frame the client receives.
         enum CommitRace {
-            /// Delete the parent membership → `ParentMembershipLost`.
+            /// Delete the parent membership → `MembershipLost`.
             ParentMembershipRevoked,
             /// Delete the creator-signed huddle_started link → `HuddleLinkGone`.
             HuddleLinkDeleted,
@@ -13402,10 +13555,17 @@ mod tests {
                 vec![Utc::now() + Duration::hours(1)],
             );
 
-            // Arm the membership-lock hook BEFORE the server starts. The hook fires
-            // inside commit_participant_join just before the membership-lock acquisition.
-            let (arrived_rx, release) =
-                crate::nip_fi_test_hooks::audio_membership_lock_hook::arm(community_id);
+            // Arm the hook BEFORE the server starts. The membership-lock hook
+            // fires inside commit_participant_join just before the membership
+            // locks. The backend-lost race needs the join to hold its child row
+            // lock, so a waiter can name the join's backend: it pauses at the
+            // archive-recheck hook, after all of the join's locks.
+            let (arrived_rx, release) = match race {
+                CommitRace::TransactionBackendLost => {
+                    crate::nip_fi_test_hooks::audio_archive_recheck_hook::arm(community_id)
+                }
+                _ => crate::nip_fi_test_hooks::audio_membership_lock_hook::arm(community_id),
+            };
 
             let state_c = Arc::clone(&state);
             let tenant_c = tenant.clone();
