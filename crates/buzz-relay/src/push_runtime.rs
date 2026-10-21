@@ -1007,3 +1007,114 @@ mod shutdown_tests {
         assert!(dropped.load(Ordering::SeqCst));
     }
 }
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::{load_match_context, match_job};
+    use nostr::{EventBuilder, Kind, Tag};
+
+    /// The matcher on real channel rows: a member's lease that names no
+    /// channel wakes for an ordinary channel's message but not for a system
+    /// channel's, and a non-member's lease wakes for neither.
+    /// Mutation: let system channel events through the matcher's channel
+    /// check → RED (the system channel's message wakes the member).
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn system_channel_messages_do_not_wake_unnamed_leases() {
+        use crate::handlers::group_state_postgres_tests::{create_channel, http_auth};
+        use crate::handlers::ingest::ingest_event;
+
+        let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = format!("push-system-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        let member = nostr::Keys::generate();
+        let outsider = nostr::Keys::generate();
+
+        let ordinary = create_channel(&state, &tenant, &member, &[]).await;
+        let system = create_channel(&state, &tenant, &member, &[&["channel_type", "system"]]).await;
+
+        let subscriptions = serde_json::json!([{"filter": {"kinds": [9]}, "class": "default"}]);
+        for (n, keys) in [&member, &outsider].into_iter().enumerate() {
+            let source = [n as u8 + 1; 32];
+            assert_eq!(
+                buzz_db::push::replace_active_lease(
+                    state.db.pool(),
+                    community,
+                    &keys.public_key().to_bytes(),
+                    "install",
+                    buzz_db::push::LeaseVersion {
+                        source_event_id: &source,
+                        source_created_at: 10,
+                        generation: 1,
+                        expires_at: i64::MAX / 2,
+                    },
+                    buzz_db::push::ActiveLease {
+                        endpoint_hash: &[42; 32],
+                        endpoint_grant: "opaque-grant",
+                        max_class: "default",
+                        subscriptions: &subscriptions,
+                    },
+                )
+                .await
+                .expect("activate lease"),
+                buzz_db::push::ReplaceLeaseOutcome::Accepted
+            );
+        }
+
+        let mut jobs = Vec::new();
+        for channel in [ordinary, system] {
+            let event = EventBuilder::new(Kind::Custom(9), "hello")
+                .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
+                .sign_with_keys(&member)
+                .unwrap();
+            let id = event.id;
+            ingest_event(&state, &tenant, event, http_auth(&member))
+                .await
+                .expect("ingest message");
+            let stored = state
+                .db
+                .get_event_by_id(community, id.as_bytes())
+                .await
+                .expect("load message")
+                .expect("stored message");
+            assert_eq!(stored.channel_id, Some(channel));
+            jobs.push(buzz_db::push::BatchedMatch {
+                event: stored,
+                attempt: 1,
+            });
+        }
+        let batch = buzz_db::push::ClaimedMatchBatch {
+            community,
+            claim_id: uuid::Uuid::new_v4(),
+            jobs,
+        };
+
+        let context = load_match_context(&state, &batch)
+            .await
+            .expect("match context");
+        let woken: Vec<Vec<Vec<u8>>> = batch
+            .jobs
+            .iter()
+            .map(|job| {
+                match_job(job, &context)
+                    .expect("match")
+                    .into_iter()
+                    .map(|wake| wake.author)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            woken,
+            vec![vec![member.public_key().to_bytes().to_vec()], vec![]],
+            "ordinary channel wakes only its member; system channel wakes no one"
+        );
+    }
+}
