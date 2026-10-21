@@ -5096,6 +5096,42 @@ sleep 1"#,
         assert!(usage.activity.tools.is_none() && usage.activity.skills.is_none());
     }
 
+    /// Binds the production per-turn reset in `session_prompt_blocks_with_idle_timeout`:
+    /// turn 1 records a tool call and context occupancy but its usage is never
+    /// drained (an Err turn end), and turn 2 must not inherit either.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn undrained_turn_activity_does_not_leak_into_next_prompt() {
+        let script = r#"
+            for N in 1 2; do
+                read -r REQ
+                ID=$(printf '%s' "$REQ" | sed -E 's/.*"id":([0-9]+).*/\1/')
+                if [ "$N" = 1 ]; then
+                    echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"a","title":"Tool: shell","kind":"execute"}}}'
+                    echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"usage_update","used":50000,"size":200000}}}'
+                fi
+                echo '{"jsonrpc":"2.0","id":'"$ID"',"result":{"stopReason":"end_turn"}}'
+            done
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let timeout = std::time::Duration::from_secs(5);
+        // Turn 1 records activity; its usage is never drained (Err turn end).
+        client
+            .session_prompt_blocks_with_idle_timeout("s1", &["hi"], timeout, timeout)
+            .await
+            .expect("turn 1");
+        assert!(client.context_usage.is_some(), "turn 1 recorded context");
+        client
+            .session_prompt_blocks_with_idle_timeout("s1", &["hi"], timeout, timeout)
+            .await
+            .expect("turn 2");
+        assert!(
+            client.take_turn_usage().is_none(),
+            "turn 1 tools/context must not leak into turn 2"
+        );
+    }
+
     fn codex_style_turn(
         client: &mut AcpClient,
         session: &str,
@@ -5105,7 +5141,6 @@ sleep 1"#,
         client.goose_usage.begin_turn(session);
         client.standard_usage.begin_turn(session);
         client.tool_counts.begin_turn();
-        client.standard_usage.begin_turn(session);
         if with_tool {
             client.handle_session_update(&tool_update(serde_json::json!({
                 "sessionUpdate":"tool_call","toolCallId":"a","title":"Tool: shell","kind":"execute"

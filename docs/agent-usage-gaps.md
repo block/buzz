@@ -30,7 +30,9 @@ Line references drift; re-verify before relying on them.
    #4223, #4937, #7077, #8246; fix in PR #5581. Affects every harness.
 3. **Unmetered turns.** Failed, timed-out, and cancelled turns may not
    publish (see #6169).
-4. **Consumers.** Desktop and mobile parse but do not show `tools`/`skills`.
+4. **Consumers.** Only desktop parses these metrics (mobile has no 44200 decoder), and it does
+   not show `tools`/`skills`. Desktop skips usage-null rows in token
+   accounting.
    #5652 (usage & budgets view) is the natural consumer.
 
 ## Per harness

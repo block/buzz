@@ -151,8 +151,9 @@ unknown fields (forward compatibility).
 
 When a `cumulative` object is present, `sessionId` and `turnSeq` are
 REQUIRED. `turnSeq` is a per-session monotonically increasing integer
-starting at any value, incremented by the publisher on every published turn
-metric for that session; a publisher restart that loses the counter MUST
+starting at any value, incremented by the publisher on every published
+token-bearing turn metric for that session (usage-null records do not
+consume a value); a publisher restart that loses the counter MUST
 start a new `sessionId` rather than reuse the old one with a reset `turnSeq`.
 Cumulative values form a series only *within* one `sessionId`, ordered by
 `turnSeq` — consumers MUST NOT diff cumulative values across different
