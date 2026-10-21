@@ -608,6 +608,50 @@ test.describe("thread titles", () => {
     await expect(panel.getByTestId("message-typing-indicator")).toBeVisible();
   });
 
+  test("View activity log from the Threads view pane opens the thread's channel", async ({
+    page,
+  }) => {
+    const agentPubkey =
+      "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
+    // #general comes first in the agent's channels, so the route fallback
+    // would land there instead of the thread's channel.
+    await installMockBridge(page, {
+      relayAgents: [
+        {
+          pubkey: agentPubkey,
+          name: "nadia",
+          channelNames: ["general", "agents"],
+          respondTo: "anyone",
+        },
+      ],
+    });
+    await page.goto("/");
+    await openThread(page, "Root of a thread nadia replied to.", {
+      channelName: "agents",
+      replyPubkey: agentPubkey,
+    });
+    await nameOpenThread(page, "Nadia thread");
+
+    await page.getByTestId("open-threads-view").click();
+    await page.getByTestId("threads-view-row").click();
+    const panel = page.getByTestId("message-thread-panel");
+    const reply = panel
+      .getByTestId("message-row")
+      .filter({ hasText: "First reply." });
+    await reply.getByTestId("message-author").hover();
+    const viewActivity = page.getByTestId(
+      `user-profile-view-activity-${agentPubkey}`,
+    );
+    await viewActivity.click();
+
+    await expect(page.getByTestId("chat-title")).toHaveText("agents");
+    await expect(page).toHaveURL(
+      new RegExp(
+        `/channels/94a444a4-c0a3-5966-ab05-530c6ddc2301\\?.*agentSession=${agentPubkey}`,
+      ),
+    );
+  });
+
   test("a Threads row shows a live timer while an agent works in that thread", async ({
     page,
   }) => {

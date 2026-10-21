@@ -45,6 +45,7 @@ import type { SearchHit } from "@/shared/api/searchTypes";
 import { getEventById } from "@/shared/api/tauri";
 import type { RelayEvent, RespondToMode } from "@/shared/api/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
+import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { Button } from "@/shared/ui/button";
 
@@ -560,7 +561,7 @@ export function ProjectConversationPanel({
 
   if (canShowThread && activeChannel && panelData.threadHead) {
     return wrapProjectConversationPane(
-      <>
+      <AgentSessionProvider onOpenAgentSession={openAgentSession}>
         <MessageThreadPanel
           {...layoutProps}
           activityAccessoryContent={
@@ -655,7 +656,7 @@ export function ProjectConversationPanel({
           }}
           open={emptyDeleteId !== null}
         />
-      </>,
+      </AgentSessionProvider>,
       paneOptions,
     );
   }
