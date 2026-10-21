@@ -127,6 +127,18 @@ fn named_channels(filter: &Filter) -> impl Iterator<Item = Uuid> + '_ {
         .filter_map(|value| value.parse::<Uuid>().ok())
 }
 
+/// Every channel ID that some filter names (see [`named_channels`]), once
+/// each, in request order. A request confirms these against the database,
+/// because each one can enter its filter's history and live scope.
+pub(crate) fn channels_named_by_filters(filters: &[Filter]) -> Vec<Uuid> {
+    let mut seen = HashSet::new();
+    filters
+        .iter()
+        .flat_map(named_channels)
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
 /// Whether `filter` opts in to every readable system channel: its kinds are
 /// all group-state kinds, and it has `#t:["system"]` or any `#P`. It opts in
 /// to system channels only, never to another named-only type.

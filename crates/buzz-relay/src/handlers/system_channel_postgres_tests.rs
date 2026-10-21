@@ -1532,7 +1532,9 @@ async fn refcount(f: &Fixture, topic: buzz_pubsub::EventTopic) -> usize {
     f.state.pubsub.topic_refcount(&f.tenant, topic).await
 }
 
-/// A relay-signed kind:39000 for `channel`, as another pod would publish it.
+/// Hand a relay-signed kind:39000 for `channel` to the handler that receives
+/// another pod's events from Redis. This covers the receive side only, not
+/// publishing or Redis transport.
 async fn fan_out_from_another_pod(f: &Fixture, channel: Uuid, name: &str) -> String {
     let event = EventBuilder::new(Kind::Custom(39000), "")
         .tags([
@@ -1555,7 +1557,8 @@ async fn fan_out_from_another_pod(f: &Fixture, channel: Uuid, name: &str) -> Str
 }
 
 /// A `#d` group-state REQ keeps receiving its channel's replacements after
-/// EOSE, on this pod and from Redis, for every reader who may read the
+/// EOSE, from this pod and through the handler for other pods' events, for
+/// every reader who may read the
 /// channel: a private channel's member and an open channel's outsider. A
 /// private channel's outsider gets neither history nor live updates, and
 /// never retains the channel's topic. CLOSE and same-ID replacement release
@@ -1615,7 +1618,7 @@ async fn group_state_replacements_reach_live_d_subscribers() {
         )
     );
 
-    // Another pod, through Redis.
+    // Another pod's event, at the Redis receive handler.
     let private_id = fan_out_from_another_pod(&f, private, "from-redis").await;
     let open_id = fan_out_from_another_pod(&f, open, "from-redis").await;
     assert_eq!(
@@ -1717,4 +1720,70 @@ async fn named_filters_keep_live_delivery_beside_unnamed_siblings() {
     assert_eq!(refcount(f, EventTopic::Channel(future)).await, 0);
     assert_eq!(refcount(f, EventTopic::Global).await, 0);
     later.drop_database().await;
+}
+
+/// A cache-negative on a non-writer pod can lag a join. A REQ confirms every
+/// channel its filters name against the database, so a recently joined
+/// channel still enters the history and live scope of the filter that names
+/// it, in both shapes that name a channel without every filter using `#h`:
+/// a group-state `#d` filter, and an `#h` filter beside a channel-less one.
+/// Mutation: confirm only `extract_channel_ids_from_filters_limited`'s
+/// all-`#h` set in `handle_req` → RED (no history, no channel topic, no live
+/// event).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn named_channels_missing_from_a_stale_cache_still_route_live() {
+    use buzz_pubsub::EventTopic;
+    let f = fixture().await;
+    let reader = Keys::generate();
+    let channel = create_channel(&f.state, &f.tenant, &reader, &[&["visibility", "private"]]).await;
+    let h = channel.to_string();
+    let reader_hex = reader.public_key().to_hex();
+    // This pod cached the reader's access set before the join.
+    let stale = || {
+        f.state.member_channels_cache.insert(
+            (
+                f.tenant.community(),
+                reader.public_key().to_bytes().to_vec(),
+            ),
+            Vec::new(),
+        );
+    };
+
+    stale();
+    let mut by_d = LiveReq::open(&f, &reader, json!([{"kinds": [39000], "#d": [h]}])).await;
+    assert_eq!(by_d.history, [group_state_id(&f, channel, 39000).await]);
+    stale();
+    let mut mixed = LiveReq::open(
+        &f,
+        &reader,
+        json!([
+            {"kinds": [9], "#h": [h]},
+            {"kinds": [1], "authors": [reader_hex]},
+        ]),
+    )
+    .await;
+    assert_eq!(refcount(&f, EventTopic::Channel(channel)).await, 2);
+
+    let message = publish(&f, &reader, 9, "hello", &[&["h", &h]]).await;
+    assert_eq!(mixed.next_event().await, (9, h.clone(), message));
+    edit_channel(
+        &f.state,
+        &f.tenant,
+        &reader,
+        channel,
+        &[&["name", "renamed"]],
+    )
+    .await
+    .expect("edit");
+    assert_eq!(
+        by_d.next_event().await,
+        (39000, h.clone(), group_state_id(&f, channel, 39000).await)
+    );
+    by_d.assert_quiet("by #d").await;
+    mixed.assert_quiet("mixed").await;
+
+    by_d.close(&f).await;
+    mixed.close(&f).await;
+    assert_eq!(refcount(&f, EventTopic::Channel(channel)).await, 0);
 }

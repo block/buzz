@@ -119,6 +119,17 @@ pub async fn handle_req(
         }
     };
 
+    // Every distinct channel a filter names, including group-state `#d`, is
+    // confirmed below; bound that set before any membership I/O.
+    let named_channels = super::system_channels::channels_named_by_filters(&filters);
+    if named_channels.len() > MAX_EXPLICIT_CHANNEL_VALUES {
+        conn.send(RelayMessage::closed(
+            &sub_id,
+            "restricted: too many explicit channels",
+        ));
+        return;
+    }
+
     let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
         metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
             .increment(1);
@@ -180,13 +191,18 @@ pub async fn handle_req(
     // `confirm_requested_channel_access`). Running this ahead of the search branch
     // is what fixes the search false-miss: a `#h=<just-added>` search would
     // otherwise be scoped against the stale vector and return empty.
-    if let Some(requested) = requested_channel_ids.as_ref() {
+    //
+    // Confirm every channel any filter names (`#h`, or `#d` on group-state
+    // kinds), not only the all-`#h` set: each filter's history and live
+    // scope come from its own names, and a live scope is fixed at
+    // registration, so a stale miss would last until the client resubscribes.
+    if !named_channels.is_empty() {
         let repaired_from = accessible_channels.len();
         let confirmed = match confirm_requested_channel_access(
             &state,
             conn.tenant.community(),
             &pubkey_bytes,
-            requested,
+            &named_channels,
             token_channel_ids.as_deref(),
             &mut accessible_channels,
             named_only.ids(),
