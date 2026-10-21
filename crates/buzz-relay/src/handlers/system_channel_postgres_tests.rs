@@ -1216,3 +1216,366 @@ async fn system_channels_are_found_by_type_or_creator() {
         "bridge /count outsider #t:system"
     );
 }
+
+/// A live REQ through the production handler, on a connection that fan-out
+/// can reach. `history` holds the event IDs sent before EOSE.
+struct LiveReq {
+    conn: Arc<crate::connection::ConnectionState>,
+    rx: tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    history: Vec<String>,
+}
+
+impl LiveReq {
+    async fn open(f: &Fixture, reader: &Keys, filters: Value) -> Self {
+        let (conn, rx) = test_conn(&f.tenant, reader);
+        f.state.conn_manager.register(
+            conn.conn_id,
+            conn.send_tx.clone(),
+            conn.ctrl_tx.clone(),
+            conn.terminal_ctrl_tx.clone(),
+            None,
+            conn.cancel.clone(),
+            f.tenant.community(),
+            conn.backpressure_count.clone(),
+            conn.subscriptions.clone(),
+            conn.grace_limit,
+            crate::state::CommunityConnectionControl::new(conn.cancel.clone()),
+        );
+        f.state
+            .conn_manager
+            .set_authenticated_pubkey(conn.conn_id, reader.public_key().to_bytes().to_vec());
+        let mut live = Self {
+            conn,
+            rx,
+            history: Vec::new(),
+        };
+        live.req(f, filters).await;
+        live
+    }
+
+    /// Send a REQ for sub `s` (replacing any earlier one) and drain to EOSE.
+    async fn req(&mut self, f: &Fixture, filters: Value) {
+        let filters: Vec<nostr::Filter> = serde_json::from_value(filters).expect("filters");
+        let before = vec![None; filters.len()];
+        crate::handlers::req::handle_req(
+            "s".into(),
+            filters,
+            before,
+            self.conn.clone(),
+            f.state.clone(),
+        )
+        .await;
+        self.history.clear();
+        loop {
+            let (kind, frame) = self
+                .frame(std::time::Duration::from_secs(5))
+                .await
+                .expect("EOSE");
+            match kind.as_str() {
+                "EVENT" => self
+                    .history
+                    .push(frame[2]["id"].as_str().expect("id").to_owned()),
+                "EOSE" => return,
+                other => panic!("unexpected frame {other}: {frame}"),
+            }
+        }
+    }
+
+    async fn frame(&mut self, wait: std::time::Duration) -> Option<(String, Value)> {
+        loop {
+            let frame = tokio::time::timeout(wait, self.rx.recv()).await.ok()??;
+            let axum::extract::ws::Message::Text(text) = frame else {
+                continue;
+            };
+            let message: Value = serde_json::from_str(&text).expect("relay frame");
+            return Some((message[0].as_str().expect("frame type").to_owned(), message));
+        }
+    }
+
+    /// The next live event, as `(kind, d or h tag, id)`.
+    async fn next_event(&mut self) -> (u16, String, String) {
+        let (kind, frame) = self
+            .frame(std::time::Duration::from_secs(5))
+            .await
+            .expect("live event");
+        assert_eq!(kind, "EVENT", "{frame}");
+        let event: nostr::Event = serde_json::from_value(frame[2].clone()).expect("event");
+        let scope = event
+            .tags
+            .iter()
+            .find(|tag| matches!(tag.as_slice().first().map(String::as_str), Some("d" | "h")))
+            .and_then(|tag| tag.as_slice().get(1).cloned())
+            .unwrap_or_default();
+        (event.kind.as_u16(), scope, event.id.to_hex())
+    }
+
+    async fn assert_quiet(&mut self, who: &str) {
+        if let Some(frame) = self.frame(std::time::Duration::from_millis(200)).await {
+            panic!("{who}: unexpected frame {frame:?}");
+        }
+    }
+
+    async fn close(&self, f: &Fixture) {
+        crate::handlers::close::handle_close("s".into(), self.conn.clone(), f.state.clone()).await;
+    }
+}
+
+async fn refcount(f: &Fixture, topic: buzz_pubsub::EventTopic) -> usize {
+    f.state.pubsub.topic_refcount(&f.tenant, topic).await
+}
+
+/// Hand a relay-signed kind:39000 for `channel` to the handler that receives
+/// another pod's events from Redis. This covers the receive side only, not
+/// publishing or Redis transport.
+async fn fan_out_from_another_pod(f: &Fixture, channel: Uuid, name: &str) -> String {
+    let event = EventBuilder::new(Kind::Custom(39000), "")
+        .tags([
+            Tag::parse(["d", &channel.to_string()]).unwrap(),
+            Tag::parse(["name", name]).unwrap(),
+        ])
+        .sign_with_keys(&f.state.relay_keypair)
+        .expect("sign 39000");
+    let id = event.id.to_hex();
+    crate::handlers::event::fan_out_pubsub_event(
+        &f.state,
+        buzz_pubsub::ChannelEvent {
+            community_id: f.tenant.community(),
+            topic: buzz_pubsub::EventTopic::Channel(channel),
+            event,
+        },
+    )
+    .await;
+    id
+}
+
+/// A `#d` group-state REQ keeps receiving its channel's replacements after
+/// EOSE, from this pod and through the handler for other pods' events, for
+/// every reader who may read the
+/// channel: a private channel's member and an open channel's outsider. A
+/// private channel's outsider gets neither history nor live updates, and
+/// never retains the channel's topic. CLOSE and same-ID replacement release
+/// each retained topic once.
+/// Mutation: give a filter without `#h` only the global scope in
+/// `filter_live_scope` → RED (no live replacement after EOSE).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn group_state_replacements_reach_live_d_subscribers() {
+    use buzz_pubsub::EventTopic;
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let private = create_channel(&f.state, &f.tenant, &owner, &[&["visibility", "private"]]).await;
+    let open = create_channel(&f.state, &f.tenant, &owner, &[&["visibility", "open"]]).await;
+    let by_d = |channel: Uuid| json!([{"kinds": [39000], "#d": [channel.to_string()]}]);
+
+    let mut member = LiveReq::open(&f, &owner, by_d(private)).await;
+    let mut open_outsider = LiveReq::open(&f, &outsider, by_d(open)).await;
+    let mut private_outsider = LiveReq::open(&f, &outsider, by_d(private)).await;
+    assert_eq!(member.history, [group_state_id(&f, private, 39000).await]);
+    assert_eq!(
+        open_outsider.history,
+        [group_state_id(&f, open, 39000).await]
+    );
+    assert!(private_outsider.history.is_empty());
+    assert_eq!(refcount(&f, EventTopic::Channel(private)).await, 1);
+    assert_eq!(refcount(&f, EventTopic::Channel(open)).await, 1);
+    assert_eq!(refcount(&f, EventTopic::Global).await, 3);
+
+    // This pod: the relay publishes a replacement after each edit.
+    for channel in [private, open] {
+        edit_channel(
+            &f.state,
+            &f.tenant,
+            &owner,
+            channel,
+            &[&["name", "renamed"]],
+        )
+        .await
+        .expect("edit");
+    }
+    assert_eq!(
+        member.next_event().await,
+        (
+            39000,
+            private.to_string(),
+            group_state_id(&f, private, 39000).await
+        )
+    );
+    assert_eq!(
+        open_outsider.next_event().await,
+        (
+            39000,
+            open.to_string(),
+            group_state_id(&f, open, 39000).await
+        )
+    );
+
+    // Another pod's event, at the Redis receive handler.
+    let private_id = fan_out_from_another_pod(&f, private, "from-redis").await;
+    let open_id = fan_out_from_another_pod(&f, open, "from-redis").await;
+    assert_eq!(
+        member.next_event().await,
+        (39000, private.to_string(), private_id)
+    );
+    assert_eq!(
+        open_outsider.next_event().await,
+        (39000, open.to_string(), open_id)
+    );
+    private_outsider.assert_quiet("private outsider").await;
+    member.assert_quiet("member").await;
+    open_outsider.assert_quiet("open outsider").await;
+
+    // Same-ID replacement moves the member's channel topic, once.
+    member.req(&f, by_d(open)).await;
+    assert_eq!(refcount(&f, EventTopic::Channel(private)).await, 0);
+    assert_eq!(refcount(&f, EventTopic::Channel(open)).await, 2);
+    assert_eq!(refcount(&f, EventTopic::Global).await, 3);
+
+    for live in [&member, &open_outsider, &private_outsider] {
+        live.close(&f).await;
+    }
+    assert_eq!(refcount(&f, EventTopic::Channel(open)).await, 0);
+    assert_eq!(refcount(&f, EventTopic::Global).await, 0);
+}
+
+/// In a REQ that mixes named and unnamed filters, the named filters keep
+/// live delivery for their own channel and the unnamed filter keeps global
+/// events. A `#P` or `#t:["system", <label>]` sibling of a filter that names
+/// a channel of a later type never receives that channel's replacements.
+/// Mutation: register every filter under the request's named channels →
+/// RED (the siblings receive the later-type channel's kind:39000).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn named_filters_keep_live_delivery_beside_unnamed_siblings() {
+    use buzz_pubsub::EventTopic;
+    let later = LaterTypeFixture::new().await;
+    let f = &later.f;
+    let owner = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let label = "shared-label";
+    let future = create_channel(&f.state, &f.tenant, &owner, &[&["t", label]]).await;
+    later.retype(future).await;
+    let h = future.to_string();
+
+    let mut mixed = LiveReq::open(
+        f,
+        &owner,
+        json!([
+            {"kinds": [39000], "#d": [h]},
+            {"kinds": [9], "#h": [h]},
+            {"kinds": [1], "authors": [owner_hex]},
+        ]),
+    )
+    .await;
+    assert_eq!(mixed.history, [group_state_id(f, future, 39000).await]);
+    let mut siblings = Vec::new();
+    for sibling in [
+        json!({"kinds": [39000], "#P": [owner_hex]}),
+        json!({"kinds": [39000], "#t": ["system", label]}),
+    ] {
+        let live = LiveReq::open(f, &owner, json!([{"kinds": [9], "#h": [h]}, sibling])).await;
+        assert!(live.history.is_empty(), "{sibling}: {:?}", live.history);
+        siblings.push((sibling, live));
+    }
+    assert_eq!(refcount(f, EventTopic::Channel(future)).await, 3);
+    assert_eq!(refcount(f, EventTopic::Global).await, 3);
+
+    let message = publish(f, &owner, 9, "hello", &[&["h", &h]]).await;
+    let note = publish(f, &owner, 1, "global", &[]).await;
+    edit_channel(&f.state, &f.tenant, &owner, future, &[&["name", "renamed"]])
+        .await
+        .expect("edit");
+    let replacement = group_state_id(f, future, 39000).await;
+
+    let mut received = Vec::new();
+    for _ in 0..3 {
+        received.push(mixed.next_event().await);
+    }
+    assert_eq!(
+        sorted(received),
+        sorted(vec![
+            (9, h.clone(), message.clone()),
+            (1, String::new(), note),
+            (39000, h.clone(), replacement),
+        ])
+    );
+    mixed.assert_quiet("mixed").await;
+    for (sibling, live) in &mut siblings {
+        assert_eq!(live.next_event().await, (9, h.clone(), message.clone()));
+        live.assert_quiet(&sibling.to_string()).await;
+    }
+
+    mixed.close(f).await;
+    for (_, live) in &siblings {
+        live.close(f).await;
+    }
+    assert_eq!(refcount(f, EventTopic::Channel(future)).await, 0);
+    assert_eq!(refcount(f, EventTopic::Global).await, 0);
+    later.drop_database().await;
+}
+
+/// A cache-negative on a non-writer pod can lag a join. A REQ confirms every
+/// channel its filters name against the database, so a recently joined
+/// channel still enters the history and live scope of the filter that names
+/// it, in both shapes that name a channel without every filter using `#h`:
+/// a group-state `#d` filter, and an `#h` filter beside a channel-less one.
+/// Mutation: confirm only `extract_channel_ids_from_filters_limited`'s
+/// all-`#h` set in `handle_req` → RED (no history, no channel topic, no live
+/// event).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn named_channels_missing_from_a_stale_cache_still_route_live() {
+    use buzz_pubsub::EventTopic;
+    let f = fixture().await;
+    let reader = Keys::generate();
+    let channel = create_channel(&f.state, &f.tenant, &reader, &[&["visibility", "private"]]).await;
+    let h = channel.to_string();
+    let reader_hex = reader.public_key().to_hex();
+    // This pod cached the reader's access set before the join.
+    let stale = || {
+        f.state.accessible_channels_cache.insert(
+            (
+                f.tenant.community(),
+                reader.public_key().to_bytes().to_vec(),
+            ),
+            Vec::new(),
+        );
+    };
+
+    stale();
+    let mut by_d = LiveReq::open(&f, &reader, json!([{"kinds": [39000], "#d": [h]}])).await;
+    assert_eq!(by_d.history, [group_state_id(&f, channel, 39000).await]);
+    stale();
+    let mut mixed = LiveReq::open(
+        &f,
+        &reader,
+        json!([
+            {"kinds": [9], "#h": [h]},
+            {"kinds": [1], "authors": [reader_hex]},
+        ]),
+    )
+    .await;
+    assert_eq!(refcount(&f, EventTopic::Channel(channel)).await, 2);
+
+    let message = publish(&f, &reader, 9, "hello", &[&["h", &h]]).await;
+    assert_eq!(mixed.next_event().await, (9, h.clone(), message));
+    edit_channel(
+        &f.state,
+        &f.tenant,
+        &reader,
+        channel,
+        &[&["name", "renamed"]],
+    )
+    .await
+    .expect("edit");
+    assert_eq!(
+        by_d.next_event().await,
+        (39000, h.clone(), group_state_id(&f, channel, 39000).await)
+    );
+    by_d.assert_quiet("by #d").await;
+    mixed.assert_quiet("mixed").await;
+
+    by_d.close(&f).await;
+    mixed.close(&f).await;
+    assert_eq!(refcount(&f, EventTopic::Channel(channel)).await, 0);
+}

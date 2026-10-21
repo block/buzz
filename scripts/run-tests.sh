@@ -251,6 +251,9 @@ run_unit_tests() {
   run_test_step "buzz-relay NIP-FI resolver tests" \
     cargo test -p buzz-relay --lib nip_fi_resolver:: -- --nocapture
 
+  run_test_step "buzz-relay subscription registry tests" \
+    cargo test -p buzz-relay --lib subscription::tests:: -- --nocapture
+
   # Infra-free REQ subscription-lifecycle tests, by exact name: the rest of
   # handlers::req needs a database.
   run_test_step "buzz-relay REQ subscription lifecycle tests" \

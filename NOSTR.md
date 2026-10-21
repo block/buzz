@@ -175,7 +175,9 @@ nak req -k 39002 --tag "d=<channel-uuid>" --auth --sec <privkey> ws://localhost:
 
 > **Note:** Channel-scoped storage means live global subscriptions (`{kinds:[39000]}`) won't
 > receive these via fan-out. Clients discover groups via historical REQ queries. Live push for
-> open-channel discovery is a future enhancement.
+> open-channel discovery is a future enhancement. A group-state filter that names channels by
+> `#d` (`{kinds:[39000], "#d":[<channel-uuid>]}`) does receive later replacements for the named
+> channels it may read, after EOSE.
 
 ### Membership Notifications
 

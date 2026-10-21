@@ -31,6 +31,7 @@ use uuid::Uuid;
 use buzz_core::CommunityId;
 
 use crate::state::AppState;
+use crate::subscription::SubscriptionScope;
 
 /// The named-only channels a request may add to a filter's scope: the
 /// readable channels of non-legacy types, and which of them are system
@@ -108,6 +109,18 @@ fn named_channels(filter: &Filter) -> impl Iterator<Item = Uuid> + '_ {
         .filter_map(|value| value.parse::<Uuid>().ok())
 }
 
+/// Every channel ID that some filter names (see [`named_channels`]), once
+/// each, in request order. A request confirms these against the database,
+/// because each one can enter its filter's history and live scope.
+pub(crate) fn channels_named_by_filters(filters: &[Filter]) -> Vec<Uuid> {
+    let mut seen = HashSet::new();
+    filters
+        .iter()
+        .flat_map(named_channels)
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
 /// Whether `filter` opts in to every readable system channel: its kinds are
 /// all group-state kinds, and it has `#t:["system"]` or any `#P`. It opts in
 /// to system channels only, never to another named-only type.
@@ -166,6 +179,37 @@ pub(crate) fn filter_channel_scope<'a>(
     let mut scope = implicit.to_vec();
     scope.extend(extra);
     Cow::Owned(scope)
+}
+
+/// The live routing scope of `filter`: the channels it names (see
+/// [`named_channels`]) that it may read, plus the community-global topic when
+/// it has no `#h`.
+///
+/// Live routing follows the filter's own names, never a sibling's. A filter
+/// without `#h` receives community-global events, as before. A group-state
+/// filter also receives later replacements for the channels its `#d` names.
+/// A filter that reaches a channel only through the implicit set or a system
+/// opt-in does not receive that channel's live events; its history read is
+/// unchanged.
+pub(crate) fn filter_live_scope(
+    filter: &Filter,
+    implicit: &[Uuid],
+    named_only: &NamedOnlyChannels,
+) -> SubscriptionScope {
+    let readable: HashSet<Uuid> = filter_channel_scope(filter, implicit, named_only)
+        .iter()
+        .copied()
+        .collect();
+    let scope =
+        SubscriptionScope::channels(named_channels(filter).filter(|id| readable.contains(id)));
+    if filter
+        .generic_tags
+        .contains_key(&SingleLetterTag::lowercase(Alphabet::H))
+    {
+        scope
+    } else {
+        scope.with_global()
+    }
 }
 
 /// Load the named-only channels the reader can read, narrowed to the token's
@@ -302,6 +346,44 @@ mod tests {
         assert_eq!(
             filter_channel_scope(&other, &implicit, &readable).as_ref(),
             &[open]
+        );
+    }
+
+    #[test]
+    fn live_scope_holds_only_the_readable_channels_a_filter_names() {
+        let open = Uuid::new_v4();
+        let private_outside = Uuid::new_v4();
+        let system = Uuid::new_v4();
+        let implicit = vec![open];
+        let readable = of_type("system", &[system]);
+        let live = |json| filter_live_scope(&filter(json), &implicit, &readable);
+
+        // #h: own readable channels, no global topic.
+        assert_eq!(
+            live(serde_json::json!({"#h": [open.to_string(), private_outside.to_string()]})),
+            SubscriptionScope::channels([open])
+        );
+        // Group-state #d: named readable channels plus the global topic.
+        assert_eq!(
+            live(serde_json::json!({
+                "kinds": [39000],
+                "#d": [open.to_string(), system.to_string(), private_outside.to_string()]
+            })),
+            SubscriptionScope::channels([open, system]).with_global()
+        );
+        // #d names nothing on other kinds.
+        assert_eq!(
+            live(serde_json::json!({"kinds": [39000, 1], "#d": [open.to_string()]})),
+            SubscriptionScope::global()
+        );
+        // The system opt-in and the implicit set widen history, not live routing.
+        assert_eq!(
+            live(serde_json::json!({"kinds": [39000], "#t": ["system"]})),
+            SubscriptionScope::global()
+        );
+        assert_eq!(
+            live(serde_json::json!({"kinds": [9]})),
+            SubscriptionScope::global()
         );
     }
 

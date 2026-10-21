@@ -12,38 +12,93 @@ use buzz_core::{filter::filters_match, CommunityId, StoredEvent};
 pub type ConnId = Uuid;
 /// Subscription identifier — the client-supplied string from a REQ message.
 pub type SubId = String;
-/// Stored subscription entry: filters paired with server-resolved community and optional channel scope.
-pub type SubEntry = (Vec<Filter>, CommunityId, SubscriptionScope);
 
-/// Server-resolved live-routing scope for a subscription.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubscriptionScope {
-    /// Community-global events only.
-    Global,
-    /// Events from any of these authorized channels.
-    Channels(Vec<Uuid>),
+/// Server-resolved live-routing scope: the community-global topic, a set of
+/// authorized channels, or both.
+///
+/// Each filter of a live subscription has its own scope, and a live event
+/// reaches the subscription only through a filter that both matches the event
+/// and has the event's channel (or the global topic, for a channel-less event)
+/// in its scope. Filters are ORed, so one request-wide scope would let a
+/// filter receive a channel that only a sibling filter may read.
+///
+/// The same type describes a subscription's retained pubsub topics: the union
+/// of its filters' scopes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubscriptionScope {
+    global: bool,
+    channels: Vec<Uuid>,
 }
 
 impl SubscriptionScope {
-    fn matches_channel(&self, channel_id: Option<Uuid>) -> bool {
-        match (self, channel_id) {
-            (Self::Global, None) => true,
-            (Self::Channels(channels), Some(channel_id)) => channels.contains(&channel_id),
-            _ => false,
+    /// Community-global events only.
+    pub fn global() -> Self {
+        Self {
+            global: true,
+            channels: Vec::new(),
         }
+    }
+
+    /// Events from any of these authorized channels. Duplicates are dropped.
+    pub fn channels(channel_ids: impl IntoIterator<Item = Uuid>) -> Self {
+        let mut scope = Self::default();
+        for channel_id in channel_ids {
+            scope.add_channel(channel_id);
+        }
+        scope
+    }
+
+    /// This scope plus community-global events.
+    pub fn with_global(mut self) -> Self {
+        self.global = true;
+        self
+    }
+
+    fn add_channel(&mut self, channel_id: Uuid) {
+        // Sorted, so equal sets compare equal whatever the request order.
+        if let Err(at) = self.channels.binary_search(&channel_id) {
+            self.channels.insert(at, channel_id);
+        }
+    }
+
+    /// Drop `channel_id`. Returns whether the scope held it.
+    fn remove_channel(&mut self, channel_id: Uuid) -> bool {
+        let before = self.channels.len();
+        self.channels.retain(|candidate| *candidate != channel_id);
+        self.channels.len() != before
+    }
+
+    fn matches_channel(&self, channel_id: Option<Uuid>) -> bool {
+        match channel_id {
+            None => self.global,
+            Some(channel_id) => self.channels.contains(&channel_id),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.global && self.channels.is_empty()
+    }
+
+    /// The union of `scopes`: every topic any of them retains, once.
+    pub fn union<'a>(scopes: impl IntoIterator<Item = &'a SubscriptionScope>) -> Self {
+        let mut union = Self::default();
+        for scope in scopes {
+            union.global |= scope.global;
+            for &channel_id in &scope.channels {
+                union.add_channel(channel_id);
+            }
+        }
+        union
     }
 
     /// Return the channels retained by this routing scope.
     pub fn channel_ids(&self) -> &[Uuid] {
-        match self {
-            Self::Global => &[],
-            Self::Channels(channels) => channels,
-        }
+        &self.channels
     }
 
     /// Whether this routing scope retains the community-global topic.
     pub fn is_global(&self) -> bool {
-        matches!(self, Self::Global)
+        self.global
     }
 }
 
@@ -63,6 +118,85 @@ struct GlobalPKindIndexKey {
     p: String,
 }
 
+/// One fan-out index entry a subscription occupies. All slots of one
+/// subscription share its community.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum IndexSlot {
+    ChannelKind(IndexKey),
+    ChannelWildcard(Uuid),
+    GlobalPKind(GlobalPKindIndexKey),
+    GlobalKind(Kind),
+    GlobalWildcard,
+}
+
+/// A registered live subscription: each filter with its server-resolved scope.
+#[derive(Debug, Clone)]
+struct LiveSubscription {
+    community_id: CommunityId,
+    filters: Vec<(Filter, SubscriptionScope)>,
+}
+
+impl LiveSubscription {
+    /// The pubsub topics this subscription retains.
+    fn topics(&self) -> SubscriptionScope {
+        SubscriptionScope::union(self.filters.iter().map(|(_, scope)| scope))
+    }
+
+    /// Whether some filter both matches `event` and has its channel in scope.
+    fn matches(&self, event: &StoredEvent) -> bool {
+        self.filters.iter().any(|(filter, scope)| {
+            scope.matches_channel(event.channel_id)
+                && filters_match(std::slice::from_ref(filter), event)
+        })
+    }
+
+    /// Every index entry that can surface an event this subscription matches.
+    /// Each filter is indexed under its own scope.
+    fn index_slots(&self) -> HashSet<IndexSlot> {
+        let mut slots = HashSet::new();
+        for (filter, scope) in &self.filters {
+            let kinds = filter.kinds.as_ref();
+            for &channel_id in &scope.channels {
+                match kinds {
+                    // No `kinds` constraint: every kind in this channel.
+                    None => {
+                        slots.insert(IndexSlot::ChannelWildcard(channel_id));
+                    }
+                    // Per NIP-01, `kinds: []` matches nothing, so an empty
+                    // list adds no slot.
+                    Some(kinds) => {
+                        slots.extend(
+                            kinds
+                                .iter()
+                                .map(|&kind| IndexSlot::ChannelKind(IndexKey { channel_id, kind })),
+                        );
+                    }
+                }
+            }
+            if !scope.global {
+                continue;
+            }
+            // A fully p-constrained filter uses the narrower (kind, #p) index;
+            // a broader one stays on the generic kind/wildcard indexes.
+            if let Some(keys) =
+                extract_global_p_kind_index_keys(self.community_id, std::slice::from_ref(filter))
+            {
+                slots.extend(keys.into_iter().map(IndexSlot::GlobalPKind));
+            } else {
+                match kinds {
+                    None => {
+                        slots.insert(IndexSlot::GlobalWildcard);
+                    }
+                    Some(kinds) => {
+                        slots.extend(kinds.iter().map(|&kind| IndexSlot::GlobalKind(kind)));
+                    }
+                }
+            }
+        }
+        slots
+    }
+}
+
 /// A removed subscription's server-resolved routing scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedSubscription {
@@ -77,17 +211,17 @@ pub struct RemovedSubscription {
 pub struct ChannelSubscriptionUpdate {
     /// Client-supplied subscription identifier.
     pub sub_id: SubId,
-    /// Whether no authorized channels remain and the subscription was removed.
+    /// Whether no topics remain and the subscription was removed.
     pub removed: bool,
 }
 
 /// Thread-safe registry of active subscriptions with targeted in-memory fan-out indexes.
 #[derive(Debug, Default)]
 pub struct SubscriptionRegistry {
-    /// Maps conn_id → sub_id → (filters, community_id, channel_id).
-    /// Storing scope alongside filters enables O(1) targeted index removal and
-    /// gives lifecycle code the exact Redis topic to release.
-    subs: DashMap<ConnId, HashMap<SubId, SubEntry>>,
+    /// Maps conn_id → sub_id → live subscription (filters with their scopes).
+    /// Storing scopes alongside filters enables O(1) targeted index removal
+    /// and gives lifecycle code the exact Redis topics to release.
+    subs: DashMap<ConnId, HashMap<SubId, LiveSubscription>>,
     channel_kind_index: DashMap<(CommunityId, IndexKey), Vec<(ConnId, SubId)>>,
     /// Subscriptions with a channel_id but no kind filter — need to receive ALL kinds.
     channel_wildcard_index: DashMap<(CommunityId, Uuid), Vec<(ConnId, SubId)>>,
@@ -106,7 +240,8 @@ impl SubscriptionRegistry {
     }
 
     /// Replaces any existing subscription with the same sub_id (NIP-01), scoped
-    /// to the server-resolved community that owns the connection.
+    /// to the server-resolved community that owns the connection. Every filter
+    /// gets the same scope: `channel_id`, or community-global when `None`.
     pub fn register_scoped(
         &self,
         community_id: CommunityId,
@@ -116,12 +251,13 @@ impl SubscriptionRegistry {
         channel_id: Option<Uuid>,
     ) -> Option<RemovedSubscription> {
         let scope = channel_id
-            .map(|channel_id| SubscriptionScope::Channels(vec![channel_id]))
-            .unwrap_or(SubscriptionScope::Global);
-        self.register_with_scope(community_id, conn_id, sub_id, filters, scope)
+            .map(|channel_id| SubscriptionScope::channels([channel_id]))
+            .unwrap_or_else(SubscriptionScope::global);
+        self.register_same_scope(community_id, conn_id, sub_id, filters, scope)
     }
 
-    /// Register a subscription under every authorized requested channel.
+    /// Register a subscription whose every filter is scoped to all of
+    /// `channel_ids`.
     pub fn register_channels_scoped(
         &self,
         community_id: CommunityId,
@@ -130,16 +266,16 @@ impl SubscriptionRegistry {
         filters: Vec<Filter>,
         channel_ids: Vec<Uuid>,
     ) -> Option<RemovedSubscription> {
-        self.register_with_scope(
+        self.register_same_scope(
             community_id,
             conn_id,
             sub_id,
             filters,
-            SubscriptionScope::Channels(channel_ids),
+            SubscriptionScope::channels(channel_ids),
         )
     }
 
-    fn register_with_scope(
+    fn register_same_scope(
         &self,
         community_id: CommunityId,
         conn_id: ConnId,
@@ -147,76 +283,39 @@ impl SubscriptionRegistry {
         filters: Vec<Filter>,
         scope: SubscriptionScope,
     ) -> Option<RemovedSubscription> {
+        let filters = filters
+            .into_iter()
+            .map(|filter| (filter, scope.clone()))
+            .collect();
+        self.register_filters_scoped(community_id, conn_id, sub_id, filters)
+    }
+
+    /// Register a subscription in which each filter has its own
+    /// server-resolved scope, replacing any existing subscription with the
+    /// same sub_id (NIP-01). Returns the replaced subscription, whose topics
+    /// the caller releases.
+    pub fn register_filters_scoped(
+        &self,
+        community_id: CommunityId,
+        conn_id: ConnId,
+        sub_id: SubId,
+        filters: Vec<(Filter, SubscriptionScope)>,
+    ) -> Option<RemovedSubscription> {
         let removed = self.remove_subscription(conn_id, &sub_id);
 
-        self.subs.entry(conn_id).or_default().insert(
-            sub_id.clone(),
-            (filters.clone(), community_id, scope.clone()),
-        );
+        let subscription = LiveSubscription {
+            community_id,
+            filters,
+        };
+        let slots = subscription.index_slots();
+        self.subs
+            .entry(conn_id)
+            .or_default()
+            .insert(sub_id.clone(), subscription);
         metrics::gauge!("buzz_subscriptions_active").increment(1.0);
 
-        if let SubscriptionScope::Channels(channel_ids) = &scope {
-            for ch_id in channel_ids {
-                let ch_id = *ch_id;
-                match extract_kinds_from_filters(&filters) {
-                    None => {
-                        // At least one filter has no `kinds` constraint — wildcard,
-                        // this sub wants all kinds in this channel.
-                        self.channel_wildcard_index
-                            .entry((community_id, ch_id))
-                            .or_default()
-                            .push((conn_id, sub_id.clone()));
-                    }
-                    Some(kinds) if kinds.is_empty() => {
-                        // All filters had explicit empty kinds lists (`kinds: []`).
-                        // Per NIP-01, `kinds: []` means "match no kinds" — this
-                        // subscription will never receive any events. Do not index it
-                        // anywhere; `filters_match` will reject all events at fan-out.
-                    }
-                    Some(kinds) => {
-                        for kind in kinds {
-                            let key = IndexKey {
-                                channel_id: ch_id,
-                                kind,
-                            };
-                            self.channel_kind_index
-                                .entry((community_id, key))
-                                .or_default()
-                                .push((conn_id, sub_id.clone()));
-                        }
-                    }
-                }
-            }
-        } else {
-            // Global subscription. Fully p-constrained filters can use the
-            // narrower (kind, #p) index; broader filters stay on the generic
-            // kind/wildcard indexes.
-            if let Some(keys) = extract_global_p_kind_index_keys(community_id, &filters) {
-                for key in keys {
-                    self.global_p_kind_index
-                        .entry(key)
-                        .or_default()
-                        .push((conn_id, sub_id.clone()));
-                }
-            } else {
-                match extract_kinds_from_filters(&filters) {
-                    None => {
-                        self.global_wildcard_index
-                            .entry(community_id)
-                            .or_default()
-                            .push((conn_id, sub_id.clone()));
-                    }
-                    Some(kinds) if kinds.is_empty() => {}
-                    Some(kinds) => {
-                        for kind in kinds {
-                            self.global_kind_index
-                                .entry((community_id, kind))
-                                .or_default()
-                                .push((conn_id, sub_id.clone()));
-                        }
-                    }
-                }
-            }
+        for slot in slots {
+            self.add_to_slot(community_id, slot, conn_id, &sub_id);
         }
 
         removed
@@ -253,16 +352,16 @@ impl SubscriptionRegistry {
         F: FnOnce(),
     {
         let mut conn_subs = self.subs.get_mut(&conn_id)?;
-        let (filters, community_id, scope) = conn_subs.remove(sub_id)?;
+        let subscription = conn_subs.remove(sub_id)?;
 
         after_remove();
-        self.remove_from_index(conn_id, sub_id, &filters, community_id, &scope);
+        self.remove_from_index(conn_id, sub_id, &subscription);
         drop(conn_subs);
 
         metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
         Some(RemovedSubscription {
-            community_id,
-            scope,
+            community_id: subscription.community_id,
+            scope: subscription.topics(),
         })
     }
 
@@ -271,11 +370,11 @@ impl SubscriptionRegistry {
         let mut removed = Vec::new();
         if let Some((_, conn_subs)) = self.subs.remove(&conn_id) {
             let count = conn_subs.len();
-            for (sub_id, (filters, community_id, scope)) in &conn_subs {
-                self.remove_from_index(conn_id, sub_id, filters, *community_id, scope);
+            for (sub_id, subscription) in &conn_subs {
+                self.remove_from_index(conn_id, sub_id, subscription);
                 removed.push(RemovedSubscription {
-                    community_id: *community_id,
-                    scope: scope.clone(),
+                    community_id: subscription.community_id,
+                    scope: subscription.topics(),
                 });
             }
             metrics::gauge!("buzz_subscriptions_active").decrement(count as f64);
@@ -283,9 +382,11 @@ impl SubscriptionRegistry {
         removed
     }
 
-    /// Remove one revoked channel from every matching subscription in a community.
-    /// Multi-channel subscriptions are re-indexed with their remaining scope;
-    /// subscriptions with no channels left are removed entirely.
+    /// Remove one revoked channel from every filter of every matching
+    /// subscription in a community. Each affected subscription is reported
+    /// once, because it retained the channel's topic once. A subscription keeps
+    /// its other channels and any global scope; one with no topics left is
+    /// removed entirely.
     pub fn remove_channel_subscriptions_scoped(
         &self,
         community_id: CommunityId,
@@ -298,9 +399,12 @@ impl SubscriptionRegistry {
             .map(|conn_subs| {
                 conn_subs
                     .iter()
-                    .filter_map(|(sub_id, (_, sub_community_id, scope))| {
-                        (*sub_community_id == community_id
-                            && scope.channel_ids().contains(&channel_id))
+                    .filter_map(|(sub_id, subscription)| {
+                        (subscription.community_id == community_id
+                            && subscription
+                                .filters
+                                .iter()
+                                .any(|(_, scope)| scope.channel_ids().contains(&channel_id)))
                         .then_some(sub_id.clone())
                     })
                     .collect()
@@ -312,22 +416,25 @@ impl SubscriptionRegistry {
             let Some(mut conn_subs) = self.subs.get_mut(&conn_id) else {
                 break;
             };
-            let Some((filters, _, scope)) = conn_subs.get_mut(&sub_id) else {
+            let Some(subscription) = conn_subs.get_mut(&sub_id) else {
                 continue;
             };
-            let filters = filters.clone();
-            let SubscriptionScope::Channels(channel_ids) = scope else {
+            let before = subscription.index_slots();
+            let mut held = false;
+            for (_, scope) in &mut subscription.filters {
+                held |= scope.remove_channel(channel_id);
+            }
+            if !held {
+                // A same-ID replacement took the ID after the snapshot.
                 continue;
-            };
-            channel_ids.retain(|candidate| *candidate != channel_id);
-            let removed = channel_ids.is_empty();
-            self.remove_from_index(
-                conn_id,
-                &sub_id,
-                &filters,
-                community_id,
-                &SubscriptionScope::Channels(vec![channel_id]),
-            );
+            }
+            let removed = subscription.topics().is_empty();
+            // Drop only the slots no remaining filter needs, so the
+            // subscription stays reachable for its other topics throughout.
+            let after = subscription.index_slots();
+            for slot in before.difference(&after) {
+                self.remove_from_slot(community_id, slot, conn_id, &sub_id);
+            }
             if removed {
                 conn_subs.remove(&sub_id);
                 metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
@@ -424,8 +531,8 @@ impl SubscriptionRegistry {
             }
         } else {
             // Global event (channel_id = None) — use global indexes for sub-linear fan-out.
-            // Channel-scoped subscriptions are never in these indexes, preserving the
-            // scoping invariant without an explicit skip check.
+            // Only filters with a global scope are in these indexes, and
+            // `push_match` re-checks the matching filter's scope.
             for p in event_p_tag_values(event) {
                 let key = GlobalPKindIndexKey {
                     community_id,
@@ -484,9 +591,10 @@ impl SubscriptionRegistry {
             }
         }
 
-        // NOTE: The scoping invariant is symmetric:
-        // - Global subscriptions (channel_id = None) do NOT receive channel-scoped events.
-        // - Channel-scoped subscriptions do NOT receive global events.
+        // NOTE: The scoping invariant is per filter and symmetric:
+        // - A filter without a global scope does NOT receive global events.
+        // - A filter receives a channel event only if that channel is in its
+        //   own scope, never through a sibling filter's scope.
         // This prevents both directions of information leakage: channel content
         // leaking to global subscribers, and global infrastructure events (like
         // membership notifications) leaking to channel subscribers.
@@ -502,9 +610,15 @@ impl SubscriptionRegistry {
 
     /// Return the filters for a specific subscription, or `None` if not found.
     pub fn get_filters(&self, conn_id: ConnId, sub_id: &str) -> Option<Vec<Filter>> {
-        self.subs
-            .get(&conn_id)
-            .and_then(|conn_subs| conn_subs.get(sub_id).map(|(filters, _, _)| filters.clone()))
+        self.subs.get(&conn_id).and_then(|conn_subs| {
+            conn_subs.get(sub_id).map(|subscription| {
+                subscription
+                    .filters
+                    .iter()
+                    .map(|(filter, _)| filter.clone())
+                    .collect()
+            })
+        })
     }
 
     /// Return the total number of active subscriptions across all connections.
@@ -525,8 +639,8 @@ impl SubscriptionRegistry {
         let mut counts: std::collections::HashMap<CommunityId, u64> =
             std::collections::HashMap::new();
         for conn_entry in self.subs.iter() {
-            for (_, community_id, _) in conn_entry.value().values() {
-                *counts.entry(*community_id).or_default() += 1;
+            for subscription in conn_entry.value().values() {
+                *counts.entry(subscription.community_id).or_default() += 1;
             }
         }
         counts
@@ -542,14 +656,12 @@ impl SubscriptionRegistry {
         seen: &mut HashSet<(ConnId, SubId)>,
     ) {
         if let Some(conn_subs) = self.subs.get(&conn_id) {
-            if let Some((filters, sub_community_id, scope)) = conn_subs.get(sub_id) {
+            if let Some(subscription) = conn_subs.get(sub_id) {
                 // Candidate snapshots can become stale while a same-ID replacement
-                // moves the subscription. Re-check its authoritative scope before
-                // matching so an old index entry cannot deliver across scopes.
-                if *sub_community_id == community_id
-                    && scope.matches_channel(event.channel_id)
-                    && filters_match(filters, event)
-                {
+                // moves the subscription. Re-check its authoritative per-filter
+                // scope before matching so an old index entry cannot deliver
+                // across scopes.
+                if subscription.community_id == community_id && subscription.matches(event) {
                     let entry = (conn_id, sub_id.to_string());
                     if seen.insert(entry.clone()) {
                         results.push(entry);
@@ -559,97 +671,94 @@ impl SubscriptionRegistry {
         }
     }
 
-    /// Removes a subscription from the channel_kind_index (or channel_wildcard_index) using
-    /// targeted O(k) lookup where k = number of kinds in the filters, instead of O(n) full-scan.
-    fn remove_from_index(
+    /// Removes a subscription from every index slot it occupies, using
+    /// targeted lookups instead of a full scan.
+    fn remove_from_index(&self, conn_id: ConnId, sub_id: &str, subscription: &LiveSubscription) {
+        for slot in subscription.index_slots() {
+            self.remove_from_slot(subscription.community_id, &slot, conn_id, sub_id);
+        }
+    }
+
+    fn add_to_slot(
         &self,
+        community_id: CommunityId,
+        slot: IndexSlot,
         conn_id: ConnId,
         sub_id: &str,
-        filters: &[Filter],
-        community_id: CommunityId,
-        scope: &SubscriptionScope,
     ) {
-        if let SubscriptionScope::Channels(channel_ids) = scope {
-            for ch_id in channel_ids {
-                let ch_id = *ch_id;
-                match extract_kinds_from_filters(filters) {
-                    // None = wildcard (at least one filter had no kinds constraint).
-                    None => {
-                        // Was in wildcard index.
-                        if let Some(mut entries) =
-                            self.channel_wildcard_index.get_mut(&(community_id, ch_id))
-                        {
-                            entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                            if entries.is_empty() {
-                                drop(entries);
-                                self.channel_wildcard_index.remove(&(community_id, ch_id));
-                            }
-                        }
-                    }
-                    Some(kinds) if kinds.is_empty() => {
-                        // `kinds: []` subscriptions are never indexed (they match nothing),
-                        // so there is nothing to remove here.
-                    }
-                    Some(kinds) => {
-                        // Was in kind-specific index.
-                        for kind in kinds {
-                            let key = IndexKey {
-                                channel_id: ch_id,
-                                kind,
-                            };
-                            if let Some(mut entries) = self
-                                .channel_kind_index
-                                .get_mut(&(community_id, key.clone()))
-                            {
-                                entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                                if entries.is_empty() {
-                                    drop(entries);
-                                    self.channel_kind_index.remove(&(community_id, key));
-                                }
-                            }
-                        }
-                    }
+        let entry = (conn_id, sub_id.to_string());
+        match slot {
+            IndexSlot::ChannelKind(key) => self
+                .channel_kind_index
+                .entry((community_id, key))
+                .or_default()
+                .push(entry),
+            IndexSlot::ChannelWildcard(channel_id) => self
+                .channel_wildcard_index
+                .entry((community_id, channel_id))
+                .or_default()
+                .push(entry),
+            IndexSlot::GlobalPKind(key) => {
+                self.global_p_kind_index.entry(key).or_default().push(entry)
+            }
+            IndexSlot::GlobalKind(kind) => self
+                .global_kind_index
+                .entry((community_id, kind))
+                .or_default()
+                .push(entry),
+            IndexSlot::GlobalWildcard => self
+                .global_wildcard_index
+                .entry(community_id)
+                .or_default()
+                .push(entry),
+        }
+    }
+
+    fn remove_from_slot(
+        &self,
+        community_id: CommunityId,
+        slot: &IndexSlot,
+        conn_id: ConnId,
+        sub_id: &str,
+    ) {
+        fn remove_entry<K: Eq + std::hash::Hash>(
+            index: &DashMap<K, Vec<(ConnId, SubId)>>,
+            key: K,
+            conn_id: ConnId,
+            sub_id: &str,
+        ) {
+            if let Some(mut entries) = index.get_mut(&key) {
+                entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
+                if entries.is_empty() {
+                    drop(entries);
+                    index.remove_if(&key, |_, entries| entries.is_empty());
                 }
             }
-        } else {
-            // Global subscription — remove from the same global index chosen at registration.
-            if let Some(keys) = extract_global_p_kind_index_keys(community_id, filters) {
-                for key in keys {
-                    if let Some(mut entries) = self.global_p_kind_index.get_mut(&key) {
-                        entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                        if entries.is_empty() {
-                            drop(entries);
-                            self.global_p_kind_index.remove(&key);
-                        }
-                    }
-                }
-            } else {
-                match extract_kinds_from_filters(filters) {
-                    None => {
-                        if let Some(mut entries) = self.global_wildcard_index.get_mut(&community_id)
-                        {
-                            entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                            if entries.is_empty() {
-                                drop(entries);
-                                self.global_wildcard_index.remove(&community_id);
-                            }
-                        }
-                    }
-                    Some(kinds) if kinds.is_empty() => {}
-                    Some(kinds) => {
-                        for kind in kinds {
-                            if let Some(mut entries) =
-                                self.global_kind_index.get_mut(&(community_id, kind))
-                            {
-                                entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                                if entries.is_empty() {
-                                    drop(entries);
-                                    self.global_kind_index.remove(&(community_id, kind));
-                                }
-                            }
-                        }
-                    }
-                }
+        }
+        match slot {
+            IndexSlot::ChannelKind(key) => remove_entry(
+                &self.channel_kind_index,
+                (community_id, key.clone()),
+                conn_id,
+                sub_id,
+            ),
+            IndexSlot::ChannelWildcard(channel_id) => remove_entry(
+                &self.channel_wildcard_index,
+                (community_id, *channel_id),
+                conn_id,
+                sub_id,
+            ),
+            IndexSlot::GlobalPKind(key) => {
+                remove_entry(&self.global_p_kind_index, key.clone(), conn_id, sub_id)
+            }
+            IndexSlot::GlobalKind(kind) => remove_entry(
+                &self.global_kind_index,
+                (community_id, *kind),
+                conn_id,
+                sub_id,
+            ),
+            IndexSlot::GlobalWildcard => {
+                remove_entry(&self.global_wildcard_index, community_id, conn_id, sub_id)
             }
         }
     }
@@ -710,35 +819,6 @@ fn event_p_tag_values(event: &StoredEvent) -> Vec<String> {
         }
     }
     values
-}
-
-/// Returns the union of all `kinds` across filters, or `None` if any filter
-/// lacks a `kinds` array (meaning that filter matches all kinds — wildcard).
-///
-/// NIP-01 OR semantics: a subscription with multiple filters is satisfied when
-/// *any* filter matches. If one filter has no `kinds` constraint it matches
-/// every kind, making the whole subscription a wildcard regardless of the other
-/// filters.
-fn extract_kinds_from_filters(filters: &[Filter]) -> Option<Vec<Kind>> {
-    let mut seen = std::collections::HashSet::new();
-    let mut kinds = Vec::new();
-    for f in filters {
-        match &f.kinds {
-            Some(filter_kinds) => {
-                for k in filter_kinds {
-                    if seen.insert(*k) {
-                        kinds.push(*k);
-                    }
-                }
-            }
-            None => {
-                // At least one filter has no kind constraint — the whole
-                // subscription is a wildcard.
-                return None;
-            }
-        }
-    }
-    Some(kinds)
 }
 
 #[cfg(test)]
@@ -1962,5 +2042,186 @@ mod tests {
             "community must have 0 subs after last removal; got {:?}",
             snap2.get(&community)
         );
+    }
+
+    fn group_state_event(channel_id: Uuid, extra: &[[&str; 2]]) -> StoredEvent {
+        let keys = Keys::generate();
+        let mut tags = vec![Tag::parse(["d", &channel_id.to_string()]).expect("d tag")];
+        tags.extend(extra.iter().map(|tag| Tag::parse(*tag).expect("tag")));
+        let event = EventBuilder::new(Kind::Custom(39000), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .expect("sign");
+        StoredEvent::with_received_at(event, Utc::now(), Some(channel_id), true)
+    }
+
+    fn group_state_filter() -> Filter {
+        Filter::new().kind(Kind::Custom(39000))
+    }
+
+    #[test]
+    fn channel_reaches_only_the_filter_that_names_it() {
+        // Filter A names channel `a` by `#d` but also requires `#t:x`; filter
+        // B (`#P`) has only the global scope. A replacement for `a` without
+        // `t:x` matches B but not A, so it must not reach the subscription:
+        // B may not read `a` just because its sibling named it.
+        let registry = SubscriptionRegistry::new();
+        let conn = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        let creator = Keys::generate().public_key().to_hex();
+        let named = group_state_filter()
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), a.to_string())
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::T), "x");
+        let by_creator =
+            group_state_filter().custom_tag(SingleLetterTag::uppercase(Alphabet::P), &creator);
+        registry.register_filters_scoped(
+            test_community(),
+            conn,
+            "s".to_string(),
+            vec![
+                (named, SubscriptionScope::channels([a]).with_global()),
+                (by_creator, SubscriptionScope::global()),
+            ],
+        );
+
+        assert!(
+            registry
+                .fan_out(&group_state_event(a, &[["P", &creator]]))
+                .is_empty(),
+            "a sibling's channel must not reach a filter that does not name it"
+        );
+        assert_eq!(
+            registry.fan_out(&group_state_event(a, &[["t", "x"]])),
+            vec![(conn, "s".to_string())],
+            "the naming filter receives its own channel's replacement"
+        );
+    }
+
+    #[test]
+    fn mixed_named_and_global_filters_each_keep_live_delivery() {
+        let registry = SubscriptionRegistry::new();
+        let conn = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let named =
+            group_state_filter().custom_tag(SingleLetterTag::lowercase(Alphabet::D), a.to_string());
+        let global = Filter::new().kind(Kind::TextNote);
+        registry.register_filters_scoped(
+            test_community(),
+            conn,
+            "s".to_string(),
+            vec![
+                (named, SubscriptionScope::channels([a]).with_global()),
+                (global, SubscriptionScope::global()),
+            ],
+        );
+        let hit = vec![(conn, "s".to_string())];
+
+        assert_eq!(registry.fan_out(&group_state_event(a, &[])), hit);
+        assert_eq!(
+            registry.fan_out(&make_stored_event(Kind::TextNote, None)),
+            hit
+        );
+        assert!(registry.fan_out(&group_state_event(other, &[])).is_empty());
+        assert!(registry
+            .fan_out(&make_stored_event(Kind::TextNote, Some(a)))
+            .is_empty());
+    }
+
+    #[test]
+    fn per_filter_topics_retain_and_release_each_topic_once() {
+        let registry = SubscriptionRegistry::new();
+        let conn = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let filters = vec![
+            (
+                group_state_filter(),
+                SubscriptionScope::channels([a, b]).with_global(),
+            ),
+            (
+                Filter::new().kind(Kind::TextNote),
+                SubscriptionScope::channels([a]),
+            ),
+            (
+                Filter::new().kind(Kind::Metadata),
+                SubscriptionScope::global(),
+            ),
+        ];
+        assert!(registry
+            .register_filters_scoped(test_community(), conn, "s".into(), filters.clone())
+            .is_none());
+
+        // Replacement reports the union of the old filters' topics, once each.
+        let replaced = registry
+            .register_filters_scoped(test_community(), conn, "s".into(), filters)
+            .expect("replaced");
+        assert_eq!(
+            replaced.scope,
+            SubscriptionScope::channels([a, b]).with_global()
+        );
+
+        // Revoking `a` reports the subscription once and keeps it live for
+        // `b` and the global topic; both filters lose `a`.
+        let updates = registry.remove_channel_subscriptions_scoped(test_community(), conn, a);
+        assert_eq!(
+            updates,
+            vec![ChannelSubscriptionUpdate {
+                sub_id: "s".into(),
+                removed: false,
+            }]
+        );
+        assert!(registry.fan_out(&group_state_event(a, &[])).is_empty());
+        assert!(registry
+            .fan_out(&make_stored_event(Kind::TextNote, Some(a)))
+            .is_empty());
+        assert_eq!(registry.fan_out(&group_state_event(b, &[])).len(), 1);
+        assert_eq!(
+            registry
+                .fan_out(&make_stored_event(Kind::Metadata, None))
+                .len(),
+            1
+        );
+        assert!(registry.channel_subscriber_conns(a).is_empty());
+
+        let removed = registry.remove_connection(conn);
+        assert_eq!(
+            removed,
+            vec![RemovedSubscription {
+                community_id: test_community(),
+                scope: SubscriptionScope::channels([b]).with_global(),
+            }]
+        );
+        assert!(registry.channel_kind_index.is_empty());
+        assert!(registry.global_kind_index.is_empty());
+    }
+
+    #[test]
+    fn revoking_the_last_channel_of_a_channel_only_subscription_removes_it() {
+        let registry = SubscriptionRegistry::new();
+        let conn = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        registry.register_filters_scoped(
+            test_community(),
+            conn,
+            "s".into(),
+            vec![
+                (
+                    Filter::new().kind(Kind::TextNote),
+                    SubscriptionScope::channels([a]),
+                ),
+                (group_state_filter(), SubscriptionScope::channels([a])),
+            ],
+        );
+        let updates = registry.remove_channel_subscriptions_scoped(test_community(), conn, a);
+        assert_eq!(
+            updates,
+            vec![ChannelSubscriptionUpdate {
+                sub_id: "s".into(),
+                removed: true,
+            }]
+        );
+        assert!(registry.get_filters(conn, "s").is_none());
+        assert!(registry.channel_kind_index.is_empty());
     }
 }
