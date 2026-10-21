@@ -57,6 +57,18 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   }
 
   @override
+  void didUpdateWidget(DeepLinkDispatcher oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A link parked while dispatch was off waits for this, not a new event.
+    if (widget.dispatchMessageLinks && !oldWidget.dispatchMessageLinks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     // Re-evaluate dispatch when either a new link arrives or channels load.
     ref.listen<BuzzDeepLink?>(pendingDeepLinkProvider, (_, link) {
@@ -165,7 +177,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   }
 
   void _dispatchNavigableLink(BuzzDeepLink link) {
-    if (_resolvingLink) return;
+    if (_resolvingLink || !widget.dispatchMessageLinks) return;
     final channelId = switch (link) {
       MessageDeepLink(:final channelId) => channelId,
       ChannelDeepLink(:final channelId) => channelId,
@@ -190,7 +202,9 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     } finally {
       _resolvingLink = false;
     }
-    if (!mounted) return;
+    // Dispatch can turn off during the lookup (hosted setup is showing).
+    // Keep the link parked; didUpdateWidget re-dispatches when it turns on.
+    if (!mounted || !widget.dispatchMessageLinks) return;
     if (ref.read(pendingDeepLinkProvider) != link) {
       // The guard above held back whatever replaced this link meanwhile.
       _maybeDispatch(ref.read(pendingDeepLinkProvider));
