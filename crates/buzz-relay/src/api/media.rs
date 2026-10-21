@@ -654,7 +654,10 @@ async fn bind_media_read_tenant(
 ) -> Result<TenantContext, MediaError> {
     crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .ok_or(MediaError::NotFound)
+        .map_err(|e| match e {
+            crate::nip_fi_shadow::TenantBindError::Unmapped => MediaError::NotFound,
+            crate::nip_fi_shadow::TenantBindError::Unavailable => MediaError::ServiceUnavailable,
+        })
 }
 
 /// Extract and signature-verify the Blossom auth event for a GET/HEAD read.

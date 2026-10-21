@@ -171,21 +171,39 @@ pub(crate) async fn observe_strict_proof<E>(
     }
 }
 
+/// Why [`bind_tenant`] bound no community. Callers answer `Unmapped` with
+/// their generic not-found rejection (so an unauthenticated caller cannot probe
+/// which hosts exist) and `Unavailable` with a 503: a failed lookup says
+/// nothing about the host, so it must not be reported as "not found".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TenantBindError {
+    /// The Host maps to no community on this deployment.
+    Unmapped,
+    /// The community lookup itself failed (e.g. a database error).
+    Unavailable,
+}
+
 /// Bind the request's tenant from its Host header, as every HTTP handler's
-/// row zero does. `None` means the Host bound no community; the caller keeps
-/// its own legacy rejection, and shadow records enforce's verdict first.
+/// row zero does. An `Err` means the Host bound no community; the caller keeps
+/// its own legacy rejection, and shadow records enforce's verdict first. A
+/// failed lookup is logged and reported as [`TenantBindError::Unavailable`].
 pub(crate) async fn bind_tenant(
     state: &crate::state::AppState,
     headers: &HeaderMap,
-) -> Option<buzz_core::TenantContext> {
+) -> Result<buzz_core::TenantContext, TenantBindError> {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
-        .await
-        .ok();
-    if tenant.is_none() {
+    let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
+        Ok(tenant) => Ok(tenant),
+        Err(crate::tenant::BindError::UnmappedHost) => Err(TenantBindError::Unmapped),
+        Err(crate::tenant::BindError::Lookup(error)) => {
+            tracing::error!(%error, "tenant lookup failed (fail closed, 503)");
+            Err(TenantBindError::Unavailable)
+        }
+    };
+    if tenant.is_err() {
         observe_unbound(state, headers).await;
     }
     tenant
