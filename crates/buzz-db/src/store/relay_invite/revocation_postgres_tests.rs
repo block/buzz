@@ -317,6 +317,7 @@ async fn stalled_production_mint_ignores_lifted_history_and_later_audit_touches(
         .unwrap();
     }
 
+    super::upgrade_postgres_tests::run_invite_repair_script(&pool).await;
     let revoked: Option<chrono::DateTime<chrono::Utc>> =
         sqlx::query_scalar("SELECT revoked_at FROM relay_invites WHERE community_id=$1 AND id=$2")
             .bind(community.as_uuid())
