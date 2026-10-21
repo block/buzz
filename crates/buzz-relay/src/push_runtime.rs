@@ -1111,21 +1111,24 @@ mod postgres_tests {
         let context = load_match_context(&state, &batch)
             .await
             .expect("match context");
-        let woken: Vec<Vec<Vec<u8>>> = batch
+        let woken: Vec<Vec<(Vec<u8>, String)>> = batch
             .jobs
             .iter()
             .map(|job| {
                 match_job(job, &context)
                     .expect("match")
                     .into_iter()
-                    .map(|wake| wake.author)
+                    .map(|wake| (wake.author, wake.installation_id))
                     .collect()
             })
             .collect();
         let member_key = member.public_key().to_bytes().to_vec();
         assert_eq!(
             woken,
-            vec![vec![member_key.clone()], vec![member_key]],
+            vec![
+                vec![(member_key.clone(), "unnamed".to_owned())],
+                vec![(member_key, "named".to_owned())],
+            ],
             "ordinary channel wakes its member's broad lease; system channel wakes only the lease that names it"
         );
     }
