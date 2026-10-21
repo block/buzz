@@ -13,7 +13,7 @@ use crate::{AdmittedTx, Db};
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
-pub use buzz_core::channel::{MemberRole, RoleChangeTarget};
+pub use buzz_core::channel::MemberRole;
 
 /// A channel membership row as returned from the database.
 #[derive(Debug, Clone)]
@@ -178,7 +178,7 @@ pub async fn verify_channel_roster_fence_behavior(pool: &sqlx::PgPool) -> Result
 /// Take the per-channel membership lock. MUST be the first statement in the
 /// transaction that then reads roles/owner counts and writes membership, so the
 /// whole check-then-write sequence is atomic against a concurrent one.
-async fn acquire_channel_membership_lock(
+pub(crate) async fn acquire_channel_membership_lock(
     tx: &mut PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
@@ -350,6 +350,17 @@ pub async fn is_member_in_transaction(
     .await?;
     let cnt: i64 = row.try_get("cnt")?;
     Ok(cnt > 0)
+}
+
+/// Read a pubkey's active channel role on a caller-owned transaction, or
+/// `None` when it is not an active member.
+pub async fn active_role_in_transaction(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<Option<String>> {
+    let community_id = tx.community();
+    get_active_role_tx(tx.conn(), community_id, channel_id, pubkey).await
 }
 
 /// Auto-add a member on a caller-owned transaction (for ephemeral-channel admission).
@@ -605,17 +616,7 @@ pub async fn lock_member_snapshot(
 
 /// Add a member to a channel.
 ///
-/// Role enforcement:
-/// - Open channels: `invited_by` is optional, and the caller's ordinary role is kept.
-///   Callers cannot self-assign elevated roles (see below).
-/// - Private channels: requires an `invited_by` who is an active member, or the channel
-///   creator bootstrapping their own first membership. Any active member may add an
-///   ordinary member, guest, or bot; only owners/admins may grant elevated roles.
-/// - Elevated roles (`Owner`, `Admin`) may only be granted by an existing owner/admin,
-///   even on open channels.
-///
-/// The entire check-then-insert sequence runs inside a transaction to prevent TOCTOU
-/// races (e.g. the inviter being removed between the role check and the INSERT).
+/// The caller picks the role explicitly. See [`put_member`].
 pub async fn add_member(
     pool: &PgPool,
     community_id: CommunityId,
@@ -624,12 +625,51 @@ pub async fn add_member(
     role: MemberRole,
     invited_by: Option<&[u8]>,
 ) -> Result<MemberRecord> {
+    put_member(
+        pool,
+        community_id,
+        channel_id,
+        pubkey,
+        Some(role),
+        invited_by,
+    )
+    .await
+}
+
+/// Add a member to a channel, or change an active member's role (kind:9000,
+/// and the kind:9021 self-join).
+///
+/// `invited_by` is the actor; `None` means the target is adding themselves.
+/// `requested` is `None` when the event has no `role` tag: an active member
+/// then keeps their role, and a new member gets the channel's `join_role`.
+///
+/// This is the authority for every admission rule
+/// ([`buzz_core::channel::decide_member_put`]), and for the last-owner rule.
+/// The relay validator applies the same rules earlier only to give the client
+/// a real error. Everything the decision reads — the channel's visibility and
+/// `join_role`, and the actor's and target's active roles — is read in one
+/// transaction after the channel's membership lock. A change to visibility or
+/// `join_role` takes the same lock ([`crate::channel::update_channel`]), so
+/// neither a membership write nor a setting change can slip between the
+/// decision and the write.
+///
+/// The private-channel creator may add themselves as the first member
+/// (bootstrap), with any role.
+pub async fn put_member(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    requested: Option<MemberRole>,
+    invited_by: Option<&[u8]>,
+) -> Result<MemberRecord> {
     if pubkey.len() != 32 {
         return Err(DbError::InvalidData(format!(
             "pubkey must be 32 bytes, got {}",
             pubkey.len()
         )));
     }
+    let actor = invited_by.unwrap_or(pubkey);
 
     let mut tx = crate::begin_community_write_transaction(
         pool,
@@ -638,141 +678,61 @@ pub async fn add_member(
     )
     .await?;
 
-    // First statement: serialize the whole role-check / owner-count / upsert
+    // First statement: serialize the whole decision / owner-count / upsert
     // sequence against concurrent membership writes on this channel.
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
 
     let channel = get_channel_tx(tx.conn(), community_id, channel_id).await?;
-
-    let effective_role = if channel.visibility == "private" {
-        let inviter = invited_by.ok_or_else(|| {
-            DbError::AccessDenied("private channel requires an invite".to_string())
-        })?;
-
-        // Bootstrap: channel creator may add themselves as the first member.
-        let is_creator_bootstrap = inviter == pubkey && inviter == channel.created_by.as_slice();
-
-        if !is_creator_bootstrap {
-            let inviter_role_str = get_active_role_tx(tx.conn(), community_id, channel_id, inviter)
-                .await?
-                .ok_or_else(|| {
-                    DbError::AccessDenied("inviter is not an active member".to_string())
-                })?;
-
-            let inviter_role: MemberRole = inviter_role_str.parse().map_err(|_| {
-                DbError::InvalidData(format!("invalid role in database: {inviter_role_str}"))
-            })?;
-
-            // Any active member may extend private-channel access with an
-            // ordinary role. Granting owner/admin remains reserved for an
-            // existing owner/admin.
-            if role.is_elevated() && !inviter_role.is_elevated() {
-                return Err(DbError::AccessDenied(
-                    "only owners/admins may grant elevated roles".to_string(),
-                ));
-            }
-        }
-
-        role
+    let private = channel.visibility == "private";
+    let join_role = buzz_core::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
+    let current_role = get_active_role_tx(tx.conn(), community_id, channel_id, pubkey).await?;
+    let actor_role = if actor == pubkey {
+        current_role.clone()
     } else {
-        // Open channel: anyone may join, but only existing owners/admins may grant
-        // elevated roles. A kind:9021 self-join passes the channel's `join_role`.
-        if role.is_elevated() {
-            let granter_role = match invited_by {
-                Some(inv) => get_active_role_tx(tx.conn(), community_id, channel_id, inv).await?,
-                None => None,
-            };
-            match granter_role.as_deref() {
-                Some("owner") | Some("admin") => role,
-                _ => {
-                    return Err(DbError::AccessDenied(
-                        "only owners/admins may grant elevated roles".to_string(),
-                    ))
-                }
-            }
-        } else {
-            role
-        }
+        get_active_role_tx(tx.conn(), community_id, channel_id, actor).await?
+    };
+    let actor_role: Option<MemberRole> = actor_role
+        .map(|r| {
+            r.parse()
+                .map_err(|_| DbError::InvalidData(format!("invalid role in database: {r}")))
+        })
+        .transpose()?;
+
+    let is_creator_bootstrap = private
+        && actor == pubkey
+        && actor_role.is_none()
+        && actor == channel.created_by.as_slice();
+    let effective_role = if is_creator_bootstrap {
+        requested.unwrap_or(MemberRole::Owner)
+    } else {
+        buzz_core::channel::decide_member_put(buzz_core::channel::MemberPut {
+            private,
+            join_role,
+            actor_role,
+            target_is_actor: actor == pubkey,
+            target_role: current_role.as_deref(),
+            requested,
+        })
+        .map_err(|denial| DbError::AccessDenied(member_put_denial_message(denial).to_string()))?
     };
 
-    // Changing an *active* member's role is privileged in BOTH directions.
-    // Demotion is as consequential as promotion: only owners/admins may grant
-    // elevated roles, so a demoted owner cannot restore themselves. Guarding
-    // only `role.is_elevated()` above therefore left owner→member demotion
-    // unauthorized-by-anyone. Re-adding an active member with the role they
-    // already hold stays idempotent and unguarded — the huddle bot-add and
-    // kind:9021 join paths rely on that.
-    //
-    // Deliberately keyed on the *active* role. A soft-removed row's stored role
-    // is history, not live authority: `removed_at` says it is no longer in
-    // force. Reactivation therefore lands at whatever `effective_role` the
-    // checks above already authorized — an ordinary role for any unprivileged caller,
-    // elevated only when a currently-elevated granter asked for it. Inferring
-    // current authority from a removed row would make soft-deleted ownership a
-    // resurrection token: an owner removed by another owner could self-rejoin
-    // via kind:9021 (`join_role, None`) and silently regain ownership.
-    let current_role = get_active_role_tx(tx.conn(), community_id, channel_id, pubkey).await?;
-    if let Some(current_role) = current_role.filter(|r| r != effective_role.as_str()) {
-        let actor_role = match invited_by {
-            Some(inviter) => {
-                get_active_role_tx(tx.conn(), community_id, channel_id, inviter).await?
-            }
-            None => None,
-        };
-        let actor_role: Option<MemberRole> = actor_role.and_then(|r| r.parse().ok());
-        // Owners and admins may change any role; any member who may post may
-        // make a guest a member, except a guest agent, which only its owner
-        // raises. A stored role this build does not know is changed only by an
-        // elevated actor.
-        let may_change = match current_role.parse::<MemberRole>() {
-            Ok(current) => {
-                let target = if current == MemberRole::Guest
-                    && !actor_role.is_some_and(|r| r.is_elevated())
-                {
-                    let agent_owner: Option<Vec<u8>> = sqlx::query_scalar(
-                        "SELECT agent_owner_pubkey FROM users \
-                         WHERE community_id = $1 AND pubkey = $2",
-                    )
-                    .bind(community_id.as_uuid())
-                    .bind(pubkey)
-                    .fetch_optional(tx.conn())
-                    .await?
-                    .flatten();
-                    RoleChangeTarget::from_agent_owner(
-                        agent_owner.as_deref(),
-                        invited_by.unwrap_or_default(),
-                    )
-                } else {
-                    RoleChangeTarget::Person
-                };
-                MemberRole::may_change_role(actor_role, current, effective_role, target)
-            }
-            Err(_) => actor_role.is_some_and(|r| r.is_elevated()),
-        };
-        if !may_change {
+    // Defense-in-depth, mirroring `remove_member`: a demotion must not strip
+    // the channel of its last owner, which would leave nobody able to
+    // moderate, edit metadata, or re-grant ownership.
+    if current_role.as_deref() == Some("owner") && effective_role != MemberRole::Owner {
+        let row = sqlx::query(
+            "SELECT COUNT(*) as cnt FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND role = 'owner' AND removed_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .fetch_one(tx.conn())
+        .await?;
+        let owner_count: i64 = row.try_get("cnt")?;
+        if owner_count <= 1 {
             return Err(DbError::AccessDenied(
-                "only owners/admins may change an active member's role".to_string(),
+                "cannot demote the last owner — transfer ownership first".to_string(),
             ));
-        }
-
-        // Defense-in-depth, mirroring `remove_member`: a demotion must not
-        // strip the channel of its last owner, which would leave nobody able
-        // to moderate, edit metadata, or re-grant ownership.
-        if current_role == "owner" && effective_role != MemberRole::Owner {
-            let row = sqlx::query(
-                "SELECT COUNT(*) as cnt FROM channel_members \
-                 WHERE community_id = $1 AND channel_id = $2 AND role = 'owner' AND removed_at IS NULL",
-            )
-            .bind(community_id.as_uuid())
-            .bind(channel_id)
-            .fetch_one(tx.conn())
-            .await?;
-            let owner_count: i64 = row.try_get("cnt")?;
-            if owner_count <= 1 {
-                return Err(DbError::AccessDenied(
-                    "cannot demote the last owner — transfer ownership first".to_string(),
-                ));
-            }
         }
     }
 
@@ -809,6 +769,20 @@ pub async fn add_member(
     let record = row_to_member_record(row)?;
     tx.commit().await?;
     Ok(record)
+}
+
+/// The client-visible reason for a [`buzz_core::channel::MemberPutDenial`].
+fn member_put_denial_message(denial: buzz_core::channel::MemberPutDenial) -> &'static str {
+    use buzz_core::channel::MemberPutDenial as D;
+    match denial {
+        D::NotAMember => "private channel requires an invite from an active member",
+        D::ElevatedRoleGrant => "only owners/admins may grant elevated roles",
+        D::GuestCannotAdd => "only members can add people in this channel",
+        D::SelfJoinAboveJoinRole => {
+            "joining this channel gives the guest role; ask a member to make you a member"
+        }
+        D::RoleChange => "only owners/admins may change an active member's role",
+    }
 }
 
 /// Remove a member from a channel (soft delete).
@@ -1911,6 +1885,28 @@ impl Db {
             channel_id,
             pubkey,
             role,
+            invited_by,
+        )
+        .await
+    }
+
+    /// Adds a member or changes a role, deciding the role from the request
+    /// and current channel state (see [`put_member`]).
+    #[datastore_span(name = "put_member", system = "postgresql")]
+    pub async fn put_member(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        requested: Option<MemberRole>,
+        invited_by: Option<&[u8]>,
+    ) -> Result<MemberRecord> {
+        put_member(
+            &self.pool,
+            community_id,
+            channel_id,
+            pubkey,
+            requested,
             invited_by,
         )
         .await
@@ -3128,7 +3124,8 @@ mod postgres_tests {
         .expect_err("a member cannot demote a member");
         assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
 
-        // A guest agent is raised only by its owner (or an owner/admin).
+        // Roles mean the same for agents: any member may raise a guest
+        // agent, not only its owner.
         let agent = random_pubkey();
         let agent_owner = random_pubkey();
         for pk in [&agent, &agent_owner] {
@@ -3143,23 +3140,13 @@ mod postgres_tests {
             &pool,
             community,
             channel.id,
-            &agent_owner,
-            MemberRole::Member,
-            Some(&owner),
-        )
-        .await
-        .expect("add agent owner");
-        add_member(
-            &pool,
-            community,
-            channel.id,
             &agent,
             MemberRole::Guest,
             None,
         )
         .await
         .expect("agent joins as guest");
-        let err = add_member(
+        add_member(
             &pool,
             community,
             channel.id,
@@ -3168,22 +3155,226 @@ mod postgres_tests {
             Some(&member),
         )
         .await
-        .expect_err("another member cannot raise someone else's agent");
-        assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
-        add_member(
-            &pool,
-            community,
-            channel.id,
-            &agent,
-            MemberRole::Member,
-            Some(&agent_owner),
-        )
-        .await
-        .expect("the agent's owner may raise it");
+        .expect("any member may raise a guest agent");
         let role = get_member_role(&pool, community, channel.id, &agent)
             .await
             .expect("read role");
         assert_eq!(role.as_deref(), Some("member"));
+    }
+
+    /// `put_member` enforces admission itself, so a caller that skips the
+    /// relay validator still cannot join an announce channel above
+    /// `join_role`, and a guest still cannot add anyone. No role tag keeps an
+    /// active member's role and gives a new member `join_role`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn put_member_enforces_announce_admission() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let joiner = random_pubkey();
+        let invitee = random_pubkey();
+        let outsider = random_pubkey();
+        for pk in [&owner, &joiner, &invitee, &outsider] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "put-member-announce",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+        crate::channel::update_channel(
+            &pool,
+            community,
+            channel.id,
+            crate::channel::ChannelUpdate {
+                join_role: Some("guest".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("make announce channel");
+
+        // A joiner cannot ask for more than `join_role`.
+        let err = put_member(
+            &pool,
+            community,
+            channel.id,
+            &joiner,
+            Some(MemberRole::Member),
+            None,
+        )
+        .await
+        .expect_err("self-join above join_role");
+        assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+        // No role tag: a new member gets `join_role`.
+        let joined = put_member(&pool, community, channel.id, &joiner, None, None)
+            .await
+            .expect("self-join");
+        assert_eq!(joined.role, "guest");
+
+        // A guest cannot add anyone, and neither can a non-member where
+        // joining gives `guest`.
+        for actor in [&joiner, &outsider] {
+            let err = put_member(
+                &pool,
+                community,
+                channel.id,
+                &invitee,
+                Some(MemberRole::Guest),
+                Some(actor),
+            )
+            .await
+            .expect_err("guest or outsider add");
+            assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+        }
+        assert_eq!(
+            get_member_role(&pool, community, channel.id, &invitee)
+                .await
+                .expect("read role"),
+            None
+        );
+
+        // A member adds with no role tag: the new member gets `join_role`;
+        // then no role tag keeps the role the owner raised them to.
+        let added = put_member(&pool, community, channel.id, &invitee, None, Some(&owner))
+            .await
+            .expect("owner adds");
+        assert_eq!(added.role, "guest");
+        put_member(
+            &pool,
+            community,
+            channel.id,
+            &invitee,
+            Some(MemberRole::Member),
+            Some(&owner),
+        )
+        .await
+        .expect("owner raises");
+        let kept = put_member(&pool, community, channel.id, &invitee, None, Some(&owner))
+            .await
+            .expect("re-add without role tag");
+        assert_eq!(kept.role, "member");
+    }
+
+    /// A `join_role` change and an admission are ordered by the membership
+    /// lock: a join that waits on an uncommitted change to `guest` is decided
+    /// on the new setting once it commits, not on the old one.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn put_member_waits_for_a_concurrent_join_role_change() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let joiner = random_pubkey();
+        for pk in [&owner, &joiner] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "put-member-join-role-race",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // The same steps as `update_channel`: the row update, then the lock.
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query("UPDATE channels SET join_role = 'guest' WHERE community_id = $1 AND id = $2")
+            .bind(community_id)
+            .bind(channel.id)
+            .execute(&mut *tx)
+            .await
+            .expect("change join_role");
+        acquire_channel_membership_lock(&mut tx, community, channel.id)
+            .await
+            .expect("lock");
+
+        let join = tokio::spawn({
+            let pool = pool.clone();
+            let channel_id = channel.id;
+            let joiner = joiner.clone();
+            async move {
+                put_member(
+                    &pool,
+                    community,
+                    channel_id,
+                    &joiner,
+                    Some(MemberRole::Member),
+                    None,
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !join.is_finished(),
+            "the join must wait for the setting change"
+        );
+        tx.commit().await.expect("commit setting change");
+
+        let err = join
+            .await
+            .expect("join task")
+            .expect_err("the join is decided on join_role = guest");
+        assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+        assert_eq!(
+            get_member_role(&pool, community, channel.id, &joiner)
+                .await
+                .expect("read role"),
+            None
+        );
+
+        // The other order: `update_channel` waits for an admission that holds
+        // the lock.
+        let mut admission = pool.begin().await.expect("begin admission");
+        acquire_channel_membership_lock(&mut admission, community, channel.id)
+            .await
+            .expect("lock");
+        let update = tokio::spawn({
+            let pool = pool.clone();
+            let channel_id = channel.id;
+            async move {
+                crate::channel::update_channel(
+                    &pool,
+                    community,
+                    channel_id,
+                    crate::channel::ChannelUpdate {
+                        join_role: Some("member".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !update.is_finished(),
+            "a join_role change must wait for an admission in progress"
+        );
+        admission.commit().await.expect("commit admission");
+        update
+            .await
+            .expect("update task")
+            .expect("join_role change");
     }
 
     /// The fix must not break legitimate role management: an owner demoting a

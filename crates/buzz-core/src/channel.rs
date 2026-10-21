@@ -241,25 +241,106 @@ impl FromStr for ChannelJoinRole {
     }
 }
 
-/// Who the target of a role change is, for [`MemberRole::may_change_role`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RoleChangeTarget {
-    /// A key with no recorded agent owner.
-    Person,
-    /// An agent whose recorded owner is the actor.
-    OwnAgent,
-    /// An agent whose recorded owner is someone else.
-    OtherAgent,
+/// The facts a kind:9000 add or role change is decided on, for
+/// [`decide_member_put`]. Every field must come from one consistent read: the
+/// relay validator reads them for a fast, client-visible answer, and
+/// `add_member` reads them again under the channel's membership lock, so the
+/// stored role is always decided on current state.
+#[derive(Debug, Clone, Copy)]
+pub struct MemberPut<'a> {
+    /// Whether the channel is private.
+    pub private: bool,
+    /// The channel's `join_role`.
+    pub join_role: ChannelJoinRole,
+    /// The actor's active role, or `None` when the actor is not a member.
+    pub actor_role: Option<MemberRole>,
+    /// Whether the actor is adding themselves.
+    pub target_is_actor: bool,
+    /// The target's active stored role, or `None` when the target is not an
+    /// active member. A soft-removed row is not an active role.
+    pub target_role: Option<&'a str>,
+    /// The role the event asks for, or `None` when it has no `role` tag.
+    pub requested: Option<MemberRole>,
 }
 
-impl RoleChangeTarget {
-    /// Classify a target from its recorded agent owner (`users.agent_owner_pubkey`).
-    pub fn from_agent_owner(agent_owner: Option<&[u8]>, actor: &[u8]) -> Self {
-        match agent_owner {
-            None => Self::Person,
-            Some(owner) if owner == actor => Self::OwnAgent,
-            Some(_) => Self::OtherAgent,
+/// Why [`decide_member_put`] refused an add or role change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberPutDenial {
+    /// A non-member tried to add someone to a private channel.
+    NotAMember,
+    /// A non-elevated actor asked for owner or admin.
+    ElevatedRoleGrant,
+    /// A guest, or a non-member where joining does not give `member`, tried
+    /// to add someone else. Adding people is a write.
+    GuestCannotAdd,
+    /// A non-member adding themselves asked for a role above `join_role`.
+    SelfJoinAboveJoinRole,
+    /// The actor may not change the target's active role.
+    RoleChange,
+}
+
+/// Decide a kind:9000 add or role change, and the role to store.
+///
+/// This is the one definition of the admission rules: a guest never adds
+/// anyone; a non-member adds others only where joining gives `member`; a
+/// joiner gets `join_role` or a lower role it asks for; only owners and admins
+/// grant elevated roles; and an active role changes only as
+/// [`MemberRole::may_change_role`] allows. With no `role` tag, an active member
+/// keeps their role and a new member gets `join_role`.
+///
+/// Returns the role to store. The last-owner rule needs the owner count and
+/// the target agent's `channel_add_policy` needs its own read; callers check
+/// both separately.
+pub fn decide_member_put(put: MemberPut<'_>) -> Result<MemberRole, MemberPutDenial> {
+    let actor_elevated = put.actor_role.is_some_and(|role| role.is_elevated());
+    if put.private && put.actor_role.is_none() {
+        return Err(MemberPutDenial::NotAMember);
+    }
+    if put.target_is_actor && put.actor_role.is_none() {
+        // A joiner (open channels only; private ones are refused above).
+        if put
+            .requested
+            .is_some_and(|role| !put.join_role.allows_self_join_as(role))
+        {
+            return Err(MemberPutDenial::SelfJoinAboveJoinRole);
         }
+    } else if put.target_role.is_none()
+        && put.requested.is_some_and(|role| role.is_elevated())
+        && !actor_elevated
+    {
+        // Granting an elevated role to a new member. An active member's role
+        // change is decided by `may_change_role` below.
+        return Err(MemberPutDenial::ElevatedRoleGrant);
+    }
+    if !put.target_is_actor {
+        let may_add = match put.actor_role {
+            Some(role) => role.can_post(),
+            None => put.join_role == ChannelJoinRole::Member,
+        };
+        if !may_add {
+            return Err(MemberPutDenial::GuestCannotAdd);
+        }
+    }
+
+    let Some(current) = put.target_role else {
+        return Ok(put.requested.unwrap_or(put.join_role.member_role()));
+    };
+    let Some(requested) = put.requested else {
+        // No role tag: an active member keeps their role.
+        return current.parse().map_err(|_| MemberPutDenial::RoleChange);
+    };
+    if current == requested.as_str() {
+        return Ok(requested);
+    }
+    // A stored role this build does not know is changed only by an elevated
+    // actor.
+    match current.parse::<MemberRole>() {
+        Ok(current) if MemberRole::may_change_role(put.actor_role, current, requested) => {
+            Ok(requested)
+        }
+        Ok(_) => Err(MemberPutDenial::RoleChange),
+        Err(_) if actor_elevated => Ok(requested),
+        Err(_) => Err(MemberPutDenial::RoleChange),
     }
 }
 
@@ -385,15 +466,14 @@ impl MemberRole {
     ///
     /// Owners and admins may make any change (the last-owner rule is checked
     /// separately). Any other active member who may post may make a guest a
-    /// member: the same authority they have to add a new member. A guest
-    /// agent is the exception: only its owner raises it, so that other people
-    /// cannot widen where an agent can write. Nobody else may change a role;
-    /// a guest cannot promote anyone, including themselves.
+    /// member: the same authority they have to add a new member. This holds
+    /// for agents too; a later restricted-agent level may limit it. Nobody
+    /// else may change a role; a guest cannot promote anyone, including
+    /// themselves.
     pub fn may_change_role(
         actor: Option<MemberRole>,
         current: MemberRole,
         requested: MemberRole,
-        target: RoleChangeTarget,
     ) -> bool {
         let Some(actor) = actor else {
             return false;
@@ -401,8 +481,7 @@ impl MemberRole {
         actor.is_elevated()
             || (actor.can_post()
                 && current == Self::Guest
-                && matches!(requested, Self::Member | Self::Bot)
-                && target != RoleChangeTarget::OtherAgent)
+                && matches!(requested, Self::Member | Self::Bot))
     }
 
     /// Numeric permission level for authorization comparisons.
@@ -453,7 +532,7 @@ mod tests {
     use super::{
         canonical_channel_name, channel_type_from_group_state_tags, group_state_identity_tags,
         parse_channel_labels, ChannelJoinRole, ChannelLabelError, ChannelType, MemberRole,
-        RoleChangeTarget, LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
+        LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
     };
 
     #[test]
@@ -667,43 +746,30 @@ mod tests {
     #[test]
     fn only_elevated_roles_change_roles_except_promoting_a_guest() {
         use MemberRole::*;
-        use RoleChangeTarget::*;
         const ALL: [MemberRole; 5] = [Owner, Admin, Member, Guest, Bot];
-        const TARGETS: [RoleChangeTarget; 3] = [Person, OwnAgent, OtherAgent];
-        for target in TARGETS {
-            for actor in [Owner, Admin] {
-                for current in ALL {
-                    for requested in ALL {
-                        assert!(MemberRole::may_change_role(
-                            Some(actor),
-                            current,
-                            requested,
-                            target
-                        ));
-                    }
+        for actor in [Owner, Admin] {
+            for current in ALL {
+                for requested in ALL {
+                    assert!(MemberRole::may_change_role(Some(actor), current, requested));
                 }
             }
-            for actor in [Member, Bot] {
-                for current in ALL {
-                    for requested in ALL {
-                        let promotes_guest = current == Guest
-                            && matches!(requested, Member | Bot)
-                            && target != OtherAgent;
-                        assert_eq!(
-                            MemberRole::may_change_role(Some(actor), current, requested, target),
-                            promotes_guest,
-                            "{actor}: {current} -> {requested} ({target:?})"
-                        );
-                    }
+        }
+        for actor in [Member, Bot] {
+            for current in ALL {
+                for requested in ALL {
+                    let promotes_guest = current == Guest && matches!(requested, Member | Bot);
+                    assert_eq!(
+                        MemberRole::may_change_role(Some(actor), current, requested),
+                        promotes_guest,
+                        "{actor}: {current} -> {requested}"
+                    );
                 }
             }
-            for actor in [None, Some(Guest)] {
-                for current in ALL {
-                    for requested in ALL {
-                        assert!(!MemberRole::may_change_role(
-                            actor, current, requested, target
-                        ));
-                    }
+        }
+        for actor in [None, Some(Guest)] {
+            for current in ALL {
+                for requested in ALL {
+                    assert!(!MemberRole::may_change_role(actor, current, requested));
                 }
             }
         }

@@ -579,7 +579,8 @@ pub async fn validate_admin_event(
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
     // Reject mutations on archived channels — except kind:9002 with archived=false
-    // (unarchive), which must be allowed through so the channel can be restored.
+    // (unarchive), which must be allowed through so the channel can be restored,
+    // and a member leaving by themselves (still subject to the last-owner rule).
     let channel = state
         .db
         .get_channel_for_event_write(tenant.community(), channel_id)
@@ -590,7 +591,7 @@ pub async fn validate_admin_event(
             let parts = t.as_slice();
             parts.len() >= 2 && parts[0] == "archived" && parts[1] == "false"
         });
-    if channel.archived_at.is_some() && !is_unarchive_request {
+    if channel.archived_at.is_some() && !is_unarchive_request && !is_self_departure(event) {
         return Err(anyhow::anyhow!("channel is archived"));
     }
 
@@ -620,28 +621,6 @@ pub async fn validate_admin_event(
             let join_role =
                 buzz_db::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
 
-            // Raising a guest agent needs its owner, so read the target's
-            // recorded agent owner only when a non-elevated actor changes a
-            // guest's role. Every other case is a person for this rule.
-            let raises_guest = requested_role.is_some()
-                && !actor_role.is_some_and(|r| r.is_elevated())
-                && members
-                    .iter()
-                    .any(|m| m.pubkey == target_pubkey && m.role == "guest");
-            let target_kind = if raises_guest {
-                let agent_owner = state
-                    .db
-                    .get_agent_channel_policy(tenant.community(), &target_pubkey)
-                    .await?
-                    .and_then(|(_, owner)| owner);
-                buzz_db::channel::RoleChangeTarget::from_agent_owner(
-                    agent_owner.as_deref(),
-                    &actor_bytes,
-                )
-            } else {
-                buzz_db::channel::RoleChangeTarget::Person
-            };
-
             // Authorization policy — visibility gate, elevated-grant gate,
             // active-member role-change gate, and last-owner demotion — lives in
             // `channel_authz`, which is pure and table-tested. The database reads
@@ -654,7 +633,6 @@ pub async fn validate_admin_event(
                 &members,
                 &target_pubkey,
                 &actor_bytes,
-                target_kind,
             )? {
                 // Self-add: always allowed regardless of policy.
                 PutUserDecision::Allow => Ok(()),
@@ -1584,43 +1562,25 @@ async fn handle_put_user(
     let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
-    // No role tag = no role change: preserve an existing member's current
-    // role. A new member gets the channel's `join_role`, whether they add
-    // themselves or someone else adds them. Unconditionally defaulting to
-    // Member let a bare PUT_USER silently demote an existing owner/admin.
-    let role: MemberRole = match extract_tag_value(event, "role") {
-        Some(role_str) => role_str
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid role: {role_str}"))?,
-        None => {
-            let existing = state
-                .db
-                .get_members_for_event_write(tenant.community(), channel_id)
-                .await?
-                .iter()
-                .find(|m| m.pubkey == target_pubkey)
-                .and_then(|m| m.role.parse().ok());
-            match existing {
-                Some(role) => role,
-                None => {
-                    let channel = state
-                        .db
-                        .get_channel_for_event_write(tenant.community(), channel_id)
-                        .await?;
-                    buzz_db::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role)
-                        .member_role()
-                }
-            }
-        }
-    };
+    // No role tag = no role change: an existing member keeps their current
+    // role, and a new member gets the channel's `join_role`, whether they add
+    // themselves or someone else adds them. `put_member` resolves that under
+    // the channel's membership lock, together with every admission rule.
+    let requested: Option<MemberRole> = extract_tag_value(event, "role")
+        .map(|role_str| {
+            role_str
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid role: {role_str}"))
+        })
+        .transpose()?;
 
     state
         .db
-        .add_member(
+        .put_member(
             tenant.community(),
             channel_id,
             &target_pubkey,
-            role,
+            requested,
             Some(&actor_bytes),
         )
         .await?;
@@ -2394,19 +2354,12 @@ async fn handle_join_request(
         return Ok(());
     }
 
-    // A self-join gets the channel's `join_role` (idempotent — add_member
-    // handles duplicates): member in a normal channel, guest in an announce
+    // A self-join gets the channel's `join_role`, read by `put_member` under
+    // the membership lock: member in a normal channel, guest in an announce
     // channel, where a member must then make them a member.
-    let join_role = buzz_db::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
     state
         .db
-        .add_member(
-            tenant.community(),
-            channel_id,
-            &actor_bytes,
-            join_role.member_role(),
-            None,
-        )
+        .put_member(tenant.community(), channel_id, &actor_bytes, None, None)
         .await?;
     state.invalidate_membership(tenant, channel_id, &actor_bytes);
 
@@ -2824,6 +2777,17 @@ fn extract_h_tag_channel(event: &Event) -> Option<Uuid> {
 }
 
 /// Extract target pubkey from first `p` tag.
+/// A member leaving a channel by themselves: kind:9022, or kind:9001 naming
+/// its own author. An archived channel still allows this, so nobody is held
+/// in a channel they cannot write in. The last-owner rule still applies.
+pub(crate) fn is_self_departure(event: &Event) -> bool {
+    match event.kind.as_u16() {
+        9022 => true,
+        9001 => extract_p_tag(event).is_some_and(|p| p == event.pubkey.to_bytes()),
+        _ => false,
+    }
+}
+
 fn extract_p_tag(event: &Event) -> Option<Vec<u8>> {
     for tag in event.tags.iter() {
         if tag.kind().to_string() == "p" {

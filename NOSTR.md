@@ -132,10 +132,9 @@ Other rules:
 
 - A non-member adding themselves with kind:9000 may ask for `join_role` or a
   lower role. A higher role is refused.
-- A member or bot can make a guest **person** a member with kind:9000
-  (`role` `member`). A guest **agent** (a key with a recorded NIP-OA owner)
-  is raised only by its owner, or by a channel owner or admin. Only owners
-  and admins can make any other role change.
+- Any member who can write (member, bot, owner or admin) can make a guest a
+  member with kind:9000 (`role` `member`). This is the same for a person and
+  an agent. Only owners and admins can make any other role change.
 - The human owner of an agent can edit (kind:40003) and delete (kind:9005)
   that agent's messages, also as a guest or a non-member. This is existing
   behavior. It lets a person correct or remove what their agent posted; it

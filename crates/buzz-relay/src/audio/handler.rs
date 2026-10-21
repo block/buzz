@@ -1875,10 +1875,17 @@ async fn run_active_audio_connection(
             .await;
             return;
         }
-        Err(JoinCommitError::ParentMembershipLost) => {
-            // Parent membership revoked between pre-join check and commit (IMPORTANT 4).
+        Err(refusal @ (JoinCommitError::ParentMembershipLost | JoinCommitError::WriteRoleLost)) => {
+            // Parent membership revoked (IMPORTANT 4), or the joiner made a
+            // guest, between pre-join check and commit.
             // No `joined` frame was sent — commit-won invariant holds.
-            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "parent membership lost before join commit");
+            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "{refusal} (join refused)");
+            let message = match refusal {
+                JoinCommitError::WriteRoleLost => {
+                    "error: only members can join huddles in this channel"
+                }
+                _ => "error: not a member",
+            };
             // IMPORTANT 3: cancel + await expiry task before peer/room teardown.
             cancel.cancel();
             if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1898,7 +1905,7 @@ async fn run_active_audio_connection(
                 &mut terminal_ctrl_rx,
                 nip_fi_assertion.is_some(),
                 buzz_auth::DenialClass::AuthorizationDenied,
-                serde_json::json!({"type": "error", "message": "error: not a member"}),
+                serde_json::json!({"type": "error", "message": message}),
             )
             .await;
             return;
@@ -3032,6 +3039,28 @@ async fn check_membership_for_admission(
         .await
         .map_err(AdmissionRefusal::Dependency)?;
 
+    // An ephemeral huddle is its own channel with its own roles: a guest of
+    // the huddle cannot join it either, even when they may write in the
+    // parent. A non-member of a private huddle is auto-added as `member` on
+    // the parent's authority, checked above.
+    if channel_id != lifecycle_parent_id
+        && (is_member || channel.visibility == "open")
+        && !crate::handlers::ingest::may_post(
+            state,
+            tenant.community(),
+            channel_id,
+            pubkey_bytes,
+            &channel,
+            is_member,
+        )
+        .await
+        .map_err(AdmissionRefusal::Dependency)?
+    {
+        return Err(AdmissionRefusal::Denied(
+            "only members can join huddles in this channel",
+        ));
+    }
+
     if is_member {
         return Ok(MembershipAdmission::Existing {
             parent_channel_id: lifecycle_parent_id,
@@ -3095,6 +3124,10 @@ pub(crate) enum JoinCommitError {
     Archived,
     /// Parent membership was revoked between pre-join check and commit (IMPORTANT 4).
     ParentMembershipLost,
+    /// The joiner's role in the huddle or its lifecycle parent no longer
+    /// allows writing (for example, they were made a guest) between the
+    /// pre-join check and commit.
+    WriteRoleLost,
     /// Creator-signed huddle_started link was deleted between pre-join check
     /// and commit (IMPORTANT 4 residual: third carried fact).
     HuddleLinkGone,
@@ -3108,6 +3141,9 @@ impl std::fmt::Display for JoinCommitError {
             JoinCommitError::Archived => write!(f, "channel archived before commit"),
             JoinCommitError::ParentMembershipLost => {
                 write!(f, "parent membership revoked before commit")
+            }
+            JoinCommitError::WriteRoleLost => {
+                write!(f, "write role lost before commit")
             }
             JoinCommitError::HuddleLinkGone => {
                 write!(f, "huddle_started creator link gone before commit")
@@ -3344,6 +3380,31 @@ async fn commit_participant_join(
             .await?;
         }
         // If not still_absent: concurrent add observed — membership preserved.
+    }
+
+    // 4e. A guest cannot join a huddle. Re-read the joiner's role in the huddle
+    //     and in its lifecycle parent in this transaction, so a demotion
+    //     committed since the pre-join check refuses the join. An absent role
+    //     keeps the rules above: an open channel, or the parent-membership
+    //     re-read on the auto-add path.
+    let scopes = if parent_channel_id == channel_id {
+        vec![channel_id]
+    } else {
+        vec![channel_id, parent_channel_id]
+    };
+    for scope in scopes {
+        let role =
+            buzz_db::channel_members::active_role_in_transaction(&mut tx, scope, pubkey_bytes)
+                .await?;
+        let may_write = role.as_deref().is_none_or(|role| {
+            role.parse::<buzz_db::channel::MemberRole>()
+                .is_ok_and(|role| role.can_post())
+        });
+        if !may_write {
+            retire_shadow();
+            let _ = tx.rollback().await;
+            return Err(JoinCommitError::WriteRoleLost);
+        }
     }
 
     // 5. Insert kind `48101` uncommitted.
@@ -7427,6 +7488,200 @@ mod tests {
 
     mod postgres_tests {
         use super::*;
+
+        /// Joining a huddle is a write. For an ephemeral huddle the joiner
+        /// needs a writing role in the huddle itself and in its lifecycle
+        /// parent, at the pre-join check and again at commit.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn huddle_join_needs_a_write_role_in_the_huddle_and_its_parent() {
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+
+            let state = audio_test_state_real_db()
+                .await
+                .expect("postgres-ci provides a database");
+            let pool = state.db.pool().clone();
+            let (tenant, parent_id, member_key) = seed_audio_fixture(&pool).await;
+            let community_uuid = *tenant.community().as_uuid();
+            let joiner = member_key.public_key().to_bytes().to_vec();
+            let joiner_hex = member_key.public_key().to_hex();
+            let creator: Vec<u8> = sqlx::query_scalar(
+                "SELECT created_by FROM channels WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community_uuid)
+            .bind(parent_id)
+            .fetch_one(&pool)
+            .await
+            .expect("parent creator");
+
+            // A private ephemeral huddle linked to the parent by its creator.
+            let child_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO channels \
+                 (id, community_id, name, channel_type, visibility, created_by, ttl_seconds) \
+                 VALUES ($1, $2, 'huddle-role-child', 'stream', 'private', $3, 3600)",
+            )
+            .bind(child_id)
+            .bind(community_uuid)
+            .bind(&creator)
+            .execute(&pool)
+            .await
+            .expect("seed huddle channel");
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+                 VALUES ($1, $2, $3, NOW(), 48100, '[]', $4, $5, $6)",
+            )
+            .bind(community_uuid)
+            .bind([Uuid::new_v4().into_bytes(), Uuid::new_v4().into_bytes()].concat())
+            .bind(&creator)
+            .bind(serde_json::json!({ "ephemeral_channel_id": child_id.to_string() }).to_string())
+            .bind(vec![0u8; 64])
+            .bind(parent_id)
+            .execute(&pool)
+            .await
+            .expect("seed huddle_started link");
+
+            let set_role = |channel: Uuid, role: Option<&'static str>| {
+                let pool = pool.clone();
+                let joiner = joiner.clone();
+                let creator = creator.clone();
+                let state = state.clone();
+                let tenant = tenant.clone();
+                async move {
+                    sqlx::query(
+                        "DELETE FROM channel_members \
+                         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+                    )
+                    .bind(community_uuid)
+                    .bind(channel)
+                    .bind(&joiner)
+                    .execute(&pool)
+                    .await
+                    .expect("clear role");
+                    if let Some(role) = role {
+                        sqlx::query(
+                            "INSERT INTO channel_members \
+                             (community_id, channel_id, pubkey, role, invited_by) \
+                             VALUES ($1, $2, $3, $4::member_role, $5)",
+                        )
+                        .bind(community_uuid)
+                        .bind(channel)
+                        .bind(&joiner)
+                        .bind(role)
+                        .bind(&creator)
+                        .execute(&pool)
+                        .await
+                        .expect("set role");
+                    }
+                    state.invalidate_membership(&tenant, channel, &joiner);
+                }
+            };
+            let admit = || {
+                check_membership_for_admission(&state, &tenant, child_id, &joiner, Some(parent_id))
+            };
+
+            // (parent role, huddle role, admitted)
+            let cases: [(&str, Option<&'static str>, bool); 5] = [
+                ("member", None, true),
+                ("member", Some("member"), true),
+                ("member", Some("guest"), false),
+                ("guest", None, false),
+                ("guest", Some("member"), false),
+            ];
+            for (parent_role, child_role, admitted) in cases {
+                set_role(parent_id, Some(parent_role)).await;
+                set_role(child_id, child_role).await;
+                let result = admit().await;
+                assert_eq!(
+                    result.is_ok(),
+                    admitted,
+                    "parent {parent_role}, huddle {child_role:?}: {:?}",
+                    result.as_ref().err().map(|e| match e {
+                        AdmissionRefusal::Denied(reason) => reason.to_string(),
+                        AdmissionRefusal::Dependency(e) => e.to_string(),
+                    })
+                );
+                if !admitted {
+                    assert!(matches!(
+                        result,
+                        Err(AdmissionRefusal::Denied(
+                            "only members can join huddles in this channel"
+                        ))
+                    ));
+                }
+            }
+
+            // In an announce parent (open, `join_role = guest`), a non-member
+            // would join as a guest, so they cannot join its huddle either.
+            sqlx::query(
+                "UPDATE channels SET visibility = 'open', join_role = 'guest' \
+                 WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community_uuid)
+            .bind(parent_id)
+            .execute(&pool)
+            .await
+            .expect("make the parent an announce channel");
+            set_role(parent_id, None).await;
+            set_role(child_id, None).await;
+            assert!(matches!(
+                admit().await,
+                Err(AdmissionRefusal::Denied(
+                    "only members can join huddles in this channel"
+                ))
+            ));
+            set_role(parent_id, Some("member")).await;
+            assert!(
+                admit().await.is_ok(),
+                "a member of the announce parent joins"
+            );
+
+            // A demotion in either scope after the pre-join check refuses the
+            // commit.
+            for demoted in [child_id, parent_id] {
+                set_role(parent_id, Some("member")).await;
+                set_role(child_id, Some("member")).await;
+                let Ok(admission) = admit().await else {
+                    panic!("admitted before the demotion");
+                };
+                set_role(demoted, Some("guest")).await;
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let gate = crate::nip_fi_gate::SessionAdmissionGate::new(
+                    Utc::now() + Duration::hours(1),
+                    cancel,
+                );
+                let result = commit_participant_join(
+                    &state,
+                    &tenant,
+                    child_id,
+                    parent_id,
+                    &joiner_hex,
+                    &joiner,
+                    Uuid::new_v4(),
+                    0,
+                    0,
+                    1,
+                    "1",
+                    &admission,
+                    &gate,
+                    &Arc::new(crate::audio::room::Room::new(tenant.community(), child_id)),
+                    None,
+                    None,
+                )
+                .await;
+                assert!(
+                    matches!(result, Err(JoinCommitError::WriteRoleLost)),
+                    "demoted in {}: {result:?}",
+                    if demoted == child_id {
+                        "huddle"
+                    } else {
+                        "parent"
+                    }
+                );
+            }
+        }
 
         // A paired, deny-clean audio AUTH refused by ordinary policy, relay
         // membership on a closed relay or channel membership, is never

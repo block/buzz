@@ -3028,7 +3028,10 @@ async fn ingest_event_inner(
                 parts.len() >= 2 && parts[0] == "archived" && parts[1] == "false"
             });
 
-        if !is_unarchive {
+        // A member may still leave an archived channel by themselves.
+        let is_self_departure = crate::handlers::side_effects::is_self_departure(&event);
+
+        if !is_unarchive && !is_self_departure {
             if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
                     return Err(match target_denial {

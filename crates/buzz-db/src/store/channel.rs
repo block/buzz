@@ -17,7 +17,8 @@ use buzz_datastore_tracing::datastore_span;
 // These live in core (zero I/O deps) so the SDK can share them
 // without pulling in sqlx/tokio.
 pub use buzz_core::channel::{
-    ChannelJoinRole, ChannelType, ChannelVisibility, MemberRole, RoleChangeTarget,
+    decide_member_put, ChannelJoinRole, ChannelType, ChannelVisibility, MemberPut, MemberPutDenial,
+    MemberRole,
 };
 
 // Keep the established channel module paths compatible while membership SQL
@@ -867,35 +868,36 @@ pub async fn update_channel(
     // or strictly precedes this transition — whose own deadline reset is
     // then the latest word. Non-TTL updates don't touch the fast path and
     // skip the lock.
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     if updates.ttl_seconds.is_some() {
-        let mut tx = crate::begin_community_write_transaction(
-            pool,
-            community_id,
-            crate::observability::WriterOperation::EventWrite,
-        )
-        .await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(channel_ttl_lock_key(community_id, channel_id))
             .execute(tx.conn())
             .await?;
-        let result = q.execute(tx.conn()).await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::ChannelNotFound(channel_id));
-        }
-        tx.commit().await?;
-    } else {
-        let mut tx = crate::begin_community_write_transaction(
-            pool,
+    }
+    let result = q.execute(tx.conn()).await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::ChannelNotFound(channel_id));
+    }
+    // Visibility and `join_role` decide admission, which `put_member` decides
+    // under the channel's membership lock. Take that lock too, so an admission
+    // either sees the old setting and commits first, or sees the new one.
+    // Take it AFTER the row update: a huddle join holds the channel row and
+    // then waits for this lock, so the opposite order could deadlock with it.
+    if updates.visibility.is_some() || updates.join_role.is_some() {
+        crate::channel_members::acquire_channel_membership_lock(
+            tx.conn(),
             community_id,
-            crate::observability::WriterOperation::EventWrite,
+            channel_id,
         )
         .await?;
-        let result = q.execute(tx.conn()).await?;
-        if result.rows_affected() == 0 {
-            return Err(DbError::ChannelNotFound(channel_id));
-        }
-        tx.commit().await?;
     }
+    tx.commit().await?;
 
     get_channel_with_operation(
         pool,
