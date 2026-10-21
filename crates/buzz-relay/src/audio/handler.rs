@@ -11111,9 +11111,12 @@ mod tests {
             );
 
             // ── Membership and settings writers wait for the join ─────────────────
+            // The existing member invites the new key, so the add does not
+            // depend on `join_role`: the two writers may commit in either order.
             let add = tokio::spawn({
                 let pool = pool.clone();
                 let new_member_bytes = new_member_bytes.clone();
+                let inviter = member_key.public_key().to_bytes().to_vec();
                 async move {
                     buzz_db::channel_members::add_member(
                         &pool,
@@ -11121,7 +11124,7 @@ mod tests {
                         channel_id,
                         &new_member_bytes,
                         buzz_db::channel_members::MemberRole::Member,
-                        None,
+                        Some(&inviter),
                     )
                     .await
                 }
