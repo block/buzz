@@ -91,8 +91,16 @@ pub enum DbError {
 
 impl DbError {
     /// Whether Postgres cancelled the statement (SQLSTATE 57014:
-    /// `statement_timeout` or an explicit cancel). Re-running such a query on
-    /// the writer would only repeat the same expensive work.
+    /// `statement_timeout` or an explicit cancel).
+    ///
+    /// Replica-routed reads surface a cancel instead of re-running on the
+    /// writer. Usually the cancel means expensive work that the writer would
+    /// only repeat at the primary's cost. It can also mean the replica waited
+    /// on a lock that only it holds (a replayed `ACCESS EXCLUSIVE` from
+    /// primary DDL), when the writer would have answered quickly. That miss is
+    /// the accepted price of keeping runaway reads off the primary. Per-call
+    /// routed reads record it as the `statement_cancelled` route reason;
+    /// `ReadSession` reads return it to the relay, which logs the failed read.
     pub fn is_statement_cancelled(&self) -> bool {
         matches!(
             self,

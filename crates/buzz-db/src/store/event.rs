@@ -2366,8 +2366,8 @@ impl Db {
                         Self::record_route(path, "replica", reason);
                         Ok(events)
                     }
-                    // A cancelled statement (timeout) would be just as slow on the
-                    // writer; surface it instead of doubling the cost.
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
                     Err(e) if e.is_statement_cancelled() => {
                         Self::record_route(path, "replica", "statement_cancelled");
                         Err(e)
@@ -2425,8 +2425,8 @@ impl Db {
                         Self::record_route(path, "replica", reason);
                         Ok(events)
                     }
-                    // A cancelled statement (timeout) would be just as slow on the
-                    // writer; surface it instead of doubling the cost.
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
                     Err(e) if e.is_statement_cancelled() => {
                         Self::record_route(path, "replica", "statement_cancelled");
                         Err(e)
@@ -2489,8 +2489,8 @@ impl Db {
                         Self::record_route(path, "replica", reason);
                         Ok(count)
                     }
-                    // A cancelled statement (timeout) would be just as slow on the
-                    // writer; surface it instead of doubling the cost.
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
                     Err(e) if e.is_statement_cancelled() => {
                         Self::record_route(path, "replica", "statement_cancelled");
                         Err(e)
@@ -2748,8 +2748,8 @@ impl Db {
                         Self::record_route(path, "replica", reason);
                         Ok(events)
                     }
-                    // A cancelled statement (timeout) would be just as slow on the
-                    // writer; surface it instead of doubling the cost.
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
                     Err(e) if e.is_statement_cancelled() => {
                         Self::record_route(path, "replica", "statement_cancelled");
                         Err(e)

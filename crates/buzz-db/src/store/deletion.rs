@@ -2392,6 +2392,9 @@ impl DeletionStore {
     pub async fn verify_postgres_logically_deleted(&self, token: &LeaseToken) -> Result<()> {
         let generation = require_fence_generation(token)?;
         let mut tx = self.pool.begin().await?;
+        // One whole-tenant `EXISTS` per table, run right after the purge while
+        // the `community_id` index still points at dead tuples.
+        lift_statement_timeout(&mut tx).await?;
         // The absence proof is only as strong as the surface it iterates:
         // validate the live catalog under the shared schema/destruction lock
         // so a scoped table committed after the purge fails this stage closed
@@ -3717,7 +3720,8 @@ async fn verify_lease_and_fence(
 /// Disable `statement_timeout` for the rest of `tx`.
 ///
 /// Community deletion runs whole-tenant statements (per-table counts at
-/// inventory, one `DELETE ... WHERE community_id` per table at purge) whose
+/// inventory, one `DELETE ... WHERE community_id` per table at purge, one
+/// `EXISTS ... WHERE community_id` per table at logical verification) whose
 /// runtime scales with the tenant. Under the always-on writer cap a large
 /// tenant's purge would be cancelled (57014, transient), retried from
 /// scratch, and eventually blocked. Like migrations and schema destruction,
@@ -7515,17 +7519,18 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         result
     }
 
-    /// Community-deletion inventory and purge statements outlive the
-    /// always-on writer statement cap, through the production paths, and only
-    /// for their own transactions. Mutation oracles: drop the
+    /// Community-deletion inventory, purge and logical-verification statements
+    /// outlive the always-on writer statement cap, through the production
+    /// paths, and only for their own transactions. Mutation oracles: drop the
     /// `lift_statement_timeout` call in `count_tenant_rows` → inventory is
     /// cancelled (57014) → RED; drop it in `purge_postgres` → purge is
-    /// cancelled → RED; lift with session scope → `SHOW` after is not
-    /// `500ms` → RED; lift to a bounded value (e.g. `'300000'`) → `SHOW`
-    /// inside the lifted transaction is not `0` → RED.
+    /// cancelled → RED; drop it in `verify_postgres_logically_deleted` →
+    /// verification is cancelled → RED; lift with session scope → `SHOW`
+    /// after is not `500ms` → RED; lift to a bounded value (e.g. `'300000'`)
+    /// → `SHOW` inside the lifted transaction is not `0` → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn deletion_inventory_and_purge_outlive_the_writer_statement_timeout() {
+    async fn deletion_whole_tenant_stages_outlive_the_writer_statement_timeout() {
         let (admin, probe_db, probe_url) =
             scratch_desired_state_database("buzz_deletion_cap").await;
         let db = Db::new(&DbConfig {
@@ -7617,6 +7622,18 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             store.get(request.id).await.expect("request").stage,
             DeletionStage::PostgresPurged
         );
+        store
+            .mark_cache_purged(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("cache purged");
+        run_behind_events_lock_past_cap(
+            &db,
+            &admin,
+            &probe_db,
+            store.verify_postgres_logically_deleted(&token),
+        )
+        .await
+        .expect("logical verification outlives the writer cap");
 
         for _ in 0..5 {
             let restored: String = sqlx::query_scalar("SHOW statement_timeout")

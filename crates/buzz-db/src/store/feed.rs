@@ -96,6 +96,7 @@ fn build_mentions_query(
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
         "SELECT {EVENT_COLS} FROM events e \
          INNER JOIN event_mentions m ON e.community_id = m.community_id AND e.id = m.event_id \
+         AND e.created_at = m.event_created_at \
          WHERE e.community_id = "
     ));
     qb.push_bind(*community.as_uuid());
@@ -185,6 +186,7 @@ fn build_needs_action_query(
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
         "SELECT {EVENT_COLS} FROM events e \
          INNER JOIN event_mentions m ON e.community_id = m.community_id AND e.id = m.event_id \
+         AND e.created_at = m.event_created_at \
          WHERE e.community_id = "
     ));
     qb.push_bind(*community.as_uuid());
@@ -379,8 +381,8 @@ impl Db {
                     Self::record_route(path, "replica", reason);
                     Ok(events)
                 }
-                // A cancelled statement (timeout) would be just as slow on the
-                // writer; surface it instead of doubling the cost.
+                // Surface a cancel instead of re-running it on the writer; see
+                // `DbError::is_statement_cancelled` for the trade-off.
                 Err(e) if e.is_statement_cancelled() => {
                     Self::record_route(path, "replica", "statement_cancelled");
                     Err(e)
@@ -470,8 +472,8 @@ impl Db {
                         Self::record_route(path, "replica", reason);
                         Ok(events)
                     }
-                    // A cancelled statement (timeout) would be just as slow on the
-                    // writer; surface it instead of doubling the cost.
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
                     Err(e) if e.is_statement_cancelled() => {
                         Self::record_route(path, "replica", "statement_cancelled");
                         Err(e)
@@ -551,8 +553,8 @@ impl Db {
                     Self::record_route(path, "replica", reason);
                     Ok(events)
                 }
-                // A cancelled statement (timeout) would be just as slow on the
-                // writer; surface it instead of doubling the cost.
+                // Surface a cancel instead of re-running it on the writer; see
+                // `DbError::is_statement_cancelled` for the trade-off.
                 Err(e) if e.is_statement_cancelled() => {
                     Self::record_route(path, "replica", "statement_cancelled");
                     Err(e)
@@ -1110,6 +1112,10 @@ mod postgres_tests {
             "mentions must join event_mentions on the composite tenant/event key: {sql}"
         );
         assert!(
+            sql.contains("AND e.id = m.event_id AND e.created_at = m.event_created_at"),
+            "mentions must carry the mention's created_at so each probe prunes to one events partition: {sql}"
+        );
+        assert!(
             sql.contains("WHERE e.community_id = "),
             "mentions feed must scope events to the tenant community: {sql}"
         );
@@ -1138,6 +1144,10 @@ mod postgres_tests {
         assert!(
             sql.contains("INNER JOIN event_mentions m ON e.community_id = m.community_id AND e.id = m.event_id"),
             "needs_action must join event_mentions on the composite tenant/event key: {sql}"
+        );
+        assert!(
+            sql.contains("AND e.id = m.event_id AND e.created_at = m.event_created_at"),
+            "needs_action must carry the mention's created_at so each probe prunes to one events partition: {sql}"
         );
         assert!(
             sql.contains("WHERE e.community_id = "),

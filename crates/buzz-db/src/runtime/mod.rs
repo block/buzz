@@ -354,8 +354,8 @@ impl ReadSession {
             ReadSessionInner::Replica { tx, writer } => {
                 match event::query_events_on(tx, q).await {
                     Ok(rows) => return Ok(rows),
-                    // A cancelled statement (timeout) would be just as slow on
-                    // the writer; surface it instead of doubling the cost.
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
                     Err(e) if e.is_statement_cancelled() => return Err(e),
                     Err(e) => {
                         tracing::warn!(

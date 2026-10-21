@@ -3642,9 +3642,10 @@ async fn floor_guard_blocks_updates_that_move_rows_below_the_fence() {
 // ---- Statement-deadline cancellation vs. replica fallback ----------------
 //
 // A replica read cancelled by `statement_timeout` (SQLSTATE 57014) must be
-// surfaced, not re-run on the writer: the writer would be just as slow and
-// the relay maps it to a distinct non-retried "query timed out". Every other
-// replica failure keeps failing closed to the writer.
+// surfaced, not re-run on the writer (policy on
+// `DbError::is_statement_cancelled`); the relay maps it to a distinct
+// non-retried "query timed out". Every other replica failure keeps failing
+// closed to the writer.
 
 /// Writer and replica scratch DBs holding one root plus an `e`-tagged reply
 /// that mentions `mentioned` — the writer copy says "writer-reply" so a
