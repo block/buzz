@@ -5,7 +5,7 @@ import 'app_colors.dart';
 /// Shared neutral background for mobile controls and selected tabs.
 Color neutralControlSurface(Brightness brightness) =>
     brightness == Brightness.dark
-    ? const Color(0xFF595959)
+    ? const Color(0xFF101010)
     : const Color(0xFFF0F0F0);
 
 extension AppThemeExtension on BuildContext {

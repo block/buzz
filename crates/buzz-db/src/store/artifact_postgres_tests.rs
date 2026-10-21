@@ -23,7 +23,10 @@ impl Fixture {
         if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
             crate::migration::run_migrations(&pool).await.unwrap();
         }
-        let db = Db::from_pool(pool);
+        Self::on(Db::from_pool(pool)).await
+    }
+    /// The fixture on `db`, which is already migrated.
+    async fn on(db: Db) -> Self {
         db.maintain_partitions(
             1,
             crate::partition::PartitionMaintenancePolicy {
@@ -295,6 +298,67 @@ async fn system_channel_artifacts_are_read_only_by_name() {
         assert_eq!(homes, [Some(system)], "#h names the system channel");
         assert_eq!(f.count(reader, named).await, 1);
     }
+}
+
+/// An artifact in a channel of a type added later is read only by a query
+/// whose `#h` names that channel, like a system channel (NIP-CL).
+/// Mutation: put back `c.channel_type <> 'system'` in `query_artifacts` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn artifacts_of_a_later_channel_type_are_read_only_by_name() {
+    use super::legacy_channel_types_postgres_tests::{scratch_db_with_future_type, FUTURE_TYPE};
+    let (db, admin, name) = scratch_db_with_future_type().await;
+    let f = Fixture::on(db).await;
+    let later = Uuid::new_v4();
+    sqlx::query("INSERT INTO channels(community_id,id,name,visibility,channel_type,created_by) VALUES($1,$2,$3,'open',$4::channel_type,$5)")
+        .bind(f.community.as_uuid())
+        .bind(later)
+        .bind(later.to_string())
+        .bind(FUTURE_TYPE)
+        .bind(f.owner.public_key().to_bytes().as_slice())
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let mut ds = Vec::new();
+    for home in [f.a, later] {
+        let d = Uuid::new_v4();
+        let create = f.revision(d, "create", home, None, &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&create, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+        let update = f.revision(d, "update", home, Some(&create), &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&update, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+        ds.push(d.to_string());
+    }
+    // History needs `#d`; both queries name both artifacts.
+    for (view, per_channel) in [("current", 1), ("history", 2)] {
+        let unnamed = serde_json::json!({ "artifact": view, "#d": ds });
+        let (events, _) = f.query(&f.owner, unnamed.clone(), false).await;
+        let homes: Vec<_> = events.iter().map(|e| e.channel_id).collect();
+        assert_eq!(homes, vec![Some(f.a); per_channel], "{view} without #h");
+        assert_eq!(f.count(&f.owner, unnamed).await, per_channel as i64);
+
+        let named = serde_json::json!({ "artifact": view, "#d": ds, "#h": [later.to_string()] });
+        let (events, _) = f.query(&f.owner, named.clone(), false).await;
+        let homes: Vec<_> = events.iter().map(|e| e.channel_id).collect();
+        assert_eq!(
+            homes,
+            vec![Some(later); per_channel],
+            "{view} #h names the channel"
+        );
+        assert_eq!(f.count(&f.owner, named).await, per_channel as i64);
+    }
+
+    f.db.pool.close().await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+    )))
+    .execute(&admin)
+    .await;
 }
 
 #[tokio::test]

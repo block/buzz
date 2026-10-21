@@ -25,4 +25,5 @@ tokio-util = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+nostr = { workspace = true }
 sqlx = { workspace = true }

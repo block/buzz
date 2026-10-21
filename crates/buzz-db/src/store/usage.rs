@@ -195,16 +195,16 @@ where
     .await?)
 }
 
-/// Owns the detached Postgres session holding the relay usage-metrics advisory lock.
+/// Owns the detached Postgres session holding a deployment-wide leader advisory lock.
 ///
 /// The connection deliberately does not return to the main pool: session advisory
-/// locks must remain bound to this exact physical connection, and the poller
-/// pings it before each leader-only collection tick.
-pub struct UsageMetricsLeader {
+/// locks must remain bound to this exact physical connection, and each leader-only
+/// loop (usage metrics, NIP-43 snapshot reconciliation) pings it before working.
+pub struct SessionLeader {
     connection: PgConnection,
 }
 
-impl UsageMetricsLeader {
+impl SessionLeader {
     /// Returns whether the lock-owning session is still reachable.
     ///
     /// Bounded to 5 seconds — a blackholed connection (no RST) would otherwise
@@ -604,17 +604,15 @@ fn into_community_hosts(rows: Vec<(Uuid, String)>) -> Vec<CommunityHost> {
 }
 
 impl Db {
-    /// Try to acquire the detached session advisory lock for relay usage metrics.
+    /// Try to acquire the detached session advisory lock `lock_key`, making this
+    /// replica the leader for the job that key names.
     ///
     /// The returned guard owns the exact connection that acquired the lock. It is
     /// detached from the shared pool so a stable leader neither returns a locked
     /// session to other callers nor permanently consumes a pool slot. Dropping the
     /// guard closes the connection and releases the session-scoped lock.
-    #[datastore_span(name = "try_lock_usage_metrics", system = "postgresql")]
-    pub async fn try_lock_usage_metrics(
-        &self,
-        lock_key: i64,
-    ) -> Result<Option<UsageMetricsLeader>> {
+    #[datastore_span(name = "try_lock_session_leader", system = "postgresql")]
+    pub async fn try_lock_session_leader(&self, lock_key: i64) -> Result<Option<SessionLeader>> {
         let mut connection = observability::acquire_writer_with_legacy_metrics(
             &self.pool,
             observability::WriterOperation::Maintenance,
@@ -625,7 +623,7 @@ impl Db {
             .fetch_one(&mut *connection)
             .await?;
         if acquired {
-            Ok(Some(UsageMetricsLeader {
+            Ok(Some(SessionLeader {
                 connection: connection.detach(),
             }))
         } else {
@@ -770,12 +768,6 @@ impl Db {
     pub async fn active_community_hosts(&self) -> Result<Vec<CommunityHost>> {
         active_community_hosts(&self.pool, observability::WriterOperation::Maintenance).await
     }
-
-    /// Return active community host mappings during startup bootstrap work.
-    #[datastore_span(name = "bootstrap_community_hosts", system = "postgresql")]
-    pub async fn bootstrap_community_hosts(&self) -> Result<Vec<CommunityHost>> {
-        active_community_hosts(&self.pool, observability::WriterOperation::Bootstrap).await
-    }
 }
 
 #[cfg(test)]
@@ -913,14 +905,14 @@ mod postgres_tests {
         let key = 0x4255_5A5A_4D45_5452;
 
         let mut leader = first
-            .try_lock_usage_metrics(key)
+            .try_lock_session_leader(key)
             .await
             .expect("first lock attempt")
             .expect("first database handle becomes leader");
         assert!(leader.is_live().await, "lock owner remains reachable");
         assert!(
             second
-                .try_lock_usage_metrics(key)
+                .try_lock_session_leader(key)
                 .await
                 .expect("second lock attempt")
                 .is_none(),
@@ -933,7 +925,7 @@ mod postgres_tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let successor = loop {
             let attempt = second
-                .try_lock_usage_metrics(key)
+                .try_lock_session_leader(key)
                 .await
                 .expect("lock attempt after leader drop");
             if attempt.is_some() || tokio::time::Instant::now() >= deadline {
@@ -1183,10 +1175,7 @@ mod postgres_tests {
 
         let db = Db::from_pool(pool.clone());
         for sweep in 0..2 {
-            for (caller, hosts) in [
-                ("maintenance", db.active_community_hosts().await),
-                ("bootstrap", db.bootstrap_community_hosts().await),
-            ] {
+            for (caller, hosts) in [("maintenance", db.active_community_hosts().await)] {
                 let hosts = hosts.unwrap_or_else(|e| panic!("{caller} sweep {sweep}: {e}"));
                 let ids: std::collections::HashSet<Uuid> = hosts.iter().map(|h| h.id).collect();
                 assert_eq!(

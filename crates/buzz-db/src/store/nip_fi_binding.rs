@@ -503,8 +503,14 @@ mod postgres_tests {
         let db = setup_db().await;
         let host = unique_host("create");
         let created = db
-            .create_community_with_owner_and_nip_fi_issuers(&host, OWNER, &issuers())
+            .create_community_with_owner_and_nip_fi_issuers(
+                &host,
+                OWNER,
+                &issuers(),
+                &nostr::Keys::generate(),
+            )
             .await
+            .map(|write| write.outcome)
             .expect("create");
         assert!(matches!(
             created,
@@ -517,8 +523,10 @@ mod postgres_tests {
             &host,
             OWNER,
             &["https://other.example".to_string()],
+            &nostr::Keys::generate(),
         )
         .await
+        .map(|write| write.outcome)
         .expect("retry");
         assert_eq!(bound(&db, &host).await, Some(issuers()));
     }
@@ -566,8 +574,14 @@ mod postgres_tests {
 
         let create = unique_host("fail-create");
         assert!(db
-            .create_community_with_owner_and_nip_fi_issuers(&create, OWNER, &invalid)
+            .create_community_with_owner_and_nip_fi_issuers(
+                &create,
+                OWNER,
+                &invalid,
+                &nostr::Keys::generate()
+            )
             .await
+            .map(|write| write.outcome)
             .is_err());
         assert!(!community_exists(&db, &create).await);
 

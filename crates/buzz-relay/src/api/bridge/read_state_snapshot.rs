@@ -170,8 +170,15 @@ mod postgres_tests {
 
         state
             .db
-            .add_relay_member(community, &key.public_key().to_hex(), "member", None)
+            .add_relay_member(
+                community,
+                &key.public_key().to_hex(),
+                "member",
+                None,
+                &nostr::Keys::generate(),
+            )
             .await
+            .map(|write| write.outcome)
             .unwrap();
         // Dev headers must not bypass real auth even for an admitted member.
         assert_eq!(

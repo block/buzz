@@ -188,6 +188,19 @@ pub enum ChannelType {
     System,
 }
 
+/// The channel types that every client knew before NIP-CL added new ones.
+///
+/// A client sees a channel only if it knows the channel's type. Queries that
+/// do not ask for a type therefore return only these types. Every other type,
+/// including any type added later, stays hidden unless a filter asks for it.
+///
+/// It is also the rule for membership notices (kind 44100/44101): a filter
+/// without `#t` sees notices only about these types.
+///
+/// Frozen. Do not add a type here: a new type must stay hidden from clients
+/// that do not know it, so it needs its own opt-in.
+pub const LEGACY_CHANNEL_TYPES: [&str; 4] = ["stream", "forum", "dm", "workflow"];
+
 impl ChannelType {
     /// Canonical string representation (matches DB enum and Nostr tags).
     pub fn as_str(&self) -> &'static str {
@@ -315,9 +328,17 @@ impl FromStr for MemberRole {
 mod tests {
     use super::{
         canonical_channel_name, channel_type_from_group_state_tags, group_state_identity_tags,
-        parse_channel_labels, ChannelLabelError, ChannelType, MAX_CHANNEL_LABELS,
-        RESERVED_CHANNEL_LABELS,
+        parse_channel_labels, ChannelLabelError, ChannelType, LEGACY_CHANNEL_TYPES,
+        MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
     };
+
+    #[test]
+    fn only_the_types_from_before_nip_cl_are_legacy() {
+        for name in LEGACY_CHANNEL_TYPES {
+            let _: ChannelType = name.parse().expect("legacy type parses");
+        }
+        assert!(!LEGACY_CHANNEL_TYPES.contains(&ChannelType::System.as_str()));
+    }
 
     /// Every channel type name is reserved, so a label cannot pose as a type.
     /// The `match` has no wildcard: a new `ChannelType` variant does not
@@ -345,6 +366,37 @@ mod tests {
                 "{channel_type:?} is not a reserved label"
             );
         }
+    }
+
+    #[test]
+    fn desktop_solo_creation_preserves_mobile_identity_contract() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../test-fixtures/solo-creation.json"))
+                .expect("Solo creation fixture");
+        let tags: Vec<Vec<String>> = serde_json::from_value(fixture["creation"]["tags"].clone())
+            .expect("captured production command tags");
+        let labels = super::parse_channel_labels(
+            tags.iter()
+                .filter(|tag| tag[0] == "t")
+                .map(|tag| tag[1].as_str()),
+        )
+        .expect("valid creation labels");
+        let channel_type = tags
+            .iter()
+            .find(|tag| tag[0] == "channel_type")
+            .expect("creation type")[1]
+            .as_str();
+        let creator =
+            hex::decode(fixture["creator"].as_str().expect("creator")).expect("creator hex");
+        let actual: Vec<Vec<String>> = group_state_identity_tags(channel_type, &labels, &creator)
+            .expect("relay identity tags")
+            .into_iter()
+            .map(|tag| tag.to_vec())
+            .collect();
+        assert_eq!(
+            serde_json::to_value(actual).expect("identity JSON"),
+            fixture["identity_tags"]
+        );
     }
 
     #[test]

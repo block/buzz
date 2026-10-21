@@ -76,7 +76,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
 
     final relayConfig = ref.watch(relayConfigProvider);
     ref.watch(relaySessionProvider);
-    final activeCommunity = ref.watch(activeCommunityProvider).value;
+    ref.watch(activeCommunityProvider);
 
     final nsec = relayConfig.nsec?.trim();
     if (nsec == null || nsec.isEmpty) {
@@ -87,14 +87,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       session: ref.read(relaySessionProvider.notifier),
       nsec: nsec,
     );
-    final pubkey =
-        _normalizePubkey(activeCommunity?.pubkey) ??
-        _safeDerivedPubkey(signedRelay);
-    if (pubkey == null) {
-      return const ReadStateState.inert();
-    }
-
-    final crypto = ReadStateCrypto.tryCreate(nsec: nsec, pubkey: pubkey);
+    final pubkey = ref.watch(_readStatePubkeyProvider);
+    if (pubkey == null) return const ReadStateState.inert();
+    final crypto = ref.watch(readStateCryptoProvider);
     if (crypto == null) {
       return const ReadStateState.inert();
     }
@@ -247,11 +242,18 @@ String? _normalizePubkey(String? value) {
   return normalized;
 }
 
-String? _safeDerivedPubkey(SignedEventRelay relay) {
-  try {
-    return _normalizePubkey(relay.pubkey);
-  } catch (e) {
-    debugPrint('[ReadStateManager] pubkey derivation failed: $e');
-    return null;
-  }
-}
+final _readStatePubkeyProvider = Provider<String?>((ref) {
+  final active = ref.watch(activeCommunityProvider).value;
+  final config = ref.watch(relayConfigProvider);
+  return _normalizePubkey(active?.pubkey) ??
+      _normalizePubkey(pubkeyFromNsec(config.nsec?.trim()));
+});
+
+/// Retains read-state encryption material across connection status changes.
+final readStateCryptoProvider = Provider<ReadStateCrypto?>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final pubkey = ref.watch(_readStatePubkeyProvider);
+  final nsec = config.nsec?.trim();
+  if (nsec == null || nsec.isEmpty || pubkey == null) return null;
+  return ReadStateCrypto.tryCreate(nsec: nsec, pubkey: pubkey);
+});

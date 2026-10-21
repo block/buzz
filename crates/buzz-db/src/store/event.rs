@@ -928,9 +928,8 @@ fn push_tag_value_filters(
 /// cannot take page slots. Skipped when the query's kinds cannot match a
 /// notice.
 fn push_notice_visibility(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
-    use buzz_core::filter::{
-        LEGACY_NOTICE_CHANNEL_TYPES, MEMBERSHIP_NOTICE_KINDS, NOTICE_CHANNEL_TYPE_TAG,
-    };
+    use buzz_core::channel::LEGACY_CHANNEL_TYPES;
+    use buzz_core::filter::{MEMBERSHIP_NOTICE_KINDS, NOTICE_CHANNEL_TYPE_TAG};
     if let Some(kinds) = q.kinds.as_deref() {
         if !kinds
             .iter()
@@ -941,14 +940,14 @@ fn push_notice_visibility(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &st
     }
     let visible: Vec<String> = match &q.notice_channel_types {
         Some(types) => types.clone(),
-        None => LEGACY_NOTICE_CHANNEL_TYPES
+        None => LEGACY_CHANNEL_TYPES
             .iter()
             .map(|t| (*t).to_owned())
             .collect(),
     };
     let untagged_visible = visible
         .iter()
-        .any(|t| LEGACY_NOTICE_CHANNEL_TYPES.contains(&t.as_str()));
+        .any(|t| LEGACY_CHANNEL_TYPES.contains(&t.as_str()));
     let [added, removed] = MEMBERSHIP_NOTICE_KINDS;
     qb.push(format!(
         " AND ({col_prefix}kind NOT IN ({added}, {removed}) OR "
@@ -2775,53 +2774,6 @@ impl Db {
         }
         tx.commit().await?;
         Ok(result)
-    }
-
-    /// Backfill `d_tag` for existing NIP-33 events (kind 30000–39999) that have `d_tag IS NULL`.
-    ///
-    /// Idempotent — safe to call on every startup. No-ops when all rows are already populated.
-    /// Admits each community before updating its NIP-33 rows with NULL d_tag.
-    #[datastore_span(name = "backfill_d_tags", system = "postgresql")]
-    pub async fn backfill_d_tags(&self) -> Result<u64> {
-        let mut connection = crate::observability::acquire_writer(
-            &self.pool,
-            crate::observability::WriterOperation::Bootstrap,
-        )
-        .await?;
-        let communities: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT community_id FROM events \
-             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL",
-        )
-        .fetch_all(&mut *connection)
-        .await?;
-        drop(connection);
-        let mut updated = 0;
-        for id in communities {
-            let Some(mut tx) = crate::begin_community_sweep_transaction(
-                &self.pool,
-                CommunityId::from_uuid(id),
-                crate::observability::WriterOperation::Bootstrap,
-            )
-            .await?
-            else {
-                continue;
-            };
-            let result = sqlx::query(
-                "UPDATE events \
-             SET d_tag = COALESCE( \
-                 (SELECT elem->>1 FROM jsonb_array_elements(tags) AS elem \
-                  WHERE elem->>0 = 'd' LIMIT 1), \
-                 '' \
-             ) \
-             WHERE community_id = $1 AND kind BETWEEN 30000 AND 39999 AND d_tag IS NULL",
-            )
-            .bind(id)
-            .execute(tx.conn())
-            .await?;
-            tx.commit().await?;
-            updated += result.rows_affected();
-        }
-        Ok(updated)
     }
 
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.

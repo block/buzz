@@ -254,6 +254,25 @@ class _SliverChannelsList extends HookConsumerWidget {
       ),
       sliver: SliverList.list(
         children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                key: const Key('browse-channels-button'),
+                icon: const Icon(BuzzIcons.compass),
+                label: const Text('Browse channels'),
+                onPressed: () => showBuzzModalBottomSheet<void>(
+                  context: context,
+                  title: 'Browse channels',
+                  constraints: _quickActionSheetConstraints(context),
+                  isScrollControlled: true,
+                  showDragHandle: true,
+                  builder: (_) => const _BrowseChannelsSheet(),
+                ),
+              ),
+            ),
+          ),
           if (visibleChannels.isEmpty)
             const _EmptyState()
           else ...[

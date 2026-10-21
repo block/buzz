@@ -170,21 +170,33 @@ NIP-29 `hidden` tag.
 
 The relay leaves system channels out of every read that does not name them.
 Clients that do not know about system channels then stay correct with no
-change. This applies to:
+change.
+
+A client sees a channel only if it knows the channel's type. A read that does
+not name a channel returns only the **legacy types**: `stream`, `forum`, `dm`
+and `workflow`, the types that every client knew before this NIP. This list is
+frozen. The relay leaves out every other type, so a channel type added later
+is also hidden from clients that do not know it. A filter that names such a
+channel (see below) reads it under the ordinary rules, and no other filter in
+the same request gains it. The opt-in in "Asking for system channels"
+(`#t:["system"]` or `#P`) adds system channels only, never a channel of
+another type. Each new type needs its own way to ask for all its channels.
+This applies to:
 
 - a filter without `#h`, for example the channels or messages a reader can see;
 - kind:39002 `#p:["<reader>"]`, the channels a reader belongs to;
 - COUNT and NIP-50 search; and
 - any relay-specific query API that does the same reads.
 
-A filter **names** a system channel when it has the channel ID in `#h`, or in
-`#d` on a filter whose kinds are all 39000–39003. Then the ordinary read rules
-apply: the reader can read the channel if they are a member or if it is open.
+A filter **names** a channel when it has the channel ID in `#h`, or in `#d` on
+a filter whose kinds are all 39000–39003. This is the same for a system
+channel and for a type added later. Then the ordinary read rules apply: the
+reader can read the channel if they are a member or if it is open.
 A client that has the ID, for example from a link, can open the channel. Thus
 a system channel stays an ordinary NIP-29 group.
 
-The relay decides this for each filter. A filter that names a system channel
-does not add it to another filter in the same request.
+The relay decides this for each filter. A filter that names a channel does
+not add it to another filter in the same request.
 
 The relay MUST NOT send push notifications for system channels.
 
@@ -243,7 +255,8 @@ the reader can read when it has:
   result, so it does not fill generic channel lists.
 
 The filter then matches as usual. A label alone does not ask for system
-channels.
+channels. These filters add only system channels. A channel of a type added
+later reaches only a filter that names it.
 
 | To find | Filter |
 | --- | --- |

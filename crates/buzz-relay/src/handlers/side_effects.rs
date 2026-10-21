@@ -3350,21 +3350,6 @@ async fn emit_initial_ref_state(
     Ok(())
 }
 
-/// Reconcile every community's event-backed NIP-43 membership view.
-///
-/// `relay_members` is canonical. A snapshot is rebuilt only when it is absent
-/// or its member/role set differs from the canonical rows. This makes the sweep
-/// safe to run at startup and periodically without producing an event stream
-/// when nothing changed. A failure in one community is logged and counted but
-/// does not prevent the remaining communities from being repaired.
-#[derive(Clone, Copy)]
-pub enum Nip43ReconciliationPurpose {
-    /// Before listener admission opens.
-    Bootstrap,
-    /// Periodic background repair after startup.
-    Maintenance,
-}
-
 /// Per-item counts from one snapshot reconciliation sweep.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReconcileSummary {
@@ -3374,167 +3359,29 @@ pub struct ReconcileSummary {
     pub failed: usize,
 }
 
-/// Preserve the original maintenance reconciliation API for downstream callers.
-#[deprecated(note = "use reconcile_nip43_membership_snapshots_with_purpose")]
-pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyhow::Result<usize> {
-    reconcile_nip43_membership_snapshots_with_purpose(
-        state,
-        Nip43ReconciliationPurpose::Maintenance,
-    )
-    .await
-    .map(|summary| summary.repaired)
-}
-
-/// Reconcile NIP-43 snapshots with explicit startup or maintenance attribution.
-pub async fn reconcile_nip43_membership_snapshots_with_purpose(
+/// Fan a committed NIP-43 membership list (kind:13534) out to live subscribers.
+///
+/// Membership mutations write the list in their own transaction (see
+/// `buzz_db::relay_members::MembershipWrite`), so this only delivers it; a
+/// missed delivery delays live updates and the next fetch is still correct.
+pub async fn fan_out_nip43_membership_list(
+    tenant: &TenantContext,
     state: &Arc<AppState>,
-    purpose: Nip43ReconciliationPurpose,
-) -> anyhow::Result<ReconcileSummary> {
-    let communities = match purpose {
-        Nip43ReconciliationPurpose::Bootstrap => state.db.bootstrap_community_hosts().await?,
-        Nip43ReconciliationPurpose::Maintenance => state.db.active_community_hosts().await?,
+    snapshot: Option<buzz_core::StoredEvent>,
+) {
+    let Some(stored) = snapshot else {
+        return;
     };
-    let mut reconciled = 0usize;
-    let mut failed = 0usize;
-    let total = communities.len();
-    let started = std::time::Instant::now();
-
-    for (index, community) in communities.into_iter().enumerate() {
-        if nip43_progress_due(purpose, index, total) {
-            info!(
-                done = index,
-                total,
-                republished = reconciled,
-                failed,
-                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                "NIP-43 startup reconciliation progress"
-            );
-        }
-        let community_id = buzz_core::CommunityId::from_uuid(community.id);
-        let host = community.host;
-        let result = async {
-            let needs_reconciliation = match purpose {
-                Nip43ReconciliationPurpose::Bootstrap => {
-                    state
-                        .db
-                        .nip43_membership_snapshot_needs_reconciliation_for_bootstrap(
-                            community_id,
-                            &state.relay_keypair.public_key(),
-                        )
-                        .await?
-                }
-                Nip43ReconciliationPurpose::Maintenance => {
-                    state
-                        .db
-                        .nip43_membership_snapshot_needs_reconciliation_for_maintenance(
-                            community_id,
-                            &state.relay_keypair.public_key(),
-                        )
-                        .await?
-                }
-            };
-            if !needs_reconciliation {
-                return Ok::<bool, anyhow::Error>(false);
-            }
-
-            let tenant = TenantContext::resolved(community_id, host.clone());
-            publish_nip43_membership_list(&tenant, state).await?;
-            Ok::<bool, anyhow::Error>(true)
-        }
-        .await;
-
-        match result {
-            Ok(true) => reconciled += 1,
-            Ok(false) => {}
-            Err(error) => {
-                failed += 1;
-                metrics::counter!("buzz_nip43_membership_reconciliation_failures_total")
-                    .increment(1);
-                warn!(%community_id, %host, %error, "NIP-43 membership reconciliation failed");
-            }
-        }
-    }
-
-    metrics::counter!("buzz_nip43_membership_reconciliations_total").increment(reconciled as u64);
-    Ok(ReconcileSummary {
-        repaired: reconciled,
-        failed,
-    })
-}
-
-/// Communities between startup NIP-43 reconciliation progress logs.
-const NIP43_BOOTSTRAP_PROGRESS_INTERVAL: usize = 5_000;
-
-/// Whether a sweep logs progress before processing community `done` of
-/// `total`. Only the startup sweep logs (the 60 s maintenance sweep stays
-/// quiet): every [`NIP43_BOOTSTRAP_PROGRESS_INTERVAL`] communities, never at
-/// the start (nothing done yet) and never past the end.
-fn nip43_progress_due(purpose: Nip43ReconciliationPurpose, done: usize, total: usize) -> bool {
-    matches!(purpose, Nip43ReconciliationPurpose::Bootstrap)
-        && done > 0
-        && done < total
-        && done.is_multiple_of(NIP43_BOOTSTRAP_PROGRESS_INTERVAL)
-}
-
-/// Publish a kind:13534 relay membership list event (NIP-43).
-///
-/// Queries all current relay members and emits a relay-signed, NIP-70-protected
-/// addressable event listing every member pubkey. Replaces any previous list.
-///
-/// The member query, event construction, and replacement all happen inside
-/// the same per-community advisory lock held by
-/// `publish_nip43_membership_locked`. This prevents a stale snapshot from
-/// overwriting a newer one when two publications race: the lock serializes
-/// the entire read-build-write cycle, not just the write.
-pub async fn publish_nip43_membership_list(
-    tenant: &TenantContext,
-    state: &Arc<AppState>,
-) -> anyhow::Result<()> {
-    let started_at = std::time::Instant::now();
-    metrics::counter!("buzz_nip43_membership_publications_total", "result" => "attempted")
-        .increment(1);
-    let result = publish_nip43_membership_list_inner(tenant, state).await;
-    metrics::histogram!("buzz_nip43_membership_publication_seconds")
-        .record(started_at.elapsed().as_secs_f64());
-    metrics::counter!(
-        "buzz_nip43_membership_publications_total",
-        "result" => if result.is_ok() { "succeeded" } else { "failed" }
-    )
-    .increment(1);
-    result
-}
-
-async fn publish_nip43_membership_list_inner(
-    tenant: &TenantContext,
-    state: &Arc<AppState>,
-) -> anyhow::Result<()> {
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
-    let community = tenant.community();
-
-    // The DB method acquires the per-community snapshot lock BEFORE reading
-    // members, so that the entire read-build-write cycle is serialized. A
-    // concurrent publication that reads newer state will block until our
-    // replacement commits, then read the updated membership. This prevents a
-    // stale snapshot from winning by arrival order.
-    let (stored, was_inserted, member_count) = state
-        .db
-        .publish_nip43_membership_locked(community, &state.relay_keypair)
-        .await?;
-
-    if was_inserted {
-        dispatch_persistent_event(
-            tenant,
-            state,
-            &stored,
-            KIND_NIP43_MEMBERSHIP_LIST,
-            &relay_pubkey_hex,
-            None,
-        )
-        .await;
-    }
-
-    info!(member_count, "NIP-43 membership list published");
-    Ok(())
+    dispatch_persistent_event(
+        tenant,
+        state,
+        &stored,
+        KIND_NIP43_MEMBERSHIP_LIST,
+        &relay_pubkey_hex,
+        None,
+    )
+    .await;
 }
 
 /// Shared helper: publish a NIP-43 membership delta event (kind 8000 or 8001).
@@ -4149,37 +3996,6 @@ mod tests {
     }
 
     #[test]
-    fn nip43_progress_logs_every_interval_inside_the_startup_sweep_only() {
-        use Nip43ReconciliationPurpose::{Bootstrap, Maintenance};
-        const STEP: usize = NIP43_BOOTSTRAP_PROGRESS_INTERVAL;
-        let total = 79_942;
-        let due: Vec<usize> = (0..total)
-            .filter(|&done| nip43_progress_due(Bootstrap, done, total))
-            .collect();
-        assert_eq!(due.first(), Some(&STEP));
-        assert_eq!(due.len(), total / STEP);
-        assert!(due.iter().all(|done| done.is_multiple_of(STEP)));
-
-        // (purpose, done, total, expected)
-        for (purpose, done, total, expected) in [
-            (Bootstrap, STEP, total, true),
-            (Maintenance, STEP, total, false),
-            (Bootstrap, 0, total, false),
-            (Bootstrap, STEP - 1, total, false),
-            (Bootstrap, STEP, STEP, false),
-            (Bootstrap, STEP, STEP + 1, true),
-        ] {
-            assert_eq!(
-                nip43_progress_due(purpose, done, total),
-                expected,
-                "done={done} total={total} bootstrap={}",
-                matches!(purpose, Bootstrap)
-            );
-        }
-        assert!(!(0..total).any(|done| nip43_progress_due(Maintenance, done, total)));
-    }
-
-    #[test]
     fn workflow_deletion_retry_matches_authorized_dispatch() {
         let keys = nostr::Keys::generate();
         let workflow = format!("30620:{}:workflow", keys.public_key());
@@ -4224,16 +4040,6 @@ mod tests {
                 .expect("sign");
             assert_eq!(is_workflow_deletion(&event), expected, "{:?}", event.tags);
         }
-    }
-
-    #[test]
-    fn nip43_reconciliation_compatibility_alias_is_preserved() {
-        #[allow(deprecated)]
-        async fn call(state: &Arc<AppState>) -> anyhow::Result<usize> {
-            reconcile_nip43_membership_snapshots(state).await
-        }
-
-        let _ = call;
     }
 
     #[test]
@@ -4351,137 +4157,5 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
-    }
-
-    mod postgres_tests {
-        use super::*;
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-
-        async fn insert_community(pool: &sqlx::PgPool) -> Uuid {
-            let id = Uuid::new_v4();
-            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-                .bind(id)
-                .bind(format!("nip43-sweep-{}.example", id.simple()))
-                .execute(pool)
-                .await
-                .expect("insert community fixture");
-            id
-        }
-
-        async fn set_deletion_state(pool: &sqlx::PgPool, id: Uuid, state: &str) {
-            let mut tx = pool.begin().await.expect("begin lifecycle fixture");
-            sqlx::query(
-                "SELECT set_config('buzz.deletion_executor_community', $1, true), \
-                        set_config('buzz.deletion_fence_generation', '0', true)",
-            )
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await
-            .expect("authorize lifecycle fixture");
-            sqlx::query(
-                "UPDATE communities SET deletion_state = $2, \
-                        deleted_at = CASE WHEN $2 = 'tombstone' THEN now() END \
-                 WHERE id = $1",
-            )
-            .bind(id)
-            .bind(state)
-            .execute(&mut *tx)
-            .await
-            .expect("set lifecycle state");
-            tx.commit().await.expect("commit lifecycle fixture");
-        }
-
-        async fn membership_snapshots(pool: &sqlx::PgPool, id: Uuid) -> i64 {
-            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2")
-                .bind(id)
-                .bind(KIND_NIP43_MEMBERSHIP_LIST as i32)
-                .fetch_one(pool)
-                .await
-                .expect("count membership snapshots")
-        }
-
-        fn reconciliation_failures(recorder: &DebuggingRecorder) -> u64 {
-            recorder
-                .snapshotter()
-                .snapshot()
-                .into_vec()
-                .into_iter()
-                .filter(|(key, _, _, _)| {
-                    key.key().name() == "buzz_nip43_membership_reconciliation_failures_total"
-                })
-                .map(|(_, _, _, value)| match value {
-                    DebugValue::Counter(value) => value,
-                    other => panic!("reconciliation failures must be a counter: {other:?}"),
-                })
-                .sum()
-        }
-
-        /// Regression for #7558 on the worker path: repeated NIP-43
-        /// maintenance sweeps reconcile the active community once and never
-        /// hand archived, quiescing, fenced, or tombstoned communities to the
-        /// publisher, so the fence never rejects a write and nothing warns.
-        #[tokio::test]
-        #[ignore = "requires Postgres"]
-        async fn maintenance_sweep_skips_archived_and_deleted_communities() {
-            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
-                .await
-                .expect("connect to test DB");
-            let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
-
-            let active = insert_community(&pool).await;
-            let archived = insert_community(&pool).await;
-            let quiescing = insert_community(&pool).await;
-            let fenced = insert_community(&pool).await;
-            let tombstone = insert_community(&pool).await;
-            sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
-                .bind(archived)
-                .execute(&pool)
-                .await
-                .expect("archive fixture");
-            set_deletion_state(&pool, quiescing, "quiescing").await;
-            set_deletion_state(&pool, fenced, "fenced").await;
-            set_deletion_state(&pool, tombstone, "tombstone").await;
-
-            let recorder = DebuggingRecorder::new();
-            let _guard = metrics::set_default_local_recorder(&recorder);
-            for sweep in 0..3 {
-                reconcile_nip43_membership_snapshots_with_purpose(
-                    &state,
-                    Nip43ReconciliationPurpose::Maintenance,
-                )
-                .await
-                .unwrap_or_else(|e| panic!("maintenance sweep {sweep}: {e}"));
-            }
-
-            assert_eq!(
-                reconciliation_failures(&recorder),
-                0,
-                "no community may fail reconciliation on any sweep"
-            );
-            assert_eq!(
-                membership_snapshots(&pool, active).await,
-                1,
-                "the active community is reconciled once and then left alone"
-            );
-            for (label, id) in [
-                ("archived", archived),
-                ("quiescing", quiescing),
-                ("fenced", fenced),
-                ("tombstone", tombstone),
-            ] {
-                assert_eq!(
-                    membership_snapshots(&pool, id).await,
-                    0,
-                    "{label} community must not receive a maintenance write"
-                );
-            }
-            let tombstone_state: String =
-                sqlx::query_scalar("SELECT deletion_state FROM communities WHERE id = $1")
-                    .bind(tombstone)
-                    .fetch_one(&pool)
-                    .await
-                    .expect("tombstone row is retained");
-            assert_eq!(tombstone_state, "tombstone");
-        }
     }
 }

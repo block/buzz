@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
@@ -430,16 +431,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       return left.name.toLowerCase().compareTo(right.name.toLowerCase());
     });
 
-    // Invalidate `channelDetailsProvider` entries whose archived state flipped
-    // since the last fetch. Required because `channelDetailsProvider` is a
-    // separate Riverpod cache and `Channel.mergeDetails(details)` overwrites
-    // archivedAt from the cached details — so an active-then-archived channel
-    // (e.g. TTL auto-archive by the relay reaper) could keep showing compose
-    // and manage actions in the detail view until the cache expired naturally.
-    //
-    // Scoped narrowly to the archived flip — broader metadata staleness
-    // (renames, topic changes, etc.) is a separate, pre-existing concern that
-    // already affects this provider for other reasons.
+    // Details are a separate cache. Invalidate changes that would otherwise
+    // overwrite fresh Solo identity or archive state when opening a channel.
     // Re-check before the first write that other providers can observe. Every
     // await above is fenced, but the switch can also land in the synchronous
     // gap, so the guard sits immediately before the write rather than only
@@ -451,7 +444,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     };
     for (final channel in channels) {
       final prev = prevById[channel.id];
-      if (prev != null && prev.isArchived != channel.isArchived) {
+      if (prev == null ||
+          prev.isArchived != channel.isArchived ||
+          prev.channelType != channel.channelType ||
+          prev.visibility != channel.visibility ||
+          prev.createdBy != channel.createdBy ||
+          !listEquals(prev.labels, channel.labels)) {
         ref.invalidate(channelDetailsProvider(channel.id));
       }
     }
@@ -623,10 +621,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       id: data.id,
       name: data.name,
       channelType: data.channelType,
+      labels: data.labels,
       visibility: data.visibility,
       description: data.description,
       topic: data.topic,
-      createdBy: event.pubkey,
+      createdBy: data.creator ?? event.pubkey,
       createdAt: DateTime.fromMillisecondsSinceEpoch(
         event.createdAt * 1000,
         isUtc: true,

@@ -155,6 +155,7 @@ Future<Channel> _createMeChat(
       name: name,
       channelType: 'stream',
       visibility: 'private',
+      labels: const ['buzz.solo'],
     ),
     hasAgent: () async {
       ref.invalidate(channelMembersProvider(channelId));

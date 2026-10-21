@@ -295,44 +295,75 @@ where
     }
 }
 
+/// Prompt retries allowed while rows timestamped now route to an empty catch-all
+/// awaiting advancement. With the 5 s to 60 s backoff they span about five
+/// minutes, after which the normal period applies until that changes.
+const PARTITION_ADVANCE_RETRY_LIMIT: u32 = 8;
+
 /// Retry missing diagnostics promptly, without tying audit recovery to readiness.
-/// Delays start after each attempt finishes, so slow audits cannot cause bursts.
+/// Also retries promptly, a bounded number of times, while the current month
+/// routes to an empty catch-all awaiting advancement, so a failed first pass on
+/// a fresh install does not wait a full period. Delays start after each attempt finishes, so slow audits
+/// cannot cause bursts.
 struct PartitionAuditSchedule {
     period: std::time::Duration,
     next_delay: std::time::Duration,
     retry_delay: std::time::Duration,
     has_completed_audit: bool,
+    advance_pending: bool,
+    advance_retries_left: u32,
 }
 
 impl PartitionAuditSchedule {
-    fn new(period: std::time::Duration, has_completed_audit: bool) -> Self {
-        Self {
+    /// `startup` is the startup attempt's outcome, as for [`Self::record_attempt`].
+    fn new(period: std::time::Duration, startup: Option<bool>) -> Self {
+        let mut schedule = Self {
             period,
-            next_delay: if has_completed_audit {
-                period
-            } else {
-                std::time::Duration::ZERO
-            },
+            next_delay: std::time::Duration::ZERO,
             retry_delay: std::time::Duration::from_secs(5),
-            has_completed_audit,
+            has_completed_audit: false,
+            advance_pending: false,
+            advance_retries_left: PARTITION_ADVANCE_RETRY_LIMIT,
+        };
+        if startup.is_some() {
+            schedule.record_attempt(startup);
         }
+        schedule
     }
 
     async fn wait(&self) {
         tokio::time::sleep(self.next_delay).await;
     }
 
-    /// A completed audit counts even when its verdict is unsafe.
-    fn record_attempt(&mut self, completed: bool) {
-        self.has_completed_audit |= completed;
-        if self.has_completed_audit {
-            self.next_delay = self.period;
+    /// Records one attempt: `None` when no audit completed, otherwise whether
+    /// catch-all advancement is still pending. A completed audit counts even
+    /// when its verdict is unsafe. A failed attempt keeps the last known
+    /// pending state.
+    fn record_attempt(&mut self, advance_pending: Option<bool>) {
+        if let Some(pending) = advance_pending {
+            self.has_completed_audit = true;
+            self.advance_pending = pending;
+        }
+        if !self.advance_pending {
+            self.advance_retries_left = PARTITION_ADVANCE_RETRY_LIMIT;
+        }
+        let retry = if !self.has_completed_audit {
+            true
+        } else if self.advance_pending && self.advance_retries_left > 0 {
+            self.advance_retries_left -= 1;
+            true
         } else {
+            false
+        };
+        if retry {
             self.next_delay = self.retry_delay;
             self.retry_delay = self
                 .retry_delay
                 .saturating_mul(2)
                 .min(std::time::Duration::from_secs(60));
+        } else {
+            self.next_delay = self.period;
+            self.retry_delay = std::time::Duration::from_secs(5);
         }
     }
 }
@@ -629,7 +660,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         {
             Ok(Some(record)) => {
                 info!(host = %record.host, community = %record.id, "Deployment community ensured");
-                Some(record.id)
+                Some(buzz_core::tenant::TenantContext::resolved(
+                    record.id,
+                    record.host,
+                ))
             }
             Ok(None) => {
                 step.degrade();
@@ -657,8 +691,21 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // Idempotent — safe to run every startup. Must run before bootstrap_owner
     // so that existing allowlist users become relay members before the owner
     // is promoted (otherwise enabling membership locks everyone out).
-    if let Some(community) = deployment_community {
-        match db.backfill_from_allowlist(community).await {
+    //
+    // Both steps write the NIP-43 membership list in their own transaction.
+    // This listener isn't up yet, but in a rolling deploy other replicas have
+    // live subscribers; the newest list is fanned out once pub/sub is ready.
+    let mut startup_membership_list = None;
+    if let Some(tenant) = &deployment_community {
+        match db
+            .backfill_from_allowlist(tenant.community(), &relay_keypair)
+            .await
+            .map(|write| {
+                if write.snapshot.is_some() {
+                    startup_membership_list = write.snapshot;
+                }
+                write.outcome
+            }) {
             Ok(0) => {}
             Ok(n) => info!("Backfilled {n} pubkey_allowlist entries into relay_members"),
             Err(e) => {
@@ -679,10 +726,18 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 
     // NIP-43: ensure the configured relay owner always holds the owner role
     // within the deployment community.
-    if let (Some(community), Some(owner_pubkey)) =
-        (deployment_community, config.relay_owner_pubkey.as_ref())
+    if let (Some(tenant), Some(owner_pubkey)) =
+        (&deployment_community, config.relay_owner_pubkey.as_ref())
     {
-        match db.bootstrap_owner(community, owner_pubkey).await {
+        match db
+            .bootstrap_owner(tenant.community(), owner_pubkey, &relay_keypair)
+            .await
+            .map(|write| {
+                if write.snapshot.is_some() {
+                    startup_membership_list = write.snapshot;
+                }
+                write.outcome
+            }) {
             Ok(()) => info!(pubkey = %owner_pubkey, "Relay owner bootstrapped"),
             Err(e) => {
                 if config.require_relay_membership {
@@ -700,19 +755,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                     );
                 }
             }
-        }
-    }
-    step.finish();
-
-    // NIP-33: backfill d_tag for any existing parameterized replaceable events
-    // that predate the column addition. Idempotent — no-ops when fully populated.
-    let mut step = StepTimer::start(StartupStep::DTagBackfill);
-    match db.backfill_d_tags().await {
-        Ok(0) => {}
-        Ok(n) => info!("Backfilled d_tag for {n} NIP-33 events"),
-        Err(e) => {
-            step.degrade();
-            error!("Failed to backfill d_tags: {e}");
         }
     }
     step.finish();
@@ -887,7 +929,17 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         app_state.nip_fi_resolver = Some(resolver);
     }
     let state = Arc::new(app_state);
-    let has_startup_partition_audit = startup_partition_audit.is_some();
+    if let Some(tenant) = &deployment_community {
+        buzz_relay::handlers::side_effects::fan_out_nip43_membership_list(
+            tenant,
+            &state,
+            startup_membership_list,
+        )
+        .await;
+    }
+    let startup_partition_attempt = startup_partition_audit
+        .as_ref()
+        .map(|audit| audit.awaits_catch_all_advance(partition_policy));
     if let Some(audit) = startup_partition_audit {
         state.record_partition_audit(audit);
     }
@@ -900,7 +952,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         let audit_interval = state.config.partition_audit_interval;
         tokio::spawn(async move {
             let mut schedule =
-                PartitionAuditSchedule::new(audit_interval, has_startup_partition_audit);
+                PartitionAuditSchedule::new(audit_interval, startup_partition_attempt);
             loop {
                 schedule.wait().await;
                 let db = &partition_state.db;
@@ -922,7 +974,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                     counted_partition_audit(db.audit_partitions(PARTITION_MANAGER_MONTHS_AHEAD))
                         .await
                 };
-                schedule.record_attempt(result.is_ok());
+                schedule.record_attempt(
+                    result
+                        .as_ref()
+                        .ok()
+                        .map(|audit| audit.awaits_catch_all_advance(partition_policy)),
+                );
                 match result {
                     Ok(audit) => partition_state.record_partition_audit(audit),
                     Err(error) => warn!(%error, "Periodic partition catalog audit failed"),
@@ -1094,65 +1151,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         }
     }
     step.finish();
-
-    // NIP-43: reconcile the event-backed roster for every provisioned
-    // community before opening the listener. `relay_members` is canonical;
-    // this repairs pre-snapshot communities and any publication that failed
-    // after a membership transaction committed.
-    if config.require_relay_membership {
-        let mut step = StepTimer::start(StartupStep::Nip43Reconcile);
-        match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots_with_purpose(
-            &state,
-            buzz_relay::handlers::side_effects::Nip43ReconciliationPurpose::Bootstrap,
-        )
-        .await
-        {
-            Ok(summary) => {
-                if summary.failed > 0 {
-                    step.degrade();
-                }
-                info!(
-                    count = summary.repaired,
-                    failed = summary.failed,
-                    "NIP-43 membership snapshots reconciled on startup"
-                );
-            }
-            Err(error) => {
-                step.degrade();
-                tracing::warn!(%error, "NIP-43 membership snapshot startup reconciliation failed")
-            }
-        }
-        step.finish();
-
-        let reconcile_state = Arc::clone(&state);
-        let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(60)
-            .max(1);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots_with_purpose(
-                    &reconcile_state,
-                    buzz_relay::handlers::side_effects::Nip43ReconciliationPurpose::Maintenance,
-                )
-                .await
-                {
-                    Ok(summary) if summary.repaired > 0 => {
-                        info!(count = summary.repaired, "NIP-43 membership snapshots repaired")
-                    }
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(
-                        %error,
-                        "periodic NIP-43 membership snapshot reconciliation failed"
-                    ),
-                }
-            }
-        });
-    }
 
     // Emit kind:39000/39002 discovery events for channels that exist in the DB
     // but don't have corresponding events (e.g. seeded via direct SQL inserts).
@@ -2458,7 +2456,7 @@ fn dropped_in_memory_keys(
 async fn run_usage_metrics_tick(
     state: &AppState,
     emission_scope: &EmissionScope,
-    leader: &mut Option<buzz_db::UsageMetricsLeader>,
+    leader: &mut Option<buzz_db::SessionLeader>,
     emitted_in_memory: &mut HashSet<InMemoryMetricKey>,
     fleet_schedule: &mut FleetUsageSchedule,
 ) -> anyhow::Result<()> {
@@ -2500,7 +2498,7 @@ async fn run_usage_metrics_tick(
     if leader.is_none() && !demoted {
         *leader = state
             .db
-            .try_lock_usage_metrics(USAGE_METRICS_LOCK_KEY)
+            .try_lock_session_leader(USAGE_METRICS_LOCK_KEY)
             .await?;
         if leader.is_some() {
             info!("Acquired usage metrics leader lock");
@@ -3236,12 +3234,12 @@ mod tests {
         let period = Duration::from_secs(900);
 
         let immediate_start = tokio::time::Instant::now();
-        let mut schedule = PartitionAuditSchedule::new(period, false);
+        let mut schedule = PartitionAuditSchedule::new(period, None);
         schedule.wait().await;
         assert_eq!(tokio::time::Instant::now(), immediate_start);
 
         // Failure of the first periodic attempt must not delay recovery by 15 minutes.
-        schedule.record_attempt(false);
+        schedule.record_attempt(None);
         schedule.wait().await;
         assert_eq!(
             tokio::time::Instant::now() - immediate_start,
@@ -3249,18 +3247,27 @@ mod tests {
         );
 
         let delayed_start = tokio::time::Instant::now();
-        let schedule = PartitionAuditSchedule::new(period, true);
+        let schedule = PartitionAuditSchedule::new(period, Some(false));
         schedule.wait().await;
         assert_eq!(tokio::time::Instant::now() - delayed_start, period);
+
+        // A startup pass that left an empty catch-all awaiting advance retries soon.
+        let pending_start = tokio::time::Instant::now();
+        let schedule = PartitionAuditSchedule::new(period, Some(true));
+        schedule.wait().await;
+        assert_eq!(
+            tokio::time::Instant::now() - pending_start,
+            Duration::from_secs(5)
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn partition_audit_recovery_backoff_is_bounded_and_completion_ends_retries() {
         let period = Duration::from_secs(900);
-        let mut schedule = PartitionAuditSchedule::new(period, false);
+        let mut schedule = PartitionAuditSchedule::new(period, None);
         schedule.wait().await;
         for seconds in [5, 10, 20, 40, 60, 60, 60] {
-            schedule.record_attempt(false);
+            schedule.record_attempt(None);
             let start = tokio::time::Instant::now();
             schedule.wait().await;
             assert_eq!(
@@ -3271,8 +3278,8 @@ mod tests {
 
         // Completion, not a serving-safe verdict, ends recovery. Later failures
         // retain the cached audit and use the normal cadence.
-        for completed in [true, false, false] {
-            schedule.record_attempt(completed);
+        for attempt in [Some(false), None, None] {
+            schedule.record_attempt(attempt);
             let start = tokio::time::Instant::now();
             schedule.wait().await;
             assert_eq!(tokio::time::Instant::now() - start, period);
@@ -3281,14 +3288,62 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn partition_audit_retries_wait_after_slow_attempts() {
-        let mut schedule = PartitionAuditSchedule::new(Duration::from_secs(900), false);
+        let mut schedule = PartitionAuditSchedule::new(Duration::from_secs(900), None);
         schedule.wait().await;
         tokio::time::advance(Duration::from_secs(120)).await;
-        schedule.record_attempt(false);
+        schedule.record_attempt(None);
         let finished = tokio::time::Instant::now();
         schedule.wait().await;
         assert_eq!(
             tokio::time::Instant::now() - finished,
+            Duration::from_secs(5)
+        );
+    }
+
+    /// Waits one scheduled delay and returns how long it was.
+    async fn partition_audit_delay(schedule: &PartitionAuditSchedule) -> Duration {
+        let start = tokio::time::Instant::now();
+        schedule.wait().await;
+        tokio::time::Instant::now() - start
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partition_advance_retries_are_bounded_and_reset_once_advanced() {
+        let period = Duration::from_secs(900);
+        let mut schedule = PartitionAuditSchedule::new(period, Some(true));
+        let mut delays = vec![partition_audit_delay(&schedule).await.as_secs()];
+        // Failed attempts keep the pending state and spend the same budget.
+        for attempt in [
+            None,
+            Some(true),
+            None,
+            Some(true),
+            Some(true),
+            Some(true),
+            Some(true),
+        ] {
+            schedule.record_attempt(attempt);
+            delays.push(partition_audit_delay(&schedule).await.as_secs());
+        }
+        assert_eq!(delays, [5, 10, 20, 40, 60, 60, 60, 60]);
+        assert_eq!(
+            usize::try_from(super::PARTITION_ADVANCE_RETRY_LIMIT).ok(),
+            Some(delays.len())
+        );
+
+        // The budget is spent: a catch-all that never advances falls back to
+        // the normal period instead of retrying forever.
+        for attempt in [Some(true), None, Some(true)] {
+            schedule.record_attempt(attempt);
+            assert_eq!(partition_audit_delay(&schedule).await, period);
+        }
+
+        // Advancing resets the budget and backoff for a later pending catch-all.
+        schedule.record_attempt(Some(false));
+        assert_eq!(partition_audit_delay(&schedule).await, period);
+        schedule.record_attempt(Some(true));
+        assert_eq!(
+            partition_audit_delay(&schedule).await,
             Duration::from_secs(5)
         );
     }

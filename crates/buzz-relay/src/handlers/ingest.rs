@@ -2849,13 +2849,13 @@ async fn ingest_event_inner(
         let sender_hex = event.pubkey.to_hex();
 
         // remove_relay_member handles both the NotFound and IsOwner cases atomically.
-        let remove_result = state
+        let write = state
             .db
-            .remove_relay_member(tenant.community(), &sender_hex)
+            .remove_relay_member(tenant.community(), &sender_hex, &state.relay_keypair)
             .await
             .map_err(|e| IngestError::Internal(format!("database error: {e}")))?;
 
-        match remove_result {
+        match write.outcome {
             buzz_db::relay_members::RemoveResult::Removed => {}
             buzz_db::relay_members::RemoveResult::NotFound => {
                 return Err(IngestError::Rejected(
@@ -2894,11 +2894,8 @@ async fn ingest_event_inner(
         {
             warn!(error = %e, "failed to publish NIP-43 member removed event");
         }
-        if let Err(e) =
-            crate::handlers::side_effects::publish_nip43_membership_list(tenant, state).await
-        {
-            warn!(error = %e, "failed to publish NIP-43 membership list");
-        }
+        crate::handlers::side_effects::fan_out_nip43_membership_list(tenant, state, write.snapshot)
+            .await;
 
         info!(pubkey = %sender_hex, "relay member left via NIP-43 leave request");
         revoked.map_err(|e| {
