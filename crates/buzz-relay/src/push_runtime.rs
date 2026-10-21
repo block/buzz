@@ -1015,12 +1015,14 @@ mod postgres_tests {
 
     /// The matcher on real channel rows: a member's lease that names no
     /// channel wakes for an ordinary channel's message but not for a system
-    /// channel's, and a non-member's lease wakes for neither.
-    /// Mutation: let system channel events through the matcher's channel
-    /// check → RED (the system channel's message wakes the member).
+    /// channel's. A member's lease that names the system channel by `#h`
+    /// wakes for that channel only. A non-member's lease wakes for neither.
+    /// Mutations: let system channel events reach a lease that does not name
+    /// them → RED (the outsider or the broad lease wakes); never push system
+    /// channels → RED (the named lease does not wake).
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
-    async fn system_channel_messages_do_not_wake_unnamed_leases() {
+    async fn system_channel_messages_wake_only_named_member_leases() {
         use crate::handlers::group_state_postgres_tests::{create_channel, http_auth};
         use crate::handlers::ingest::ingest_event;
 
@@ -1041,15 +1043,24 @@ mod postgres_tests {
         let ordinary = create_channel(&state, &tenant, &member, &[]).await;
         let system = create_channel(&state, &tenant, &member, &[&["channel_type", "system"]]).await;
 
-        let subscriptions = serde_json::json!([{"filter": {"kinds": [9]}, "class": "default"}]);
-        for (n, keys) in [&member, &outsider].into_iter().enumerate() {
+        let unnamed = serde_json::json!([{"filter": {"kinds": [9]}, "class": "default"}]);
+        let named = serde_json::json!([{
+            "filter": {"kinds": [9], "#h": [system.to_string()]},
+            "class": "default"
+        }]);
+        let leases = [
+            (&member, "unnamed", &unnamed),
+            (&member, "named", &named),
+            (&outsider, "unnamed", &unnamed),
+        ];
+        for (n, (keys, install, subscriptions)) in leases.into_iter().enumerate() {
             let source = [n as u8 + 1; 32];
             assert_eq!(
                 buzz_db::push::replace_active_lease(
                     state.db.pool(),
                     community,
                     &keys.public_key().to_bytes(),
-                    "install",
+                    install,
                     buzz_db::push::LeaseVersion {
                         source_event_id: &source,
                         source_created_at: 10,
@@ -1057,10 +1068,10 @@ mod postgres_tests {
                         expires_at: i64::MAX / 2,
                     },
                     buzz_db::push::ActiveLease {
-                        endpoint_hash: &[42; 32],
+                        endpoint_hash: &[n as u8 + 42; 32],
                         endpoint_grant: "opaque-grant",
                         max_class: "default",
-                        subscriptions: &subscriptions,
+                        subscriptions,
                     },
                 )
                 .await
@@ -1111,10 +1122,11 @@ mod postgres_tests {
                     .collect()
             })
             .collect();
+        let member_key = member.public_key().to_bytes().to_vec();
         assert_eq!(
             woken,
-            vec![vec![member.public_key().to_bytes().to_vec()], vec![]],
-            "ordinary channel wakes only its member; system channel wakes no one"
+            vec![vec![member_key.clone()], vec![member_key]],
+            "ordinary channel wakes its member's broad lease; system channel wakes only the lease that names it"
         );
     }
 }
