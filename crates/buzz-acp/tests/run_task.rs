@@ -182,6 +182,7 @@ fn file_and_stdin_run_one_fresh_equipped_session_without_service() {
         for proc in spawned {
             assert_eq!(proc["key"], KEY);
             assert_eq!(proc["relay"], "ws://127.0.0.1:1");
+            assert_eq!(proc["outputFormat"], "agent");
             assert_dead(proc["pid"].as_u64().unwrap() as u32);
             assert!(!std::path::Path::new(proc["gitKeyfile"].as_str().unwrap()).exists());
         }
@@ -196,6 +197,13 @@ fn file_and_stdin_run_one_fresh_equipped_session_without_service() {
             .collect();
         assert_eq!(prompts.len(), 2);
         for (session, prompt) in sessions.iter().zip(prompts) {
+            let mcp_env = session["params"]["mcpServers"][0]["env"]
+                .as_array()
+                .unwrap();
+            let format = mcp_env
+                .iter()
+                .find(|entry| entry["name"] == "BUZZ_OUTPUT_FORMAT");
+            assert_eq!(format.map(|entry| &entry["value"]), Some(&json!("agent")));
             let setup = session["params"].to_string();
             assert!(setup.contains("/test/mcp"));
             assert!(setup.contains("task title"));

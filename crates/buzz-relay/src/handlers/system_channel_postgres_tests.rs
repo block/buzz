@@ -1216,3 +1216,107 @@ async fn system_channels_are_found_by_type_or_creator() {
         "bridge /count outsider #t:system"
     );
 }
+
+/// GET a workflow's runs as `reader`, returning the response status.
+async fn workflow_runs_status(f: &Fixture, reader: &Keys, workflow: Uuid) -> u16 {
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use tower::ServiceExt;
+
+    crate::router::build_router(f.state.clone())
+        .oneshot(
+            Request::get(format!("/workflows/{workflow}/runs"))
+                .header(header::HOST, &f.host)
+                .header("x-pubkey", reader.public_key().to_hex())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("router")
+        .status()
+        .as_u16()
+}
+
+/// A workflow names its channel, so the workflows API reads a workflow in a
+/// system channel under the ordinary rules: members read it, outsiders read
+/// it only when the channel is open, and a private one answers 404 like a
+/// missing workflow.
+/// Mutation: drop the `get_readable_named_only_channels` check from
+/// `authorize_workflow_read` → RED (members get 404 for their own system
+/// channel's workflow).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn workflows_in_system_channels_follow_channel_access() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+
+    let private = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    let open = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    edit_channel(
+        &f.state,
+        &f.tenant,
+        &owner,
+        open,
+        &[&["visibility", "open"]],
+    )
+    .await
+    .expect("open the system channel");
+    let ordinary = create_channel(&f.state, &f.tenant, &owner, &[&["visibility", "private"]]).await;
+
+    let owner_bytes = owner.public_key().to_bytes();
+    f.state
+        .db
+        .ensure_user(f.tenant.community(), &owner_bytes)
+        .await
+        .expect("workflow owner user");
+    let workflow = |channel: Uuid| {
+        let state = f.state.clone();
+        let community = f.tenant.community();
+        async move {
+            state
+                .db
+                .create_workflow(
+                    community,
+                    Some(channel),
+                    &owner_bytes,
+                    &format!("wf-{}", channel.simple()),
+                    "{}",
+                    &[0; 32],
+                )
+                .await
+                .expect("create workflow")
+        }
+    };
+    let (private_wf, open_wf, ordinary_wf) = (
+        workflow(private).await,
+        workflow(open).await,
+        workflow(ordinary).await,
+    );
+
+    let cases = [
+        (&owner, private_wf, 200, "member, private system channel"),
+        (&owner, open_wf, 200, "member, open system channel"),
+        (&owner, ordinary_wf, 200, "member, ordinary channel"),
+        (
+            &outsider,
+            private_wf,
+            404,
+            "outsider, private system channel",
+        ),
+        (&outsider, open_wf, 200, "outsider, open system channel"),
+        (
+            &outsider,
+            ordinary_wf,
+            404,
+            "outsider, private ordinary channel",
+        ),
+    ];
+    for (reader, workflow, expected, case) in cases {
+        assert_eq!(
+            workflow_runs_status(&f, reader, workflow).await,
+            expected,
+            "{case}"
+        );
+    }
+}

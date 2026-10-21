@@ -43,6 +43,11 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via buzz-mesh-smoke → mesh-llm → keyring 4 → secret-service 5 → zbus 5; unmaintained, not vulnerable" },
+    # webpki-roots 0.26.11 bundles no certificates: it re-exports webpki-roots 1,
+    # which the lockfile pins at the patched 1.0.10. tokio-tungstenite 0.28/0.29
+    # (via axum and nostr-sdk) still require ^0.26, and no patched 0.26 release
+    # exists. Remove when those consumers move to webpki-roots 1.
+    { id = "RUSTSEC-2026-0381", reason = "only webpki-roots 0.26.11 remains: a shim re-exporting the patched 1.0.10; required by tokio-tungstenite 0.28/0.29" },
 ]
 
 [licenses]

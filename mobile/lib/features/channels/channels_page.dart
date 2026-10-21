@@ -2,6 +2,7 @@ import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/widgets/compose_morph_icon.dart';
 import '../../shared/me/me_sync.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' show max, min, pi;
@@ -77,7 +78,7 @@ part 'channels_page/quick_actions.dart';
 part 'channels_page/quick_actions_launcher.dart';
 part 'channels_page/header_actions.dart';
 
-enum _QuickAction { createChannel, newDm, browseChannels }
+enum _QuickAction { createChannel, newDm }
 
 const double _kChannelSectionInset = Grid.gutter;
 const double _kChannelLeadingWidth = 22.0;

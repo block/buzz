@@ -2,14 +2,18 @@ import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
+
 import 'dart:async';
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
+
 import 'dart:math';
 import 'dart:io';
 import 'dart:ui' as ui;
+
 import 'package:buzz/shared/widgets/buzz_sheet_header.dart';
 import 'package:flutter/rendering.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
@@ -55,6 +59,8 @@ import 'package:buzz/shared/widgets/skeleton.dart';
 import '../../helpers/thread_ids.dart';
 
 part 'channels_page_test/presence_tests.dart';
+part 'channels_page_test/dm_recipient_layout_tests.dart';
+part 'channels_page_test/discovery_journey_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
 
 void main() {
@@ -153,6 +159,7 @@ void main() {
   }
 
   _communityUnreadLandingTests(buildTestable);
+  _discoveryJourneyTests(buildTestable);
 
   final testChannels = [
     Channel(
@@ -340,6 +347,43 @@ void main() {
     );
   });
 
+  testWidgets('shows channel visibility icons and excludes Solo chats', (
+    tester,
+  ) async {
+    final channels = [
+      testChannels.first,
+      for (final type in ['stream', 'solo'])
+        Channel(
+          id: 'private-$type',
+          name: 'private-$type',
+          channelType: type,
+          visibility: 'private',
+          description: '',
+          createdBy: 'aabb',
+          createdAt: DateTime(2025),
+          memberCount: 1,
+          isMember: true,
+        ),
+    ];
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final publicIcon = find.byKey(const ValueKey('channel-icon-1'));
+    final privateIcon = find.byKey(
+      const ValueKey('channel-icon-private-stream'),
+    );
+    expect(tester.widget<Icon>(publicIcon).icon, BuzzIcons.hash);
+    expect(tester.widget<Icon>(privateIcon).icon, BuzzIcons.lock);
+    expect(tester.getTopLeft(publicIcon).dx, tester.getTopLeft(privateIcon).dx);
+    expect(find.text('private-solo'), findsNothing);
+  });
+
   testWidgets('shows grouped channel list when data loads', (tester) async {
     // Valid fixture keys whose npub encodings were verified against the
     // NIP-19 codec independently of the code under test.
@@ -454,7 +498,7 @@ void main() {
         Theme.of(tester.element(find.text(label))).colorScheme.onSurface,
       );
     }
-    expect(find.byKey(const ValueKey('channel-icon-1')), findsNothing);
+    expect(find.byKey(const ValueKey('channel-icon-1')), findsOneWidget);
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w400);
@@ -679,7 +723,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final lastChannel = tester.getRect(find.text('general'));
+    final lastChannel = tester
+        .getRect(find.text('general'))
+        .expandToInclude(
+          tester.getRect(find.byKey(const ValueKey('channel-icon-1'))),
+        );
     final divider = tester.getRect(find.byType(Divider).last);
     final nextSectionHeader = tester.getRect(find.text('DMs'));
 
@@ -1183,9 +1231,11 @@ void main() {
     expect(find.text('Community'), findsNothing);
     final sectionLabelX = tester.getTopLeft(find.text('Channels')).dx;
     final rowLabelX = tester.getTopLeft(find.text('general')).dx;
-    // The community title shares the leading row with its avatar. Channel
-    // labels stay aligned below it.
-    expect(sectionLabelX, rowLabelX);
+    final rowIconX = tester
+        .getTopLeft(find.byKey(const ValueKey('channel-icon-1')))
+        .dx;
+    expect(sectionLabelX, rowIconX);
+    expect(rowLabelX, greaterThan(rowIconX));
 
     relaySession.setReconnecting();
     await tester.pump();
@@ -1202,7 +1252,7 @@ void main() {
           find.byKey(const Key('channels-skeleton-row-label-0')).first,
         )
         .dx;
-    expect(skeletonSectionLabelX, skeletonRowLabelX);
+    expect(skeletonRowLabelX, rowLabelX);
     expect(skeletonSectionLabelX, sectionLabelX);
   });
 
@@ -2902,8 +2952,8 @@ void main() {
     }
     await tester.pumpAndSettle();
 
-    expect(largestHeight, greaterThan(216));
-    expect(tester.getSize(surface).height, closeTo(216, 0.01));
+    expect(largestHeight, greaterThan(142));
+    expect(tester.getSize(surface).height, closeTo(142, 0.01));
     final screenWidth = MediaQuery.sizeOf(tester.element(surface)).width;
     final surfaceRect = tester.getRect(surface);
     expect(surfaceRect.left, closeTo(20, 0.01));
@@ -2916,23 +2966,15 @@ void main() {
       const Key('quick-action-create-channel-card'),
     );
     final dmCard = find.byKey(const Key('quick-action-new-dm-card'));
-    final browseCard = find.byKey(
-      const Key('quick-action-browse-channels-card'),
-    );
     final createRect = tester.getRect(createCard);
     final dmRect = tester.getRect(dmCard);
-    final browseRect = tester.getRect(browseCard);
 
     expect(createRect.left - menuRect.left, closeTo(8, 0.01));
     expect(menuRect.right - createRect.right, closeTo(8, 0.01));
     expect(dmRect.left - menuRect.left, closeTo(8, 0.01));
     expect(menuRect.right - dmRect.right, closeTo(8, 0.01));
-    expect(browseRect.left - menuRect.left, closeTo(8, 0.01));
-    expect(menuRect.right - browseRect.right, closeTo(8, 0.01));
-    expect(dmRect.top - createRect.bottom, closeTo(8, 0.01));
-    expect(browseRect.top - dmRect.bottom, closeTo(8, 0.01));
+    expect(dmRect.top - createRect.bottom, closeTo(6, 0.01));
     expect(dmRect.width, createRect.width);
-    expect(browseRect.width, createRect.width);
     expect(dmRect.width, closeTo(menuRect.width - 16, 0.01));
 
     final expectedCardColor = Color.alphaBlend(
@@ -2945,25 +2987,21 @@ void main() {
     final dmMaterial = tester.widget<Material>(
       find.descendant(of: dmCard, matching: find.byType(Material)).first,
     );
-    final browseMaterial = tester.widget<Material>(
-      find.descendant(of: browseCard, matching: find.byType(Material)).first,
-    );
     expect(createMaterial.color, expectedCardColor);
     expect(dmMaterial.color, expectedCardColor);
-    expect(browseMaterial.color, expectedCardColor);
     expect(
-      ((createMaterial.shape as RoundedSuperellipseBorder).borderRadius
-              as BorderRadius)
-          .topLeft
-          .x,
-      closeTo(20, 0.01),
+      (createMaterial.shape as RoundedSuperellipseBorder).borderRadius,
+      const BorderRadius.vertical(
+        top: Radius.circular(20),
+        bottom: Radius.circular(8),
+      ),
     );
     expect(
-      ((dmMaterial.shape as RoundedSuperellipseBorder).borderRadius
-              as BorderRadius)
-          .topLeft
-          .x,
-      closeTo(20, 0.01),
+      (dmMaterial.shape as RoundedSuperellipseBorder).borderRadius,
+      const BorderRadius.vertical(
+        top: Radius.circular(8),
+        bottom: Radius.circular(20),
+      ),
     );
 
     expect(find.text('Start a new stream channel'), findsNothing);
@@ -2976,8 +3014,8 @@ void main() {
       16,
     );
     expect(
-      tester.widget<Text>(find.text('Browse channels')).style?.fontSize,
-      16,
+      find.byKey(const Key('quick-action-browse-channels-card')),
+      findsNothing,
     );
     expect(find.text('Message one or more people'), findsNothing);
   });
@@ -3040,11 +3078,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-    );
+    await tester.tap(find.byKey(const Key('browse-channels-button')));
     await tester.pumpAndSettle();
 
     expect(
@@ -3076,11 +3110,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-    );
+    await tester.tap(find.byKey(const Key('browse-channels-button')));
     await tester.pumpAndSettle();
 
     expect(find.text('No open channels available to join.'), findsOneWidget);
@@ -3115,11 +3145,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-    );
+    await tester.tap(find.byKey(const Key('browse-channels-button')));
     await tester.pumpAndSettle();
 
     expect(find.text('Couldn’t load open channels.'), findsOneWidget);
@@ -3166,11 +3192,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-    );
+    await tester.tap(find.byKey(const Key('browse-channels-button')));
     await tester.pumpAndSettle();
 
     expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
@@ -3222,11 +3244,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-    );
+    await tester.tap(find.byKey(const Key('browse-channels-button')));
     await tester.pumpAndSettle();
 
     expect(
@@ -3342,6 +3360,16 @@ void main() {
       'private',
     );
   });
+
+  dmRecipientLayoutTests(
+    (overrides) => buildTestable(
+      keyboardInset: 300,
+      overrides: [
+        channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ...overrides,
+      ],
+    ),
+  );
 
   testWidgets('new message sheet lists and selects relay members', (
     tester,
@@ -3520,7 +3548,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     final directoryUsers = [
-      for (var index = 0; index < 8; index++)
+      for (var index = 0; index < 9; index++)
         DirectoryUser(
           pubkey: 'person-$index',
           displayName: 'Long recipient name number $index',
@@ -3545,7 +3573,7 @@ void main() {
     await tester.tap(find.text('New direct message'));
     await tester.pumpAndSettle();
 
-    for (final user in directoryUsers) {
+    for (final user in directoryUsers.take(8)) {
       final result = find.byKey(Key('new-dm-person-${user.pubkey}'));
       await tester.ensureVisible(result);
       await tester.pumpAndSettle();
@@ -3562,6 +3590,31 @@ void main() {
       find.text('DMs support up to nine people, including you.'),
       findsOneWidget,
     );
+    expect(find.byKey(const Key('new-dm-person-person-8')), findsNothing);
+    final lastChip = find.byKey(const Key('new-dm-selected-person-7'));
+    await tester.ensureVisible(lastChip);
+    await tester.pumpAndSettle();
+    await tester.tap(lastChip);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('new-dm-selected-person-7')), findsNothing);
+    final ninthRecipient = find.byKey(const Key('new-dm-person-person-8'));
+    final listScroll = find
+        .descendant(
+          of: find.byType(BottomSheet).last,
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Scrollable &&
+                widget.axisDirection == AxisDirection.down,
+          ),
+        )
+        .last;
+    await tester.scrollUntilVisible(
+      ninthRecipient,
+      100,
+      scrollable: listScroll,
+    );
+    await tester.pumpAndSettle();
+    expect(ninthRecipient.hitTestable(), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -3737,6 +3790,7 @@ void main() {
 
     await tester.pumpWidget(
       buildTestable(
+        brightness: Brightness.dark,
         overrides: [
           channelsProvider.overrideWith(
             () => _FakeNotifier(
@@ -3761,12 +3815,29 @@ void main() {
       Theme.of(tester.element(find.text('general'))).colorScheme.onSurface,
     );
 
+    expect(
+      tester.widget<Text>(find.text('Channels')).style?.color,
+      const Color(0xFFA4A4A4),
+    );
+    final options = find.descendant(
+      of: find.byTooltip('Channels options'),
+      matching: find.byIcon(BuzzIcons.ellipsisVertical),
+    );
+    expect(tester.widget<Icon>(options).color, const Color(0xFFC7C7C7));
+    expect(
+      tester.widget<Icon>(find.byKey(const ValueKey('channel-icon-1'))).color,
+      const Color(0xFFC7C7C7),
+    );
     readState.markContextRead('1', 20);
     await tester.pump();
 
     expect(
       tester.widget<Text>(find.text('general')).style?.fontWeight,
       FontWeight.w400,
+    );
+    expect(
+      tester.widget<Text>(find.text('general')).style?.color,
+      const Color(0xFFC7C7C7),
     );
   });
 
@@ -4055,104 +4126,10 @@ class _FakeNotifier extends ChannelsNotifier {
   get observedUnreadEventsByChannel => _observedEventsByChannel;
 }
 
-class _RetryingDirectoryNotifier extends ChannelsNotifier {
-  _RetryingDirectoryNotifier({
-    required this.initialChannels,
-    required this.retriedChannels,
-  });
-
-  final List<Channel> initialChannels;
-  final List<Channel> retriedChannels;
-  int retryCount = 0;
-
-  @override
-  Future<List<Channel>> build() async => initialChannels;
-
-  @override
-  Future<void> ensureDirectoryLoaded() async {
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markError(_activeDirectoryScope(ref));
-  }
-
-  @override
-  Future<void> retryDirectory() async {
-    retryCount++;
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoading(_activeDirectoryScope(ref));
-    await Future<void>.delayed(Duration.zero);
-    state = AsyncData(retriedChannels);
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoaded(_activeDirectoryScope(ref));
-  }
-}
-
-class _SupersededDirectoryNotifier extends ChannelsNotifier {
-  _SupersededDirectoryNotifier({
-    required this.initialChannels,
-    required this.retriedChannels,
-  });
-
-  final List<Channel> initialChannels;
-  final List<Channel> retriedChannels;
-  final _directoryCompletion = Completer<void>();
-  int retryCount = 0;
-
-  @override
-  Future<List<Channel>> build() async => initialChannels;
-
-  @override
-  Future<void> ensureDirectoryLoaded() async {
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoading(_activeDirectoryScope(ref));
-    await _directoryCompletion.future;
-  }
-
-  /// Mirrors an ordinary refresh invalidating the active directory request.
-  void supersedeLoadingDirectory() {
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markError(_activeDirectoryScope(ref));
-    _directoryCompletion.complete();
-  }
-
-  @override
-  Future<void> retryDirectory() async {
-    retryCount++;
-    state = AsyncData(retriedChannels);
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoaded(_activeDirectoryScope(ref));
-  }
-}
-
 String _activeDirectoryScope(Ref ref) => channelDirectoryScope(
   ref.read(relayConfigProvider).baseUrl,
   ref.read(myPubkeyProvider),
 );
-
-class _RecordingChannelActions extends ChannelActions {
-  _RecordingChannelActions(Ref ref)
-    : super(
-        ref: ref,
-        session: ref.read(relaySessionProvider.notifier),
-        signedEventRelay: SignedEventRelay(
-          session: ref.read(relaySessionProvider.notifier),
-          nsec: null,
-        ),
-        currentPubkey: 'self',
-      );
-
-  final List<String> joinedChannelIds = [];
-
-  @override
-  Future<void> joinChannel(String channelId) async {
-    joinedChannelIds.add(channelId);
-  }
-}
 
 class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   _FakeChannelSectionsNotifier(this._store);
@@ -4358,4 +4335,98 @@ class _SwitchingUserCache extends UserCacheNotifier {
 class _CompletedPairingNotifier extends PairingNotifier {
   @override
   PairingState build() => const PairingState(status: PairingStatus.success);
+}
+
+class _RetryingDirectoryNotifier extends ChannelsNotifier {
+  _RetryingDirectoryNotifier({
+    required this.initialChannels,
+    required this.retriedChannels,
+  });
+
+  final List<Channel> initialChannels;
+  final List<Channel> retriedChannels;
+  int retryCount = 0;
+
+  @override
+  Future<List<Channel>> build() async => initialChannels;
+
+  @override
+  Future<void> ensureDirectoryLoaded() async {
+    ref
+        .read(channelDirectoryLoadStatusProvider.notifier)
+        .markError(_activeDirectoryScope(ref));
+  }
+
+  @override
+  Future<void> retryDirectory() async {
+    retryCount++;
+    ref
+        .read(channelDirectoryLoadStatusProvider.notifier)
+        .markLoading(_activeDirectoryScope(ref));
+    await Future<void>.delayed(Duration.zero);
+    state = AsyncData(retriedChannels);
+    ref
+        .read(channelDirectoryLoadStatusProvider.notifier)
+        .markLoaded(_activeDirectoryScope(ref));
+  }
+}
+
+class _SupersededDirectoryNotifier extends ChannelsNotifier {
+  _SupersededDirectoryNotifier({
+    required this.initialChannels,
+    required this.retriedChannels,
+  });
+
+  final List<Channel> initialChannels;
+  final List<Channel> retriedChannels;
+  final _directoryCompletion = Completer<void>();
+  int retryCount = 0;
+
+  @override
+  Future<List<Channel>> build() async => initialChannels;
+
+  @override
+  Future<void> ensureDirectoryLoaded() async {
+    ref
+        .read(channelDirectoryLoadStatusProvider.notifier)
+        .markLoading(_activeDirectoryScope(ref));
+    await _directoryCompletion.future;
+  }
+
+  /// Mirrors an ordinary refresh invalidating the active directory request.
+  void supersedeLoadingDirectory() {
+    ref
+        .read(channelDirectoryLoadStatusProvider.notifier)
+        .markError(_activeDirectoryScope(ref));
+    _directoryCompletion.complete();
+  }
+
+  @override
+  Future<void> retryDirectory() async {
+    retryCount++;
+    state = AsyncData(retriedChannels);
+    ref
+        .read(channelDirectoryLoadStatusProvider.notifier)
+        .markLoaded(_activeDirectoryScope(ref));
+  }
+}
+
+class _RecordingChannelActions extends ChannelActions {
+  _RecordingChannelActions(Ref ref)
+    : super(
+        ref: ref,
+        session: ref.read(relaySessionProvider.notifier),
+        signedEventRelay: SignedEventRelay(
+          session: ref.read(relaySessionProvider.notifier),
+          nsec: null,
+        ),
+        currentPubkey: 'self',
+      );
+
+  final List<String> joinedChannelIds = [];
+
+  @override
+  Future<void> joinChannel(String channelId) async {
+    joinedChannelIds.add(channelId);
+  }
 }

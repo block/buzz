@@ -145,15 +145,13 @@ void bubbleLayoutTests() {
             find.byType(MessageMediaAvatar),
           );
           expect(incomingAvatar.right, lessThan(incoming.left));
-          expect(
-            find.descendant(
-              of: find.byKey(const ValueKey('message-row-outgoing')),
-              matching: find.byType(MessageMediaAvatar),
-            ),
-            findsNothing,
+          final outgoingAvatar = bounds(
+            'outgoing',
+            find.byType(MessageMediaAvatar),
           );
+          expect(outgoingAvatar.left, greaterThan(outgoing.right));
           expect(
-            outgoing.right,
+            outgoingAvatar.right,
             closeTo(
               tester
                   .getRect(find.byKey(const ValueKey('message-row-outgoing')))

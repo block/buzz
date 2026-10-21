@@ -77,6 +77,8 @@ pub struct CustomEmoji {
 
 /// Return a channel name without client-rendered leading hash prefixes.
 pub use buzz_core::channel::canonical_channel_name;
+/// The role a new person gets in a channel (kind:9002/39000 `join_role`).
+pub use buzz_core::channel::ChannelJoinRole;
 /// Channel type.
 pub use buzz_core::channel::ChannelType as ChannelKind;
 /// Channel visibility.

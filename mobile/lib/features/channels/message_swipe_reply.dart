@@ -139,11 +139,10 @@ class MessageSwipeReply extends HookConsumerWidget {
           child: child,
           builder: (context, child) {
             final progress = (offset.value / 72).clamp(0.0, 1.0);
-            final accent = context.appColors.accent;
-            final filledForeground =
-                ThemeData.estimateBrightnessForColor(accent) == Brightness.dark
-                ? Colors.white
-                : Colors.black;
+            // Follows the chosen message color, like the user's own bubbles.
+            final chatColors = ChatColors.of(context);
+            final accent = chatColors.outgoing;
+            final filledForeground = chatColors.foreground;
             return Stack(
               key: layoutKey,
               clipBehavior: Clip.none,

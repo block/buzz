@@ -238,6 +238,7 @@ Widget _buildTestable({
   ProfileNotifier? profileNotifier,
   String? signingPubkey,
   bool darkTheme = false,
+  String? chatColor,
   bool personalChat = false,
   required List<NostrEvent> messages,
   PresenceCacheNotifier? presenceCache,
@@ -465,7 +466,14 @@ Widget _buildTestable({
     ],
     child: MaterialApp(
       navigatorKey: navigatorKey,
-      theme: darkTheme ? AppTheme.dark() : AppTheme.light(),
+      theme: chatColor != null
+          ? mobileAppearanceTheme(
+              darkTheme ? Brightness.dark : Brightness.light,
+              chatColor,
+            )
+          : darkTheme
+          ? AppTheme.dark()
+          : AppTheme.light(),
       builder: (context, child) => MediaQuery(
         data: MediaQuery.of(context).copyWith(
           textScaler: textScaler,
@@ -3489,23 +3497,13 @@ void main() {
       await tester.tap(seeAllRow);
       await tester.pumpAndSettle();
       // Verify each group when it enters the lazy sheet viewport.
-      expect(
-        find.byWidgetPredicate(
-          (widget) => widget is AppListCard && widget.label == 'People · 6',
-        ),
-        findsOneWidget,
-      );
+      expect(find.text('People · 6'), findsOneWidget);
       await tester.drag(
         find.byKey(const ValueKey('members-sheet-list')),
         const Offset(0, -500),
       );
       await tester.pumpAndSettle();
-      expect(
-        find.byWidgetPredicate(
-          (widget) => widget is AppListCard && widget.label == 'Agents · 1',
-        ),
-        findsOneWidget,
-      );
+      expect(find.text('Agents · 1'), findsOneWidget);
       expect(find.text('Agent'), findsOneWidget);
       expect(find.text('Bot'), findsNothing);
     });
@@ -5894,7 +5892,7 @@ void main() {
     for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
       for (final multiline in [false, true]) {
         testWidgets(
-          'outgoing group stays avatar-free throughout a local send: $platform, multiline=$multiline',
+          'outgoing group keeps one trailing avatar throughout a local send: $platform, multiline=$multiline',
           (tester) async {
             final previousPlatform = debugDefaultTargetPlatformOverride;
             debugDefaultTargetPlatformOverride = platform;
@@ -5925,7 +5923,7 @@ void main() {
                 of: find.byKey(ValueKey('message-row-$id')),
                 matching: find.byType(AvatarImage),
               );
-              expect(avatar('first'), findsNothing);
+              expect(avatar('first'), findsOneWidget);
               final container = ProviderScope.containerOf(
                 tester.element(find.byType(ChannelDetailPage)),
               );
@@ -5952,12 +5950,12 @@ void main() {
                 );
                 expect(
                   avatar('second'),
-                  findsNothing,
+                  findsOneWidget,
                   reason: 'second avatar frame $frame',
                 );
               }
               await tester.pumpAndSettle();
-              expect(avatar('second'), findsNothing);
+              expect(avatar('second'), findsOneWidget);
             } finally {
               debugDefaultTargetPlatformOverride = previousPlatform;
             }
@@ -11139,34 +11137,15 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
 
-      expect(find.text('Alice is typing…'), findsOneWidget);
-
-      final indicator = tester.widget<Container>(
-        find.byKey(const ValueKey('channel-typing-indicator')),
-      );
-      final decoration = indicator.decoration! as BoxDecoration;
       expect(
-        indicator.padding,
-        const EdgeInsets.symmetric(horizontal: Grid.xxs, vertical: Grid.xxs),
-      );
-      expect(
-        decoration.color,
-        AppTheme.light().colorScheme.surfaceContainerHighest,
-      );
-      expect(decoration.border, isA<Border>());
-      expect(
-        tester.widget<Text>(find.text('Alice is typing…')).style?.color,
-        AppTheme.light().colorScheme.onSurfaceVariant,
-      );
-      expect(
-        tester.widget<Text>(find.text('Alice is typing…')).style?.fontStyle,
-        isNot(FontStyle.italic),
-      );
-      expect(
-        find.byKey(const ValueKey('channel-typing-shimmer')),
+        find.byKey(const ValueKey('inline-agent-typing-alice')),
         findsOneWidget,
       );
-      expect(tester.widget<SmallAvatar>(find.byType(SmallAvatar)).size, 24);
+      expect(find.byKey(const ValueKey('agent-typing-dot-2')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('channel-typing-indicator')),
+        findsNothing,
+      );
     });
 
     testWidgets('shows two typers', (tester) async {
@@ -11192,10 +11171,13 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
 
-      expect(find.text('Alice and Bob are typing…'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('agent-typing-dot-2')),
+        findsNWidgets(2),
+      );
     });
 
-    testWidgets('shows N others for 3+ typers', (tester) async {
+    testWidgets('shows inline dots for all three typers', (tester) async {
       await tester.pumpWidget(
         _buildTestable(
           messages: [],
@@ -11223,10 +11205,13 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
 
-      expect(find.text('Alice and 2 others are typing…'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('agent-typing-dot-2')),
+        findsNWidgets(3),
+      );
     });
 
-    testWidgets('keeps typing text static when motion is reduced', (
+    testWidgets('keeps inline dots static when motion is reduced', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -11247,7 +11232,7 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('Alice is typing…'), findsOneWidget);
+      expect(find.byKey(const ValueKey('agent-typing-dot-2')), findsOneWidget);
       expect(
         find.byKey(const ValueKey('channel-typing-shimmer')),
         findsNothing,

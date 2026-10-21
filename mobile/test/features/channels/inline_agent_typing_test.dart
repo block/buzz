@@ -1,4 +1,6 @@
 import 'package:buzz/features/channels/channel_identity_names_provider.dart';
+import 'package:buzz/features/channels/agent_typing_bubble.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/inline_agent_typing.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
@@ -19,8 +21,17 @@ class Profiles extends UserCacheNotifier {
   Map<String, UserProfile> build() => {agent: profile};
 }
 
-Widget surface({bool reduced = false, bool typing = true}) => ProviderScope(
+Widget surface({
+  bool reduced = false,
+  bool typing = true,
+  bool bot = true,
+  List<TypingEntry>? entries,
+  double textScale = 1,
+}) => ProviderScope(
   overrides: [
+    agentMentionPubkeysProvider(
+      'chat',
+    ).overrideWithValue(bot ? {agent} : <String>{}),
     userCacheProvider.overrideWith(Profiles.new),
     channelIdentityNamesProvider('chat').overrideWithValue(
       const IdentityNameSources(profiles: {agent: profile}).scope([agent]),
@@ -29,13 +40,16 @@ Widget surface({bool reduced = false, bool typing = true}) => ProviderScope(
   child: MaterialApp(
     theme: AppTheme.light(),
     home: MediaQuery(
-      data: MediaQueryData(disableAnimations: reduced),
+      data: MediaQueryData(
+        disableAnimations: reduced,
+        textScaler: TextScaler.linear(textScale),
+      ),
       child: Scaffold(
         body: InlineAgentTyping(
           channelId: 'chat',
-          entries: [
-            if (typing) const TypingEntry(pubkey: agent, expiresAtMs: 8000),
-          ],
+          entries:
+              entries ??
+              [if (typing) const TypingEntry(pubkey: agent, expiresAtMs: 8000)],
         ),
       ),
     ),
@@ -48,6 +62,10 @@ void main() {
       await tester.pumpWidget(surface());
       expect(find.text('Test agent'), findsOneWidget);
       expect(find.byType(AvatarImage), findsOneWidget);
+      expect(
+        tester.widget<AvatarImage>(find.byType(AvatarImage)).isAgent,
+        isTrue,
+      );
       expect(find.textContaining('typing'), findsNothing);
       expect(find.byType(Text), findsNWidgets(2)); // Name and avatar initial.
       expect(find.byKey(const ValueKey('agent-typing-dot-2')), findsOneWidget);
@@ -72,6 +90,89 @@ void main() {
       expect(find.text('Working…'), findsNothing);
     },
   );
+  testWidgets('human typing keeps a round avatar', (tester) async {
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(surface(bot: false));
+    expect(find.bySemanticsLabel('Test agent is typing'), findsOneWidget);
+    expect(
+      tester.widget<AvatarImage>(find.byType(AvatarImage)).isAgent,
+      isFalse,
+    );
+    expect(find.byKey(const ValueKey('agent-typing-dot-2')), findsOneWidget);
+    semantics.dispose();
+  });
+  testWidgets('many typers keep rows and active animation owners bounded', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final entries = List.generate(
+      1024,
+      (index) => TypingEntry(
+        pubkey: index.toRadixString(16).padLeft(64, '0'),
+        expiresAtMs: 8000,
+      ),
+    );
+    // The first three stay visible while the aggregate grows. Duplicate scopes
+    // for the same identity must not inflate the remainder count.
+    for (final count in [3, 4, 1024]) {
+      final visibleEntries = entries.take(count).toList();
+      await tester.pumpWidget(
+        surface(
+          entries: [
+            ...visibleEntries,
+            TypingEntry(
+              pubkey: visibleEntries.last.pubkey.toUpperCase(),
+              threadHeadId: 'thread',
+              expiresAtMs: 8000,
+            ),
+          ],
+          textScale: 2,
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 240));
+      expect(find.byType(AvatarImage), findsNWidgets(3));
+      expect(find.byType(AgentTypingBubble), findsNWidgets(3));
+      // Each repeating ticker schedules one transient callback for the next
+      // frame: this measures active work, not just visible dot widgets.
+      expect(tester.binding.transientCallbackCount, 3);
+      for (final entry in entries.take(3)) {
+        expect(
+          find.byKey(ValueKey('inline-agent-typing-${entry.pubkey}')),
+          findsOneWidget,
+        );
+      }
+      if (count > 3) {
+        final remainder = count - 3;
+        expect(
+          find.text('and $remainder ${remainder == 1 ? 'other' : 'others'}'),
+          findsOneWidget,
+        );
+        expect(
+          find.bySemanticsLabel(
+            '$remainder ${remainder == 1 ? 'other person is' : 'other people are'} typing',
+          ),
+          findsOneWidget,
+        );
+      } else {
+        expect(find.textContaining('and '), findsNothing);
+      }
+      expect(tester.takeException(), isNull);
+    }
+    await tester.pumpWidget(surface(entries: entries.take(1).toList()));
+    await tester.pump(const Duration(milliseconds: 240));
+    expect(find.byType(AvatarImage), findsOneWidget);
+    expect(find.textContaining('and '), findsNothing);
+    expect(tester.binding.transientCallbackCount, 1);
+    await tester.pumpWidget(surface(entries: entries, reduced: true));
+    await tester.pumpAndSettle();
+    expect(find.byType(AgentTypingBubble), findsNWidgets(3));
+    expect(tester.binding.transientCallbackCount, 0);
+    await tester.pumpWidget(surface(typing: false, reduced: true));
+    await tester.pumpAndSettle();
+    expect(find.byType(AvatarImage), findsNothing);
+    expect(tester.binding.transientCallbackCount, 0);
+    semantics.dispose();
+  });
   testWidgets('Reduce Motion leaves static dots and no active animation', (
     tester,
   ) async {
