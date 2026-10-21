@@ -1,8 +1,26 @@
-import { Activity, Bot, Folders, Inbox, Zap } from "lucide-react";
+import * as React from "react";
+import {
+  Activity,
+  Bot,
+  Folders,
+  Inbox,
+  MessagesSquare,
+  Zap,
+} from "lucide-react";
 
+import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
+import { useChannelsQuery } from "@/features/channels/hooks";
+import {
+  useThreadTitleLiveSync,
+  useTitledThreadUnreadCounts,
+  useWorkingTitledThreads,
+} from "@/features/threads/hooks";
+import type { WorkingTitledThreads } from "@/features/threads/lib/threadTitles";
 import { FeatureGate } from "@/shared/features";
+import { cn } from "@/shared/lib/cn";
+import { useNow } from "@/shared/lib/useNow";
 import type { Channel, SearchHit } from "@/shared/api/types";
 import {
   SidebarHeader,
@@ -21,7 +39,8 @@ type SidebarSelectedView =
   | "agents"
   | "workflows"
   | "pulse"
-  | "projects";
+  | "projects"
+  | "threads";
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
@@ -45,6 +64,7 @@ type AppSidebarPrimaryMenuProps = {
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
+  onSelectThreads: () => void;
   onSelectWorkflows: () => void;
   projectsOverviewActive: boolean;
   selectedView: SidebarSelectedView;
@@ -89,12 +109,103 @@ export function AppSidebarPinnedHeader({
   );
 }
 
+/** The sidebar channel badge, rolled up across working threads. */
+function ThreadsWorkingBadge({
+  isActive,
+  working,
+}: {
+  isActive: boolean;
+  working: WorkingTitledThreads;
+}) {
+  const now = useNow(1000);
+  const elapsed = formatElapsed(now - working.anchorAt);
+  const { threadCount } = working;
+  return (
+    <span
+      className={cn(
+        "max-w-32 shrink-0 truncate rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums motion-safe:animate-pulse group-data-[collapsible=icon]:hidden",
+        "hidden sm:inline-flex",
+        isActive
+          ? "bg-sidebar-active-foreground/20 text-sidebar-active-foreground"
+          : "bg-primary/10 text-primary",
+      )}
+      data-testid="threads-working"
+      title={`${threadCount} ${threadCount === 1 ? "thread" : "threads"} working`}
+    >
+      {threadCount > 1 ? `${elapsed} (${threadCount})` : elapsed}
+    </span>
+  );
+}
+
+/**
+ * Bold with a dot while any titled thread has unread replies, and a working
+ * timer while an agent runs in one, like a channel row.
+ */
+function ThreadsMenuItem({
+  isActive,
+  onSelect,
+}: {
+  isActive: boolean;
+  onSelect: () => void;
+}) {
+  const channelsQuery = useChannelsQuery();
+  // Titles change in channels the user isn't looking at (an agent naming a
+  // new thread); without this the dot waits for the next refetch.
+  const joinedChannelIds = React.useMemo(
+    () =>
+      (channelsQuery.data ?? [])
+        .filter((channel) => channel.isMember)
+        .map((channel) => channel.id),
+    [channelsQuery.data],
+  );
+  useThreadTitleLiveSync(joinedChannelIds);
+  const hasUnread = useTitledThreadUnreadCounts().size > 0;
+  const working = useWorkingTitledThreads();
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        className={cn(
+          "data-[active=true]:font-normal",
+          hasUnread &&
+            "font-bold text-sidebar-foreground hover:text-sidebar-foreground data-[active=true]:font-bold",
+        )}
+        data-testid="open-threads-view"
+        isActive={isActive}
+        onClick={onSelect}
+        tooltip="Threads"
+        type="button"
+      >
+        <MessagesSquare className="h-4 w-4" />
+        {/* Grows like a channel row's label, so the badge and dot sit right. */}
+        <SidebarMenuLabel className="flex-1">Threads</SidebarMenuLabel>
+        {working ? (
+          <ThreadsWorkingBadge isActive={isActive} working={working} />
+        ) : null}
+        {hasUnread ? (
+          <span
+            // On the selected row's primary fill a primary dot vanishes, and
+            // that is exactly when a thread pane covers the list.
+            className={cn(
+              "ml-auto h-2 w-2 shrink-0 rounded-full",
+              isActive ? "bg-sidebar-active-foreground" : "bg-primary",
+            )}
+            data-testid="threads-unread-dot"
+          >
+            <span className="sr-only">unread</span>
+          </span>
+        ) : null}
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  );
+}
+
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
+  onSelectThreads,
   onSelectWorkflows,
   projectsOverviewActive,
   selectedView,
@@ -127,6 +238,10 @@ export function AppSidebarPrimaryMenu({
               </SidebarMenuBadge>
             ) : null}
           </SidebarMenuItem>
+          <ThreadsMenuItem
+            isActive={selectedView === "threads"}
+            onSelect={onSelectThreads}
+          />
           <FeatureGate feature="pulse">
             <SidebarMenuItem>
               <SidebarMenuButton

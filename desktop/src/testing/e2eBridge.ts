@@ -1522,6 +1522,7 @@ declare global {
       channelId: string;
       turnId: string;
       kind?: "turn_started" | "turn_completed";
+      threadRootEventId?: string;
     }) => void;
     __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
       agentPubkey: string;
@@ -3423,8 +3424,9 @@ type MockThreadTitle = {
   revision: string;
   author: string;
   updated_at: number;
+  last_activity_at: number;
 };
-/** Keyed by `${channel}:${root}`; mirrors the get/set thread title commands. */
+/** Keyed by `${channel}:${root}`; mirrors the list/get/set thread title commands. */
 let mockThreadTitles = new Map<string, MockThreadTitle>();
 
 // The canvas UI reaches the mock via the starter "general" channel in specs.
@@ -11724,6 +11726,7 @@ export function maybeInstallE2eTauriMocks() {
       revision: event.id,
       author,
       updated_at: event.created_at,
+      last_activity_at: event.created_at,
     });
     emitMockLiveEvent(channel.id, event);
   };
@@ -12030,6 +12033,7 @@ export function maybeInstallE2eTauriMocks() {
     channelId,
     turnId,
     kind = "turn_started",
+    threadRootEventId,
   }) => {
     seedTurnSeq += 1;
     const event = {
@@ -12040,7 +12044,7 @@ export function maybeInstallE2eTauriMocks() {
       channelId,
       sessionId: null,
       turnId,
-      payload: null,
+      payload: threadRootEventId ? { threadRootEventId } : null,
     };
     syncAgentTurnsFromEvents(agentPubkey, [event]);
     syncAgentObserverEvents(agentPubkey, [event]);
@@ -15006,12 +15010,31 @@ export function maybeInstallE2eTauriMocks() {
         mockCanvasRevisions.set(req.channelId, [revision, ...stream]);
         return { ok: true, event_id: revision.eventId, verified: true };
       }
+      case "list_thread_titles": {
+        // Mirror the command: activity is the later of the title and the
+        // newest reply; ties keep newest-revision-first.
+        return [...mockThreadTitles.values()]
+          .reverse()
+          .map((entry) => ({
+            ...entry,
+            last_activity_at: getMockMessageStore(entry.channel).reduce(
+              (latest, event) =>
+                event.tags.some(
+                  (tag) => tag[0] === "e" && tag[1] === entry.root,
+                )
+                  ? Math.max(latest, event.created_at)
+                  : latest,
+              entry.last_activity_at,
+            ),
+          }))
+          .sort((a, b) => b.last_activity_at - a.last_activity_at);
+      }
       case "get_thread_titles": {
         const req = payload as { rootIds: string[] };
         const roots = new Set(req.rootIds.map((id) => id.toLowerCase()));
-        return [...mockThreadTitles.values()].filter((entry) =>
-          roots.has(entry.root),
-        );
+        return [...mockThreadTitles.values()]
+          .filter((entry) => roots.has(entry.root))
+          .map(({ last_activity_at: _activity, ...entry }) => entry);
       }
       case "set_thread_title": {
         const req = payload as {
@@ -15044,6 +15067,7 @@ export function maybeInstallE2eTauriMocks() {
           revision: mockEventId(),
           author: DEFAULT_MOCK_IDENTITY.pubkey,
           updated_at: now,
+          last_activity_at: now,
         });
         return { title, revision: mockThreadTitles.get(key)?.revision ?? null };
       }

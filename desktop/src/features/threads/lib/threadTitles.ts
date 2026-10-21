@@ -1,4 +1,7 @@
-import type { ThreadTitleRecord } from "@/shared/api/tauriThreadTitles";
+import type {
+  ThreadTitle,
+  ThreadTitleRecord,
+} from "@/shared/api/tauriThreadTitles";
 
 /** Same bound the relay enforces on the NIP-AR `title` tag. */
 export const MAX_THREAD_TITLE_BYTES = 512;
@@ -75,6 +78,23 @@ export function createThreadTitleBatcher(
   };
 }
 
+/** The shared title for a thread, if one is set. */
+export function findThreadTitle(
+  titles: readonly ThreadTitle[] | undefined,
+  channelId: string | null,
+  rootId: string | null,
+): ThreadTitle | null {
+  if (!titles || !channelId || !rootId) {
+    return null;
+  }
+  const root = rootId.toLowerCase();
+  return (
+    titles.find(
+      (entry) => entry.channelId === channelId && entry.rootId === root,
+    ) ?? null
+  );
+}
+
 /** User-facing message for a failed title save. */
 export function describeTitleSaveError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -108,6 +128,40 @@ export function interpretTitleDraft(
   return { kind: "set", title };
 }
 
+/** Optimistically apply a write to the cached list so the UI updates before the refetch. */
+export function applyTitleWrite(
+  titles: readonly ThreadTitle[] | undefined,
+  write: {
+    channelId: string;
+    rootId: string;
+    title: string | null;
+    /** Stored revision once known; until then the previous one is kept. */
+    revision?: string | null;
+  },
+  nowSeconds: number,
+): ThreadTitle[] {
+  const root = write.rootId.toLowerCase();
+  const rest = (titles ?? []).filter(
+    (entry) => !(entry.channelId === write.channelId && entry.rootId === root),
+  );
+  if (write.title === null) {
+    return rest;
+  }
+  const previous = findThreadTitle(titles, write.channelId, root);
+  return [
+    {
+      author: previous?.author ?? "",
+      channelId: write.channelId,
+      lastActivityAt: Math.max(previous?.lastActivityAt ?? 0, nowSeconds),
+      revision: write.revision ?? previous?.revision ?? "",
+      rootId: root,
+      title: write.title,
+      updatedAt: nowSeconds,
+    },
+    ...rest,
+  ];
+}
+
 /** Optimistically apply a write to one root's cached title. */
 export function applyRootTitleWrite(
   previous: ThreadTitleRecord | null | undefined,
@@ -131,6 +185,57 @@ export function applyRootTitleWrite(
     title: write.title,
     updatedAt: nowSeconds,
   };
+}
+
+/**
+ * Unread reply counts per thread root, for the titled threads only. Replies
+ * are counted once each, so a reply listed twice (live activity plus a
+ * reopened Inbox row) can't inflate a count.
+ */
+export function countUnreadByTitledRoot(
+  titles: readonly ThreadTitle[] | undefined,
+  unreadReplies: ReadonlyArray<{ id: string; rootId: string | null }>,
+): Map<string, number> {
+  const titledRoots = new Set((titles ?? []).map((entry) => entry.rootId));
+  const seen = new Set<string>();
+  const counts = new Map<string, number>();
+  for (const reply of unreadReplies) {
+    const root = reply.rootId?.toLowerCase();
+    if (!root || !titledRoots.has(root) || seen.has(reply.id)) {
+      continue;
+    }
+    seen.add(reply.id);
+    counts.set(root, (counts.get(root) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Agent work across the threads the Threads view lists. */
+export type WorkingTitledThreads = {
+  /** Start of the longest-running turn, on the desktop clock. */
+  anchorAt: number;
+  threadCount: number;
+};
+
+/**
+ * Rolls active thread turns up for the sidebar's Threads entry. Untitled
+ * threads are left out: the view doesn't list them, so counting them would
+ * light the entry with no row to find.
+ */
+export function summarizeWorkingTitledThreads(
+  titles: readonly ThreadTitle[] | undefined,
+  workingThreads: ReadonlyMap<string, { anchorAt: number }>,
+): WorkingTitledThreads | null {
+  if (!titles || workingThreads.size === 0) return null;
+  const titledRoots = new Set(titles.map((entry) => entry.rootId));
+  let anchorAt = Number.POSITIVE_INFINITY;
+  let threadCount = 0;
+  for (const [rootId, summary] of workingThreads) {
+    if (!titledRoots.has(rootId.toLowerCase())) continue;
+    threadCount += 1;
+    anchorAt = Math.min(anchorAt, summary.anchorAt);
+  }
+  return threadCount === 0 ? null : { anchorAt, threadCount };
 }
 
 /** The relay rejects a REQ naming more than 128 `#h` values. */

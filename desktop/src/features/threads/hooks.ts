@@ -2,31 +2,54 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
+import { useAppShell } from "@/app/AppShellContext";
+import { useActiveAgentTurnsByThread } from "@/features/agents/activeAgentTurnsStore";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import {
   applyRootTitleWrite,
+  applyTitleWrite,
   batchTitleSyncChannels,
+  countUnreadByTitledRoot,
   createThreadTitleBatcher,
   describeTitleSaveError,
+  summarizeWorkingTitledThreads,
   THREAD_TITLES_QUERY_KEY,
   threadTitleRootQueryKey,
+  type WorkingTitledThreads,
 } from "@/features/threads/lib/threadTitles";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   getThreadTitles,
+  listThreadTitles,
   setThreadTitle,
+  type ThreadTitle,
   type ThreadTitleRecord,
 } from "@/shared/api/tauriThreadTitles";
 import { KIND_ARTIFACT, KIND_ARTIFACT_REMOVAL } from "@/shared/constants/kinds";
 
+/** Titles live in other channels too; poll so the Threads view stays current. */
+const THREAD_TITLES_REFRESH_MS = 60_000;
 const LIVE_RETRY_MS = 5_000;
 const THREAD_TITLE_STALE_MS = 30_000;
 
 const loadThreadTitle = createThreadTitleBatcher(getThreadTitles);
 
+/** Every titled thread the user can read, most recently active first. */
+export function useThreadTitlesQuery(options?: { refetchInterval?: boolean }) {
+  return useQuery({
+    queryKey: THREAD_TITLES_QUERY_KEY,
+    queryFn: listThreadTitles,
+    staleTime: THREAD_TITLE_STALE_MS,
+    refetchInterval: options?.refetchInterval
+      ? THREAD_TITLES_REFRESH_MS
+      : false,
+  });
+}
+
 /**
- * One root's live title, looked up by its derived id, so it stays exact
- * however many titles exist. Lookups made in the same tick share one relay
- * query.
+ * One root's live title, looked up by root rather than read from the Threads
+ * list, so it stays exact however many titles exist. Lookups made in the same
+ * tick share one relay query.
  */
 function useThreadTitleRecord(rootId: string | null) {
   const root = rootId?.toLowerCase() ?? null;
@@ -56,20 +79,97 @@ export function useThreadTitleForRoot(rootId: string | null): string | null {
   return useThreadTitleRecord(rootId)?.title ?? null;
 }
 
+/**
+ * Unread reply counts per titled thread, keyed by root id. Uses the same
+ * thread read state as the channel sidebar's unread dot, so the two agree.
+ */
+export function useTitledThreadUnreadCounts(): ReadonlyMap<string, number> {
+  const query = useThreadTitlesQuery();
+  const { unreadThreadFeedItems } = useAppShell();
+  return React.useMemo(
+    () =>
+      countUnreadByTitledRoot(
+        query.data,
+        unreadThreadFeedItems.map((item) => ({
+          id: item.id,
+          rootId: getThreadReference(item.tags).rootId,
+        })),
+      ),
+    [query.data, unreadThreadFeedItems],
+  );
+}
+
+/** Agent work in threads the Threads view lists, for its sidebar entry. */
+export function useWorkingTitledThreads(): WorkingTitledThreads | null {
+  const query = useThreadTitlesQuery();
+  const workingThreads = useActiveAgentTurnsByThread();
+  return React.useMemo(
+    () => summarizeWorkingTitledThreads(query.data, workingThreads),
+    [query.data, workingThreads],
+  );
+}
+
+/**
+ * Reads a thread while it is open outside its channel, including replies that
+ * arrive while it stays open. Mirrors Inbox: advance each reply's own marker
+ * and the thread frontier, and drop any manual "mark unread" override.
+ */
+export function useMarkOpenThreadRead(rootId: string | null) {
+  const {
+    feedItemState,
+    markMessageRead,
+    markThreadRead,
+    unreadThreadFeedItems,
+  } = useAppShell();
+  const unread = React.useMemo(
+    () =>
+      rootId
+        ? unreadThreadFeedItems.filter(
+            (item) => getThreadReference(item.tags).rootId === rootId,
+          )
+        : [],
+    [rootId, unreadThreadFeedItems],
+  );
+
+  React.useEffect(() => {
+    if (!rootId || unread.length === 0) return;
+    let latest = 0;
+    for (const item of unread) {
+      feedItemState.undoUnread(item.id);
+      markMessageRead(item.id, item.createdAt);
+      latest = Math.max(latest, item.createdAt);
+    }
+    markThreadRead(rootId, latest);
+  }, [
+    feedItemState.undoUnread,
+    markMessageRead,
+    markThreadRead,
+    rootId,
+    unread,
+  ]);
+}
+
 export function useSetThreadTitleMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: setThreadTitle,
     onMutate: async (write) => {
+      await queryClient.cancelQueries({ queryKey: THREAD_TITLES_QUERY_KEY });
       const rootKey = threadTitleRootQueryKey(write.rootId);
-      await queryClient.cancelQueries({ queryKey: rootKey });
+      const previous = queryClient.getQueryData<ThreadTitle[]>(
+        THREAD_TITLES_QUERY_KEY,
+      );
       const previousRecord = queryClient.getQueryData<ThreadTitleRecord | null>(
         rootKey,
       );
-      queryClient.setQueryData<ThreadTitleRecord | null>(rootKey, (old) =>
-        applyRootTitleWrite(old, write, Math.floor(Date.now() / 1000)),
+      const now = Math.floor(Date.now() / 1000);
+      queryClient.setQueryData<ThreadTitle[]>(THREAD_TITLES_QUERY_KEY, (old) =>
+        applyTitleWrite(old, write, now),
       );
-      return { previousRecord };
+      queryClient.setQueryData<ThreadTitleRecord | null>(rootKey, (old) =>
+        applyRootTitleWrite(old, write, now),
+      );
+      return { previous, previousRecord };
     },
     onSuccess: (result, write) => {
       const stored = {
@@ -77,14 +177,18 @@ export function useSetThreadTitleMutation() {
         title: result.title,
         revision: result.revision,
       };
+      const now = Math.floor(Date.now() / 1000);
+      queryClient.setQueryData<ThreadTitle[]>(THREAD_TITLES_QUERY_KEY, (old) =>
+        applyTitleWrite(old, stored, now),
+      );
       queryClient.setQueryData<ThreadTitleRecord | null>(
         threadTitleRootQueryKey(write.rootId),
-        (old) =>
-          applyRootTitleWrite(old, stored, Math.floor(Date.now() / 1000)),
+        (old) => applyRootTitleWrite(old, stored, now),
       );
     },
     // Hook-level so the toast still shows when the editor unmounted on blur.
     onError: (error, write, context) => {
+      queryClient.setQueryData(THREAD_TITLES_QUERY_KEY, context?.previous);
       queryClient.setQueryData(
         threadTitleRootQueryKey(write.rootId),
         context?.previousRecord,
