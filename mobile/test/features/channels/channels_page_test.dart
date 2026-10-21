@@ -1,9 +1,16 @@
+import 'package:buzz/shared/widgets/app_list.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/features/channels/channel_filter/channel_filter_provider.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_manager.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_store.dart';
+import 'package:buzz/features/channels/channel_sort/channel_sort_manager.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -62,6 +69,7 @@ part 'channels_page_test/presence_tests.dart';
 part 'channels_page_test/dm_recipient_layout_tests.dart';
 part 'channels_page_test/discovery_journey_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
+part 'channels_page_test/filter_feedback_tests.dart';
 
 void main() {
   setUpAll(() async {
@@ -159,6 +167,7 @@ void main() {
   }
 
   _communityUnreadLandingTests(buildTestable);
+  _filterFeedbackTests(buildTestable);
   _discoveryJourneyTests(buildTestable);
 
   final testChannels = [
@@ -202,6 +211,201 @@ void main() {
   presenceListTests(
     (overrides) => buildTestable(overrides: overrides),
     testChannels,
+  );
+
+  testWidgets(
+    'read-only filter retains an empty header and hidden navigation',
+    (tester) async {
+      final manager = _filterTestManager(
+        cached: ChannelFilterStore.empty().edit(
+          'channels',
+          ChannelFilterMode.unreads,
+        ),
+      );
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            channelFilterProvider.overrideWithValue(manager),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('general'), findsNothing);
+      expect(find.byTooltip('Channels options'), findsOneWidget);
+      await tester.tap(find.byTooltip('Channels options'));
+      await tester.pumpAndSettle();
+      expect(find.text('general'), findsNothing);
+      final all = tester.widget<AppListRow>(
+        find.ancestor(of: find.text('All'), matching: find.byType(AppListRow)),
+      );
+      expect(all.onTap, isNull);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Show hidden channels · 1'));
+      await tester.pumpAndSettle();
+      expect(find.text('general'), findsOneWidget);
+      expect(tester.widget<InkWell>(_dmTileFor('general')).onTap, isNotNull);
+      expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
+      await tester.pumpWidget(const SizedBox());
+      manager.dispose();
+    },
+  );
+
+  testWidgets(
+    'section view stages choices until Apply and reopens saved duration',
+    (tester) async {
+      var publications = 0;
+      final keys = nostr.Keys.generate();
+      final crypto = ChannelSortCrypto(keys.nsec, keys.public);
+      final remote = NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: EventKind.readState,
+          tags: [
+            ['d', 'channel-filter'],
+          ],
+          content: crypto.encrypt(
+            jsonEncode(
+              ChannelFilterStore.empty()
+                  .edit('channels', ChannelFilterMode.unreads)
+                  .toJson(),
+            ),
+          ),
+          secretKey: nostr.Nip19.decode(payload: keys.nsec).data,
+          createdAt: 10,
+          verify: false,
+        ).toMap(),
+      );
+      final manager = _filterTestManager(
+        fetch: () async => [remote],
+        testKeys: keys,
+        onPublish: () => publications++,
+      );
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            channelFilterProvider.overrideWithValue(manager),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Channels options'));
+      await tester.pumpAndSettle();
+      // Sort is available while preferences load. A late verified load must
+      // update the untouched filter draft and never cause an All publication.
+      await tester.tap(find.text('Recent'));
+      await tester.pumpAndSettle();
+      await manager.refresh();
+      await tester.pumpAndSettle();
+      expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
+      final unreads = tester.widget<AppListRow>(
+        find.ancestor(
+          of: find.text('Unreads'),
+          matching: find.byType(AppListRow),
+        ),
+      );
+      expect(unreads.trailing, isA<Icon>());
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      expect(publications, 0);
+      expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
+      await tester.tap(find.byTooltip('Channels options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Active'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('7 days'));
+      await tester.tap(find.text('7 days'));
+      await tester.pumpAndSettle();
+      expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      expect(manager.store.modeFor('channels'), ChannelFilterMode.active);
+      expect(manager.store.windowFor('channels'), 7 * 86400);
+      await tester.tap(find.byTooltip('Channels options'));
+      await tester.pumpAndSettle();
+      final days = tester.widget<AppListRow>(
+        find.ancestor(
+          of: find.text('7 days'),
+          matching: find.byType(AppListRow),
+        ),
+      );
+      expect(days.trailing, isA<Icon>());
+      await tester.tap(find.text('All'));
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(manager.store.modeFor('channels'), ChannelFilterMode.active);
+      expect(find.byType(AlertDialog), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      manager.dispose();
+    },
+  );
+
+  testWidgets(
+    'failed Active Apply retains duration draft; Cancel discards it at enlarged text',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final semantics = tester.ensureSemantics();
+      try {
+        final manager = _filterTestManager(failPublish: true)..ready = true;
+        await tester.pumpWidget(
+          buildTestable(
+            textScaler: const TextScaler.linear(2),
+            overrides: [
+              channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+              channelFilterProvider.overrideWithValue(manager),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Channels options'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Active'));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('7 days'));
+        await tester.tap(find.text('7 days'));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('Apply'));
+        await tester.tap(find.text('Apply'));
+        await tester.pumpAndSettle();
+        expect(
+          find.text(
+            'Could not confirm the filter save. Your choices are kept; try again.',
+          ),
+          findsOneWidget,
+        );
+        final failure = find.text(
+          'Could not confirm the filter save. Your choices are kept; try again.',
+        );
+        final status = tester.getSemantics(failure);
+        expect(status.getSemanticsData().flagsCollection.isLiveRegion, isTrue);
+        final errorRect = tester.getRect(failure);
+        final footerRect = tester.getRect(find.text('Retry'));
+        expect(errorRect.top, greaterThanOrEqualTo(0));
+        expect(errorRect.bottom, lessThanOrEqualTo(footerRect.top));
+        expect(footerRect.bottom, lessThanOrEqualTo(844));
+        final selected = tester.widget<AppListRow>(
+          find.ancestor(
+            of: find.text('7 days'),
+            matching: find.byType(AppListRow),
+          ),
+        );
+        expect(selected.trailing, isA<Icon>());
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(manager.store.modeFor('channels'), ChannelFilterMode.all);
+        expect(manager.store.windowFor('channels'), defaultActiveWindowSeconds);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        manager.dispose();
+      } finally {
+        semantics.dispose();
+      }
+    },
   );
 
   testWidgets('DM tile presence observation failure hides the dot', (
@@ -293,16 +497,14 @@ void main() {
         );
         node.owner!.performAction(node.id, ui.SemanticsAction.tap);
         await tester.pumpAndSettle();
-        expect(
-          find.byKey(
-            ValueKey(
-              label == 'Channels options'
-                  ? 'sort-popover-Channels'
-                  : 'section-popover-section-1',
-            ),
-          ),
-          findsOneWidget,
+        // The approved section-view sheet replaces the original popover;
+        // the same accessible button must still open the section controls.
+        final title = tester.widget<Text>(
+          find.byKey(const ValueKey('buzz-sheet-title')),
         );
+        expect(title.data, label == 'Channels options' ? 'Channels' : 'Design');
+        expect(find.text('Sort'), findsOneWidget);
+        expect(find.text('Show'), findsOneWidget);
       } finally {
         semantics.dispose();
       }
@@ -474,20 +676,16 @@ void main() {
     );
     await tester.tap(find.byTooltip('Channels options'));
     await tester.pumpAndSettle();
-    expect(find.text('Sort: Recent'), findsOneWidget);
-    expect(find.text('Sort: A–Z'), findsOneWidget);
-    final popover = find.byKey(const ValueKey('sort-popover-Channels'));
-    expect(popover, findsOneWidget);
-    expect(
-      find.descendant(of: popover, matching: find.byType(PopupMenuDivider)),
-      findsNothing,
+    expect(find.text('Recent'), findsOneWidget);
+    expect(find.text('A–Z'), findsOneWidget);
+    expect(find.text('Show'), findsOneWidget);
+    expect(find.byType(AlertDialog), findsNothing);
+    final alpha = tester.widget<AppListRow>(
+      find.ancestor(of: find.text('A–Z'), matching: find.byType(AppListRow)),
     );
-    final selectedCheck = find.byKey(const ValueKey('sort-selected-check'));
-    expect(selectedCheck, findsOneWidget);
-    expect(
-      tester.getCenter(selectedCheck).dx,
-      greaterThan(tester.getCenter(find.text('Sort: A–Z')).dx),
-    );
+    expect(alpha.trailing, isA<Icon>());
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
 
     for (final label in ['general', 'Alice']) {
       final text = tester.widget<Text>(find.text(label));
@@ -1154,63 +1352,23 @@ void main() {
     await tester.tap(find.byKey(const Key('section-menu-section-1')));
     await tester.pumpAndSettle();
 
-    final popover = find.byKey(const Key('section-popover-section-1'));
-    expect(popover, findsOneWidget);
     for (final label in [
       'Rename section',
       'Move up',
       'Move down',
       'Delete section',
     ]) {
-      expect(
-        find.descendant(of: popover, matching: find.text(label)),
-        findsOne,
-      );
+      expect(find.text(label), findsOneWidget);
     }
-    for (final icon in [
-      BuzzIcons.pencil,
-      BuzzIcons.arrowUp,
-      BuzzIcons.arrowDown,
-      BuzzIcons.trash2,
-    ]) {
-      expect(
-        find.descendant(of: popover, matching: find.byIcon(icon)),
-        findsOne,
-      );
-    }
-
-    final actionMenuItems = tester
-        .widgetList<PopupMenuItem<String>>(
-          find.descendant(
-            of: popover,
-            matching: find.byWidgetPredicate(
-              (widget) => widget is PopupMenuItem<String>,
-            ),
-          ),
-        )
-        .where(
-          (item) => const {
-            'rename',
-            'move_up',
-            'move_down',
-            'delete',
-          }.contains(item.value),
-        );
-    expect(actionMenuItems, hasLength(4));
-    for (final item in actionMenuItems) {
-      expect(
-        item.padding,
-        const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0),
-      );
-    }
-
-    final error = Theme.of(tester.element(popover)).colorScheme.error;
-    final deleteText = tester.widget<Text>(find.text('Delete section'));
-    final deleteIcon = tester.widget<Icon>(
-      find.descendant(of: popover, matching: find.byIcon(BuzzIcons.trash2)),
+    final moveUp = tester.widget<ListTile>(
+      find.ancestor(of: find.text('Move up'), matching: find.byType(ListTile)),
     );
-    expect(deleteText.style?.color, error);
-    expect(deleteIcon.color, error);
+    expect(moveUp.enabled, isFalse);
+    final deleteText = tester.widget<Text>(find.text('Delete section'));
+    expect(
+      deleteText.style?.color,
+      Theme.of(tester.element(find.text('Delete section'))).colorScheme.error,
+    );
   });
 
   testWidgets('aligns the top, section, row, and skeleton label columns', (
@@ -4335,6 +4493,44 @@ class _SwitchingUserCache extends UserCacheNotifier {
 class _CompletedPairingNotifier extends PairingNotifier {
   @override
   PairingState build() => const PairingState(status: PairingStatus.success);
+}
+
+ChannelFilterManager _filterTestManager({
+  Future<List<NostrEvent>> Function()? fetch,
+  nostr.Keys? testKeys,
+  ChannelFilterStore? cached,
+  bool failPublish = false,
+  VoidCallback? onPublish,
+}) {
+  final keys = testKeys ?? nostr.Keys.generate();
+  final crypto = ChannelSortCrypto(keys.nsec, keys.public);
+  var history = <NostrEvent>[];
+  return ChannelFilterManager(
+    pubkey: keys.public,
+    crypto: crypto,
+    cached: cached,
+    cache: (_) {},
+    fetch: () async =>
+        history.isEmpty && fetch != null ? await fetch() : history,
+    publish: (content, at) async {
+      onPublish?.call();
+      if (failPublish) throw StateError('rejected');
+      history = [
+        NostrEvent.fromJson(
+          nostr.Event.from(
+            kind: EventKind.readState,
+            tags: [
+              ['d', 'channel-filter'],
+            ],
+            content: content,
+            secretKey: nostr.Nip19.decode(payload: keys.nsec).data,
+            createdAt: at,
+            verify: false,
+          ).toMap(),
+        ),
+      ];
+    },
+  );
 }
 
 class _RetryingDirectoryNotifier extends ChannelsNotifier {

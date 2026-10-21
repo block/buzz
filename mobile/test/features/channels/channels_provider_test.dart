@@ -1779,6 +1779,52 @@ void main() {
     expect(members.every((member) => member.joinedAt == joinedAt), isTrue);
   });
 
+  test(
+    'self-authored activity invalidates filter reads without changing unread or sort time',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      final before = container
+          .read(channelsProvider)
+          .requireValue
+          .single
+          .lastMessageAt;
+      final versions = <int>[];
+      final listener = container.listen(
+        channelsProvider.select((_) => notifier.activityRevisionFor(_channelA)),
+        (_, next) => versions.add(next),
+      );
+      addTearDown(listener.close);
+      session.emit(
+        const NostrEvent(
+          id: 'self-message',
+          pubkey: myPk,
+          createdAt: 20,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['h', _channelA],
+          ],
+          content: 'my own activity',
+          sig: 'sig',
+        ),
+      );
+      await _settle();
+      expect(versions, [1]);
+      expect(notifier.latestObservedByChannel[_channelA], isNull);
+      expect(
+        container.read(channelsProvider).requireValue.single.lastMessageAt,
+        before,
+      );
+      expect(notifier.activityRevisionFor(_channelB), 0);
+    },
+  );
+
   test('live channel events update channel lastMessageAt', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],

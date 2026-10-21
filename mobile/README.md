@@ -230,6 +230,57 @@ for names and app-rendered avatar thumbnails. It never fetches an avatar URL;
 missing, stale, or invalid enrichment falls back to the verified message with a
 short sender pubkey, community subtitle, and no image.
 
+## Channel section filters
+
+Each section's options menu opens one sheet with Sort and Show controls using
+the shared sheet header and checked list rows. Show offers All, Unreads, and
+Active; Active reveals inline 1-, 7-, 30-, and 90-day choices. Apply commits the
+draft; Cancel discards it. A failed filter save keeps the draft for Retry.
+
+Filtered sections offer **Show hidden channels** in the main list, expanding
+the original sorted roster without changing the saved filter. Filtered-empty
+sections retain their header, options and recovery control. Section membership
+and sorting ownership are unchanged. Filter mode and duration are confirmed
+together; sorting retains its existing asynchronous persistence contract.
+
+Unreads uses the shared unread computation, including manually
+marked unread channels and observed unread thread replies. Active uses verified
+message timestamps; unavailable activity leaves channels visible with Retry.
+
+Mobile reads and writes the encrypted kind-30078 `channel-filter` preference
+for the current account and community. Its desktop counterpart is the separate
+[buzz-app implementation](https://github.com/block/buzz-app/pull/1297), including
+both browser and packaged-native writers. The older `desktop/` client in this
+repository does not implement this lane. Cross-client use requires that companion
+implementation; this PR does not add filters to the older desktop client.
+Mobile preserves
+metadata registers, null All tombstones, durations, and unrelated record fields.
+A cached copy is display-only until a complete relay read succeeds. Writes read
+the fresh record, publish one update, and confirm the mode and duration on relay
+readback. Failed saves roll back locally; the sheet retains the draft for Retry
+or Cancel.
+Modes and durations share **whole-record last-write-wins** authority: the retained
+Nostr event supplies both maps. `meta.g` supplies mode projection and tombstones,
+not a separate per-section merge protocol. A fresh preflight preserves edits it
+has seen, but crossed writes can lose an unseen edit, including another section's
+edit. Readback confirms the requested mode and duration together; load/refresh
+adopts the retained winning record. There is no conflict-free merge guarantee.
+
+Within a supported v1 record, malformed groups, durations and register siblings
+are discarded while valid siblings, reset tombstones and unrelated fields remain.
+An explicit user save publishes and confirms that canonical repair. Oversized
+records and unsupported schema versions remain read-only; cached display data
+never becomes repair authority.
+
+Preference refresh happens on load, foreground resume, and pull to refresh;
+instant cross-device preference synchronization is not promised. Filter choices
+are disabled while preferences are unavailable; hidden-channel navigation remains
+available. Deleting a custom section immediately persists its local removal,
+even offline. Unfiltered sections need no filter publication. Other sections get
+best-effort filter cleanup; failure reports that cleanup was unavailable without
+restoring the section. Never-reused section IDs make retained orphan filters
+unreachable; no automatic cleanup retry or offline filter-save queue is added.
+
 ## Checks
 
 ```bash
