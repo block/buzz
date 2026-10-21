@@ -232,3 +232,64 @@ BEGIN
         RAISE EXCEPTION 'replica_heartbeat must contain its singleton row after pgschema apply';
     END IF;
 END $$;
+
+-- Entity deletion is operator-global, even when a stage targets a community.
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('entity_deletion_requests', 'deployment entity deletion workflow and synthetic demo state'),
+    ('entity_deletion_stage_history', 'deployment entity deletion workflow and synthetic demo state'),
+    ('entity_deletion_approvals', 'deployment entity deletion workflow and synthetic demo state'),
+    ('entity_deletion_executor_heartbeats', 'deployment entity deletion workflow and synthetic demo state')
+ON CONFLICT (table_name) DO NOTHING;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'entity_deletion_requests'::regclass
+                     AND conname = 'entity_deletion_request_shape') THEN
+        ALTER TABLE entity_deletion_requests ADD CONSTRAINT entity_deletion_request_shape CHECK (
+        ((lease_owner IS NULL) = (lease_until IS NULL))
+        AND ((blocked_at IS NULL) = (blocked_reason IS NULL))
+        AND ((status = 'demo_completed') = (completed_at IS NOT NULL))
+        AND (status <> 'demo_completed' OR lease_owner IS NULL)
+        AND ((status = 'submitted') = (inventory_manifest IS NULL))
+        AND ((inventory_manifest IS NULL) = (inventory_digest IS NULL))
+        AND ((inventory_manifest IS NULL) = (inventory_frozen_at IS NULL))
+        );
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'entity_deletion_requests'::regclass
+                     AND conname = 'entity_deletion_request_shape' AND convalidated) THEN
+        RAISE EXCEPTION 'entity_deletion_request_shape must be validated';
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'entity_deletion_stage_history'::regclass
+                     AND conname = 'entity_deletion_stage_shape') THEN
+        ALTER TABLE entity_deletion_stage_history ADD CONSTRAINT entity_deletion_stage_shape CHECK (
+        (is_current = (status <> 'completed'))
+        AND ((status = 'completed') = (finished_at IS NOT NULL))
+        AND ((status = 'pending') = (started_at IS NULL))
+        AND (finished_at IS NULL OR finished_at >= started_at)
+        );
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = 'entity_deletion_stage_history'::regclass
+                     AND conname = 'entity_deletion_stage_shape' AND convalidated) THEN
+        RAISE EXCEPTION 'entity_deletion_stage_shape must be validated';
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM _operator_global_tables WHERE table_name IN (
+        'entity_deletion_requests',
+        'entity_deletion_stage_history',
+        'entity_deletion_approvals',
+        'entity_deletion_executor_heartbeats'
+    )) <> 4 THEN
+        RAISE EXCEPTION 'entity deletion tables must be operator-global';
+    END IF;
+END $$;

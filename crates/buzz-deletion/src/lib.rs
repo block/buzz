@@ -1,6 +1,18 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! Shared durable whole-community deletion engine and store adapters.
+//! Shared durable deletion engine and store adapters.
+
+mod executor;
+/// Synthetic multi-community user deletion commands.
+pub mod user;
+
+use executor::run_loop;
+
+#[cfg(test)]
+use executor::execute_claim;
+
+#[cfg(test)]
+mod user_postgres_tests;
 
 use std::future::Future;
 #[cfg(test)]
@@ -546,6 +558,10 @@ fn resolve_submit_host(host: Option<&str>, relay_url: Option<&str>) -> Result<St
 }
 
 async fn connect_store() -> Result<DeletionStore> {
+    Ok(store(&connect_database().await?))
+}
+
+async fn connect_database() -> Result<Db> {
     let database_url = required_env("DATABASE_URL")?;
     // The scheduled drain starts in a fresh pod whose first connection can
     // outlast the relay's three-second budget.
@@ -559,7 +575,7 @@ async fn connect_store() -> Result<DeletionStore> {
         "deletion",
     )
     .await?;
-    Ok(store(&db))
+    Ok(db)
 }
 
 fn resolve_s3_region(buzz_region: Option<String>, aws_region: Option<String>) -> String {
@@ -962,91 +978,6 @@ async fn freeze_destructive_manifest(
     Ok(manifest)
 }
 
-async fn run_loop(
-    services: Services,
-    mode: LoopMode,
-    request_id: Option<Uuid>,
-    executor_id: String,
-) -> Result<i32> {
-    let shutdown = shutdown_token();
-    let mut ran = false;
-    loop {
-        if shutdown.is_cancelled() {
-            services
-                .store
-                .stop_executor(None, &executor_id)
-                .await
-                .context("record executor drain")?;
-            return Ok(0);
-        }
-        let claim = match request_id {
-            Some(id) => {
-                services
-                    .store
-                    .claim_specific(id, &executor_id, DEFAULT_LEASE_DURATION)
-                    .await?
-            }
-            None => {
-                services
-                    .store
-                    .claim_next(&executor_id, DEFAULT_LEASE_DURATION)
-                    .await?
-            }
-        };
-        let claim = if claim.is_none() && mode == LoopMode::Drain && request_id.is_none() {
-            services
-                .store
-                .claim_next_owner_submission(&executor_id, DEFAULT_LEASE_DURATION)
-                .await?
-        } else {
-            claim
-        };
-        let Some(mut claim) = claim else {
-            if mode == LoopMode::Run && !ran {
-                anyhow::bail!(
-                    "deletion request is not runnable, is blocked, or is leased by another executor"
-                );
-            }
-            return Ok(0);
-        };
-        ran = true;
-        if claim.request.stage == DeletionStage::Submitted {
-            let preparation_request = claim.request.clone();
-            let preparation_services = &services;
-            match prepare_owner_claim_with(
-                &services,
-                mode,
-                claim,
-                &shutdown,
-                HEARTBEAT_INTERVAL,
-                |heartbeat_lost| async move {
-                    build_inventory(
-                        preparation_services,
-                        &preparation_request,
-                        Some(&heartbeat_lost),
-                    )
-                    .await
-                },
-            )
-            .await?
-            {
-                OwnerPreparationOutcome::Prepared(prepared) => claim = *prepared,
-                OwnerPreparationOutcome::Stopped => return Ok(0),
-                OwnerPreparationOutcome::Failed(output) => {
-                    print_json(&output)?;
-                    return Ok(1);
-                }
-            }
-        }
-        let output = execute_claim(&services, mode, claim, &shutdown).await?;
-        print_json(&output)?;
-        let failed = output.last_error.is_some() || output.blocked_reason.is_some();
-        if mode == LoopMode::Run || shutdown.is_cancelled() || failed {
-            return Ok(i32::from(failed));
-        }
-    }
-}
-
 enum OwnerPreparationOutcome {
     Prepared(Box<ClaimedDeletion>),
     Stopped,
@@ -1254,57 +1185,6 @@ async fn record_stage_failure(
     }
 }
 
-async fn execute_claim(
-    services: &Services,
-    mode: LoopMode,
-    mut claim: ClaimedDeletion,
-    shutdown: &CancellationToken,
-) -> Result<RunOutput> {
-    let token = claim.lease.clone();
-    loop {
-        if shutdown.is_cancelled() {
-            stop_claim_executor(services, mode, &token).await?;
-            let request = services.store.get(token.request_id).await?;
-            return Ok(run_output(request));
-        }
-        services
-            .store
-            .heartbeat(&token, mode.as_str(), DEFAULT_LEASE_DURATION, false)
-            .await?;
-        let stage_result = run_stage_with_heartbeat(services, mode, &claim, shutdown).await;
-        match stage_result {
-            StageOutcome::Completed => {}
-            StageOutcome::Shutdown => {
-                stop_claim_executor(services, mode, &token).await?;
-                let request = services.store.get(token.request_id).await?;
-                return Ok(run_output(request));
-            }
-            StageOutcome::Failed(error) => {
-                let request = services.store.get(token.request_id).await?;
-                if request.lease_owner.as_deref() != Some(&token.owner)
-                    || request.lease_generation != token.generation
-                {
-                    return Ok(run_output(request));
-                }
-                if !record_stage_failure(services, &token, claim.request.stage, &error).await? {
-                    // Ownership expired between the stage failure and durable
-                    // error recording. A successor now owns retry/block policy.
-                    let request = services.store.get(token.request_id).await?;
-                    return Ok(run_output(request));
-                }
-                let request = services.store.get(token.request_id).await?;
-                return Ok(run_output(request));
-            }
-        }
-        let request = services.store.get(token.request_id).await?;
-        if request.stage == DeletionStage::RetentionPending || request.blocked_reason.is_some() {
-            return Ok(run_output(request));
-        }
-        claim.request = request.clone();
-        claim.lease.fence_generation = request.fence_generation;
-    }
-}
-
 enum StageOutcome {
     Completed,
     Shutdown,
@@ -1327,61 +1207,6 @@ where
             Ok(()) => StageOutcome::Completed,
             Err(error) => StageOutcome::Failed(error),
         },
-    }
-}
-
-async fn run_stage_with_heartbeat(
-    services: &Services,
-    mode: LoopMode,
-    claim: &ClaimedDeletion,
-    shutdown: &CancellationToken,
-) -> StageOutcome {
-    let heartbeat_services = services.clone();
-    let heartbeat_token = claim.lease.clone();
-    let heartbeat_mode = mode.as_str();
-    let heartbeat_shutdown = CancellationToken::new();
-    let heartbeat_cancel = heartbeat_shutdown.clone();
-    let heartbeat_error = CancellationToken::new();
-    let heartbeat_error_signal = heartbeat_error.clone();
-    let heartbeat = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(heartbeat_interval());
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
-        loop {
-            tokio::select! {
-                _ = heartbeat_cancel.cancelled() => return,
-                _ = interval.tick() => {
-                    if heartbeat_services
-                        .store
-                        .heartbeat(
-                            &heartbeat_token,
-                            heartbeat_mode,
-                            DEFAULT_LEASE_DURATION,
-                            false,
-                        )
-                        .await
-                        .is_err()
-                    {
-                        heartbeat_error_signal.cancel();
-                        return;
-                    }
-                }
-            }
-        }
-    });
-
-    let stage = await_stage(
-        execute_stage(services, claim, &heartbeat_error),
-        shutdown,
-        &heartbeat_error,
-    )
-    .await;
-    heartbeat_shutdown.cancel();
-    match heartbeat.await {
-        Ok(()) => stage,
-        Err(error) => {
-            StageOutcome::Failed(anyhow::anyhow!("deletion heartbeat task failed: {error}"))
-        }
     }
 }
 

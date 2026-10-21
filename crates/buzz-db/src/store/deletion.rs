@@ -702,11 +702,11 @@ pub struct LeaseToken {
 
 /// A claimed request with its durable token.
 #[derive(Debug, Clone)]
-pub struct ClaimedDeletion {
+pub struct ClaimedDeletion<R = DeletionRequest, L = LeaseToken> {
     /// Request snapshot.
-    pub request: DeletionRequest,
+    pub request: R,
     /// Required token.
-    pub lease: LeaseToken,
+    pub lease: L,
 }
 
 /// Short-lived durable lease for an external serving side effect.

@@ -489,6 +489,10 @@ mod postgres_tests {
             "storage_taxonomy_sweeps",
             "community_serving_write_leases",
             "community_deletion_executor_heartbeats",
+            "entity_deletion_requests",
+            "entity_deletion_stage_history",
+            "entity_deletion_approvals",
+            "entity_deletion_executor_heartbeats",
             "relay_operators",
             "relay_admin_actions",
             "relay_admin_outbox",
@@ -709,7 +713,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 66);
+        assert_eq!(migrations.len(), 67);
+        assert_eq!(migrations[66].version, 67);
+        assert!(migrations[66]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE entity_deletion_stage_history"));
         assert_eq!(migrations[64].version, 65);
         let retire_ttl = strip_sql_comments(migrations[64].sql.as_str());
         for statement in [

@@ -78,6 +78,10 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i functions/attach_community_write_fence.sql
 \i functions/profile_name_fields.sql
 
+\i functions/protect_entity_deletion_request.sql
+\i functions/protect_entity_deletion_approval.sql
+\i functions/protect_entity_deletion_stage.sql
+
 -- tables
 \i tables/public/communities.sql
 \i tables/public/channels.sql
@@ -138,11 +142,19 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/artifact_heads.sql
 \i tables/public/artifact_revisions.sql
 
+\i tables/public/entity_deletion_requests.sql
+\i tables/public/entity_deletion_stage_history.sql
+\i tables/public/entity_deletion_approvals.sql
+\i tables/public/entity_deletion_executor_heartbeats.sql
+
 -- partitions
 \i partitions/events.sql
 \i partitions/delivery_log.sql
 
 -- triggers
+\i triggers/entity_deletion_requests.sql
+\i triggers/entity_deletion_stage_history.sql
+\i triggers/entity_deletion_approvals.sql
 \i triggers/channels.sql
 \i triggers/events.sql
 \i triggers/community_deletion_requests.sql
@@ -210,3 +222,9 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- Fence any community-scoped table that lacks an explicit attach.
 \i community_write_fence.sql
+
+-- Operator-global entity deletion state.
+\i seeds/entity_deletion_requests.sql
+\i seeds/entity_deletion_stage_history.sql
+\i seeds/entity_deletion_approvals.sql
+\i seeds/entity_deletion_executor_heartbeats.sql

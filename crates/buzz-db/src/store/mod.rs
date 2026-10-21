@@ -18,6 +18,8 @@ pub mod community;
 pub mod deletion;
 /// Direct message channel persistence.
 pub mod dm;
+/// Operator-global synthetic user deletion workflow persistence.
+pub mod entity_deletion;
 /// Event storage and retrieval.
 pub mod event;
 /// App-owned push enqueue and channel TTL refresh for inserted events.
