@@ -356,11 +356,12 @@ fn match_job(
     Ok(wakes)
 }
 
-/// Whether a lease filter may read an event in `channel`, by the same rule as
+/// Whether a lease filter may push an event in `channel`, by the same rule as
 /// REQ: a legacy-type channel is in every filter's scope (membership is
 /// checked separately), and a named-only channel is in scope only when the
 /// filter names it (see [`crate::handlers::system_channels`]). Lease filters
-/// cannot carry `#t` or `#P`, so for push "names it" means `#h`.
+/// cannot carry `#t` or `#P`, so for push "names it" means `#h`. The one
+/// exception: NIP-CL forbids push for system channels, even when named.
 fn push_filter_reads_channel(
     filter: &Filter,
     channel: Option<uuid::Uuid>,
@@ -371,6 +372,9 @@ fn push_filter_reads_channel(
     };
     if !named_only.ids().contains(&channel) {
         return true;
+    }
+    if named_only.is_system(&channel) {
+        return false;
     }
     filter_channel_scope(filter, &[], named_only).contains(&channel)
 }
@@ -796,55 +800,85 @@ mod tests {
     #[test]
     fn named_only_channel_pushes_only_to_a_filter_that_names_it() {
         let member = nostr::Keys::generate();
+        let outsider = nostr::Keys::generate();
         let sender = nostr::Keys::generate();
         let legacy = uuid::Uuid::new_v4();
         let system = uuid::Uuid::new_v4();
         let future = uuid::Uuid::new_v4();
-        let author = member.public_key().to_bytes().to_vec();
-        let lease = |filter: Value| buzz_db::push::MatchLease {
-            author: author.clone(),
-            installation_id: "phone".into(),
-            generation: 1,
-            subscriptions: serde_json::json!([{"filter": filter, "class": "default"}]),
-            expires_at: Utc::now().timestamp() + 3600,
-        };
-        let context = |filter: Value| MatchContext {
-            leases: vec![lease(filter)],
+        let author = |keys: &nostr::Keys| keys.public_key().to_bytes().to_vec();
+        let context = |keys: &nostr::Keys, filter: Value| MatchContext {
+            leases: vec![buzz_db::push::MatchLease {
+                author: author(keys),
+                installation_id: "phone".into(),
+                generation: 1,
+                subscriptions: serde_json::json!([{"filter": filter, "class": "default"}]),
+                expires_at: Utc::now().timestamp() + 3600,
+            }],
             memberships: [legacy, system, future]
                 .into_iter()
-                .map(|channel| (channel, author.clone()))
+                .map(|channel| (channel, author(&member)))
                 .collect(),
             named_only: NamedOnlyChannels::from_typed([
                 (system, "system".to_owned()),
                 (future, "later-type".to_owned()),
             ]),
         };
-        let job = |channel: uuid::Uuid| buzz_db::push::BatchedMatch {
-            event: buzz_core::StoredEvent::new(
-                EventBuilder::new(Kind::Custom(9), "hi")
-                    .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
-                    .sign_with_keys(&sender)
-                    .unwrap(),
-                Some(channel),
-            ),
-            attempt: 1,
+        let job = |channel: Option<uuid::Uuid>| {
+            let mut event = EventBuilder::new(Kind::Custom(9), "hi");
+            if let Some(channel) = channel {
+                event = event.tag(Tag::parse(["h", &channel.to_string()]).unwrap());
+            }
+            buzz_db::push::BatchedMatch {
+                event: buzz_core::StoredEvent::new(event.sign_with_keys(&sender).unwrap(), channel),
+                attempt: 1,
+            }
         };
-        let wakes = |filter: Value, channel| match_job(&job(channel), &context(filter)).unwrap();
-
-        // A filter that names no channel reads only legacy-type channels.
+        let wakes = |keys: &nostr::Keys, filter: Value, channel| {
+            match_job(&job(channel), &context(keys, filter))
+                .unwrap()
+                .len()
+        };
+        let names =
+            |channel: uuid::Uuid| serde_json::json!({"kinds": [9], "#h": [channel.to_string()]});
         let broad = serde_json::json!({"kinds": [9]});
-        assert_eq!(wakes(broad.clone(), legacy).len(), 1);
-        assert!(wakes(broad.clone(), system).is_empty());
-        assert!(wakes(broad, future).is_empty());
 
-        // Naming a named-only channel by #h reads it, as in REQ.
-        for channel in [system, future] {
-            let named = serde_json::json!({"kinds": [9], "#h": [channel.to_string()]});
-            assert_eq!(wakes(named, channel).len(), 1);
-        }
+        // A filter that names no channel reads legacy-type channels and
+        // channel-less events, but no named-only channel.
+        assert_eq!(wakes(&member, broad.clone(), Some(legacy)), 1, "legacy");
+        assert_eq!(wakes(&member, broad.clone(), None), 1, "no channel");
+        assert_eq!(
+            wakes(&member, broad.clone(), Some(system)),
+            0,
+            "unnamed system"
+        );
+        assert_eq!(wakes(&member, broad, Some(future)), 0, "unnamed later type");
+
+        // Naming a later-type channel by #h reads it, as in REQ.
+        assert_eq!(
+            wakes(&member, names(future), Some(future)),
+            1,
+            "named later type"
+        );
+        // NIP-CL: a system channel never pushes, even when named.
+        assert_eq!(
+            wakes(&member, names(system), Some(system)),
+            0,
+            "named system"
+        );
         // Naming one channel does not widen the filter to another.
-        let other = serde_json::json!({"kinds": [9], "#h": [system.to_string()]});
-        assert!(wakes(other, future).is_empty());
+        let other = uuid::Uuid::new_v4();
+        assert_eq!(wakes(&member, names(other), Some(future)), 0, "other #h");
+        // Membership is still required.
+        assert_eq!(
+            wakes(&outsider, names(future), Some(future)),
+            0,
+            "non-member"
+        );
+        assert_eq!(
+            wakes(&outsider, names(legacy), Some(legacy)),
+            0,
+            "non-member legacy"
+        );
     }
 
     async fn capture(
