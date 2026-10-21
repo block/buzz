@@ -1022,6 +1022,38 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
+  /// Finds [channelId] so a link can open it.
+  ///
+  /// The loaded list holds member channels and, after Browse, the open
+  /// directory. A link can name an open channel outside both, so this then
+  /// reads that one channel's kind:39000 metadata. The relay filters the read
+  /// by the caller's access. Like directory discovery, a private channel or DM
+  /// opens only from the member list. Returns null when no channel qualifies.
+  Future<Channel?> resolveChannel(String channelId) async {
+    final listed = state.value
+        ?.where((channel) => channel.id == channelId)
+        .firstOrNull;
+    if (listed != null) return listed;
+
+    final metas = await ref
+        .read(relaySessionProvider.notifier)
+        .fetchHistory(NostrFilters.channelMetadata([channelId]));
+    NostrEvent? latest;
+    for (final event in metas) {
+      if (event.kind != 39000 || event.getTagValue('d') != channelId) continue;
+      if (latest == null ||
+          event.createdAt > latest.createdAt ||
+          (event.createdAt == latest.createdAt &&
+              event.id.compareTo(latest.id) < 0)) {
+        latest = event;
+      }
+    }
+    if (latest == null) return null;
+    final channel = _channelFromMeta(latest, isMember: false);
+    if (channel.isPrivate || channel.isDm) return null;
+    return channel;
+  }
+
   /// Loads the directory when Browse channels opens after startup or an error.
   Future<void> ensureDirectoryLoaded() async {
     final directoryState = ref.read(channelDirectoryLoadStatusProvider);

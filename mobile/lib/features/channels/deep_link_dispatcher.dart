@@ -45,6 +45,7 @@ class DeepLinkDispatcher extends ConsumerStatefulWidget {
 class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   bool _preparingInvite = false;
   bool _handlingOnboarding = false;
+  bool _resolvingLink = false;
 
   @override
   void initState() {
@@ -164,34 +165,56 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   }
 
   void _dispatchNavigableLink(BuzzDeepLink link) {
+    if (_resolvingLink) return;
     final channelId = switch (link) {
       MessageDeepLink(:final channelId) => channelId,
       ChannelDeepLink(:final channelId) => channelId,
       _ => throw StateError('unsupported navigable deep link: $link'),
     };
-    final channels = ref.read(channelsProvider).asData?.value;
     // Channels not loaded yet — keep the link parked; the channelsProvider
     // listener re-attempts once data arrives.
-    if (channels == null) return;
+    if (ref.read(channelsProvider).asData?.value == null) return;
+    unawaited(_resolveAndPush(link, channelId));
+  }
 
-    final channel = channels
-        .where((c) => c.id == channelId)
-        .cast<Channel?>()
-        .firstOrNull;
-    if (channel == null) {
+  Future<void> _resolveAndPush(BuzzDeepLink link, String channelId) async {
+    _resolvingLink = true;
+    Channel? channel;
+    Object? failure;
+    try {
+      channel = await ref
+          .read(channelsProvider.notifier)
+          .resolveChannel(channelId);
+    } catch (error) {
+      failure = error;
+    } finally {
+      _resolvingLink = false;
+    }
+    if (!mounted) return;
+    if (ref.read(pendingDeepLinkProvider) != link) {
+      // The guard above held back whatever replaced this link meanwhile.
+      _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      return;
+    }
+    if (channel != null) {
+      _pushChannel(channel, link);
       ref.read(pendingDeepLinkProvider.notifier).consume();
+      return;
+    }
+    ref.read(pendingDeepLinkProvider.notifier).consume();
+    if (failure != null) {
+      debugPrint('deep-link: channel $channelId lookup failed: $failure');
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('Could not open the channel')),
+      );
+    } else {
       debugPrint(
         'deep-link: channel $channelId not found in workspace; dropping link',
       );
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         const SnackBar(content: Text('Channel not found in this workspace')),
       );
-      return;
     }
-    if (!context.mounted) return;
-
-    _pushChannel(channel, link);
-    ref.read(pendingDeepLinkProvider.notifier).consume();
   }
 
   void _pushChannel(Channel channel, BuzzDeepLink link) {
