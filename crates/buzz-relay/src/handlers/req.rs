@@ -22,7 +22,7 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-const MAX_SUBSCRIPTIONS: usize = 1024;
+pub(crate) const MAX_SUBSCRIPTIONS: usize = 1024;
 
 /// Maximum aggregate number of explicit `#h` values accepted in one REQ,
 /// COUNT, HTTP `/query`, or HTTP `/count` request.

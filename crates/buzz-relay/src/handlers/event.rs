@@ -267,7 +267,9 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
     stored: &StoredEvent,
 ) {
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
+    state.artifact_syncs.signal_access_change(stored, &matches);
     let matches = filter_fanout_by_access(state, community_id, stored, matches, None).await;
+    let matches = state.artifact_syncs.divert(stored, matches);
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     if matches.is_empty() {
         return;
@@ -327,7 +329,9 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
     }
 
     let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
+    state.artifact_syncs.signal_access_change(&stored, &matches);
     let matches = filter_fanout_by_access(state, community_id, &stored, matches, None).await;
+    let matches = state.artifact_syncs.divert(&stored, matches);
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
     if matches.is_empty() {
         return;
@@ -437,23 +441,14 @@ async fn dispatch_persistent_event_inner(
         Some(channel_id) => EventTopic::Channel(channel_id),
         None => EventTopic::Global,
     };
-    state.mark_local_event(tenant.community(), &stored_event.event.id);
-    #[cfg(test)]
-    crate::nip_fi_test_hooks::before_event_publish(tenant.community());
-    if let Err(e) = state
-        .pubsub
-        .publish_event(tenant, topic, &stored_event.event)
-        .await
-    {
-        state
-            .local_event_ids
-            .invalidate(&(tenant.community(), stored_event.event.id.to_bytes()));
-        warn!(event_id = %event_id_hex, "Redis publish failed: {e}");
-    }
+    super::artifact_sync::publish_reliably(state, tenant, topic, stored_event).await;
 
     let matches = state
         .sub_registry
         .fan_out_scoped(tenant.community(), stored_event);
+    state
+        .artifact_syncs
+        .signal_access_change(stored_event, &matches);
     let matches = filter_fanout_by_access(
         state,
         tenant.community(),
@@ -462,6 +457,7 @@ async fn dispatch_persistent_event_inner(
         threaded_visibility.as_ref(),
     )
     .await;
+    let matches = state.artifact_syncs.divert(stored_event, matches);
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     debug!(
         event_id = %event_id_hex,

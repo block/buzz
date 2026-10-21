@@ -47,6 +47,7 @@ pub(crate) async fn retire_locked(
     state: &AppState,
 ) {
     subs.remove(sub_id);
+    state.artifact_syncs.remove(conn.conn_id, sub_id);
     if let Some(removed) = state.sub_registry.remove_subscription(conn.conn_id, sub_id) {
         #[cfg(test)]
         test_seam::pause_at(&test_seam::RELEASE_PAUSE).await;
@@ -93,6 +94,7 @@ pub(crate) async fn release_connection_subscriptions(conn: &ConnectionState, sta
     test_seam::pause_at(&test_seam::CLEANUP_PAUSE).await;
     let mut subs = conn.subscriptions.lock().await;
     subs.clear();
+    state.artifact_syncs.remove_connection(conn.conn_id);
     for removed in state.sub_registry.remove_connection(conn.conn_id) {
         release_scope_topics(state, &conn.tenant, &removed.scope).await;
     }

@@ -26,7 +26,9 @@ pub(crate) enum RejectionTarget<'a> {
 /// Picks the acknowledgement channel a rejection of `msg` must travel on.
 pub(crate) fn rejection_target_for(msg: &ClientMessage) -> RejectionTarget<'_> {
     match msg {
-        ClientMessage::Req { sub_id, .. } | ClientMessage::Count { sub_id, .. } => {
+        ClientMessage::Req { sub_id, .. }
+        | ClientMessage::Count { sub_id, .. }
+        | ClientMessage::ArtifactSync { sub_id, .. } => {
             RejectionTarget::Subscription(sub_id.as_str())
         }
         ClientMessage::Event(event) => RejectionTarget::Event(event.id),
@@ -52,7 +54,14 @@ pub(crate) async fn enforce_ws_admission(
     state: &AppState,
 ) -> bool {
     let is_event = matches!(msg, ClientMessage::Event(_));
-    if !is_event && !matches!(msg, ClientMessage::Req { .. } | ClientMessage::Count { .. }) {
+    if !is_event
+        && !matches!(
+            msg,
+            ClientMessage::Req { .. }
+                | ClientMessage::Count { .. }
+                | ClientMessage::ArtifactSync { .. }
+        )
+    {
         return true;
     }
 

@@ -25,6 +25,15 @@ pub enum ClientMessage {
         /// Optional per-filter composite cursor tiebreaks from raw extension fields.
         before_ids: Vec<Option<Vec<u8>>>,
     },
+    /// A REQ whose single filter is a NIP-AR sync (`"artifact":"sync"`).
+    /// An invalid sync filter is answered with `CLOSED`, so the parse error
+    /// travels to the handler.
+    ArtifactSync {
+        /// The client-assigned subscription identifier.
+        sub_id: String,
+        /// The parsed sync filter, or the reason it is invalid.
+        filter: std::result::Result<buzz_core::artifact_sync::ArtifactSyncFilter, &'static str>,
+    },
     /// A CLOSE message cancelling an active subscription.
     Close(String),
     /// A COUNT message requesting aggregate counts (NIP-45).
@@ -109,6 +118,16 @@ impl ClientMessage {
                     )));
                 }
                 let filter_values = &arr[2..];
+                if filter_values
+                    .iter()
+                    .any(buzz_core::artifact_sync::is_sync_filter)
+                {
+                    let filter = match filter_values {
+                        [filter] => buzz_core::artifact_sync::parse_sync(filter),
+                        _ => Err("sync requires exactly one filter"),
+                    };
+                    return Ok(ClientMessage::ArtifactSync { sub_id, filter });
+                }
                 reject_artifact_query_filters(filter_values)?;
 
                 // Enforce NIP-11 advertised max_filters: 10
@@ -302,6 +321,32 @@ mod tests {
         ] {
             assert!(super::ClientMessage::parse(&request).is_err(), "{request}");
         }
+    }
+
+    /// A sync filter becomes its own message, even when invalid, so the
+    /// handler can answer with `CLOSED`. COUNT has no sync mode.
+    #[test]
+    fn sync_filters_route_to_artifact_sync() {
+        let h = uuid::Uuid::new_v4();
+        let sync = format!(r##"{{"artifact":"sync","#h":["{h}"]}}"##);
+        let parsed = super::ClientMessage::parse(&format!(r#"["REQ","s",{sync}]"#)).unwrap();
+        assert!(matches!(
+            parsed,
+            super::ClientMessage::ArtifactSync { ref sub_id, filter: Ok(ref f) } if sub_id == "s" && f.channels == [h]
+        ));
+        for request in [
+            format!(r#"["REQ","s",{sync},{{"kinds":[1]}}]"#),
+            r#"["REQ","s",{"artifact":"sync"}]"#.to_owned(),
+        ] {
+            assert!(
+                matches!(
+                    super::ClientMessage::parse(&request).unwrap(),
+                    super::ClientMessage::ArtifactSync { filter: Err(_), .. }
+                ),
+                "{request}"
+            );
+        }
+        assert!(super::ClientMessage::parse(&format!(r#"["COUNT","c",{sync}]"#)).is_err());
     }
 
     use super::*;

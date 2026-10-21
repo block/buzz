@@ -1401,6 +1401,28 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 .instrument(span),
             );
         }
+        ClientMessage::ArtifactSync { sub_id, filter } => {
+            let conn = Arc::clone(&conn);
+            let state = Arc::clone(&state);
+            let permit = match state.handler_semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    conn.send(request_rejection_message(
+                        RejectionTarget::Subscription(&sub_id),
+                        "rate-limited: too many concurrent requests",
+                    ));
+                    return;
+                }
+            };
+            let span =
+                tracing::info_span!("ws.artifact_sync", conn_id = %conn.conn_id, sub_id = %sub_id);
+            tokio::spawn(
+                async move {
+                    handlers::artifact_sync::handle_sync(sub_id, filter, conn, state, permit).await;
+                }
+                .instrument(span),
+            );
+        }
         ClientMessage::Count { sub_id, filters } => {
             let conn = Arc::clone(&conn);
             let state = Arc::clone(&state);
