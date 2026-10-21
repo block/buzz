@@ -102,9 +102,11 @@ enum Command {
     },
     /// Record media shares for events stored before share recording existed.
     ///
-    /// Idempotent and resumable; run after every relay pod records shares and
+    /// Run after every relay pod records shares and
     /// before enforcing channel-scoped media reads. Historical references are
     /// trusted only before each community's schema-recorded cutoff.
+    /// Later references use current permissions, so reruns can grant references
+    /// live recording previously refused if their authors have since gained access.
     BackfillMediaShares {
         /// Events read and recorded per transaction.
         #[arg(long, default_value_t = 1000)]
