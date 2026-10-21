@@ -22,13 +22,17 @@ class InlineAgentTyping extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final keys = entries.map((entry) => entry.pubkey.toLowerCase()).toSet();
+    // Bound layout, profile lookups, live regions, and animation controllers
+    // even when the relay supplies a large burst of concurrent typers.
+    final visibleKeys = keys.take(3).toList();
+    final remaining = keys.length - visibleKeys.length;
     final profiles = ref.watch(userCacheProvider);
     final bots = ref.watch(agentMentionPubkeysProvider(channelId));
-    final labels = watchChannelIdentityLabels(ref, channelId, keys);
+    final labels = watchChannelIdentityLabels(ref, channelId, visibleKeys);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final key in keys)
+        for (final key in visibleKeys)
           Semantics(
             key: ValueKey('inline-agent-typing-$key'),
             liveRegion: true,
@@ -76,6 +80,27 @@ class InlineAgentTyping extends ConsumerWidget {
                       ),
                     ),
                   ],
+                ),
+              ),
+            ),
+          ),
+        if (remaining > 0)
+          Semantics(
+            liveRegion: true,
+            label:
+                '$remaining ${remaining == 1 ? 'other person is' : 'other people are'} typing',
+            child: ExcludeSemantics(
+              child: Padding(
+                padding: const EdgeInsets.only(
+                  left: messageAvatarSize + messageAvatarContentGap + Grid.xs,
+                  top: Grid.xs,
+                  bottom: Grid.xxs,
+                ),
+                child: Text(
+                  'and $remaining ${remaining == 1 ? 'other' : 'others'}',
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.onSurfaceVariant,
+                  ),
                 ),
               ),
             ),
