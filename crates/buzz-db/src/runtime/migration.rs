@@ -1583,7 +1583,12 @@ mod postgres_tests {
                 .expect("read .pgschemaignore");
         let exempt: BTreeSet<String> = ignore
             .lines()
-            .filter_map(|line| line.trim().strip_prefix("\"!")?.strip_suffix("\","))
+            .filter_map(|line| {
+                line.trim()
+                    .trim_end_matches(',')
+                    .strip_prefix("\"!")?
+                    .strip_suffix('"')
+            })
             .map(str::to_owned)
             .collect();
         assert_eq!(
@@ -2832,11 +2837,12 @@ mod postgres_tests {
         }
     }
 
-    /// pgschema does not compare partition bounds, so re-applying
-    /// `schema/schema.sql` to a database a relay has used plans
+    /// Re-applying `schema/schema.sql` to a database a relay has used plans
     /// `DROP TABLE IF EXISTS ... CASCADE` for every monthly the partition
     /// manager created at runtime, and their rows go with them.
-    /// `.pgschemaignore` keeps those monthlies out of pgschema's view.
+    /// `.pgschemaignore` keeps those monthlies out of pgschema's view, and
+    /// pgschema does not compare partition bounds, so the advanced catch-all
+    /// is left alone too.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn pgschema_reapply_keeps_runtime_partitions() {
@@ -2865,11 +2871,34 @@ mod postgres_tests {
             String::from_utf8_lossy(&apply.stderr),
         );
 
-        // The relay's default startup pass, which advances the static layout's
-        // catch-all into dated monthlies schema/partitions/ does not declare.
         let pool = PgPool::connect(&format!("{base_prefix}/{database}"))
             .await
             .expect("connect probe database");
+        // Every pgschema caller attaches the declared children this way.
+        sqlx::raw_sql(include_str!(
+            "../../../../scripts/reconcile-schema-after-pgschema.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("reconcile schema after pgschema");
+        async fn catch_all_bounds(pool: &PgPool) -> Vec<(String, Option<String>)> {
+            sqlx::query_as(
+                "SELECT relname::text, pg_get_expr(relpartbound, oid) FROM pg_class \
+                 WHERE relname IN ('events_p_future', 'delivery_log_p_future') \
+                 ORDER BY relname",
+            )
+            .fetch_all(pool)
+            .await
+            .expect("read catch-all bounds")
+        }
+        let declared_bounds = catch_all_bounds(&pool).await;
+        assert!(
+            declared_bounds.len() == 2 && declared_bounds.iter().all(|(_, bound)| bound.is_some()),
+            "reconcile did not attach both catch-alls: {declared_bounds:?}"
+        );
+
+        // The relay's default startup pass advances each catch-all into dated
+        // monthlies schema/partitions/ does not declare.
         maintain_partitions(
             &pool,
             PARTITION_MANAGER_MONTHS_AHEAD,
@@ -2880,6 +2909,10 @@ mod postgres_tests {
         )
         .await
         .expect("maintain partitions");
+        let advanced_bounds = catch_all_bounds(&pool).await;
+        for (declared, advanced) in declared_bounds.iter().zip(&advanced_bounds) {
+            assert_ne!(declared, advanced, "catch-all did not advance");
+        }
         let children: Vec<(String, String)> = sqlx::query_as(
             "SELECT p.relname::text, c.relname::text FROM pg_inherits i \
              JOIN pg_class c ON c.oid = i.inhrelid \
@@ -2898,9 +2931,11 @@ mod postgres_tests {
             })
             .collect();
         for parent in ["events", "delivery_log"] {
+            // The first month the declared catch-all served.
+            let first = format!("{parent}_p2026_07");
             assert!(
-                runtime.iter().any(|(p, _)| p == parent),
-                "maintenance created no runtime {parent} monthly: {children:?}"
+                runtime.iter().any(|(_, child)| *child == first),
+                "maintenance did not advance into {first}: {children:?}"
             );
         }
 
@@ -2913,8 +2948,14 @@ mod postgres_tests {
         );
         assert!(
             !plan_sql.contains("DROP TABLE"),
-            "re-applying schema.sql would drop tables; runtime monthlies {runtime:?}:\n{plan_sql}"
+            "re-applying schema.sql would drop tables:\n{plan_sql}"
         );
+        for (_, child) in &runtime {
+            assert!(
+                !plan_sql.contains(child.as_str()),
+                "re-applying schema.sql would change runtime monthly {child}:\n{plan_sql}"
+            );
+        }
 
         sqlx::query(AssertSqlSafe(format!(
             "DROP DATABASE {database} WITH (FORCE)"
