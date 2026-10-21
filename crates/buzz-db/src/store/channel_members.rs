@@ -695,8 +695,9 @@ pub async fn add_member(
 /// neither a membership write nor a setting change can slip between the
 /// decision and the write.
 ///
-/// The private-channel creator may add themselves as the first member
-/// (bootstrap), with any role.
+/// There is no creator exception: channel creation installs the creator as
+/// owner in the same transaction, so a creator without an active row was
+/// removed and is admitted like anyone else.
 pub async fn put_member(
     pool: &PgPool,
     community_id: CommunityId,
@@ -740,23 +741,15 @@ pub async fn put_member(
         })
         .transpose()?;
 
-    let is_creator_bootstrap = private
-        && actor == pubkey
-        && actor_role.is_none()
-        && actor == channel.created_by.as_slice();
-    let effective_role = if is_creator_bootstrap {
-        requested.unwrap_or(MemberRole::Owner)
-    } else {
-        buzz_core::channel::decide_member_put(buzz_core::channel::MemberPut {
-            private,
-            join_role,
-            actor_role,
-            target_is_actor: actor == pubkey,
-            target_role: current_role.as_deref(),
-            requested,
-        })
-        .map_err(|denial| DbError::AccessDenied(member_put_denial_message(denial).to_string()))?
-    };
+    let effective_role = buzz_core::channel::decide_member_put(buzz_core::channel::MemberPut {
+        private,
+        join_role,
+        actor_role,
+        target_is_actor: actor == pubkey,
+        target_role: current_role.as_deref(),
+        requested,
+    })
+    .map_err(|denial| DbError::AccessDenied(member_put_denial_message(denial).to_string()))?;
 
     // Defense-in-depth, mirroring `remove_member`: a demotion must not strip
     // the channel of its last owner, which would leave nobody able to
@@ -4565,6 +4558,56 @@ mod postgres_tests {
             Some("member"),
             "a kicked owner must rejoin at baseline privilege, not regain ownership"
         );
+    }
+
+    /// A removed creator is not re-admitted to a private channel by being its
+    /// creator. A kind:9021 self-join can pass the relay's open-channel check
+    /// and reach `put_member` after the channel became private; it must be
+    /// refused there, not turned into a creator bootstrap that restores
+    /// ownership. The same holds for a self-add that names the creator as
+    /// inviter and for one that asks for `owner`.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn removed_creator_cannot_rejoin_a_private_channel() {
+        let pool = setup_pool().await;
+        let (community, channel_id, creator, other_owner) =
+            channel_with_two_owners(&pool, "removed-creator-private").await;
+
+        remove_member(&pool, community, channel_id, &creator, &other_owner)
+            .await
+            .expect("an owner may remove the creator");
+        crate::channel::update_channel(
+            &pool,
+            community,
+            channel_id,
+            crate::channel::ChannelUpdate {
+                visibility: Some("private".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("make the channel private");
+
+        for (requested, invited_by) in [
+            (None, None),
+            (None, Some(creator.as_slice())),
+            (Some(MemberRole::Owner), Some(creator.as_slice())),
+        ] {
+            let result = put_member(
+                &pool, community, channel_id, &creator, requested, invited_by,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(DbError::AccessDenied(_))),
+                "a removed creator must not rejoin a private channel \
+                 (requested {requested:?}, inviter set {}): {result:?}",
+                invited_by.is_some()
+            );
+        }
+        let role = get_member_role(&pool, community, channel_id, &creator)
+            .await
+            .expect("read creator role");
+        assert_eq!(role, None, "the removed creator must stay removed");
     }
 
     /// The other side of the same boundary: reactivation may reach an elevated
