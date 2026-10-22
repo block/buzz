@@ -506,7 +506,69 @@ mod postgres_tests {
                 !readable_share(&db, community, &sha, &reader).await,
                 "a purged source cannot leave a dangling grant"
             );
+            assert!(reap_all(&db).await > 0);
+            assert_eq!(
+                shares(&db, community, &sha).await.len(),
+                usize::from(channel_id.is_some()),
+                "cleanup retains at most one channel boundary, never public history"
+            );
+            if let Some(edit_sha) = &edit_only {
+                assert_eq!(
+                    shares(&db, community, edit_sha).await.len(),
+                    1,
+                    "inactive edit grants compact to one channel marker"
+                );
+            }
+            assert!(!readable_share(&db, community, &sha, &reader).await);
+            assert_eq!(reap_all(&db).await, 0, "cleanup is idempotent");
         }
+
+        // Fleet cleanup skips a quiescing community while reclaiming another
+        // community's dead copy of the same hash and keeping its live copy.
+        let sha = unique_sha();
+        upload(&db, community, &owner, &sha).await;
+        let retired = attachment(&owner, &sha, None);
+        db.insert_event(community, &retired, None).await.unwrap();
+        db.soft_delete_event_and_update_thread(community, retired.id.as_bytes(), None, None)
+            .await
+            .unwrap();
+        let mut lifecycle = db.pool.begin().await.unwrap();
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                    set_config('buzz.deletion_fence_generation', '0', true)",
+        )
+        .bind(community.as_uuid().to_string())
+        .execute(&mut *lifecycle)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE communities SET deletion_state = 'quiescing' WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *lifecycle)
+            .await
+            .unwrap();
+        lifecycle.commit().await.unwrap();
+        let (other, other_community) = fixture().await;
+        upload(&other, other_community, &owner, &sha).await;
+        let old = attachment(&owner, &sha, None);
+        let current = attachment(&owner, &sha, None);
+        for event in [&old, &current] {
+            other
+                .insert_event(other_community, event, None)
+                .await
+                .unwrap();
+        }
+        other
+            .soft_delete_event_and_update_thread(other_community, old.id.as_bytes(), None, None)
+            .await
+            .unwrap();
+        assert!(reap_all(&db).await > 0);
+        assert_eq!(
+            shares(&db, community, &sha).await.len(),
+            1,
+            "cleanup may not write into a quiescing community"
+        );
+        assert_eq!(shares(&other, other_community, &sha).await.len(), 1);
+        assert!(readable_share(&other, other_community, &sha, &reader).await);
     }
 
     async fn readable_share(db: &Db, community: CommunityId, sha: &str, reader: &Keys) -> bool {
@@ -521,6 +583,25 @@ mod postgres_tests {
         .fetch_one(&db.pool)
         .await
         .unwrap()
+    }
+
+    async fn reap_all(db: &Db) -> u64 {
+        let mut cursor = None;
+        let mut removed = 0;
+        // One row per page exercises progress across live rows and retained
+        // channel markers as well as rows deleted by a previous page.
+        for _ in 0..10_000 {
+            let batch = db
+                .reap_inactive_media_shares(cursor.as_ref(), 1)
+                .await
+                .unwrap();
+            removed += batch.removed;
+            cursor = batch.next_cursor;
+            if cursor.is_none() {
+                return removed;
+            }
+        }
+        panic!("cleanup must finish its bounded primary-key scan");
     }
 
     #[tokio::test]
@@ -577,6 +658,12 @@ mod postgres_tests {
             assert!(publish(&make(&uploader, Kind::Metadata, 1, false)).await);
             assert!(readable_share(&db, community, &sha, &viewer).await);
             assert!(publish(&make(&publisher, kind, 1, true)).await);
+            assert!(reap_all(&db).await > 0);
+            assert_eq!(
+                shares(&db, community, &sha).await.len(),
+                1,
+                "cleanup keeps the surviving profile/emoji head"
+            );
             assert!(
                 readable_share(&db, community, &sha, &viewer).await,
                 "a replacement must carry forward an authorized reference"
@@ -611,6 +698,8 @@ mod postgres_tests {
             .unwrap();
             tx.commit().await.unwrap();
             assert!(publish(&legacy_make(1, true)).await);
+            assert!(reap_all(&db).await > 0);
+            assert_eq!(shares(&db, community, &legacy_sha).await.len(), 1);
             db.backfill_media_shares(1).await.unwrap();
             assert!(
                 readable_share(&db, community, &legacy_sha, &viewer).await,
@@ -620,6 +709,12 @@ mod postgres_tests {
             assert!(!readable_share(&db, community, &legacy_sha, &viewer).await);
             assert!(publish(&legacy_make(3, true)).await);
             assert!(!readable_share(&db, community, &legacy_sha, &viewer).await);
+            assert!(reap_all(&db).await > 0);
+            assert!(
+                shares(&db, community, &legacy_sha).await.is_empty(),
+                "replaced avatar/emoji heads must not accumulate inactive rows"
+            );
+            assert!(shares(&db, community, &sha).await.is_empty());
         }
     }
 

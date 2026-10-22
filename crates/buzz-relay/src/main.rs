@@ -134,6 +134,7 @@ const _: () = assert!(FLEET_STOCK_COLLECTION_DEADLINE.as_secs() > 5);
 const _: () = assert!(FLEET_ACTIVITY_COLLECTION_DEADLINE.as_secs() > 15);
 
 struct FleetUsageSchedule {
+    media_cleanup_cursor: Option<buzz_db::media_cleanup::MediaShareCleanupCursor>,
     next_stock: std::time::Instant,
     next_activity: std::time::Instant,
     last_stock_success: Option<std::time::Instant>,
@@ -167,6 +168,7 @@ impl FleetUsageSchedule {
         retry_interval: std::time::Duration,
     ) -> Self {
         Self {
+            media_cleanup_cursor: None,
             next_stock: now,
             next_activity: now,
             last_stock_success: None,
@@ -2518,6 +2520,19 @@ async fn run_usage_metrics_tick(
             emit_fleet_db_usage_metrics(state, fleet_schedule).await;
         }
         let invite_retention_cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        match state
+            .db
+            .reap_inactive_media_shares(fleet_schedule.media_cleanup_cursor.as_ref(), 1000)
+            .await
+        {
+            Ok(batch) => {
+                fleet_schedule.media_cleanup_cursor = batch.next_cursor;
+                if batch.removed > 0 {
+                    info!(removed = batch.removed, "reaped inactive media shares");
+                }
+            }
+            Err(error) => warn!(error = %error, "failed to reap inactive media shares"),
+        }
         match state
             .db
             .reap_expired_relay_invites(invite_retention_cutoff)
