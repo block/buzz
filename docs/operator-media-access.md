@@ -17,24 +17,28 @@ During that restart, pods use their own configured mode until replaced.
 
 ## Rollout
 
-1. Deploy share recording to every pod with reads in `log-only`.
-2. Run `buzz-admin backfill-media-shares` after all pods record shares.
-3. Inspect `buzz_media_read_access_total{mode="log-only",outcome="deny"}` and `outcome="error"` in Prometheus.
-4. Investigate denied workflows and repair missing provenance before enforcing.
-5. Set `BUZZ_MEDIA_READ_MODE=enforce` and restart every pod.
+1. Before any backfill, explicitly accept that reconsidered references can create lasting grants; otherwise defer the backfill.
+2. Deploy share recording to every pod with reads in `log-only`.
+3. Run `buzz-admin backfill-media-shares` after all pods record shares.
+4. Inspect `buzz_media_read_access_total{mode="log-only",outcome="deny"}` and `outcome="error"` in Prometheus.
+5. Investigate denied workflows and repair missing provenance before enforcing.
+6. Set `BUZZ_MEDIA_READ_MODE=enforce` and restart every pod.
 
 The counter uses only fixed `mode` and `outcome` labels: `allow`, `report`, `deny`, or `error`.
 It measures authorization evaluations on GET and HEAD, before checking whether storage contains the file.
 It counts requests, not distinct files, and includes thumbnail requests checked against the original hash.
 Use controlled client smoke tests to investigate counts; hashes, keys, and URLs are not metric labels.
-Log-only evaluations create no shares and do not grant future access.
+Log-only GET/HEAD evaluations create no shares and do not grant future access.
+Event recording and backfill still write grants in every read mode.
 
 Backfill reevaluates references received after recording began using their authors' current permissions.
-It does not remember earlier refusals: a rerun can grant an old reference after its author gains access.
+It does not remember earlier refusals: any run, including the first, can grant an old reference after its author gains access.
 For a community-wide note, that grant can survive removal of the author's channel access and deletion of the original private post.
 The grant remains tied to the note and ends when that note is deleted.
-This migration limitation is accepted for recording and log-only rollout; before enabling enforcement, explicitly accept it or prevent reevaluation.
-Reruns deduplicate rows but do not preserve earlier authorization decisions.
+Accept those resulting grants before the first backfill, or defer backfill until refusal-preserving behavior exists.
+Changing read modes does not revoke grants, and preventing reevaluation later does not remove grants already created.
+Any unwanted existing grants need a provenance-based repair before enforcement.
+Every invocation restarts the scan from the beginning; rows are deduplicated, but earlier authorization decisions are not preserved.
 
 Previously unshared uploads without uploader proof still need an upload of the exact bytes before they can be shared.
 Historical uploader backfill and unparsed-reference recovery remain separate work.
@@ -45,7 +49,7 @@ To roll back file denials, set `off` or `log-only` and restart every pod.
 A community owner or admin who can view the moderation queue may read an attachment
 on a reported message outside their channels while that report has status `open`.
 The report, message, and file grant must belong to the requesting community.
-The source message must still exist and be undeleted.
+The source event and an edit's target message must still exist and be undeleted.
 Report notes, arbitrary URLs, pubkey reports, and blob-only reports grant no extra access.
 There is no role-based bypass for unrelated files, and reports create no public shares.
 
