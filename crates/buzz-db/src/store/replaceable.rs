@@ -307,6 +307,10 @@ async fn replace_parameterized_event_in_transaction_impl(
         }
 
         crate::insert_mentions_in_transaction(&mut *tx, event, channel_id).await?;
+        // Recover eligible legacy references before retiring the old head.
+        if let Some((_, previous_id)) = &existing {
+            crate::store::media_grant::bootstrap_replacement(tx, event, previous_id).await?;
+        }
         // Authorize retained references while the previous head is still live.
         crate::store::event_follow_up::record_admitted_media(tx, event, channel_id).await?;
         if existing.is_some() {
@@ -471,9 +475,9 @@ impl Db {
                 // NIP-16: created_at is second-resolution. On same-second tie, lowest
                 // event id (lexicographic) wins — deterministic across relays.
                 let incoming_id = event.id.as_bytes().as_slice();
-                if let Some((existing_ts, existing_id)) = existing {
-                    let dominated = created_at < existing_ts
-                        || (created_at == existing_ts
+                if let Some((existing_ts, existing_id)) = &existing {
+                    let dominated = created_at < *existing_ts
+                        || (created_at == *existing_ts
                             && incoming_id >= existing_id.as_slice());
                     if dominated {
                         tx.rollback().await?;
@@ -535,6 +539,10 @@ impl Db {
                     ));
                 }
 
+                if let Some((_, previous_id)) = &existing {
+                    crate::store::media_grant::bootstrap_replacement(&mut tx, event, previous_id)
+                        .await?;
+                }
                 // Authorize retained references while the previous head is still live.
                 crate::store::event_follow_up::after_admitted_insert(&mut tx, event, channel_id)
                     .await?;

@@ -2419,18 +2419,6 @@ mod postgres_tests {
             .as_str()
             .contains("attach_community_write_fence('community_nip_fi_issuers')"));
         expected_fences.insert("community_nip_fi_issuers".to_owned());
-        // 0068 fences the media access tables.
-        let media_access = MIGRATOR
-            .iter()
-            .find(|m| m.version == 68)
-            .expect("media access migration");
-        for table in ["media_uploaders", "media_shares"] {
-            assert!(media_access
-                .sql
-                .as_str()
-                .contains(&format!("attach_community_write_fence('{table}')")));
-            expected_fences.insert(table.to_owned());
-        }
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"

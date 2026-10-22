@@ -33,6 +33,7 @@ pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
 /// Where each media blob is shared, recorded with the events that reference it.
+mod media_grant;
 pub mod media_reference;
 /// Who has uploaded each blob, as proof of possession for sharing it.
 pub mod media_uploader;

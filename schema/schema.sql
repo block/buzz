@@ -161,8 +161,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i triggers/event_mentions.sql
 \i triggers/git_repo_names.sql
 \i triggers/join_policy_acceptances.sql
-\i triggers/media_shares.sql
-\i triggers/media_uploaders.sql
 \i triggers/moderation_actions.sql
 \i triggers/moderation_reports.sql
 \i triggers/parameterized_event_watermarks.sql
