@@ -12,10 +12,13 @@ async fn migration_schema_bootstrap_keeps_only_explicit_legacy_fences() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::raw_sql(&crate::test_support::desired_state_schema_sql())
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Only checked-in schema files contribute SQL to this test bootstrap.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(
+        crate::test_support::desired_state_schema_sql(),
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
 
     for (table, expected) in [
         ("new_tenant_probe", false),
