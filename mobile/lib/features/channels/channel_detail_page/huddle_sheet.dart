@@ -30,13 +30,17 @@ final _huddleLogicalParticipantPubkeysProvider = Provider.autoDispose
       final backingMembers =
           ref.watch(channelMembersProvider(channelId)).value ??
           const <ChannelMember>[];
+      final agentPubkeys = ref.watch(huddleAgentPubkeysProvider(channelId));
       return _huddleParticipantPubkeys(
         sessionParticipantPubkeys: session.ephemeralChannelId == channelId
             ? session.participantPubkeys
             : const [],
         currentPubkey: session.currentPubkey,
         members: session.wasAdmitted
-            ? backingMembers.where((member) => member.isBot)
+            ? backingMembers.where(
+                (member) =>
+                    agentPubkeys.contains(member.pubkey.trim().toLowerCase()),
+              )
             : backingMembers,
       );
     });
@@ -51,10 +55,7 @@ final _huddleIdentityNamesProvider = Provider.autoDispose
           const <ChannelMember>[];
       final names = sources.scope(
         ref.watch(_huddleLogicalParticipantPubkeysProvider(channelId)),
-        agentPubkeys: {
-          for (final member in members)
-            if (member.isBot) member.pubkey,
-        },
+        agentPubkeys: ref.watch(huddleAgentPubkeysProvider(channelId)),
         fallbackNames: {
           for (final member in members) member.pubkey: ?member.displayName,
         },
@@ -619,17 +620,13 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     final parentAgentPubkeys = ref.watch(
       agentMentionPubkeysProvider(invite.parentChannelId),
     );
-    // Ephemeral Huddle bot membership is authoritative for native enrollment;
-    // parent classification is only best-effort and may miss a valid Huddle
-    // bot. Union both so a Huddle-only agent still enters the preparing state.
-    final huddleBotPubkeys = <String>{
-      for (final member
-          in ref
-                  .watch(channelMembersProvider(invite.ephemeralChannelId))
-                  .value ??
-              const <ChannelMember>[])
-        if (member.isBot) member.pubkey.trim().toLowerCase(),
-    };
+    // Ephemeral Huddle agent membership is authoritative for native
+    // enrollment; parent classification is only best-effort and may miss a
+    // valid Huddle agent. Union both so a Huddle-only agent still enters the
+    // preparing state.
+    final huddleBotPubkeys = ref.watch(
+      huddleAgentPubkeysProvider(invite.ephemeralChannelId),
+    );
     final workingAgentPubkeys = <String>{
       for (final entry in huddleTypingEntries)
         if (parentAgentPubkeys.contains(entry.pubkey.toLowerCase()) ||
