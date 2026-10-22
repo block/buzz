@@ -95,6 +95,64 @@ void main() {
     expect(await _settledAgents(container), {_botAgent});
   });
 
+  test(
+    'a relay disconnect keeps record agents until a connected read',
+    () async {
+      final relay = _HuddleRelaySession(
+        members: {
+          _owner.public: 'owner',
+          _botAgent: 'bot',
+          _ownerAgent: 'member',
+          _viewerAgent: 'member',
+        },
+        records: [_record(_owner, _ownerAgent), _record(_owner, _viewerAgent)],
+      );
+      final container = _container(relay);
+      expect(await _settledAgents(container), {
+        _botAgent,
+        _ownerAgent,
+        _viewerAgent,
+      });
+
+      // While disconnected, the last records still apply.
+      relay.setStatus(SessionStatus.reconnecting);
+      expect(await _settledAgents(container), {
+        _botAgent,
+        _ownerAgent,
+        _viewerAgent,
+      });
+      expect(relay.recordFilters, hasLength(1));
+
+      // After reconnecting, a successful read is authoritative again.
+      relay.records = [_record(_owner, _ownerAgent)];
+      relay.setStatus(SessionStatus.connected);
+      expect(await _settledAgents(container), {_botAgent, _ownerAgent});
+      expect(relay.recordFilters, hasLength(2));
+    },
+  );
+
+  test('records read for another account do not apply', () async {
+    final relay = _HuddleRelaySession(
+      members: {_owner.public: 'owner', _viewerAgent: 'member'},
+      // Only the viewer vouches for this agent.
+      records: [_record(_viewer, _viewerAgent)],
+    );
+    final container = _container(relay);
+    final viewer = container.read(_viewerOverride.notifier);
+    // Load the Huddle once as the other account, so its member snapshot is
+    // cached, then as the viewer.
+    viewer.set(_stranger.public);
+    expect(await _settledAgents(container), isEmpty);
+    viewer.set(_viewer.public);
+    expect(await _settledAgents(container), {_viewerAgent});
+
+    // Switching account while disconnected must not carry the viewer's
+    // records over to the other account's cached members.
+    relay.setStatus(SessionStatus.reconnecting);
+    viewer.set(_stranger.public);
+    expect(await _settledAgents(container), isEmpty);
+  });
+
   test('last-human count leaves out agents known by their record', () async {
     final relay = _HuddleRelaySession(
       members: {
@@ -174,12 +232,21 @@ void main() {
   });
 }
 
+final _viewerOverride = NotifierProvider<_Viewer, String?>(_Viewer.new);
+
+class _Viewer extends Notifier<String?> {
+  @override
+  String? build() => _viewer.public;
+
+  void set(String? pubkey) => state = pubkey;
+}
+
 ProviderContainer _container(_HuddleRelaySession relay) {
   final container = ProviderContainer(
     retry: (_, _) => null,
     overrides: [
       relaySessionProvider.overrideWith(() => relay),
-      myPubkeyProvider.overrideWithValue(_viewer.public),
+      myPubkeyProvider.overrideWith((ref) => ref.watch(_viewerOverride)),
     ],
   );
   addTearDown(container.dispose);
@@ -220,7 +287,7 @@ MemberEntry _member(String pubkey, String role) =>
 
 class _HuddleRelaySession extends RelaySessionNotifier {
   Map<String, String> members;
-  final List<NostrEvent> records;
+  List<NostrEvent> records;
   Object? recordError;
   Completer<void>? recordGate;
   final List<NostrFilter> recordFilters = [];
@@ -233,6 +300,8 @@ class _HuddleRelaySession extends RelaySessionNotifier {
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
 
   @override
   Future<List<NostrEvent>> fetchHistory(
