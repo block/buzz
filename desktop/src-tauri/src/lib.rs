@@ -8,6 +8,7 @@ mod channel_head_cache;
 mod commands;
 mod deep_link;
 mod egress_guard;
+mod employee_api;
 mod employee_login;
 mod event_sync;
 mod events;

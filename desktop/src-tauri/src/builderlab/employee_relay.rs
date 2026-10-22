@@ -140,9 +140,10 @@ impl BuilderlabSession {
             .header("Content-Type", "application/json")
             .body(body)
             .timeout(Duration::from_secs(30));
+        let request = crate::employee_api::request(request)?;
         let response = tokio::select! {
             _ = cancel.cancelled() => return Err("Square sign-in changed".to_owned()),
-            result = request.send() => result.map_err(|_| "Could not request employee relay access")?,
+            result = app_state.media_fetch_client.execute(request) => result.map_err(|_| "Could not request employee relay access")?,
         };
         let status = response.status();
         let mut response = response;

@@ -452,11 +452,19 @@ pub(crate) async fn authenticated_user(
     credential: &str,
     api_base: &str,
 ) -> Result<AuthMeResponse, String> {
-    let response = client
+    let builder = client
         .get(api_url_for_base(api_base, "/v1/auth/me")?)
         .header(BB_SESSION_CREDENTIAL_HEADER, session_header(credential)?)
-        .timeout(Duration::from_secs(30))
-        .send()
+        .timeout(Duration::from_secs(30));
+    let request = if api_base == crate::employee_login::API_BASE {
+        crate::employee_api::request(builder)?
+    } else {
+        builder
+            .build()
+            .map_err(|_| "Could not prepare Builderlab session check")?
+    };
+    let response = client
+        .execute(request)
         .await
         .map_err(|error| format!("Builderlab session check failed: {error}"))?;
     if !response.status().is_success() {

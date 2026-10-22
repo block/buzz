@@ -241,7 +241,11 @@ pub(crate) async fn start_employee_login(
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|_| "Could not configure Square sign-in")?;
-    let response = client.post(api_url_for_base(API_BASE,REDEEM_PATH)?).json(&serde_json::json!({"code":code,"code_verifier":verifier,"return_to":return_to,"state":state})).send().await.map_err(|_| "Could not exchange Square sign-in code")?;
+    let request = crate::employee_api::request(client.post(api_url_for_base(API_BASE, REDEEM_PATH)?).json(&serde_json::json!({"code":code,"code_verifier":verifier,"return_to":return_to,"state":state})))?;
+    let response = client
+        .execute(request)
+        .await
+        .map_err(|_| "Could not exchange Square sign-in code")?;
     let receipt: RedeemedSession = read_response(response).await?;
     let me = authenticated_user(&client, &receipt.session_credential, API_BASE).await?;
     verify_session(&receipt, me.subject.as_deref(), &me.expires_at)?;
