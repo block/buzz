@@ -3,7 +3,7 @@
 -- possession, so an uploader may share a blob into their own channels.
 
 CREATE TABLE media_uploaders (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     sha256       TEXT NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
     pubkey       BYTEA NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),

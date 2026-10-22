@@ -7,9 +7,9 @@
 --
 -- Everything SchemaBot cannot apply lives in this directory's other
 -- subdirectories: `types/`, `functions/`, `partitions/`, `triggers/` (including
--- write-fence attachment), `seeds/`, and the `community_write_fence.sql`
--- bootstrap. This file composes all of them into one fresh database, in load
--- order: types → functions → tables → partitions → triggers → seeds → fence.
+-- explicit legacy write-fence attachment), and `seeds/`. This file composes
+-- them into one fresh database, in load order:
+-- types → functions → tables → partitions → triggers → seeds.
 --
 -- `./bin/pgschema apply --file schema/schema.sql` resolves the `\i` includes
 -- relative to this file (it refuses `..`). `pgschema` skips INSERTs and some
@@ -161,8 +161,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i triggers/event_mentions.sql
 \i triggers/git_repo_names.sql
 \i triggers/join_policy_acceptances.sql
-\i triggers/media_shares.sql
-\i triggers/media_uploaders.sql
 \i triggers/moderation_actions.sql
 \i triggers/moderation_reports.sql
 \i triggers/parameterized_event_watermarks.sql
@@ -213,4 +211,3 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i seeds/storage_accounting_snapshots.sql
 
 -- Fence any community-scoped table that lacks an explicit attach.
-\i community_write_fence.sql

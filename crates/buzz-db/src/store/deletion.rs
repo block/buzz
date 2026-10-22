@@ -8495,6 +8495,31 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         .expect("count relay admin rows")
     }
 
+    async fn seed_unfenced_media(db: &Db, community: Uuid) -> nostr::Event {
+        let community = CommunityId::from_uuid(community);
+        let keys = nostr::Keys::generate();
+        let sha = "ab".repeat(32);
+        let store = db.deletion_store();
+        let lease = store
+            .acquire_serving_write_lease(
+                community,
+                "media_upload",
+                "purge-test",
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        db.record_media_uploader(&lease, &sha, keys.public_key().as_bytes())
+            .await
+            .unwrap();
+        store.release_serving_write_lease(&lease).await.unwrap();
+        let event = nostr::EventBuilder::new(nostr::Kind::TextNote, format!("/media/{sha}"))
+            .sign_with_keys(&keys)
+            .unwrap();
+        db.insert_event(community, &event, None).await.unwrap();
+        event
+    }
+
     /// Report-backed staff actions FK `moderation_reports`, and outbox rows FK
     /// their action. Purge must delete the community's report-backed and direct
     /// rows in FK order and leave other communities' rows alone.
@@ -8504,6 +8529,21 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let (db, store) = store().await;
         let (request, inventory) = inventoried_request(&db, &store).await;
         let community = *request.community_id.as_uuid();
+        let media = seed_unfenced_media(&db, community).await;
+        let backstops: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM pg_constraint WHERE contype = 'f' \
+                     AND conrelid IN ('media_shares'::regclass, 'media_uploaders'::regclass)) \
+                  + (SELECT count(*) FROM pg_trigger \
+                     WHERE tgrelid IN ('media_shares'::regclass, 'media_uploaders'::regclass) \
+                       AND tgfoid = 'enforce_community_write_fence()'::regprocedure)",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            backstops, 0,
+            "new media tables rely on application admission"
+        );
         seed_relay_admin_rows(&db, community).await;
         let bystander = db
             .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
@@ -8513,6 +8553,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .as_uuid()
             .to_owned();
         seed_relay_admin_rows(&db, bystander).await;
+        seed_unfenced_media(&db, bystander).await;
         let live = store
             .inventory_schema(request.community_id)
             .await
@@ -8530,6 +8571,10 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("claim")
             .expect("won claim");
         store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        assert!(db
+            .insert_event(request.community_id, &media, None)
+            .await
+            .is_err());
         let generation = store.fence(&claim.lease).await.expect("fence");
         let token = LeaseToken {
             fence_generation: Some(generation),
@@ -8546,6 +8591,18 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("bindings");
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
 
+        for table in ["media_shares", "media_uploaders"] {
+            assert_eq!(deleted.get(table), Some(&1));
+        }
+        let media_rows: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM media_shares WHERE community_id = $1), \
+                    (SELECT count(*) FROM media_uploaders WHERE community_id = $1)",
+        )
+        .bind(bystander)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(media_rows, (1, 1), "another community's media must survive");
         assert_eq!(deleted.get("relay_admin_outbox"), Some(&2));
         assert_eq!(deleted.get("relay_admin_actions"), Some(&2));
         assert_eq!(relay_admin_row_counts(&db, community).await, (0, 0));
