@@ -2508,18 +2508,7 @@ async fn run_usage_metrics_tick(
         }
     }
     if leader.is_some() {
-        if emission_scope.includes_per_community() {
-            let result = emit_db_usage_metrics(state, emission_scope, &host_map).await;
-            record_legacy_usage_collection(result.is_ok(), fleet_schedule);
-            if let Err(error) = result {
-                warn!("Usage metrics leader demoting: DB collection failed");
-                *leader = None;
-                return Err(error);
-            }
-        } else {
-            emit_fleet_db_usage_metrics(state, fleet_schedule).await;
-        }
-        let invite_retention_cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        // Run maintenance before optional telemetry collection.
         match state
             .db
             .reap_inactive_media_shares(fleet_schedule.media_cleanup_cursor.as_ref(), 1000)
@@ -2533,6 +2522,18 @@ async fn run_usage_metrics_tick(
             }
             Err(error) => warn!(error = %error, "failed to reap inactive media shares"),
         }
+        if emission_scope.includes_per_community() {
+            let result = emit_db_usage_metrics(state, emission_scope, &host_map).await;
+            record_legacy_usage_collection(result.is_ok(), fleet_schedule);
+            if let Err(error) = result {
+                warn!("Usage metrics leader demoting: DB collection failed");
+                *leader = None;
+                return Err(error);
+            }
+        } else {
+            emit_fleet_db_usage_metrics(state, fleet_schedule).await;
+        }
+        let invite_retention_cutoff = chrono::Utc::now() - chrono::Duration::days(30);
         match state
             .db
             .reap_expired_relay_invites(invite_retention_cutoff)
