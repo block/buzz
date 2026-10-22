@@ -1140,6 +1140,24 @@ test("Square employee sign-in gates community onboarding and opens chat after na
 }, testInfo) => {
   await page.addInitScript(() => {
     let authenticated = false;
+    let profileReads = 0;
+    Object.defineProperty(window, "__EMPLOYEE_PROFILE_READS__", {
+      get: () => profileReads,
+    });
+    const now = new Date().toISOString();
+    window.localStorage.setItem(
+      "buzz-community-onboarding-transaction.v1",
+      JSON.stringify({
+        id: "employee-existing-profile",
+        source: "add-community",
+        stage: "connecting",
+        relayUrl: "ws://localhost:3000",
+        communityName: "E2E Test",
+        communityId: "e2e-default-community",
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
     type Invoke = (
       command: string,
       args?: unknown,
@@ -1156,6 +1174,13 @@ test("Square employee sign-in gates community onboarding and opens chat after na
               args?: unknown,
               options?: unknown,
             ) => {
+              if (command === "get_profile") {
+                profileReads += 1;
+                if (!authenticated)
+                  throw new Error(
+                    "employee authentication required before profile check",
+                  );
+              }
               if (command === "employee_session_status")
                 return {
                   required: true,
@@ -1192,6 +1217,13 @@ test("Square employee sign-in gates community onboarding and opens chat after na
     page.getByRole("button", { name: "Sign in with Square", exact: true }),
   ).toBeVisible();
   await expect(page.getByTestId("app-sidebar")).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & { __EMPLOYEE_PROFILE_READS__?: number })
+          .__EMPLOYEE_PROFILE_READS__,
+    ),
+  ).toBe(0);
   await page.screenshot({
     path: testInfo.outputPath("square-employee-sign-in.png"),
   });
@@ -1200,6 +1232,21 @@ test("Square employee sign-in gates community onboarding and opens chat after na
     .click();
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
   await expect(page.getByTestId("stream-list")).toContainText("general");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __EMPLOYEE_PROFILE_READS__?: number })
+            .__EMPLOYEE_PROFILE_READS__ ?? 0,
+      ),
+    )
+    .toBeGreaterThan(0);
+  await expect(
+    page.getByRole("heading", { name: "Meet your starter team" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Build your profile" }),
+  ).toHaveCount(0);
   await page.screenshot({
     path: testInfo.outputPath("square-employee-chat.png"),
   });
