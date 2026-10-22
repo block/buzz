@@ -76,6 +76,7 @@ import {
   SettingsOptionRow,
 } from "./SettingsOptionGroup";
 import { SegmentedControl } from "@/shared/ui/segmented-control";
+import { SquareEmployeeSignInCard } from "./SquareEmployeeSignInCard";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -806,10 +807,13 @@ export function renderSettingsSection(
   switch (section) {
     case "profile":
       return (
-        <ProfileSettingsCard
-          currentPubkey={props.currentPubkey}
-          fallbackDisplayName={props.fallbackDisplayName}
-        />
+        <div className="space-y-4">
+          <ProfileSettingsCard
+            currentPubkey={props.currentPubkey}
+            fallbackDisplayName={props.fallbackDisplayName}
+          />
+          <SquareEmployeeSignInCard />
+        </div>
       );
     case "notifications":
       return (

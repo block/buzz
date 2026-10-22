@@ -24,6 +24,7 @@ import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { useCloseWindowShortcut } from "@/app/useCloseWindowShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
+import { SquareEmployeeSessionGate } from "@/features/settings/ui/SquareEmployeeSessionGate";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
 import {
@@ -676,7 +677,7 @@ function CommunityApp({
   }
 
   return (
-    <>
+    <SquareEmployeeSessionGate active={communityApplied} scope={communityKey}>
       {appContent}
       {transaction ? (
         <div
@@ -691,7 +692,7 @@ function CommunityApp({
           />
         </div>
       ) : null}
-    </>
+    </SquareEmployeeSessionGate>
   );
 }
 

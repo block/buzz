@@ -5,12 +5,15 @@ use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, Keys, Tag};
 use serde_json::{json, Value};
 use tokio::time::timeout;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderMap;
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest,
+    handshake::client::Request,
+    http::{HeaderMap, HeaderValue},
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::debug;
 
-use crate::error::WsClientError;
+use crate::error::{NipFiConnectError, WsClientError};
 use crate::message::{build_auth_event, parse_relay_message, OkResponse, RelayMessage};
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -30,9 +33,73 @@ pub struct NostrWsConnection {
     buffer: VecDeque<RelayMessage>,
     pending_challenge: Option<String>,
     relay_url: String,
+    // Only active during the opt-in NIP-FI handshake. Ordinary connections
+    // retain their existing behavior; authenticated traffic is not restricted.
+    auth_buffer_remaining: Option<usize>,
 }
 
 impl NostrWsConnection {
+    /// Sends one explicit NIP-FI bearer header on a WSS upgrade, then proves
+    /// possession of `keys` using NIP-42. The relay verifies the assertion and
+    /// its binding to this key; this client does not verify or mint JWTs.
+    ///
+    /// `url` must come from trusted application policy and contain no user
+    /// information, query, or fragment. `assertion` is the complete
+    /// `Bearer <compact-JWS>` field, obtained from the issuer-bound login.
+    /// The compact JWS is limited to 16 KiB; claims remain opaque.
+    /// No NIP-OA delegation or unauthenticated fallback is attempted.
+    /// `budget` bounds the complete upgrade and authentication, including DNS
+    /// and TLS, and must be nonzero. Dropping this future closes its socket.
+    ///
+    /// The caller owns logout/account-switch cancellation and connection
+    /// lifetime. Refresh requires a new connection with a fresh assertion;
+    /// there is no in-band renewal. This method publishes no user event.
+    ///
+    /// This crate suppresses AUTH payload logs and redacts connection errors.
+    /// Hosts must disable tungstenite raw-wire TRACE for this connection:
+    /// dependency tracing can dump serialized upgrade bytes, including the
+    /// assertion, despite the header's sensitive marker.
+    pub async fn connect_authenticated_with_nip_fi(
+        url: &str,
+        keys: &Keys,
+        assertion: &HeaderValue,
+        budget: Duration,
+    ) -> Result<Self, NipFiConnectError> {
+        let request = nip_fi_request(url, assertion)?;
+        Self::connect_nip_fi_request(request, url, keys, assertion, budget).await
+    }
+
+    async fn connect_nip_fi_request(
+        request: Request,
+        url: &str,
+        keys: &Keys,
+        assertion: &HeaderValue,
+        budget: Duration,
+    ) -> Result<Self, NipFiConnectError> {
+        if budget.is_zero() {
+            return Err(NipFiConnectError::InvalidConfiguration);
+        }
+        let token = nip_fi_token(assertion)?;
+        timeout(budget, async {
+            let (ws, _) = connect_async(request)
+                .await
+                .map_err(WsClientError::WebSocket)?;
+            let mut conn = Self {
+                ws,
+                buffer: VecDeque::new(),
+                pending_challenge: None,
+                relay_url: url.to_owned(),
+                auth_buffer_remaining: Some(64 * 1024),
+            };
+            conn.authenticate_inner(keys, None, Some(token)).await?;
+            conn.auth_buffer_remaining = None;
+            Ok::<_, WsClientError>(conn)
+        })
+        .await
+        .map_err(|_| NipFiConnectError::Timeout)?
+        .map_err(NipFiConnectError::from)
+    }
+
     /// Connects to the relay at `url` and performs NIP-42 authentication with `keys`.
     ///
     /// Pass `auth_tag` to include a NIP-OA authorization tag in the AUTH event.
@@ -90,6 +157,7 @@ impl NostrWsConnection {
             buffer: VecDeque::new(),
             pending_challenge: None,
             relay_url: url.to_string(),
+            auth_buffer_remaining: None,
         })
     }
 
@@ -101,14 +169,38 @@ impl NostrWsConnection {
         keys: &Keys,
         auth_tag: Option<&Tag>,
     ) -> Result<(), WsClientError> {
+        self.authenticate_inner(keys, auth_tag, None).await
+    }
+
+    async fn authenticate_inner(
+        &mut self,
+        keys: &Keys,
+        auth_tag: Option<&Tag>,
+        protected_assertion: Option<&str>,
+    ) -> Result<(), WsClientError> {
         let challenge = self
             .wait_for_auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
             .await?;
 
+        // An untrusted relay can echo our upgrade credential as its challenge.
+        // Never turn that credential into a signed event or a trace record.
+        if protected_assertion.is_some_and(|token| challenge.contains(token)) {
+            return Err(WsClientError::AuthFailed(
+                "invalid authentication challenge".into(),
+            ));
+        }
+
         let auth_event = build_auth_event(&challenge, &self.relay_url, keys, auth_tag)?;
         let event_id = auth_event.id.to_hex();
 
-        self.send_raw(&json!(["AUTH", auth_event])).await?;
+        let auth = json!(["AUTH", auth_event]);
+        if protected_assertion.is_some() {
+            // NIP-FI authentication traces must not contain relay-controlled
+            // challenge content. Keep the ordinary connector's behavior intact.
+            self.ws.send(Message::Text(auth.to_string().into())).await?;
+        } else {
+            self.send_raw(&auth).await?;
+        }
 
         let ok = self
             .wait_for_ok(&event_id, Duration::from_secs(AUTH_OK_TIMEOUT_SECS))
@@ -221,6 +313,7 @@ impl NostrWsConnection {
 
             match raw {
                 Message::Text(text) => {
+                    self.check_auth_buffer(&text)?;
                     let msg = parse_relay_message(&text)?;
                     match msg {
                         RelayMessage::Auth { challenge } => {
@@ -278,6 +371,7 @@ impl NostrWsConnection {
 
             match raw {
                 Message::Text(text) => {
+                    self.check_auth_buffer(&text)?;
                     let msg = parse_relay_message(&text)?;
                     match msg {
                         RelayMessage::Ok(ok) if ok.event_id == event_id => return Ok(ok),
@@ -296,7 +390,74 @@ impl NostrWsConnection {
             }
         }
     }
+
+    fn check_auth_buffer(&mut self, text: &str) -> Result<(), WsClientError> {
+        if let Some(remaining) = &mut self.auth_buffer_remaining {
+            if self.buffer.len() >= 64 {
+                return Err(WsClientError::UnexpectedMessage(
+                    "authentication buffer limit".into(),
+                ));
+            }
+            *remaining = remaining.checked_sub(text.len()).ok_or_else(|| {
+                WsClientError::UnexpectedMessage("authentication buffer limit".into())
+            })?;
+        }
+        Ok(())
+    }
 }
+
+fn nip_fi_token(assertion: &HeaderValue) -> Result<&str, NipFiConnectError> {
+    // Match the bounded compact-JWS transport shape without interpreting claims.
+    let token = assertion
+        .to_str()
+        .ok()
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| token.len() <= 16 * 1024)
+        .ok_or(NipFiConnectError::InvalidConfiguration)?;
+    let mut segments = token.split('.');
+    for _ in 0..3 {
+        if !segments.next().is_some_and(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        }) {
+            return Err(NipFiConnectError::InvalidConfiguration);
+        }
+    }
+    if segments.next().is_some() {
+        return Err(NipFiConnectError::InvalidConfiguration);
+    }
+    Ok(token)
+}
+
+fn nip_fi_request(url: &str, assertion: &HeaderValue) -> Result<Request, NipFiConnectError> {
+    nip_fi_token(assertion)?;
+    let parsed = url::Url::parse(url).map_err(|_| NipFiConnectError::InvalidConfiguration)?;
+    if parsed.scheme() != "wss"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(NipFiConnectError::InvalidConfiguration);
+    }
+    let mut request = parsed
+        .as_str()
+        .into_client_request()
+        .map_err(|_| NipFiConnectError::InvalidConfiguration)?;
+    let mut header = assertion.clone();
+    header.set_sensitive(true);
+    request
+        .headers_mut()
+        .insert("Nostr-Federated-Identity", header);
+    Ok(request)
+}
+
+#[cfg(test)]
+#[path = "nip_fi_tests.rs"]
+mod nip_fi_tests;
 
 /// One-shot helper: connect, authenticate, send one event, disconnect.
 ///

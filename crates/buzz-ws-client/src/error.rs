@@ -1,5 +1,50 @@
 use thiserror::Error;
 
+/// Redacted outcomes of an assertion-bearing WebSocket handshake.
+///
+/// Neither HTTP response bodies nor NIP-42 refusal text are retained: an
+/// untrusted relay can echo the assertion in either. These errors never cause
+/// an automatic retry without the assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum NipFiConnectError {
+    /// The destination, bearer header, or handshake budget is invalid.
+    #[error("invalid federated identity connection configuration")]
+    InvalidConfiguration,
+    /// HTTP 401 or a rejected NIP-42 proof; refresh or authenticate again.
+    #[error("relay authentication rejected")]
+    AuthenticationRejected,
+    /// HTTP 403; authentication alone does not grant access.
+    #[error("relay permission denied")]
+    PermissionDenied,
+    /// The caller's connection budget or a NIP-42 deadline elapsed.
+    #[error("relay authentication timed out")]
+    Timeout,
+    /// DNS, socket, TLS, or connection closure prevented authentication.
+    #[error("relay network failure")]
+    Network,
+    /// Other HTTP statuses, redirects, malformed messages, or protocol errors.
+    #[error("relay authentication unavailable")]
+    Unavailable,
+}
+
+impl From<WsClientError> for NipFiConnectError {
+    fn from(error: WsClientError) -> Self {
+        use tokio_tungstenite::tungstenite::Error as WsError;
+        match error {
+            WsClientError::WebSocket(WsError::Http(response)) => match response.status().as_u16() {
+                401 => Self::AuthenticationRejected,
+                403 => Self::PermissionDenied,
+                _ => Self::Unavailable,
+            },
+            WsClientError::WebSocket(WsError::Io(_) | WsError::Tls(_))
+            | WsClientError::ConnectionClosed => Self::Network,
+            WsClientError::Timeout | WsClientError::NoAuthChallenge => Self::Timeout,
+            WsClientError::AuthFailed(_) => Self::AuthenticationRejected,
+            _ => Self::Unavailable,
+        }
+    }
+}
+
 /// Errors returned by [`crate::NostrWsConnection`] and related operations.
 #[derive(Debug, Error)]
 pub enum WsClientError {

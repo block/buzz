@@ -12574,6 +12574,10 @@ export function maybeInstallE2eTauriMocks() {
           registry: await handleMockCommand("list_voice_registry", null),
         };
       }
+      case "employee_session_status":
+        return { required: false, authenticated: false, expiresAt: null };
+      case "employee_sign_in_available":
+        return false;
       case "get_builderlab_auth":
         return activeConfig?.mock?.builderlabAuth ?? null;
       case "start_builderlab_login": {

@@ -117,16 +117,6 @@ pub fn relay_api_base_url() -> String {
 
 // ── NIP-98 HTTP auth ────────────────────────────────────────────────────────
 
-pub fn build_nip98_auth_header(
-    method: &Method,
-    url: &str,
-    body: &[u8],
-    state: &AppState,
-) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
-    build_nip98_auth_header_for_keys(&keys, method, url, body)
-}
-
 pub fn build_nip98_auth_header_for_keys(
     keys: &Keys,
     method: &Method,
@@ -374,14 +364,16 @@ pub async fn query_relay_at(
     let url = format!("{}/query", api_base_url);
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
-    let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
+    let keys = state.signing_keys()?;
+    let auth = build_nip98_auth_header_for_keys(&keys, &Method::POST, &url, &body_bytes)?;
     send_query_request(
-        &state.http_client,
+        &state.media_fetch_client,
         &url,
         &auth,
         None,
         body_bytes,
         QUERY_REQUEST_TIMEOUT,
+        Some((state, &keys)),
     )
     .await
 }
@@ -399,12 +391,13 @@ pub async fn query_relay_at_with_keys(
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
     send_query_request(
-        &state.http_client,
+        &state.media_fetch_client,
         &url,
         &auth,
         auth_tag,
         body_bytes,
         QUERY_REQUEST_TIMEOUT,
+        Some((state, keys)),
     )
     .await
 }
@@ -455,8 +448,9 @@ async fn send_query_request(
     auth_tag: Option<&str>,
     body_bytes: Vec<u8>,
     timeout: std::time::Duration,
+    employee: Option<(&AppState, &Keys)>,
 ) -> Result<Vec<nostr::Event>, String> {
-    let response = build_authenticated_relay_request(
+    let request = build_authenticated_relay_request(
         http_client,
         Method::POST,
         url,
@@ -464,10 +458,15 @@ async fn send_query_request(
         Some(body_bytes),
         auth_tag,
         Some(timeout),
-    )
-    .send()
-    .await
-    .map_err(|e| classify_request_error(&e))?;
+    );
+    let response = if let Some((state, keys)) = employee {
+        crate::builderlab::send_employee_request(state, keys, url, request).await?
+    } else {
+        request
+            .send()
+            .await
+            .map_err(|e| classify_request_error(&e))?
+    };
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
     }
@@ -708,7 +707,7 @@ pub async fn submit_signed_event_with_keys(
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
     let mut request = state
-        .http_client
+        .media_fetch_client
         .post(&url)
         .header("Authorization", auth_header)
         .header("Content-Type", "application/json");
@@ -716,11 +715,9 @@ pub async fn submit_signed_event_with_keys(
         request = request.header("x-auth-tag", tag);
     }
 
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let response =
+        crate::builderlab::send_employee_request(state, keys, &url, request.body(body_bytes))
+            .await?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);

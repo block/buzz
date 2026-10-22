@@ -84,6 +84,7 @@ pub(crate) struct MatchedEvent {
 #[derive(Default)]
 pub(crate) struct NativeRelayClient {
     current: Mutex<Option<ManagedSession>>,
+    app_handle: std::sync::Mutex<Option<tauri::AppHandle>>,
 }
 
 struct ManagedSession {
@@ -132,6 +133,19 @@ impl Drop for SessionLease {
 }
 
 impl NativeRelayClient {
+    pub(crate) fn set_app_handle(&self, handle: tauri::AppHandle) -> Result<(), String> {
+        *self
+            .app_handle
+            .lock()
+            .map_err(|_| "Native relay context unavailable")? = Some(handle);
+        Ok(())
+    }
+    fn app_handle(&self) -> Option<tauri::AppHandle> {
+        self.app_handle
+            .lock()
+            .ok()
+            .and_then(|handle| handle.clone())
+    }
     /// Installs the session for `scope`, shutting down whatever scope held the
     /// slot. Destructive on entry, so every caller must already hold proof it
     /// is the current owner — today that is
@@ -139,13 +153,16 @@ impl NativeRelayClient {
     async fn ensure_session(&self, relay_url: String, keys: Keys) -> Arc<RelaySession> {
         let scope = (relay_url.clone(), keys.public_key().to_hex());
         let mut current = self.current.lock().await;
-        if let Some(managed) = current.as_ref().filter(|managed| managed.scope == scope) {
+        if let Some(managed) = current
+            .as_ref()
+            .filter(|managed| managed.scope == scope && !managed.session.cancel.is_cancelled())
+        {
             return Arc::clone(&managed.session);
         }
         if let Some(previous) = current.take() {
             previous.session.shutdown();
         }
-        let session = start_managed(relay_url, keys, None);
+        let session = start_managed(relay_url, keys, None, self.app_handle());
         *current = Some(ManagedSession {
             scope,
             session: Arc::clone(&session),
@@ -179,6 +196,12 @@ impl NativeRelayClient {
     pub(crate) async fn session(&self, relay_url: String, keys: Keys) -> SessionLease {
         let scope = (relay_url.clone(), keys.public_key().to_hex());
         let mut current = self.current.lock().await;
+        if current
+            .as_ref()
+            .is_some_and(|managed| managed.session.cancel.is_cancelled())
+        {
+            *current = None;
+        }
         if let Some(managed) = current.as_ref() {
             return if managed.scope == scope {
                 SessionLease {
@@ -187,12 +210,12 @@ impl NativeRelayClient {
                 }
             } else {
                 SessionLease {
-                    session: start_managed(relay_url, keys, None),
+                    session: start_managed(relay_url, keys, None, self.app_handle()),
                     private: true,
                 }
             };
         }
-        let session = start_managed(relay_url, keys, None);
+        let session = start_managed(relay_url, keys, None, self.app_handle());
         *current = Some(ManagedSession {
             scope,
             session: Arc::clone(&session),
@@ -439,12 +462,17 @@ pub(crate) async fn start(
     keys: Keys,
     auth_tag: Option<nostr::Tag>,
 ) -> (Arc<RelaySession>, mpsc::Receiver<MatchedEvent>) {
-    let session = start_managed(relay_url, keys, auth_tag);
+    let session = start_managed(relay_url, keys, auth_tag, None);
     let events = session.attach_archive().await;
     (session, events)
 }
 
-fn start_managed(relay_url: String, keys: Keys, auth_tag: Option<nostr::Tag>) -> Arc<RelaySession> {
+fn start_managed(
+    relay_url: String,
+    keys: Keys,
+    auth_tag: Option<nostr::Tag>,
+    app_handle: Option<tauri::AppHandle>,
+) -> Arc<RelaySession> {
     let (wake, wake_rx) = mpsc::channel(1);
     let session = Arc::new(RelaySession {
         state: Arc::new(Mutex::new(SessionState::default())),
@@ -460,6 +488,7 @@ fn start_managed(relay_url: String, keys: Keys, auth_tag: Option<nostr::Tag>) ->
         auth_tag,
         Arc::clone(&session),
         wake_rx,
+        app_handle,
     ));
 
     session
@@ -471,15 +500,42 @@ async fn run_session(
     auth_tag: Option<nostr::Tag>,
     session: Arc<RelaySession>,
     mut wake_rx: mpsc::Receiver<()>,
+    app_handle: Option<tauri::AppHandle>,
 ) {
     let mut delay = RECONNECT_BASE_DELAY;
+    let mut employee_failures = 0_u8;
     loop {
         if session.cancel.is_cancelled() {
             return;
         }
 
-        let connecting =
-            NostrWsConnection::connect_authenticated(&relay_url, &keys, auth_tag.as_ref());
+        let connecting = async {
+            let employee = if crate::builderlab::requires_employee(&relay_url)? {
+                use tauri::Manager;
+                let handle = app_handle
+                    .as_ref()
+                    .ok_or("Employee identity context unavailable")?;
+                let state = handle.state::<crate::app_state::AppState>();
+                crate::builderlab::employee_evidence(&state, &keys, &relay_url).await?
+            } else {
+                None
+            };
+            let connection = if let Some(evidence) = &employee {
+                NostrWsConnection::connect_authenticated_with_nip_fi(
+                    &relay_url,
+                    &keys,
+                    &evidence.header,
+                    Duration::from_secs(30),
+                )
+                .await
+                .map_err(|_| "Employee relay connection refused".to_owned())?
+            } else {
+                NostrWsConnection::connect_authenticated(&relay_url, &keys, auth_tag.as_ref())
+                    .await
+                    .map_err(|error| error.to_string())?
+            };
+            Ok::<_, String>((connection, employee))
+        };
         tokio::pin!(connecting);
         let connected = loop {
             tokio::select! {
@@ -489,15 +545,37 @@ async fn run_session(
             }
         };
         match connected {
-            Ok(conn) => {
+            Ok((conn, employee)) => {
                 // A connection that authenticated is healthy regardless of how
                 // long it then lived, so backoff resets here rather than on
                 // clean exit — a socket that drops after one event must not
                 // inherit the previous failure's delay.
                 delay = RECONNECT_BASE_DELAY;
-                run_connection(conn, &session, &mut wake_rx).await;
+                employee_failures = 0;
+                if let Some(evidence) = employee {
+                    let lifetime = Duration::from_secs(
+                        evidence
+                            .expires_at
+                            .saturating_sub(chrono::Utc::now().timestamp())
+                            .max(0) as u64,
+                    );
+                    tokio::select! {
+                        _ = evidence.cancel.cancelled()=>{ session.shutdown();return; },
+                        _ = tokio::time::sleep(lifetime)=>{},
+                        _ = run_connection(conn,&session,&mut wake_rx)=>{},
+                    }
+                } else {
+                    run_connection(conn, &session, &mut wake_rx).await;
+                }
             }
             Err(error) => {
+                if crate::builderlab::requires_employee(&relay_url).unwrap_or(true) {
+                    employee_failures += 1;
+                    if employee_failures >= 5 {
+                        session.shutdown();
+                        return;
+                    }
+                }
                 eprintln!("buzz-desktop: native_relay_client: connect failed: {error}");
             }
         }

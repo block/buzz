@@ -1134,3 +1134,73 @@ test("lifts Jump to latest when the composer grows", async ({ page }) => {
     (expandedPillBox?.y ?? 0) + (expandedPillBox?.height ?? 0),
   ).toBeLessThanOrEqual(expandedComposerBox?.y ?? 0);
 });
+
+test("Square employee sign-in gates community onboarding and opens chat after native authorization", async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(() => {
+    let authenticated = false;
+    type Invoke = (
+      command: string,
+      args?: unknown,
+      options?: unknown,
+    ) => Promise<unknown>;
+    let internals: Record<string, unknown> = {};
+    const wrap = (next: Record<string, unknown>) =>
+      new Proxy(next, {
+        set(target, key, value) {
+          if (key === "invoke" && typeof value === "function") {
+            const original = value as Invoke;
+            target[key] = async (
+              command: string,
+              args?: unknown,
+              options?: unknown,
+            ) => {
+              if (command === "employee_session_status")
+                return {
+                  required: true,
+                  authenticated,
+                  expiresAt: authenticated
+                    ? Math.floor(Date.now() / 1000) + 240
+                    : null,
+                };
+              if (command === "employee_sign_in_available") return true;
+              if (command === "start_employee_login") {
+                authenticated = true;
+                return {
+                  expires_at: new Date(Date.now() + 240_000).toISOString(),
+                  email: null,
+                  name: null,
+                };
+              }
+              return original(command, args, options);
+            };
+          } else target[key as string] = value;
+          return true;
+        },
+      });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      get: () => internals,
+      set: (value: Record<string, unknown>) => {
+        internals = wrap(value);
+      },
+    });
+  });
+  await page.goto("/");
+  await expect(
+    page.getByRole("button", { name: "Sign in with Square", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("app-sidebar")).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath("square-employee-sign-in.png"),
+  });
+  await page
+    .getByRole("button", { name: "Sign in with Square", exact: true })
+    .click();
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+  await expect(page.getByTestId("stream-list")).toContainText("general");
+  await page.screenshot({
+    path: testInfo.outputPath("square-employee-chat.png"),
+  });
+});
