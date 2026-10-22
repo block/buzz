@@ -504,6 +504,8 @@ shape is an explicit transition, not a flag day:
   never spans communities. Serving leases use the same application admission.
   Startup and deletion catalog validation tolerate the universal fence objects
   being absent; inventories still record live fences for older executors.
+  Desired-state bootstraps install only explicitly declared legacy fences.
+  New tenant-owned tables rely on application admission, without a fence trigger.
 - **Replica floor (transition foundation):** runtime now provides a shared
   replica-floor lock helper for compliant channel-event writers, and the writer
   probe handshake takes the exclusive counterpart before sampling `S`, scanning

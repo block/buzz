@@ -360,13 +360,7 @@ pub async fn accept_lease_event(
         return Err(error.into());
     }
     // The row above is always kind 30350 with no channel.
-    crate::store::event_follow_up::after_admitted_insert(
-        &mut tx,
-        event.id.as_bytes().as_slice(),
-        30350,
-        None,
-    )
-    .await?;
+    crate::store::event_follow_up::after_admitted_insert(&mut tx, event, None).await?;
 
     let (is_active, endpoint_hash, endpoint_grant, max_class, subscriptions) = active
         .map_or((false, None, None, None, None), |active| {

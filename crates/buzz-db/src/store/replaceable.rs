@@ -262,54 +262,6 @@ async fn replace_parameterized_event_in_transaction_impl(
         let tags_json = serde_json::to_value(&event.tags)?;
         crate::channel_members::guard_channel_roster_event(tx, kind_i32, channel_id, &tags_json)
             .await?;
-        if existing.is_some() {
-            let previous_nip_rs_hard_delete: Option<String> = if is_nip_rs {
-                sqlx::query_scalar(
-                    "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
-                )
-                .fetch_one(tx.conn())
-                .await?
-            } else {
-                None
-            };
-            if is_nip_rs {
-                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-                    .execute(tx.conn())
-                    .await?;
-            }
-            let statement = if hard_delete_superseded {
-                "DELETE FROM events \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
-            } else {
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
-            };
-            sqlx::query(statement)
-                .bind(community_id.as_uuid())
-                .bind(kind_i32)
-                .bind(pubkey_bytes.as_slice())
-                .bind(d_tag)
-                .execute(tx.conn())
-                .await?;
-
-            if is_nip_rs {
-                let previous_value = previous_nip_rs_hard_delete.as_deref().unwrap_or_default();
-                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', $1, true)")
-                    .bind(previous_value)
-                    .execute(tx.conn())
-                    .await?;
-            }
-
-            if hard_delete_superseded {
-                if let Some((_, existing_id)) = &existing {
-                    sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
-                        .bind(community_id.as_uuid())
-                        .bind(existing_id)
-                        .execute(tx.conn())
-                        .await?;
-                }
-            }
-        }
 
         let sig_bytes = event.sig.serialize();
         let insert_result = sqlx::query(
@@ -355,6 +307,62 @@ async fn replace_parameterized_event_in_transaction_impl(
         }
 
         crate::insert_mentions_in_transaction(&mut *tx, event, channel_id).await?;
+        // Recover eligible legacy references before retiring the old head.
+        if let Some((_, previous_id)) = &existing {
+            crate::store::media_grant::bootstrap_replacement(tx, event, previous_id).await?;
+        }
+        // Authorize retained references while the previous head is still live.
+        crate::store::event_follow_up::record_admitted_media(tx, event, channel_id).await?;
+        if existing.is_some() {
+            let previous_nip_rs_hard_delete: Option<String> = if is_nip_rs {
+                sqlx::query_scalar(
+                    "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
+                )
+                .fetch_one(tx.conn())
+                .await?
+            } else {
+                None
+            };
+            if is_nip_rs {
+                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+                    .execute(tx.conn())
+                    .await?;
+            }
+            let statement = if hard_delete_superseded {
+                "DELETE FROM events \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL AND id <> $5"
+            } else {
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL AND id <> $5"
+            };
+            sqlx::query(statement)
+                .bind(community_id.as_uuid())
+                .bind(kind_i32)
+                .bind(pubkey_bytes.as_slice())
+                .bind(d_tag)
+                .bind(incoming_id)
+                .execute(tx.conn())
+                .await?;
+
+            if is_nip_rs {
+                let previous_value = previous_nip_rs_hard_delete.as_deref().unwrap_or_default();
+                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', $1, true)")
+                    .bind(previous_value)
+                    .execute(tx.conn())
+                    .await?;
+            }
+
+            if hard_delete_superseded {
+                if let Some((_, existing_id)) = &existing {
+                    sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
+                        .bind(community_id.as_uuid())
+                        .bind(existing_id)
+                        .execute(tx.conn())
+                        .await?;
+                }
+            }
+        }
+
         Ok(true)
     }
     .await;
@@ -383,8 +391,7 @@ async fn replace_parameterized_event_in_transaction_impl(
         .execute(tx.conn())
         .await?;
     if status == ParameterizedReplaceStatus::Inserted {
-        crate::store::event_follow_up::after_admitted_insert(tx, incoming_id, kind_i32, channel_id)
-            .await?;
+        crate::store::event_follow_up::stage_admitted_insert(tx, event, channel_id);
     }
 
     Ok(ParameterizedReplaceResult::new(
@@ -468,9 +475,9 @@ impl Db {
                 // NIP-16: created_at is second-resolution. On same-second tie, lowest
                 // event id (lexicographic) wins — deterministic across relays.
                 let incoming_id = event.id.as_bytes().as_slice();
-                if let Some((existing_ts, existing_id)) = existing {
-                    let dominated = created_at < existing_ts
-                        || (created_at == existing_ts
+                if let Some((existing_ts, existing_id)) = &existing {
+                    let dominated = created_at < *existing_ts
+                        || (created_at == *existing_ts
                             && incoming_id >= existing_id.as_slice());
                     if dominated {
                         tx.rollback().await?;
@@ -491,20 +498,6 @@ impl Db {
                 crate::channel_members::guard_channel_roster_event(
                     &mut tx, kind_i32, channel_id, &tags_json,
                 )
-                .await?;
-
-                // Soft-delete the old event (if any). IS NOT DISTINCT FROM for NULL safety.
-                sqlx::query(
-                    "UPDATE events SET deleted_at = NOW() \
-                     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-                     AND channel_id IS NOT DISTINCT FROM $4 \
-                     AND deleted_at IS NULL",
-                )
-                .bind(community_id.as_uuid())
-                .bind(kind_i32)
-                .bind(pubkey_bytes.as_slice())
-                .bind(channel_id)
-                .execute(tx.conn())
                 .await?;
 
                 // Insert the new event inside the same transaction.
@@ -533,8 +526,7 @@ impl Db {
 
                 let was_inserted = insert_result.rows_affected() > 0;
                 if !was_inserted {
-                    // ON CONFLICT fired — the event ID already exists. Rollback the
-                    // soft-delete so we don't lose the previous replaceable event.
+                    // ON CONFLICT fired — leave the previously-live event intact.
                     tx.rollback().await?;
                     return Ok((
                         StoredEvent::with_received_at(
@@ -547,12 +539,27 @@ impl Db {
                     ));
                 }
 
-                crate::store::event_follow_up::after_admitted_insert(
-                    &mut tx,
-                    event.id.as_bytes().as_slice(),
-                    kind_i32,
-                    channel_id,
+                if let Some((_, previous_id)) = &existing {
+                    crate::store::media_grant::bootstrap_replacement(&mut tx, event, previous_id)
+                        .await?;
+                }
+                // Authorize retained references while the previous head is still live.
+                crate::store::event_follow_up::after_admitted_insert(&mut tx, event, channel_id)
+                    .await?;
+
+                // Soft-delete the old event (if any). IS NOT DISTINCT FROM for NULL safety.
+                sqlx::query(
+                    "UPDATE events SET deleted_at = NOW() \
+                     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+                     AND channel_id IS NOT DISTINCT FROM $4 \
+                     AND deleted_at IS NULL AND id <> $5",
                 )
+                .bind(community_id.as_uuid())
+                .bind(kind_i32)
+                .bind(pubkey_bytes.as_slice())
+                .bind(channel_id)
+                .bind(incoming_id)
+                .execute(tx.conn())
                 .await?;
 
                 // The replaceable event and its denormalized mention index are one

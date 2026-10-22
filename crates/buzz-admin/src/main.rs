@@ -100,6 +100,22 @@ enum Command {
         #[arg(long, default_value_t = 10_000_000)]
         max_objects: u64,
     },
+    /// Record media shares for events stored before share recording existed.
+    ///
+    /// Run after every relay pod records shares and
+    /// before enforcing channel-scoped media reads. Historical references are
+    /// trusted only before each community's schema-recorded cutoff.
+    /// Restores uploader proof from surviving server media_uploaded audit rows;
+    /// files without that evidence still need an upload of the exact bytes.
+    /// Later references use current permissions, so any run can grant references
+    /// live recording previously refused if their authors have since gained access.
+    /// Accept the resulting lasting grants before the first backfill; otherwise
+    /// defer it. Each invocation restarts the scan and deduplicates existing rows.
+    BackfillMediaShares {
+        /// Events read and recorded per transaction.
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(i64).range(1..))]
+        batch_size: i64,
+    },
     /// Run the partition catalog audit using a read-only database session.
     PartitionAudit {
         /// Future months to include in the coverage check.
@@ -193,6 +209,14 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Command::StorageSnapshot { max_objects } => cmd_storage_snapshot(max_objects).await,
+        Command::BackfillMediaShares { batch_size } => {
+            let added = connect_db()
+                .await?
+                .backfill_media_shares(batch_size)
+                .await?;
+            println!("Recorded {added} media shares.");
+            Ok(0)
+        }
         Command::PartitionAudit { months_ahead } => cmd_partition_audit(months_ahead).await,
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
