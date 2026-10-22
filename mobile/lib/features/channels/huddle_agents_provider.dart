@@ -30,16 +30,21 @@ const managedAgentRecordKind = 30177;
 ///
 /// The result holds only current members. Until the records first load,
 /// only the `bot` role counts. While the records reload after a membership
-/// change, or if that reload fails, the last loaded records still apply to
-/// the members who remain; a failed read never removes a `bot` agent.
+/// change, if that reload fails, or while the relay is disconnected, the last
+/// records loaded for the same relay and account still apply to the members
+/// who remain; a failed read never removes a `bot` agent.
 final huddleAgentPubkeysProvider = Provider.autoDispose
     .family<Set<String>, String>((ref, channelId) {
       final members =
           ref.watch(channelMembersProvider(channelId)).value ??
           const <ChannelMember>[];
-      final recordAgents =
-          ref.watch(huddleManagedAgentRecordPubkeysProvider(channelId)).value ??
-          const <String>{};
+      final scope = ref.watch(huddleManagedAgentRecordScopeProvider);
+      final loaded = ref
+          .watch(huddleManagedAgentRecordPubkeysProvider(channelId))
+          .value;
+      final recordAgents = loaded != null && loaded.scope == scope
+          ? loaded.agents
+          : const <String>{};
       return Set.unmodifiable({
         for (final member in members)
           if (member.isBot ||
@@ -48,25 +53,50 @@ final huddleAgentPubkeysProvider = Provider.autoDispose
       });
     });
 
+/// The relay and account that a managed-agent record read belongs to.
+typedef HuddleManagedAgentRecordScope = ({String relay, String? viewer});
+
+/// Agents named by trusted managed-agent records, with the relay and account
+/// that read them.
+typedef HuddleManagedAgentRecords = ({
+  HuddleManagedAgentRecordScope scope,
+  Set<String> agents,
+});
+
+final huddleManagedAgentRecordScopeProvider =
+    Provider<HuddleManagedAgentRecordScope>(
+      (ref) => (
+        relay: ref.watch(
+          relayConfigProvider.select((config) => config.baseUrl),
+        ),
+        viewer: ref.watch(myPubkeyProvider),
+      ),
+    );
+
+/// Fails, rather than returning no records, while the relay is disconnected:
+/// "not read" must not replace the last records read.
 final huddleManagedAgentRecordPubkeysProvider = FutureProvider.autoDispose
-    .family<Set<String>, String>((ref, channelId) async {
+    .family<HuddleManagedAgentRecords, String>((ref, channelId) async {
       final connected = ref.watch(
         relaySessionProvider.select(
           (state) => state.status == SessionStatus.connected,
         ),
       );
-      final viewer = ref.watch(myPubkeyProvider);
+      final scope = ref.watch(huddleManagedAgentRecordScopeProvider);
       final members = await ref.watch(channelMembersProvider(channelId).future);
-      if (!connected) return const {};
+      if (!connected) {
+        throw StateError('relay disconnected; managed-agent records not read');
+      }
       try {
-        return await fetchTrustedManagedAgentPubkeys(
+        final agents = await fetchTrustedManagedAgentPubkeys(
           ref.read(relaySessionProvider.notifier),
           members: [
             for (final member in members)
               MemberEntry(pubkey: member.pubkey, role: member.role),
           ],
-          viewerPubkey: viewer,
+          viewerPubkey: scope.viewer,
         );
+        return (scope: scope, agents: agents);
       } catch (error) {
         debugPrint('[HuddleAgents] managed-agent query failed: $error');
         rethrow;

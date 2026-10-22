@@ -390,9 +390,12 @@ Widget _buildTestable({
       if (huddleMembersNotifier != null)
         _mutableHuddleMembersProvider.overrideWith(() => huddleMembersNotifier),
       if (huddleRecordAgentPubkeys != null)
-        huddleManagedAgentRecordPubkeysProvider(
-          _huddleChannelId,
-        ).overrideWith((ref) async => huddleRecordAgentPubkeys),
+        huddleManagedAgentRecordPubkeysProvider(_huddleChannelId).overrideWith(
+          (ref) async => (
+            scope: ref.watch(huddleManagedAgentRecordScopeProvider),
+            agents: huddleRecordAgentPubkeys,
+          ),
+        ),
       if (!watchChannelMembershipUpdates)
         channelBotPubkeysProvider(_channelId).overrideWith(
           (ref) async => loadChannelBotPubkeys?.call() ?? const <String>{},
