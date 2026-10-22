@@ -183,6 +183,7 @@ struct StoredSession {
     api_base: &'static str,
     employee: Option<EmployeeBinding>,
     assertion: Option<CachedAssertion>,
+    refusal: Option<String>,
     cancel: tokio_util::sync::CancellationToken,
 }
 
@@ -197,9 +198,13 @@ struct CachedAssertion {
 }
 
 mod employee_relay;
+mod employee_response;
 pub(crate) use employee_relay::{
-    employee_evidence, employee_response_end, guard_employee_response, requires_employee,
-    send_employee_media_request, send_employee_request, EmployeeEvidence, ProtectedAssertion,
+    employee_evidence, requires_employee, send_employee_media_request, send_employee_request,
+    EmployeeEvidence,
+};
+pub(crate) use employee_response::{
+    employee_response_end, guard_employee_response, ProtectedAssertion,
 };
 
 impl BuilderlabSession {
@@ -219,6 +224,47 @@ impl BuilderlabSession {
             .as_mut()
         {
             stored.assertion = None;
+        }
+        Ok(())
+    }
+    pub(crate) fn employee_can_retry(&self, state: &crate::app_state::AppState) -> bool {
+        if self.request_context(state).ok().flatten().is_none() {
+            return false;
+        }
+        self.0
+            .lock()
+            .ok()
+            .and_then(|stored| {
+                stored
+                    .as_ref()
+                    .map(|stored| stored.employee.is_some() && stored.refusal.is_some())
+            })
+            .unwrap_or(false)
+    }
+    fn refuse_employee_access(&self, credential: &str, reason: String) -> Result<(), String> {
+        let mut stored = self.0.lock().map_err(|_| "Square session unavailable")?;
+        if let Some(stored) = stored
+            .as_mut()
+            .filter(|stored| stored.credential == credential)
+        {
+            stored.cancel.cancel();
+            stored.assertion = None;
+            stored.refusal = Some(reason);
+        }
+        Ok(())
+    }
+    pub(crate) fn clear_failed_employee_login(
+        &self,
+        credential: &str,
+        canceled: bool,
+    ) -> Result<(), String> {
+        let mut stored = self.0.lock().map_err(|_| "Square session unavailable")?;
+        if stored.as_ref().is_some_and(|value| {
+            value.credential == credential && (canceled || value.refusal.is_none())
+        }) {
+            if let Some(previous) = stored.take() {
+                previous.cancel.cancel();
+            }
         }
         Ok(())
     }
@@ -294,6 +340,7 @@ impl BuilderlabSession {
             api_base,
             employee: Some(employee),
             assertion: None,
+            refusal: None,
             cancel: tokio_util::sync::CancellationToken::new(),
         })?;
         // The login remains cancellable through first assertion/key enrollment.
@@ -543,6 +590,7 @@ pub(crate) async fn start_builderlab_login(
             api_base: BUILDERLAB_API_BASE_URL,
             employee: None,
             assertion: None,
+            refusal: None,
             cancel: tokio_util::sync::CancellationToken::new(),
         })?;
         *pending = None;
@@ -902,6 +950,7 @@ mod tests {
                 api_base: BUILDERLAB_API_BASE_URL,
                 employee: None,
                 assertion: None,
+                refusal: None,
                 cancel: tokio_util::sync::CancellationToken::new(),
             })
             .unwrap();

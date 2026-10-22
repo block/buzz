@@ -85,6 +85,7 @@ pub(super) async fn send_upload_attempt(
     let req = state
         .http_client
         .put(&url)
+        .timeout(std::time::Duration::from_secs(5 * 60))
         .header("Authorization", auth_header)
         .header("Content-Type", mime)
         .header("X-SHA-256", sha256);

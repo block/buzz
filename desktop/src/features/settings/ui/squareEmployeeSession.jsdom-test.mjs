@@ -350,3 +350,26 @@ test("local community and identity recovery stay reachable while access is refus
   assert.deepEqual([switched, recovered, canceled], [1, 1, 1]);
   assert.doesNotMatch(container.textContent, /Community chat/);
 });
+
+test("refused relay access retains an explicit retry without claiming the employee is connected", async () => {
+  handlers.set("employee_sign_in_available", async () => true);
+  handlers.set("employee_session_status", async () => ({
+    required: true,
+    authenticated: false,
+    canRetry: true,
+    expiresAt: null,
+  }));
+  handlers.set("refresh_employee_relay_access", async () => {});
+  relayClient.reconnect = async () => {};
+  await mount(React.createElement(SquareEmployeeSignInCard));
+  assert.match(container.textContent, /Retry community connection/);
+  assert.doesNotMatch(
+    container.textContent,
+    /Square session and your Buzz key are connected/,
+  );
+  await click("Retry community connection");
+  assert.ok(
+    calls.some(([command]) => command === "refresh_employee_relay_access"),
+  );
+  assert.ok(!calls.some(([command]) => command === "start_employee_login"));
+});

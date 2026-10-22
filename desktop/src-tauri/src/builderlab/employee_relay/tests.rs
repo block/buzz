@@ -92,6 +92,7 @@ impl Fixture {
                     relay: relay.clone(),
                 }),
                 assertion: None,
+                refusal: None,
                 cancel: CancellationToken::new(),
             })
             .unwrap();
@@ -255,13 +256,24 @@ async fn employee_authorization_denial_explains_recovery_without_echoing_the_res
     assert!(error.contains("another Buzz key"));
     assert!(!error.contains("private-session-fixture"));
     assert!(fixture.session.employee_expiry(&fixture.state).is_none());
-    assert!(fixture.session.0.lock().unwrap().is_none());
+    assert!(fixture.session.employee_can_retry(&fixture.state));
     assert!(fixture.evidence().await.is_err());
     assert_eq!(
         fixture.stub.captured.lock().unwrap().len(),
         1,
-        "terminal denial must require explicit new sign-in"
+        "refused access must not automatically contact the issuer again"
     );
+    *fixture.stub.status.lock().unwrap() = StatusCode::OK;
+    let keys = fixture.state.signing_keys().unwrap();
+    *fixture.stub.response.lock().unwrap() = serde_json::json!({"assertion":"test.assertion.signature","nostr_pubkey":keys.public_key().to_hex(),"expires_at":chrono::Utc::now().timestamp()+120});
+    let evidence = fixture
+        .session
+        .evidence_with_refresh(&fixture.state, &keys, &fixture.relay, true)
+        .await
+        .unwrap();
+    assert!(!evidence.cancel.is_cancelled());
+    assert!(!fixture.session.employee_can_retry(&fixture.state));
+    assert_eq!(fixture.stub.captured.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -433,4 +445,102 @@ async fn ordinary_media_remains_available_while_identity_is_in_recovery() {
         .0
         .get("Nostr-Federated-Identity")
         .is_none());
+}
+
+#[tokio::test]
+async fn employee_transfer_proofs_keep_blossom_kind_and_streaming_body() {
+    use nostr::JsonUtil;
+    for streaming in [true, false] {
+        let keys = nostr::Keys::generate();
+        let proof = crate::commands::media::sign_blossom_upload_auth(
+            &keys,
+            &"a".repeat(64),
+            300,
+            "https://employee.example",
+        )
+        .unwrap();
+        let auth = format!(
+            "Nostr {}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(proof.as_json())
+        );
+        let body = if streaming {
+            reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+                bytes::Bytes::from_static(b"media"),
+            )]))
+        } else {
+            reqwest::Body::from("media")
+        };
+        let mut request = reqwest::Client::new()
+            .put("https://employee.example/upload")
+            .header("Authorization", &auth)
+            .body(body)
+            .build()
+            .unwrap();
+        refresh_nip98_request(&mut request, &keys).unwrap();
+        assert_eq!(request.headers()["Authorization"], auth);
+        assert_eq!(request.body().unwrap().as_bytes().is_none(), streaming);
+    }
+}
+
+#[tokio::test]
+async fn ended_employee_sessions_still_require_a_new_browser_login() {
+    let fixture = Fixture::new(false, false).await;
+    *fixture.stub.status.lock().unwrap() = StatusCode::UNAUTHORIZED;
+    *fixture.stub.response.lock().unwrap() = serde_json::json!({"error":"session_expired"});
+    assert!(fixture.evidence().await.is_err());
+    assert!(fixture.session.0.lock().unwrap().is_none());
+    assert!(!fixture.session.employee_can_retry(&fixture.state));
+}
+
+#[test]
+fn queued_employee_request_refreshes_only_the_expired_nip98_proof() {
+    use nostr::JsonUtil;
+    let keys = nostr::Keys::generate();
+    let url = "https://employee.example/query";
+    let body = b"[]";
+    let old = nostr::EventBuilder::new(nostr::Kind::Custom(27235), "")
+        .tags([
+            nostr::Tag::parse(["u", url]).unwrap(),
+            nostr::Tag::parse(["method", "POST"]).unwrap(),
+            nostr::Tag::parse(["payload", &hex::encode(Sha256::digest(body))]).unwrap(),
+        ])
+        .custom_created_at(nostr::Timestamp::from_secs(1))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let mut request = reqwest::Client::new()
+        .post(url)
+        .header(
+            "Authorization",
+            format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD.encode(old.as_json())
+            ),
+        )
+        .body(body.to_vec())
+        .build()
+        .unwrap();
+    refresh_nip98_request(&mut request, &keys).unwrap();
+    let encoded = request.headers()["Authorization"]
+        .to_str()
+        .unwrap()
+        .strip_prefix("Nostr ")
+        .unwrap();
+    let event: nostr::Event = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap(),
+    )
+    .unwrap();
+    event.verify().unwrap();
+    assert_eq!(event.kind, nostr::Kind::Custom(27235));
+    assert_eq!(event.pubkey, keys.public_key());
+    assert!(event.created_at.as_secs() > 1);
+    assert!(event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().is_some_and(|value| value == "nonce")));
+    for tag in old.tags.iter() {
+        assert!(event.tags.iter().any(|current| current == tag));
+    }
+    assert_eq!(request.body().unwrap().as_bytes().unwrap(), body);
 }

@@ -79,6 +79,12 @@ impl BuilderlabSession {
         let _issuance = self.1.lock().await;
         if force {
             self.invalidate_employee_assertion()?;
+            let mut stored = self.0.lock().map_err(|_| "Square session unavailable")?;
+            if let Some(stored) = stored.as_mut() {
+                if stored.refusal.take().is_some() {
+                    stored.cancel = CancellationToken::new();
+                }
+            }
         }
         if crate::relay::relay_ws_url_with_override(app_state) != relay {
             return Err("Employee community changed".to_owned());
@@ -92,6 +98,9 @@ impl BuilderlabSession {
         let (expires_at, cancel) = {
             let stored = self.0.lock().map_err(|_| "Square session unavailable")?;
             let stored = stored.as_ref().ok_or("Sign in with Square")?;
+            if let Some(reason) = &stored.refusal {
+                return Err(reason.clone());
+            }
             let binding = stored
                 .employee
                 .as_ref()
@@ -156,17 +165,16 @@ impl BuilderlabSession {
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned)
                 });
-            if matches!(
-                code.as_deref(),
-                Some(
-                    "session_required"
-                        | "session_expired"
-                        | "binding_mismatch"
-                        | "authorization_denied"
-                )
-            ) {
-                self.clear_if_credential(&credential)?;
-                super::notify_session_changed(app_state);
+            match code.as_deref() {
+                Some("session_required" | "session_expired") => {
+                    self.clear_if_credential(&credential)?;
+                    super::notify_session_changed(app_state);
+                }
+                Some("binding_mismatch" | "authorization_denied") => {
+                    self.refuse_employee_access(&credential, "Square access is suspended. Use Retry community connection after your employer resolves access.".to_owned())?;
+                    super::notify_session_changed(app_state);
+                }
+                _ => {}
             }
             return Err(match code.as_deref() {
                 Some("binding_mismatch") => "This Square account is linked to another Buzz key. Use that Buzz identity or ask your employer to resolve the link.",
@@ -276,30 +284,7 @@ pub(crate) async fn send_employee_request(
         let evidence = employee_evidence(app_state, keys, url)
             .await?
             .ok_or("Employee relay evidence is required")?;
-        // Re-mint the own-key proof after the serialized assertion wait.
-        if request
-            .headers()
-            .get("Authorization")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("Nostr "))
-        {
-            let body = match request.body() {
-                Some(body) => body
-                    .as_bytes()
-                    .ok_or("Cannot sign a streaming relay request")?,
-                None => &[],
-            };
-            let proof = crate::relay::build_nip98_auth_header_for_keys(
-                keys,
-                request.method(),
-                request.url().as_str(),
-                body,
-            )?;
-            request.headers_mut().insert(
-                "Authorization",
-                proof.parse().map_err(|_| "Invalid relay proof")?,
-            );
-        }
+        refresh_nip98_request(&mut request, keys)?;
         // Keep response-body consumption inside the original operation budget too.
         *request.timeout_mut() = Some(timeout.saturating_sub(started.elapsed()));
         // This client never follows redirects, including media request builders.
@@ -309,36 +294,41 @@ pub(crate) async fn send_employee_request(
     .map_err(|_| "relay unreachable: request timed out".to_owned())?
 }
 
-#[derive(Clone)]
-pub(crate) struct ProtectedAssertion(
-    pub(crate) String,
-    pub(crate) CancellationToken,
-    pub(crate) i64,
-);
-
-pub(crate) async fn employee_response_end(scope: Option<ProtectedAssertion>) {
-    if let Some(scope) = scope {
-        let lifetime = Duration::from_secs(
-            scope
-                .2
-                .saturating_sub(chrono::Utc::now().timestamp())
-                .max(0) as u64,
+fn refresh_nip98_request(request: &mut reqwest::Request, keys: &Keys) -> Result<(), String> {
+    use base64::Engine;
+    let encoded = request
+        .headers()
+        .get("Authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Nostr "));
+    let nip98 = encoded
+        .and_then(|value| {
+            base64::engine::general_purpose::STANDARD
+                .decode(value)
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(value))
+                .ok()
+        })
+        .and_then(|value| serde_json::from_slice::<serde_json::Value>(&value).ok())
+        .is_some_and(|value| value["kind"].as_u64() == Some(27235));
+    if nip98 {
+        let body = match request.body() {
+            Some(body) => body
+                .as_bytes()
+                .ok_or("Cannot sign a streaming NIP-98 request")?,
+            None => &[],
+        };
+        let proof = crate::relay::build_nip98_auth_header_for_keys(
+            keys,
+            request.method(),
+            request.url().as_str(),
+            body,
+        )?;
+        request.headers_mut().insert(
+            "Authorization",
+            proof.parse().map_err(|_| "Invalid relay proof")?,
         );
-        tokio::select! { _ = scope.1.cancelled() => {}, _ = tokio::time::sleep(lifetime) => {} }
-    } else {
-        std::future::pending::<()>().await;
     }
-}
-
-pub(crate) async fn guard_employee_response<T>(
-    scope: Option<ProtectedAssertion>,
-    future: impl std::future::Future<Output = T>,
-) -> Result<T, String> {
-    tokio::select! {
-        biased;
-        _ = employee_response_end(scope) => Err("Employee relay authorization changed".to_owned()),
-        result = future => Ok(result),
-    }
+    Ok(())
 }
 
 async fn send_authorized_request(
@@ -372,7 +362,7 @@ async fn send_authorized_request(
         evidence.cancel,
         evidence.expires_at,
     ));
-    Ok(response)
+    super::employee_response::filter_response(response)
 }
 
 #[cfg(test)]

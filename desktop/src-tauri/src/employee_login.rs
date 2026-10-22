@@ -277,13 +277,14 @@ pub(crate) async fn start_employee_login(
     drop(_identity_guard);
     let keys = app_state.signing_keys()?;
     // The existing key-bound NIP-FI issuance atomically verifies and enrolls this own key.
-    let result = tokio::select! {
+    let (result, canceled) = tokio::select! {
         biased;
-        _ = &mut cancel => Err("Square sign-in canceled".to_owned()),
-        result = crate::builderlab::employee_evidence(&app_state, &keys, &relay) => result.map(|_| ()),
+        _ = &mut cancel => (Err("Square sign-in canceled".to_owned()), true),
+        result = crate::builderlab::employee_evidence(&app_state, &keys, &relay) => (result.map(|_| ()), false),
     };
     if let Err(error) = result {
-        session.clear_if_credential(&receipt.session_credential)?;
+        session.clear_failed_employee_login(&receipt.session_credential, canceled)?;
+        let _ = login.complete_employee_login(login_id);
         crate::builderlab::notify_session_changed(&app_state);
         return Err(error);
     }
@@ -430,6 +431,7 @@ mod tests {
 pub(crate) struct EmployeeSessionStatus {
     required: bool,
     authenticated: bool,
+    can_retry: bool,
     expires_at: Option<i64>,
 }
 
@@ -443,6 +445,7 @@ pub(crate) fn employee_session_status(
         return Ok(EmployeeSessionStatus {
             required: false,
             authenticated: false,
+            can_retry: false,
             expires_at: None,
         });
     }
@@ -450,6 +453,7 @@ pub(crate) fn employee_session_status(
     Ok(EmployeeSessionStatus {
         required: true,
         authenticated: expires_at.is_some(),
+        can_retry: session.employee_can_retry(&app_state),
         expires_at,
     })
 }

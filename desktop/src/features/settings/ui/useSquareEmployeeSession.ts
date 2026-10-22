@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export type SquareEmployeeSessionStatus = {
   required: boolean;
   authenticated: boolean;
+  canRetry?: boolean;
   expiresAt: number | null;
 };
 

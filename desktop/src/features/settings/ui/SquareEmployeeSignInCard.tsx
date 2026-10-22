@@ -17,6 +17,7 @@ export function SquareEmployeeSignInCard({
     "square-employee-settings",
   );
   const signedIn = session.status?.authenticated === true && session.ready;
+  const canReconnect = signedIn || session.status?.canRetry === true;
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   useEffect(() => {
@@ -138,7 +139,7 @@ export function SquareEmployeeSignInCard({
           Cancel sign-in
         </Button>
       ) : null}
-      {signedIn ? (
+      {canReconnect ? (
         <>
           <Button
             variant="outline"

@@ -264,6 +264,11 @@ impl PeerSlot {
     }
 }
 
+fn valid_control_roster(value: &serde_json::Value) -> bool {
+    !matches!(value["type"].as_str(), Some("joined" | "roster"))
+        || buzz_audio_client::connection::parse_peers(value).is_ok()
+}
+
 /// Drive the receive loop until cancelled or the WS closes.
 ///
 /// `ws_tx_for_pongs` is shared with the encode-side task and only used here to
@@ -538,6 +543,7 @@ pub(crate) async fn run_playout_recv_loop(
                     }
                     Some(Ok(WsMsg::Text(text))) => {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if !valid_control_roster(&v) { return; }
                             match v["type"].as_str() {
                                 Some("joined") => {
                                     if let Some(peer_list) = v["peers"].as_array() {
@@ -668,6 +674,19 @@ pub(crate) async fn run_playout_recv_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn employee_control_roster_rejects_reflected_assertions_before_speaker_events() {
+        for kind in ["joined", "roster"] {
+            let text = format!(
+                r#"{{"type":"{kind}","peers":[{{"pubkey":"private\u002eaudio\u002eassertion","peer_index":1}}]}}"#
+            );
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(!valid_control_roster(&value));
+            assert!(valid_control_roster(
+                &serde_json::json!({"type":kind,"peers":[{"pubkey":"a".repeat(64),"peer_index":1}]})
+            ));
+        }
+    }
 
     #[test]
     fn continuous_silence_does_not_extend_remote_floor_deadline() {
