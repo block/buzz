@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 
 use crate::kind::{
-    event_is_shared, is_author_only_event_kind, is_shared_gated_kind, P_GATED_KINDS,
+    event_is_shared, is_author_only_event_kind, is_shared_gated_kind, KIND_AGENT_ENGRAM,
+    P_GATED_KINDS,
 };
 
 /// Hashes of every blob `event` shares into its channel, or with the whole
@@ -17,6 +18,7 @@ pub fn shared_blob_hashes(event: &nostr::Event) -> Vec<String> {
     let kind = u32::from(event.kind.as_u16());
     if is_author_only_event_kind(event)
         || P_GATED_KINDS.contains(&kind)
+        || kind == KIND_AGENT_ENGRAM
         || (is_shared_gated_kind(kind) && !event_is_shared(event))
     {
         return Vec::new();
