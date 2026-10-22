@@ -65,7 +65,7 @@ async fn ingest(f: &Fixture, keys: &Keys, event: Event) {
     assert!(result.accepted, "kind:{kind} refused: {}", result.message);
 }
 
-/// Accept one artifact revision and return it.
+/// Accept one `buzz.task` revision and return it.
 async fn revision(
     f: &Fixture,
     keys: &Keys,
@@ -74,11 +74,24 @@ async fn revision(
     op: &str,
     prev: Option<&Event>,
 ) -> Event {
+    typed_revision(f, keys, home, d, "buzz.task", op, prev).await
+}
+
+/// Accept one artifact revision of type `ty` and return it.
+async fn typed_revision(
+    f: &Fixture,
+    keys: &Keys,
+    home: Uuid,
+    d: Uuid,
+    ty: &str,
+    op: &str,
+    prev: Option<&Event>,
+) -> Event {
     let mut tags = vec![
         vec!["ar".to_owned(), "1".into()],
         vec!["d".into(), d.to_string()],
         vec!["h".into(), home.to_string()],
-        vec!["type".into(), "buzz.task".into()],
+        vec!["type".into(), ty.into()],
         vec!["op".into(), op.into()],
     ];
     if op != "delete" {
@@ -219,6 +232,18 @@ async fn sync_sends_one_cut_then_current_heads() {
         (message[0].as_str(), message[2]["id"].as_str()),
         (Some("EVENT"), Some(deleted.id.to_hex().as_str()))
     );
+    // An artifact of another type in the same channel is never in scope.
+    typed_revision(
+        &f,
+        &owner,
+        home,
+        Uuid::new_v4(),
+        "buzz.note",
+        "create",
+        None,
+    )
+    .await;
+    no_frame(&mut rx).await;
     // An ordinary chat message in the channel is not a change.
     let chat = EventBuilder::new(Kind::Custom(9), "hi")
         .tags([Tag::parse(["h", &home.to_string()]).unwrap()])

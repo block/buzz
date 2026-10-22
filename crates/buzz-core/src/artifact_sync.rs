@@ -18,6 +18,28 @@ pub struct ArtifactSyncFilter {
     pub tags: Vec<(String, Vec<String>)>,
 }
 
+/// Tags NIP-AR fixes at creation. A head that fails a predicate on one of
+/// them was never in scope and never will be.
+const IMMUTABLE_TAGS: [&str; 2] = ["d", "type"];
+
+impl ArtifactSyncFilter {
+    /// Whether `head` fails a predicate on an immutable tag, so no change to
+    /// it can be in scope (NIP-AR sync rule 3). Mutable tags are left to the
+    /// client's match rule: a head that stopped matching must still be sent.
+    pub fn never_in_scope(&self, head: &nostr::Event) -> bool {
+        self.tags
+            .iter()
+            .filter(|(name, _)| IMMUTABLE_TAGS.contains(&name.as_str()))
+            .any(|(name, values)| {
+                let first = head.tags.iter().find_map(|tag| match tag.as_slice() {
+                    [tag_name, value, ..] if tag_name == name => Some(value),
+                    _ => None,
+                });
+                !first.is_some_and(|value| values.contains(value))
+            })
+    }
+}
+
 /// Whether a raw `REQ` filter is a sync: the current-state view. Other
 /// artifact views have no live form and stay HTTP-only.
 pub fn is_sync_filter(value: &serde_json::Value) -> bool {
@@ -76,5 +98,36 @@ mod tests {
         ] {
             assert!(parse_sync(&invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn never_in_scope_checks_only_immutable_tags() {
+        let h = Uuid::new_v4().to_string();
+        let filter = parse_sync(
+            &json!({"artifact":"current","#h":[h],"#type":["work.set"],"#status":["open"]}),
+        )
+        .unwrap();
+        let keys = nostr::Keys::generate();
+        let head = |tags: &[[&str; 2]]| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(45010), "")
+                .tags(tags.iter().map(|t| nostr::Tag::parse(t.to_vec()).unwrap()))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        // Another type: never in scope, whatever its other tags.
+        assert!(filter.never_in_scope(&head(&[
+            ["h", &h],
+            ["type", "work.goals"],
+            ["status", "open"]
+        ])));
+        assert!(filter.never_in_scope(&head(&[["h", &h]])));
+        // Same type but a mutable tag no longer matches: still sent, so the
+        // client can drop it.
+        assert!(!filter.never_in_scope(&head(&[
+            ["h", &h],
+            ["type", "work.set"],
+            ["status", "done"]
+        ])));
+        assert!(!filter.never_in_scope(&head(&[["h", &h], ["type", "work.set"]])));
     }
 }

@@ -547,6 +547,14 @@ async fn run_live(
                     return;
                 }
             };
+            // A head of another type (or `d`) was never in scope; the change
+            // signal is per channel, so it reaches every sync there.
+            if head
+                .as_ref()
+                .is_some_and(|head| filter.never_in_scope(&head.event))
+            {
+                continue;
+            }
             // A head the reader cannot read leaves only the source removal.
             let Some(event) = head.map(|head| head.event).or(removal) else {
                 continue;
