@@ -811,6 +811,9 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE TABLE community_nip_fi_issuers"));
         assert_eq!(migrations[67].version, 68);
+        assert!(strip_sql_comments(migrations[67].sql.as_str())
+            .trim_start()
+            .starts_with("SET LOCAL lock_timeout = '5s';"));
         for table in ["media_uploaders", "media_shares"] {
             assert!(migrations[67]
                 .sql

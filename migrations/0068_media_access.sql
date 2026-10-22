@@ -1,3 +1,5 @@
+SET LOCAL lock_timeout = '5s';
+
 -- Durable historical backfill cutoff, independent of the schema install tool.
 ALTER TABLE communities
     ADD COLUMN media_shares_recording_started_at TIMESTAMPTZ NOT NULL DEFAULT now();
