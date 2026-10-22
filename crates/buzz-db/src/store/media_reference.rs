@@ -108,6 +108,10 @@ impl Db {
     /// reading `batch_size` events at a time; returns
     /// the number of shares added.
     ///
+    /// Retained server upload audits restore uploader proof before references
+    /// are evaluated. Missing, malformed, or unattributed audit rows establish
+    /// no ownership; those uploads still need the exact bytes uploaded again.
+    ///
     /// Shares come from the same rule as live writes. Events received before
     /// share recording was installed predate the readability check, so their
     /// references are recorded as they stand; later events get the live,
@@ -130,6 +134,7 @@ impl Db {
         let mut added = 0;
         for (community, installed) in communities {
             let community = CommunityId::from_uuid(community);
+            self.backfill_media_uploaders(community, batch_size).await?;
             let mut cursor: Option<(DateTime<Utc>, Vec<u8>)> = None;
             loop {
                 let rows = sqlx::query(
@@ -343,6 +348,44 @@ mod postgres_tests {
             expected,
             "an uploader may share their own bytes"
         );
+
+        let excluded = unique_sha();
+        upload(&db, community, &alice, &excluded).await;
+        use buzz_core::kind::{
+            AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_DELETION, KIND_EVENT_REMINDER,
+            P_GATED_KINDS, SHARED_GATED_KINDS,
+        };
+        let kinds = AUTHOR_ONLY_KINDS
+            .iter()
+            .chain(P_GATED_KINDS)
+            .chain(SHARED_GATED_KINDS)
+            .copied()
+            .chain([KIND_AGENT_ENGRAM, KIND_DELETION]);
+        for kind in kinds {
+            if (20_000..30_000).contains(&kind) {
+                continue; // Ephemeral frames have no stored reference to backfill.
+            }
+            let mut tags = vec![Tag::parse(["d", "private-media"]).unwrap()];
+            if kind == KIND_DELETION {
+                tags.push(Tag::parse(["k", &KIND_EVENT_REMINDER.to_string()]).unwrap());
+            }
+            let event = EventBuilder::new(Kind::from(kind as u16), format!("/media/{excluded}"))
+                .tags(tags)
+                .sign_with_keys(&alice)
+                .unwrap();
+            db.insert_event(community, &event, None).await.unwrap();
+            assert!(
+                db.get_event_by_id(community, event.id.as_bytes())
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "kind {kind} must exercise a stored event"
+            );
+            assert!(
+                shares(&db, community, &excluded).await.is_empty(),
+                "private kind {kind} must create no grant even for its uploader"
+            );
+        }
     }
 
     #[tokio::test]
@@ -490,21 +533,7 @@ mod postgres_tests {
         db.soft_delete_event_and_update_thread(community, retired.id.as_bytes(), None, None)
             .await
             .unwrap();
-        let mut lifecycle = db.pool.begin().await.unwrap();
-        sqlx::query(
-            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
-                    set_config('buzz.deletion_fence_generation', '0', true)",
-        )
-        .bind(community.as_uuid().to_string())
-        .execute(&mut *lifecycle)
-        .await
-        .unwrap();
-        sqlx::query("UPDATE communities SET deletion_state = 'quiescing' WHERE id = $1")
-            .bind(community.as_uuid())
-            .execute(&mut *lifecycle)
-            .await
-            .unwrap();
-        lifecycle.commit().await.unwrap();
+        quiesce(&db, community).await;
         let (other, other_community) = fixture().await;
         upload(&other, other_community, &owner, &sha).await;
         let old = attachment(&owner, &sha, None);
@@ -541,6 +570,24 @@ mod postgres_tests {
         .fetch_one(&db.pool)
         .await
         .unwrap()
+    }
+
+    async fn quiesce(db: &Db, community: CommunityId) {
+        let mut lifecycle = db.pool.begin().await.unwrap();
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                    set_config('buzz.deletion_fence_generation', '0', true)",
+        )
+        .bind(community.as_uuid().to_string())
+        .execute(&mut *lifecycle)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE communities SET deletion_state = 'quiescing' WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *lifecycle)
+            .await
+            .unwrap();
+        lifecycle.commit().await.unwrap();
     }
 
     async fn reap_all(db: &Db) -> u64 {
@@ -727,6 +774,73 @@ mod postgres_tests {
             .expect("forget shares");
         tx.commit().await.expect("commit");
 
+        // Surviving server upload audits recover legacy ownership; malformed,
+        // missing, or unrelated audit evidence never creates uploader proof.
+        let (recovered, unproven) = (unique_sha(), unique_sha());
+        let (uploader, stranger) = (Keys::generate(), Keys::generate());
+        db.insert_event(community, &attachment(&uploader, &recovered, None), None)
+            .await
+            .unwrap();
+        db.insert_event(community, &attachment(&stranger, &unproven, None), None)
+            .await
+            .unwrap();
+        let mut tx = db.begin_media_share_transaction(community).await.unwrap();
+        for (seq, action, actor, object) in [
+            (
+                1_i64,
+                "media_uploaded",
+                Some(uploader.public_key().to_bytes().to_vec()),
+                recovered.clone(),
+            ),
+            (2, "media_uploaded", None, unproven.clone()),
+            (3, "media_uploaded", Some(vec![1; 31]), unproven.clone()),
+            (
+                4,
+                "event_created",
+                Some(stranger.public_key().to_bytes().to_vec()),
+                unproven.clone(),
+            ),
+            (
+                5,
+                "media_uploaded",
+                Some(stranger.public_key().to_bytes().to_vec()),
+                "bad-hash".into(),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO audit_log (community_id, seq, hash, action, actor_pubkey, object_id) \
+                         VALUES ($1,$2,$3,$4,$5,$6)",
+            )
+            .bind(community.as_uuid())
+            .bind(seq)
+            .bind(vec![seq as u8; 32])
+            .bind(action)
+            .bind(actor)
+            .bind(object)
+            .execute(tx.conn())
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+        let (fenced, fenced_community) = fixture().await;
+        let mut tx = fenced
+            .begin_media_share_transaction(fenced_community)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO audit_log (community_id, seq, hash, action, actor_pubkey, object_id) \
+                     VALUES ($1,1,$2,'media_uploaded',$3,$4)",
+        )
+        .bind(fenced_community.as_uuid())
+        .bind(vec![1_u8; 32])
+        .bind(stranger.public_key().to_bytes().as_slice())
+        .bind(&unproven)
+        .execute(tx.conn())
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        quiesce(&fenced, fenced_community).await;
+
         db.backfill_media_shares(1).await.expect("backfill");
         assert_eq!(db.backfill_media_shares(1).await.expect("rerun"), 0);
         assert_eq!(
@@ -735,6 +849,30 @@ mod postgres_tests {
             "a reference live recording refused must stay unshared"
         );
         assert_eq!(shares(&db, community, &historical).await, vec![None]);
+        let fenced_proofs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM media_uploaders WHERE community_id = $1")
+                .bind(fenced_community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            fenced_proofs, 0,
+            "audit recovery must not write across a fenced tenant boundary"
+        );
+        assert_eq!(
+            shares(&db, community, &recovered).await,
+            vec![None],
+            "retained upload evidence must recover an uploader's intended share"
+        );
+        assert!(shares(&db, community, &unproven).await.is_empty());
+        let proofs: Vec<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT sha256, pubkey FROM media_uploaders WHERE community_id = $1 AND sha256 = ANY($2)",
+        ).bind(community.as_uuid()).bind(vec![recovered.clone(), unproven])
+            .fetch_all(&db.pool).await.unwrap();
+        assert_eq!(
+            proofs,
+            vec![(recovered, uploader.public_key().to_bytes().to_vec())]
+        );
         assert!(
             shares(&db, community, &deleted_history).await.is_empty(),
             "legacy deleted messages must never gain a share"

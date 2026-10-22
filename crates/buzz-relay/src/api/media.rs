@@ -587,7 +587,15 @@ async fn upload_blob_result(
             auth.auth_event.pubkey.as_bytes(),
         )
         .await
-        .map_err(|error| serving_lease_lost(error.into()))?;
+        .map_err(|error| {
+            let error = anyhow::Error::from(error);
+            if buzz_deletion::ServingWriteGuard::is_lease_lost(&error) {
+                serving_lease_lost(error)
+            } else {
+                tracing::error!(%error, "media uploader recording failed");
+                MediaError::ServiceUnavailable
+            }
+        })?;
 
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
