@@ -1583,6 +1583,32 @@ mod postgres_tests {
         );
     }
 
+    /// The reconcile script repairs `events_pkey` after every apply, and
+    /// `start-relay-for-tests.sh` runs the same repair before apply so a reused
+    /// database reconciled before the repair existed can still be applied.
+    #[test]
+    fn events_pkey_repair_runs_before_reused_apply_and_matches_reconcile() {
+        let repair = include_str!("../../../../scripts/repair-events-pkey.sql");
+        let block = &repair[repair.find("DO $$").expect("repair script has a DO block")..];
+        assert!(
+            include_str!("../../../../scripts/reconcile-schema-after-pgschema.sql").contains(block),
+            "scripts/reconcile-schema-after-pgschema.sql must carry scripts/repair-events-pkey.sql's \
+             DO block verbatim"
+        );
+
+        let launcher = include_str!("../../../../scripts/start-relay-for-tests.sh");
+        let repair_at = launcher
+            .find("scripts/repair-events-pkey.sql")
+            .expect("start-relay-for-tests.sh runs scripts/repair-events-pkey.sql");
+        let apply_at = launcher
+            .find("./bin/pgschema apply")
+            .expect("start-relay-for-tests.sh runs pgschema apply");
+        assert!(
+            repair_at < apply_at,
+            "start-relay-for-tests.sh must repair events_pkey before pgschema apply"
+        );
+    }
+
     /// `.pgschemaignore` hides dated monthlies from pgschema so a re-apply
     /// cannot drop the ones the relay created at runtime. Each monthly
     /// `schema/partitions/` declares must be exempt, or pgschema would stop
