@@ -9,6 +9,11 @@
 -- script can run, so scripts/start-relay-for-tests.sh, the one launcher that
 -- reuses its database, runs this file before pgschema apply. It does nothing on
 -- an empty database or one whose key is already in order.
+--
+-- Both copies are temporary. The reconcile block, and the test that keeps the
+-- copies identical, can go once pgschema creates the key in declared order
+-- (1.13.3 does). This file and the launcher step can go once no local database
+-- reconciled before the reconcile block existed remains.
 
 DO $$
 DECLARE

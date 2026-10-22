@@ -2743,6 +2743,10 @@ mod postgres_tests {
     /// by name, not ordinal, because migrations append via `ALTER TABLE` while
     /// `schema.sql` declares them inline — positions legitimately differ, shapes
     /// must not. Entity-intake constraints are also compared in the live catalog.
+    /// `events` and its partitions must carry the same primary key on both
+    /// probes, so the reconcile script's `events_pkey` rebuild cannot drift from
+    /// the migrations. Partitions are compared as a set of key definitions
+    /// because the two paths create different months.
     ///
     /// Driving the real binary is load-bearing: `pgschema` 1.7.4 discards
     /// per-key `NULLS FIRST`/`NULLS LAST` when it re-emits an index, so a naive
@@ -2815,6 +2819,23 @@ mod postgres_tests {
             .expect("read constraint definitions")
         }
 
+        // Distinct (is the parent, key definition) pairs across events and its
+        // partitions.
+        async fn events_key_defs(pool: &PgPool) -> Vec<(bool, String)> {
+            sqlx::query_as(
+                "SELECT DISTINCT conrelid = 'events'::regclass, pg_get_constraintdef(oid) \
+                 FROM pg_constraint \
+                 WHERE contype = 'p' AND conrelid IN ( \
+                     SELECT 'events'::regclass \
+                     UNION ALL \
+                     SELECT inhrelid FROM pg_inherits WHERE inhparent = 'events'::regclass) \
+                 ORDER BY 1, 2",
+            )
+            .fetch_all(pool)
+            .await
+            .expect("read events key definitions")
+        }
+
         let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
@@ -2835,8 +2856,8 @@ mod postgres_tests {
             .await
             .expect("create migrated probe database");
 
-        // Bootstrap the desired-state probe through the real pgschema binary, the
-        // same invocation the test-relay launchers use.
+        // Bootstrap the desired-state probe the way the test-relay launchers do:
+        // the real pgschema binary, then the post-apply reconcile script.
         let apply = pgschema(&conn, &desired_db, &["apply", "--auto-approve"]);
         assert!(
             apply.status.success(),
@@ -2883,6 +2904,13 @@ mod postgres_tests {
                  migration and schema.sql must both use a representable shape."
             );
         }
+        assert_eq!(
+            events_key_defs(&desired).await,
+            events_key_defs(&migrated).await,
+            "events primary-key parity mismatch: the pgschema-bootstrapped, reconciled \
+             desired state has drifted from the migrations; update the events_pkey block in \
+             scripts/reconcile-schema-after-pgschema.sql and scripts/repair-events-pkey.sql"
+        );
 
         assert_eq!(
             constraints(&desired, "entity_deletion_requests").await,
