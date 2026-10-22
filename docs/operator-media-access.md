@@ -63,3 +63,21 @@ Closing the report, deleting the source message, or removing the queue role ends
 for subsequent requests; ordinary shares can still independently authorize access.
 Escalated and processing reports do not qualify for this community-review exception.
 Bytes already downloaded cannot be recalled.
+
+## Inactive grant cleanup
+
+The elected usage-poller leader inspects at most 1,000 media grants per tick,
+in primary-key order, and removes inactive grants in community-admitted transactions.
+The tick uses `BUZZ_USAGE_METRICS_INTERVAL_SECS` (300 seconds by default).
+The scan wraps at the end; its cursor is held in memory and restarts after a relay restart.
+Tenant-local failures retry on a later scan cycle, and quiescing/deleting communities are skipped.
+
+A grant is inactive when its source event is missing or deleted, or its edit target is no longer live.
+Live grants survive cleanup. Inactive public profile/emoji grants are removed completely.
+Cleanup compacts inactive channel history to at most one row per community and file: removing every
+channel row would incorrectly restore uploader preview access after message deletion.
+Whole-community purge removes that final row as well.
+
+Successful reclamation logs `reaped inactive media shares` with the number removed;
+failures log `failed to reap inactive media shares` or a tenant-local sweep error.
+This reclaims grant records; file retention follows the storage policy.

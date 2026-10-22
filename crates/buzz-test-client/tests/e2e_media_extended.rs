@@ -44,6 +44,30 @@ async fn media_db_pool() -> sqlx::PgPool {
     sqlx::PgPool::connect(&database).await.unwrap()
 }
 
+async fn wait_for_share_cleanup(hash: &str, maximum: i64) {
+    let pool = media_db_pool().await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let remaining: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM media_shares s JOIN communities c ON c.id = s.community_id \
+                 WHERE c.host = $1 AND s.sha256 = $2",
+            )
+            .bind(relay_server_authority())
+            .bind(hash)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if remaining <= maximum {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("periodic cleanup must reclaim inactive grant rows");
+    pool.close().await;
+}
+
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
     let server = relay_server_authority();
@@ -1012,6 +1036,17 @@ async fn test_deleted_messages_revoke_only_their_own_media_shares() {
         }
     }
 
+    // Wait for the actual periodic worker to compact the two dead edit grants.
+    // Losing every channel row would incorrectly restore uploader preview.
+    wait_for_share_cleanup(added_desc["sha256"].as_str().unwrap(), 1).await;
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(
+            read_status(&http, &owner, method.clone(), added_url).await,
+            404
+        );
+        assert_eq!(read_status(&http, &viewer, method, added_url).await, 404);
+    }
+
     // A community-wide note grants access only for as long as it survives.
     let note = EventBuilder::new(Kind::TextNote, format!("shared file {url}"))
         .sign_with_keys(&owner)
@@ -1139,6 +1174,10 @@ async fn test_profile_replacement_preserves_only_its_retained_avatar() {
                 "retaining a picture preserves its grant; removing it revokes it"
             );
         }
+    }
+    wait_for_share_cleanup(descriptor["sha256"].as_str().unwrap(), 0).await;
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(read_status(&http, &viewer, method, url).await, 404);
     }
 }
 

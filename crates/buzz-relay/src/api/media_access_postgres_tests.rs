@@ -375,6 +375,27 @@ async fn rollout_and_report_review_preserve_private_file_boundaries() {
         ),
         "an open report cannot revive an edit of a deleted message"
     );
+    let mut cleanup_cursor = None;
+    loop {
+        let batch = state
+            .db
+            .reap_inactive_media_shares(cleanup_cursor.as_ref(), 1000)
+            .await
+            .unwrap();
+        cleanup_cursor = batch.next_cursor;
+        if cleanup_cursor.is_none() {
+            break;
+        }
+    }
+    for cleaned_hash in [&hash, &edited_hash] {
+        assert!(
+            matches!(
+                check(&state, &tenant, &owner, cleaned_hash).await,
+                Err(MediaError::NotFound)
+            ),
+            "cleanup must not restore uploader preview for a deleted channel attachment"
+        );
+    }
     pool.close().await;
     for policy in [
         MediaReadMode::Off,

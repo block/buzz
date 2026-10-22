@@ -600,6 +600,7 @@ jobs:
     name: Relay E2E
     env:
       BUZZ_MEDIA_READ_MODE: enforce
+      BUZZ_USAGE_METRICS_INTERVAL_SECS: "5"
     runs-on: ubuntu-latest
     timeout-minutes: 20
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
