@@ -114,13 +114,6 @@ impl SyncHandle {
         self.notify.notify_one();
     }
 
-    fn resync_reason(&self) -> Option<&'static str> {
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .resync
-    }
-
     /// Record a fanned-out event that falls in this sync's channels.
     fn signal(&self, stored: &StoredEvent) {
         let kind = stored.event.kind.as_u16();
@@ -401,11 +394,8 @@ pub async fn handle_sync(
     // the handler slot past the budget or get EOSE after retirement.
     let initial = async {
         send_initial_set(&sub_id, owner, &filter, &reader, &conn, &state).await?;
-        // A resync requested during the read also ends the sync before EOSE.
-        if let Some(reason) = handle.resync_reason() {
-            return Err(Stop::Close(reason));
-        }
-        send_owned(&sub_id, owner, RelayMessage::eose(&sub_id), &conn).await
+        // A resync requested before EOSE is queued ends the sync without it.
+        send_eose(&sub_id, owner, &handle, &conn).await
     };
     let outcome = tokio::select! {
         biased;
@@ -575,6 +565,36 @@ async fn send_owned(
     frame: String,
     conn: &ConnectionState,
 ) -> Result<(), Stop> {
+    send_reserved(sub_id, owner, frame, None, conn).await
+}
+
+/// Queue `EOSE` like `send_owned`, unless the sync must resync. The pending
+/// resync is checked under the inbox lock while the frame is queued, so a
+/// resync recorded at any time before `EOSE` enters the queue ends the sync
+/// with `CLOSED` and no `EOSE` (rule 1); a later one closes after it.
+async fn send_eose(
+    sub_id: &str,
+    owner: u64,
+    handle: &SyncHandle,
+    conn: &ConnectionState,
+) -> Result<(), Stop> {
+    send_reserved(
+        sub_id,
+        owner,
+        RelayMessage::eose(sub_id),
+        Some(handle),
+        conn,
+    )
+    .await
+}
+
+async fn send_reserved(
+    sub_id: &str,
+    owner: u64,
+    frame: String,
+    unless_resync: Option<&SyncHandle>,
+    conn: &ConnectionState,
+) -> Result<(), Stop> {
     let slot = conn
         .send_tx
         .reserve()
@@ -583,6 +603,15 @@ async fn send_owned(
     let subs = conn.subscriptions.lock().await;
     if subs.get(sub_id) != Some(&owner) {
         return Err(Stop::Retired);
+    }
+    let pending = unless_resync.map(|handle| {
+        handle
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    });
+    if let Some(reason) = pending.as_ref().and_then(|pending| pending.resync) {
+        return Err(Stop::Close(reason));
     }
     slot.send(WsMessage::Text(frame.into()));
     Ok(())
@@ -874,22 +903,56 @@ mod tests {
                 .try_send(WsMessage::Text("fill".into()))
                 .unwrap();
         }
-        let waiting = tokio::spawn({
-            let conn = Arc::clone(&conn);
-            async move { send_owned("s", 1, "eose".into(), &conn).await }
-        });
-        tokio::task::yield_now().await;
-        assert!(!waiting.is_finished());
+        let mut waiting = std::pin::pin!(send_owned("s", 1, "eose".into(), &conn));
+        // Polled once, the frame is now waiting in `reserve`.
+        assert!(futures_util::poll!(&mut waiting).is_pending());
         // A replacing REQ takes the ID while the frame waits.
         conn.subscriptions.lock().await.insert("s".into(), 2);
         rx.recv().await.unwrap();
-        assert!(matches!(waiting.await.unwrap(), Err(Stop::Retired)));
+        assert!(matches!(waiting.await, Err(Stop::Retired)));
         let mut rest = 0;
         while let Ok(WsMessage::Text(text)) = rx.try_recv() {
             assert_eq!(text.as_str(), "fill");
             rest += 1;
         }
         assert_eq!(rest, capacity - 1);
+    }
+
+    /// A resync recorded while `EOSE` waits for queue room ends the sync
+    /// without `EOSE` (rule 1). Mutation: check the pending resync before
+    /// `reserve` instead of while queueing → `EOSE` is queued → RED.
+    #[tokio::test]
+    async fn resync_during_the_eose_wait_sends_no_eose() {
+        let (conn, mut rx) = conn_with_sub(1);
+        let handle = SyncHandle::new();
+        let capacity = conn.send_tx.capacity();
+        for _ in 0..capacity {
+            conn.send_tx
+                .try_send(WsMessage::Text("fill".into()))
+                .unwrap();
+        }
+        let mut waiting = std::pin::pin!(send_eose("s", 1, &handle, &conn));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        // The held list overflows while EOSE waits.
+        for _ in 0..=MAX_SYNC_EVENTS {
+            handle.signal(&stored(45010, Uuid::new_v4()));
+        }
+        rx.recv().await.unwrap();
+        assert!(matches!(
+            waiting.await,
+            Err(Stop::Close("resync: too many changes"))
+        ));
+        while let Ok(WsMessage::Text(text)) = rx.try_recv() {
+            assert_eq!(text.as_str(), "fill");
+        }
+
+        // Without a pending resync, EOSE is queued.
+        let clean = SyncHandle::new();
+        assert!(send_eose("s", 1, &clean, &conn).await.is_ok());
+        let Ok(WsMessage::Text(text)) = rx.try_recv() else {
+            panic!("no EOSE");
+        };
+        assert!(text.as_str().starts_with(r#"["EOSE""#), "{text}");
     }
 
     #[test]
