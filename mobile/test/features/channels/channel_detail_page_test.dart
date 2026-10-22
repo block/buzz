@@ -51,6 +51,7 @@ import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/features/channels/emoji_picker.dart';
+import 'package:buzz/features/channels/huddle_agents_provider.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
@@ -256,6 +257,7 @@ Widget _buildTestable({
   List<ChannelMember> members = const [],
   List<ChannelMember> huddleMembers = const [],
   _MutableHuddleMembersNotifier? huddleMembersNotifier,
+  Set<String>? huddleRecordAgentPubkeys,
   Channel? channel,
   ChannelDetails Function()? channelDetails,
   List<Channel>? channels,
@@ -387,6 +389,10 @@ Widget _buildTestable({
       ),
       if (huddleMembersNotifier != null)
         _mutableHuddleMembersProvider.overrideWith(() => huddleMembersNotifier),
+      if (huddleRecordAgentPubkeys != null)
+        huddleManagedAgentRecordPubkeysProvider(
+          _huddleChannelId,
+        ).overrideWith((ref) async => huddleRecordAgentPubkeys),
       if (!watchChannelMembershipUpdates)
         channelBotPubkeysProvider(_channelId).overrideWith(
           (ref) async => loadChannelBotPubkeys?.call() ?? const <String>{},
@@ -7391,6 +7397,135 @@ void main() {
         expect(
           find.byKey(const ValueKey('huddle-avatar-image-agent')),
           findsNothing,
+        );
+        expect(
+          find.bySemanticsLabel('Pollen, preparing a response'),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'keeps a record-only Huddle agent in the roster without audio',
+      (tester) async {
+        // After relay PR #8494 an agent without NIP-OA joins with role
+        // `member`. After admission the roster shows audio peers plus agents,
+        // so a record-only agent that is not on audio must still appear.
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final transport = _HuddleTestTransport(
+          peers: const {1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0)},
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'record-only-quiet-agent-call',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+              'person': UserProfile(pubkey: 'person', displayName: 'Away'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+            huddleMembers: [
+              ChannelMember(
+                pubkey: 'agent',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+              ChannelMember(
+                pubkey: 'person',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+            huddleRecordAgentPubkeys: const {'agent'},
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('huddle-participant-avatar-agent')),
+          findsOneWidget,
+        );
+        // A person who is not on audio is not in the roster after admission.
+        expect(
+          find.byKey(const ValueKey('huddle-participant-avatar-person')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'shows preparing indicator for a Huddle agent known only by its record',
+      (tester) async {
+        // After relay PR #8494 an agent without NIP-OA joins with role
+        // `member`. A managed-agent record from a trusted author still makes
+        // it an agent in the Huddle.
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final typing = _FakeTypingNotifier([
+          TypingEntry(
+            pubkey: 'agent',
+            expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+          ),
+        ], channelId: _huddleChannelId);
+        final transport = _HuddleTestTransport(
+          peers: const {
+            1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0),
+            2: HuddlePeer(pubkey: 'agent', peerIndex: 2, epoch: 0),
+          },
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'record-only-working-agent-call',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+            huddleMembers: [
+              ChannelMember(
+                pubkey: 'agent',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+            huddleRecordAgentPubkeys: const {'agent'},
+            huddleTypingNotifier: typing,
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pump(const Duration(milliseconds: 200));
+
+        expect(
+          find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+          findsOneWidget,
         );
         expect(
           find.bySemanticsLabel('Pollen, preparing a response'),

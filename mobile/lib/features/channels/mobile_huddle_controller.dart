@@ -7,6 +7,7 @@ import '../../shared/community/community_provider.dart';
 import '../../shared/huddle/huddle.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_management_provider.dart';
+import 'huddle_agents_provider.dart';
 
 typedef HuddleHumanCountLoader = Future<int> Function(String channelId);
 
@@ -65,9 +66,24 @@ final huddleHumanCountProvider = Provider<HuddleHumanCountLoader>((ref) {
       throw StateError('Relay disconnected during Huddle member lookup.');
     }
     if (events.isEmpty) return 0;
-    return membersFromEvent(
-      events.first,
-    ).where((member) => member.role != 'bot').length;
+    final members = membersFromEvent(events.first);
+    // An agent without NIP-OA has role `member`. A failed record read throws,
+    // so leave keeps the Huddle open rather than count an agent as a person.
+    final recordAgents = await fetchTrustedManagedAgentPubkeys(
+      ref.read(relaySessionProvider.notifier),
+      members: members,
+      viewerPubkey: ref.read(myPubkeyProvider),
+    );
+    if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
+      throw StateError('Relay disconnected during Huddle member lookup.');
+    }
+    return members
+        .where(
+          (member) =>
+              member.role != 'bot' &&
+              !recordAgents.contains(member.pubkey.trim().toLowerCase()),
+        )
+        .length;
   };
 });
 

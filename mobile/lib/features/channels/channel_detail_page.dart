@@ -58,6 +58,7 @@ import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
 import 'conversation_activity.dart';
 import 'conversation_activity_state.dart';
+import 'huddle_agents_provider.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
