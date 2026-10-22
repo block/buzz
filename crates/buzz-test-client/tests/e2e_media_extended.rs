@@ -37,6 +37,12 @@ fn http_client() -> Client {
         .expect("http client")
 }
 
+async fn media_db_pool() -> sqlx::PgPool {
+    let database = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test-only credentials
+    sqlx::PgPool::connect(&database).await.unwrap()
+}
+
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
     let server = relay_server_authority();
@@ -200,6 +206,24 @@ async fn test_upload_png_roundtrip() {
 
     // GET back — reads are authenticated, so scope a token to the uploaded hash.
     let sha256 = desc["sha256"].as_str().expect("descriptor sha256");
+    // Bind uploader recording to the real HTTP handler, independently of
+    // whether this relay currently enforces file reads.
+    let pool = media_db_pool().await;
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM media_uploaders u JOIN communities c ON c.id = u.community_id \
+         WHERE c.host = $1 AND u.sha256 = $2 AND u.pubkey = $3",
+    )
+    .bind(relay_server_authority())
+    .bind(sha256)
+    .bind(keys.public_key().to_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded, 1,
+        "successful upload must persist its authenticated uploader"
+    );
+    pool.close().await;
     let get = client
         .get(desc["url"].as_str().unwrap())
         .header(
