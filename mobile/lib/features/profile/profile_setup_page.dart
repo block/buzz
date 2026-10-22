@@ -130,7 +130,8 @@ class ProfileSetupPage extends HookConsumerWidget {
               };
             case 'save':
               name = ((call.arguments as Map)['name'] as String? ?? '').trim();
-              if (name.isEmpty || name.length > 100) return {'saved': false};
+              if (name.isEmpty || name.characters.length > 100)
+                return {'saved': false};
               try {
                 await save();
                 return {'saved': true};
