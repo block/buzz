@@ -40,8 +40,11 @@ Changing read modes does not revoke grants, and preventing reevaluation later do
 Any unwanted existing grants need a provenance-based repair before enforcement.
 Every invocation restarts the scan from the beginning; rows are deduplicated, but earlier authorization decisions are not preserved.
 
-Previously unshared uploads without uploader proof still need an upload of the exact bytes before they can be shared.
-Historical uploader backfill and unparsed-reference recovery remain separate work.
+Before recording shares, the backfill restores uploader proof from retained server
+`media_uploaded` audit rows with an attributed 32-byte pubkey and a valid SHA-256 object ID.
+It scans each community's audit sequence in bounded batches and skips quiescing/deleting communities.
+Missing, malformed, or unattributed audit evidence grants no ownership; those files still
+need an upload of the exact bytes. Unparsed references need separate repair before enforcement.
 To roll back file denials, set `off` or `log-only` and restart every pod.
 
 ## Open reports

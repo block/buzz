@@ -899,6 +899,39 @@ async fn test_private_channel_attachment_unreadable_to_non_members() {
         );
     }
 
+    // Exercise the actual membership tombstone, not just never-joined readers.
+    let recipient = BuzzTestClient::connect(&relay_ws_url(), &outsider)
+        .await
+        .unwrap();
+    let mut membership = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    for (kind, expected) in [(9000, 200), (9001, 404)] {
+        let change = EventBuilder::new(Kind::from(kind), "")
+            .tags([
+                Tag::parse(["h", &channel_id]).unwrap(),
+                Tag::parse(["p", &outsider.public_key().to_hex()]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let result = membership.send_event(change).await.unwrap();
+        assert!(
+            result.accepted,
+            "membership change rejected: {}",
+            result.message
+        );
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(
+                read_status(&http, &outsider, method.clone(), url).await,
+                expected,
+                "removed private-channel members must lose media access"
+            );
+            assert_eq!(read_status(&http, &owner, method, url).await, 200);
+        }
+    }
+    membership.disconnect().await.unwrap();
+    recipient.disconnect().await.unwrap();
+
     let outsider_channel = create_channel(&http, &outsider, "outsider-media", "open").await;
     let mut outsider_client = BuzzTestClient::connect(&relay_ws_url(), &outsider)
         .await
