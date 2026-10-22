@@ -146,6 +146,7 @@ RUN apt-get update \
         curl \
         git \
         openssl \
+        tini \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1000 buzz \
     && useradd  --system --uid 1000 --gid 1000 --home-dir /var/lib/buzz \
@@ -169,7 +170,11 @@ RUN mkdir -p /data/git && chown buzz:buzz /data/git
 USER buzz:buzz
 WORKDIR /var/lib/buzz
 
-ENTRYPOINT ["/usr/local/bin/buzz-relay"]
+# tini reaps zombies: the relay spawns git, and git's own children are
+# reparented to PID 1 when their parent exits. Without a reaper they pile up
+# until the container hits its pids limit and every spawn fails with EAGAIN.
+# -s keeps reaping when an outer init (e.g. `docker run --init`) is PID 1.
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/buzz-relay"]
 
 # Optimized binaries with line-table debug information for native profiling.
 # Published under debug-* tags; runtime behavior otherwise matches the normal
