@@ -146,6 +146,41 @@ async fn open_report_grants_only_audited_moderator_attachment_access() {
     );
     read(&http, &moderator, &base, &host, hash, 404).await;
     read(&http, &owner, &base, &host, hash, 200).await;
+
+    // A later edit adds a different attachment. The report targets the logical
+    // message, and deleting it must revoke the exception even while open.
+    let edited_hash = &sources[1].0;
+    let edit = EventBuilder::new(Kind::from(40003), format!("{base}/media/{edited_hash}"))
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["e", &event_id.to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    assert!(author.send_event(edit).await.unwrap().accepted);
+    let reopened = EventBuilder::new(Kind::from(1984), "review edited attachment")
+        .allow_self_tagging()
+        .tags([
+            Tag::parse(["e", &event_id.to_hex(), "spam"]).unwrap(),
+            Tag::parse(["p", &owner.public_key().to_hex(), "spam"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    assert!(author.send_event(reopened).await.unwrap().accepted);
+    read(&http, &moderator, &base, &host, edited_hash, 200).await;
+    read(&http, &stranger, &base, &host, edited_hash, 404).await;
+    let deletion = EventBuilder::new(Kind::EventDeletion, "delete edited message")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["e", &event_id.to_hex()]).unwrap(),
+            Tag::parse(["k", "9"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    assert!(author.send_event(deletion).await.unwrap().accepted);
+    read(&http, &moderator, &base, &host, edited_hash, 404).await;
+    // Its independent private post survives, so the channel owner still reads it.
+    read(&http, &owner, &base, &host, edited_hash, 200).await;
     author.disconnect().await.unwrap();
     reviewer.disconnect().await.unwrap();
 }

@@ -934,10 +934,30 @@ async fn test_deleted_messages_revoke_only_their_own_media_shares() {
         assert!(result.accepted, "attachment rejected: {}", result.message);
         messages.push(event);
     }
+    let added = upload(&http, &owner, &uuid::Uuid::new_v4().as_bytes().repeat(8)).await;
+    assert_eq!(added.status(), 200);
+    let added_desc: serde_json::Value = added.json().await.unwrap();
+    let added_url = added_desc["url"].as_str().unwrap();
+    for message in &messages[1..] {
+        let edit = EventBuilder::new(Kind::from(40003), "retain and add attachments")
+            .tags([
+                Tag::parse(["h", &open]).unwrap(),
+                Tag::parse(["e", &message.id.to_hex()]).unwrap(),
+                imeta_for(&desc),
+                imeta_for(&added_desc),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let result = client.send_event(edit).await.unwrap();
+        assert!(result.accepted, "edit rejected: {}", result.message);
+    }
     for reader in [&owner, &viewer] {
         for method in [Method::GET, Method::HEAD] {
             assert_eq!(read_status(&http, reader, method, url).await, 200);
         }
+    }
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(read_status(&http, &viewer, method, added_url).await, 200);
     }
     // Author deletion removes the first post; the second must keep its grant.
     // Moderator removal then removes the last open-channel grant.
@@ -959,7 +979,12 @@ async fn test_deleted_messages_revoke_only_their_own_media_shares() {
                 read_status(&http, &viewer, method.clone(), url).await,
                 expected
             );
-            assert_eq!(read_status(&http, &owner, method, url).await, 200);
+            assert_eq!(read_status(&http, &owner, method.clone(), url).await, 200);
+            assert_eq!(
+                read_status(&http, &viewer, method.clone(), added_url).await,
+                expected,
+                "deleting the logical message must revoke its edit-only attachment"
+            );
         }
     }
 

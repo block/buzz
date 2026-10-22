@@ -1,7 +1,7 @@
 use super::*;
 use buzz_db::channel::{ChannelType, ChannelVisibility};
 use buzz_db::moderation::{NewReport, ReportTarget};
-use nostr::{EventBuilder, Keys, Kind};
+use nostr::{EventBuilder, Keys, Kind, Tag};
 use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
@@ -149,6 +149,24 @@ async fn rollout_and_report_review_preserve_private_file_boundaries() {
         .id;
     let (hash, source) = post(&state, &tenant, &owner, private).await;
     let (unrelated, _) = post(&state, &tenant, &owner, private).await;
+    let (edited_hash, seed) = post(&state, &tenant, &owner, private).await;
+    let edit = EventBuilder::new(Kind::from(40003), format!("/media/{edited_hash}"))
+        .tags([
+            Tag::parse(["h", &private.to_string()]).unwrap(),
+            Tag::parse(["e", &source.id.to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    state
+        .db
+        .insert_event(community, &edit, Some(private))
+        .await
+        .unwrap();
+    state
+        .db
+        .soft_delete_event_and_update_thread(community, seed.id.as_bytes(), None, None)
+        .await
+        .unwrap();
     for policy in [
         MediaReadMode::Off,
         MediaReadMode::LogOnly,
@@ -204,6 +222,12 @@ async fn rollout_and_report_review_preserve_private_file_boundaries() {
     assert_eq!(audit.1, hash);
     assert_eq!(audit.2["report_id"], report_id.to_string());
     assert_eq!(audit.2["event_id"], source.id.to_hex());
+    assert!(
+        check(&state, &tenant, &reviewer, &edited_hash)
+            .await
+            .is_ok(),
+        "a report of the logical message covers its live edit attachment"
+    );
     assert!(matches!(
         check(&state, &tenant, &stranger, &hash).await,
         Err(MediaError::NotFound)
@@ -286,6 +310,10 @@ async fn rollout_and_report_review_preserve_private_file_boundaries() {
         ),
         "closing a report revokes the exception"
     );
+    assert!(matches!(
+        check(&state, &tenant, &reviewer, &edited_hash).await,
+        Err(MediaError::NotFound)
+    ));
     report(
         &state,
         &tenant,
@@ -339,6 +367,13 @@ async fn rollout_and_report_review_preserve_private_file_boundaries() {
             Err(MediaError::NotFound)
         ),
         "deleted messages grant no exception"
+    );
+    assert!(
+        matches!(
+            check(&state, &tenant, &reviewer, &edited_hash).await,
+            Err(MediaError::NotFound)
+        ),
+        "an open report cannot revive an edit of a deleted message"
     );
     pool.close().await;
     for policy in [

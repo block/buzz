@@ -23,15 +23,18 @@ impl Db {
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        Ok(sqlx::query_as(
+        Ok(sqlx::query_as(concat!(
             "SELECT r.id, r.target_event_id FROM moderation_reports r \
              JOIN media_shares s ON s.community_id = r.community_id \
-               AND s.event_id = r.target_event_id AND s.sha256 = $2 \
+               AND (s.event_id = r.target_event_id OR s.target_event_id = r.target_event_id) \
+               AND s.sha256 = $2 \
              JOIN events e ON e.community_id = s.community_id AND e.id = s.event_id \
-               AND e.created_at = s.event_created_at AND e.deleted_at IS NULL \
+               AND e.created_at = s.event_created_at AND ",
+            crate::store::media_reference::live_source_sql!(),
+            " \
              WHERE r.community_id = $1 AND r.target_kind = 'event' AND r.status = 'open' \
              ORDER BY r.created_at, r.id LIMIT 1",
-        )
+        ))
         .bind(community.as_uuid())
         .bind(sha256)
         .fetch_optional(&mut *conn)
