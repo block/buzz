@@ -105,8 +105,10 @@ enum Command {
     /// Run after every relay pod records shares and
     /// before enforcing channel-scoped media reads. Historical references are
     /// trusted only before each community's schema-recorded cutoff.
-    /// Later references use current permissions, so reruns can grant references
+    /// Later references use current permissions, so any run can grant references
     /// live recording previously refused if their authors have since gained access.
+    /// Accept the resulting lasting grants before the first backfill; otherwise
+    /// defer it. Each invocation restarts the scan and deduplicates existing rows.
     BackfillMediaShares {
         /// Events read and recorded per transaction.
         #[arg(long, default_value_t = 1000)]
