@@ -1,93 +1,81 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
-import { invoke } from "@tauri-apps/api/core";
+import type { ReactNode } from "react";
 import { Button } from "@/shared/ui/button";
 import { SquareEmployeeSignInCard } from "./SquareEmployeeSignInCard";
+import {
+  useSquareEmployeeSession,
+  type SquareEmployeeSessionState,
+} from "./useSquareEmployeeSession";
 
-type Status = {
-  required: boolean;
-  authenticated: boolean;
-  expiresAt: number | null;
-};
-
-/** Shows employee login before relay-dependent onboarding can hide its recovery action. */
+/** Protects relay content while keeping local community and identity recovery available. */
 export function SquareEmployeeSessionGate({
   active,
   scope,
+  session,
+  recovery,
   children,
 }: {
   active: boolean;
   scope: string;
+  session?: SquareEmployeeSessionState;
+  recovery?: ReactNode;
   children: ReactNode;
 }) {
   if (!active) return children;
-  return <ActiveSessionGate key={scope}>{children}</ActiveSessionGate>;
+  if (session)
+    return (
+      <SessionGateContent session={session} recovery={recovery}>
+        {children}
+      </SessionGateContent>
+    );
+  return (
+    <ActiveSessionGate key={scope} scope={scope} recovery={recovery}>
+      {children}
+    </ActiveSessionGate>
+  );
 }
 
-function ActiveSessionGate({ children }: { children: ReactNode }) {
-  const [status, setStatus] = useState<Status | null>(null);
-  const [error, setError] = useState(false);
-  const generation = useRef(0);
-  const refresh = useCallback(() => {
-    const ownGeneration = ++generation.current;
-    void invoke<Status>("employee_session_status")
-      .then((value) => {
-        if (generation.current !== ownGeneration) return;
-        setStatus(value);
-        setError(false);
-      })
-      .catch(() => {
-        if (generation.current !== ownGeneration) return;
-        setStatus(null);
-        setError(true);
-      });
-  }, []);
-  useEffect(() => {
-    refresh();
-    window.addEventListener("square-employee-auth-changed", refresh);
-    return () => {
-      generation.current += 1;
-      window.removeEventListener("square-employee-auth-changed", refresh);
-    };
-  }, [refresh]);
-  useEffect(() => {
-    if (!status?.expiresAt) return;
-    const timer = window.setTimeout(
-      () => {
-        setStatus(null);
-        refresh();
-      },
-      Math.max(0, status.expiresAt * 1000 - Date.now()),
-    );
-    return () => window.clearTimeout(timer);
-  }, [status, refresh]);
-  if (
-    status &&
-    (!status.required ||
-      (status.authenticated &&
-        status.expiresAt !== null &&
-        status.expiresAt * 1000 > Date.now()))
-  )
-    return children;
+function ActiveSessionGate({
+  scope,
+  recovery,
+  children,
+}: {
+  scope: string;
+  recovery?: ReactNode;
+  children: ReactNode;
+}) {
+  const session = useSquareEmployeeSession(true, scope);
+  return (
+    <SessionGateContent session={session} recovery={recovery}>
+      {children}
+    </SessionGateContent>
+  );
+}
+
+function SessionGateContent({
+  session,
+  recovery,
+  children,
+}: {
+  session: SquareEmployeeSessionState;
+  recovery?: ReactNode;
+  children: ReactNode;
+}) {
+  if (session.ready) return children;
   return (
     <main className="flex min-h-dvh items-center justify-center p-6">
       <div className="max-w-md space-y-4">
-        {error ? (
+        {session.error ? (
           <>
             <p role="alert">Square access could not be checked.</p>
-            <Button onClick={refresh}>Retry access check</Button>
+            <Button onClick={session.retry}>Retry access check</Button>
           </>
         ) : null}
-        {status?.required ? (
-          <SquareEmployeeSignInCard onConnected={refresh} />
+        {session.status?.required ? (
+          <SquareEmployeeSignInCard onConnected={session.refresh} />
         ) : (
           <p role="status">Checking community access…</p>
         )}
+        {recovery}
       </div>
     </main>
   );

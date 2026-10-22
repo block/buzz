@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { fireEvent } from "@testing-library/react";
@@ -9,19 +9,47 @@ import { SquareEmployeeSignInCard } from "./SquareEmployeeSignInCard.tsx";
 
 const handlers = new Map();
 const calls = [];
+const callbacks = new Map();
+const listeners = new Map();
+let nextId = 0;
 const ipc = {
   invoke(command, args) {
     calls.push([command, args]);
+    if (command === "plugin:event|listen") {
+      const id = ++nextId;
+      listeners.set(id, {
+        event: args.event,
+        callback: callbacks.get(args.handler),
+      });
+      return Promise.resolve(id);
+    }
+    if (command === "plugin:event|unlisten") {
+      listeners.delete(args.eventId);
+      return Promise.resolve();
+    }
     return (
       handlers.get(command)?.(args) ??
       Promise.reject(new Error(`Unexpected command: ${command}`))
     );
   },
+  transformCallback(callback) {
+    const id = ++nextId;
+    callbacks.set(id, callback);
+    return id;
+  },
+  unregisterCallback(id) {
+    callbacks.delete(id);
+  },
+};
+window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+  unregisterListener(_event, id) {
+    listeners.delete(id);
+  },
 };
 window.__TAURI_INTERNALS__ = ipc;
 globalThis.__TAURI_INTERNALS__ = ipc;
 const originalDisconnect = relayClient.disconnect;
-const originalPreconnect = relayClient.preconnect;
+const originalReconnect = relayClient.reconnect;
 let root;
 let container;
 const deferred = () => {
@@ -58,6 +86,13 @@ const gate = (scope) =>
     { active: true, scope },
     React.createElement("p", null, "Community chat"),
   );
+beforeEach(() => {
+  handlers.set("employee_session_status", async () => ({
+    required: true,
+    authenticated: false,
+    expiresAt: null,
+  }));
+});
 afterEach(async () => {
   if (root) await act(async () => root.unmount());
   container?.remove();
@@ -65,7 +100,9 @@ afterEach(async () => {
   handlers.clear();
   calls.length = 0;
   relayClient.disconnect = originalDisconnect;
-  relayClient.preconnect = originalPreconnect;
+  relayClient.reconnect = originalReconnect;
+  assert.equal(listeners.size, 0, "native session listeners are released");
+  callbacks.clear();
 });
 
 test("ordinary communities retain the existing onboarding path", async () => {
@@ -141,7 +178,7 @@ test("cancel fences a late login result before relay connection", async () => {
   handlers.set("start_employee_login", () => login.promise);
   handlers.set("cancel_builderlab_login", async () => undefined);
   relayClient.disconnect = () => {};
-  relayClient.preconnect = async () => {
+  relayClient.reconnect = async () => {
     connections += 1;
   };
   await mount(React.createElement(SquareEmployeeSignInCard));
@@ -162,15 +199,24 @@ test("community refusal keeps an explicit retry, and sign-out tears down native 
   let disconnects = 0;
   let connected = 0;
   handlers.set("employee_sign_in_available", async () => true);
-  handlers.set("start_employee_login", async () => ({
-    expires_at: "public expiry",
+  let authenticated = false;
+  handlers.set("employee_session_status", async () => ({
+    required: true,
+    authenticated,
+    expiresAt: authenticated ? Math.floor(Date.now() / 1000) + 240 : null,
   }));
+  handlers.set("start_employee_login", async () => {
+    authenticated = true;
+    return { expires_at: "public expiry" };
+  });
   handlers.set("refresh_employee_relay_access", async () => undefined);
-  handlers.set("clear_builderlab_auth", async () => undefined);
+  handlers.set("clear_builderlab_auth", async () => {
+    authenticated = false;
+  });
   relayClient.disconnect = () => {
     disconnects += 1;
   };
-  relayClient.preconnect = async () => {
+  relayClient.reconnect = async () => {
     if (++connects === 1) throw new Error("Community admission is pending");
   };
   await mount(
@@ -186,7 +232,12 @@ test("community refusal keeps an explicit retry, and sign-out tears down native 
   await click("Retry community connection");
   assert.equal(connected, 1);
   await click("Sign out of Square");
-  assert.equal(disconnects, 3);
+  assert.equal(
+    disconnects,
+    1,
+    "only sign-out tears down subscription ownership",
+  );
+  assert.equal(connects, 2, "login and retry preserve live owners");
   assert.equal(
     calls.filter(([name]) => name === "clear_builderlab_auth").length,
     1,
@@ -195,4 +246,107 @@ test("community refusal keeps an explicit retry, and sign-out tears down native 
     container.textContent,
     /Square session and your Buzz key are connected/,
   );
+});
+
+async function nativeSessionChanged() {
+  await act(async () => {
+    for (const [id, listener] of [...listeners])
+      if (listener.event === "builderlab-session-changed")
+        listener.callback({ event: listener.event, id, payload: null });
+  });
+  await settle();
+}
+
+test("settings hydrates existing native access and every view reacts to shared sign-out", async () => {
+  let authenticated = true;
+  handlers.set("employee_sign_in_available", async () => true);
+  handlers.set("employee_session_status", async () => ({
+    required: true,
+    authenticated,
+    expiresAt: authenticated ? Math.floor(Date.now() / 1000) + 240 : null,
+  }));
+  await mount(
+    React.createElement(
+      React.Fragment,
+      null,
+      gate("employee"),
+      React.createElement(SquareEmployeeSignInCard),
+    ),
+  );
+  assert.match(container.textContent, /Community chat/);
+  assert.match(container.textContent, /Sign out of Square/);
+  authenticated = false;
+  await nativeSessionChanged();
+  assert.doesNotMatch(container.textContent, /Community chat/);
+  assert.doesNotMatch(container.textContent, /Sign out of Square/);
+  assert.match(container.textContent, /Sign in with Square/);
+});
+
+test("native change closes content during recheck and ignores an older successful response", async () => {
+  handlers.set("employee_sign_in_available", async () => true);
+  handlers.set("employee_session_status", async () => ({
+    required: true,
+    authenticated: true,
+    expiresAt: Math.floor(Date.now() / 1000) + 240,
+  }));
+  await mount(gate("employee"));
+  assert.match(container.textContent, /Community chat/);
+  const pending = deferred();
+  handlers.set("employee_session_status", () => pending.promise);
+  await nativeSessionChanged();
+  assert.doesNotMatch(container.textContent, /Community chat/);
+  handlers.set("employee_session_status", async () => ({
+    required: true,
+    authenticated: false,
+    expiresAt: null,
+  }));
+  await nativeSessionChanged();
+  await act(async () =>
+    pending.resolve({
+      required: true,
+      authenticated: true,
+      expiresAt: Math.floor(Date.now() / 1000) + 240,
+    }),
+  );
+  await settle();
+  assert.doesNotMatch(container.textContent, /Community chat/);
+  assert.match(container.textContent, /Sign in with Square/);
+});
+
+test("local community and identity recovery stay reachable while access is refused", async () => {
+  let switched = 0,
+    recovered = 0,
+    canceled = 0;
+  handlers.set("employee_sign_in_available", async () => true);
+  const recovery = React.createElement(
+    "nav",
+    { "aria-label": "Community recovery" },
+    React.createElement(
+      "button",
+      { type: "button", onClick: () => switched++ },
+      "Switch to saved community",
+    ),
+    React.createElement(
+      "button",
+      { type: "button", onClick: () => recovered++ },
+      "Recover Buzz identity",
+    ),
+    React.createElement(
+      "button",
+      { type: "button", onClick: () => canceled++ },
+      "Cancel joining community",
+    ),
+  );
+  await mount(
+    React.createElement(
+      SquareEmployeeSessionGate,
+      { active: true, scope: "employee", recovery },
+      React.createElement("p", null, "Community chat"),
+    ),
+  );
+  await click("Switch to saved community");
+  await click("Recover Buzz identity");
+  await click("Cancel joining community");
+  assert.deepEqual([switched, recovered, canceled], [1, 1, 1]);
+  assert.doesNotMatch(container.textContent, /Community chat/);
 });

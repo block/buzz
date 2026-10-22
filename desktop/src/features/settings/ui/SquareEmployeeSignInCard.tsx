@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { relayClient } from "@/shared/api/relayClient";
 import { Button } from "@/shared/ui/button";
+import { useSquareEmployeeSession } from "./useSquareEmployeeSession";
 
 /** Explicitly enabled employee sign-in; the native process retains all session credentials. */
 export function SquareEmployeeSignInCard({
@@ -11,7 +12,11 @@ export function SquareEmployeeSignInCard({
 }) {
   const [available, setAvailable] = useState(false);
   const [pending, setPending] = useState(false);
-  const [signedIn, setSignedIn] = useState(false);
+  const session = useSquareEmployeeSession(
+    available,
+    "square-employee-settings",
+  );
+  const signedIn = session.status?.authenticated === true && session.ready;
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   useEffect(() => {
@@ -37,9 +42,8 @@ export function SquareEmployeeSignInCard({
     try {
       await invoke("start_employee_login");
       if (generation.current !== ownGeneration) return;
-      setSignedIn(true);
-      relayClient.disconnect();
-      await relayClient.preconnect();
+      session.refresh();
+      await relayClient.reconnect();
       if (generation.current === ownGeneration) {
         window.dispatchEvent(new Event("square-employee-auth-changed"));
         onConnected?.();
@@ -64,7 +68,7 @@ export function SquareEmployeeSignInCard({
     try {
       await invoke("clear_builderlab_auth");
       relayClient.disconnect();
-      setSignedIn(false);
+      session.refresh();
       window.dispatchEvent(new Event("square-employee-auth-changed"));
     } catch {
       setError("Could not sign out. Try again.");
@@ -77,8 +81,8 @@ export function SquareEmployeeSignInCard({
     try {
       await invoke("refresh_employee_relay_access");
       if (generation.current !== ownGeneration) return;
-      relayClient.disconnect();
-      await relayClient.preconnect();
+      session.refresh();
+      await relayClient.reconnect();
       if (generation.current === ownGeneration) {
         window.dispatchEvent(new Event("square-employee-auth-changed"));
         onConnected?.();
@@ -108,6 +112,14 @@ export function SquareEmployeeSignInCard({
         </p>
       ) : null}
       {error ? <p role="alert">{error}</p> : null}
+      {session.error ? (
+        <>
+          <p role="alert">Square session status could not be checked.</p>
+          <Button variant="outline" onClick={session.retry}>
+            Retry Square access check
+          </Button>
+        </>
+      ) : null}
       <Button
         disabled={pending}
         onClick={() => {
