@@ -704,7 +704,9 @@ mismatched `server` tag MUST be rejected as `evidence_rejected`.
 #### Read proofs
 
 Read proofs MAY be host-wide: no `x` tag is required for reads, and a valid
-read proof authorizes reads of any blob on the one bound tenant host.
+read proof authenticates the signing key on the one bound tenant host.
+Proof validity does not itself grant access to every blob: community membership
+and the relay's file-share policy apply separately.
 
 Read proofs MUST carry exactly one `server` tag whose value matches the
 request's already-resolved tenant host.  A read proof with an absent or
@@ -716,9 +718,12 @@ rejected as `evidence_rejected`.
 
 > **Named residual:** within a window of at most 60 seconds from minting (plus
 > a bounded 5-second future-skew allowance), a captured full header set allows
-> reading any media blob on exactly one tenant host.  This access is read-only,
-> membership-checked, and revocable via assertion expiry or deny-map
-> enforcement.  It is not state-changing and does not cross tenant boundaries.
+> impersonating the signing key for media reads on exactly one tenant host.
+> Where the relay enforces its file-share policy, reads are limited to files
+> that key may access through a live share, upload proof, or an audited
+> open-report review; otherwise community membership is the read-access gate.
+> This access is read-only and revocable via assertion expiry or deny-map
+> enforcement; it does not cross tenant boundaries.
 
 #### Freshness
 

@@ -579,6 +579,24 @@ async fn upload_blob_result(
         auth.tenant.host(),
     );
 
+    state
+        .db
+        .record_media_uploader(
+            serving_write.lease(),
+            &descriptor.sha256,
+            auth.auth_event.pubkey.as_bytes(),
+        )
+        .await
+        .map_err(|error| {
+            let error = anyhow::Error::from(error);
+            if buzz_deletion::ServingWriteGuard::is_lease_lost(&error) {
+                serving_lease_lost(error)
+            } else {
+                tracing::error!(%error, "media uploader recording failed");
+                MediaError::ServiceUnavailable
+            }
+        })?;
+
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
         "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4" => {
@@ -707,6 +725,24 @@ async fn enforce_blossom_read_membership(
     .map_err(|e| membership_denial(e, strictness))
 }
 
+/// Every read gate a Blossom GET/HEAD passes before any storage lookup:
+/// community membership, then the channels the blob is attached in. A channel
+/// refusal is `NotFound` so a non-member cannot probe whether a private
+/// attachment exists.
+async fn enforce_blossom_read_access(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    auth_event: &nostr::Event,
+    headers: &HeaderMap,
+    sha256: &str,
+    strictness: BlossomStrictness,
+) -> Result<(), MediaDenial> {
+    enforce_blossom_read_membership(state, tenant, auth_event, headers, strictness).await?;
+    super::media_access::enforce(state, tenant, auth_event.pubkey.as_bytes(), sha256)
+        .await
+        .map_err(|error| media_denial(error, strictness))
+}
+
 fn blob_cache_control() -> &'static str {
     "private, max-age=31536000, immutable"
 }
@@ -823,8 +859,9 @@ pub(crate) async fn get_blob(
         .map(drop)
     })
     .await;
+    let proof_sha256 = sha256.clone();
     let admission = match admit_nip_fi_http_on_state(&state, &req_headers, move || {
-        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
+        extract_blossom_read_proof(&headers_clone, &proof_sha256, &tenant_host, strictness)
             .map_err(|e| e.into_response())
     })
     .await
@@ -833,8 +870,15 @@ pub(crate) async fn get_blob(
         Err(resp) => return Ok(resp),
     };
     let auth_event = admission.into_extra();
-    // Post-admission: membership gate.
-    enforce_blossom_read_membership(&state, &tenant, &auth_event, &req_headers, strictness).await?;
+    enforce_blossom_read_access(
+        &state,
+        &tenant,
+        &auth_event,
+        &req_headers,
+        &sha256,
+        strictness,
+    )
+    .await?;
     serve_blob_for_tenant(&state, &tenant, &sha256_ext, &req_headers)
         .await
         .map_err(MediaDenial::from)
@@ -1120,8 +1164,9 @@ pub(crate) async fn head_blob(
             .map(drop)
     })
     .await;
+    let proof_sha256 = sha256.clone();
     let admission = match admit_nip_fi_http_on_state(&state, &headers, move || {
-        extract_blossom_read_proof(&headers_clone, &sha256, &tenant_host, strictness)
+        extract_blossom_read_proof(&headers_clone, &proof_sha256, &tenant_host, strictness)
             .map_err(|e| e.into_response())
     })
     .await
@@ -1130,7 +1175,8 @@ pub(crate) async fn head_blob(
         Err(resp) => return Ok(resp),
     };
     let auth_event = admission.into_extra();
-    enforce_blossom_read_membership(&state, &tenant, &auth_event, &headers, strictness).await?;
+    enforce_blossom_read_access(&state, &tenant, &auth_event, &headers, &sha256, strictness)
+        .await?;
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
@@ -2144,11 +2190,13 @@ mod tests {
         const TEST_ISSUER: &str = "https://issuer.example";
         const TEST_AUDIENCE: &str = "https://relay.example";
         const TEST_KID: &str = "test-key-1";
-        const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-            MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-            WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-            zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-            -----END PRIVATE KEY-----\n";
+        const TEST_EC_PKCS8_PEM: &str = concat!(
+            "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- static test-only key
+            "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+            "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+            "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+            "-----END PRIVATE KEY-----\n",
+        );
 
         /// Build an AppState with NIP-FI Enforce and a real injected P-256 verifier.
         async fn media_enforce_test_state() -> Option<Arc<AppState>> {

@@ -297,6 +297,10 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
     describe_community_admission_metrics();
     describe_db_pool_metrics();
     describe_auth_metrics();
+    metrics::describe_counter!(
+        "buzz_media_read_access_total",
+        "File authorization evaluations by rollout mode and bounded outcome"
+    );
     crate::startup_steps::describe_metrics();
     initialize_auth_metric_series();
     initialize_partition_audit_metric_series();

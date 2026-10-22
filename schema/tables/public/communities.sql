@@ -20,6 +20,8 @@ CREATE TABLE communities (
     -- Added by migration 0003; kept here so desired-state applies match.
     icon            TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- The share-recording cutoff exists in both desired-state and migrated DBs.
+    media_shares_recording_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     archived_at     TIMESTAMPTZ,
     deletion_state  TEXT NOT NULL DEFAULT 'active' CHECK (deletion_state IN ('active', 'quiescing', 'fenced', 'tombstone')),
     deletion_fence_generation BIGINT NOT NULL DEFAULT 0 CHECK (deletion_fence_generation >= 0),

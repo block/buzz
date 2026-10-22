@@ -598,6 +598,9 @@ jobs:
 
   relay-e2e:
     name: Relay E2E
+    env:
+      BUZZ_MEDIA_READ_MODE: enforce
+      BUZZ_USAGE_METRICS_INTERVAL_SECS: "5"
     runs-on: ubuntu-latest
     timeout-minutes: 20
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
@@ -643,7 +646,7 @@ jobs:
         # --no-fail-fast: without it cargo stops after the first failing binary,
         # so one broken case hides every later binary's result.
         run: |
-          cargo test -p buzz-test-client --no-fail-fast --test e2e_media --test e2e_media_extended --test e2e_media_video -- --ignored --nocapture
+          cargo test -p buzz-test-client --no-fail-fast --test e2e_media --test e2e_media_extended --test e2e_media_review --test e2e_media_video -- --ignored --nocapture
         env:
           RELAY_URL: ws://localhost:3000
           RELAY_HTTP_URL: http://localhost:3000

@@ -1,7 +1,10 @@
 //! App-owned follow-up work for a newly inserted `events` row.
 //!
-//! Two pieces of work follow every durable event insert:
+//! Three pieces of work follow every durable event insert:
 //!
+//! - **Media grants.** References grant access only after their author passes
+//!   the sharing check. Replacements record these before retiring the old head,
+//!   inside their savepoint; delivery is staged only after it succeeds.
 //! - **Push match enqueue.** Eligible event IDs are staged in memory. Commit
 //!   submits them to a bounded best-effort worker using a dedicated connection.
 //!   Push errors, delays, overload, and shutdown can drop wakes, never messages.
@@ -37,16 +40,51 @@ const SQLSTATE_LOCK_NOT_AVAILABLE: &str = "55P03";
 /// Follow-up for an event row inserted in an admitted transaction.
 ///
 /// Call only when the INSERT affected a row, after releasing any savepoint
-/// that may roll it back. Stages push work for after commit and records TTL work.
+/// that may roll it back. Stages push work for after commit, records TTL work,
+/// and shares the blobs the event references into its channel in the same
+/// transaction, so a stored reference always carries its share.
 pub(crate) async fn after_admitted_insert(
     tx: &mut AdmittedTx,
-    event_id: &[u8],
-    kind: i32,
+    event: &nostr::Event,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
-    tx.record_push_event(event_id, kind);
-    tx.record_channel_event(channel_id, kind);
+    record_admitted_media(tx, event, channel_id).await?;
+    stage_admitted_insert(tx, event, channel_id);
     Ok(())
+}
+
+/// Record media inside a replacement's savepoint, before retiring its old head.
+/// This preserves authority carried by a reference the new head keeps.
+pub(crate) async fn record_admitted_media(
+    tx: &mut AdmittedTx,
+    event: &nostr::Event,
+    channel_id: Option<Uuid>,
+) -> Result<()> {
+    let hashes = buzz_core::media::shared_blob_hashes(event);
+    if !hashes.is_empty() {
+        let community = tx.community();
+        crate::store::media_reference::record_media_shares(
+            tx.conn(),
+            community,
+            &hashes,
+            event,
+            channel_id,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Stage delivery only after the insertion's savepoint has succeeded.
+/// Call after [`record_admitted_media`] when splitting the two phases.
+pub(crate) fn stage_admitted_insert(
+    tx: &mut AdmittedTx,
+    event: &nostr::Event,
+    channel_id: Option<Uuid>,
+) {
+    let kind = i32::from(event.kind.as_u16());
+    tx.record_push_event(event.id.as_bytes(), kind);
+    tx.record_channel_event(channel_id, kind);
 }
 
 /// The channel whose TTL an event of `kind` in `channel_id` refreshes, if any.

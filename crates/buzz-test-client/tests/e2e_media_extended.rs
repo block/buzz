@@ -1,7 +1,8 @@
 //! Extended media upload integration tests — auth edge cases, content validation,
 //! multi-format uploads, WebSocket imeta validation.
 //!
-//! Run: cargo test -p buzz-test-client --test e2e_media_extended -- --ignored --nocapture
+//! Run: cargo test -p buzz-test-client --test e2e_media_extended -- --ignored --nocapture --test-threads=1
+//! The full suite expects BUZZ_MEDIA_READ_MODE=enforce on the relay.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
@@ -35,6 +36,36 @@ fn http_client() -> Client {
         .timeout(Duration::from_secs(15))
         .build()
         .expect("http client")
+}
+
+async fn media_db_pool() -> sqlx::PgPool {
+    let database = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test-only credentials
+    sqlx::PgPool::connect(&database).await.unwrap()
+}
+
+async fn wait_for_share_cleanup(hash: &str, maximum: i64) {
+    let pool = media_db_pool().await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let remaining: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM media_shares s JOIN communities c ON c.id = s.community_id \
+                 WHERE c.host = $1 AND s.sha256 = $2",
+            )
+            .bind(relay_server_authority())
+            .bind(hash)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if remaining <= maximum {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("periodic cleanup must reclaim inactive grant rows");
+    pool.close().await;
 }
 
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
@@ -96,6 +127,55 @@ async fn upload_to_path(
         .send()
         .await
         .expect("upload request")
+}
+
+/// Status of an authenticated Blossom read of `url` by `keys`.
+async fn read_status(client: &Client, keys: &Keys, method: reqwest::Method, url: &str) -> u16 {
+    let sha256 = url
+        .rsplit('/')
+        .next()
+        .and_then(|file| file.split('.').next())
+        .expect("media url ends in {sha256}.{ext}");
+    client
+        .request(method, url)
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_get_auth(keys, sha256)),
+        )
+        .send()
+        .await
+        .expect("read request")
+        .status()
+        .as_u16()
+}
+
+/// Create a stream channel owned by `keys` via a signed kind:9007; returns its id.
+async fn create_channel(
+    client: &Client,
+    keys: &Keys,
+    name_prefix: &str,
+    visibility: &str,
+) -> String {
+    let channel_id = uuid::Uuid::new_v4().to_string();
+    let create_event = EventBuilder::new(Kind::from(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["name", &format!("{name_prefix}-{channel_id}")]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", visibility]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap();
+    let create_resp = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&create_event).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert!(create_resp.status().is_success(), "channel creation failed");
+    channel_id
 }
 
 fn tiny_jpeg() -> Vec<u8> {
@@ -200,6 +280,24 @@ async fn test_upload_png_roundtrip() {
 
     // GET back — reads are authenticated, so scope a token to the uploaded hash.
     let sha256 = desc["sha256"].as_str().expect("descriptor sha256");
+    // Bind uploader recording to the real HTTP handler, independently of
+    // whether this relay currently enforces file reads.
+    let pool = media_db_pool().await;
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM media_uploaders u JOIN communities c ON c.id = u.community_id \
+         WHERE c.host = $1 AND u.sha256 = $2 AND u.pubkey = $3",
+    )
+    .bind(relay_server_authority())
+    .bind(sha256)
+    .bind(keys.public_key().to_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded, 1,
+        "successful upload must persist its authenticated uploader"
+    );
+    pool.close().await;
     let get = client
         .get(desc["url"].as_str().unwrap())
         .header(
@@ -411,7 +509,7 @@ async fn test_auth_server_tag_correct() {
             Tag::parse(["t", "upload"]).unwrap(),
             Tag::parse(["x", &sha256]).unwrap(),
             Tag::parse(["expiration", &(now + 55).to_string()]).unwrap(),
-            Tag::parse(["server", "localhost:3000"]).unwrap(),
+            Tag::parse(["server", &relay_server_authority()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
@@ -631,38 +729,16 @@ async fn test_ws_valid_imeta() {
     use buzz_test_client::BuzzTestClient;
 
     let keys = Keys::generate();
-    let pubkey_hex = keys.public_key().to_hex();
     let http = http_client();
 
-    // Create channel via signed kind:9007 event
-    let channel_uuid = uuid::Uuid::new_v4();
-    let channel_name = format!("ws-imeta-test-{}", channel_uuid);
-    let create_event = EventBuilder::new(Kind::from(9007), "")
-        .tags(vec![
-            Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
-            Tag::parse(["name", &channel_name]).unwrap(),
-            Tag::parse(["channel_type", "stream"]).unwrap(),
-            Tag::parse(["visibility", "open"]).unwrap(),
-        ])
-        .sign_with_keys(&keys)
-        .unwrap();
-    let create_resp = http
-        .post(format!("{}/events", relay_http_url()))
-        .header("X-Pubkey", &pubkey_hex)
-        .header("Content-Type", "application/json")
-        .body(serde_json::to_string(&create_event).unwrap())
-        .send()
-        .await
-        .unwrap();
-    assert!(create_resp.status().is_success(), "channel creation failed");
-    let channel_id = channel_uuid.to_string();
+    let channel_id = create_channel(&http, &keys, "ws-imeta-test", "open").await;
     println!("Channel: {channel_id}");
 
     // Upload a JPEG to get a valid sha256
     let jpeg = tiny_jpeg();
-    let sha256 = hex::encode(Sha256::digest(&jpeg));
     let resp = upload(&http, &keys, &jpeg).await;
     assert_eq!(resp.status(), 200);
+    let descriptor: serde_json::Value = resp.json().await.unwrap();
 
     // Connect via WebSocket
     let mut client = BuzzTestClient::connect(&relay_ws_url(), &keys)
@@ -673,14 +749,7 @@ async fn test_ws_valid_imeta() {
     let event = EventBuilder::new(Kind::from(9), "image via ws")
         .tags(vec![
             Tag::parse(["h", &channel_id]).unwrap(),
-            Tag::parse([
-                "imeta",
-                &format!("url http://localhost:3000/media/{sha256}.jpg"),
-                "m image/jpeg",
-                &format!("x {sha256}"),
-                "size 347",
-            ])
-            .unwrap(),
+            imeta_for(&descriptor),
         ])
         .sign_with_keys(&keys)
         .unwrap();
@@ -702,30 +771,9 @@ async fn test_ws_invalid_imeta_external_url() {
     use buzz_test_client::BuzzTestClient;
 
     let keys = Keys::generate();
-    let pubkey_hex = keys.public_key().to_hex();
     let http = http_client();
 
-    let channel_uuid = uuid::Uuid::new_v4();
-    let channel_name = format!("ws-imeta-bad-{}", channel_uuid);
-    let create_event = EventBuilder::new(Kind::from(9007), "")
-        .tags(vec![
-            Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
-            Tag::parse(["name", &channel_name]).unwrap(),
-            Tag::parse(["channel_type", "stream"]).unwrap(),
-            Tag::parse(["visibility", "open"]).unwrap(),
-        ])
-        .sign_with_keys(&keys)
-        .unwrap();
-    let create_resp = http
-        .post(format!("{}/events", relay_http_url()))
-        .header("X-Pubkey", &pubkey_hex)
-        .header("Content-Type", "application/json")
-        .body(serde_json::to_string(&create_event).unwrap())
-        .send()
-        .await
-        .unwrap();
-    assert!(create_resp.status().is_success(), "channel creation failed");
-    let channel_id = channel_uuid.to_string();
+    let channel_id = create_channel(&http, &keys, "ws-imeta-bad", "open").await;
 
     let sha = "a".repeat(64);
     let mut client = BuzzTestClient::connect(&relay_ws_url(), &keys)
@@ -768,30 +816,9 @@ async fn test_ws_invalid_imeta_missing_fields() {
     use buzz_test_client::BuzzTestClient;
 
     let keys = Keys::generate();
-    let pubkey_hex = keys.public_key().to_hex();
     let http = http_client();
 
-    let channel_uuid = uuid::Uuid::new_v4();
-    let channel_name = format!("ws-imeta-miss-{}", channel_uuid);
-    let create_event = EventBuilder::new(Kind::from(9007), "")
-        .tags(vec![
-            Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
-            Tag::parse(["name", &channel_name]).unwrap(),
-            Tag::parse(["channel_type", "stream"]).unwrap(),
-            Tag::parse(["visibility", "open"]).unwrap(),
-        ])
-        .sign_with_keys(&keys)
-        .unwrap();
-    let create_resp = http
-        .post(format!("{}/events", relay_http_url()))
-        .header("X-Pubkey", &pubkey_hex)
-        .header("Content-Type", "application/json")
-        .body(serde_json::to_string(&create_event).unwrap())
-        .send()
-        .await
-        .unwrap();
-    assert!(create_resp.status().is_success(), "channel creation failed");
-    let channel_id = channel_uuid.to_string();
+    let channel_id = create_channel(&http, &keys, "ws-imeta-miss", "open").await;
 
     let sha = "b".repeat(64);
     let mut client = BuzzTestClient::connect(&relay_ws_url(), &keys)
@@ -816,4 +843,449 @@ async fn test_ws_invalid_imeta_missing_fields() {
     println!("✅ WS incomplete imeta rejected: {:?}", ok.message);
 
     client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_private_channel_attachment_unreadable_to_non_members() {
+    use buzz_test_client::BuzzTestClient;
+    use reqwest::Method;
+
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let http = http_client();
+    let channel_id = create_channel(&http, &owner, "private-media", "private").await;
+
+    let body = uuid::Uuid::new_v4().as_bytes().repeat(8);
+    let resp = upload(&http, &owner, &body).await;
+    assert_eq!(resp.status(), 200);
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    let url = desc["url"].as_str().expect("descriptor url");
+
+    assert_eq!(
+        read_status(&http, &owner, Method::GET, url).await,
+        200,
+        "an uploader can preview an unposted upload"
+    );
+    assert_eq!(
+        read_status(&http, &outsider, Method::GET, url).await,
+        404,
+        "an unposted upload is readable only by its uploader"
+    );
+
+    let imeta = imeta_for(&desc);
+
+    let mut owner_client = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    let event = EventBuilder::new(Kind::from(9), "private attachment")
+        .tags(vec![Tag::parse(["h", &channel_id]).unwrap(), imeta.clone()])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let ok = owner_client.send_event(event).await.unwrap();
+    assert!(ok.accepted, "attachment rejected: {:?}", ok.message);
+    owner_client.disconnect().await.unwrap();
+
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(
+            read_status(&http, &outsider, method.clone(), url).await,
+            404,
+            "{method} by a non-member must not reveal a private-channel attachment"
+        );
+        assert_eq!(
+            read_status(&http, &owner, method.clone(), url).await,
+            200,
+            "{method} by a channel member must still succeed"
+        );
+    }
+
+    // Exercise the actual membership tombstone, not just never-joined readers.
+    let recipient = BuzzTestClient::connect(&relay_ws_url(), &outsider)
+        .await
+        .unwrap();
+    let mut membership = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    for (kind, expected) in [(9000, 200), (9001, 404)] {
+        let change = EventBuilder::new(Kind::from(kind), "")
+            .tags([
+                Tag::parse(["h", &channel_id]).unwrap(),
+                Tag::parse(["p", &outsider.public_key().to_hex()]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let result = membership.send_event(change).await.unwrap();
+        assert!(
+            result.accepted,
+            "membership change rejected: {}",
+            result.message
+        );
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(
+                read_status(&http, &outsider, method.clone(), url).await,
+                expected,
+                "removed private-channel members must lose media access"
+            );
+            assert_eq!(read_status(&http, &owner, method, url).await, 200);
+        }
+    }
+    membership.disconnect().await.unwrap();
+    recipient.disconnect().await.unwrap();
+
+    let outsider_channel = create_channel(&http, &outsider, "outsider-media", "open").await;
+    let mut outsider_client = BuzzTestClient::connect(&relay_ws_url(), &outsider)
+        .await
+        .unwrap();
+    let mut post_in_outsider_channel = async |content: &str| {
+        let event = EventBuilder::new(Kind::from(9), content)
+            .tags(vec![
+                Tag::parse(["h", &outsider_channel]).unwrap(),
+                imeta.clone(),
+            ])
+            .sign_with_keys(&outsider)
+            .unwrap();
+        let ok = outsider_client.send_event(event).await.unwrap();
+        assert!(ok.accepted, "post rejected: {:?}", ok.message);
+    };
+    let viewer = Keys::generate();
+
+    post_in_outsider_channel("reshare by hash").await;
+    assert_eq!(
+        read_status(&http, &viewer, Method::GET, url).await,
+        404,
+        "referencing a known hash must not share the blob"
+    );
+
+    assert_eq!(upload(&http, &outsider, &body).await.status(), 200);
+    assert_eq!(
+        read_status(&http, &outsider, Method::GET, url).await,
+        404,
+        "uploading grants no read access until the blob is shared"
+    );
+    post_in_outsider_channel("my own copy").await;
+    assert_eq!(
+        read_status(&http, &viewer, Method::GET, url).await,
+        200,
+        "uploading the same bytes lets the uploader share it into their channel"
+    );
+    outsider_client.disconnect().await.unwrap();
+}
+
+/// NIP-92 `imeta` tag attaching the blob an upload `desc` describes.
+fn imeta_for(desc: &serde_json::Value) -> Tag {
+    Tag::parse([
+        "imeta",
+        &format!("url {}", desc["url"].as_str().unwrap()),
+        &format!("m {}", desc["type"].as_str().unwrap()),
+        &format!("x {}", desc["sha256"].as_str().unwrap()),
+        &format!("size {}", desc["size"]),
+    ])
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_deleted_messages_revoke_only_their_own_media_shares() {
+    use buzz_test_client::BuzzTestClient;
+    use reqwest::Method;
+
+    let (owner, viewer) = (Keys::generate(), Keys::generate());
+    let http = http_client();
+    let private = create_channel(&http, &owner, "retained-media", "private").await;
+    let open = create_channel(&http, &owner, "deleted-media", "open").await;
+    let body = uuid::Uuid::new_v4().as_bytes().repeat(8);
+    let response = upload(&http, &owner, &body).await;
+    assert_eq!(response.status(), 200);
+    let desc: serde_json::Value = response.json().await.unwrap();
+    let url = desc["url"].as_str().unwrap();
+    let mut client = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    let mut messages = Vec::new();
+    for (name, channel) in [
+        ("private copy", &private),
+        ("first", &open),
+        ("last", &open),
+    ] {
+        let event = EventBuilder::new(Kind::from(9), name)
+            .tags([Tag::parse(["h", channel]).unwrap(), imeta_for(&desc)])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let result = client.send_event(event.clone()).await.unwrap();
+        assert!(result.accepted, "attachment rejected: {}", result.message);
+        messages.push(event);
+    }
+    let added = upload(&http, &owner, &uuid::Uuid::new_v4().as_bytes().repeat(8)).await;
+    assert_eq!(added.status(), 200);
+    let added_desc: serde_json::Value = added.json().await.unwrap();
+    let added_url = added_desc["url"].as_str().unwrap();
+    for message in &messages[1..] {
+        let edit = EventBuilder::new(Kind::from(40003), "retain and add attachments")
+            .tags([
+                Tag::parse(["h", &open]).unwrap(),
+                Tag::parse(["e", &message.id.to_hex()]).unwrap(),
+                imeta_for(&desc),
+                imeta_for(&added_desc),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let result = client.send_event(edit).await.unwrap();
+        assert!(result.accepted, "edit rejected: {}", result.message);
+    }
+    for reader in [&owner, &viewer] {
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(read_status(&http, reader, method, url).await, 200);
+        }
+    }
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(read_status(&http, &viewer, method, added_url).await, 200);
+    }
+    // Author deletion removes the first post; the second must keep its grant.
+    // Moderator removal then removes the last open-channel grant.
+    for (kind, index, expected) in [(5, 1, 200), (9005, 2, 404)] {
+        let mut tags = vec![Tag::parse(["e", &messages[index].id.to_hex()]).unwrap()];
+        if kind == 5 {
+            tags.push(Tag::parse(["k", "9"]).unwrap());
+        } else {
+            tags.push(Tag::parse(["h", &open]).unwrap());
+        }
+        let deletion = EventBuilder::new(Kind::from(kind), "remove attachment")
+            .tags(tags)
+            .sign_with_keys(&owner)
+            .unwrap();
+        let result = client.send_event(deletion).await.unwrap();
+        assert!(result.accepted, "deletion rejected: {}", result.message);
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(
+                read_status(&http, &viewer, method.clone(), url).await,
+                expected
+            );
+            assert_eq!(read_status(&http, &owner, method.clone(), url).await, 200);
+            assert_eq!(
+                read_status(&http, &viewer, method.clone(), added_url).await,
+                expected,
+                "deleting the logical message must revoke its edit-only attachment"
+            );
+        }
+    }
+
+    // Wait for the actual periodic worker to compact the two dead edit grants.
+    // Losing every channel row would incorrectly restore uploader preview.
+    wait_for_share_cleanup(added_desc["sha256"].as_str().unwrap(), 1).await;
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(
+            read_status(&http, &owner, method.clone(), added_url).await,
+            404
+        );
+        assert_eq!(read_status(&http, &viewer, method, added_url).await, 404);
+    }
+
+    // A community-wide note grants access only for as long as it survives.
+    let note = EventBuilder::new(Kind::TextNote, format!("shared file {url}"))
+        .sign_with_keys(&owner)
+        .unwrap();
+    assert!(client.send_event(note.clone()).await.unwrap().accepted);
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(read_status(&http, &viewer, method, url).await, 200);
+    }
+    let deletion = EventBuilder::new(Kind::EventDeletion, "remove note")
+        .tags([
+            Tag::parse(["e", &note.id.to_hex()]).unwrap(),
+            Tag::parse(["k", "1"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    let result = client.send_event(deletion).await.unwrap();
+    assert!(
+        result.accepted,
+        "note deletion rejected: {}",
+        result.message
+    );
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(read_status(&http, &viewer, method.clone(), url).await, 404);
+        assert_eq!(read_status(&http, &owner, method, url).await, 200);
+    }
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_private_attachment_cannot_hide_an_avatar() {
+    use buzz_test_client::BuzzTestClient;
+    use reqwest::Method;
+
+    let owner = Keys::generate();
+    let griefer = Keys::generate();
+    let viewer = Keys::generate();
+    let http = http_client();
+
+    let body = uuid::Uuid::new_v4().as_bytes().repeat(8);
+    let resp = upload(&http, &owner, &body).await;
+    assert_eq!(resp.status(), 200);
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    let url = desc["url"].as_str().expect("descriptor url");
+
+    let mut owner_client = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    let profile = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({ "picture": url }).to_string(),
+    )
+    .sign_with_keys(&owner)
+    .unwrap();
+    let ok = owner_client.send_event(profile).await.unwrap();
+    assert!(ok.accepted, "profile rejected: {:?}", ok.message);
+    owner_client.disconnect().await.unwrap();
+
+    let channel_id = create_channel(&http, &griefer, "hide-avatar", "private").await;
+    let mut griefer_client = BuzzTestClient::connect(&relay_ws_url(), &griefer)
+        .await
+        .unwrap();
+    let event = EventBuilder::new(Kind::from(9), "attach someone's avatar")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            imeta_for(&desc),
+        ])
+        .sign_with_keys(&griefer)
+        .unwrap();
+    let ok = griefer_client.send_event(event).await.unwrap();
+    assert!(ok.accepted, "attachment rejected: {:?}", ok.message);
+    griefer_client.disconnect().await.unwrap();
+
+    assert_eq!(
+        read_status(&http, &viewer, Method::GET, url).await,
+        200,
+        "a private attachment must not hide a current avatar"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_profile_replacement_preserves_only_its_retained_avatar() {
+    use buzz_test_client::BuzzTestClient;
+    use reqwest::Method;
+
+    let (uploader, publisher, viewer) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let http = http_client();
+    let mut image = tiny_gif();
+    image[13..19].copy_from_slice(&uuid::Uuid::new_v4().as_bytes()[..6]);
+    let response = upload(&http, &uploader, &image).await;
+    assert_eq!(response.status(), 200);
+    let descriptor: serde_json::Value = response.json().await.unwrap();
+    let url = descriptor["url"].as_str().unwrap();
+    let base = Timestamp::now().as_secs();
+    for (signer, keep_picture, step, expected) in [
+        (&uploader, true, 0, 200),
+        (&publisher, true, 0, 200),
+        (&uploader, false, 1, 200),
+        (&publisher, true, 1, 200),
+        (&publisher, false, 2, 404),
+        (&publisher, true, 3, 404),
+    ] {
+        let mut client = BuzzTestClient::connect(&relay_ws_url(), signer)
+            .await
+            .unwrap();
+        let profile = EventBuilder::new(
+            Kind::Metadata,
+            serde_json::json!({
+                "name": format!("updated-profile-{step}"),
+                "picture": if keep_picture { url } else { "" },
+            })
+            .to_string(),
+        )
+        .custom_created_at(Timestamp::from_secs(base + step))
+        .sign_with_keys(signer)
+        .unwrap();
+        let result = client.send_event(profile).await.unwrap();
+        assert!(result.accepted, "profile rejected: {}", result.message);
+        client.disconnect().await.unwrap();
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(
+                read_status(&http, &viewer, method, url).await,
+                expected,
+                "retaining a picture preserves its grant; removing it revokes it"
+            );
+        }
+    }
+    wait_for_share_cleanup(descriptor["sha256"].as_str().unwrap(), 0).await;
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(read_status(&http, &viewer, method, url).await, 404);
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_agent_avatar_uploaded_by_owner_is_readable_to_other_members() {
+    use buzz_sdk::nip_oa;
+    use buzz_test_client::BuzzTestClient;
+    use reqwest::Method;
+
+    let (owner, agent, viewer) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let http = http_client();
+    let owner_client = BuzzTestClient::connect(&relay_ws_url(), &owner)
+        .await
+        .unwrap();
+    let mut image = tiny_gif();
+    image[13..19].copy_from_slice(&uuid::Uuid::new_v4().as_bytes()[..6]);
+    let response = upload(&http, &owner, &image).await;
+    assert_eq!(response.status(), 200);
+    let descriptor: serde_json::Value = response.json().await.unwrap();
+    let url = descriptor["url"].as_str().unwrap();
+    assert_eq!(read_status(&http, &viewer, Method::GET, url).await, 404);
+
+    let tag = nip_oa::compute_auth_tag(&owner, &agent.public_key(), "kind=0").unwrap();
+    let tag = nip_oa::parse_auth_tag(&tag).unwrap();
+    let mut agent_client = BuzzTestClient::connect_unauthenticated(&relay_ws_url())
+        .await
+        .unwrap();
+    agent_client
+        .authenticate_with_nip_oa(&agent, &tag)
+        .await
+        .unwrap();
+    let profile = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"picture": url}).to_string(),
+    )
+    .sign_with_keys(&agent)
+    .unwrap();
+    let result = agent_client.send_event(profile).await.unwrap();
+    assert!(
+        result.accepted,
+        "agent profile rejected: {}",
+        result.message
+    );
+    for reader in [&agent, &viewer] {
+        for method in [Method::GET, Method::HEAD] {
+            assert_eq!(read_status(&http, reader, method, url).await, 200);
+        }
+    }
+    agent_client.disconnect().await.unwrap();
+    owner_client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_media_read_rollout_policy() {
+    use reqwest::Method;
+    let policy = std::env::var("MEDIA_READ_TEST_MODE").unwrap_or_else(|_| "enforce".into());
+    assert!(["off", "log-only", "enforce"].contains(&policy.as_str()));
+    let (owner, outsider) = (Keys::generate(), Keys::generate());
+    let http = http_client();
+    let response = upload(&http, &owner, &uuid::Uuid::new_v4().as_bytes().repeat(8)).await;
+    assert_eq!(response.status(), 200);
+    let descriptor: serde_json::Value = response.json().await.unwrap();
+    let url = descriptor["url"].as_str().unwrap();
+    for method in [Method::GET, Method::HEAD] {
+        assert_eq!(read_status(&http, &owner, method.clone(), url).await, 200);
+        assert_eq!(
+            read_status(&http, &outsider, method.clone(), url).await,
+            if policy == "enforce" { 404 } else { 200 },
+            "{policy} {method}"
+        );
+        assert_eq!(
+            http.request(method, url).send().await.unwrap().status(),
+            401
+        );
+    }
 }

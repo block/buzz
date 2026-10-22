@@ -134,6 +134,7 @@ const _: () = assert!(FLEET_STOCK_COLLECTION_DEADLINE.as_secs() > 5);
 const _: () = assert!(FLEET_ACTIVITY_COLLECTION_DEADLINE.as_secs() > 15);
 
 struct FleetUsageSchedule {
+    media_cleanup_cursor: Option<buzz_db::media_cleanup::MediaShareCleanupCursor>,
     next_stock: std::time::Instant,
     next_activity: std::time::Instant,
     last_stock_success: Option<std::time::Instant>,
@@ -167,6 +168,7 @@ impl FleetUsageSchedule {
         retry_interval: std::time::Duration,
     ) -> Self {
         Self {
+            media_cleanup_cursor: None,
             next_stock: now,
             next_activity: now,
             last_stock_success: None,
@@ -484,6 +486,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         metrics_port = config.metrics_port,
         max_frame_bytes = config.max_frame_bytes,
         audit_enabled = config.audit_enabled,
+        media_read_mode = config.media_read_mode.as_str(),
         push_enabled = config.push_enabled,
         "Config loaded"
     );
@@ -2505,6 +2508,20 @@ async fn run_usage_metrics_tick(
         }
     }
     if leader.is_some() {
+        // Run maintenance before optional telemetry collection.
+        match state
+            .db
+            .reap_inactive_media_shares(fleet_schedule.media_cleanup_cursor.as_ref(), 1000)
+            .await
+        {
+            Ok(batch) => {
+                fleet_schedule.media_cleanup_cursor = batch.next_cursor;
+                if batch.removed > 0 {
+                    info!(removed = batch.removed, "reaped inactive media shares");
+                }
+            }
+            Err(error) => warn!(error = %error, "failed to reap inactive media shares"),
+        }
         if emission_scope.includes_per_community() {
             let result = emit_db_usage_metrics(state, emission_scope, &host_map).await;
             record_legacy_usage_collection(result.is_ok(), fleet_schedule);

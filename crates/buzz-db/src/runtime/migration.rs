@@ -14,6 +14,10 @@ use crate::Result;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
+#[cfg(test)]
+#[path = "tests/schema_fence_bootstrap_postgres_tests.rs"]
+mod schema_fence_bootstrap_postgres_tests;
+
 /// Run all pending Buzz database migrations.
 ///
 /// The entire run holds the exclusive [`SCHEMA_DESTRUCTION_LOCK_KEY`] session
@@ -769,7 +773,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 67);
+        assert_eq!(migrations.len(), 68);
         assert_eq!(migrations[64].version, 65);
         let retire_ttl = strip_sql_comments(migrations[64].sql.as_str());
         for statement in [
@@ -806,6 +810,16 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE TABLE community_nip_fi_issuers"));
+        assert_eq!(migrations[67].version, 68);
+        assert!(strip_sql_comments(migrations[67].sql.as_str())
+            .trim_start()
+            .starts_with("SET LOCAL lock_timeout = '5s';"));
+        for table in ["media_uploaders", "media_shares"] {
+            assert!(migrations[67]
+                .sql
+                .as_str()
+                .contains(&format!("CREATE TABLE {table}")));
+        }
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
