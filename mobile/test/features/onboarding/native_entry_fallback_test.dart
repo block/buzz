@@ -1,7 +1,6 @@
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/shared/hosted/device_identity_source.dart';
 import 'package:buzz/shared/hosted/self_hosted_entry.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';

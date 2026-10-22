@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:buzz/features/profile/profile_setup_page.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
