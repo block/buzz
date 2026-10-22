@@ -14,7 +14,7 @@ use buzz_core::artifact_sync::{ArtifactSyncFilter, MAX_SYNC_EVENTS};
 use buzz_core::StoredEvent;
 use buzz_pubsub::EventTopic;
 use dashmap::DashMap;
-use nostr::{Alphabet, Event, Filter, Kind, SingleLetterTag};
+use nostr::{Alphabet, Event, Filter, JsonUtil, Kind, SingleLetterTag};
 use tokio::sync::{Notify, OwnedSemaphorePermit};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -32,6 +32,10 @@ const SNAPSHOT_PAGE: i64 = 256;
 const SNAPSHOT_BUDGET: Duration = Duration::from_secs(30);
 /// How long a new sync waits for Redis to confirm its live interest (rule 1).
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most bytes of kind-45011 removals one sync holds (rule 5). Other
+/// held changes are a `d` only, so `MAX_SYNC_EVENTS` bounds them. Not
+/// advertised: a sync past either bound resyncs.
+const MAX_HELD_BYTES: usize = 4 << 20;
 /// Kind-9005 redaction; it can retire a head that is in scope (rule 6).
 const KIND_REDACTION: u16 = 9005;
 /// NIP-29 kinds that can change a reader's access to a channel: remove user,
@@ -46,8 +50,46 @@ pub(crate) const LIVE_KINDS: [u16; 7] = [45010, 45011, KIND_REDACTION, 9001, 900
 struct Pending {
     /// Changed artifacts, with the latest kind-45011 removal seen for each.
     changed: HashMap<Uuid, Option<Event>>,
-    /// The first reason this sync must resync, if any.
+    /// Serialized size of the removals in `changed`.
+    held_bytes: usize,
+    /// The first reason this sync must resync, if any. Once set, nothing
+    /// more is held: the sync ends without reading its changes.
     resync: Option<&'static str>,
+}
+
+impl Pending {
+    fn end(&mut self, reason: &'static str) {
+        self.resync.get_or_insert(reason);
+        self.changed = HashMap::new();
+        self.held_bytes = 0;
+    }
+
+    /// Hold one change, refusing it before it is stored when it would pass
+    /// a bound.
+    fn hold(&mut self, d: Uuid, removal: Option<Event>) {
+        if self.resync.is_some() {
+            return;
+        }
+        if !self.changed.contains_key(&d) && self.changed.len() >= MAX_SYNC_EVENTS {
+            return self.end("resync: too many changes");
+        }
+        let Some(removal) = removal else {
+            self.changed.entry(d).or_default();
+            return;
+        };
+        let size = removal.as_json().len();
+        let replaced = self
+            .changed
+            .get(&d)
+            .and_then(Option::as_ref)
+            .map_or(0, |old| old.as_json().len());
+        let held = self.held_bytes - replaced + size;
+        if held > MAX_HELD_BYTES {
+            return self.end("resync: too many changes");
+        }
+        self.held_bytes = held;
+        self.changed.insert(d, Some(removal));
+    }
 }
 
 /// One live sync's signal inbox. Fan-out and loss detection write to it; the
@@ -68,13 +110,15 @@ impl SyncHandle {
     }
 
     fn update(&self, change: impl FnOnce(&mut Pending)) {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        change(&mut pending);
-        if pending.changed.len() > MAX_SYNC_EVENTS {
-            pending.resync.get_or_insert("resync: too many changes");
-        }
-        drop(pending);
+        change(&mut self.pending.lock().unwrap_or_else(PoisonError::into_inner));
         self.notify.notify_one();
+    }
+
+    fn resync_reason(&self) -> Option<&'static str> {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .resync
     }
 
     /// Record a fanned-out event that falls in this sync's channels.
@@ -99,19 +143,12 @@ impl SyncHandle {
             return;
         };
         let removal = (kind == 45011).then(|| stored.event.clone());
-        self.update(|pending| {
-            let entry = pending.changed.entry(d).or_default();
-            if removal.is_some() {
-                *entry = removal;
-            }
-        });
+        self.update(|pending| pending.hold(d, removal));
     }
 
     /// Ask the sync to end with `CLOSED reason`, where reason is `resync: ...`.
     pub fn resync(&self, reason: &'static str) {
-        self.update(|pending| {
-            pending.resync.get_or_insert(reason);
-        });
+        self.update(|pending| pending.end(reason));
     }
 
     fn take(&self) -> Pending {
@@ -359,33 +396,39 @@ pub async fn handle_sync(
         return;
     }
 
-    // Rule 2: the initial set from one snapshot, inside the time budget.
-    let initial = tokio::time::timeout(
-        SNAPSHOT_BUDGET,
-        send_initial_set(&sub_id, &filter, &reader, &conn, &state),
-    );
+    // Rule 2: the initial set from one snapshot and its EOSE, all inside the
+    // time budget and the cancellation race, so a slow reader cannot hold
+    // the handler slot past the budget or get EOSE after retirement.
+    let initial = async {
+        send_initial_set(&sub_id, owner, &filter, &reader, &conn, &state).await?;
+        // A resync requested during the read also ends the sync before EOSE.
+        if let Some(reason) = handle.resync_reason() {
+            return Err(Stop::Close(reason));
+        }
+        send_owned(&sub_id, owner, RelayMessage::eose(&sub_id), &conn).await
+    };
     let outcome = tokio::select! {
         biased;
         () = conn.nip_fi_gate.cancelled() => None,
         () = handle.cancel.cancelled() => return,
-        out = initial => Some(out),
+        out = tokio::time::timeout(SNAPSHOT_BUDGET, initial) => Some(out),
     };
-    let reason = match outcome {
+    match outcome {
         None => {
             super::close::close_if_owner(&sub_id, owner, None, &conn, &state).await;
             return;
         }
-        Some(Err(_)) => Some("error: sync snapshot budget exceeded"),
-        Some(Ok(result)) => result.err(),
-    };
-    // A resync requested during the read also ends the sync before EOSE.
-    let reason = reason.or_else(|| handle.pending.lock().ok().and_then(|p| p.resync));
-    if let Some(reason) = reason {
-        close(&sub_id, owner, reason, &conn, &state).await;
-        return;
-    }
-    if !send_awaiting(&conn, RelayMessage::eose(&sub_id)).await {
-        return;
+        Some(Err(_)) => {
+            let reason = "error: sync snapshot budget exceeded";
+            close(&sub_id, owner, reason, &conn, &state).await;
+            return;
+        }
+        Some(Ok(Err(Stop::Retired))) => return,
+        Some(Ok(Err(Stop::Close(reason)))) => {
+            close(&sub_id, owner, reason, &conn, &state).await;
+            return;
+        }
+        Some(Ok(Ok(()))) => {}
     }
     drop(_effect);
     drop(permit);
@@ -394,6 +437,14 @@ pub async fn handle_sync(
 }
 
 const RESTRICTED: &str = "restricted: channel not readable";
+
+/// Why a sync stops sending.
+enum Stop {
+    /// End with `CLOSED reason`.
+    Close(&'static str),
+    /// Another request now owns the ID, or it was closed: say nothing.
+    Retired,
+}
 
 /// Claim `sub_id` under the lifecycle lock. The sync's inbox is installed
 /// before fan-out registration, so no event frame is ever sent to it.
@@ -458,25 +509,26 @@ async fn confirm(channels: &[Uuid], epoch: u64, conn: &ConnectionState, state: &
         .unwrap_or(false)
 }
 
-/// Read and send every head in scope from one snapshot. An `Err` is the
-/// `CLOSED` reason; nothing after it is sent.
+/// Read and send every head in scope from one snapshot. After an `Err`
+/// nothing more is sent.
 async fn send_initial_set(
     sub_id: &str,
+    owner: u64,
     filter: &ArtifactSyncFilter,
     reader: &[u8],
     conn: &ConnectionState,
     state: &AppState,
-) -> Result<(), &'static str> {
+) -> Result<(), Stop> {
     let mut snapshot = match state
         .db
         .open_artifact_snapshot(conn.tenant.community(), reader, &filter.channels)
         .await
     {
         Ok(Ok(snapshot)) => snapshot,
-        Ok(Err(buzz_db::SnapshotDenied::Restricted)) => return Err(RESTRICTED),
+        Ok(Err(buzz_db::SnapshotDenied::Restricted)) => return Err(Stop::Close(RESTRICTED)),
         Err(e) => {
             warn!(conn_id = %conn.conn_id, "artifact sync snapshot failed: {e}");
-            return Err("error: sync read failed");
+            return Err(Stop::Close("error: sync read failed"));
         }
     };
     let mut sent = 0usize;
@@ -486,35 +538,71 @@ async fn send_initial_set(
             .await
             .map_err(|e| {
                 warn!(conn_id = %conn.conn_id, "artifact sync page failed: {e}");
-                "error: sync read failed"
+                Stop::Close("error: sync read failed")
             })?;
         if page.is_empty() {
             break;
         }
         sent += page.len();
         if sent > MAX_SYNC_EVENTS {
-            return Err("error: sync set exceeds max_events");
+            return Err(Stop::Close("error: sync set exceeds max_events"));
         }
         for stored in page {
-            if !send_awaiting(conn, RelayMessage::event(sub_id, &stored.event)).await {
-                return Err("error: connection closed");
-            }
+            send_owned(
+                sub_id,
+                owner,
+                RelayMessage::event(sub_id, &stored.event),
+                conn,
+            )
+            .await?;
         }
     }
     snapshot
         .finish()
         .await
-        .map_err(|_| "error: sync read failed")?;
+        .map_err(|_| Stop::Close("error: sync read failed"))?;
     Ok(())
 }
 
-/// Queue a frame, waiting for room: the snapshot budget, not the slow-client
-/// grace limit, bounds a slow reader during the initial set.
-async fn send_awaiting(conn: &ConnectionState, frame: String) -> bool {
-    conn.send_tx
-        .send(WsMessage::Text(frame.into()))
+/// Queue a frame while this request owns `sub_id`, waiting for room: the
+/// snapshot budget, not the slow-client grace limit, bounds a slow reader
+/// during the initial set. The slot is reserved first and the owner checked
+/// under the lifecycle lock, so the lock is never held while waiting, and a
+/// CLOSE or replacing REQ (which retire under that lock) fences the frame.
+async fn send_owned(
+    sub_id: &str,
+    owner: u64,
+    frame: String,
+    conn: &ConnectionState,
+) -> Result<(), Stop> {
+    let slot = conn
+        .send_tx
+        .reserve()
         .await
-        .is_ok()
+        .map_err(|_| Stop::Close("error: connection closed"))?;
+    let subs = conn.subscriptions.lock().await;
+    if subs.get(sub_id) != Some(&owner) {
+        return Err(Stop::Retired);
+    }
+    slot.send(WsMessage::Text(frame.into()));
+    Ok(())
+}
+
+/// Queue a live frame without waiting, fenced like `send_owned`. A full
+/// queue is a lost frame.
+async fn try_send_owned(
+    sub_id: &str,
+    owner: u64,
+    frame: String,
+    conn: &ConnectionState,
+) -> Result<(), Stop> {
+    let subs = conn.subscriptions.lock().await;
+    if subs.get(sub_id) != Some(&owner) {
+        return Err(Stop::Retired);
+    }
+    conn.send_tx
+        .try_send(WsMessage::Text(frame.into()))
+        .map_err(|_| Stop::Close("resync: send queue full"))
 }
 
 /// Rules 3–5 after `EOSE`: read each changed head, one read at a time, and
@@ -535,6 +623,10 @@ async fn run_live(
             return;
         }
         for (d, removal) in pending.changed {
+            // A retired sync reads nothing more.
+            if handle.cancel.is_cancelled() {
+                return;
+            }
             let head = match state
                 .db
                 .artifact_head(conn.tenant.community(), reader, d, &filter.channels)
@@ -559,16 +651,18 @@ async fn run_live(
             let Some(event) = head.map(|head| head.event).or(removal) else {
                 continue;
             };
-            if conn
-                .send_tx
-                .try_send(WsMessage::Text(RelayMessage::event(sub_id, &event).into()))
-                .is_err()
-            {
+            #[cfg(test)]
+            super::close::test_seam::pause_at(&test_seam::LIVE_SEND_PAUSE).await;
+            match try_send_owned(sub_id, owner, RelayMessage::event(sub_id, &event), conn).await {
+                Ok(()) => {}
+                Err(Stop::Retired) => return,
                 // One lost frame breaks the copy; the slow-client grace limit
                 // does not apply. `close` drops the connection when even the
                 // CLOSED frame cannot be queued.
-                close(sub_id, owner, "resync: send queue full", conn, state).await;
-                return;
+                Err(Stop::Close(reason)) => {
+                    close(sub_id, owner, reason, conn, state).await;
+                    return;
+                }
             }
         }
         tokio::select! {
@@ -582,6 +676,18 @@ async fn run_live(
 /// End the sync with `CLOSED reason` if this request still owns its ID.
 async fn close(sub_id: &str, owner: u64, reason: &str, conn: &ConnectionState, state: &AppState) {
     super::close::close_if_owner(sub_id, owner, Some(reason), conn, state).await;
+}
+
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::sync::Arc;
+
+    use super::super::close::test_seam::Pause;
+
+    tokio::task_local! {
+        /// After a live head read, before its frame is queued.
+        pub(crate) static LIVE_SEND_PAUSE: Arc<Pause>;
+    }
 }
 
 #[cfg(test)]
@@ -665,6 +771,125 @@ mod tests {
             handle.signal(&stored(45010, Uuid::new_v4()));
         }
         assert_eq!(handle.take().resync, Some("resync: too many changes"));
+    }
+
+    /// The held list is a hard bound: a change past the limit is refused
+    /// before it is stored, and nothing is held after the sync must resync.
+    /// Mutation: insert before the size check, or keep holding after
+    /// `resync` → `changed` grows past `MAX_SYNC_EVENTS` → RED.
+    #[test]
+    fn held_list_holds_nothing_past_its_limit() {
+        let handle = SyncHandle::new();
+        for _ in 0..MAX_SYNC_EVENTS {
+            handle.signal(&stored(45010, Uuid::new_v4()));
+        }
+        {
+            let pending = handle.pending.lock().unwrap();
+            assert_eq!(pending.changed.len(), MAX_SYNC_EVENTS);
+            assert!(pending.resync.is_none());
+        }
+        for _ in 0..100 {
+            handle.signal(&stored(45010, Uuid::new_v4()));
+            handle.signal(&stored(45011, Uuid::new_v4()));
+        }
+        let pending = handle.pending.lock().unwrap();
+        assert_eq!(pending.resync, Some("resync: too many changes"));
+        assert!(pending.changed.is_empty());
+        assert_eq!(pending.held_bytes, 0);
+    }
+
+    fn removal(d: Uuid, size: usize) -> StoredEvent {
+        let event = EventBuilder::new(Kind::Custom(45011), "x".repeat(size))
+            .tags([Tag::parse(["d", &d.to_string()]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        StoredEvent::new(event, Some(Uuid::new_v4()))
+    }
+
+    /// Held removals are whole events, so their bytes have their own bound.
+    /// A newer removal for the same `d` replaces the older one's bytes.
+    #[test]
+    fn held_removals_have_a_byte_bound() {
+        let handle = SyncHandle::new();
+        let d = Uuid::new_v4();
+        for _ in 0..2 * (MAX_HELD_BYTES >> 16) {
+            handle.signal(&removal(d, 1 << 16));
+        }
+        {
+            let pending = handle.pending.lock().unwrap();
+            assert!(pending.resync.is_none());
+            assert!(pending.held_bytes < 1 << 17, "{}", pending.held_bytes);
+        }
+        for _ in 0..=MAX_HELD_BYTES >> 16 {
+            handle.signal(&removal(Uuid::new_v4(), 1 << 16));
+        }
+        let pending = handle.pending.lock().unwrap();
+        assert_eq!(pending.resync, Some("resync: too many changes"));
+        assert!(pending.changed.is_empty());
+    }
+
+    fn conn_with_sub(owner: u64) -> (Arc<ConnectionState>, tokio::sync::mpsc::Receiver<WsMessage>) {
+        let tenant = buzz_core::TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+            "relay.example",
+        );
+        let (conn, rx) =
+            super::super::group_state_postgres_tests::test_conn(&tenant, &Keys::generate());
+        conn.subscriptions
+            .try_lock()
+            .unwrap()
+            .insert("s".into(), owner);
+        (conn, rx)
+    }
+
+    /// A live frame goes out only while its request still owns the ID.
+    /// Mutation: drop the owner check in `try_send_owned` → RED.
+    #[tokio::test]
+    async fn live_frame_is_fenced_by_the_owner() {
+        let (conn, mut rx) = conn_with_sub(1);
+        assert!(matches!(
+            try_send_owned("s", 2, "x".into(), &conn).await,
+            Err(Stop::Retired)
+        ));
+        conn.subscriptions.lock().await.remove("s");
+        assert!(matches!(
+            try_send_owned("s", 1, "x".into(), &conn).await,
+            Err(Stop::Retired)
+        ));
+        assert!(rx.try_recv().is_err());
+        conn.subscriptions.lock().await.insert("s".into(), 1);
+        assert!(try_send_owned("s", 1, "x".into(), &conn).await.is_ok());
+        assert!(rx.try_recv().is_ok());
+    }
+
+    /// A frame (such as `EOSE`) waiting for queue room is checked against
+    /// the owner after the room appears, not before it waited. Mutation:
+    /// check the owner before `reserve` → the stale frame is queued → RED.
+    #[tokio::test]
+    async fn waiting_frame_is_fenced_when_replaced_during_the_wait() {
+        let (conn, mut rx) = conn_with_sub(1);
+        let capacity = conn.send_tx.capacity();
+        for _ in 0..capacity {
+            conn.send_tx
+                .try_send(WsMessage::Text("fill".into()))
+                .unwrap();
+        }
+        let waiting = tokio::spawn({
+            let conn = Arc::clone(&conn);
+            async move { send_owned("s", 1, "eose".into(), &conn).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        // A replacing REQ takes the ID while the frame waits.
+        conn.subscriptions.lock().await.insert("s".into(), 2);
+        rx.recv().await.unwrap();
+        assert!(matches!(waiting.await.unwrap(), Err(Stop::Retired)));
+        let mut rest = 0;
+        while let Ok(WsMessage::Text(text)) = rx.try_recv() {
+            assert_eq!(text.as_str(), "fill");
+            rest += 1;
+        }
+        assert_eq!(rest, capacity - 1);
     }
 
     #[test]

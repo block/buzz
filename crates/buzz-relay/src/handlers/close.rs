@@ -139,7 +139,7 @@ pub(crate) mod test_seam {
         pub(crate) static CLEANUP_PAUSE: Arc<Pause>;
     }
 
-    pub(super) async fn pause_at(point: &'static tokio::task::LocalKey<Arc<Pause>>) {
+    pub(crate) async fn pause_at(point: &'static tokio::task::LocalKey<Arc<Pause>>) {
         if let Ok(pause) = point.try_with(Arc::clone) {
             pause.reached.notify_one();
             pause.resume.notified().await;

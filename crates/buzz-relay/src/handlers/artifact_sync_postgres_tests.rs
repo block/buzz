@@ -344,3 +344,50 @@ async fn node_loss_resyncs_a_live_sync() {
         .unwrap();
     assert!(!f.state.artifact_syncs.contains(conn.conn_id, "s"));
 }
+
+/// A CLOSE while a live head read is in flight retires the sync: the head
+/// it read is never sent under the closed ID. Mutation: drop the owner
+/// check in `try_send_owned` → the EVENT follows `CLOSED` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn close_during_a_live_head_read_sends_nothing_more() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let home = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+    let d = Uuid::new_v4();
+    let first = revision(&f, &owner, home, d, "create", None).await;
+
+    let (conn, mut rx) = connect(&f, &owner);
+    let filter = buzz_core::artifact_sync::parse_sync(&sync_filter(&[home]));
+    let permit = f
+        .state
+        .handler_semaphore
+        .clone()
+        .try_acquire_owned()
+        .expect("permit");
+    let pause = Arc::new(super::close::test_seam::Pause::default());
+    let task = tokio::spawn(super::artifact_sync::test_seam::LIVE_SEND_PAUSE.scope(
+        Arc::clone(&pause),
+        super::artifact_sync::handle_sync(
+            "s".into(),
+            filter,
+            Arc::clone(&conn),
+            Arc::clone(&f.state),
+            permit,
+        ),
+    ));
+    assert_eq!(initial_set(&mut rx).await, vec![first.id.to_hex()]);
+
+    revision(&f, &owner, home, d, "update", Some(&first)).await;
+    tokio::time::timeout(Duration::from_secs(10), pause.reached.notified())
+        .await
+        .expect("live head read reached");
+    super::close::handle_close("s".into(), Arc::clone(&conn), Arc::clone(&f.state)).await;
+    assert_eq!(frame(&mut rx).await, json!(["CLOSED", "s", ""]));
+    pause.resume.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("sync task ends")
+        .unwrap();
+    no_frame(&mut rx).await;
+}
