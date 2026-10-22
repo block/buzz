@@ -424,3 +424,35 @@ async fn ordinary_connector_keeps_its_header_free_nip42_path() {
         .unwrap();
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn protected_connection_rejects_post_auth_escaped_reflection_before_parsing_or_logging() {
+    let trace = crate_trace();
+    let (listener, relay) = listener().await;
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        ws.send(Message::text(r#"["AUTH","public-challenge"]"#))
+            .await
+            .unwrap();
+        let frame: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        let proof = Event::from_json(frame[1].to_string()).unwrap();
+        ws.send(Message::text(json!(["OK", proof.id, true, ""]).to_string()))
+            .await
+            .unwrap();
+        ws.send(Message::text(format!(
+            r#"["{}"]"#,
+            TOKEN.replace('.', "\\u002e")
+        )))
+        .await
+        .unwrap();
+        while ws.next().await.is_some() {}
+    });
+    let mut connection = connect(&relay, BUDGET).await.unwrap();
+    let error = connection.next_event(BUDGET).await.unwrap_err();
+    assert!(!format!("{error:?}").contains(TOKEN));
+    assert!(!trace.0.lock().unwrap().contains(TOKEN));
+    connection.disconnect().await.unwrap();
+    server.await.unwrap();
+}

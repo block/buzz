@@ -503,32 +503,31 @@ async fn run_session(
     app_handle: Option<tauri::AppHandle>,
 ) {
     let mut delay = RECONNECT_BASE_DELAY;
-    let mut employee_failures = 0_u8;
     loop {
         if session.cancel.is_cancelled() {
             return;
         }
 
         let connecting = async {
-            let employee = if crate::builderlab::requires_employee(&relay_url)? {
-                use tauri::Manager;
-                let handle = app_handle
-                    .as_ref()
-                    .ok_or("Employee identity context unavailable")?;
-                let state = handle.state::<crate::app_state::AppState>();
-                crate::builderlab::employee_evidence(&state, &keys, &relay_url).await?
-            } else {
-                None
-            };
+            let employee =
+                if auth_tag.is_none() && crate::builderlab::requires_employee(&relay_url)? {
+                    use tauri::Manager;
+                    let handle = app_handle
+                        .as_ref()
+                        .ok_or("Employee identity context unavailable")?;
+                    let state = handle.state::<crate::app_state::AppState>();
+                    crate::builderlab::employee_evidence(&state, &keys, &relay_url).await?
+                } else {
+                    None
+                };
             let connection = if let Some(evidence) = &employee {
-                NostrWsConnection::connect_authenticated_with_nip_fi(
-                    &relay_url,
-                    &keys,
-                    &evidence.header,
-                    Duration::from_secs(30),
-                )
-                .await
-                .map_err(|_| "Employee relay connection refused".to_owned())?
+                tokio::select! {
+                    biased;
+                    _ = evidence.cancel.cancelled() => return Err("Square sign-in changed".to_owned()),
+                    result = NostrWsConnection::connect_authenticated_with_nip_fi(
+                        &relay_url, &keys, &evidence.header, Duration::from_secs(30),
+                    ) => result.map_err(|_| "Employee relay connection refused".to_owned())?,
+                }
             } else {
                 NostrWsConnection::connect_authenticated(&relay_url, &keys, auth_tag.as_ref())
                     .await
@@ -551,8 +550,12 @@ async fn run_session(
                 // clean exit — a socket that drops after one event must not
                 // inherit the previous failure's delay.
                 delay = RECONNECT_BASE_DELAY;
-                employee_failures = 0;
                 if let Some(evidence) = employee {
+                    if evidence.cancel.is_cancelled()
+                        || evidence.expires_at <= chrono::Utc::now().timestamp()
+                    {
+                        continue;
+                    }
                     let lifetime = Duration::from_secs(
                         evidence
                             .expires_at
@@ -560,22 +563,15 @@ async fn run_session(
                             .max(0) as u64,
                     );
                     tokio::select! {
-                        _ = evidence.cancel.cancelled()=>{ session.shutdown();return; },
+                        _ = evidence.cancel.cancelled()=>{},
                         _ = tokio::time::sleep(lifetime)=>{},
-                        _ = run_connection(conn,&session,&mut wake_rx)=>{},
+                        _ = run_connection(conn,&session,&mut wake_rx, true)=>{},
                     }
                 } else {
-                    run_connection(conn, &session, &mut wake_rx).await;
+                    run_connection(conn, &session, &mut wake_rx, false).await;
                 }
             }
             Err(error) => {
-                if crate::builderlab::requires_employee(&relay_url).unwrap_or(true) {
-                    employee_failures += 1;
-                    if employee_failures >= 5 {
-                        session.shutdown();
-                        return;
-                    }
-                }
                 eprintln!("buzz-desktop: native_relay_client: connect failed: {error}");
             }
         }
@@ -601,6 +597,7 @@ async fn run_connection(
     mut conn: NostrWsConnection,
     session: &RelaySession,
     wake_rx: &mut mpsc::Receiver<()>,
+    protected: bool,
 ) {
     // Subscription ids currently open ON THIS SOCKET. Deliberately local: a new
     // socket has none, so reconnect resubscribes the full desired set without
@@ -771,7 +768,8 @@ async fn run_connection(
                             }
                         }
                         if let Some(request) = requests.remove(&subscription_id) {
-                            let _ = request.complete.send(Err(format!("relay closed request: {message}")));
+                            let error = if protected { "employee relay closed request".to_owned() } else { format!("relay closed request: {message}") };
+                            let _ = request.complete.send(Err(error));
                             let mut state = session.state.lock().await;
                             state.transient.retain(|subscription| subscription.id != subscription_id);
                             state.removed.insert(subscription_id.clone());
@@ -782,9 +780,9 @@ async fn run_connection(
                         drop(requests);
                         let retry = retries.entry(subscription_id.clone()).or_default();
                         retry.schedule(&message);
-                        eprintln!(
-                            "buzz-desktop: native_relay_client: relay closed {subscription_id}: {message}"
-                        );
+                        if !protected {
+                            eprintln!("buzz-desktop: native_relay_client: relay closed {subscription_id}: {message}");
+                        }
                     }
                     Ok(RelayMessage::Eose { subscription_id }) => {
                         // The relay served this subscription, so whatever
@@ -831,7 +829,11 @@ async fn run_connection(
                     Ok(_) => {}
                     Err(error) => {
                         if !is_read_timeout(&error) {
-                            eprintln!("buzz-desktop: native_relay_client: read failed: {error}");
+                            if protected {
+                                eprintln!("buzz-desktop: native_relay_client: employee relay read failed");
+                            } else {
+                                eprintln!("buzz-desktop: native_relay_client: read failed: {error}");
+                            }
                             return;
                         }
                     }

@@ -65,7 +65,21 @@ impl BuilderlabSession {
         keys: &Keys,
         relay: &str,
     ) -> Result<EmployeeEvidence, String> {
+        self.evidence_with_refresh(app_state, keys, relay, false)
+            .await
+    }
+
+    pub(crate) async fn evidence_with_refresh(
+        &self,
+        app_state: &crate::app_state::AppState,
+        keys: &Keys,
+        relay: &str,
+        force: bool,
+    ) -> Result<EmployeeEvidence, String> {
         let _issuance = self.1.lock().await;
+        if force {
+            self.invalidate_employee_assertion()?;
+        }
         if crate::relay::relay_ws_url_with_override(app_state) != relay {
             return Err("Employee community changed".to_owned());
         }
@@ -142,10 +156,22 @@ impl BuilderlabSession {
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned)
                 });
+            if matches!(
+                code.as_deref(),
+                Some(
+                    "session_required"
+                        | "session_expired"
+                        | "binding_mismatch"
+                        | "authorization_denied"
+                )
+            ) {
+                self.clear_if_credential(&credential)?;
+                super::notify_session_changed(app_state);
+            }
             return Err(match code.as_deref() {
                 Some("binding_mismatch") => "This Square account is linked to another Buzz key. Use that Buzz identity or ask your employer to resolve the link.",
                 Some("authorization_denied") => "Square access is not prepared or has been disabled. Ask your employer to check your access.",
-                Some("session_expired") => "Your Square session expired. Sign in again.",
+                Some("session_required" | "session_expired") => "Your Square session expired. Sign in again.",
                 Some("rate_limited") => "Too many access attempts. Wait a moment and retry.",
                 Some("invalid_proof") => "Could not verify this Buzz key. Check your device clock and retry.",
                 _ => "Square access is temporarily unavailable. Retry in a moment.",
@@ -210,6 +236,22 @@ fn evidence(
     })
 }
 
+/// Ordinary public media keeps its existing behavior, including identity recovery mode.
+pub(crate) async fn send_employee_media_request(
+    state: &crate::app_state::AppState,
+    url: &str,
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, String> {
+    if !requires_employee(url)? {
+        return request
+            .send()
+            .await
+            .map_err(|error| crate::relay::classify_request_error(&error));
+    }
+    let keys = state.signing_keys()?;
+    send_employee_request(state, &keys, url, request).await
+}
+
 /// Adds only scoped relay evidence. The request's own NIP-98 proof is preserved.
 pub(crate) async fn send_employee_request(
     app_state: &crate::app_state::AppState,
@@ -217,23 +259,120 @@ pub(crate) async fn send_employee_request(
     url: &str,
     request: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, String> {
-    let Some(evidence) = employee_evidence(app_state, keys, url).await? else {
+    if !requires_employee(url)? {
         return request
             .send()
             .await
             .map_err(|error| crate::relay::classify_request_error(&error));
-    };
-    send_authorized_request(request, evidence).await
+    }
+    let (_, request) = request.build_split();
+    let mut request = request.map_err(|_| "Invalid employee relay request")?;
+    let timeout = request
+        .timeout()
+        .copied()
+        .unwrap_or(Duration::from_secs(30));
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(timeout, async {
+        let evidence = employee_evidence(app_state, keys, url)
+            .await?
+            .ok_or("Employee relay evidence is required")?;
+        // Re-mint the own-key proof after the serialized assertion wait.
+        if request
+            .headers()
+            .get("Authorization")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("Nostr "))
+        {
+            let body = match request.body() {
+                Some(body) => body
+                    .as_bytes()
+                    .ok_or("Cannot sign a streaming relay request")?,
+                None => &[],
+            };
+            let proof = crate::relay::build_nip98_auth_header_for_keys(
+                keys,
+                request.method(),
+                request.url().as_str(),
+                body,
+            )?;
+            request.headers_mut().insert(
+                "Authorization",
+                proof.parse().map_err(|_| "Invalid relay proof")?,
+            );
+        }
+        // Keep response-body consumption inside the original operation budget too.
+        *request.timeout_mut() = Some(timeout.saturating_sub(started.elapsed()));
+        // This client never follows redirects, including media request builders.
+        send_authorized_request(app_state.media_fetch_client.clone(), request, evidence).await
+    })
+    .await
+    .map_err(|_| "relay unreachable: request timed out".to_owned())?
+}
+
+#[derive(Clone)]
+pub(crate) struct ProtectedAssertion(
+    pub(crate) String,
+    pub(crate) CancellationToken,
+    pub(crate) i64,
+);
+
+pub(crate) async fn employee_response_end(scope: Option<ProtectedAssertion>) {
+    if let Some(scope) = scope {
+        let lifetime = Duration::from_secs(
+            scope
+                .2
+                .saturating_sub(chrono::Utc::now().timestamp())
+                .max(0) as u64,
+        );
+        tokio::select! { _ = scope.1.cancelled() => {}, _ = tokio::time::sleep(lifetime) => {} }
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+pub(crate) async fn guard_employee_response<T>(
+    scope: Option<ProtectedAssertion>,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    tokio::select! {
+        biased;
+        _ = employee_response_end(scope) => Err("Employee relay authorization changed".to_owned()),
+        result = future => Ok(result),
+    }
 }
 
 async fn send_authorized_request(
-    request: reqwest::RequestBuilder,
+    client: reqwest::Client,
+    mut request: reqwest::Request,
     evidence: EmployeeEvidence,
 ) -> Result<reqwest::Response, String> {
-    tokio::select! {
-        _ = evidence.cancel.cancelled()=>Err("Square sign-in changed".to_owned()),
-        response=request.header("Nostr-Federated-Identity",evidence.header).send()=>response.map_err(|_|"Employee relay request failed".to_owned()),
-    }
+    let assertion = evidence
+        .header
+        .to_str()
+        .map_err(|_| "Invalid relay assertion")?
+        .trim_start_matches("Bearer ")
+        .to_owned();
+    request
+        .headers_mut()
+        .insert("Nostr-Federated-Identity", evidence.header);
+    let remaining = Duration::from_secs(
+        evidence
+            .expires_at
+            .saturating_sub(chrono::Utc::now().timestamp())
+            .max(0) as u64,
+    );
+    let mut response = tokio::select! {
+        biased;
+        _ = evidence.cancel.cancelled()=>return Err("Square sign-in changed".to_owned()),
+        _ = tokio::time::sleep(remaining)=>return Err("Employee relay authorization expired".to_owned()),
+        response=client.execute(request)=>response.map_err(|error|crate::relay::classify_request_error(&error))?,
+    };
+    response.extensions_mut().insert(ProtectedAssertion(
+        assertion,
+        evidence.cancel,
+        evidence.expires_at,
+    ));
+    Ok(response)
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ pub struct NostrWsConnection {
     // Only active during the opt-in NIP-FI handshake. Ordinary connections
     // retain their existing behavior; authenticated traffic is not restricted.
     auth_buffer_remaining: Option<usize>,
+    protected_assertion: Option<String>,
 }
 
 impl NostrWsConnection {
@@ -90,6 +91,7 @@ impl NostrWsConnection {
                 pending_challenge: None,
                 relay_url: url.to_owned(),
                 auth_buffer_remaining: Some(64 * 1024),
+                protected_assertion: Some(token.to_owned()),
             };
             conn.authenticate_inner(keys, None, Some(token)).await?;
             conn.auth_buffer_remaining = None;
@@ -158,6 +160,7 @@ impl NostrWsConnection {
             pending_challenge: None,
             relay_url: url.to_string(),
             auth_buffer_remaining: None,
+            protected_assertion: None,
         })
     }
 
@@ -241,7 +244,9 @@ impl NostrWsConnection {
     /// Sends a raw JSON value as a WebSocket text frame.
     pub async fn send_raw(&mut self, value: &Value) -> Result<(), WsClientError> {
         let text = serde_json::to_string(value)?;
-        debug!("→ relay: {text}");
+        if self.protected_assertion.is_none() {
+            debug!("→ relay: {text}");
+        }
         self.ws.send(Message::Text(text.into())).await?;
         Ok(())
     }
@@ -260,7 +265,7 @@ impl NostrWsConnection {
 
             match raw {
                 Message::Text(text) => {
-                    let msg = parse_relay_message(&text)?;
+                    let msg = self.parse_message(&text)?;
                     if let RelayMessage::Auth { ref challenge } = msg {
                         self.pending_challenge = Some(challenge.clone());
                     }
@@ -314,7 +319,7 @@ impl NostrWsConnection {
             match raw {
                 Message::Text(text) => {
                     self.check_auth_buffer(&text)?;
-                    let msg = parse_relay_message(&text)?;
+                    let msg = self.parse_message(&text)?;
                     match msg {
                         RelayMessage::Auth { challenge } => {
                             if challenge.len() > 1024 {
@@ -372,7 +377,7 @@ impl NostrWsConnection {
             match raw {
                 Message::Text(text) => {
                     self.check_auth_buffer(&text)?;
-                    let msg = parse_relay_message(&text)?;
+                    let msg = self.parse_message(&text)?;
                     match msg {
                         RelayMessage::Ok(ok) if ok.event_id == event_id => return Ok(ok),
                         RelayMessage::Auth { ref challenge } => {
@@ -389,6 +394,26 @@ impl NostrWsConnection {
                 _ => {}
             }
         }
+    }
+
+    fn parse_message(&self, text: &str) -> Result<RelayMessage, WsClientError> {
+        if let Some(token) = &self.protected_assertion {
+            let decoded: Value = serde_json::from_str(text).map_err(|_| {
+                WsClientError::AuthFailed("invalid protected relay response".to_owned())
+            })?;
+            if decoded.to_string().contains(token) {
+                return Err(WsClientError::AuthFailed(
+                    "invalid protected relay response".to_owned(),
+                ));
+            }
+        }
+        parse_relay_message(text).map_err(|error| {
+            if self.protected_assertion.is_some() {
+                WsClientError::AuthFailed("invalid protected relay response".to_owned())
+            } else {
+                error
+            }
+        })
     }
 
     fn check_auth_buffer(&mut self, text: &str) -> Result<(), WsClientError> {

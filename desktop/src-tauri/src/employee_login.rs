@@ -266,7 +266,7 @@ pub(crate) async fn start_employee_login(
     session.finish_employee_login(
         &login,
         login_id,
-        receipt.session_credential,
+        receipt.session_credential.clone(),
         API_BASE,
         crate::builderlab::EmployeeBinding {
             pubkey,
@@ -277,7 +277,22 @@ pub(crate) async fn start_employee_login(
     drop(_identity_guard);
     let keys = app_state.signing_keys()?;
     // The existing key-bound NIP-FI issuance atomically verifies and enrolls this own key.
-    crate::builderlab::employee_evidence(&app_state, &keys, &relay).await?;
+    let result = tokio::select! {
+        biased;
+        _ = &mut cancel => Err("Square sign-in canceled".to_owned()),
+        result = crate::builderlab::employee_evidence(&app_state, &keys, &relay) => result.map(|_| ()),
+    };
+    if let Err(error) = result {
+        session.clear_if_credential(&receipt.session_credential)?;
+        crate::builderlab::notify_session_changed(&app_state);
+        return Err(error);
+    }
+    if let Err(error) = login.complete_employee_login(login_id) {
+        session.clear_if_credential(&receipt.session_credential)?;
+        crate::builderlab::notify_session_changed(&app_state);
+        return Err(error);
+    }
+    crate::builderlab::notify_session_changed(&app_state);
     Ok(BuilderlabAuthInfo {
         expires_at: me.expires_at,
         email: None,
@@ -445,12 +460,14 @@ pub(crate) async fn refresh_employee_relay_access(
     app_state: tauri::State<'_, crate::app_state::AppState>,
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<(), String> {
-    session.invalidate_employee_assertion()?;
     let keys = app_state.signing_keys()?;
     let relay = crate::relay::relay_ws_url_with_override(&app_state);
     if !crate::builderlab::requires_employee(&relay)? {
         return Err("Select the configured Square community".to_owned());
     }
-    crate::builderlab::employee_evidence(&app_state, &keys, &relay).await?;
+    session
+        .evidence_with_refresh(&app_state, &keys, &relay, true)
+        .await?;
+    crate::builderlab::notify_session_changed(&app_state);
     Ok(())
 }

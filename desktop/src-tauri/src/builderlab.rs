@@ -33,9 +33,17 @@ pub(crate) fn invalidate_changed_employee_context(state: &crate::app_state::AppS
     if let Some(handle) = handle {
         if let Some(session) = handle.try_state::<BuilderlabSession>() {
             let _ = session.request_context(state);
+            notify_session_changed(state);
         }
     }
 }
+pub(crate) fn notify_session_changed(state: &crate::app_state::AppState) {
+    use tauri::Emitter;
+    if let Some(handle) = state.app_handle.lock().ok().and_then(|value| value.clone()) {
+        let _ = handle.emit("builderlab-session-changed", ());
+    }
+}
+
 // Builderlab enforces an Origin check on the identity bind endpoints. Browsers
 // attach this automatically; the desktop reqwest client must set it explicitly
 // or challenge/verify fail with `invalid_origin`. It also seeds the challenge
@@ -190,7 +198,8 @@ struct CachedAssertion {
 
 mod employee_relay;
 pub(crate) use employee_relay::{
-    employee_evidence, requires_employee, send_employee_request, EmployeeEvidence,
+    employee_evidence, employee_response_end, guard_employee_response, requires_employee,
+    send_employee_media_request, send_employee_request, EmployeeEvidence, ProtectedAssertion,
 };
 
 impl BuilderlabSession {
@@ -226,6 +235,19 @@ impl BuilderlabSession {
         }
         Ok(())
     }
+    pub(crate) fn clear_if_credential(&self, credential: &str) -> Result<(), String> {
+        let mut stored = self.0.lock().map_err(|_| "Square session unavailable")?;
+        if stored
+            .as_ref()
+            .is_some_and(|value| value.credential == credential)
+        {
+            if let Some(previous) = stored.take() {
+                previous.cancel.cancel();
+            }
+        }
+        Ok(())
+    }
+
     fn request_context(
         &self,
         app_state: &crate::app_state::AppState,
@@ -263,7 +285,7 @@ impl BuilderlabSession {
         api_base: &'static str,
         employee: EmployeeBinding,
     ) -> Result<(), String> {
-        let mut pending = login.0.lock().map_err(|error| error.to_string())?;
+        let pending = login.0.lock().map_err(|error| error.to_string())?;
         if pending.as_ref().is_none_or(|pending| pending.id != id) {
             return Err("Square sign-in canceled".to_owned());
         }
@@ -274,12 +296,21 @@ impl BuilderlabSession {
             assertion: None,
             cancel: tokio_util::sync::CancellationToken::new(),
         })?;
-        *pending = None;
+        // The login remains cancellable through first assertion/key enrollment.
         Ok(())
     }
 }
 
 impl BuilderlabLogin {
+    pub(crate) fn complete_employee_login(&self, id: uuid::Uuid) -> Result<(), String> {
+        let mut pending = self.0.lock().map_err(|_| "Square sign-in unavailable")?;
+        if pending.as_ref().is_none_or(|value| value.id != id) {
+            return Err("Square sign-in canceled".to_owned());
+        }
+        *pending = None;
+        Ok(())
+    }
+
     pub(crate) fn begin_employee_login(
         &self,
     ) -> Result<(uuid::Uuid, oneshot::Receiver<()>), String> {
@@ -516,6 +547,7 @@ pub(crate) async fn start_builderlab_login(
         })?;
         *pending = None;
     }
+    notify_session_changed(&app_state);
     Ok(info)
 }
 
@@ -535,7 +567,8 @@ pub(crate) async fn get_builderlab_auth(
             name: me.name,
         })),
         Err(error) => {
-            session.clear()?;
+            session.clear_if_credential(&credential)?;
+            notify_session_changed(&app_state);
             Err(error)
         }
     }
@@ -555,11 +588,13 @@ pub(crate) fn cancel_builderlab_login(
 pub(crate) fn clear_builderlab_auth(
     session: tauri::State<'_, BuilderlabSession>,
     login: tauri::State<'_, BuilderlabLogin>,
+    app_state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<(), String> {
     if let Some(pending) = login.0.lock().map_err(|error| error.to_string())?.take() {
         let _ = pending.cancel.send(());
     }
     session.clear()?;
+    notify_session_changed(&app_state);
     Ok(())
 }
 
@@ -837,6 +872,45 @@ mod tests {
         *state.keys.lock().unwrap() = nostr::Keys::generate();
         assert!(session.request_context(&state).is_err());
         assert!(session.request_context(&state).unwrap().is_none());
+    }
+    #[test]
+    fn employee_provisional_login_remains_cancelable_and_cannot_clear_a_replacement() {
+        let state = crate::app_state::build_app_state();
+        let session = BuilderlabSession::default();
+        let login = BuilderlabLogin::default();
+        let (id, mut cancellation) = login.begin_employee_login().unwrap();
+        session
+            .finish_employee_login(
+                &login,
+                id,
+                "provisional".to_owned(),
+                BUILDERLAB_API_BASE_URL,
+                EmployeeBinding {
+                    pubkey: state.signing_keys().unwrap().public_key().to_hex(),
+                    expires_at: chrono::Utc::now().timestamp() + 240,
+                    relay: crate::relay::relay_ws_url_with_override(&state),
+                },
+            )
+            .unwrap();
+        // A later login/cancel still owns and invalidates this in-flight admission.
+        let (new_id, _) = login.begin_employee_login().unwrap();
+        assert!(cancellation.try_recv().is_ok());
+        assert!(login.complete_employee_login(id).is_err());
+        session
+            .replace(StoredSession {
+                credential: "replacement".to_owned(),
+                api_base: BUILDERLAB_API_BASE_URL,
+                employee: None,
+                assertion: None,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            })
+            .unwrap();
+        session.clear_if_credential("provisional").unwrap();
+        assert_eq!(
+            session.request_context(&state).unwrap().unwrap().0,
+            "replacement"
+        );
+        login.complete_employee_login(new_id).unwrap();
     }
     #[test]
     fn auth_complete_page_uses_buzz_brand() {

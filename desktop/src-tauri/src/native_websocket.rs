@@ -132,8 +132,12 @@ async fn open_connection(
     url: &str,
     on_message: Channel<InvokeResponseBody>,
     employee: Option<crate::builderlab::EmployeeEvidence>,
+    connect_generation: Option<CancellationToken>,
 ) -> Result<Id, String> {
-    let connect_cancel = manager.connect_cancel.lock().await.clone();
+    let connect_cancel = match connect_generation {
+        Some(token) => token,
+        None => manager.connect_cancel.lock().await.clone(),
+    };
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut request = url.into_client_request().map_err(|_| "Invalid relay URL")?;
     if let Some(evidence) = &employee {
@@ -147,6 +151,7 @@ async fn open_connection(
         .map(|value| value.cancel.clone())
         .unwrap_or_default();
     let (socket, _) = tokio::select! {
+        biased;
         _ = employee_cancel.cancelled() => return Err("Square sign-in changed".to_owned()),
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
         result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request)) => result
@@ -223,13 +228,25 @@ async fn connect(
     on_message: Channel<InvokeResponseBody>,
     _config: Option<serde_json::Value>,
 ) -> Result<Id, String> {
+    let connect_generation = manager.connect_cancel.lock().await.clone();
     let employee = if crate::builderlab::requires_employee(&url)? {
         let keys = app_state.signing_keys()?;
-        crate::builderlab::employee_evidence(&app_state, &keys, &url).await?
+        tokio::select! {
+            biased;
+            _ = connect_generation.cancelled() => return Err("WebSocket connection cancelled".to_owned()),
+            result = crate::builderlab::employee_evidence(&app_state, &keys, &url) => result?,
+        }
     } else {
         None
     };
-    open_connection(manager.inner(), &url, on_message, employee).await
+    open_connection(
+        manager.inner(),
+        &url,
+        on_message,
+        employee,
+        Some(connect_generation),
+    )
+    .await
 }
 
 pub(crate) async fn send_message(
@@ -321,6 +338,10 @@ async fn run_connection<S>(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
+                if let Ok(frame) = serde_json::to_string(&OutboundMessage::Close(None)) {
+                    batch.push(frame);
+                    batch.flush(&on_message);
+                }
                 let _ = tokio::time::timeout(
                     SHUTDOWN_TIMEOUT,
                     socket.send(Message::Close(Some(CloseFrame {
@@ -345,7 +366,7 @@ async fn run_connection<S>(
                 let message = match incoming {
                     Some(Ok(message)) => {
                         let reflected = protected_assertion.as_ref().is_some_and(|token|match &message {
-                            Message::Text(text)=>text.contains(token),
+                            Message::Text(text)=>text.contains(token) || serde_json::from_str::<serde_json::Value>(text).ok().is_some_and(|value| contains_assertion(&value, token)),
                             Message::Binary(bytes) | Message::Ping(bytes) | Message::Pong(bytes)=>bytes.windows(token.len()).any(|window|window==token.as_bytes()),
                             Message::Close(Some(frame))=>frame.reason.contains(token),
                             _=>false,
@@ -387,6 +408,19 @@ async fn run_connection<S>(
     batch.flush(&on_message);
     cancel.cancel();
     manager.remove(id).await;
+}
+
+fn contains_assertion(value: &serde_json::Value, token: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value.contains(token),
+        serde_json::Value::Array(values) => {
+            values.iter().any(|value| contains_assertion(value, token))
+        }
+        serde_json::Value::Object(values) => values
+            .iter()
+            .any(|(key, value)| key.contains(token) || contains_assertion(value, token)),
+        _ => false,
+    }
 }
 
 fn outbound_message(message: Message) -> OutboundMessage {
@@ -696,9 +730,15 @@ mod tests {
         });
 
         let manager = WebSocketManager::default();
-        let id = open_connection(&manager, &format!("ws://{address}"), silent_channel(), None)
-            .await
-            .unwrap();
+        let id = open_connection(
+            &manager,
+            &format!("ws://{address}"),
+            silent_channel(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         send_message(&manager, id, WebSocketMessage::Text("live-probe".into()))
             .await
             .unwrap();

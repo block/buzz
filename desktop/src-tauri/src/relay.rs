@@ -256,9 +256,20 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     // malformed body, so route it through `classify_body_timeout` — the same
     // helper the non-2xx error-body path uses — to preserve the stable
     // "relay unreachable: request timed out" label.
-    response.json::<T>().await.map_err(|e| {
-        classify_body_timeout(&e).unwrap_or_else(|| MALFORMED_RESPONSE_MESSAGE.to_string())
-    })
+    let assertion = response
+        .extensions()
+        .get::<crate::builderlab::ProtectedAssertion>()
+        .cloned();
+    let value: serde_json::Value =
+        crate::builderlab::guard_employee_response(assertion.clone(), response.json())
+            .await?
+            .map_err(|e| {
+                classify_body_timeout(&e).unwrap_or_else(|| MALFORMED_RESPONSE_MESSAGE.to_string())
+            })?;
+    if assertion.is_some_and(|assertion| value.to_string().contains(&assertion.0)) {
+        return Err("Invalid employee relay response".to_owned());
+    }
+    serde_json::from_value(value).map_err(|_| MALFORMED_RESPONSE_MESSAGE.to_owned())
 }
 
 /// Extract the `retry in Ns` hint from a rate-limit error string.
@@ -274,6 +285,11 @@ fn extract_retry_in_hint(body: &str) -> Option<u64> {
 
 pub async fn relay_error_message(response: reqwest::Response) -> String {
     let status = response.status();
+    let scope = response
+        .extensions()
+        .get::<crate::builderlab::ProtectedAssertion>()
+        .cloned();
+    let protected = scope.is_some();
 
     // Check for intercepted/proxy responses before reading the body.
     let final_host = response.url().host_str().unwrap_or("").to_string();
@@ -295,9 +311,10 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     // shared helper instead of letting `unwrap_or_default` swallow it into a
     // bare status label. A non-timeout body error still degrades to an empty
     // body → status-only message, exactly as before.
-    let body = match response.text().await {
-        Ok(body) => body,
-        Err(e) => {
+    let body = match crate::builderlab::guard_employee_response(scope, response.text()).await {
+        Ok(Ok(body)) => body,
+        Err(error) => return error,
+        Ok(Err(e)) => {
             if let Some(timeout) = classify_body_timeout(&e) {
                 return timeout;
             }
@@ -324,6 +341,9 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
         return "relay rate-limited: quota exceeded".to_string();
     }
 
+    if protected {
+        return format!("employee relay returned {status}");
+    }
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
         if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
             return format!("relay returned {status}: {message}");
@@ -397,7 +417,11 @@ pub async fn query_relay_at_with_keys(
         auth_tag,
         body_bytes,
         QUERY_REQUEST_TIMEOUT,
-        Some((state, keys)),
+        if auth_tag.is_some() {
+            None
+        } else {
+            Some((state, keys))
+        },
     )
     .await
 }
@@ -715,9 +739,16 @@ pub async fn submit_signed_event_with_keys(
         request = request.header("x-auth-tag", tag);
     }
 
-    let response =
+    let response = if auth_tag.is_some() {
+        request
+            .body(body_bytes)
+            .send()
+            .await
+            .map_err(|error| classify_request_error(&error))?
+    } else {
         crate::builderlab::send_employee_request(state, keys, &url, request.body(body_bytes))
-            .await?;
+            .await?
+    };
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);

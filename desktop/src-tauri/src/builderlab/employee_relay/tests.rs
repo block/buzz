@@ -255,6 +255,13 @@ async fn employee_authorization_denial_explains_recovery_without_echoing_the_res
     assert!(error.contains("another Buzz key"));
     assert!(!error.contains("private-session-fixture"));
     assert!(fixture.session.employee_expiry(&fixture.state).is_none());
+    assert!(fixture.session.0.lock().unwrap().is_none());
+    assert!(fixture.evidence().await.is_err());
+    assert_eq!(
+        fixture.stub.captured.lock().unwrap().len(),
+        1,
+        "terminal denial must require explicit new sign-in"
+    );
 }
 
 #[tokio::test]
@@ -297,7 +304,8 @@ async fn relay_http_preserves_own_nip98_proof_without_forwarding_the_bb_session(
         .post(&url)
         .header("Authorization", &proof)
         .body(body.clone());
-    assert!(send_authorized_request(request, evidence)
+    let (client, request) = request.build_split();
+    assert!(send_authorized_request(client, request.unwrap(), evidence)
         .await
         .unwrap()
         .status()
@@ -316,4 +324,113 @@ async fn relay_http_preserves_own_nip98_proof_without_forwarding_the_bb_session(
     assert_eq!(headers["Authorization"], proof);
     assert!(!headers.contains_key(BB_SESSION_CREDENTIAL_HEADER));
     assert_eq!(actual_body, &body);
+}
+
+#[tokio::test]
+async fn employee_manual_refresh_waits_for_old_issuance_then_requires_a_fresh_receipt() {
+    let fixture = Fixture::new(true, false).await;
+    let old = fixture.evidence();
+    tokio::pin!(old);
+    tokio::select! { _ = fixture.stub.entered.notified() => {}, _ = &mut old => panic!("must wait") }
+    let keys = fixture.state.signing_keys().unwrap();
+    let refresh =
+        fixture
+            .session
+            .evidence_with_refresh(&fixture.state, &keys, &fixture.relay, true);
+    tokio::pin!(refresh);
+    fixture.stub.release.notify_one();
+    old.await.unwrap();
+    tokio::select! { _ = fixture.stub.entered.notified() => {}, _ = &mut refresh => panic!("manual refresh reused a pre-retry receipt") }
+    assert_eq!(fixture.stub.captured.lock().unwrap().len(), 2);
+    fixture.stub.release.notify_one();
+    refresh.await.unwrap();
+}
+
+#[tokio::test]
+async fn employee_http_response_cannot_reflect_assertion_through_errors_or_success_json() {
+    for success in [true, false] {
+        let fixture = Fixture::new(false, false).await;
+        let evidence = fixture.evidence().await.unwrap();
+        *fixture.stub.response.lock().unwrap() = serde_json::json!({"message":"test.assertion.signature","nested":{"value":"test.assertion.signature"}});
+        *fixture.stub.status.lock().unwrap() = if success {
+            StatusCode::OK
+        } else {
+            StatusCode::FORBIDDEN
+        };
+        let base = fixture
+            .session
+            .request_context(&fixture.state)
+            .unwrap()
+            .unwrap()
+            .1;
+        let url = format!(
+            "{}/query",
+            Url::parse(base).unwrap().origin().ascii_serialization()
+        );
+        let (client, request) = fixture.state.media_fetch_client.post(&url).build_split();
+        let response = send_authorized_request(client, request.unwrap(), evidence)
+            .await
+            .unwrap();
+        let error = if success {
+            crate::relay::parse_json_response::<serde_json::Value>(response)
+                .await
+                .unwrap_err()
+        } else {
+            crate::relay::relay_error_message(response).await
+        };
+        assert!(!error.contains("test.assertion.signature"));
+    }
+}
+
+#[tokio::test]
+async fn employee_response_body_is_canceled_on_logout_or_assertion_expiry() {
+    for expired in [true, false] {
+        let cancel = CancellationToken::new();
+        let lifetime = if expired {
+            chrono::Utc::now().timestamp() - 1
+        } else {
+            chrono::Utc::now().timestamp() + 60
+        };
+        let scope = ProtectedAssertion(
+            "test.assertion.signature".to_owned(),
+            cancel.clone(),
+            lifetime,
+        );
+        if !expired {
+            cancel.cancel();
+        }
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            guard_employee_response(Some(scope), std::future::pending::<()>()),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+    }
+}
+
+#[tokio::test]
+async fn ordinary_media_remains_available_while_identity_is_in_recovery() {
+    let fixture = Fixture::new(false, false).await;
+    fixture
+        .state
+        .identity_lost
+        .store(true, std::sync::atomic::Ordering::Release);
+    let base = fixture.session.0.lock().unwrap().as_ref().unwrap().api_base;
+    let url = format!(
+        "{}/query",
+        Url::parse(base).unwrap().origin().ascii_serialization()
+    );
+    let response = send_employee_media_request(
+        &fixture.state,
+        &url,
+        fixture.state.media_fetch_client.post(&url),
+    )
+    .await
+    .unwrap();
+    assert!(response.status().is_success());
+    assert!(fixture.stub.captured.lock().unwrap()[0]
+        .0
+        .get("Nostr-Federated-Identity")
+        .is_none());
 }

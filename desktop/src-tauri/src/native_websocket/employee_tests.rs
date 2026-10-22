@@ -51,6 +51,7 @@ async fn employee_upgrade_keeps_native_evidence_out_of_ipc_and_closes_on_logout(
         &format!("ws://{address}"),
         channel,
         Some(evidence),
+        None,
     )
     .await
     .unwrap();
@@ -79,6 +80,10 @@ async fn employee_upgrade_keeps_native_evidence_out_of_ipc_and_closes_on_logout(
     .unwrap();
     let renderer = deliveries.lock().unwrap().join("");
     assert!(renderer.contains("public frame"));
+    assert!(
+        renderer.contains("Close"),
+        "logout must immediately notify renderer teardown"
+    );
     assert!(!renderer.contains("private.native.assertion"));
 }
 
@@ -90,7 +95,9 @@ async fn employee_relay_reflection_is_refused_before_the_renderer_channel() {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
         socket
-            .send(Message::Text("reflected private.native.assertion".into()))
+            .send(Message::Text(
+                r#"["AUTH","private\u002enative\u002eassertion"]"#.into(),
+            ))
             .await
             .unwrap();
         while socket.next().await.is_some() {}
@@ -107,6 +114,7 @@ async fn employee_relay_reflection_is_refused_before_the_renderer_channel() {
         &format!("ws://{address}"),
         channel,
         Some(evidence),
+        None,
     )
     .await
     .unwrap();
@@ -121,4 +129,22 @@ async fn employee_relay_reflection_is_refused_before_the_renderer_channel() {
     assert!(renderer.contains("Invalid employee relay response"));
     assert!(!renderer.contains("private.native.assertion"));
     server.abort();
+}
+
+#[tokio::test]
+async fn employee_socket_cannot_adopt_a_new_generation_after_reload() {
+    let manager = WebSocketManager::default();
+    let generation = manager.connect_cancel.lock().await.clone();
+    generation.cancel();
+    *manager.connect_cancel.lock().await = CancellationToken::new();
+    let result = open_connection(
+        &manager,
+        "ws://127.0.0.1:1",
+        recording_channel().0,
+        None,
+        Some(generation),
+    )
+    .await;
+    assert!(result.unwrap_err().contains("cancelled"));
+    assert!(manager.connections.lock().await.is_empty());
 }
