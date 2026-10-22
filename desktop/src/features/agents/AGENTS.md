@@ -227,6 +227,13 @@ with a TypeScript lookup table or an id comparison in a component.
    hosting location, availability, or permission. Keep all identity surfaces on
    the shared provenance context, without per-row directory subscriptions. See
    [the provenance contract](../../../../docs/agent-management-provenance.md).
+   The Agents page lists those same owned, not-locally-managed identities under
+   **Running elsewhere** (`lib/otherSetupAgent.ts`
+   `ownedAgentsNotManagedOnDevice`, `ui/RunningElsewhereAgentsGroup.tsx`). The
+   list is read-only: no Start, Stop, edit or persona controls, because this
+   device holds neither the key nor the runtime. A card opens the exact-key
+   profile. It stays empty until both the local and relay directories have
+   loaded, and it omits archived identities.
 14. **Thinking effort has two surfaces: a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
    (`ui/EffortPickerField.tsx`), mounted in `AgentInstanceEditDialog` beside
@@ -397,6 +404,9 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
   and keep Markdown concealment syntax literal in the review surface.
 - `../profile/ui/UserProfileRuntimeContent.test.mjs` — profile runtime panels
   cannot reintroduce build-mode previews or synthetic fallback controls.
+- `lib/otherSetupAgent.test.mjs` and `desktop/tests/e2e/owned-agent-discovery.spec.ts`
+  — the Running elsewhere list: ownership, local-record exclusion, readiness,
+  archive and the read-only card.
 - `desktop/tests/e2e/profile.spec.ts` — the owned-agent parity flow compares
   every profile tab when opened from Agents and from the agent's DM.
 - `ui/AgentConfigPanelPresentation.test.mjs` — shared profile/agent config rows

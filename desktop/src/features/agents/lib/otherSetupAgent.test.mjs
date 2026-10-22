@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   isOtherSetupAgent,
   isOwnedAgentNotManagedOnDevice,
+  ownedAgentsNotManagedOnDevice,
 } from "./otherSetupAgent.ts";
 
 const OWNER = "a".repeat(64);
@@ -71,3 +72,94 @@ for (const [name, overrides, expected] of [
     );
   });
 }
+
+function relayAgent(pubkey, name, ownerPubkey = OWNER) {
+  return {
+    pubkey,
+    ownerPubkey,
+    name,
+    agentType: "agent",
+    channels: [],
+    channelIds: [],
+    capabilities: [],
+    status: "unknown",
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+  };
+}
+
+const notArchived = () => false;
+
+test("running elsewhere: lists owned relay agents without a local record, by name", () => {
+  const listed = ownedAgentsNotManagedOnDevice({
+    agentDirectoriesReady: true,
+    currentPubkey: OWNER,
+    isArchived: notArchived,
+    managedAgents: [{ pubkey: "c".repeat(64) }],
+    relayAgents: [
+      relayAgent("d".repeat(64), "Zed"),
+      relayAgent("c".repeat(64), "Local twin"),
+      relayAgent("e".repeat(64), "Someone else's", "f".repeat(64)),
+      relayAgent("1".repeat(64), "Unowned", null),
+      relayAgent(AGENT, "Atlas"),
+    ],
+  });
+  assert.deepEqual(
+    listed.map((agent) => agent.name),
+    ["Atlas", "Zed"],
+  );
+});
+
+test("running elsewhere: empty until both directories are ready", () => {
+  assert.deepEqual(
+    ownedAgentsNotManagedOnDevice({
+      agentDirectoriesReady: false,
+      currentPubkey: OWNER,
+      isArchived: notArchived,
+      managedAgents: [],
+      relayAgents: [relayAgent(AGENT, "Atlas")],
+    }),
+    [],
+  );
+  assert.deepEqual(
+    ownedAgentsNotManagedOnDevice({
+      agentDirectoriesReady: true,
+      currentPubkey: undefined,
+      isArchived: notArchived,
+      managedAgents: [],
+      relayAgents: [relayAgent(AGENT, "Atlas")],
+    }),
+    [],
+  );
+});
+
+test("running elsewhere: matches keys case-insensitively and lists each once", () => {
+  const listed = ownedAgentsNotManagedOnDevice({
+    agentDirectoriesReady: true,
+    currentPubkey: OWNER.toUpperCase(),
+    isArchived: notArchived,
+    managedAgents: [{ pubkey: "C".repeat(64) }],
+    relayAgents: [
+      relayAgent(AGENT, "Atlas"),
+      relayAgent(AGENT.toUpperCase(), "Atlas"),
+      relayAgent("c".repeat(64), "Local twin"),
+    ],
+  });
+  assert.deepEqual(
+    listed.map((agent) => agent.pubkey),
+    [AGENT],
+  );
+});
+
+test("running elsewhere: omits archived identities", () => {
+  assert.deepEqual(
+    ownedAgentsNotManagedOnDevice({
+      agentDirectoriesReady: true,
+      currentPubkey: OWNER,
+      isArchived: (pubkey) => pubkey === AGENT,
+      managedAgents: [],
+      relayAgents: [relayAgent(AGENT, "Atlas")],
+    }),
+    [],
+  );
+});

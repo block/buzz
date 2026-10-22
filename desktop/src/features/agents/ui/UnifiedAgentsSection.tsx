@@ -13,7 +13,11 @@ import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlA
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type {
+  AgentPersona,
+  ManagedAgent,
+  RelayAgent,
+} from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { Badge } from "@/shared/ui/badge";
@@ -26,6 +30,7 @@ import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
+import { RunningElsewhereAgentsGroup } from "./RunningElsewhereAgentsGroup";
 import { buildUnifiedGroups } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
@@ -64,9 +69,12 @@ type UnifiedAgentsSectionProps = {
   ) => void;
   onDeactivatePersona: (persona: AgentPersona) => void;
   onDeletePersona: (persona: AgentPersona) => void;
+  /** Owned relay agents with no local record; listed read-only. */
+  runningElsewhereAgents?: readonly RelayAgent[];
 };
 
 const AGENT_CARD_COLUMN_CLASS = "w-full";
+const NO_RELAY_AGENTS: readonly RelayAgent[] = [];
 export const AGENT_CARD_GRID_COLUMNS_CLASS =
   "grid-cols-1 [@container(min-width:21rem)]:grid-cols-2 [@container(min-width:32rem)]:grid-cols-3 [@container(min-width:43rem)]:grid-cols-4 [@container(min-width:54rem)]:grid-cols-5";
 export const IDENTITY_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} ${AGENT_CARD_GRID_COLUMNS_CLASS} grid gap-3`;
@@ -101,6 +109,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     onSharePersona,
     onDeactivatePersona,
     onDeletePersona,
+    runningElsewhereAgents = NO_RELAY_AGENTS,
   } = props;
 
   const isArchived = useIsArchivedPredicate();
@@ -213,6 +222,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               onStartAgent={onStartAgent}
             />
           ) : null}
+          <RunningElsewhereAgentsGroup
+            agents={runningElsewhereAgents}
+            collapsed={collapsed}
+            gridClassName={IDENTITY_CARD_GRID_CLASS}
+            onOpenAgentProfile={onOpenAgentProfile}
+            onToggle={toggle}
+          />
         </div>
       ) : null}
 

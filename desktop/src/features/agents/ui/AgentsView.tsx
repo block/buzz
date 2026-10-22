@@ -23,9 +23,13 @@ import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
+import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
+import { isAgentDirectoryReady } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { ownedAgentsNotManagedOnDevice } from "@/features/agents/lib/otherSetupAgent";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
 import {
@@ -44,6 +48,30 @@ export function AgentsView() {
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
+  const currentPubkey = useIdentityQuery().data?.pubkey;
+  const isArchived = useIsArchivedPredicate();
+  const agentDirectoriesReady =
+    isAgentDirectoryReady(agents.managedAgentsQuery) &&
+    isAgentDirectoryReady(agents.relayAgentsQuery);
+  const managedAgentsData = agents.managedAgentsQuery.data;
+  const relayAgentsData = agents.relayAgentsQuery.data;
+  const runningElsewhereAgents = React.useMemo(
+    () =>
+      ownedAgentsNotManagedOnDevice({
+        agentDirectoriesReady,
+        currentPubkey,
+        isArchived,
+        managedAgents: managedAgentsData ?? [],
+        relayAgents: relayAgentsData ?? [],
+      }),
+    [
+      agentDirectoriesReady,
+      currentPubkey,
+      isArchived,
+      managedAgentsData,
+      relayAgentsData,
+    ],
+  );
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const fullAiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -224,6 +252,7 @@ export function AgentsView() {
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
+              runningElsewhereAgents={runningElsewhereAgents}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error
                   ? agents.managedAgentsQuery.error

@@ -49,6 +49,11 @@ legacy offline default. Policy still controls ownership and permissions; claimed
 runtime membership is not restored. An invalid latest policy still excludes the
 agent rather than falling back to runtime permissions.
 
+The Agents page lists discovered agents that the viewer owns and does not
+manage locally under a read-only **Running elsewhere** group, marked with the
+shared cloud glyph. It offers no lifecycle controls and shows no status dot.
+Each card opens the exact-key profile.
+
 Discovery alone supplies no liveness evidence: Pulse and Projects omit the status
 dot rather than inventing offline or active presence, and active-agent lookups
 require positive evidence.
