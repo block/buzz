@@ -11,7 +11,7 @@ abstract final class NativeCommunityEntry {
   static bool _presenting = false;
   static int _session = 0;
 
-  /// Returns null only when the native plugin is unavailable.
+  /// Returns null when native presentation is unavailable.
   static Future<bool?> show({
     required String name,
     required bool dark,
@@ -114,6 +114,10 @@ abstract final class NativeCommunityEntry {
           false;
     } on MissingPluginException {
       return null;
+    } on PlatformException catch (error) {
+      // Scene transitions can temporarily leave UIKit without a presenter.
+      if (error.code == 'presentation_failed') return null;
+      rethrow;
     } finally {
       active = false;
       generation++;

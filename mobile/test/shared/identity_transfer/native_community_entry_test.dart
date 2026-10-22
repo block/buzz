@@ -38,6 +38,45 @@ void main() {
     return result.future;
   }
 
+  for (final code in [
+    'presentation_failed',
+    'invalid_arguments',
+    'already_presented',
+  ]) {
+    test('native $code preserves the presentation contract', () async {
+      messenger.setMockMethodCallHandler(channel, (_) async {
+        throw PlatformException(code: code);
+      });
+      final result = NativeCommunityEntry.show(
+        name: 'Preview',
+        dark: false,
+        primaryArgb: 0xFF007AFF,
+        choices: const [],
+        connect: (_, _, _, _) async => fail('Must not connect'),
+      );
+      if (code == 'presentation_failed') {
+        expect(await result, isNull);
+        // A failed presentation must not leave the singleton busy.
+        messenger.setMockMethodCallHandler(channel, (_) async => true);
+        expect(
+          await NativeCommunityEntry.show(
+            name: 'Preview',
+            dark: false,
+            primaryArgb: 0xFF007AFF,
+            choices: const [],
+            connect: (_, _, _, _) async {},
+          ),
+          isTrue,
+        );
+      } else {
+        await expectLater(
+          result,
+          throwsA(isA<PlatformException>().having((e) => e.code, 'code', code)),
+        );
+      }
+    });
+  }
+
   test(
     'invite confirmation delegates claiming and preserves retry errors',
     () async {
