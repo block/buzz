@@ -1,3 +1,4 @@
+use super::managed_agent_definition::apply_model_provider_prompt_update;
 use std::collections::{BTreeMap, HashSet};
 
 use nostr::Keys;
@@ -5,7 +6,6 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
-use super::managed_agent_definition::apply_model_provider_prompt_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
 use super::agent_models_env::{
@@ -201,8 +201,10 @@ pub async fn discover_agent_models(
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
-    // Also validate definition_env (caller-supplied, same trust level as env_vars).
     crate::managed_agents::validate_user_env_keys(&input.definition_env)?;
+    if let Some(provider) = input.provider.as_deref() {
+        crate::managed_agents::validate_provider_value(provider)?;
+    }
 
     let acp_command = input
         .acp_command
@@ -345,13 +347,11 @@ use openrouter::{
 };
 
 fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
-    matches!(
-        provider
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("openai" | "openai-compat")
-    )
+    let normalized = provider.map(str::trim).map(str::to_ascii_lowercase);
+    matches!(normalized.as_deref(), Some("openai" | "openai-compat"))
+        || normalized
+            .as_deref()
+            .is_some_and(crate::managed_agents::provider_is_http_base_url)
 }
 
 #[cfg(test)]
