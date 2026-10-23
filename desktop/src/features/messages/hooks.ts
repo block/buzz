@@ -16,6 +16,7 @@ import {
   buildReplyTags,
   getThreadReference,
   isBroadcastReply,
+  liveThreadReplyCacheRootId,
   normalizeMentionPubkeys,
   resolveReplyRootId,
 } from "@/features/messages/lib/threading";
@@ -345,7 +346,9 @@ export function useChannelSubscription(channel: Channel | null) {
       ? getThreadReference(event.tags)
       : null;
     if (threadReference?.parentId != null) {
-      const rootId = threadReference?.rootId;
+      // Broadcast replies render flat on the main timeline. Merging them
+      // here ghosts a second copy in the thread panel (#8063).
+      const rootId = liveThreadReplyCacheRootId(event.tags);
       if (rootId) {
         queryClient.setQueryData<RelayEvent[]>(
           threadRepliesKey(channelId, rootId),
