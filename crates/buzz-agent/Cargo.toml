@@ -50,6 +50,7 @@ serde_yaml = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
 arc-swap = "1"
+dirs = "6"
 getrandom = "0.4"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -62,7 +63,6 @@ sha2 = { workspace = true }
 url = { workspace = true }
 urlencoding = "2"
 webbrowser = "1"
-dirs = "6"
 # Cross-process advisory file lock (flock on Unix, LockFileEx on Windows) for
 # the auth coordinator's single-flight. Kept off std's `File::try_lock` so the
 # crate stays buildable on the repo's declared 1.88 MSRV (those std APIs are
