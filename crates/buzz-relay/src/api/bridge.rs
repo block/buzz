@@ -686,6 +686,7 @@ fn build_aux_query(
 /// Where an aux hop reads from: the window path pins the request's proved
 /// read session; the thread path takes the routed display-read fast path.
 enum AuxReader<'a> {
+    Writer(&'a buzz_db::Db),
     Session(&'a mut buzz_db::ReadSession),
     Routed(&'a buzz_db::Db, &'static str),
     #[cfg(test)]
@@ -699,6 +700,7 @@ impl AuxReader<'_> {
     ) -> buzz_db::Result<Vec<buzz_core::StoredEvent>> {
         match self {
             AuxReader::Session(session) => session.query_events(query).await,
+            AuxReader::Writer(db) => db.query_events(query).await,
             AuxReader::Routed(db, path) => db.query_events_routed(path, query).await,
             #[cfg(test)]
             AuxReader::Fake(fetch) => Ok(fetch(query)),
@@ -1917,20 +1919,21 @@ async fn query_events_authed(
                     ReadRoute::Writer => db.query_events(&query).await,
                     ReadRoute::Routed => db.query_events_routed("bridge_query", &query).await,
                 };
-                (idx, result)
+                (idx, read_route, result)
             }
         },
     ))
     .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
 
     // Phase 3 — post-processing, strictly in filter order.
-    while let Some((idx, filter_events)) = catchall_results.next().await {
+    while let Some((idx, read_route, filter_events)) = catchall_results.next().await {
         let filter = &filters[idx];
         let accessible_channels = crate::handlers::system_channels::filter_channel_scope(
             filter,
             &accessible_channels,
             &named_only,
         );
+        let mut result_ids = Vec::new();
         match filter_events {
             Ok(stored_events) => {
                 for se in stored_events {
@@ -1949,12 +1952,49 @@ async fn query_events_authed(
                         continue;
                     }
                     if let Ok(v) = serde_json::to_value(&se.event) {
+                        result_ids.push(se.event.id.to_hex());
                         events.push(v);
                     }
                 }
             }
             Err(e) => {
                 return Err(db_read_error("query error", &e));
+            }
+        }
+
+        // Aux closure for the catch-all path: include reactions, deletions,
+        // and edits targeting the returned events, plus deletions targeting
+        // those aux events. This covers `messages get` (no top_level, no
+        // depth_limit) and the root-event filter in `messages thread` (an
+        // `ids` filter that falls through to catch-all).
+        if extension_flag(&raw_filters[idx], "include_aux") && !result_ids.is_empty() {
+            let mut seen_aux = std::collections::HashSet::new();
+            let mut hop_ids = result_ids;
+            for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+                let aux_query =
+                    build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+                let mut reader = match read_route {
+                    ReadRoute::Writer => AuxReader::Writer(&state.db),
+                    ReadRoute::Routed => AuxReader::Routed(&state.db, "bridge_catchall_aux"),
+                };
+                let aux_events = query_all_pages(aux_query, AUX_PAGE_LIMIT, &mut reader)
+                    .await
+                    .map_err(|e| db_read_error("catch-all aux query error", &e))?;
+                for se in aux_events {
+                    if !seen_aux.insert(se.event.id)
+                        || !event_in_accessible_channel(&se, &accessible_channels)
+                        || !crate::handlers::req::event_visible_to_reader(&se.event, &pubkey_bytes)
+                    {
+                        continue;
+                    }
+                    hop_ids.push(se.event.id.to_hex());
+                    if let Ok(value) = serde_json::to_value(&se.event) {
+                        events.push(value);
+                    }
+                }
+                if hop_ids.is_empty() {
+                    break;
+                }
             }
         }
     }
@@ -8049,6 +8089,24 @@ pub(crate) mod postgres_tests {
             // replica_pool deliberately receives no canvas events.
         });
 
+        let reaction_ev = EventBuilder::new(Kind::Custom(7), "+")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+                Tag::parse(["e", &canvas_ev.id.to_hex()]).expect("e tag"),
+            ])
+            .sign_with_keys(&author)
+            .expect("sign writer-only reaction");
+        rt.block_on(async {
+            buzz_db::Db::from_pool(writer_pool.clone())
+                .insert_event(
+                    CommunityId::from_uuid(community),
+                    &reaction_ev,
+                    Some(channel_id),
+                )
+                .await
+                .expect("insert writer-only reaction");
+        });
+
         // --- build AppState with two-pool Db ---------------------------------
         let state = rt.block_on(async {
             let mut config = crate::config::Config::for_test();
@@ -8133,6 +8191,7 @@ pub(crate) mod postgres_tests {
             "#h": [&channel_str],
             "limit": 10,
             "consistency": "strong",
+            "include_aux": true,
         }]))
         .expect("serialize strong filter");
         let (status, resp_body) = rt.block_on(post_query(state.clone(), &host, &pubkey_hex, &body));
@@ -8146,7 +8205,7 @@ pub(crate) mod postgres_tests {
             serde_json::from_slice(&resp_body).expect("parse strong response");
         assert_eq!(
             strong_events.len(),
-            1,
+            2,
             "Probe 2 FAIL — strong-consistency read MUST see the writer-only canvas event. \
              Mutation oracle: if ReadRoute::Writer dispatches to query_events_routed instead \
              of query_events, this returns empty and this assertion fails: {strong_events:?}"
@@ -8156,6 +8215,29 @@ pub(crate) mod postgres_tests {
             Some("writer-only canvas content"),
             "strong read must return the canvas event inserted into the writer pool"
         );
+
+        assert!(
+            strong_events
+                .iter()
+                .any(|event| event["id"] == reaction_ev.id.to_hex()),
+            "strong reads must use the writer for aux events too"
+        );
+
+        // An empty aux-enabled OR sibling must not expand the earlier filter.
+        let body = serde_json::to_vec(&serde_json::json!([
+            {"ids": [canvas_ev.id.to_hex()], "#h": [&channel_str], "consistency": "strong"},
+            {"ids": ["0".repeat(64)], "#h": [&channel_str], "consistency": "strong", "include_aux": true}
+        ])).expect("serialize independent filters");
+        let (status, response) = rt.block_on(post_query(state.clone(), &host, &pubkey_hex, &body));
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let events: Vec<serde_json::Value> =
+            serde_json::from_slice(&response).expect("query response");
+        assert_eq!(
+            events.len(),
+            1,
+            "aux expansion belongs to its own filter's accepted rows"
+        );
+        assert_eq!(events[0]["id"], canvas_ev.id.to_hex());
 
         // Probe 3: malformed consistency value must 400.
         let body = serde_json::to_vec(&serde_json::json!([{

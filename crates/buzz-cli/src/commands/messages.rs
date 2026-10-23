@@ -320,17 +320,26 @@ fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+/// Common pagination and auxiliary-event options for message reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MessageReadOptions {
+    /// Maximum number of primary messages to retrieve.
+    pub limit: Option<u32>,
+    /// Include reactions, edits, and deletions attached to the primary rows.
+    pub include_aux: bool,
+}
+
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
-    limit: Option<u32>,
+    options: MessageReadOptions,
     before: Option<i64>,
     since: Option<i64>,
     kinds: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
-    let limit = limit.unwrap_or(50).min(200);
+    let limit = options.limit.unwrap_or(50).min(200);
 
     let mut filter = serde_json::json!({
         "kinds": [9, 40002, 40008, 45001, 45003],
@@ -351,6 +360,9 @@ pub async fn cmd_get_messages(
     }
     if let Some(s) = since {
         filter["since"] = serde_json::json!(s);
+    }
+    if options.include_aux {
+        filter["include_aux"] = serde_json::json!(true);
     }
 
     let resp = client.query(&filter).await?;
@@ -389,7 +401,7 @@ pub async fn cmd_get_thread(
     channel_id: &str,
     event_id: &str,
     expected_root_id: Option<&str>,
-    limit: Option<u32>,
+    options: MessageReadOptions,
     depth_limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
@@ -402,7 +414,7 @@ pub async fn cmd_get_thread(
         expected_root_id,
         &selected_event,
     )?;
-    let limit = limit.unwrap_or(100).min(500);
+    let limit = options.limit.unwrap_or(100).min(500);
 
     let mut reply_filter = serde_json::json!({
         "kinds": [9, 40002, 40003, 40008, 45003],
@@ -413,11 +425,17 @@ pub async fn cmd_get_thread(
     if let Some(d) = depth_limit {
         reply_filter["depth_limit"] = serde_json::json!(d);
     }
-    let root_filter = serde_json::json!({
+    if options.include_aux {
+        reply_filter["include_aux"] = serde_json::json!(true);
+    }
+    let mut root_filter = serde_json::json!({
         "ids": [root_event_id.as_str()],
         "#h": [channel_id],
         "limit": 1
     });
+    if options.include_aux {
+        root_filter["include_aux"] = serde_json::json!(true);
+    }
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|event| {
@@ -982,11 +1000,12 @@ pub async fn dispatch(
             before,
             since,
             kinds,
+            include_aux,
         } => {
             cmd_get_messages(
                 client,
                 &channel,
-                limit,
+                MessageReadOptions { limit, include_aux },
                 before,
                 since,
                 kinds.as_deref(),
@@ -1000,6 +1019,7 @@ pub async fn dispatch(
             link,
             limit,
             depth_limit,
+            include_aux,
         } => {
             let (channel, event, expected_root) =
                 match link {
@@ -1020,7 +1040,7 @@ pub async fn dispatch(
                 &channel,
                 &event,
                 expected_root.as_deref(),
-                limit,
+                MessageReadOptions { limit, include_aux },
                 depth_limit,
                 format,
             )
@@ -1055,7 +1075,7 @@ mod tests {
         find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,
         normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
         resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        CliError, MessageReadOptions, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1082,7 +1102,7 @@ mod tests {
             "not-a-uuid",
             ID_A,
             None,
-            None,
+            MessageReadOptions::default(),
             None,
             &crate::OutputFormat::Json,
         )
@@ -1091,6 +1111,61 @@ mod tests {
 
         assert!(matches!(error, CliError::Usage(_)));
         assert!(error.to_string().contains("invalid UUID"));
+    }
+
+    #[tokio::test]
+    async fn thread_aux_flag_reaches_both_root_and_reply_filters() {
+        use std::sync::{Arc, Mutex};
+        for include_aux in [false, true] {
+            let channel = Uuid::new_v4().to_string();
+            let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+            let captured = Arc::clone(&requests);
+            let response = json!([{
+                "id": ID_A, "pubkey": PUBKEY, "kind": 9, "created_at": 1,
+                "content": "root", "tags": [["h", channel]], "sig": ""
+            }]);
+            let app = axum::Router::new().route(
+                "/query",
+                axum::routing::post(move |axum::Json(filters): axum::Json<serde_json::Value>| {
+                    let captured = Arc::clone(&captured);
+                    let response = response.clone();
+                    async move {
+                        captured.lock().unwrap().push(filters);
+                        axum::Json(response)
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let client =
+                BuzzClient::new(format!("http://{address}"), Keys::generate(), None, None).unwrap();
+            cmd_get_thread(
+                &client,
+                &channel,
+                ID_A,
+                None,
+                MessageReadOptions {
+                    limit: None,
+                    include_aux,
+                },
+                None,
+                &crate::OutputFormat::Json,
+            )
+            .await
+            .unwrap();
+            server.abort();
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            let filters = requests[1].as_array().unwrap();
+            assert_eq!(filters.len(), 2);
+            for filter in filters {
+                assert_eq!(
+                    filter.get("include_aux"),
+                    include_aux.then_some(&serde_json::Value::Bool(true))
+                );
+            }
+        }
     }
 
     #[test]
