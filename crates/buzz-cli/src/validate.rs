@@ -35,6 +35,12 @@ pub fn validate_hex64(s: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Validate a 64-hex pubkey/event id and return lowercase for relay filters.
+pub fn canonicalize_hex64(s: &str) -> Result<String, CliError> {
+    validate_hex64(s)?;
+    Ok(s.to_ascii_lowercase())
+}
+
 /// Validate a git repo identifier: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`.
 pub fn validate_repo_id(s: &str) -> Result<(), CliError> {
     if s.is_empty() || s.len() > 64 {
@@ -226,6 +232,12 @@ mod tests {
     fn validate_hex64_valid() {
         let hex = "a".repeat(64);
         assert!(validate_hex64(&hex).is_ok());
+    }
+
+    #[test]
+    fn canonicalize_hex64_lowercases() {
+        let hex = "A".repeat(64);
+        assert_eq!(super::canonicalize_hex64(&hex).unwrap(), "a".repeat(64));
     }
 
     #[test]

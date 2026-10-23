@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::{parse_event_id, validate_hex64};
+use crate::validate::{canonicalize_hex64, parse_event_id, validate_hex64};
 
 /// A single contact entry (CLI-local, not from buzz-sdk).
 #[derive(Debug, Deserialize)]
@@ -87,10 +87,11 @@ pub async fn cmd_get_user_notes(
     before: Option<i64>,
     before_id: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
-    if let Some(bid) = before_id {
-        validate_hex64(bid)?;
-    }
+    let pubkey = canonicalize_hex64(pubkey)?;
+    let before_id = match before_id {
+        Some(bid) => Some(canonicalize_hex64(bid)?),
+        None => None,
+    };
     let limit = limit.unwrap_or(50).min(100);
 
     let mut filter = serde_json::json!({
@@ -113,7 +114,7 @@ pub async fn cmd_get_user_notes(
 
 /// Get a user's contact list (kind:3) by pubkey.
 pub async fn cmd_get_contact_list(client: &BuzzClient, pubkey: &str) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = canonicalize_hex64(pubkey)?;
     let filter = serde_json::json!({
         "kinds": [3],
         "authors": [pubkey],
@@ -187,7 +188,7 @@ pub async fn cmd_get_list(
     kind: u32,
     d_tag: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = canonicalize_hex64(pubkey)?;
     validate_social_list_kind(kind)?;
     if !is_parameterized_social_list_kind(kind) && d_tag.is_some() {
         return Err(CliError::Usage(format!(
