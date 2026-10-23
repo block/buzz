@@ -1697,17 +1697,28 @@ pub(crate) fn format_event_block(
 
 /// Append a reply instruction when the agent is responding to a thread event.
 ///
-/// Tells the agent to default to `--reply-to <event_id>` for ordinary replies
-/// while still allowing an explicit human request to post at the channel root or
-/// top level.
-fn append_reply_instruction(s: &mut String, event_id: &str) {
-    s.push_str(&format!(
-        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
-         on `buzz messages send` so the conversation stays threaded. \
-         If the human explicitly asks for a channel-root, top-level, \
-         or broadcast post, send that message without `--reply-to`. \
-         If the requested destination is ambiguous, ask before sending."
-    ));
+/// Channel turns default to `--reply-to <event_id> --broadcast` so a depth-1
+/// reply stays in the thread and also becomes a NIP-CW window row. DM turns
+/// omit `--broadcast` (there is no channel timeline). An explicit human
+/// request can still post at the channel root or stay thread-only.
+fn append_reply_instruction(s: &mut String, event_id: &str, broadcast: bool) {
+    if broadcast {
+        s.push_str(&format!(
+            "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id} --broadcast` \
+             on `buzz messages send` so the conversation stays threaded and the reply also \
+             appears on the channel timeline. \
+             If the human explicitly asks for a channel-root or top-level post, \
+             send that message without `--reply-to`. \
+             If they ask to stay in the thread only, omit `--broadcast`. \
+             If the requested destination is ambiguous, ask before sending."
+        ));
+    } else {
+        s.push_str(&format!(
+            "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
+             on `buzz messages send` so the conversation stays threaded. \
+             If the requested destination is ambiguous, ask before sending."
+        ));
+    }
 }
 
 /// Append a new-thread reply instruction for a human-facing top-level mention.
@@ -1715,13 +1726,17 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
 /// The triggering mention has no thread tags, so the agent's reply becomes the
 /// thread root. Anchoring to the triggering event (rather than leaving the
 /// choice open) prevents replying into a stale/unrelated prior thread.
+/// `--broadcast` surfaces that depth-1 reply on the channel timeline so the
+/// answer is not hidden under a reply counter.
 fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     s.push_str(&format!(
         "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
-         this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
-         triggering message is the thread root. Do NOT reply into any other \
-         (older) thread. If the human explicitly asks for a channel-root, \
-         top-level, or broadcast post, send that message without `--reply-to`."
+         this turn, use `--reply-to {event_id} --broadcast` on `buzz messages send` — the \
+         triggering message is the thread root, and `--broadcast` surfaces the reply \
+         on the channel timeline. Do NOT reply into any other \
+         (older) thread. If the human explicitly asks for a channel-root or \
+         top-level post, send that message without `--reply-to`. \
+         If they ask to stay in the thread only, omit `--broadcast`."
     ));
 }
 
@@ -2014,7 +2029,7 @@ fn format_context_hints(
                 }
             }
             if let Some(event_id) = reply_anchor {
-                append_reply_instruction(&mut s, event_id);
+                append_reply_instruction(&mut s, event_id, false);
             }
         }
         crate::prompt_framing::semantic_section("context", &s)
@@ -2052,7 +2067,7 @@ fn format_context_hints(
         s.push_str(&format!("\n{ctx_hint}"));
         if let Some(event_id) = reply_anchor {
             if thread_tags.root_event_id.is_some() {
-                append_reply_instruction(&mut s, event_id);
+                append_reply_instruction(&mut s, event_id, true);
             } else {
                 append_new_thread_reply_instruction(&mut s, event_id);
             }
@@ -4589,6 +4604,17 @@ mod tests {
                                 root.clone()
                             };
                             assert!(prompt.contains(&format!("--reply-to {anchor}")));
+                            if is_dm {
+                                assert!(
+                                    !prompt.contains("--broadcast"),
+                                    "DM reply instruction must not add --broadcast"
+                                );
+                            } else {
+                                assert!(
+                                    prompt.contains(&format!("--reply-to {anchor} --broadcast")),
+                                    "channel reply instruction must broadcast"
+                                );
+                            }
                         } else {
                             assert!(!prompt.contains("--reply-to"));
                             assert!(prompt.contains("buzz messages get"));
@@ -4686,7 +4712,7 @@ mod tests {
             .contains("<thread-context included=\"2\" total=\"2\" truncated=\"false\">"));
         assert!(complete_prompt.contains("Let's refactor auth"));
         assert!(complete_prompt.contains(&format!(
-            "IMPORTANT: For ordinary replies in this turn, use `--reply-to {root}`"
+            "IMPORTANT: For ordinary replies in this turn, use `--reply-to {root} --broadcast`"
         )));
 
         let prompt_with_prior_delivery = format_prompt(
@@ -5862,8 +5888,8 @@ mod tests {
         // triggering event id.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
-            "human-facing thread reply should anchor to the thread root"
+            prompt.contains(&format!("--reply-to {root_id} --broadcast")),
+            "human-facing thread reply should anchor to the thread root and broadcast"
         );
         assert!(
             prompt.contains("For ordinary replies in this turn"),
@@ -5872,6 +5898,10 @@ mod tests {
         assert!(
             prompt.contains("send that message without `--reply-to`"),
             "channel thread reply should allow explicit channel-root/top-level requests"
+        );
+        assert!(
+            prompt.contains("omit `--broadcast`"),
+            "channel thread reply should allow explicit thread-only requests"
         );
         assert!(
             !prompt.contains("Do not broadcast to the channel"),
@@ -5919,6 +5949,10 @@ mod tests {
             prompt.contains(&format!("--reply-to {event_id}")),
             "DM thread reply should include reply instruction"
         );
+        assert!(
+            !prompt.contains("--broadcast"),
+            "DM thread reply should not instruct --broadcast"
+        );
     }
 
     #[test]
@@ -5944,8 +5978,8 @@ mod tests {
         // stale older thread.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "top-level human message should anchor a new thread at the triggering event"
+            prompt.contains(&format!("--reply-to {event_id} --broadcast")),
+            "top-level human message should anchor a new thread at the triggering event and broadcast"
         );
         assert!(
             prompt.contains("new top-level message"),
@@ -6020,8 +6054,8 @@ mod tests {
         // keep the conversation flat — NOT the triggering event or parent.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
-            "human-facing nested reply should anchor to the thread root"
+            prompt.contains(&format!("--reply-to {root_id} --broadcast")),
+            "human-facing nested reply should anchor to the thread root and broadcast"
         );
         assert!(
             !prompt.contains(&format!("--reply-to {event_id}")),
@@ -6056,11 +6090,11 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
-            "human-facing thread reply should anchor to the thread root"
+            prompt.contains(&format!("--reply-to {root_id} --broadcast")),
+            "human-facing thread reply should anchor to the thread root and broadcast"
         );
         assert!(
-            prompt.contains("channel-root, top-level"),
+            prompt.contains("channel-root or top-level"),
             "instruction should tell agents to honor explicit root/top-level requests"
         );
         assert!(
@@ -6103,8 +6137,8 @@ mod tests {
         // to that thread's root.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
-            "batched prompt should anchor to the last (threaded) event's root"
+            prompt.contains(&format!("--reply-to {root_id} --broadcast")),
+            "batched prompt should anchor to the last (threaded) event's root and broadcast"
         );
     }
 
@@ -6143,8 +6177,8 @@ mod tests {
         // anchored to that top-level event (NOT the earlier thread's root).
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {plain_id}")),
-            "batched top-level-last prompt should anchor to the last (top-level) event"
+            prompt.contains(&format!("--reply-to {plain_id} --broadcast")),
+            "batched top-level-last prompt should anchor to the last (top-level) event and broadcast"
         );
         assert!(
             prompt.contains("new top-level message"),
