@@ -181,6 +181,92 @@ fn append_workflow_mention_tags(
     Ok(())
 }
 
+/// Collect distinct valid NIP-30 shortcodes in first-appearance order.
+fn workflow_emoji_shortcodes(text: &str) -> Vec<String> {
+    let mut shortcodes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut consumed = 0;
+    for (start, _) in text.match_indices(':') {
+        if start < consumed {
+            continue;
+        }
+        let tail = &text[start + 1..];
+        let len = tail
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+            .count();
+        if len > 0 && tail.as_bytes().get(len) == Some(&b':') {
+            consumed = start + len + 2;
+            if let Ok(shortcode) = buzz_sdk::normalize_custom_emoji_shortcode(&tail[..len]) {
+                if seen.insert(shortcode.clone()) {
+                    shortcodes.push(shortcode);
+                }
+            }
+        }
+    }
+    shortcodes
+}
+
+/// Attach only used emoji from the destination community's palette. Match the
+/// clients' newest-set / lexicographically-smallest-URL collision rule.
+async fn append_workflow_emoji_tags(
+    tags: &mut Vec<Tag>,
+    text: &str,
+    community: CommunityId,
+    db: &buzz_db::Db,
+) -> Result<(), ActionSinkError> {
+    let shortcodes = workflow_emoji_shortcodes(text);
+    if shortcodes.is_empty() {
+        return Ok(());
+    }
+    let sets = db
+        .query_events_for_event_write(&buzz_db::event::EventQuery {
+            kinds: Some(vec![buzz_core::kind::KIND_EMOJI_SET as i32]),
+            d_tag: Some(buzz_sdk::CUSTOM_EMOJI_SET_D_TAG.to_owned()),
+            global_only: true,
+            // Same bounded community palette as the desktop client.
+            limit: Some(500),
+            ..buzz_db::event::EventQuery::for_community(community)
+        })
+        .await
+        .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+    let mut palette: std::collections::HashMap<String, (u64, String)> =
+        std::collections::HashMap::new();
+    for set in sets {
+        let created_at = set.event.created_at.as_secs();
+        let mut seen = std::collections::HashSet::new();
+        for tag in set.event.tags.iter() {
+            let parts = tag.as_slice();
+            if parts.len() < 3 || parts[0] != "emoji" || parts[2].is_empty() {
+                continue;
+            }
+            let Ok(shortcode) = buzz_sdk::normalize_custom_emoji_shortcode(&parts[1]) else {
+                continue;
+            };
+            if !seen.insert(shortcode.clone()) || !shortcodes.contains(&shortcode) {
+                continue;
+            }
+            let url = &parts[2];
+            match palette.get(&shortcode) {
+                Some((at, old_url))
+                    if *at > created_at || (*at == created_at && old_url <= url) => {}
+                _ => {
+                    palette.insert(shortcode, (created_at, url.clone()));
+                }
+            }
+        }
+    }
+    for shortcode in shortcodes {
+        if let Some((_, url)) = palette.get(&shortcode) {
+            tags.push(
+                Tag::parse(["emoji", &shortcode, url])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("emoji tag: {e}")))?,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -403,6 +489,8 @@ impl ActionSink for RelayActionSink {
                 &named_members,
                 &author_pubkey_hex,
             )?;
+
+            append_workflow_emoji_tags(&mut tags, &text, tenant.community(), &state.db).await?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -784,6 +872,21 @@ mod tests {
 
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].as_slice(), ["p", owner.as_str()]);
+    }
+}
+
+#[cfg(test)]
+mod emoji_tests {
+    use super::workflow_emoji_shortcodes;
+
+    #[test]
+    fn shortcodes_cover_workflow_text_and_ignore_non_icons() {
+        assert_eq!(
+            workflow_emoji_shortcodes("@engineering-lead :octopus: GitHub: #655 closed :OCTOPUS::chat-bubble: :espresso-cup: :binoculars: :bad name: ::"),
+            ["octopus", "chat-bubble", "espresso-cup", "binoculars"]
+        );
+        assert!(workflow_emoji_shortcodes("08:15 https://example.com 🔎").is_empty());
+        assert!(workflow_emoji_shortcodes(&format!(":{}:", "a".repeat(65))).is_empty());
     }
 }
 
