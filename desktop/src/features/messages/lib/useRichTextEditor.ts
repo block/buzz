@@ -41,6 +41,7 @@ import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
 import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
 import { LinkPasteTrailingSpace } from "./linkPasteTrailingSpace";
+import { createMiddleClickPasteHandlers } from "./middleClickPaste";
 import {
   CodeBlockAfterHardBreak,
   handleCodeFenceEnter,
@@ -179,6 +180,7 @@ export function useRichTextEditor({
 
   const placeholderRef = React.useRef(placeholder);
   placeholderRef.current = placeholder;
+  const middleClickPasteRef = React.useRef(createMiddleClickPasteHandlers());
 
   // Custom-emoji atom node wiring (config + src re-resolve). Kept in a sibling
   // hook so this file stays focused on generic editor setup.
@@ -390,15 +392,20 @@ export function useRichTextEditor({
               isCut: true,
               view,
             }),
-          paste: (view, event) =>
-            parseSnapshotClipboardHtml(
+          mousedown: (view, event) =>
+            middleClickPasteRef.current.mousedown(view, event),
+          paste: (view, event) => {
+            // First: a middle-click paste carries the wrong clipboardData.
+            if (middleClickPasteRef.current.paste(view, event)) return true;
+            return parseSnapshotClipboardHtml(
               (event as ClipboardEvent).clipboardData?.getData("text/html") ??
                 "",
             )
               ? false
               : createComposerLinkPasteHandler(
                   messageLinkWiring.resolveChannelName,
-                )(view, event as ClipboardEvent),
+                )(view, event as ClipboardEvent);
+          },
         },
         attributes: {
           autocapitalize: "none",
