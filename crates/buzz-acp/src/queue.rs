@@ -1725,6 +1725,63 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Ask the agent to name the thread a human just started by mentioning it.
+///
+/// `--if-unset` makes the write create-only, so a title the human (or another
+/// agent) already set is never replaced, and concurrent agents cannot clobber
+/// each other.
+fn append_auto_title_instruction(s: &mut String, channel_id: Uuid, event_id: &str) {
+    s.push_str(&format!(
+        "\nTHREAD TITLE: You are the first agent mentioned in this new thread, \
+         so name it. Once you understand the request, run \
+         `buzz threads title set --channel {channel_id} --event {event_id} \
+         --if-unset --title \"<title>\"` with a short, specific title \
+         (about 3–8 words, no trailing punctuation) describing what the thread \
+         is about. Do this once, without mentioning it in your reply. If the \
+         command reports \"already titled\", leave the existing title alone."
+    ));
+}
+
+/// Whether this agent should auto-title the thread the triggering event starts.
+///
+/// Only a human's new top-level message qualifies (never a reply, an edit, or
+/// a DM), and only for the first agent it mentions, so a later mention inside
+/// an existing thread never renames it. Pubkeys whose profile is unknown are
+/// skipped rather than treated as agents; if one was an agent too, the
+/// create-only write in [`append_auto_title_instruction`] settles the race.
+fn should_auto_title(
+    be: &BatchEvent,
+    thread_tags: &ThreadTags,
+    is_dm: bool,
+    agent_pubkey: Option<&str>,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> bool {
+    let Some(agent_pubkey) = agent_pubkey else {
+        return false;
+    };
+    if is_dm || thread_tags.root_event_id.is_some() || edit_target_id(&be.event).is_some() {
+        return false;
+    }
+    let is_agent = |pubkey: &str| {
+        profile_lookup
+            .and_then(|m| m.get(&normalize_lookup_key(pubkey)))
+            .is_some_and(|p| p.is_agent)
+    };
+    if is_agent(&be.event.pubkey.to_hex()) {
+        return false;
+    }
+    let me = normalize_lookup_key(agent_pubkey);
+    for pubkey in &thread_tags.mentioned_pubkeys {
+        if normalize_lookup_key(pubkey) == me {
+            return true;
+        }
+        if is_agent(pubkey) {
+            return false;
+        }
+    }
+    false
+}
+
 /// Decide whether a turn is human-facing for reply-anchor purposes.
 ///
 /// A turn is human-facing when the triggering sender is a human, OR a human
@@ -1961,6 +2018,7 @@ fn format_context_hints(
     is_dm: bool,
     conversation_context_status: ConversationContextStatus,
     reply_anchor: Option<&str>,
+    auto_title_event: Option<&str>,
 ) -> String {
     let channel_id = scope.channel_id();
     let channel_display = match channel_info {
@@ -2057,6 +2115,9 @@ fn format_context_hints(
                 append_new_thread_reply_instruction(&mut s, event_id);
             }
         }
+        if let Some(event_id) = auto_title_event {
+            append_auto_title_instruction(&mut s, channel_id, event_id);
+        }
         crate::prompt_framing::semantic_section("context", &s)
     } else {
         let mut s = format!(
@@ -2071,6 +2132,9 @@ fn format_context_hints(
         );
         if let Some(event_id) = reply_anchor {
             append_new_thread_reply_instruction(&mut s, event_id);
+        }
+        if let Some(event_id) = auto_title_event {
+            append_auto_title_instruction(&mut s, channel_id, event_id);
         }
         crate::prompt_framing::semantic_section("context", &s)
     }
@@ -2237,6 +2301,9 @@ pub struct FormatPromptArgs<'a> {
     /// Defaults to `false` so a caller that never sets it behaves as if this
     /// were the session's first message.
     pub standing_context_sent: bool,
+    /// This agent's own pubkey (hex). Required to recognize when it is the
+    /// first agent mentioned in a new thread; `None` disables auto-titling.
+    pub agent_pubkey: Option<&'a str>,
 }
 
 /// The prompt sections that do not change for the life of a session: base
@@ -2407,6 +2474,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             args.profile_lookup,
         )
     };
+    let auto_title_event = should_auto_title(
+        last_event,
+        &thread_tags,
+        is_dm,
+        args.agent_pubkey,
+        args.profile_lookup,
+    )
+    .then_some(routing_event_id.as_str());
     sections.push(format_context_hints(
         &batch.scope,
         args.channel_info,
@@ -2418,6 +2493,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             args.conversation_context_had_session_events,
         ),
         reply_anchor.as_deref(),
+        auto_title_event,
     ));
 
     // 3. Conversation context (thread or DM).
@@ -7413,5 +7489,144 @@ mod tests {
             !prompt.contains("Description:"),
             "unresolved metadata must not render a Description field; got: {prompt}"
         );
+    }
+
+    fn auto_title_batch(channel_id: Uuid, tags: Vec<nostr::Tag>) -> FlushBatch {
+        let event = EventBuilder::new(Kind::Custom(9), "@Agent please help")
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        FlushBatch {
+            channel_id,
+            scope: conv(channel_id),
+            events: vec![BatchEvent {
+                edit: None,
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    fn p_tag(pubkey: &str) -> nostr::Tag {
+        nostr::Tag::parse(["p", pubkey]).unwrap()
+    }
+
+    fn agent_profiles(agents: &[&str], humans: &[&str]) -> PromptProfileLookup {
+        agents
+            .iter()
+            .map(|pk| (pk, true))
+            .chain(humans.iter().map(|pk| (pk, false)))
+            .map(|(pk, is_agent)| {
+                (
+                    pk.to_string(),
+                    PromptProfile {
+                        is_agent,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn auto_title_prompt(batch: &FlushBatch, me: &str, profiles: &PromptProfileLookup) -> String {
+        format_prompt(
+            batch,
+            &FormatPromptArgs {
+                profile_lookup: Some(profiles),
+                agent_pubkey: Some(me),
+                ..Default::default()
+            },
+        )
+        .join("\n\n")
+    }
+
+    #[test]
+    fn first_mentioned_agent_is_asked_to_title_a_new_thread() {
+        let ch = Uuid::new_v4();
+        let (me, other, human) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        // A human mention ahead of the agents doesn't count; agent order does.
+        let batch = auto_title_batch(ch, vec![p_tag(&human), p_tag(&me), p_tag(&other)]);
+        let profiles = agent_profiles(&[&me, &other], &[&human]);
+        let event_id = batch.events[0].event.id.to_hex();
+
+        let mine = auto_title_prompt(&batch, &me, &profiles);
+        assert!(mine.contains("THREAD TITLE:"), "got: {mine}");
+        assert!(mine.contains(&format!(
+            "buzz threads title set --channel {ch} --event {event_id} --if-unset"
+        )));
+        let theirs = auto_title_prompt(&batch, &other, &profiles);
+        assert!(
+            !theirs.contains("THREAD TITLE:"),
+            "only the first agent titles"
+        );
+    }
+
+    #[test]
+    fn unknown_profile_ahead_of_me_does_not_block_auto_title() {
+        let ch = Uuid::new_v4();
+        let (me, unknown) = ("a".repeat(64), "d".repeat(64));
+        let batch = auto_title_batch(ch, vec![p_tag(&unknown), p_tag(&me)]);
+        let prompt = auto_title_prompt(&batch, &me, &agent_profiles(&[&me], &[]));
+        assert!(prompt.contains("THREAD TITLE:"));
+    }
+
+    #[test]
+    fn replies_agent_authors_dms_and_unmentioned_agents_never_auto_title() {
+        let ch = Uuid::new_v4();
+        let me = "a".repeat(64);
+        let profiles = agent_profiles(&[&me], &[]);
+
+        // A mention inside an existing thread never (re)names it.
+        let root = "f".repeat(64);
+        let reply = auto_title_batch(
+            ch,
+            vec![
+                nostr::Tag::parse(["e", root.as_str(), "", "reply"]).unwrap(),
+                p_tag(&me),
+            ],
+        );
+        assert!(!auto_title_prompt(&reply, &me, &profiles).contains("THREAD TITLE:"));
+
+        // Not mentioned at all.
+        let unmentioned = auto_title_batch(ch, vec![]);
+        assert!(!auto_title_prompt(&unmentioned, &me, &profiles).contains("THREAD TITLE:"));
+
+        // Started by another agent rather than a human.
+        let agent_batch = auto_title_batch(ch, vec![p_tag(&me)]);
+        let author = agent_batch.events[0].event.pubkey.to_hex();
+        let with_agent_author = agent_profiles(&[&me, &author], &[]);
+        assert!(!auto_title_prompt(&agent_batch, &me, &with_agent_author).contains("THREAD TITLE:"));
+
+        // DMs have no thread list to name.
+        let dm_info = PromptChannelInfo {
+            name: "dm".into(),
+            channel_type: "dm".into(),
+            ..Default::default()
+        };
+        let dm = format_prompt(
+            &agent_batch,
+            &FormatPromptArgs {
+                channel_info: Some(&dm_info),
+                profile_lookup: Some(&profiles),
+                agent_pubkey: Some(&me),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(!dm.contains("THREAD TITLE:"));
+
+        // No identity wired in → feature off.
+        let off = format_prompt(
+            &agent_batch,
+            &FormatPromptArgs {
+                profile_lookup: Some(&profiles),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(!off.contains("THREAD TITLE:"));
     }
 }

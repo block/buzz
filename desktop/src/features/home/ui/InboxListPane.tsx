@@ -51,6 +51,7 @@ import { Switch } from "@/shared/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
+import { ThreadTitleLine } from "@/features/threads/ui/ThreadTitleLine";
 
 const INBOX_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
   all: "No activity yet",
@@ -444,6 +445,7 @@ export function InboxListPane({
                 isDone={isDone}
                 label={typeLabel}
               />
+              <ThreadTitleLine className="mt-1" rootId={item.conversationId} />
               {dueReminder ? (
                 <div
                   className="mt-1 flex items-center gap-1 text-2xs font-medium text-amber-600/80 dark:text-amber-300/80"

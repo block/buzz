@@ -275,6 +275,9 @@ enum Cmd {
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
+    /// Shared, editable thread titles (NIP-AR artifacts)
+    #[command(subcommand)]
+    Threads(ThreadsCmd),
     /// Manage your custom emoji set (workspace palette is the union of all members' sets)
     #[command(subcommand)]
     Emoji(EmojiCmd),
@@ -877,6 +880,60 @@ pub enum ReactionsCmd {
         /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ThreadsCmd {
+    /// Set, clear, get, and list shared thread titles
+    #[command(subcommand)]
+    Title(ThreadTitleCmd),
+}
+
+#[derive(Subcommand)]
+pub enum ThreadTitleCmd {
+    /// Set or rename a thread's title (visible to everyone in the channel)
+    Set {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Any message in the thread (64-char hex); resolved to the thread root
+        #[arg(long)]
+        event: String,
+        /// Title text, at most 512 UTF-8 bytes
+        #[arg(long)]
+        title: String,
+        /// Only name a thread that has never had a title; an existing or
+        /// cleared title is left alone and reported as "already titled"
+        #[arg(long)]
+        if_unset: bool,
+    },
+    /// Remove a thread's title
+    Clear {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Any message in the thread (64-char hex); resolved to the thread root
+        #[arg(long)]
+        event: String,
+    },
+    /// Show a thread's current title
+    Get {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Any message in the thread (64-char hex); resolved to the thread root
+        #[arg(long)]
+        event: String,
+    },
+    /// List titled threads, most recently titled first
+    List {
+        /// Restrict to one channel (default: every channel you can read)
+        #[arg(long)]
+        channel: Option<String>,
+        /// Maximum results (1–1000)
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        limit: u32,
     },
 }
 
@@ -2252,6 +2309,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
+        Cmd::Threads(sub) => commands::threads::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
@@ -2458,6 +2516,7 @@ mod tests {
             "reactions",
             "repos",
             "social",
+            "threads",
             "upload",
             "users",
             "workflows",
