@@ -2904,6 +2904,19 @@ pub(crate) mod tests {
     /// tests deterministically exercise fail-closed database seams without
     /// depending on whether a developer has the normal test database running.
     pub(crate) async fn test_state_with_database_url(database_url: &str) -> Arc<AppState> {
+        test_state_with_database_url_and_acquire_timeout(
+            database_url,
+            std::time::Duration::from_millis(100),
+        )
+        .await
+    }
+
+    /// Build the explicit-database test state with a caller-selected bounded
+    /// pool-acquire timeout for database suites that perform sustained writes.
+    pub(crate) async fn test_state_with_database_url_and_acquire_timeout(
+        database_url: &str,
+        acquire_timeout: std::time::Duration,
+    ) -> Arc<AppState> {
         // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
@@ -2911,7 +2924,7 @@ pub(crate) mod tests {
         config.database_url = database_url.to_owned();
         config.read_database_url = None;
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(std::time::Duration::from_millis(100))
+            .acquire_timeout(acquire_timeout)
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         build_test_state(config, pool).await

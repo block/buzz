@@ -405,23 +405,26 @@ pub mod relay_members {
     /// Both principals are ensured first because `agent_owner_pubkey` has a
     /// community-scoped foreign key. The mapping is first-write-wins; an
     /// existing mapping is accepted only when it names the same owner.
+    /// Returns `Ok(false)` for an owner mismatch and `Err` for storage failure.
     ///
     /// A mapping already confirmed in `observer_owner_cache` returns early:
     /// `agent_owner_pubkey` is set once and never cleared, so the writes
     /// below would all be no-ops. HTTP agents call this on every request.
+    /// Returns `Ok(false)` for a confirmed owner mismatch; storage failures
+    /// propagate so callers can distinguish denial from unavailability.
     pub async fn materialize_nip_oa_owner(
         state: &AppState,
         tenant: &TenantContext,
         agent: &nostr::PublicKey,
         owner: &nostr::PublicKey,
-    ) -> bool {
+    ) -> Result<bool, buzz_db::DbError> {
         let owner_key = (
             tenant.community(),
             agent.to_bytes().to_vec(),
             owner.to_bytes().to_vec(),
         );
         if state.observer_owner_cache.get(&owner_key) == Some(true) {
-            return true;
+            return Ok(true);
         }
         for (role, pubkey) in [("agent", agent), ("owner", owner)] {
             match state
@@ -439,7 +442,7 @@ pub mod relay_members {
                 Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(%role, error = %e, "ensure_user failed during NIP-OA backfill");
-                    return false;
+                    return Err(e);
                 }
             }
         }
@@ -464,10 +467,12 @@ pub mod relay_members {
                 .db
                 .is_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())
                 .await
-                .unwrap_or(false),
+                .inspect_err(|e| {
+                    tracing::warn!(error = %e, "failed to verify recorded NIP-OA owner");
+                })?,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to backfill agent_owner_pubkey");
-                false
+                return Err(e);
             }
         };
 
@@ -477,7 +482,7 @@ pub mod relay_members {
                 .insert((tenant.community(), agent.to_bytes().to_vec()), true);
             state.observer_owner_cache.insert(owner_key, true);
         }
-        materialized
+        Ok(materialized)
     }
 
     #[cfg(test)]

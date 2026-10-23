@@ -939,6 +939,7 @@ async fn run_active_audio_connection(
             };
             crate::api::relay_members::materialize_nip_oa_owner(&state, &tenant, &pubkey, &owner)
                 .await
+                .unwrap_or(false)
         };
         if !linked {
             shadow_attempt.refused();

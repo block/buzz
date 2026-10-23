@@ -625,6 +625,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     &owner,
                 )
                 .await
+                .unwrap_or(false)
                 {
                     warn!(
                         conn_id = %conn_id,
@@ -2158,7 +2159,8 @@ mod tests {
                     &agent.public_key(),
                     &owner.public_key(),
                 )
-                .await,
+                .await
+                .expect("owner storage available"),
                 "the owner link commits"
             );
             release.notify_one();

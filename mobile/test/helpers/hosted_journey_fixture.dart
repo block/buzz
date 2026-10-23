@@ -75,6 +75,7 @@ class HostedJourneyFixture {
   bool loseCreateResponse = false;
   bool loseClaimResponse = false;
   bool inviteExpired = false;
+  String? claimError;
   final owned = <Map<String, dynamic>>[];
   final expiry = DateTime.now()
       .toUtc()
@@ -259,6 +260,9 @@ class HostedJourneyFixture {
       }
       result = {'receipt': 'synthetic-policy-receipt'};
     } else if (path == '/api/invites/claim') {
+      if (claimError != null) {
+        return http.Response(jsonEncode({'error': claimError}), 403);
+      }
       if (loseClaimResponse) {
         loseClaimResponse = false;
         rows.add(row(request.url.host.split('.').first));

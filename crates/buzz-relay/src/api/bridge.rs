@@ -1241,7 +1241,8 @@ async fn submit_event_authed(
         }
     };
     if let Some(owner) = nip_oa_owner {
-        super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
+        let _ =
+            super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
     }
 
     let auth = IngestAuth::Http {
@@ -8675,7 +8676,7 @@ pub(crate) mod postgres_tests {
             .unwrap()
         };
 
-        assert!(materialize().await, "first call records the link");
+        assert!(materialize().await.unwrap(), "first call records the link");
         assert_eq!(agent_rows().await, 1);
 
         // Remove the row behind the cache's back: a call that still wrote
@@ -8686,7 +8687,10 @@ pub(crate) mod postgres_tests {
             .execute(state.db.pool())
             .await
             .unwrap();
-        assert!(materialize().await, "a known link is still confirmed");
+        assert!(
+            materialize().await.unwrap(),
+            "a known link is still confirmed"
+        );
         assert_eq!(agent_rows().await, 0, "a known link writes nothing");
     }
 
@@ -8719,6 +8723,7 @@ pub(crate) mod postgres_tests {
                 "CREATE SCHEMA {schema}; \
                  CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
                  CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
+                 CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
                  CREATE TABLE {schema}.relay_members (LIKE public.relay_members INCLUDING ALL); \
                  CREATE TABLE {schema}.join_policy_acceptances \
                      (LIKE public.join_policy_acceptances INCLUDING ALL); \
@@ -8824,12 +8829,6 @@ pub(crate) mod postgres_tests {
                 "{action}: the HTTP request recorded the owner"
             );
 
-            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-                "ALTER TABLE {schema}.users RENAME TO users_unavailable"
-            )))
-            .execute(&admin)
-            .await
-            .expect("break the owner-to-agent lookup");
             let owner_hex = owner.public_key().to_hex();
             match action {
                 "ban" => state
@@ -8869,6 +8868,12 @@ pub(crate) mod postgres_tests {
                         .expect("removal commits");
                 }
             }
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {schema}.users RENAME TO users_unavailable"
+            )))
+            .execute(&admin)
+            .await
+            .expect("break the owner-to-agent lookup");
             let revoked = state
                 .revoke_live_access(
                     &tenant,

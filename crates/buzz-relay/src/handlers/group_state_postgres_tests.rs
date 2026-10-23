@@ -13,7 +13,14 @@ use crate::state::AppState;
 use buzz_auth::Scope;
 
 pub(crate) async fn state() -> Arc<AppState> {
-    crate::state::tests::test_state_with_database_url(&crate::test_support::database_url()).await
+    // This fixture creates several real channels per test. Keep pool waiting
+    // bounded while allowing the isolated PostgreSQL lane's local service a
+    // little scheduling headroom.
+    crate::state::tests::test_state_with_database_url_and_acquire_timeout(
+        &crate::test_support::database_url(),
+        std::time::Duration::from_secs(3),
+    )
+    .await
 }
 
 pub(crate) async fn community(state: &AppState, label: &str) -> TenantContext {

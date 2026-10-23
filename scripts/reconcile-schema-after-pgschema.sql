@@ -281,3 +281,37 @@ BEGIN
         RAISE EXCEPTION 'replica_heartbeat must contain its singleton row after pgschema apply';
     END IF;
 END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'relay_invites'
+          AND column_name = 'revoked_at'
+          AND data_type = 'timestamp with time zone'
+          AND is_nullable = 'YES'
+          AND column_default IS NULL
+    ) THEN
+        RAISE EXCEPTION 'relay_invites.revoked_at must remain nullable without a default';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'relay_invites'
+          AND column_name = 'legacy_admission'
+          AND data_type = 'boolean'
+          AND is_nullable = 'NO'
+          AND column_default = 'true'
+    ) THEN
+        RAISE EXCEPTION 'relay_invites.legacy_admission must default to true and be not null';
+    END IF;
+    IF (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal
+        AND tgname IN ('invite_restriction_lock', 'invite_issuer_revocation',
+                       'invite_owner_lock', 'invite_owner_revocation')) <> 0 THEN
+        RAISE EXCEPTION 'invitation revocation must use supported application writers, not triggers';
+    END IF;
+END
+$$;
