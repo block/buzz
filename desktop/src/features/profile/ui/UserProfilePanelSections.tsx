@@ -64,6 +64,8 @@ export type ProfileSummaryViewProps = {
   canEditAgent: boolean;
   canOpenAgentLogs: boolean;
   canViewActivity: boolean;
+  canViewUsage: boolean;
+  usageIngressTrailing: string | undefined;
   channelCount: number;
   channelIdToName: Record<string, string>;
   channels: ProfileChannelLink[];
@@ -106,6 +108,7 @@ export type ProfileSummaryViewProps = {
   onOpenActivity: (channelId?: string | null) => void;
   onOpenChannel: (channelId: string) => void;
   onOpenDiagnostics: () => void;
+  onOpenUsage: () => void;
   onStickyChromeChange: (state: { active: boolean; height: number }) => void;
   onTabChange: (tab: ProfilePanelTab, options?: { replace?: boolean }) => void;
   presenceStatus: "online" | "away" | "offline" | undefined;
@@ -140,6 +143,8 @@ export function ProfileSummaryView({
   canEditAgent,
   canOpenAgentLogs,
   canViewActivity,
+  canViewUsage,
+  usageIngressTrailing,
   channelCount,
   channelIdToName,
   channels,
@@ -181,6 +186,7 @@ export function ProfileSummaryView({
   onOpenActivity,
   onOpenChannel,
   onOpenDiagnostics,
+  onOpenUsage,
   onStickyChromeChange,
   onTabChange,
   presenceStatus,
@@ -238,11 +244,13 @@ export function ProfileSummaryView({
     diagnosticsFields.some((field) => field.label !== "Status") ||
     canOpenAgentLogs;
   const showActivityIngress = canViewActivity;
+  const showUsageIngress = canViewUsage;
   const showInfoTab =
     agentInfoFields.length > 0 ||
     runtimeFields.length > 0 ||
     isArchived ||
     showActivityIngress ||
+    showUsageIngress ||
     showInstructionBlock ||
     managedAgent !== undefined ||
     !showRuntimeTab;
@@ -527,8 +535,11 @@ export function ProfileSummaryView({
                 onDuplicateAgent={onDuplicateAgent}
                 onExportAgent={onExportAgent}
                 onOpenActivity={onOpenActivity}
+                onOpenUsage={onOpenUsage}
                 pubkey={pubkey}
                 showActivityIngress={showActivityIngress}
+                showUsageIngress={showUsageIngress}
+                usageIngressTrailing={usageIngressTrailing}
                 showInstructionBlock={showInstructionBlock}
               />
             ) : null}

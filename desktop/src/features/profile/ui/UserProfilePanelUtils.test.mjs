@@ -200,6 +200,7 @@ test("parseProfilePanelView accepts all profile panel subviews", () => {
     "memories",
     "channels",
     "logs",
+    "usage",
   ]) {
     assert.equal(parseProfilePanelView(view), view);
   }
