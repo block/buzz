@@ -56,8 +56,19 @@ function cursorsEqual(
   );
 }
 
-/** Relay order: newest timestamp first, then ascending id within a second. */
+/**
+ * Relay order: newest timestamp first, then ascending id within a second.
+ * A local pending send has no relay id yet and is the newest event in its
+ * second; ordering its optimistic id against hex ids would render it above an
+ * earlier same-second message until the acknowledgement moves it down.
+ */
 export function compareRelayOrder(left: RelayEvent, right: RelayEvent) {
+  if (
+    left.created_at === right.created_at &&
+    !left.pending !== !right.pending
+  ) {
+    return left.pending ? -1 : 1;
+  }
   return left.created_at !== right.created_at
     ? right.created_at - left.created_at
     : left.id < right.id
