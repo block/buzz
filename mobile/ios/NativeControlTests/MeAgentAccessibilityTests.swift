@@ -6,6 +6,7 @@ struct MeAgentAccessibilityTests {
   @MainActor static func main() {
     for locked in [false, true] {
       for empty in [false, true] {
+        var submitted: [String: String]?
         let controller = NativeProfileTextEditorViewController(
           title: "New chat", initialValue: "Chat", placeholder: "Chat name",
           multiline: false, pageBackgroundColor: .systemGroupedBackground,
@@ -14,8 +15,8 @@ struct MeAgentAccessibilityTests {
           channelDescription: nil, originalName: nil, originalDescription: nil,
           canEditDetails: true, canEditCanvas: false, canvasContent: "",
           canvasLoaded: false,
-          chatOptions: ["fieldsLocked": locked, "assistants": empty ? [] : [["id": "agent", "name": "Agent"]]],
-          onCancel: {}, onSet: { _ in }
+          chatOptions: ["selectedAssistant": "agent", "presentationId": "test", "assistantsLoading": empty, "fieldsLocked": locked, "assistants": empty ? [] : [["id": "agent", "name": "Agent"]]],
+          onCancel: {}, onSet: { submitted = $0 as? [String: String] }
         )
         controller.loadViewIfNeeded()
         precondition(controller.numberOfSections(in: controller.tableView) == 3)
@@ -31,6 +32,35 @@ struct MeAgentAccessibilityTests {
         precondition(cell.accessibilityTraits.contains(.notEnabled) == disabled)
         precondition(cell.accessibilityTraits.contains(.button) == !disabled)
         precondition((cell.selectionStyle == .none) == disabled)
+        let canSubmit = locked || !empty
+        precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == canSubmit)
+        // Invoke the action even when disabled to check its independent gate.
+        _ = controller.perform(NSSelectorFromString("setTapped"))
+        precondition(submitted?["assistant"] == (canSubmit ? "agent" : nil))
+        if empty && !locked {
+          controller.tableView.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+          controller.tableView.reloadData()
+          controller.tableView.layoutIfNeeded()
+          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 1) == nil)
+          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 2) == "Loading agents…")
+          controller.updateChatAssistants([
+            "presentationId": "test",
+            "assistants": [["id": "agent", "name": "Agent"]],
+          ])
+          controller.tableView.layoutIfNeeded()
+          let updated = controller.tableView.cellForRow(at: IndexPath(row: 0, section: 2))!
+          precondition(updated.accessibilityTraits.contains(.button))
+          precondition(!updated.accessibilityTraits.contains(.notEnabled))
+          precondition(controller.tableView(controller.tableView, titleForFooterInSection: 2) == nil)
+        }
+        submitted = nil
+        controller.updateChatAssistants([
+          "presentationId": "test",
+          "assistants": empty ? [] : [["id": "agent", "name": "Agent"]],
+        ])
+        precondition(controller.navigationItem.rightBarButtonItem?.isEnabled == canSubmit)
+        _ = controller.perform(NSSelectorFromString("setTapped"))
+        precondition(submitted?["assistant"] == (canSubmit ? "agent" : nil))
       }
     }
     avatarTests()

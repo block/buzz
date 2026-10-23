@@ -16,6 +16,7 @@ import '../../shared/utils/string_utils.dart';
 class AgentDirectoryEntry {
   final String pubkey;
   final String? displayName;
+  final String? avatarUrl;
   final String? respondTo;
   final List<String> respondToAllowlist;
   final List<String> channelIds;
@@ -23,6 +24,7 @@ class AgentDirectoryEntry {
   const AgentDirectoryEntry({
     required this.pubkey,
     this.displayName,
+    this.avatarUrl,
     this.respondTo,
     this.respondToAllowlist = const [],
     this.channelIds = const [],
@@ -38,6 +40,7 @@ class AgentDirectoryEntry {
     return AgentDirectoryEntry(
       pubkey: event.pubkey.toLowerCase(),
       displayName: text('display_name') ?? text('name'),
+      avatarUrl: text('picture'),
       respondTo: text('respond_to'),
       respondToAllowlist: strings(
         'respond_to_allowlist',
