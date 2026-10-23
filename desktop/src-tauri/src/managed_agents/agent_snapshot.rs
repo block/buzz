@@ -31,7 +31,7 @@
 //!   - lineage ids: `persona_id`, `team_id`, `source_team`, `source_team_persona_slug`,
 //!     `persona_source_version`
 //!   - internal bookkeeping: `start_on_app_launch`,
-//!     `auto_restart_on_config_change`
+//!     `auto_restart_on_config_change`, `self_update_fields`
 //!
 //! The portable `sourceIsBuiltIn` hint preserves how the exported definition
 //! should be described in an import preview. It never grants built-in status

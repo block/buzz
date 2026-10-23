@@ -33,6 +33,7 @@ import type {
   InstallRuntimeResult,
   GitBashPrerequisite,
   RuntimeConfigSurface,
+  SelfUpdateField,
 } from "@/shared/api/types";
 
 export * from "@/shared/api/tauriChannels";
@@ -150,6 +151,8 @@ export type RawManagedAgent = {
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
+  // Pre-feature stores omit it; mapped to [] in fromRawManagedAgent.
+  self_update_fields?: SelfUpdateField[];
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
   // Pre-feature fixtures may omit these; mapped to "owner-only"/[] in fromRawManagedAgent.
@@ -640,6 +643,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     logPath: agent.log_path,
     startOnAppLaunch: agent.start_on_app_launch,
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
+    selfUpdateFields: agent.self_update_fields ?? [],
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
     respondTo: agent.respond_to ?? "owner-only",
