@@ -2,6 +2,7 @@ import {
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
 } from "../../../shared/constants/kinds.ts";
+import { removeEmptySpoilerBlocks } from "./ttsLiveMessageSanitizer";
 
 export type LiveTtsEvent = {
   id: string;
@@ -46,10 +47,7 @@ function textWithoutAttachments(event: LiveTtsEvent): string {
       (line) => !Array.from(urls).some((url) => line.includes(`](${url})`)),
     )
     .join("\n");
-  return withoutMedia.replace(
-    /(^|\n)\s*\|\|\s*\n(?:\s*\n)*\s*\|\|\s*(?=\n|$)/gu,
-    "$1",
-  );
+  return removeEmptySpoilerBlocks(withoutMedia);
 }
 
 export function classifySpeakableAgentText(
