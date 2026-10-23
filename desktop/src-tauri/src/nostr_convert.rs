@@ -305,21 +305,19 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
     let v: Value = serde_json::from_str(&event.content)
         .map_err(|e| format!("kind:0 content is not valid JSON: {e}"))?;
 
+    let name = v.get("name").and_then(Value::as_str).map(str::to_string);
     let display_name = v
         .get("display_name")
         .and_then(Value::as_str)
-        .or_else(|| v.get("name").and_then(Value::as_str))
         .map(str::to_string);
-    let avatar_url = v.get("picture").and_then(Value::as_str).map(str::to_string);
-    let about = v.get("about").and_then(Value::as_str).map(str::to_string);
-    let nip05_handle = v.get("nip05").and_then(Value::as_str).map(str::to_string);
 
     Ok(ProfileInfo {
         pubkey: event.pubkey.to_hex(),
+        name,
         display_name,
-        avatar_url,
-        about,
-        nip05_handle,
+        avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
+        about: v.get("about").and_then(Value::as_str).map(str::to_string),
+        nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
         owner_pubkey: profile_valid_oa_owner_pubkey(event),
         has_profile_event: true,
     })
@@ -350,13 +348,17 @@ pub fn users_batch_from_events(
     for (pk, ev) in &latest {
         let v: Value = serde_json::from_str(&ev.content).unwrap_or(Value::Null);
         let owner_pubkey = profile_valid_oa_owner_pubkey(ev);
-        let summary = UserProfileSummaryInfo {
-            display_name: v
-                .get("display_name")
+        let nonblank = |field| {
+            v.get(field)
                 .and_then(Value::as_str)
-                .or_else(|| v.get("name").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        };
+        let summary = UserProfileSummaryInfo {
+            display_name: nonblank("display_name")
+                .or_else(|| nonblank("name"))
                 .map(str::to_string),
-            name: v.get("name").and_then(Value::as_str).map(str::to_string),
+            name: nonblank("name").map(str::to_string),
             avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
             nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
             is_agent: owner_pubkey.is_some(),
