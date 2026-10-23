@@ -4507,14 +4507,13 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             store.validate_catalog().await.expect("deletion catalog");
             let inventory = store.inventory_schema(community).await.expect("inventory");
             assert_eq!(inventory.scoped_tables.len(), EXPECTED_SCOPED_TABLES.len());
-            assert_eq!(
-                inventory.fenced_tables.len(),
-                if objects_present {
-                    EXPECTED_SCOPED_TABLES.len()
-                } else {
-                    0
-                }
-            );
+            // Tables added after fence retirement are admitted in the app and
+            // carry no fence, so only legacy tables are fenced.
+            assert_eq!(inventory.fenced_tables.is_empty(), !objects_present);
+            assert!(inventory
+                .fenced_tables
+                .iter()
+                .all(|table| inventory.scoped_tables.contains(table)));
             let lease = store
                 .acquire_serving_write_lease(
                     community,
