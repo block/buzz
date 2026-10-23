@@ -12,7 +12,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn user_intake_commands_are_registered_without_execution() {
+    fn user_workflow_commands_are_registered() {
         for args in [
             vec![
                 "buzz-admin",
@@ -22,6 +22,31 @@ mod tests {
                 "demo:alice",
                 "--requested-by",
                 "operator-a",
+            ],
+            vec![
+                "buzz-admin",
+                "user-deletions",
+                "approve",
+                "00000000-0000-0000-0000-000000000001",
+                "--approved-by",
+                "operator-b",
+                "--inventory-digest",
+                "digest-from-inspect",
+            ],
+            vec![
+                "buzz-admin",
+                "user-deletions",
+                "run",
+                "00000000-0000-0000-0000-000000000001",
+                "--next-step",
+                "--executor-id",
+                "demo-worker",
+                "--fail-stage",
+                "purge_db",
+                "--stage-delay-ms",
+                "1000",
+                "--demo-no-agents-in",
+                "00000000-0000-0000-0000-00000000000c",
             ],
             vec!["buzz-admin", "user-deletions", "list"],
             vec![
@@ -33,7 +58,39 @@ mod tests {
         ] {
             assert!(crate::Cli::try_parse_from(args).is_ok());
         }
-        for command in ["inventory", "approve", "run", "drain", "worker"] {
+        assert!(crate::Cli::try_parse_from([
+            "buzz-admin",
+            "user-deletions",
+            "approve",
+            "00000000-0000-0000-0000-000000000001",
+            "--approved-by",
+            "operator-b",
+        ])
+        .is_err());
+        for (flag, value) in [
+            ("--max-stages", "1"),
+            ("--stage-delay-ms", "60001"),
+            ("--fail-stage", "real_delete"),
+        ] {
+            assert!(crate::Cli::try_parse_from([
+                "buzz-admin",
+                "user-deletions",
+                "run",
+                "00000000-0000-0000-0000-000000000001",
+                flag,
+                value
+            ])
+            .is_err());
+        }
+        assert!(crate::Cli::try_parse_from([
+            "buzz-admin",
+            "user-deletions",
+            "run",
+            "00000000-0000-0000-0000-000000000001",
+            "--pause-after-handler"
+        ])
+        .is_err());
+        for command in ["inventory", "run", "drain", "worker"] {
             assert!(crate::Cli::try_parse_from(["buzz-admin", "user-deletions", command]).is_err());
         }
     }
