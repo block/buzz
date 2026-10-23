@@ -94,9 +94,8 @@ export function WorkspaceTabs({
   createPullRequestAction,
   createPullRequestRequestKey,
   updatePullRequestAction,
-  initialTab,
+  selectedTab,
   initialFilePath,
-  initialTabRequestKey,
   fileContentSource,
   localSnapshot,
   localSnapshotError,
@@ -115,6 +114,7 @@ export function WorkspaceTabs({
   pullRequestsError,
   pullRequestsLoading,
   onSelectedCommitHashChange,
+  onFilePathChange,
   onFilesContextChange,
   onSelectedIssueIdChange,
   onSelectedPullRequestIdChange,
@@ -141,12 +141,10 @@ export function WorkspaceTabs({
   createPullRequestAction?: CreatePullRequestAction;
   createPullRequestRequestKey?: number;
   updatePullRequestAction?: UpdatePullRequestAction;
-  /** Tab to open on mount (workspace vocabulary), e.g. from a share link. */
-  initialTab?: string;
+  /** Active workspace tab controlled by route search state. */
+  selectedTab: string;
   /** File or folder to open when entering the repository Files tab. */
   initialFilePath?: string;
-  /** Changes for every entity-link activation, including repeated links. */
-  initialTabRequestKey?: string;
   fileContentSource?: RepositoryFileContentSource;
   localSnapshot: ProjectLocalRepoSnapshot | null | undefined;
   localSnapshotError: unknown;
@@ -165,6 +163,7 @@ export function WorkspaceTabs({
   pullRequestsError: unknown;
   pullRequestsLoading: boolean;
   onSelectedCommitHashChange: (hash: string | null) => void;
+  onFilePathChange?: (path: string | null) => void;
   onFilesContextChange?: (context: {
     kind: "file" | "folder";
     path: string;
@@ -261,15 +260,6 @@ export function WorkspaceTabs({
   const isDetailSelected = Boolean(
     selectedPullRequestId || selectedIssueId || selectedCommitHash,
   );
-  const [selectedTab, setSelectedTab] = React.useState(
-    initialTab ?? "overview",
-  );
-  // Follow later share-link navigations to the same project (the search
-  // param changes without a remount).
-  // biome-ignore lint/correctness/useExhaustiveDependencies: request key intentionally retriggers an unchanged tab.
-  React.useEffect(() => {
-    if (initialTab) setSelectedTab(initialTab);
-  }, [initialTab, initialTabRequestKey]);
   const [pullRequestCommentTarget, setPullRequestCommentTarget] =
     React.useState<{
       anchor: ProjectPullRequestCommentAnchor;
@@ -300,46 +290,11 @@ export function WorkspaceTabs({
     setCreatePullRequestOpen(true);
   }, [createPullRequestRequestKey]);
 
-  React.useEffect(() => {
-    onSelectedTabChange?.(selectedTab);
-  }, [onSelectedTabChange, selectedTab]);
-
-  React.useEffect(() => {
-    if (isPullRequestSelected) {
-      setSelectedTab("prs");
-    }
-  }, [isPullRequestSelected]);
-
-  React.useEffect(() => {
-    if (selectedIssueId) {
-      setSelectedTab("issues");
-    }
-  }, [selectedIssueId]);
-
-  React.useEffect(() => {
-    if (selectedCommitHash) {
-      setSelectedTab("activity");
-    }
-  }, [selectedCommitHash]);
-
   const handleTabChange = React.useCallback(
     (nextTab: string) => {
-      setSelectedTab(nextTab);
-      if (nextTab !== "prs") {
-        onSelectedPullRequestIdChange(null);
-      }
-      if (nextTab !== "issues") {
-        onSelectedIssueIdChange(null);
-      }
-      if (nextTab !== "activity") {
-        onSelectedCommitHashChange(null);
-      }
+      onSelectedTabChange?.(nextTab);
     },
-    [
-      onSelectedCommitHashChange,
-      onSelectedIssueIdChange,
-      onSelectedPullRequestIdChange,
-    ],
+    [onSelectedTabChange],
   );
   const handleOpenPullRequestComment = React.useCallback(
     (anchor: ProjectPullRequestCommentAnchor) => {
@@ -587,6 +542,7 @@ export function WorkspaceTabs({
                 initialPath={initialFilePath}
                 isLoading={displayedSnapshotLoading}
                 onContextChange={onFilesContextChange}
+                onPathChange={onFilePathChange}
                 onOpenCommit={onSelectedCommitHashChange}
                 profiles={profiles}
                 snapshot={displayedSnapshot}
