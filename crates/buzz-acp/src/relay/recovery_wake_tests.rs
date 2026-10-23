@@ -59,6 +59,7 @@ async fn review_recurring_headroom_between_ticks_gets_an_attempt() {
         "ws://127.0.0.1:1".into(),
         "agent".into(),
         None,
+        false,
     ));
     let ch = Uuid::new_v4();
     let sub = channel_sub_id(ch);
@@ -167,6 +168,7 @@ impl Owner {
             "ws://127.0.0.1:1".into(),
             "agent".into(),
             None,
+            false,
         ));
         let mut owner = Self {
             server,
