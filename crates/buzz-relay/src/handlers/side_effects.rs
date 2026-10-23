@@ -3426,50 +3426,119 @@ pub async fn reconcile_large_channel_member_snapshots(
             &relay_pubkey.to_bytes(),
         )
         .await?;
+    let summary = republish_roster_candidates(
+        state,
+        candidates
+            .into_iter()
+            .map(|candidate| (candidate.community_id, candidate.host, candidate.channel_id))
+            .collect(),
+        "large channel roster reconciliation failed",
+    )
+    .await;
+    metrics::counter!("buzz_channel_roster_reconciliations_total")
+        .increment(summary.repaired as u64);
+    Ok(summary)
+}
+
+/// Republish rosters whose `member`/`bot` roles disagree with the rows: after
+/// the maintenance script `scripts/maintenance/bot_role_follows_agent_owner.sql`
+/// changed rows without republishing, or after a relay stopped between
+/// recording an agent owner and republishing that agent's rosters.
+///
+/// Converged deployments find no candidates, so this only reads.
+pub async fn reconcile_ordinary_role_rosters(
+    state: &Arc<AppState>,
+) -> anyhow::Result<ReconcileSummary> {
+    let relay_pubkey = state.relay_keypair.public_key();
+    let candidates = state
+        .db
+        .list_channel_rosters_with_stale_ordinary_roles(&relay_pubkey.to_bytes())
+        .await?;
+    let summary = republish_roster_candidates(
+        state,
+        candidates
+            .into_iter()
+            .map(|candidate| (candidate.community_id, candidate.host, candidate.channel_id))
+            .collect(),
+        "ordinary role roster reconciliation failed",
+    )
+    .await;
+    metrics::counter!("buzz_channel_role_roster_reconciliations_total")
+        .increment(summary.repaired as u64);
+    Ok(summary)
+}
+
+/// Republish each `(community, host, channel)` roster under its membership
+/// lock, counting failures instead of stopping.
+async fn republish_roster_candidates(
+    state: &Arc<AppState>,
+    candidates: Vec<(buzz_core::CommunityId, String, uuid::Uuid)>,
+    failure_message: &'static str,
+) -> ReconcileSummary {
+    let relay_pubkey = state.relay_keypair.public_key();
     let relay_pubkey_hex = relay_pubkey.to_hex();
     let mut reconciled = 0usize;
     let mut failed = 0usize;
 
-    for candidate in candidates {
+    for (community_id, host, channel_id) in candidates {
         let result = async {
-            let channel_id = candidate.channel_id;
             // Hold the membership-writer lock from roster capture through
             // replacement. Otherwise a rolling deployment can publish stale
             // roster A after another relay commits and publishes roster B.
             let mut member_snapshot = state
                 .db
-                .lock_member_snapshot(candidate.community_id, channel_id, &relay_pubkey.to_bytes())
+                .lock_member_snapshot(community_id, channel_id, &relay_pubkey.to_bytes())
                 .await?;
-            let tenant = TenantContext::resolved(candidate.community_id, candidate.host.clone());
+            let tenant = TenantContext::resolved(community_id, host.clone());
             let stored_members = store_group_members_event(state, &mut member_snapshot).await?;
             member_snapshot.release().await?;
             dispatch_group_members_event(&tenant, state, stored_members, &relay_pubkey_hex).await;
-            Ok::<bool, anyhow::Error>(true)
+            Ok::<(), anyhow::Error>(())
         }
         .await;
 
         match result {
-            Ok(true) => reconciled += 1,
-            Ok(false) => {}
+            Ok(()) => reconciled += 1,
             Err(error) => {
                 failed += 1;
                 metrics::counter!("buzz_channel_roster_reconciliation_failures_total").increment(1);
-                warn!(
-                    community_id = %candidate.community_id,
-                    host = %candidate.host,
-                    channel_id = %candidate.channel_id,
-                    %error,
-                    "large channel roster reconciliation failed"
-                );
+                warn!(%community_id, %host, %channel_id, %error, "{failure_message}");
             }
         }
     }
 
-    metrics::counter!("buzz_channel_roster_reconciliations_total").increment(reconciled as u64);
-    Ok(ReconcileSummary {
+    ReconcileSummary {
         repaired: reconciled,
         failed,
-    })
+    }
+}
+
+/// Republish, in the background, the kind:39002 roster of each channel in
+/// `channels`, for example after recording an agent owner turned the agent's
+/// `member` rows into `bot`.
+///
+/// Each roster is captured and replaced under the channel's membership lock,
+/// like every other roster writer. That lock can wait up to the lock timeout,
+/// so the caller does not wait: first AUTH must finish inside its own
+/// deadline. A failure is logged and counted and does not stop the other
+/// channels; [`reconcile_ordinary_role_rosters`] repairs any roster left
+/// stale (including by a relay that stopped first) at the next startup.
+pub fn spawn_channel_roster_republish(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channels: Vec<uuid::Uuid>,
+) {
+    if channels.is_empty() {
+        return;
+    }
+    let candidates = channels
+        .into_iter()
+        .map(|channel_id| (tenant.community(), tenant.host().to_owned(), channel_id))
+        .collect();
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        republish_roster_candidates(&state, candidates, "channel roster republish failed").await;
+    });
 }
 
 /// Reconcile channels that exist in the DB but don't have kind:39000 events.

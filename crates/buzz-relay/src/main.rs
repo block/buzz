@@ -1152,6 +1152,36 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
     step.finish();
 
+    // Make rosters follow the `member`/`bot` rows: the bot-role maintenance
+    // script changes rows without republishing, and a relay can stop between
+    // recording an agent owner and republishing that agent's rosters.
+    //
+    // This runs in the background so that its scan never delays the listener.
+    // Until it finishes, a stale roster shows the wrong `member`/`bot` label;
+    // both roles have the same permissions. A relay that stops first leaves
+    // the repair to the next startup.
+    let role_roster_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        match buzz_relay::handlers::side_effects::reconcile_ordinary_role_rosters(
+            &role_roster_state,
+        )
+        .await
+        {
+            Ok(summary) => {
+                if summary.repaired > 0 || summary.failed > 0 {
+                    info!(
+                        count = summary.repaired,
+                        failed = summary.failed,
+                        "member/bot channel rosters reconciled on startup"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "member/bot channel roster startup reconciliation failed")
+            }
+        }
+    });
+
     // Emit kind:39000/39002 discovery events for channels that exist in the DB
     // but don't have corresponding events (e.g. seeded via direct SQL inserts).
     // Only runs when BUZZ_RECONCILE_CHANNELS=true (dev/CI environments).

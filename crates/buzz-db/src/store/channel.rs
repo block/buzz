@@ -26,10 +26,11 @@ pub use buzz_core::channel::{
 pub use crate::channel_members::{
     add_member, get_accessible_channel_ids, get_accessible_channels, get_bot_members,
     get_member_count, get_member_counts_bulk, get_member_role, get_members, get_members_bulk,
-    get_users_bulk, is_member, list_large_channel_rosters_needing_reconciliation,
-    lock_member_snapshot, membership_pairs, remove_member, verify_channel_roster_fence_behavior,
-    verify_channel_roster_fence_catalog, AccessibleChannel, BotChannelEntry, BotMemberRecord,
-    ChannelIdentity, LargeChannelRoster, LockedMemberSnapshot, MemberRecord, UserRecord,
+    get_users_bulk, is_member, list_channel_rosters_with_stale_ordinary_roles,
+    list_large_channel_rosters_needing_reconciliation, lock_member_snapshot, membership_pairs,
+    remove_member, verify_channel_roster_fence_behavior, verify_channel_roster_fence_catalog,
+    AccessibleChannel, BotChannelEntry, BotMemberRecord, ChannelIdentity, LargeChannelRoster,
+    LockedMemberSnapshot, MemberRecord, StaleRoleRoster, UserRecord,
 };
 
 /// A channel row as returned from the database.
@@ -403,26 +404,36 @@ async fn insert_channel_rows(
         .execute(tx.conn())
         .await?;
 
-        for member in members
+        // Ascending key order: each member's role read takes that key's
+        // agent-owner lock, and two creations must take shared keys in the
+        // same order.
+        let mut initial_members: Vec<&Vec<u8>> = members
             .iter()
             .filter(|member| member.as_slice() != created_by)
-        {
+            .collect();
+        initial_members.sort();
+        initial_members.dedup();
+        for member in initial_members {
             if member.len() != 32 {
                 return Err(DbError::InvalidData(format!(
                     "pubkey must be 32 bytes, got {}",
                     member.len()
                 )));
             }
+            let role =
+                crate::channel_members::ordinary_member_role_tx(tx.conn(), community_id, member)
+                    .await?;
             sqlx::query(
                 r#"
                 INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
-                VALUES ($1, $2, $3, 'member', $4)
+                VALUES ($1, $2, $3, $4::member_role, $5)
                 ON CONFLICT (community_id, channel_id, pubkey) DO NOTHING
                 "#,
             )
             .bind(community_id.as_uuid())
             .bind(channel_id)
             .bind(member)
+            .bind(role.as_str())
             .bind(created_by)
             .execute(tx.conn())
             .await?;
@@ -2220,6 +2231,133 @@ mod postgres_tests {
             labels: &[],
             members,
         }
+    }
+
+    /// A create that adds a key as an initial member before that key has a
+    /// user row chooses `member`. First authentication can then record the
+    /// key's owner while the create is open: the owner record must wait for
+    /// the create and convert its row to `bot`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn an_owner_recorded_beside_an_open_create_converts_its_initial_member() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let creator = random_pubkey();
+        let owner = random_pubkey();
+        let agent = random_pubkey();
+        for key in [&creator, &owner] {
+            crate::user::ensure_user(&pool, community, key)
+                .await
+                .expect("ensure user");
+        }
+        let channel_id = Uuid::new_v4();
+        let members = vec![agent.clone()];
+        let mut create = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("begin create");
+        assert!(
+            insert_channel_rows(&mut create, channel_id, new_channel(&creator, &members))
+                .await
+                .expect("create rows")
+        );
+
+        crate::user::ensure_user(&pool, community, &agent)
+            .await
+            .expect("first authentication creates the user");
+        let record = spawn_owner_record(&pool, community, &agent, &owner);
+        crate::test_support::wait_for_agent_owner_lock_waiter(&pool, community, &agent).await;
+        assert!(
+            !record.is_finished(),
+            "the owner record waits for the create"
+        );
+        create.commit().await.expect("commit create");
+
+        let record = record.await.expect("owner task").expect("record owner");
+        assert_eq!(record.converted_channels, vec![channel_id]);
+        assert_eq!(role_of(&pool, community, channel_id, &agent).await, "bot");
+    }
+
+    /// A DM create reads each participant's role under that key's agent-owner
+    /// lock, so an owner recorded at the same time ends with the agent stored
+    /// as `bot` whichever writer goes first.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_dm_create_reads_roles_under_the_agent_owner_lock() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let creator = random_pubkey();
+        let owner = random_pubkey();
+        let agent = random_pubkey();
+        for key in [&creator, &owner, &agent] {
+            crate::user::ensure_user(&pool, community, key)
+                .await
+                .expect("ensure user");
+        }
+        let mut hold = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("begin hold");
+        crate::channel_members::acquire_agent_owner_lock(hold.conn(), community, &agent)
+            .await
+            .expect("hold agent lock");
+        let created = tokio::spawn({
+            let (pool, creator, agent) = (pool.clone(), creator.clone(), agent.clone());
+            async move { crate::dm::create_dm(&pool, community, &[&creator, &agent], &creator).await }
+        });
+        crate::test_support::wait_for_agent_owner_lock_waiter(&pool, community, &agent).await;
+        assert!(
+            !created.is_finished(),
+            "the DM create waits to read the role"
+        );
+        let record = spawn_owner_record(&pool, community, &agent, &owner);
+        drop(hold);
+
+        let channel = created.await.expect("dm task").expect("create dm");
+        record.await.expect("owner task").expect("record owner");
+        assert_eq!(role_of(&pool, community, channel.id, &agent).await, "bot");
+        assert_eq!(
+            role_of(&pool, community, channel.id, &creator).await,
+            "member"
+        );
+    }
+
+    fn spawn_owner_record(
+        pool: &PgPool,
+        community: CommunityId,
+        agent: &[u8],
+        owner: &[u8],
+    ) -> tokio::task::JoinHandle<Result<crate::user::AgentOwnerRecord>> {
+        let (pool, agent, owner) = (pool.clone(), agent.to_vec(), owner.to_vec());
+        tokio::spawn(async move {
+            crate::user::set_agent_owner_with_operation(
+                &pool,
+                community,
+                &agent,
+                &owner,
+                crate::observability::WriterOperation::Authorization,
+            )
+            .await
+        })
+    }
+
+    async fn role_of(pool: &PgPool, community: CommunityId, channel: Uuid, key: &[u8]) -> String {
+        sqlx::query_scalar(
+            "SELECT role::text FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND removed_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(key)
+        .fetch_one(pool)
+        .await
+        .expect("stored role")
     }
 
     /// Holds a create open on its own transaction (channel row and event both

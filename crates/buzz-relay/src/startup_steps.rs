@@ -387,4 +387,19 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn role_roster_reconcile_does_not_delay_the_listener() {
+        let main = include_str!("main.rs");
+        let call = "reconcile_ordinary_role_rosters(";
+        assert_eq!(main.matches(call).count(), 1);
+        let (before, _) = main.split_once(call).expect("startup reconciles rosters");
+        let spawn = before
+            .rfind("tokio::spawn(async move {")
+            .expect("the reconcile runs in a spawned task");
+        assert!(
+            !before[spawn..].contains(';'),
+            "the reconcile must be the spawned task's first statement"
+        );
+    }
 }

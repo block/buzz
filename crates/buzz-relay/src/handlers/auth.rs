@@ -1952,15 +1952,18 @@ mod tests {
                     .await
                     .expect("seed user");
             }
-            assert!(state
-                .db
-                .set_agent_owner_for_authorization(
-                    community,
-                    agent.public_key().as_bytes(),
-                    prior_owner.public_key().as_bytes(),
-                )
-                .await
-                .expect("seed prior owner"));
+            assert!(
+                state
+                    .db
+                    .set_agent_owner_for_authorization(
+                        community,
+                        agent.public_key().as_bytes(),
+                        prior_owner.public_key().as_bytes(),
+                    )
+                    .await
+                    .expect("seed prior owner")
+                    .recorded
+            );
             let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
                 .expect("sign NIP-OA credential");
             let auth_tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
@@ -2011,15 +2014,18 @@ mod tests {
                     .await
                     .expect("seed user");
             }
-            assert!(state
-                .db
-                .set_agent_owner_for_authorization(
-                    community,
-                    stored.public_key().as_bytes(),
-                    owner.public_key().as_bytes(),
-                )
-                .await
-                .expect("seed stored owner link"));
+            assert!(
+                state
+                    .db
+                    .set_agent_owner_for_authorization(
+                        community,
+                        stored.public_key().as_bytes(),
+                        owner.public_key().as_bytes(),
+                    )
+                    .await
+                    .expect("seed stored owner link")
+                    .recorded
+            );
             let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &tagged.public_key(), "")
                 .expect("sign NIP-OA credential");
             let auth_tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
@@ -2120,6 +2126,124 @@ mod tests {
                 "the socket admitted with its owner stays"
             );
             assert!(!watcher.cancel.is_cancelled(), "the bystander stays");
+        }
+
+        /// First AUTH with a NIP-OA credential records the owner, which turns
+        /// the agent's `member` rows into `bot`. The rosters must follow, but
+        /// a contended roster lock must not hold AUTH: the pending AUTH
+        /// expires after 5 s, the same as the default lock timeout.
+        ///
+        /// Mutation: await the roster republish inside
+        /// `materialize_nip_oa_owner` → AUTH waits on the held lock → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn first_auth_is_not_held_by_a_contended_roster_lock() {
+            use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+            use std::sync::Arc;
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (creator, owner, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+            for key in [&creator, &agent] {
+                state
+                    .db
+                    .ensure_user(community, &key.public_key().to_bytes())
+                    .await
+                    .expect("seed user");
+            }
+            let channel = state
+                .db
+                .create_channel(
+                    community,
+                    "roster-lock",
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    &creator.public_key().to_bytes(),
+                    None,
+                )
+                .await
+                .expect("create channel")
+                .id;
+            state
+                .db
+                .add_member(
+                    community,
+                    channel,
+                    &agent.public_key().to_bytes(),
+                    MemberRole::Member,
+                    Some(&creator.public_key().to_bytes()),
+                )
+                .await
+                .expect("add unowned agent");
+
+            // Hold the roster lock the republish needs.
+            let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+            let held = state
+                .db
+                .lock_member_snapshot(community, channel, &relay_pubkey)
+                .await
+                .expect("hold roster lock");
+
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let auth_tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "roster-lock");
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                handle_auth(
+                    signed_auth(&agent, "roster-lock", Some(auth_tag)),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                ),
+            )
+            .await
+            .expect("AUTH must not wait on the roster lock");
+            assert!(
+                matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                "the agent is admitted while the roster lock is held"
+            );
+            assert!(state
+                .db
+                .is_agent_owner(
+                    community,
+                    agent.public_key().as_bytes(),
+                    owner.public_key().as_bytes(),
+                )
+                .await
+                .expect("read owner"));
+
+            // Once the lock is free, the background republish names the agent
+            // `bot` in the live roster.
+            held.release().await.expect("release roster lock");
+            let agent_hex = agent.public_key().to_hex();
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let live: Option<serde_json::Value> = sqlx::query_scalar(
+                    "SELECT tags FROM events WHERE community_id = $1 AND channel_id = $2 \
+                     AND kind = 39002 AND deleted_at IS NULL",
+                )
+                .bind(community.as_uuid())
+                .bind(channel)
+                .fetch_optional(state.db.pool())
+                .await
+                .expect("read live roster");
+                let is_bot = live
+                    .as_ref()
+                    .and_then(|tags| tags.as_array())
+                    .is_some_and(|tags| {
+                        tags.iter().any(|tag| {
+                            tag[0] == "p" && tag[1] == agent_hex.as_str() && tag[3] == "bot"
+                        })
+                    });
+                if is_bot {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the roster must converge to bot after the lock is released: {live:?}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
         }
 
         /// An untagged AUTH that read a NULL stored owner just before a

@@ -475,7 +475,7 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 | `error.rs` | Database error types |
 
 **Channel types:** `Stream`, `Forum`, `Dm`, `Workflow`, `System`  
-**Member roles:** `Owner`, `Admin`, `Member`, `Guest`, `Bot`  
+**Member roles:** `Owner`, `Admin`, `Member`, `Guest`, `Bot` (`Bot` = `Member` permissions; the relay stores it exactly for keys with a recorded agent owner)  
 **Workflow statuses:** `Active`, `Disabled`, `Archived`  
 **Run statuses:** `Pending`, `Running`, `WaitingApproval`, `Completed`, `Failed`, `Cancelled`
 

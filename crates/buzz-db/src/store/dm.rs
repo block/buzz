@@ -185,12 +185,19 @@ pub async fn create_dm(
     .execute(tx.conn())
     .await?;
 
-    // Add all participants as members with role='member'.
-    for pk in participants {
+    // Add all participants at the ordinary role (`bot` for an owned agent).
+    // Ascending key order: each role read takes that key's agent-owner lock,
+    // and two transactions must take shared keys in the same order.
+    let mut ordered: Vec<&[u8]> = participants.to_vec();
+    ordered.sort_unstable();
+    ordered.dedup();
+    for pk in ordered {
+        let role =
+            crate::channel_members::ordinary_member_role_tx(tx.conn(), community_id, pk).await?;
         sqlx::query(
             r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
-            VALUES ($1, $2, $3, 'member', $4)
+            VALUES ($1, $2, $3, $4::member_role, $5)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
                 removed_at = NULL,
                 removed_by = NULL,
@@ -199,7 +206,8 @@ pub async fn create_dm(
         )
         .bind(community_id.as_uuid())
         .bind(id)
-        .bind(*pk)
+        .bind(pk)
+        .bind(role.as_str())
         .bind(created_by)
         .execute(tx.conn())
         .await?;

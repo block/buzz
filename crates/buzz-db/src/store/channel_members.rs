@@ -318,8 +318,9 @@ impl ChannelMembershipLocks<'_> {
 
     /// Auto-add a member (for ephemeral-channel admission).
     ///
-    /// Inserts or reactivates the membership row at `Member` role with the
-    /// given `invited_by` (channel creator for huddle auto-add). Refuses a
+    /// Inserts or reactivates the membership row at the ordinary member role
+    /// ([`ordinary_member_role_tx`]) with the given `invited_by` (channel
+    /// creator for huddle auto-add). Refuses a
     /// channel whose membership lock this proof does not hold.
     ///
     /// Used by `commit_participant_join` to atomically add membership and the
@@ -332,10 +333,11 @@ impl ChannelMembershipLocks<'_> {
     ) -> Result<()> {
         self.check_covers(channel_id)?;
         let community_id = self.tx.community();
+        let role = ordinary_member_role_tx(self.tx.conn(), community_id, pubkey).await?;
         sqlx::query(
             r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
-            VALUES ($1, $2, $3, 'member'::member_role, $4)
+            VALUES ($1, $2, $3, $4::member_role, $5)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
                 removed_at = NULL,
                 removed_by = NULL,
@@ -345,6 +347,7 @@ impl ChannelMembershipLocks<'_> {
         .bind(community_id.as_uuid())
         .bind(channel_id)
         .bind(pubkey)
+        .bind(role.as_str())
         .bind(invited_by)
         .execute(self.tx.conn())
         .await?;
@@ -475,6 +478,79 @@ pub async fn active_role_in_transaction(
 ) -> Result<Option<String>> {
     let community_id = tx.community();
     get_active_role_tx(tx.conn(), community_id, channel_id, pubkey).await
+}
+
+/// Advisory-lock namespace for a key's agent-owner record within a community.
+///
+/// [`ordinary_member_role_tx`] and [`crate::user::set_agent_owner`] both take
+/// this key, so choosing `member` or `bot` for a key and recording that key's
+/// owner never interleave. A row lock on `users` cannot do this: the key may
+/// have no `users` row yet when it is added, and a share lock on an absent row
+/// locks nothing.
+const AGENT_OWNER_LOCK_NAMESPACE: &str = "buzz_agent_owner:";
+
+/// Take the transaction-scoped agent-owner lock for `pubkey`.
+///
+/// Lock order: a transaction that also takes a channel membership lock takes
+/// it first. A transaction that takes this lock for several keys takes them in
+/// ascending key order.
+pub(crate) async fn acquire_agent_owner_lock(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<()> {
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::Membership,
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(agent_owner_lock_key(community_id, pubkey))
+            .execute(&mut *conn),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The text hashed into `pubkey`'s agent-owner advisory lock.
+pub(crate) fn agent_owner_lock_key(community_id: CommunityId, pubkey: &[u8]) -> String {
+    format!(
+        "{AGENT_OWNER_LOCK_NAMESPACE}{}:{}",
+        community_id.as_uuid(),
+        hex::encode(pubkey)
+    )
+}
+
+/// The ordinary member role to store for `pubkey`: `bot` when the key has a
+/// recorded agent owner (`users.agent_owner_pubkey`), otherwise `member`.
+///
+/// This is the one definition of the relay's write rule. Callers that store an
+/// ordinary role use it and ignore whether the client asked for `member` or
+/// `bot`.
+///
+/// The read holds the key's agent-owner lock until the caller's transaction
+/// ends. The first owner record ([`crate::user::set_agent_owner`]) takes the
+/// same lock and converts the key's `member` rows in its transaction, so it
+/// commits either before this read (and this returns `bot`) or after the
+/// caller's transaction (and converts the row the caller wrote). That holds
+/// even when the key has no `users` row yet. A key with no `users` row is not
+/// an owned agent.
+pub(crate) async fn ordinary_member_role_tx(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<MemberRole> {
+    acquire_agent_owner_lock(conn, community_id, pubkey).await?;
+    let owned: Option<bool> = sqlx::query_scalar(
+        "SELECT agent_owner_pubkey IS NOT NULL FROM users \
+         WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(if owned == Some(true) {
+        MemberRole::Bot
+    } else {
+        MemberRole::Member
+    })
 }
 
 // ── End transaction-level helpers ─────────────────────────────────────────────
@@ -787,6 +863,15 @@ pub async fn put_member(
         requested,
     })
     .map_err(|denial| DbError::AccessDenied(member_put_denial_message(denial).to_string()))?;
+
+    // The relay, not the client, chooses between `member` and `bot`
+    // ([`ordinary_member_role_tx`]); `decide_member_put` treats them as one
+    // role, so this never turns an allowed request into a role change.
+    let effective_role = if effective_role.is_ordinary_member() {
+        ordinary_member_role_tx(tx.conn(), community_id, pubkey).await?
+    } else {
+        effective_role
+    };
 
     // Defense-in-depth, mirroring `remove_member`: a demotion must not strip
     // the channel of its last owner, which would leave nobody able to
@@ -1513,6 +1598,109 @@ pub async fn list_large_channel_rosters_needing_reconciliation(
         .collect()
 }
 
+/// A channel whose live relay-authored kind:39002 roster names an active
+/// member with the other ordinary role (`member` instead of `bot`, or the
+/// reverse) than its `channel_members` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleRoleRoster {
+    /// Community that owns the channel.
+    pub community_id: CommunityId,
+    /// Canonical host for the owning community.
+    pub host: String,
+    /// Channel whose roster must be republished.
+    pub channel_id: Uuid,
+}
+
+/// Returns active channels whose live roster disagrees with the stored rows
+/// about `member` versus `bot`.
+///
+/// Such a roster exists after the bot-role maintenance script changed the
+/// rows, or when a
+/// relay stopped between recording an agent owner and republishing the
+/// rosters. Only two kinds of channel can disagree, so only they are read:
+/// channels with an active `bot` row, and channels whose roster names someone
+/// `bot` (found through the `tags` GIN index). Only active communities are
+/// scanned, as in [`list_large_channel_rosters_needing_reconciliation`].
+///
+/// This is an internal cross-community maintenance read. Callers must preserve
+/// the returned community id when rewriting discovery state.
+pub async fn list_channel_rosters_with_stale_ordinary_roles(
+    pool: &PgPool,
+    relay_pubkey: &[u8],
+) -> Result<Vec<StaleRoleRoster>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
+    let rows = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT cm.community_id, cm.channel_id
+            FROM channel_members cm
+            WHERE cm.role = 'bot' AND cm.removed_at IS NULL
+            UNION
+            SELECT roster.community_id, roster.channel_id
+            FROM events roster
+            WHERE roster.kind = 39002
+              AND roster.pubkey = $1
+              AND roster.deleted_at IS NULL
+              AND roster.channel_id IS NOT NULL
+              AND roster.tags @> '[["bot"]]'::jsonb
+        )
+        SELECT candidate.community_id, community.host, candidate.channel_id
+        FROM candidates candidate
+        JOIN channels ch
+          ON ch.community_id = candidate.community_id
+         AND ch.id = candidate.channel_id
+         AND ch.deleted_at IS NULL
+        JOIN communities community
+          ON community.id = candidate.community_id
+         AND community.archived_at IS NULL
+         AND community.deleted_at IS NULL
+         AND community.deletion_state = 'active'
+        JOIN LATERAL (
+            SELECT roster.tags
+            FROM events roster
+            WHERE roster.community_id = candidate.community_id
+              AND roster.channel_id = candidate.channel_id
+              AND roster.kind = 39002
+              AND roster.pubkey = $1
+              AND roster.deleted_at IS NULL
+            ORDER BY roster.created_at DESC, roster.id ASC
+            LIMIT 1
+        ) live_roster ON true
+        WHERE EXISTS (
+            SELECT 1
+            FROM channel_members cm
+            JOIN jsonb_array_elements(live_roster.tags) tag
+              ON tag->>0 = 'p'
+             AND tag->>1 = encode(cm.pubkey, 'hex')
+            WHERE cm.community_id = candidate.community_id
+              AND cm.channel_id = candidate.channel_id
+              AND cm.removed_at IS NULL
+              AND cm.role IN ('member', 'bot')
+              AND tag->>3 IN ('member', 'bot')
+              AND tag->>3 <> cm.role::text
+        )
+        ORDER BY candidate.community_id, candidate.channel_id
+        "#,
+    )
+    .bind(relay_pubkey)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(StaleRoleRoster {
+                community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+                host: row.try_get("host")?,
+                channel_id: row.try_get("channel_id")?,
+            })
+        })
+        .collect()
+}
+
 /// Transaction-aware variant of [`get_active_role_tx`].
 async fn get_active_role_tx(
     tx: &mut PgConnection,
@@ -2126,6 +2314,19 @@ impl Db {
             .await
     }
 
+    /// Returns active channels whose roster disagrees with the rows about
+    /// `member` versus `bot`.
+    #[datastore_span(
+        name = "list_channel_rosters_with_stale_ordinary_roles",
+        system = "postgresql"
+    )]
+    pub async fn list_channel_rosters_with_stale_ordinary_roles(
+        &self,
+        relay_pubkey: &[u8],
+    ) -> Result<Vec<StaleRoleRoster>> {
+        list_channel_rosters_with_stale_ordinary_roles(&self.pool, relay_pubkey).await
+    }
+
     /// Returns full channel records for all channels a user can access.
     #[datastore_span(name = "get_accessible_channels", system = "postgresql")]
     pub async fn get_accessible_channels(
@@ -2397,6 +2598,844 @@ mod postgres_tests {
                 .expect("is_member check"),
             "agent should no longer be a member"
         );
+    }
+
+    async fn stored_role(
+        pool: &PgPool,
+        community_id: Uuid,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> String {
+        sqlx::query_scalar(
+            "SELECT role::text FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(pubkey)
+        .fetch_one(pool)
+        .await
+        .expect("read stored role")
+    }
+
+    async fn open_test_channel(pool: &PgPool, community_id: Uuid, creator: &[u8]) -> Uuid {
+        create_test_channel(
+            pool,
+            community_id,
+            "ordinary-role",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            creator,
+            None,
+        )
+        .await
+        .expect("create channel")
+        .id
+    }
+
+    /// The relay, not the client, chooses between `member` and `bot`: an
+    /// owned agent is stored as `bot` and anyone else as `member`, whichever
+    /// the request named. Elevated and guest roles are not rewritten.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn add_member_stores_bot_exactly_for_keys_with_a_recorded_agent_owner() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let creator = random_pubkey();
+        let owner = random_pubkey();
+        let agent = random_pubkey();
+        let person = random_pubkey();
+        let unknown = random_pubkey();
+        for key in [&creator, &owner, &agent, &person] {
+            ensure_user(&pool, community, key)
+                .await
+                .expect("ensure user");
+        }
+        set_agent_owner(&pool, community, &agent, &owner)
+            .await
+            .expect("record agent owner");
+        let channel = open_test_channel(&pool, community_id, &creator).await;
+
+        for (key, requested, expected) in [
+            (&agent, MemberRole::Member, "bot"),
+            (&person, MemberRole::Bot, "member"),
+            // A key with no users row is not an owned agent.
+            (&unknown, MemberRole::Bot, "member"),
+        ] {
+            add_member(&pool, community, channel, key, requested, None)
+                .await
+                .expect("add ordinary member");
+            assert_eq!(
+                stored_role(&pool, community_id, channel, key).await,
+                expected
+            );
+        }
+
+        // Asking for the other ordinary role is not a role change, so an
+        // unprivileged self re-add succeeds and keeps the relay's choice.
+        add_member(
+            &pool,
+            community,
+            channel,
+            &agent,
+            MemberRole::Member,
+            Some(&agent),
+        )
+        .await
+        .expect("re-add owned agent as member");
+        assert_eq!(
+            stored_role(&pool, community_id, channel, &agent).await,
+            "bot"
+        );
+
+        // Elevated and guest roles are stored as asked, even for an agent.
+        let guest_channel = open_test_channel(&pool, community_id, &creator).await;
+        add_member(
+            &pool,
+            community,
+            guest_channel,
+            &agent,
+            MemberRole::Guest,
+            None,
+        )
+        .await
+        .expect("add agent as guest");
+        assert_eq!(
+            stored_role(&pool, community_id, guest_channel, &agent).await,
+            "guest"
+        );
+        add_member(
+            &pool,
+            community,
+            guest_channel,
+            &agent,
+            MemberRole::Admin,
+            Some(&creator),
+        )
+        .await
+        .expect("promote agent to admin");
+        assert_eq!(
+            stored_role(&pool, community_id, guest_channel, &agent).await,
+            "admin"
+        );
+    }
+
+    /// Recording an owner converts the agent's active `member` rows to `bot`
+    /// and reports exactly those channels for roster republish. Removed rows
+    /// and other roles keep their role, and a second owner record is a no-op.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn recording_an_agent_owner_converts_only_active_member_rows() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let creator = random_pubkey();
+        let owner = random_pubkey();
+        let agent = random_pubkey();
+        for key in [&creator, &owner, &agent] {
+            ensure_user(&pool, community, key)
+                .await
+                .expect("ensure user");
+        }
+        let active = open_test_channel(&pool, community_id, &creator).await;
+        let removed = open_test_channel(&pool, community_id, &creator).await;
+        let guest = open_test_channel(&pool, community_id, &creator).await;
+        for channel in [active, removed] {
+            add_member(&pool, community, channel, &agent, MemberRole::Member, None)
+                .await
+                .expect("add unowned agent");
+            assert_eq!(
+                stored_role(&pool, community_id, channel, &agent).await,
+                "member"
+            );
+        }
+        add_member(&pool, community, guest, &agent, MemberRole::Guest, None)
+            .await
+            .expect("add agent as guest");
+        remove_member(&pool, community, removed, &agent, &agent)
+            .await
+            .expect("agent leaves");
+
+        let record = crate::user::set_agent_owner_with_operation(
+            &pool,
+            community,
+            &agent,
+            &owner,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("record owner");
+        assert!(record.recorded);
+        assert_eq!(record.converted_channels, vec![active]);
+        assert_eq!(
+            stored_role(&pool, community_id, active, &agent).await,
+            "bot"
+        );
+        assert_eq!(
+            stored_role(&pool, community_id, removed, &agent).await,
+            "member"
+        );
+        assert_eq!(
+            stored_role(&pool, community_id, guest, &agent).await,
+            "guest"
+        );
+
+        let second = crate::user::set_agent_owner_with_operation(
+            &pool,
+            community,
+            &agent,
+            &random_pubkey(),
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("second owner record");
+        assert_eq!(second, crate::user::AgentOwnerRecord::default());
+    }
+
+    /// Any writing member may make a guest a member, and the relay still
+    /// stores an owned agent's ordinary role as `bot` when the actor is not
+    /// the agent's owner.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn non_owner_member_raising_a_guest_agent_stores_bot() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let creator = random_pubkey();
+        let owner = random_pubkey();
+        let agent = random_pubkey();
+        let peer = random_pubkey();
+        for key in [&creator, &owner, &agent, &peer] {
+            ensure_user(&pool, community, key)
+                .await
+                .expect("ensure user");
+        }
+        set_agent_owner(&pool, community, &agent, &owner)
+            .await
+            .expect("record agent owner");
+        let channel = open_test_channel(&pool, community_id, &creator).await;
+        add_member(&pool, community, channel, &peer, MemberRole::Member, None)
+            .await
+            .expect("add peer");
+        add_member(&pool, community, channel, &agent, MemberRole::Guest, None)
+            .await
+            .expect("add agent as guest");
+
+        add_member(
+            &pool,
+            community,
+            channel,
+            &agent,
+            MemberRole::Member,
+            Some(&peer),
+        )
+        .await
+        .expect("a member who is not the owner raises the guest agent");
+        assert_eq!(
+            stored_role(&pool, community_id, channel, &agent).await,
+            "bot"
+        );
+    }
+
+    /// The roster a relay would build from `snapshot`, at `created_at`.
+    /// The relay gives each roster a later second than the last one
+    /// (`emit_addressable_discovery_event`), so the replaceable tie-break never
+    /// drops a republish; callers pass increasing times to match.
+    fn snapshot_roster(
+        snapshot: &LockedMemberSnapshot,
+        relay_keys: &Keys,
+        created_at: u64,
+    ) -> nostr::Event {
+        let tags = std::iter::once(
+            nostr::Tag::parse(["d", &snapshot.channel_id().to_string()]).expect("d tag"),
+        )
+        .chain(snapshot.members.iter().map(|m| {
+            nostr::Tag::parse(["p", &hex::encode(&m.pubkey), "", &m.role]).expect("p tag")
+        }))
+        .collect::<Vec<_>>();
+        nostr::EventBuilder::new(nostr::Kind::Custom(39002), "")
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(relay_keys)
+            .expect("sign roster")
+    }
+
+    /// Publish the roster built from `snapshot` and commit.
+    async fn publish_snapshot(
+        mut snapshot: LockedMemberSnapshot,
+        relay_keys: &Keys,
+        created_at: u64,
+    ) -> Result<()> {
+        let event = snapshot_roster(&snapshot, relay_keys, created_at);
+        snapshot.replace_member_event(&event).await?;
+        snapshot.release().await
+    }
+
+    /// Recording an agent owner does not take the channels' membership locks
+    /// (see `set_agent_owner_with_operation`). The roster still converges in
+    /// both orders around a concurrent roster publication:
+    ///
+    /// - the record commits between capture and replacement: the roster
+    ///   fence refuses the stale roster, and the republish writes `bot`;
+    /// - the stale roster commits first: the startup scan reports it, and the
+    ///   republish writes `bot`.
+    ///
+    /// Each record must also finish while the publisher holds the membership
+    /// lock: it must not wait on it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_record_during_roster_publication_converges() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let relay_keys = Keys::generate();
+        let relay_pubkey = relay_keys.public_key().to_bytes();
+        let snapshot_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(1))
+            .connect(&crate::test_support::database_url())
+            .await
+            .expect("connect one-connection pool");
+
+        for record_before_replace in [true, false] {
+            let stale_at = nostr::Timestamp::now().as_secs();
+            let creator = random_pubkey();
+            let owner = random_pubkey();
+            let agent = random_pubkey();
+            for key in [&creator, &owner, &agent] {
+                ensure_user(&pool, community, key)
+                    .await
+                    .expect("ensure user");
+            }
+            let channel = open_test_channel(&pool, community_id, &creator).await;
+            add_member(&pool, community, channel, &agent, MemberRole::Member, None)
+                .await
+                .expect("add unowned agent");
+
+            let snapshot = lock_member_snapshot(&snapshot_pool, community, channel, &relay_pubkey)
+                .await
+                .expect("capture roster");
+            assert!(snapshot
+                .members
+                .iter()
+                .any(|m| m.pubkey == agent && m.role == "member"));
+            let record_owner = || async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    crate::user::set_agent_owner_with_operation(
+                        &pool,
+                        community,
+                        &agent,
+                        &owner,
+                        crate::observability::WriterOperation::EventWrite,
+                    ),
+                )
+                .await
+                .expect("owner record must not wait on the membership lock")
+                .expect("record owner")
+            };
+
+            let record = if record_before_replace {
+                let record = record_owner().await;
+                let refused = publish_snapshot(snapshot, &relay_keys, stale_at).await;
+                assert!(
+                    refused.is_err(),
+                    "the roster fence must refuse a roster captured before the record"
+                );
+                record
+            } else {
+                let mut snapshot = snapshot;
+                let event = snapshot_roster(&snapshot, &relay_keys, stale_at);
+                snapshot
+                    .replace_member_event(&event)
+                    .await
+                    .expect("replace before the record commits");
+                let record = record_owner().await;
+                snapshot.release().await.expect("commit stale roster");
+                let stale = list_channel_rosters_with_stale_ordinary_roles(&pool, &relay_pubkey)
+                    .await
+                    .expect("list stale rosters");
+                assert!(
+                    stale.iter().any(|c| c.channel_id == channel),
+                    "the startup scan must report the stale roster"
+                );
+                record
+            };
+            assert_eq!(record.converted_channels, vec![channel]);
+
+            // The caller's republish of `converted_channels`.
+            let snapshot = lock_member_snapshot(&snapshot_pool, community, channel, &relay_pubkey)
+                .await
+                .expect("capture roster for republish");
+            publish_snapshot(snapshot, &relay_keys, stale_at + 1)
+                .await
+                .expect("republish converted roster");
+            let live: serde_json::Value = sqlx::query_scalar(
+                "SELECT tags FROM events WHERE community_id = $1 AND channel_id = $2 \
+                 AND kind = 39002 AND deleted_at IS NULL",
+            )
+            .bind(community_id)
+            .bind(channel)
+            .fetch_one(&pool)
+            .await
+            .expect("read live roster");
+            assert!(
+                live.as_array().expect("tags").iter().any(|tag| {
+                    tag[0] == "p" && tag[1] == hex::encode(&agent) && tag[3] == "bot"
+                }),
+                "live roster must name the agent bot: {live}"
+            );
+            assert!(
+                !list_channel_rosters_with_stale_ordinary_roles(&pool, &relay_pubkey)
+                    .await
+                    .expect("list stale rosters")
+                    .iter()
+                    .any(|c| c.channel_id == channel)
+            );
+        }
+    }
+
+    /// Insert a relay-authored kind:39002 roster that matches the current
+    /// rows, as migration 0032's fence requires.
+    async fn publish_matching_roster(
+        pool: &PgPool,
+        community_id: Uuid,
+        channel_id: Uuid,
+        relay_pubkey: &[u8],
+    ) {
+        let members: Vec<(Vec<u8>, String)> = sqlx::query_as(
+            "SELECT pubkey, role::text FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .fetch_all(pool)
+        .await
+        .expect("read roster rows");
+        let tags: Vec<serde_json::Value> =
+            std::iter::once(serde_json::json!(["d", channel_id.to_string()]))
+                .chain(
+                    members.iter().map(|(pubkey, role)| {
+                        serde_json::json!(["p", hex::encode(pubkey), "", role])
+                    }),
+                )
+                .collect();
+        sqlx::query(
+            r#"
+            INSERT INTO events
+                (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, d_tag)
+            VALUES ($1, $2, $3, NOW(), 39002, $4, '', $5, $6, $7)
+            "#,
+        )
+        .bind(community_id)
+        .bind(random_pubkey())
+        .bind(relay_pubkey)
+        .bind(serde_json::Value::Array(tags))
+        .bind(vec![0u8; 64])
+        .bind(channel_id)
+        .bind(channel_id.to_string())
+        .execute(pool)
+        .await
+        .expect("insert roster snapshot");
+    }
+
+    /// Seed a channel where `key` holds `published` in a matching roster,
+    /// then change its row to `stored` without republishing.
+    async fn seed_role_drift(
+        pool: &PgPool,
+        community_id: Uuid,
+        relay_pubkey: &[u8],
+        key: &[u8],
+        published: &str,
+        stored: &str,
+    ) -> Uuid {
+        let channel = open_test_channel(pool, community_id, &random_pubkey()).await;
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) \
+             VALUES ($1, $2, $3, $4::member_role)",
+        )
+        .bind(community_id)
+        .bind(channel)
+        .bind(key)
+        .bind(published)
+        .execute(pool)
+        .await
+        .expect("insert member row");
+        publish_matching_roster(pool, community_id, channel, relay_pubkey).await;
+        sqlx::query(
+            "UPDATE channel_members SET role = $4::member_role \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community_id)
+        .bind(channel)
+        .bind(key)
+        .bind(stored)
+        .execute(pool)
+        .await
+        .expect("change row role");
+        channel
+    }
+
+    /// The startup reconcile finds a roster that names a member with the
+    /// other ordinary role in either direction, and skips converged rosters,
+    /// other signers and non-active communities.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stale_ordinary_role_rosters_are_found_in_both_directions() {
+        let pool = setup_pool().await;
+        let relay_pubkey = random_pubkey();
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let key = random_pubkey();
+
+        let row_became_bot =
+            seed_role_drift(&pool, community_id, &relay_pubkey, &key, "member", "bot").await;
+        let row_became_member =
+            seed_role_drift(&pool, community_id, &relay_pubkey, &key, "bot", "member").await;
+        let converged_bot =
+            seed_role_drift(&pool, community_id, &relay_pubkey, &key, "bot", "bot").await;
+        let converged_member =
+            seed_role_drift(&pool, community_id, &relay_pubkey, &key, "member", "member").await;
+
+        let fenced_id = make_test_community(&pool).await;
+        seed_role_drift(&pool, fenced_id, &relay_pubkey, &key, "member", "bot").await;
+        crate::test_support::set_deletion_state(&pool, fenced_id, "fenced").await;
+
+        let found: Vec<(CommunityId, Uuid)> =
+            list_channel_rosters_with_stale_ordinary_roles(&pool, &relay_pubkey)
+                .await
+                .expect("list stale rosters")
+                .into_iter()
+                .filter(|c| c.community_id == community || *c.community_id.as_uuid() == fenced_id)
+                .map(|c| (c.community_id, c.channel_id))
+                .collect();
+        let mut expected = vec![(community, row_became_bot), (community, row_became_member)];
+        expected.sort();
+        assert_eq!(found, expected);
+        assert!(!found
+            .iter()
+            .any(|(_, channel)| [converged_bot, converged_member].contains(channel)));
+
+        assert!(
+            list_channel_rosters_with_stale_ordinary_roles(&pool, &random_pubkey())
+                .await
+                .expect("other signer")
+                .iter()
+                .all(|c| c.community_id != community),
+            "another signer's rosters are not this relay's"
+        );
+    }
+
+    /// First authentication can create a key's user row and record its owner
+    /// while an add of that key is open: the add read no user row and chose
+    /// `member`. The owner record must wait for the add and then convert the
+    /// row it wrote. A share lock on the absent user row could not do this.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn an_owner_recorded_beside_an_open_add_converts_the_added_row() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let creator = random_pubkey();
+        let owner = random_pubkey();
+        let agent = random_pubkey();
+        for key in [&creator, &owner] {
+            ensure_user(&pool, community, key)
+                .await
+                .expect("ensure user");
+        }
+        let channel = open_test_channel(&pool, community_id, &creator).await;
+
+        let mut add = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("begin add");
+        let role = ordinary_member_role_tx(add.conn(), community, &agent)
+            .await
+            .expect("role read");
+        assert_eq!(role, MemberRole::Member, "the key has no user row yet");
+
+        ensure_user(&pool, community, &agent)
+            .await
+            .expect("first authentication creates the user");
+        let record = tokio::spawn({
+            let (pool, agent, owner) = (pool.clone(), agent.clone(), owner.clone());
+            async move {
+                crate::user::set_agent_owner_with_operation(
+                    &pool,
+                    community,
+                    &agent,
+                    &owner,
+                    crate::observability::WriterOperation::Authorization,
+                )
+                .await
+            }
+        });
+        crate::test_support::wait_for_agent_owner_lock_waiter(&pool, community, &agent).await;
+        assert!(!record.is_finished(), "the owner record waits for the add");
+
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, $3, $4::member_role, $5)",
+        )
+        .bind(community_id)
+        .bind(channel)
+        .bind(&agent)
+        .bind(role.as_str())
+        .bind(&creator)
+        .execute(add.conn())
+        .await
+        .expect("add writes its row");
+        add.commit().await.expect("commit add");
+
+        let record = record.await.expect("owner task").expect("record owner");
+        assert!(record.recorded);
+        assert_eq!(record.converted_channels, vec![channel]);
+        assert_eq!(
+            stored_role(&pool, community_id, channel, &agent).await,
+            "bot"
+        );
+    }
+
+    /// Rows written before the write rule (or by an older relay during a
+    /// rolling deploy) can store an owned agent as `member` and an unowned key
+    /// as `bot`, with a roster that matches. The roster reconcile alone sees
+    /// nothing to do. The maintenance script
+    /// `scripts/maintenance/bot_role_follows_agent_owner.sql` repairs the
+    /// rows, after which the reconcile finds the roster. Removed rows, other
+    /// roles and non-active communities are left alone, the validation
+    /// queries return 0, and a second run changes nothing.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bot_role_maintenance_script_repairs_rows_and_skips_fenced_communities() {
+        let pool = setup_pool().await;
+        let relay_pubkey = random_pubkey();
+        let creator = random_pubkey();
+        let owner = random_pubkey();
+        let agent = random_pubkey();
+        let person = random_pubkey();
+        let leaver = random_pubkey();
+
+        let active_id = make_test_community(&pool).await;
+        let fenced_id = make_test_community(&pool).await;
+        let mut channels = Vec::new();
+        for community_id in [active_id, fenced_id] {
+            let community = CommunityId::from_uuid(community_id);
+            for key in [&creator, &owner, &agent, &person, &leaver] {
+                ensure_user(&pool, community, key)
+                    .await
+                    .expect("ensure user");
+            }
+            // The owner was recorded before these writes, so nothing
+            // converted them.
+            crate::user::set_agent_owner(&pool, community, &agent, &owner)
+                .await
+                .expect("record owner");
+            let channel = open_test_channel(&pool, community_id, &creator).await;
+            // An old relay's writes after the migration.
+            sqlx::query(
+                "INSERT INTO channel_members (community_id, channel_id, pubkey, role, removed_at) \
+                 VALUES ($1, $2, $3, 'member', NULL), ($1, $2, $4, 'bot', NULL), \
+                        ($1, $2, $5, 'bot', NOW())",
+            )
+            .bind(community_id)
+            .bind(channel)
+            .bind(&agent)
+            .bind(&person)
+            .bind(&leaver)
+            .execute(&pool)
+            .await
+            .expect("seed old relay rows");
+            publish_matching_roster(&pool, community_id, channel, &relay_pubkey).await;
+            channels.push(channel);
+        }
+        crate::test_support::set_deletion_state(&pool, fenced_id, "fenced").await;
+        let (active_channel, fenced_channel) = (channels[0], channels[1]);
+        let stale = |pool: PgPool, relay_pubkey: Vec<u8>| async move {
+            list_channel_rosters_with_stale_ordinary_roles(&pool, &relay_pubkey)
+                .await
+                .expect("list stale rosters")
+                .into_iter()
+                .map(|candidate| candidate.channel_id)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            !stale(pool.clone(), relay_pubkey.clone())
+                .await
+                .contains(&active_channel),
+            "a roster that matches wrong rows looks converged"
+        );
+
+        run_bot_role_maintenance_script(&pool).await;
+        assert_eq!(
+            stored_role(&pool, active_id, active_channel, &agent).await,
+            "bot"
+        );
+        assert_eq!(
+            stored_role(&pool, active_id, active_channel, &person).await,
+            "member"
+        );
+        assert_eq!(
+            stored_role(&pool, active_id, active_channel, &leaver).await,
+            "bot"
+        );
+        assert_eq!(
+            stored_role(&pool, active_id, active_channel, &creator).await,
+            "owner"
+        );
+        assert_eq!(
+            stored_role(&pool, fenced_id, fenced_channel, &agent).await,
+            "member"
+        );
+        assert!(
+            stale(pool.clone(), relay_pubkey.clone())
+                .await
+                .contains(&active_channel),
+            "the repaired rows make the roster stale, so it is republished"
+        );
+
+        assert_eq!(
+            bot_role_validation_counts(&pool, active_id).await,
+            [0, 0],
+            "validation queries"
+        );
+        let before = stored_roles(&pool, active_id).await;
+        run_bot_role_maintenance_script(&pool).await;
+        assert_eq!(
+            stored_roles(&pool, active_id).await,
+            before,
+            "a second run changes nothing"
+        );
+    }
+
+    const BOT_ROLE_SCRIPT: &str =
+        include_str!("../../../../scripts/maintenance/bot_role_follows_agent_owner.sql");
+
+    /// The script's repair block, without the session setup before it.
+    fn bot_role_repair_block() -> &'static str {
+        let start = BOT_ROLE_SCRIPT.find("DO $$").expect("DO block");
+        let end = BOT_ROLE_SCRIPT[start..]
+            .find("\n$$;")
+            .expect("DO block end")
+            + start
+            + 4;
+        &BOT_ROLE_SCRIPT[start..end]
+    }
+
+    /// Run the script's repair block the way psql does: alone, outside any
+    /// transaction, so its per-key COMMIT is allowed.
+    async fn run_bot_role_maintenance_script(pool: &PgPool) {
+        sqlx::raw_sql(bot_role_repair_block())
+            .execute(pool)
+            .await
+            .expect("maintenance script");
+    }
+
+    /// Under REPEATABLE READ the community state read after the deletion lock
+    /// can come from a snapshot taken before it, and miss a fence committed
+    /// while the script waited. The repair block must refuse to run, on its
+    /// own: a schema without the write-fence trigger has no other guard. The
+    /// error must be the block's own refusal, not the trigger's, and no row
+    /// may change. The community is fenced, so a parallel run of the script
+    /// leaves its row alone too.
+    ///
+    /// Mutation: remove the isolation check from the DO block → the block
+    /// runs (or fails on the trigger's error) → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bot_role_maintenance_script_refuses_repeatable_read() {
+        let pool = setup_pool().await;
+        let creator = random_pubkey();
+        let owner = random_pubkey();
+        let agent = random_pubkey();
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        for key in [&creator, &owner, &agent] {
+            ensure_user(&pool, community, key)
+                .await
+                .expect("ensure user");
+        }
+        crate::user::set_agent_owner(&pool, community, &agent, &owner)
+            .await
+            .expect("record owner");
+        let channel = open_test_channel(&pool, community_id, &creator).await;
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) \
+             VALUES ($1, $2, $3, 'member')",
+        )
+        .bind(community_id)
+        .bind(channel)
+        .bind(&agent)
+        .execute(&pool)
+        .await
+        .expect("seed old relay row");
+        crate::test_support::set_deletion_state(&pool, community_id, "fenced").await;
+
+        let mut conn = pool.acquire().await.expect("connection");
+        sqlx::raw_sql("SET default_transaction_isolation = 'repeatable read'")
+            .execute(&mut *conn)
+            .await
+            .expect("operator isolation");
+        let err = sqlx::raw_sql(bot_role_repair_block())
+            .execute(&mut *conn)
+            .await
+            .expect_err("the repair block refuses repeatable read");
+        assert!(
+            err.to_string()
+                .contains("bot role repair requires read committed isolation"),
+            "the block's own refusal, got {err}"
+        );
+        sqlx::raw_sql("RESET default_transaction_isolation")
+            .execute(&mut *conn)
+            .await
+            .expect("reset isolation");
+        drop(conn);
+        assert_eq!(
+            stored_role(&pool, community_id, channel, &agent).await,
+            "member",
+            "no row changes"
+        );
+    }
+
+    /// The script's two validation queries, limited to one community so
+    /// parallel tests stay out of each other's rows.
+    async fn bot_role_validation_counts(pool: &PgPool, community_id: Uuid) -> Vec<i64> {
+        let queries: Vec<&str> = BOT_ROLE_SCRIPT
+            .split("\\echo 'Validation")
+            .skip(1)
+            .map(|q| {
+                let q = &q[q.find('\n').expect("query line") + 1..];
+                q.trim().trim_end_matches(';')
+            })
+            .collect();
+        assert_eq!(queries.len(), 2, "two validation queries");
+        let mut counts = Vec::new();
+        for query in queries {
+            let scoped = format!("{query} AND cm.community_id = $1");
+            let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(scoped))
+                .bind(community_id)
+                .fetch_one(pool)
+                .await
+                .expect("validation query");
+            counts.push(n);
+        }
+        counts
+    }
+
+    async fn stored_roles(pool: &PgPool, community_id: Uuid) -> Vec<(Vec<u8>, String)> {
+        sqlx::query_as(
+            "SELECT pubkey, role::text FROM channel_members \
+             WHERE community_id = $1 AND removed_at IS NULL ORDER BY channel_id, pubkey",
+        )
+        .bind(community_id)
+        .fetch_all(pool)
+        .await
+        .expect("stored roles")
     }
 
     #[tokio::test]
@@ -3196,7 +4235,8 @@ mod postgres_tests {
         let role = get_member_role(&pool, community, channel.id, &agent)
             .await
             .expect("read role");
-        assert_eq!(role.as_deref(), Some("member"));
+        // The relay stores the ordinary role of an owned agent as `bot`.
+        assert_eq!(role.as_deref(), Some("bot"));
     }
 
     /// `put_member` enforces admission itself, so a caller that skips the

@@ -410,7 +410,7 @@ pub mod relay_members {
     /// `agent_owner_pubkey` is set once and never cleared, so the writes
     /// below would all be no-ops. HTTP agents call this on every request.
     pub async fn materialize_nip_oa_owner(
-        state: &AppState,
+        state: &std::sync::Arc<AppState>,
         tenant: &TenantContext,
         agent: &nostr::PublicKey,
         owner: &nostr::PublicKey,
@@ -453,14 +453,24 @@ pub mod relay_members {
             )
             .await
         {
-            Ok(true) => {
+            Ok(record) if record.recorded => {
                 // The owner was just recorded. Sockets this agent opened
                 // without it would only be found by an owner-to-agent lookup
                 // at revoke time; make them reconnect with the owner attached.
                 state.disconnect_unowned_agent_clusterwide(tenant, &agent.to_bytes());
+                // Recording the owner turned the agent's `member` rows into
+                // `bot`; publish those rosters so they match the rows. The
+                // owner write above is the admission fact; the rosters follow
+                // in the background so a contended roster lock cannot hold
+                // first AUTH past its deadline.
+                crate::handlers::side_effects::spawn_channel_roster_republish(
+                    tenant,
+                    state,
+                    record.converted_channels,
+                );
                 true
             }
-            Ok(false) => state
+            Ok(_) => state
                 .db
                 .is_agent_owner(tenant.community(), agent.as_bytes(), owner.as_bytes())
                 .await

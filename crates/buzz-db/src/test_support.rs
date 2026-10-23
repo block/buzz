@@ -314,3 +314,35 @@ pub(crate) async fn wait_for_lock_wait(pool: &sqlx::PgPool, application_name: &s
     .await
     .expect("session reached a lock wait");
 }
+
+/// Wait until some session is blocked on `pubkey`'s agent-owner advisory lock.
+///
+/// Race tests use this as a barrier: it proves the writer under test reached
+/// the lock and is waiting for the transaction the test holds open.
+pub(crate) async fn wait_for_agent_owner_lock_waiter(
+    pool: &sqlx::PgPool,
+    community: buzz_core::CommunityId,
+    pubkey: &[u8],
+) {
+    let key = crate::channel_members::agent_owner_lock_key(community, pubkey);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks \
+             WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1 \
+               AND ((classid::bigint << 32) | objid::bigint) = hashtextextended($1, 0))",
+        )
+        .bind(&key)
+        .fetch_one(pool)
+        .await
+        .expect("read advisory lock waiters");
+        if waiting {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no session waited for the agent-owner lock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}

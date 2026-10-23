@@ -8711,8 +8711,9 @@ pub(crate) mod postgres_tests {
             // A schema whose `users` table can be taken away after the link,
             // so only the owner-to-agent lookup fails at revoke time. It
             // carries `communities` and the deletion lock key so writes pass
-            // community write admission, and `events` for the member list
-            // each membership change writes.
+            // community write admission, `events` for the member list each
+            // membership change writes, and `channel_members` for the
+            // `member`-to-`bot` conversion that recording the owner runs.
             let db_url = crate::test_support::database_url();
             let schema = format!("late_owner_{}", uuid::Uuid::new_v4().simple());
             sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
@@ -8724,6 +8725,7 @@ pub(crate) mod postgres_tests {
                      (LIKE public.join_policy_acceptances INCLUDING ALL); \
                  CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
                  CREATE TABLE {schema}.events (LIKE public.events INCLUDING ALL); \
+                 CREATE TABLE {schema}.channel_members (LIKE public.channel_members INCLUDING ALL); \
                  CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
                  LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT public.community_deletion_lock_key(target)';"
             )))
