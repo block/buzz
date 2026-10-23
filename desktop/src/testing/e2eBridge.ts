@@ -9987,6 +9987,7 @@ async function handleUpdateManagedAgent(args: {
     respondTo?: "owner-only" | "allowlist" | "anyone";
     respondToAllowlist?: string[];
     acpCommand?: string;
+    backend?: RawManagedAgent["backend"];
   };
 }): Promise<{ agent: RawManagedAgent; profile_sync_error: string | null }> {
   const agent = getMockManagedAgent(args.input.pubkey);
@@ -10010,6 +10011,10 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.acpCommand !== undefined) {
     agent.acp_command = args.input.acpCommand;
+  }
+  if (args.input.backend !== undefined) {
+    agent.backend = args.input.backend;
+    agent.backend_agent_id = null;
   }
   agent.updated_at = new Date().toISOString();
   return { agent: cloneManagedAgent(agent), profile_sync_error: null };

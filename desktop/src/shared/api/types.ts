@@ -707,6 +707,10 @@ export type UpdateManagedAgentInput = {
   respondToAllowlist?: string[];
   /** Tri-state: absent = don't touch; `null` = clear; `string` = set. Persisted in the locked update so access-change restarts snapshot the new effort. Send only when `effortTouched`. */
   effortLevel?: string | null;
+  /** Absent = don't touch. Present = move the agent (server-validated). */
+  backend?: ManagedAgentBackend;
+  /** Required to move an agent that a provider has already deployed. */
+  forceBackendChange?: boolean;
 };
 // Persona (agent definition) types live in a sibling module to keep this
 // file inside the repo-wide size ratchet; re-exported so import paths
