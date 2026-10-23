@@ -129,13 +129,24 @@ pub enum ManifestError {
     MalformedPackKey(String),
 }
 
-/// Conservative refname validation, used symmetrically on both the write side
-/// (in `Manifest::validate`, before `put_manifest`) and the read side (in
-/// `api::git::hydrate`, before writing the ref to disk).
+/// Conservative refname validation, used symmetrically on the write side
+/// (in `Manifest::validate`, before `put_manifest`), the read side (in
+/// `api::git::hydrate`, before writing the ref to disk), and the `info/refs`
+/// fast-path eligibility gate (`api::git::transport`, before emitting refnames
+/// into pkt-line bytes).
 ///
 /// Refuses traversal (`..`), null/newline/control chars, non-`refs/` prefixes,
 /// and leading/trailing/double slashes. Allowed alphabet:
-/// `[a-zA-Z0-9_./-]`.
+/// `[a-zA-Z0-9_./+@-]`.
+///
+/// `+` and `@` are git-legal (`git check-ref-format` accepts them anywhere in
+/// a component) and inert here: refnames are stored inside the manifest JSON
+/// body and written as loose-ref file paths — never used as object-store key
+/// components — and both characters are valid filename bytes on Unix and
+/// Windows. The two `@` forms git does forbid stay unreachable: a refname that
+/// is *entirely* the single character `@` cannot occur behind the mandatory
+/// `refs/` prefix, and the `@{` sequence requires `{`, which stays outside the
+/// alphabet.
 ///
 /// Sharing one predicate is load-bearing: any divergence creates the
 /// "valid CAS, un-clone-able output" hazard.
@@ -147,7 +158,7 @@ pub fn is_safe_refname(s: &str) -> bool {
         return false;
     }
     s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-' | '+' | '@'))
 }
 
 /// Hex-OID predicate. Accepts both SHA-1 (40 chars) and SHA-256 (64 chars) —
@@ -336,6 +347,19 @@ mod tests {
         assert!(is_safe_refname("refs/heads/main"));
         assert!(is_safe_refname("refs/tags/v1.0.0"));
         assert!(is_safe_refname("refs/heads/feat/cas-publish"));
+        // Git-legal `+` and `@` (#4194): real-world refs that must round-trip.
+        assert!(is_safe_refname("refs/heads/test/842+841-devnet"));
+        assert!(is_safe_refname(
+            "refs/heads/dependabot/npm_and_yarn/@types/node-1.2.3"
+        ));
+        assert!(is_safe_refname("refs/tags/v1.0.0+build.5"));
+        assert!(is_safe_refname("refs/heads/user@host"));
+        // A component that is only `@` is git-legal too (git forbids only the
+        // whole-refname `@`, unreachable behind the `refs/` prefix).
+        assert!(is_safe_refname("refs/heads/@"));
+        assert!(is_safe_refname("refs/@/x"));
+        // `@{` stays impossible: `{` is outside the alphabet.
+        assert!(!is_safe_refname("refs/heads/a@{0}"));
         assert!(!is_safe_refname("refs/heads/../escape"));
         assert!(!is_safe_refname("HEAD"));
         assert!(!is_safe_refname(""));
