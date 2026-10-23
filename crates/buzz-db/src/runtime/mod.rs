@@ -969,17 +969,47 @@ impl Db {
     /// the reason names the mechanism rather than a diagnosis).
     const READER_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
 
+    /// Client-side bound on a routed read's fence proof (Aurora capability
+    /// probe, `BEGIN`, heartbeat observation) once a connection is in hand.
+    /// Well above a normal round trip, so a brief reader stall waits on the
+    /// reader instead of flooding the writer; finite, so a reader that stops
+    /// answering without closing its sockets fails closed to the writer as
+    /// `reader_proof_timeout`.
+    const READER_PROOF_TIMEOUT: Duration = Duration::from_secs(1);
+
+    /// Warm floor for a reader pool of `max_connections`: one fifth of the
+    /// ceiling, at least one.
+    ///
+    /// The floor exists so routed reads find an established connection
+    /// instead of dialing one inside [`Db::READER_ACQUIRE_TIMEOUT`]. A cold
+    /// dial (TCP+TLS+SCRAM) that outlasts that budget is dropped mid-handshake,
+    /// the read falls back to the writer, and the next read dials again; under
+    /// a fleet-wide burst that loop turned brief reader slowness into a writer
+    /// pool exhaustion (production, 2026-10-19 and 2026-10-20: thousands of
+    /// `could not accept SSL connection: EOF detected` per second on both
+    /// readers ahead of the writer acquire timeouts).
+    fn reader_min_connections(max_connections: u32) -> u32 {
+        (max_connections / 5).max(1).min(max_connections)
+    }
+
     /// Connect the read-replica pool **lazily** — no connection is
     /// attempted at construction, so a reader that is down at boot cannot
     /// crash the relay (it starts all-writer with the fence closed and
     /// recovers when the replica returns).
     ///
-    /// `min_connections` is pinned to 0 explicitly: sqlx's lazy pool still
-    /// spawns an eager background connect task to satisfy a nonzero
-    /// minimum, which would reintroduce boot-time reader dial attempts (and
-    /// their log noise) that "lazy" is meant to avoid. With 0, connections
-    /// are dialed only on first acquire; the ~10-minute reaper never tops
-    /// the pool back up, which is fine — routed reads re-fill it on demand.
+    /// The pool keeps a warm floor of [`Db::reader_min_connections`]. With
+    /// `max_lifetime` and `idle_timeout` both set, sqlx 0.9 does not dial
+    /// that floor at construction; it re-dials it in the background, under
+    /// sqlx's own 300s maintenance deadline rather than the 150ms request
+    /// budget, whenever a connection is reaped, closed on drop, or fails its
+    /// release check. [`Db::spawn_read_pool_boot_ping`] fills it at boot.
+    ///
+    /// `test_before_acquire(false)`: the idle-connection ping runs inside the
+    /// 150ms acquire budget, and a ping that overruns closes a healthy warm
+    /// connection instead of returning it. The routed read's first statement
+    /// (`BEGIN ... READ ONLY` in [`Db::proved_reader`]) already proves the
+    /// connection and fails closed to the writer as `reader_validation_error`,
+    /// and sqlx still pings every connection on release.
     ///
     /// No floor guard or writer-isolation assertion: replica sessions are
     /// read-only, so the commit-time trigger from migration 0021 never fires
@@ -992,7 +1022,8 @@ impl Db {
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
         Ok(PgPoolOptions::new()
             .max_connections(max_connections)
-            .min_connections(0)
+            .min_connections(Self::reader_min_connections(max_connections))
+            .test_before_acquire(false)
             .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
@@ -1009,13 +1040,21 @@ impl Db {
             .connect_lazy(url)?)
     }
 
-    /// Spawn a one-shot reader reachability probe that only WARNs.
+    /// Spawn a one-shot reader reachability probe that only WARNs, then
+    /// fills the reader's warm floor.
     ///
-    /// With a lazy pool and `min_connections(0)`, nothing dials the replica
-    /// until the first routed read — so a misconfigured `READ_DATABASE_URL`
-    /// would otherwise be invisible until traffic arrives and quietly falls
-    /// back to the writer. This ping is the only boot-time reader-down
-    /// visibility; it must never gate startup or [`Db::spawn_fence_probe`].
+    /// The lazy pool dials nothing at construction, so without this ping a
+    /// misconfigured `READ_DATABASE_URL` would be invisible until traffic
+    /// arrives and quietly falls back to the writer. This ping is the only
+    /// boot-time reader-down visibility; it must never gate startup or
+    /// [`Db::spawn_fence_probe`].
+    ///
+    /// On success it closes its probe connection, which makes sqlx dial the
+    /// pool up to [`Db::reader_min_connections`] in the background, so a
+    /// freshly started pod does not meet its first traffic with an empty
+    /// reader pool and pay every dial inside the 150ms request budget.
+    /// Probe acquires that overrun that budget are retried with
+    /// [`Db::READER_BOOT_PROBE_BACKOFF`].
     ///
     /// On success it also primes the Aurora identity capability cache
     /// ([`Db::reader_aurora_identity`]) on the connection it already holds,
@@ -1032,32 +1071,58 @@ impl Db {
         tokio::spawn(Self::read_pool_boot_ping_once(read_pool, aurora_identity));
     }
 
+    /// Backoff before each boot-probe retry after an acquire that overran
+    /// [`Db::READER_ACQUIRE_TIMEOUT`]. Bounded and spaced out so a reader
+    /// that is slow at boot sees a handful of abandoned dials per pod, not
+    /// a tight retry loop; off the request path, so a slow boot dial costs
+    /// a retry, not a fallback.
+    const READER_BOOT_PROBE_BACKOFF: [Duration; 4] = [
+        Duration::from_millis(250),
+        Duration::from_millis(500),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    ];
+
     async fn read_pool_boot_ping_once(
         read_pool: PgPool,
         aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
     ) {
-        match observability::acquire_reader_with_legacy_metrics(
-            &read_pool,
-            observability::ReaderOperation::Bootstrap,
-        )
-        .await
-        {
-            Ok(mut conn) => {
-                tracing::info!("read replica reachable at boot");
-                match replica_fence::reader_supports_aurora_identity(&mut conn).await {
-                    Ok(supported) => {
-                        let _ = aurora_identity.set(supported);
-                    }
-                    Err(e) => tracing::debug!(
-                        error = %e,
-                        "aurora identity boot prime failed; first routed read will probe"
-                    ),
+        let mut backoff = Self::READER_BOOT_PROBE_BACKOFF.into_iter();
+        let mut conn = loop {
+            let error = match observability::acquire_reader_with_legacy_metrics(
+                &read_pool,
+                observability::ReaderOperation::Bootstrap,
+            )
+            .await
+            {
+                Ok(conn) => break conn,
+                Err(error) => error,
+            };
+            match (error, backoff.next()) {
+                (sqlx::Error::PoolTimedOut, Some(delay)) => tokio::time::sleep(delay).await,
+                (e, _) => {
+                    tracing::warn!(
+                        "read replica unreachable at boot; serving all-writer until it recovers: {e}"
+                    );
+                    return;
                 }
             }
-            Err(e) => tracing::warn!(
-                "read replica unreachable at boot; serving all-writer until it recovers: {e}"
+        };
+        tracing::info!("read replica reachable at boot");
+        match replica_fence::reader_supports_aurora_identity(&mut conn).await {
+            Ok(supported) => {
+                let _ = aurora_identity.set(supported);
+            }
+            Err(e) => tracing::debug!(
+                error = %e,
+                "aurora identity boot prime failed; first routed read will probe"
             ),
         }
+        // Closing (rather than returning) the probe connection makes sqlx
+        // run its `min_connections` maintenance, which dials the warm floor
+        // in the background under its own 300s deadline, outside the 150ms
+        // request budget, releasing each connection idle as it lands.
+        conn.close_on_drop();
     }
 
     #[cfg(test)]
@@ -1226,54 +1291,84 @@ impl Db {
             // can drop this checkout at any of them.
             conn.close_on_drop();
         }
-        let aurora = self.reader_aurora_capability_on(&mut conn).await;
-        let mut tx = match sqlx::Transaction::begin(
-            conn,
-            Some(sqlx::SqlStr::from_static(
-                "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY",
-            )),
-        )
-        .await
-        {
-            Ok(tx) => tx,
-            // The acquire miss gets its own reason code: the reader pool's
-            // short acquire timeout (READER_ACQUIRE_TIMEOUT) makes this the
-            // fast fail-closed path under load, and
-            // `buzz_db_route_decision{decision="writer",reason="reader_acquire_timeout"}`
-            // is the operator's alert signal for a struggling reader pool.
-            //
-            // The reason deliberately names the mechanism, not a diagnosis:
-            // `PoolTimedOut` proves only that no connection was handed out
-            // within the 150ms budget. That budget includes cold connect
-            // (TCP+TLS+auth), and sqlx's `size` counts in-flight dials, so
-            // this fires for slow connection establishment as well as for
-            // established-connection contention — and neither `size == 0`
-            // nor `size >= max` recovers the missing causal bit (in-flight
-            // dials hold a size slot, and a cold burst can push
-            // `active = size - idle` toward max with zero busy connections).
-            // Runbook: correlate with `buzz_db_read_pool_active` / `_max`
-            // and reader connection health/latency; high active suggests
-            // contention, but this metric alone does not distinguish
-            // contention from slow connects. Note the gauge is a coarse
-            // sample (BUZZ_POOL_METRICS_INTERVAL_SECS, default 10s) while
-            // the event it explains lasts ~150ms — a short burst may fall
-            // between samples entirely, so absence of elevated active is
-            // NOT evidence of a cold connect.
-            Err(sqlx::Error::PoolTimedOut) => {
-                tracing::warn!("reader pool acquire timed out");
-                return Err("reader_acquire_timeout");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "reader transaction begin failed");
-                return Err("reader_validation_error");
-            }
-        };
-        let obs = match replica_fence::observe_heartbeat(&mut tx, aurora).await {
-            Ok(Some(observation)) => observation,
-            Ok(None) => return Err("reader_validation_error"),
-            Err(e) => {
-                tracing::warn!(error = %e, "heartbeat observation failed");
-                return Err("reader_validation_error");
+        // The proof is the reader's first wire round trip (no pre-acquire
+        // ping, see `connect_read_pool`), so it carries the liveness bound:
+        // a half-open socket to a vanished reader would otherwise hang the
+        // request until TCP gives up. The proof owns everything it touches
+        // so an expired one can be detached instead of dropped (see below).
+        let aurora_identity = self.reader_aurora_identity.clone();
+        let mut proof = Box::pin(async move {
+            let aurora = Self::reader_aurora_capability_on(&aurora_identity, &mut conn).await;
+            let mut tx = match sqlx::Transaction::begin(
+                conn,
+                Some(sqlx::SqlStr::from_static(
+                    "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+                )),
+            )
+            .await
+            {
+                Ok(tx) => tx,
+                // The acquire miss gets its own reason code: the reader pool's
+                // short acquire timeout (READER_ACQUIRE_TIMEOUT) makes this the
+                // fast fail-closed path under load, and
+                // `buzz_db_route_decision{decision="writer",reason="reader_acquire_timeout"}`
+                // is the operator's alert signal for a struggling reader pool.
+                //
+                // The reason deliberately names the mechanism, not a diagnosis:
+                // `PoolTimedOut` proves only that no connection was handed out
+                // within the 150ms budget. That budget includes cold connect
+                // (TCP+TLS+auth), and sqlx's `size` counts in-flight dials, so
+                // this fires for slow connection establishment as well as for
+                // established-connection contention — and neither `size == 0`
+                // nor `size >= max` recovers the missing causal bit (in-flight
+                // dials hold a size slot, and a cold burst can push
+                // `active = size - idle` toward max with zero busy connections).
+                // Runbook: correlate with `buzz_db_read_pool_active` / `_max`
+                // and reader connection health/latency; high active suggests
+                // contention, but this metric alone does not distinguish
+                // contention from slow connects. Note the gauge is a coarse
+                // sample (BUZZ_POOL_METRICS_INTERVAL_SECS, default 10s) while
+                // the event it explains lasts ~150ms — a short burst may fall
+                // between samples entirely, so absence of elevated active is
+                // NOT evidence of a cold connect.
+                Err(sqlx::Error::PoolTimedOut) => {
+                    tracing::warn!("reader pool acquire timed out");
+                    return Err("reader_acquire_timeout");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "reader transaction begin failed");
+                    return Err("reader_validation_error");
+                }
+            };
+            let obs = match replica_fence::observe_heartbeat(&mut tx, aurora).await {
+                Ok(Some(observation)) => observation,
+                Ok(None) => return Err("reader_validation_error"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "heartbeat observation failed");
+                    return Err("reader_validation_error");
+                }
+            };
+            Ok((tx, obs))
+        });
+        let (tx, obs) = match tokio::time::timeout(Self::READER_PROOF_TIMEOUT, &mut proof).await {
+            Ok(proved) => proved?,
+            Err(_) => {
+                tracing::warn!("reader fence proof timed out");
+                // Dropping the proof mid-`BEGIN` would leak a server-side
+                // transaction: sqlx counts the transaction only once `BEGIN`
+                // is acknowledged, so the cancelled begin queues no
+                // `ROLLBACK`, and the release ping then consumes the late
+                // `BEGIN` reply and returns the connection to the pool
+                // `idle in transaction`. Detached, the proof runs to
+                // completion off the request path; its transaction drops
+                // normally (rollback, then release ping), or the task ends
+                // when a dead reader's socket errors. A bounded-release
+                // checkout is closed on drop instead, so there is nothing to
+                // leak and its slot is freed within the close bound.
+                if !operation.bounded_release() {
+                    tokio::spawn(proof);
+                }
+                return Err("reader_proof_timeout");
             }
         };
         match self.fence.resolve(obs.token, obs.epoch) {
@@ -1302,14 +1397,14 @@ impl Db {
     /// Aurora capability on a connection the caller already holds, so the
     /// routed path never spends a second acquire budget.
     async fn reader_aurora_capability_on(
-        &self,
+        aurora_identity: &std::sync::OnceLock<bool>,
         conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
     ) -> bool {
-        if let Some(cached) = self.reader_aurora_identity.get() {
+        if let Some(cached) = aurora_identity.get() {
             return *cached;
         }
         match replica_fence::reader_supports_aurora_identity(conn).await {
-            Ok(supported) => *self.reader_aurora_identity.get_or_init(|| supported),
+            Ok(supported) => *aurora_identity.get_or_init(|| supported),
             Err(e) => {
                 tracing::debug!(error = %e, "aurora identity probe failed; will retry");
                 false
