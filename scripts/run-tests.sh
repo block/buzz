@@ -101,6 +101,10 @@ run_unit_tests() {
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
 
+  # Inter-relay mesh crate (infra-free). Mirrors `just test-unit`.
+  run_test_step "buzz-relay-mesh tests" \
+    cargo test -p buzz-relay-mesh -- --nocapture
+
   run_test_step "buzz-cli tests" \
     cargo test -p buzz-cli -- --nocapture
 
@@ -235,6 +239,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay startup step tests" \
     cargo test -p buzz-relay --lib startup_steps::tests:: -- --nocapture
+
+  run_test_step "buzz-relay mesh boot tests" \
+    cargo test -p buzz-relay --lib mesh_boot::tests:: -- --nocapture
 
   # telemetry and config tests mutate process env. libtest runs one process
   # with many threads (nextest, used by `just test-unit`, isolates each test),
