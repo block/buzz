@@ -12888,6 +12888,28 @@ export function maybeInstallE2eTauriMocks() {
         return;
       case "fetch_join_policy":
         return activeConfig?.mock?.joinPolicy ?? null;
+      case "mint_invite": {
+        // Forward over HTTP so specs can intercept `**/api/invites`.
+        const { maxUses, ttlSecs } = payload as {
+          maxUses: number | null;
+          ttlSecs: number | null;
+        };
+        const response = await fetch(
+          `${getRelayHttpUrl(activeConfig)}/api/invites`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ...(ttlSecs == null ? {} : { ttl_secs: ttlSecs }),
+              ...(maxUses == null ? {} : { max_uses: maxUses }),
+            }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(`relay returned ${response.status}`);
+        }
+        return response.json();
+      }
       case "fetch_link_preview_metadata": {
         if (activeConfig?.mock?.deferLinkPreviewMetadata) {
           await new Promise<void>((resolve) => {
