@@ -77,7 +77,7 @@ fn effort_env_leaf(canonical: &serde_json::Value) -> Option<&serde_json::Value> 
 /// top authority tier for Goose: effort comes from user env_vars, no column).
 /// Pins `runtime = "goose"` so the effective command resolves to Goose and
 /// `GOOSE_THINKING_EFFORT` is the record-*native* key — without it the record
-/// falls back to the default `buzz-agent` runtime, for which that key is a
+/// falls back to the default `goose-acp` runtime, for which that key is a
 /// foreign env alias the projection suppresses rather than an authority tier.
 fn record_with_env_effort(value: &str) -> ManagedAgentRecord {
     let mut rec = record();
