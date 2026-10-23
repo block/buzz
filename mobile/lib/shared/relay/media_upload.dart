@@ -534,6 +534,21 @@ class MediaUploadService {
     }
     final bytes = await pickedFile.readAsBytes();
     _throwIfCancelled(cancellationToken);
+    // The relay sniffs content and applies its image metadata policy whatever
+    // type is declared, so an image picked as a file needs the image path.
+    if (_tryDetectImageMimeType(bytes) case final imageMimeType?) {
+      final preparedImage = await _prepareDetectedUploadImage(
+        bytes,
+        imageMimeType,
+      );
+      _throwIfCancelled(cancellationToken);
+      return _uploadPreparedBytes(
+        preparedImage.bytes,
+        mimeType: preparedImage.mimeType,
+        onProgress: onProgress,
+        cancellationToken: cancellationToken,
+      );
+    }
     final descriptor = await _uploadPreparedBytes(
       bytes,
       mimeType: 'application/octet-stream',
