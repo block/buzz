@@ -165,12 +165,13 @@ struct ProbeResponse {
 
 async fn probe(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<ProbeResponse>, ApiError> {
     let (auth_mode, role, source, can_act, can_staff) =
-        match authorize_read(&state, &headers, &method, &uri).await? {
+        match authorize_read(&state, &slot, &headers, &method, &uri).await? {
             AdminAccess::NetworkTrusted => ("disabled", None, None, false, false),
             AdminAccess::Staff(p) => {
                 let can_staff = p.role == AdminRole::Operator;
@@ -196,12 +197,13 @@ async fn probe(
 
 async fn reports(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
     Query(query): Query<ReportQuery>,
 ) -> Result<Json<Vec<buzz_db::admin_moderation::AdminReport>>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     validate(
         query.status.as_deref(),
         REPORT_STATUS_ALLOWLIST,
@@ -240,12 +242,13 @@ async fn reports(
 
 async fn report_detail(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<buzz_db::admin_moderation::AdminReportDetail>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     state
         .db
         .admin_get_report(id)
@@ -272,11 +275,12 @@ struct FeedbackSummary {
 
 async fn feedback(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<Vec<FeedbackSummary>>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     let items = state
         .db
         .admin_list_feedback(100)
@@ -301,12 +305,13 @@ async fn feedback(
 
 async fn feedback_detail(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<buzz_db::admin_moderation::AdminFeedback>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     state
         .db
         .admin_get_feedback(id)
@@ -317,13 +322,33 @@ async fn feedback_detail(
 
 async fn feedback_attachment(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
     Path((id, sha256)): Path<(Uuid, String)>,
 ) -> Result<Response, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
-    if !is_sha256(&sha256) {
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
+    // The request's access line carries the attachment read.
+    let served = serve_feedback_attachment_checked(&state, &headers, id, &sha256).await;
+    if let Ok((_, community_id)) = &served {
+        slot.in_community(*community_id);
+        slot.detail(crate::access::Detail::Attachment {
+            feedback_id: id,
+            attachment_sha256: sha256,
+        });
+    }
+    served.map(|(response, _)| response)
+}
+
+/// The attachment `sha256` of feedback `id`, and the community it was read from.
+async fn serve_feedback_attachment_checked(
+    state: &crate::state::AppState,
+    headers: &HeaderMap,
+    id: Uuid,
+    sha256: &str,
+) -> Result<(Response, buzz_core::tenant::CommunityId), ApiError> {
+    if !is_sha256(sha256) {
         return Err(ApiError::not_found());
     }
 
@@ -342,7 +367,7 @@ async fn feedback_attachment(
         return Err(ApiError::not_found());
     };
 
-    if !feedback_references_hash(&feedback.tags, community_host, &sha256) {
+    if !feedback_references_hash(&feedback.tags, community_host, sha256) {
         return Err(ApiError::not_found());
     }
 
@@ -362,19 +387,13 @@ async fn feedback_attachment(
         return Err(ApiError::not_found());
     }
 
-    let response = crate::api::media::serve_feedback_attachment(&state, &tenant, &sha256, &headers)
+    let response = crate::api::media::serve_feedback_attachment(state, &tenant, sha256, headers)
         .await
         .map_err(|error| match error {
             buzz_media::MediaError::NotFound => ApiError::not_found(),
             _ => ApiError::internal(),
         })?;
-    tracing::info!(
-        feedback_id = %feedback.id,
-        community_id = %community_id,
-        attachment_sha256 = %sha256,
-        "admin feedback attachment read"
-    );
-    Ok(response)
+    Ok((response, tenant.community()))
 }
 
 // ── Phase 2: Report resolution ────────────────────────────────────────────────
@@ -443,6 +462,7 @@ fn compute_timeout_until(secs: u64) -> Result<DateTime<Utc>, ApiError> {
 /// - delete/kick/ban/timeout: server-side enforcement state machine.
 async fn resolve_report(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -454,7 +474,7 @@ async fn resolve_report(
         resolve_report_with_enforcement, ResolutionError,
     };
 
-    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
         .act()?;
 
@@ -665,6 +685,7 @@ struct ReopenReportBody {
 /// records a durable `reopen` audit row. `409` if the report is not terminal.
 async fn reopen_report(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -673,7 +694,7 @@ async fn reopen_report(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     use buzz_db::relay_admin_actions::ReopenResult;
 
-    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
         .act()?;
 
@@ -744,13 +765,14 @@ struct CancelReportBody {
 /// `activeAction: null`.
 async fn cancel_report(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(report_id): Path<Uuid>,
     body_bytes: Bytes,
 ) -> Result<axum::http::Response<axum::body::Body>, ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
         .act()?;
 
@@ -813,13 +835,14 @@ async fn cancel_report(
 /// Update product_feedback status. Requires nip98 auth.
 async fn update_feedback_status(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     body_bytes: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let _principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let _principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
         .act()?;
 
@@ -868,11 +891,12 @@ struct OperatorEntry {
 /// Requires nip98 auth + Operator role.
 async fn list_operators(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<Vec<OperatorEntry>>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri)
+    authorize_read(&state, &slot, &headers, &method, &uri)
         .await?
         .operator()?;
 
@@ -943,13 +967,14 @@ struct UpsertOperatorBody {
 /// Requires nip98 auth + Operator role.
 async fn upsert_operator(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     body_bytes: Bytes,
 ) -> Result<Json<OperatorEntry>, ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
         .operator()?;
 
@@ -1014,12 +1039,13 @@ async fn upsert_operator(
 /// Requires nip98 auth + Operator role.
 async fn delete_operator(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, None)
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, None)
         .await?
         .operator()?;
 
@@ -1201,12 +1227,13 @@ struct RestrictionsQuery {
 /// malformed. Returns 401 without a valid admin credential.
 async fn list_member_restrictions(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
     Query(query): Query<RestrictionsQuery>,
 ) -> Result<Json<RestrictionsPage>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
 
     let page_limit = limit(query.limit, 200, 200)?;
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
@@ -1238,13 +1265,14 @@ async fn list_member_restrictions(
 /// Requires nip98 auth.
 async fn unban_member(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, None)
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, None)
         .await?
         .act()?;
 
@@ -1279,13 +1307,14 @@ async fn unban_member(
 /// Requires nip98 auth.
 async fn untimeout_member(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, None)
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, None)
         .await?
         .act()?;
 
@@ -1582,6 +1611,21 @@ mod postgres_tests {
         router(state).oneshot(request).await.expect("response")
     }
 
+    /// Sends an admin-relative request to its mounted path on the production
+    /// router, whose access layer writes the request's line.
+    async fn production_status_for(
+        state: Arc<crate::state::AppState>,
+        mut request: Request<Body>,
+    ) -> axum::response::Response {
+        *request.uri_mut() = format!("{ADMIN_API_PREFIX}{}", request.uri())
+            .parse()
+            .expect("mounted uri");
+        crate::router::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("response")
+    }
+
     #[tokio::test]
     async fn every_route_rejects_a_missing_credential_before_database_access() {
         let state = test_state().await;
@@ -1718,8 +1762,10 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres — DB lookup returns 500 without a database"]
     async fn feedback_attachment_rejects_unknown_feedback() {
-        let response = status_for(
-            test_state().await,
+        let state = test_state().await;
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let response = production_status_for(
+            state,
             status_request(authorized(&format!(
                 "/feedback/{}/attachments/{HASH}",
                 Uuid::nil()
@@ -1727,6 +1773,106 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // The read's one access line: the login and the read's status.
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "success", "{}", lines[0]);
+        assert_eq!(lines[0]["status"], 404, "{}", lines[0]);
+    }
+
+    /// A served attachment writes one access line carrying the feedback id,
+    /// attachment hash, community and final status, in both admin auth
+    /// modes; a network-trusted read carries no key.
+    mod external_infra_minio_tests {
+        use super::*;
+
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn served_attachment_writes_one_line_in_both_admin_modes() {
+            let signed = nip98_state(vec![test_operator_keys().public_key().to_hex()]).await;
+            let open = disabled_mode_state().await;
+            for (mode, state) in [("nip98", signed), ("network_trusted", open)] {
+                let host = format!("attach-{}.test", Uuid::new_v4().simple());
+                state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community");
+                let tenant = crate::tenant::bind_community(&state.db, &host)
+                    .await
+                    .expect("bind community");
+                let bytes = format!("attachment bytes {}", Uuid::new_v4()).into_bytes();
+                let sha256 = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+                state
+                    .media_storage
+                    .put(&format!("{sha256}.txt"), &bytes, "text/plain")
+                    .await
+                    .expect("put blob");
+                let meta = buzz_media::BlobMeta {
+                    dim: String::new(),
+                    blurhash: String::new(),
+                    thumb_url: String::new(),
+                    ext: "txt".into(),
+                    mime_type: "text/plain".into(),
+                    size: bytes.len() as u64,
+                    uploaded_at: 0,
+                    duration_secs: None,
+                };
+                state
+                    .media_storage
+                    .put_sidecar(&tenant, &sha256, &meta)
+                    .await
+                    .expect("put sidecar");
+                let feedback_id = Uuid::new_v4();
+                let tags = serde_json::json!([[
+                    "imeta",
+                    format!("url /media/{sha256}.txt"),
+                    format!("x {sha256}")
+                ]]);
+                sqlx::query(
+                    "INSERT INTO product_feedback (id, community_id, event_id, submitter_pubkey, \
+                     category, body, tags, status, event_created_at, received_at) \
+                     VALUES ($1, $2, $3, $4, 'bug', 'see attachment', $5, 'new', now(), now())",
+                )
+                .bind(feedback_id)
+                .bind(tenant.community().as_uuid())
+                .bind([feedback_id.as_bytes().as_slice(), feedback_id.as_bytes()].concat())
+                .bind(vec![9_u8; 32])
+                .bind(&tags)
+                .execute(state.db.pool())
+                .await
+                .expect("insert feedback");
+
+                let uri = format!("/feedback/{feedback_id}/attachments/{sha256}");
+                let request = if mode == "nip98" {
+                    authorized(&uri)
+                } else {
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::HOST, "admin.example")
+                };
+                let (guard, out) = crate::access::tests::capture_scoped();
+                let response = production_status_for(state, status_request(request)).await;
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                drop(guard);
+                assert_eq!(status, StatusCode::OK, "{mode}");
+                assert_eq!(body.as_ref(), bytes.as_slice(), "{mode}");
+                let lines = out.lines();
+                assert_eq!(lines.len(), 1, "{mode}: {lines:?}");
+                let line = &lines[0];
+                assert_eq!(line["method"], mode, "{line}");
+                assert_eq!(line["status"], 200, "{line}");
+                assert_eq!(line["feedback_id"], feedback_id.to_string(), "{line}");
+                assert_eq!(line["attachment_sha256"], sha256.as_str(), "{line}");
+                assert_eq!(line["community"], tenant.community().to_string(), "{line}");
+                if mode == "network_trusted" {
+                    assert!(line.get("pubkey").is_none(), "{line}");
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -2934,7 +3080,7 @@ mod postgres_tests {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
-        // Populate relay_operator_pubkeys so resolve_admin_principal can grant
+        // Populate relay_operator_pubkeys so lookup_admin_principal can grant
         // Operator/Config to the test pubkeys without a DB lookup.
         config.relay_operator_pubkeys = pubkeys;
         // Ensure relay_operator_api_origin is set (required when pubkeys is non-empty).

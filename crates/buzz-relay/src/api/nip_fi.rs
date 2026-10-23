@@ -2524,9 +2524,12 @@ mod route_integration_tests {
                 .parse()
                 .expect("header value"),
         );
-        crate::nip_fi_http::admit_nip_fi_http_on_state(state, &headers, || {
-            Ok(crate::nip_fi_http::Nip98Proof::new(*key, ()))
-        })
+        crate::nip_fi_http::admit_nip_fi_http_on_state(
+            state,
+            &headers,
+            &crate::access::AccessSlot::default(),
+            || Ok(crate::nip_fi_http::Nip98Proof::new(*key, ())),
+        )
         .await
         .map(|_| ())
     }
@@ -2658,15 +2661,17 @@ mod route_integration_tests {
             "control: the route recorded the deny entry"
         );
 
-        let admitted =
-            crate::nip_fi_http::admit_nip_fi_http_on_state(&state, &HeaderMap::new(), || {
-                Ok(crate::nip_fi_http::Nip98Proof::new(key, 7u8))
-            })
-            .await
-            .expect("Off mode admits on NIP-98 success regardless of deny entries");
+        let admitted = crate::nip_fi_http::admit_nip_fi_http_on_state(
+            &state,
+            &HeaderMap::new(),
+            &crate::access::AccessSlot::default(),
+            || Ok(crate::nip_fi_http::Nip98Proof::new(key, 7u8)),
+        )
+        .await
+        .expect("Off mode admits on NIP-98 success regardless of deny entries");
         assert_eq!(admitted.proven_pubkey(), &key);
-        assert!(admitted.assertion().is_none());
-        assert_eq!(*admitted.extra(), 7);
+        assert!(admitted.admission().assertion().is_none());
+        assert_eq!(*admitted.admission().extra(), 7);
 
         let legacy = || {
             Response::builder()
@@ -2678,10 +2683,12 @@ mod route_integration_tests {
         let resp = crate::nip_fi_http::admit_nip_fi_http_on_state::<(), _>(
             &state,
             &HeaderMap::new(),
+            &crate::access::AccessSlot::default(),
             || Err(legacy()),
         )
         .await
-        .expect_err("Off mode propagates the NIP-98 failure");
+        .err()
+        .expect("Off mode propagates the NIP-98 failure");
         let expected = legacy();
         assert_eq!(resp.status(), expected.status());
         assert_eq!(resp.headers(), expected.headers());

@@ -45,6 +45,27 @@ impl AssertionRejection {
             Self::Verifier(err) => err.denial_class(),
         }
     }
+
+    /// A fixed code for access logs; never token contents.
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::Transport(DenialClass::MissingEvidence) => "assertion_missing",
+            Self::Transport(_) => "assertion_malformed",
+            Self::VerifierUnavailable => "verifier_unavailable",
+            Self::Verifier(err) => err.code(),
+        }
+    }
+
+    /// The access-log result: an unavailable verifier is a refusal, every
+    /// other rejection is a failed proof.
+    pub(crate) const fn auth_result(self) -> crate::access::AuthResult {
+        match self {
+            Self::VerifierUnavailable => {
+                crate::access::AuthResult::Denied(crate::access::AuthReason::VerifierUnavailable)
+            }
+            _ => crate::access::AuthResult::Failed(self.code()),
+        }
+    }
 }
 
 /// The request `Host`, if present and readable.

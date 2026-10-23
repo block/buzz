@@ -57,13 +57,15 @@ use axum::{
     http::{HeaderMap, Response},
 };
 use buzz_auth::{DenialClass, NipFiMode, VerifiedAssertion, VerifyAssertion};
+use buzz_core::CommunityId;
 use chrono::{DateTime, Utc};
 use nostr::PublicKey;
 use std::fmt;
 
+use crate::access::{AccessSlot, AuthMethod, AuthResult};
 use crate::nip_fi_core::ResolvedCommunity;
 use crate::nip_fi_core::{
-    asserted_key_matches, evaluate_attached_assertion, http_denial, AssertionRejection, Communities,
+    asserted_key_matches, evaluate_attached_assertion, http_denial, Communities,
 };
 use buzz_auth::CommunityBinding;
 
@@ -224,6 +226,8 @@ pub(crate) struct NipFiAdmission<X = ()> {
     assertion: Option<VerifiedAssertion>,
     /// Caller-supplied side-data from the NIP-98 extraction closure.
     extra: X,
+    /// False for a dev-mode `X-Pubkey` identity, which nothing signed.
+    signed: bool,
 }
 
 impl<X> fmt::Debug for NipFiAdmission<X> {
@@ -260,9 +264,66 @@ impl<X> NipFiAdmission<X> {
         &self.extra
     }
 
+    /// Record this admitted request's identity: an enterprise assertion in
+    /// Enforce, the unsigned dev-mode `X-Pubkey` identity, or `proof_method`
+    /// (NIP-98 or Blossom) otherwise.
+    fn record(&self, slot: &AccessSlot, proof_method: AuthMethod) {
+        let method = match (&self.assertion, self.signed) {
+            (Some(_), _) => AuthMethod::NipFi,
+            (None, false) => AuthMethod::XPubkey,
+            (None, true) => proof_method,
+        };
+        slot.attempt(method, Some(self.proven_pubkey), self.signed);
+    }
+
     /// Consume the admission, returning ownership of the side-data.
     pub(crate) fn into_extra(self) -> X {
         self.extra
+    }
+}
+
+/// A NIP-FI admission for one HTTP request, with the request's access note
+/// already holding the proven identity. The route's later steps (rate limit,
+/// replay, membership) decide it; a route that never decides is logged as
+/// `undecided`.
+#[must_use]
+pub(crate) struct AdmittedRequest<X = ()> {
+    admission: NipFiAdmission<X>,
+    slot: AccessSlot,
+}
+
+impl<X> AdmittedRequest<X> {
+    fn new(admission: NipFiAdmission<X>, slot: &AccessSlot) -> Self {
+        admission.record(slot, AuthMethod::Nip98);
+        Self {
+            admission,
+            slot: slot.clone(),
+        }
+    }
+
+    /// The pubkey proven by NIP-98 (and, in Enforce, by assertion pairing).
+    pub(crate) fn proven_pubkey(&self) -> &PublicKey {
+        self.admission.proven_pubkey()
+    }
+
+    /// The admission itself.
+    #[cfg(test)]
+    pub(crate) fn admission(&self) -> &NipFiAdmission<X> {
+        &self.admission
+    }
+
+    /// This request's proof was `method` (a Blossom authorization) rather
+    /// than NIP-98.
+    pub(crate) fn proved_by(self, method: AuthMethod) -> Self {
+        self.admission.record(&self.slot, method);
+        self
+    }
+
+    /// The request's access note, bound to `community`, and the side-data
+    /// from the proof closure.
+    pub(crate) fn into_line(self, community: CommunityId) -> (AccessSlot, X) {
+        self.slot.in_community(community);
+        (self.slot, self.admission.into_extra())
     }
 }
 
@@ -321,6 +382,7 @@ impl<X> NipFiAdmission<X> {
 // is load-bearing: it IS the HTTP response, returned directly by handlers.
 #[allow(clippy::result_large_err)]
 pub(crate) async fn admit_nip_fi_http<'a, D, X, F>(
+    slot: &AccessSlot,
     headers: &HeaderMap,
     extract_nip98: F,
     communities: impl Into<Communities<'a>>,
@@ -336,6 +398,10 @@ where
     // request shape (duplicate, missing, or invalid `Authorization`) can turn
     // it into a 401/403, and so neither NIP-98 nor the verifier runs.
     if mode.denies_unconditionally() {
+        slot.method(AuthMethod::NipFi);
+        slot.finish(AuthResult::Denied(
+            crate::access::AuthReason::AuthorizationUnavailable,
+        ));
         return Err(http_denial(DenialClass::AuthorizationUnavailable));
     }
     let communities = communities.into();
@@ -353,6 +419,7 @@ where
             proven_pubkey: proof.pubkey,
             assertion: None,
             extra: proof.extra,
+            signed: proof.signed,
         });
     }
 
@@ -364,21 +431,38 @@ where
         deny_map,
         extract_nip98,
     )
-    .map_err(|(stage, class)| {
-        let reason = match stage {
-            Stage::Pairing => Some("nip_fi_http_key_mismatch"),
-            Stage::DenySet => Some("nip_fi_http_denied_pubkey"),
-            _ => None,
-        };
-        if let Some(reason) = reason {
-            metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
-        }
-        http_denial(class)
-    })?;
+    .map_err(
+        |EnforceDenial {
+             stage,
+             class,
+             pubkey,
+             result,
+         }| {
+            if let Some(result) = result {
+                slot.attempt(AuthMethod::NipFi, pubkey, pubkey.is_some());
+                slot.finish(result);
+            }
+            let reason = match stage {
+                Stage::Pairing => Some("nip_fi_http_key_mismatch"),
+                Stage::DenySet => Some("nip_fi_http_denied_pubkey"),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
+            }
+            http_denial(class)
+        },
+    )?;
     // The handler may have awaited (tenant lookup) since the guard resolved
     // the community; a snapshot that went stale meanwhile admits nothing.
     if let Ok(community) = &community {
-        community.deadline().check().map_err(http_denial)?;
+        community.deadline().check().map_err(|class| {
+            slot.attempt(AuthMethod::NipFi, Some(proof.pubkey), true);
+            slot.finish(AuthResult::Denied(
+                crate::access::AuthReason::AuthorizationUnavailable,
+            ));
+            http_denial(class)
+        })?;
     }
 
     // Step 8: admit.
@@ -386,6 +470,7 @@ where
         proven_pubkey: proof.pubkey,
         assertion: Some(assertion),
         extra: proof.extra,
+        signed: proof.signed,
     })
 }
 
@@ -402,6 +487,7 @@ async fn observe_shadow_verdict<D: HttpDenyMap>(
     let verdict = evaluate_enforce_steps(headers, community.as_deref(), verifier, deny_map, || {
         signed.map(|key| Nip98Proof::new(key, ())).ok_or(())
     })
+    .map_err(|d| (d.stage, d.class))
     .and_then(|_| match &community {
         // Enforce's final re-check, after the handler's awaits.
         Ok(community) => community
@@ -430,15 +516,41 @@ pub(crate) async fn observe_failed_proof(state: &crate::state::AppState, headers
     }
 }
 
-/// Enforce admission steps 1–7 in normative order. A denial names the step
-/// (the shadow `stage` label) and its class.
+/// An enforce-step denial: the shadow `stage` label and class, plus the access
+/// result the enforcing caller logs. `result` is `None` when the NIP-98
+/// extraction closure already logged its own rejection.
+struct EnforceDenial {
+    stage: Stage,
+    class: DenialClass,
+    pubkey: Option<PublicKey>,
+    result: Option<AuthResult>,
+}
+
+impl EnforceDenial {
+    fn new(
+        stage: Stage,
+        class: DenialClass,
+        pubkey: Option<PublicKey>,
+        result: Option<AuthResult>,
+    ) -> Self {
+        Self {
+            stage,
+            class,
+            pubkey,
+            result,
+        }
+    }
+}
+
+/// Enforce admission steps 1–7 in normative order. Pure: no access-log side
+/// effects, so shadow observation can share it. Only the enforcing caller logs.
 fn evaluate_enforce_steps<D, X, E, F>(
     headers: &HeaderMap,
     community: Result<&CommunityBinding, &DenialClass>,
     verifier: Option<&dyn VerifyAssertion>,
     deny_map: &D,
     extract_nip98: F,
-) -> Result<(Nip98Proof<X>, VerifiedAssertion), crate::nip_fi_shadow::WouldDeny>
+) -> Result<(Nip98Proof<X>, VerifiedAssertion), EnforceDenial>
 where
     D: HttpDenyMap,
     F: FnOnce() -> Result<Nip98Proof<X>, E>,
@@ -447,7 +559,14 @@ where
     // evidence (`Authorization`, NIP-98, assertion) is examined. Explicit
     // here because some admitted routes are exempt from the router guard.
     // [NIP-FI.md:266-268]
-    let community = community.map_err(|c| (Stage::Community, *c))?;
+    let community = community.map_err(|c| {
+        EnforceDenial::new(
+            Stage::Community,
+            *c,
+            None,
+            Some(AuthResult::Failed("community_unresolved")),
+        )
+    })?;
 
     // Step 2 — cardinality gate: exactly one Authorization field per
     // NIP-FI.md:695-700.
@@ -458,10 +577,16 @@ where
     // closes the attack where a relay-aware adversary slips a second credential
     // past the NIP-98 verifier.  [FI-INV-15]
     if headers.get_all("authorization").iter().count() > 1 {
-        return Err((Stage::Cardinality, DenialClass::EvidenceRejected));
+        return Err(EnforceDenial::new(
+            Stage::Cardinality,
+            DenialClass::EvidenceRejected,
+            None,
+            Some(AuthResult::Failed("duplicate_authorization")),
+        ));
     }
 
     // Step 3: NIP-98.  Failure is a NIP-FI DenialClass, not a legacy error.
+    // The extraction closure owns the access line for its own rejection.
     // [NIP-FI.md §Admission procedure step 3; FI-TRACE-DENIAL-ORACLE]
     let proof = extract_nip98().map_err(|_legacy| {
         let class = if headers.contains_key("authorization") {
@@ -469,30 +594,43 @@ where
         } else {
             DenialClass::MissingEvidence
         };
-        (Stage::Nip98, class)
+        EnforceDenial::new(Stage::Nip98, class, None, None)
     })?;
+    let key = Some(proof.pubkey);
 
     // Steps 4–5: extract and verify the assertion.
     let assertion =
         evaluate_attached_assertion(headers, community, verifier).map_err(|rejection| {
-            if let AssertionRejection::Verifier(e) = rejection {
-                tracing::debug!(code = e.code(), "nip-fi assertion denied at http ingress");
-            }
-            (Stage::Assertion, rejection.denial_class())
+            EnforceDenial::new(
+                Stage::Assertion,
+                rejection.denial_class(),
+                key,
+                Some(rejection.auth_result()),
+            )
         })?;
 
     // Step 6: key pairing — assertion.asserted_key MUST equal proven NIP-98 key.
     // A claimless assertion (no nostr_pubkey) is also a denial; key mismatch
     // is a private-state denial (403).  [FI-INV-05] [FI-TRACE-DENIAL-ORACLE]
+    let denied = |stage, reason| {
+        EnforceDenial::new(
+            stage,
+            DenialClass::AuthorizationDenied,
+            key,
+            Some(AuthResult::Denied(reason)),
+        )
+    };
     if !asserted_key_matches(&assertion, proof.pubkey) {
-        tracing::debug!(proven = %proof.pubkey.to_hex(), "NIP-FI HTTP key pairing mismatch");
-        return Err((Stage::Pairing, DenialClass::AuthorizationDenied));
+        return Err(denied(
+            Stage::Pairing,
+            crate::access::AuthReason::KeyMismatch,
+        ));
     }
 
     // Step 7: deny-map check — (iss, pubkey) must not be in an active deny
     // window.  Private-state denial.  [FI-INV-14] [NIP-FI.md:624-627]
     if deny_map.is_denied(assertion.identity().issuer(), &proof.pubkey, Utc::now()) {
-        return Err((Stage::DenySet, DenialClass::AuthorizationDenied));
+        return Err(denied(Stage::DenySet, crate::access::AuthReason::DenySet));
     }
 
     Ok((proof, assertion))
@@ -517,17 +655,19 @@ where
 pub(crate) async fn admit_nip_fi_http_on_state<X, F>(
     state: &crate::state::AppState,
     headers: &HeaderMap,
+    slot: &AccessSlot,
     extract_nip98: F,
-) -> Result<NipFiAdmission<X>, Response<Body>>
+) -> Result<AdmittedRequest<X>, Response<Body>>
 where
     F: FnOnce() -> Result<Nip98Proof<X>, Response<Body>>,
 {
     let mode = state.config.nip_fi.mode;
     let verifier = state.nip_fi_verifier.as_deref();
     let communities = state.nip_fi_communities();
-    match state.nip_fi_deny_map.as_deref() {
+    let admission = match state.nip_fi_deny_map.as_deref() {
         Some(deny_map) => {
             admit_nip_fi_http(
+                slot,
                 headers,
                 extract_nip98,
                 communities,
@@ -539,6 +679,7 @@ where
         }
         None => {
             admit_nip_fi_http(
+                slot,
                 headers,
                 extract_nip98,
                 communities,
@@ -548,7 +689,8 @@ where
             )
             .await
         }
-    }
+    }?;
+    Ok(AdmittedRequest::new(admission, slot))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -597,6 +739,28 @@ mod tests {
 
     fn any_pubkey() -> PublicKey {
         nostr::Keys::generate().public_key()
+    }
+
+    /// An unsigned dev-mode `X-Pubkey` identity never logs as a verified
+    /// signature; a signed NIP-98 proof does.
+    #[test]
+    fn unsigned_x_pubkey_logs_as_unverified_x_pubkey() {
+        for (signed, method) in [(false, "x_pubkey"), (true, "nip98")] {
+            let admission = NipFiAdmission {
+                proven_pubkey: any_pubkey(),
+                assertion: None,
+                extra: (),
+                signed,
+            };
+            let slot = AccessSlot::default();
+            admission.record(&slot, AuthMethod::Nip98);
+            slot.finish(AuthResult::Success);
+            let ((), out) = crate::access::tests::capture(|| slot.emit("/query", 200));
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(lines[0]["method"], method);
+            assert_eq!(lines[0]["pubkey_verified"], signed);
+        }
     }
 
     // ── extract_bearer_token ─────────────────────────────────────────────────
@@ -783,6 +947,7 @@ mod tests {
         );
         let admit = |proven: PublicKey, deny_map: &FixedDenyMap| {
             admit_nip_fi_http(
+                &AccessSlot::default(),
                 &headers,
                 || Ok(Nip98Proof::new(proven, ())),
                 &communities(),
@@ -832,6 +997,7 @@ mod tests {
         let expected_pubkey = any_pubkey();
         let ep = expected_pubkey;
         let outcome = admit_nip_fi_http(
+            &AccessSlot::default(),
             &headers,
             || Ok(Nip98Proof::new(ep, ())),
             &communities(),
@@ -857,6 +1023,7 @@ mod tests {
         let deny_resp = http_denial(DenialClass::MissingEvidence);
         let deny_status = deny_resp.status();
         let outcome = admit_nip_fi_http::<_, (), _>(
+            &AccessSlot::default(),
             &headers,
             || Err(deny_resp),
             &communities(),
@@ -891,6 +1058,7 @@ mod tests {
         let headers = host_headers(); // no Authorization header
         let legacy_resp = http_denial(DenialClass::EvidenceRejected); // would be 403 if propagated
         let outcome = admit_nip_fi_http::<_, (), _>(
+            &AccessSlot::default(),
             &headers,
             || Err(legacy_resp),
             &communities(),
@@ -919,6 +1087,7 @@ mod tests {
         );
         let legacy_resp = http_denial(DenialClass::MissingEvidence); // would be 401 if propagated
         let outcome = admit_nip_fi_http::<_, (), _>(
+            &AccessSlot::default(),
             &headers,
             || Err(legacy_resp),
             &communities(),
@@ -945,6 +1114,7 @@ mod tests {
         let legacy_status = StatusCode::UNAUTHORIZED;
         let legacy_resp = http_denial(DenialClass::MissingEvidence);
         let outcome = admit_nip_fi_http::<_, (), _>(
+            &AccessSlot::default(),
             &headers,
             || Err(legacy_resp),
             &communities(),
@@ -985,6 +1155,7 @@ mod tests {
             .unwrap();
         let headers = host_headers();
         let outcome = admit_nip_fi_http::<_, (), _>(
+            &AccessSlot::default(),
             &headers,
             || Err(legacy_resp),
             &communities(),
@@ -1069,6 +1240,7 @@ mod tests {
             let closure_calls = Cell::new(0u32);
             let verifier = CountingVerifier(AtomicUsize::new(0));
             let outcome = admit_nip_fi_http::<_, (), _>(
+                &AccessSlot::default(),
                 headers,
                 || {
                     closure_calls.set(closure_calls.get() + 1);
@@ -1125,6 +1297,7 @@ mod tests {
         let headers = host_headers();
         let pubkey = any_pubkey();
         let outcome = admit_nip_fi_http(
+            &AccessSlot::default(),
             &headers,
             || Ok(Nip98Proof::new(pubkey, ())),
             &communities(),
@@ -1159,6 +1332,7 @@ mod tests {
         );
         let pubkey = any_pubkey();
         let outcome = admit_nip_fi_http(
+            &AccessSlot::default(),
             &headers,
             || Ok(Nip98Proof::new(pubkey, ())),
             &communities(),
@@ -1221,6 +1395,7 @@ mod tests {
         );
 
         let outcome = admit_nip_fi_http(
+            &AccessSlot::default(),
             &headers,
             || Ok(Nip98Proof::new(pubkey_b, ())),
             &communities(),
@@ -1296,6 +1471,7 @@ mod tests {
         );
 
         let outcome = admit_nip_fi_http::<_, (), _>(
+            &AccessSlot::default(),
             &headers,
             || {
                 closure_ran_clone.store(true, Ordering::SeqCst);
@@ -1348,6 +1524,7 @@ mod tests {
 
         // Closure succeeds → Off mode should admit.
         let outcome = admit_nip_fi_http::<_, (), _>(
+            &AccessSlot::default(),
             &headers,
             || {
                 closure_ran_clone.store(true, Ordering::SeqCst);
@@ -1397,6 +1574,7 @@ mod tests {
         verifier: Option<&dyn VerifyAssertion>,
     ) -> Result<NipFiAdmission<()>, Response<Body>> {
         admit_nip_fi_http(
+            &AccessSlot::default(),
             headers,
             || Ok(Nip98Proof::new(proven, ())),
             &communities(),
@@ -1513,6 +1691,7 @@ mod tests {
     fn characterize_http_nip98_precedes_assertion_evaluation() {
         let verifier = ScriptedVerifier::new(Ok(Some(any_pubkey())));
         let outcome = admit_nip_fi_http::<_, (), _>(
+            &AccessSlot::default(),
             &bearer_headers("Bearer a.b.c"),
             || Err(http_denial(DenialClass::MissingEvidence)),
             &communities(),
@@ -1544,6 +1723,7 @@ mod tests {
             let verifier = ScriptedVerifier::new(Ok(Some(any_pubkey())));
             let closure_ran = std::cell::Cell::new(false);
             let outcome = admit_nip_fi_http::<_, (), _>(
+                &AccessSlot::default(),
                 &headers,
                 || {
                     closure_ran.set(true);
@@ -1582,6 +1762,7 @@ mod tests {
         let key = any_pubkey();
         for headers in [unmapped, absent] {
             let admission = admit_nip_fi_http::<_, (), _>(
+                &AccessSlot::default(),
                 &headers,
                 || Ok(Nip98Proof::new(key, ())),
                 &communities(),
@@ -1615,10 +1796,17 @@ mod tests {
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let admission = metrics::with_local_recorder(&recorder, || {
             admit_nip_fi_http(
+                &AccessSlot::default(),
                 &headers,
                 || {
                     crate::api::bridge::verify_bridge_auth_with_options(
-                        &headers, "GET", "u", None, false, false,
+                        &crate::access::AccessSlot::default(),
+                        &headers,
+                        "GET",
+                        "u",
+                        None,
+                        false,
+                        false,
                     )
                     .map(|auth| auth.proof(()))
                     .map_err(axum::response::IntoResponse::into_response)
@@ -1653,6 +1841,7 @@ mod tests {
         let key = any_pubkey();
         let verifier = ScriptedVerifier::new(Ok(Some(key)));
         let admission = admit_nip_fi_http::<_, (), _>(
+            &AccessSlot::default(),
             &bearer_headers("Bearer a.b.c"),
             || Ok(Nip98Proof::new(key, ())),
             &communities(),
@@ -1667,6 +1856,7 @@ mod tests {
         assert_eq!(verifier.calls(), 1);
 
         let legacy = admit_nip_fi_http::<_, (), _>(
+            &AccessSlot::default(),
             &bearer_headers("Bearer a.b.c"),
             || Err(Response::new(Body::from("legacy"))),
             &communities(),
@@ -1680,5 +1870,60 @@ mod tests {
             panic!("NIP-98 failure must propagate")
         };
         assert_eq!(body_bytes(resp), b"legacy");
+    }
+
+    /// Run admission, check it wrote no line itself, and render the line its
+    /// note would log.
+    fn admit_logged(
+        mode: NipFiMode,
+        asserted: PublicKey,
+        proven: PublicKey,
+    ) -> (bool, serde_json::Value) {
+        let verifier = ScriptedVerifier::new(Ok(Some(asserted)));
+        let slot = AccessSlot::default();
+        let (admitted, early) = crate::access::tests::capture(|| {
+            admit_nip_fi_http::<_, (), _>(
+                &slot,
+                &bearer_headers("Bearer a.b.c"),
+                || Ok(Nip98Proof::new(proven, ())),
+                &communities(),
+                Some(&verifier as &dyn VerifyAssertion),
+                mode,
+                &AlwaysAdmitStubDenyMap,
+            )
+            .now_or_never()
+            .expect("env resolution never waits")
+            .is_ok()
+        });
+        assert!(early.lines().is_empty(), "admission writes no access line");
+        let ((), out) = crate::access::tests::capture(|| slot.emit("/test", 200));
+        let mut lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        (admitted, lines.remove(0))
+    }
+
+    // Shadow evaluation of a would-deny (key mismatch) admits and leaves the
+    // decision to the caller.
+    #[test]
+    fn shadow_would_deny_leaves_the_request_undecided() {
+        let (admitted, line) = admit_logged(NipFiMode::Shadow, any_pubkey(), any_pubkey());
+        assert!(admitted);
+        assert_eq!(line["outcome"], "undecided", "{line}");
+    }
+
+    // Enforce records a denial, and no decision for an admission (the caller
+    // records success once its last check passes).
+    #[test]
+    fn enforce_records_a_denial_and_leaves_an_admission_undecided() {
+        let (admitted, line) = admit_logged(NipFiMode::Enforce, any_pubkey(), any_pubkey());
+        assert!(!admitted);
+        assert_eq!(line["method"], "nip_fi");
+        assert_eq!(line["outcome"], "denied");
+        assert_eq!(line["reason"], "key_mismatch");
+
+        let key = any_pubkey();
+        let (admitted, line) = admit_logged(NipFiMode::Enforce, key, key);
+        assert!(admitted);
+        assert_eq!(line["outcome"], "undecided", "{line}");
     }
 }

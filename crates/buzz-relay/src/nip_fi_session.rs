@@ -114,7 +114,8 @@ pub(crate) async fn enforce_nip_fi_key_pairing(
                 proven_pubkey = %proven_pubkey.to_hex(),
                 "NIP-FI key pairing mismatch — closing connection"
             );
-            conn.reject_auth(crate::metrics::AuthOutcome::PairingMismatch);
+            crate::access::AuthAttempt::nip42(conn, proven_pubkey, true)
+                .reject(conn, crate::metrics::AuthOutcome::PairingMismatch);
             // Use the dedicated terminal channel — guaranteed one free slot even
             // when ctrl_tx (capacity 8) is saturated by ordinary control traffic —
             // through the shared first-writer-wins transition, so the close is
