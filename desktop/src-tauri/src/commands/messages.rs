@@ -826,7 +826,23 @@ pub async fn add_reaction(
         // shortcode normalization + validation match the relay exactly.
         Some(url) => buzz_sdk_pkg::build_custom_emoji_reaction(target_eid, emoji.trim(), &url)
             .map_err(|e| format!("invalid custom emoji reaction: {e}"))?,
-        None => events::build_reaction(target_eid, emoji.trim())?,
+        None => {
+            // NIP-25: include the target author's pubkey as a `p` tag so relay
+            // notification filters (`#p`) match (#2568). Resolve it from the
+            // target event (single round-trip); on any failure, omit the tag
+            // for this reaction rather than failing the submit.
+            let target_author = query_relay(
+                &state,
+                &[serde_json::json!({
+                    "ids": [target_eid.to_hex()],
+                    "limit": 1,
+                })],
+            )
+            .await
+            .ok()
+            .and_then(|events| events.first().map(|ev| ev.pubkey.to_hex()));
+            events::build_reaction(target_eid, emoji.trim(), target_author.as_deref())?
+        }
     };
     submit_event(builder, &state).await?;
     Ok(())
