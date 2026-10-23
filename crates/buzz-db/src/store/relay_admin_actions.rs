@@ -803,6 +803,22 @@ pub async fn execute_delete_with_marker(
         .fetch_optional(tx.conn())
         .await?;
 
+    // NIP-AR: an artifact revision leaves current state only through its own
+    // `op=delete` or a kind-9005 redaction. Both are fanned out, so open syncs
+    // see them; this delete would retire a head with no live signal.
+    let kind: Option<i32> =
+        sqlx::query_scalar("SELECT kind FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community_id.as_uuid())
+            .bind(target_event_id)
+            .fetch_optional(tx.conn())
+            .await?;
+    if kind == Some(45010) {
+        return Err(crate::error::DbError::InvalidData(
+            "artifact revisions cannot be deleted by admin action; use op=delete or kind 9005 redaction"
+                .into(),
+        ));
+    }
+
     // Canonical delete + thread_metadata counters, fenced by this transaction.
     // Counters move only when the row transitions to deleted, so a second
     // action against an already-deleted target leaves them unchanged.

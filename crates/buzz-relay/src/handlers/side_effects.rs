@@ -257,12 +257,28 @@ pub(crate) async fn evict_conn_channel_subscriptions(
             .pubsub
             .release_topic(tenant, buzz_pubsub::EventTopic::Channel(channel_id))
             .await;
-        if update.removed {
+        // A sync cannot keep its other channels: its set is no longer exact,
+        // so the whole sync ends with a resync (NIP-AR Sync rule 9).
+        let sync = state.artifact_syncs.remove(conn_id, &update.sub_id);
+        if sync && !update.removed {
+            if let Some(rest) = state
+                .sub_registry
+                .remove_subscription(conn_id, &update.sub_id)
+            {
+                super::close::release_scope_topics(state, tenant, &rest.scope).await;
+            }
+        }
+        if update.removed || sync {
             conn_subscriptions.remove(&update.sub_id);
-            if !state.conn_manager.send_to(
-                conn_id,
-                RelayMessage::closed(&update.sub_id, "restricted: channel access revoked"),
-            ) {
+            let reason = if sync {
+                "resync: channel access changed"
+            } else {
+                "restricted: channel access revoked"
+            };
+            if !state
+                .conn_manager
+                .send_to(conn_id, RelayMessage::closed(&update.sub_id, reason))
+            {
                 // Terminal frame lost — cancel so the subscription is not
                 // silently orphaned on a congested connection.
                 state.conn_manager.cancel_conn(conn_id);

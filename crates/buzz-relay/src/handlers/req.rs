@@ -22,7 +22,7 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-const MAX_SUBSCRIPTIONS: usize = 1024;
+pub(crate) const MAX_SUBSCRIPTIONS: usize = 1024;
 
 /// Maximum aggregate number of explicit `#h` values accepted in one REQ,
 /// COUNT, HTTP `/query`, or HTTP `/count` request.
@@ -1511,7 +1511,7 @@ async fn handle_huddle_liveness_req(
 /// owner token, register for fan-out (replacing any same-ID entry), retain its
 /// topics, and release the replaced scope's. Returns the owner token, or
 /// `None` once the connection is closing — the caller then exits silently.
-async fn claim_live_subscription(
+pub(crate) async fn claim_live_subscription(
     sub_id: &str,
     filters: &[Filter],
     channel_ids: Option<&[uuid::Uuid]>,
@@ -1524,6 +1524,9 @@ async fn claim_live_subscription(
     }
     let owner = super::close::next_owner();
     subs.insert(sub_id.to_string(), owner);
+    // A sync that held the ID stops; the registry entry and topics below are
+    // replaced in place.
+    state.artifact_syncs.remove(conn.conn_id, sub_id);
     let community = conn.tenant.community();
     let replaced = match channel_ids {
         Some(ids) => state.sub_registry.register_channels_scoped(
@@ -1931,6 +1934,78 @@ mod tests {
                 other => panic!("expected text frame, got {other:?}"),
             })
             .collect()
+    }
+
+    /// A live REQ that reuses a sync's ID retires the sync, so fan-out
+    /// delivers to the new subscription instead of the stale sync inbox.
+    /// Mutation: drop the `artifact_syncs.remove` in
+    /// `claim_live_subscription` → the event is diverted → RED.
+    #[tokio::test]
+    async fn live_req_replacing_a_sync_retires_it() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, _send_rx) = lifecycle_conn();
+        state.artifact_syncs.insert_idle(conn.conn_id, "s");
+        claim_live_subscription(
+            "s",
+            &text_filters(),
+            Some(&[uuid::Uuid::new_v4()]),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("claim");
+        assert!(!state.artifact_syncs.contains(conn.conn_id, "s"));
+        let event = nostr::EventBuilder::text_note("x")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign");
+        let matches = vec![(conn.conn_id, "s".to_string())];
+        let delivered = state
+            .artifact_syncs
+            .divert(&buzz_core::StoredEvent::new(event, None), matches.clone());
+        assert_eq!(delivered, matches);
+    }
+
+    /// A refused sync REQ answers `CLOSED`, so whatever held its ID must stop
+    /// first (NIP-01 replacement): no later frame may arrive under a closed
+    /// ID. Covers a filter refusal and an auth refusal. Mutation: send the
+    /// refusal without `retire_locked` → the old subscription stays → RED.
+    #[tokio::test]
+    async fn refused_sync_req_retires_the_old_holder() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let conn = Arc::new(conn);
+        let channel = uuid::Uuid::new_v4();
+        let topic = EventTopic::Channel(channel);
+        let valid = buzz_core::artifact_sync::parse_sync(
+            &serde_json::json!({"artifact":"current","#h":[channel.to_string()]}),
+        );
+        for (filter, reason) in [
+            (Err("sync requires #h"), "invalid: sync requires #h"),
+            (valid, "auth-required: not authenticated"),
+        ] {
+            claim_live_subscription("s", &text_filters(), Some(&[channel]), &conn, &state)
+                .await
+                .expect("claim");
+            let permit = Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await
+                .expect("permit");
+            super::super::artifact_sync::handle_sync(
+                "s".into(),
+                filter,
+                Arc::clone(&conn),
+                Arc::clone(&state),
+                permit,
+            )
+            .await;
+            assert!(conn.subscriptions.lock().await.is_empty(), "{reason}");
+            assert!(!registered(&state, &conn, "s"), "{reason}");
+            assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 0);
+            assert_eq!(
+                closed_frames(&mut send_rx),
+                vec![serde_json::json!(["CLOSED", "s", reason]).to_string()]
+            );
+        }
     }
 
     #[tokio::test]

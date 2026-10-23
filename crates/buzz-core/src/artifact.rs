@@ -248,6 +248,8 @@ mod tests {
         );
         let query = parse_query(&json!({"artifact":"current","#project":["p"]})).unwrap();
         assert_eq!(query.view, ArtifactView::Current);
+        let head = parse_query(&json!({"artifact":"head","#d":["x"]})).unwrap();
+        assert_eq!(head.view, ArtifactView::Head);
         for invalid in [
             json!({"artifact":"lookup","#d":["x"]}),
             json!({"artifact":"history"}),
@@ -256,6 +258,8 @@ mod tests {
             json!({"artifact":"current","limit":1001}),
             json!({"artifact":"current","#assignee":[]}),
             json!({"artifact":"history","#d":[]}),
+            json!({"artifact":"head"}),
+            json!({"artifact":"sync","#h":["c"]}),
         ] {
             assert!(parse_query(&invalid).is_err(), "{invalid}");
         }
@@ -276,6 +280,9 @@ pub enum ArtifactView {
     Current,
     /// Every stored, unredacted revision of the artifacts named by `#d`.
     History,
+    /// The current revision of each artifact named by `#d`, including a
+    /// deletion.
+    Head,
 }
 /// Explicit HTTP artifact query. All `#name` predicates compare the first
 /// value of the same tag.
@@ -331,8 +338,38 @@ pub fn parse_query(value: &serde_json::Value) -> Result<ArtifactQuery, &'static 
     let view = match object.get("artifact").and_then(|v| v.as_str()) {
         Some("current") => ArtifactView::Current,
         Some("history") => ArtifactView::History,
-        _ => return Err("artifact must be \"current\" or \"history\""),
+        Some("head") => ArtifactView::Head,
+        _ => return Err("artifact must be \"current\", \"history\" or \"head\""),
     };
+    let tags = parse_predicates(object, &["artifact", "kinds", "limit", "offset"])?;
+    let number = |name: &str, default: u64| {
+        object
+            .get(name)
+            .map(|v| v.as_u64().ok_or("invalid limit or offset"))
+            .transpose()
+            .map(|v| v.unwrap_or(default))
+    };
+    let limit = number("limit", 100)?;
+    let offset = number("offset", 0)?;
+    if limit == 0 || limit > MAX_PAGE_SIZE as u64 || offset > MAX_OFFSET {
+        return Err("artifact page limit exceeded");
+    }
+    if view != ArtifactView::Current && !tags.iter().any(|(n, _)| n == "d") {
+        return Err("history and head require #d");
+    }
+    Ok(ArtifactQuery {
+        view,
+        tags,
+        limit: limit as i64,
+        offset: offset as i64,
+    })
+}
+/// Parse the `kinds` and `#name` predicates shared by every artifact filter.
+/// Keys outside `#name` and `allowed` are rejected.
+pub(crate) fn parse_predicates(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+) -> Result<Vec<(String, Vec<String>)>, &'static str> {
     if let Some(kinds) = object.get("kinds") {
         if kinds.as_array().map(Vec::as_slice) != Some(&[serde_json::json!(45010)]) {
             return Err("artifact queries accept only kinds [45010]");
@@ -361,32 +398,12 @@ pub fn parse_query(value: &serde_json::Value) -> Result<ArtifactQuery, &'static 
                 parsed.push(value.into());
             }
             tags.push((name.into(), parsed));
-        } else if !["artifact", "kinds", "limit", "offset"].contains(&name.as_str()) {
+        } else if !allowed.contains(&name.as_str()) {
             return Err("unsupported artifact predicate");
         }
     }
     if tags.len() > MAX_PREDICATES || total > MAX_QUERY_VALUES || bytes > MAX_TAG_BYTES {
         return Err("artifact predicate limits exceeded");
     }
-    let number = |name: &str, default: u64| {
-        object
-            .get(name)
-            .map(|v| v.as_u64().ok_or("invalid limit or offset"))
-            .transpose()
-            .map(|v| v.unwrap_or(default))
-    };
-    let limit = number("limit", 100)?;
-    let offset = number("offset", 0)?;
-    if limit == 0 || limit > MAX_PAGE_SIZE as u64 || offset > MAX_OFFSET {
-        return Err("artifact page limit exceeded");
-    }
-    if view == ArtifactView::History && !tags.iter().any(|(n, _)| n == "d") {
-        return Err("history requires #d");
-    }
-    Ok(ArtifactQuery {
-        view,
-        tags,
-        limit: limit as i64,
-        offset: offset as i64,
-    })
+    Ok(tags)
 }

@@ -282,8 +282,12 @@ impl RelayInfo {
             artifacts: serde_json::json!({
                 "version": 1, "revision_kind": 45010, "removal_kind": 45011,
                 "query": "/query", "count": "/count",
-                "modes": ["current", "history"],
-                "websocket_query_extensions": false,
+                "modes": ["current", "history", "head"],
+                "sync": {
+                    "version": 1,
+                    "max_events": buzz_core::artifact_sync::MAX_SYNC_EVENTS,
+                },
+                "websocket_query_extensions": true,
                 "max_tags": buzz_core::artifact::MAX_TAGS,
                 "max_tag_name_bytes": buzz_core::artifact::MAX_TAG_NAME_BYTES,
                 "max_tag_value_bytes": buzz_core::artifact::MAX_TAG_VALUE_BYTES,

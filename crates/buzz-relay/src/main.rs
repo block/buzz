@@ -1471,6 +1471,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         });
     }
 
+    // NIP-AR Sync: a possible loss on the Redis link resyncs every sync.
+    tokio::spawn(buzz_relay::handlers::artifact_sync::watch_link(Arc::clone(
+        &state,
+    )));
+
     // Multi-node fan-out consumer: receive events from Redis pub/sub
     // (published by other relay instances) and fan out to local WS subscribers.
     {
@@ -1489,6 +1494,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         metrics::counter!("buzz_multinode_fanout_lag_total").increment(n);
                         tracing::warn!("Multi-node fan-out lagged by {n} messages");
+                        // Skipped messages are not replayed (NIP-AR Sync rule 5).
+                        state_for_sub
+                            .artifact_syncs
+                            .resync_all("resync: live delivery lagged");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::error!("Multi-node fan-out broadcast channel closed");

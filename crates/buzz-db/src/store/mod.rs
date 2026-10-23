@@ -79,6 +79,7 @@ pub mod workflow;
 pub mod artifact;
 
 mod artifact_query;
+pub use artifact_query::{ArtifactSnapshot, SnapshotDenied};
 
 #[cfg(test)]
 mod artifact_postgres_tests;

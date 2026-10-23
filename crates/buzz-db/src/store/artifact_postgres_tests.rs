@@ -643,3 +643,135 @@ async fn head_outside_authorized_channel_matches_missing_head() {
         ArtifactOutcome::Accepted(_)
     ));
 }
+
+/// Sync's complete-set read: keyset pages by `d` share one snapshot, so a
+/// change committed after it opens is in no page. Mutation: drop the
+/// `REPEATABLE READ` statement → the late create appears in a later page →
+/// RED. Mutation: drop the `a.artifact_id>` keyset bound → pages repeat → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
+    let f = Fixture::new().await;
+    let mut ids: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+    ids.sort();
+    let mut heads = vec![];
+    for d in &ids {
+        let create = f.revision(*d, "create", f.a, None, &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&create, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+        heads.push(create);
+    }
+    // A deleted artifact leaves the set but stays visible to the head view.
+    let deleted = f.revision(ids[4], "delete", f.a, Some(&heads[4]), &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&deleted, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let reader = f.owner.public_key();
+    let mut snapshot =
+        f.db.open_artifact_snapshot(f.community, reader.as_bytes(), &[f.a])
+            .await
+            .unwrap()
+            .unwrap();
+    let first = snapshot.next_page(&[], 2).await.unwrap();
+    // Committed after the snapshot opened, and its `d` sorts after the first
+    // page, so only a fresh snapshot per page would return it.
+    let late = loop {
+        let d = Uuid::new_v4();
+        if d > ids[1] {
+            break d;
+        }
+    };
+    let late_create = f.revision(late, "create", f.a, None, &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&late_create, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let mut seen: Vec<_> = first.iter().map(|e| e.event.id).collect();
+    loop {
+        let page = snapshot.next_page(&[], 2).await.unwrap();
+        if page.is_empty() {
+            break;
+        }
+        seen.extend(page.iter().map(|e| e.event.id));
+    }
+    snapshot.finish().await.unwrap();
+    assert_eq!(seen, heads[..4].iter().map(|e| e.id).collect::<Vec<_>>());
+
+    // Predicates apply inside the snapshot.
+    let mut filtered =
+        f.db.open_artifact_snapshot(f.community, reader.as_bytes(), &[f.a])
+            .await
+            .unwrap()
+            .unwrap();
+    let none = filtered
+        .next_page(&[("type".into(), vec!["other".into()])], 10)
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+
+    // A private channel the reader cannot read refuses the whole sync.
+    assert!(matches!(
+        f.db.open_artifact_snapshot(f.community, f.peer.public_key().as_bytes(), &[f.a, f.b])
+            .await
+            .unwrap(),
+        Err(super::artifact_query::SnapshotDenied::Restricted)
+    ));
+    // So does a channel that does not exist.
+    assert!(matches!(
+        f.db.open_artifact_snapshot(f.community, reader.as_bytes(), &[Uuid::new_v4()])
+            .await
+            .unwrap(),
+        Err(super::artifact_query::SnapshotDenied::Restricted)
+    ));
+
+    let (head, is_deletion) =
+        f.db.artifact_head(f.community, reader.as_bytes(), ids[4], &[])
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(head.event.id, deleted.id);
+    assert!(is_deletion);
+    let (head, is_deletion) =
+        f.db.artifact_head(f.community, reader.as_bytes(), ids[0], &[])
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(head.event.id, heads[0].id);
+    assert!(!is_deletion);
+    let (view, _) = f
+        .query(
+            &f.owner,
+            serde_json::json!({"artifact":"head","#d":[ids[4], ids[0]]}),
+            false,
+        )
+        .await;
+    let mut view: Vec<_> = view.iter().map(|e| e.event.id).collect();
+    view.sort();
+    let mut expected = vec![deleted.id, heads[0].id];
+    expected.sort();
+    assert_eq!(view, expected);
+    assert_eq!(
+        f.count(
+            &f.owner,
+            serde_json::json!({"artifact":"current","#d":[ids[4]]})
+        )
+        .await,
+        0
+    );
+    // A reader who cannot read the head's channel learns nothing.
+    let private = Uuid::new_v4();
+    let create = f.revision(private, "create", f.b, None, &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&create, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    assert!(f
+        .db
+        .artifact_head(f.community, f.peer.public_key().as_bytes(), private, &[])
+        .await
+        .unwrap()
+        .is_none());
+}
