@@ -106,3 +106,135 @@ Artifact revisions are state changes, not conversation messages. Receiving one M
 Clients validate content before interpreting it as a known type. Unknown types or malformed content render a safe fallback using the title, type, and home link. Editors MUST preserve unfamiliar fields and annotation tags or decline the edit. References may be unavailable or cyclic; clients must handle them safely without assuming relay validation.
 
 Artifact text is untrusted. A type name, relationship tag, or payload cannot authorize a privileged action. Moving, deleting, or revoking access cannot erase copies already downloaded.
+
+## Incremental reads
+
+Incremental reads maintain an eventually consistent local store. They do not prove a complete set at one database snapshot. Absence from a page never proves deletion or loss of access.
+
+This HTTP protocol uses `artifacts.incremental`. The WebSocket Sync subscription uses a separate `artifacts.sync` capability and defines its own complete-set guarantee. Clients select each protocol through its own capability.
+
+The relay advertises `artifacts.incremental` when incremental reads are enabled.
+Each signed `POST /query` request contains one filter. The query uses the
+same community, relay admission, channel access, and exact tag rules as an
+ordinary artifact read. The existing `current` and `history` array responses
+keep their format.
+
+```json
+[{"artifact":"incremental","query":{"artifact":"current","#type":["buzz.task"]}}]
+```
+
+The initial read pages through current identities. A later read supplies the
+last completed `checkpoint`. A continuation supplies only `cursor`, with
+the same `query`. The server signs these opaque strings. They bind the
+community, reader, exact query, access-policy boundary, and database start
+time. Tokens contain a fixed-size digest of the query. The cursor also binds
+the last page position. Relay instances use the
+same configured signing identity, so another instance can serve a continuation.
+No server-side manifest or Redis allocation is required.
+
+```json
+{
+  "version": 1,
+  "startedAt": "2026-10-21T12:00:00.123456Z",
+  "overlapSeconds": 120,
+  "changes": [
+    {"type":"upsert","artifactId":"22222222-2222-4222-8222-222222222222","event":{}},
+    {"type":"remove","artifactId":"33333333-3333-4333-8333-333333333333"},
+    {"type":"removeChannel","channelId":"44444444-4444-4444-8444-444444444444"}
+  ],
+  "nextCursor": null,
+  "checkpoint": "opaque"
+}
+```
+
+`event` is the complete signed current revision. `remove` has one meaning:
+the requested artifact is unavailable for this query. It does not distinguish
+a missing identity, deletion, redaction, query exit, or denied access.
+`removeChannel` names a removed membership retained for this exact reader.
+It applies only to local rows whose current saved home is that channel.
+An earlier move upsert to another home therefore survives a later source
+channel removal.
+
+Each pass fixes `startedAt` from the database clock. A later pass reads from
+the previous completed start time minus 120 seconds through its own start
+time, inclusive. New head writes, move-source records, and membership changes
+use database `clock_timestamp()`. The protocol assumes the delay from this
+stamp to commit visibility stays within the accepted 120-second overlap.
+That overlap is an operating assumption. It is not a measured upper bound.
+
+Pages order by `(change timestamp, source, stable identity)`. The source
+separates membership removals, head changes, grants, and move-source records.
+The identity breaks equal timestamp ties. It does not encode creation time.
+The time window and page position are stable. The current contents can change
+between requests. Replays must be idempotent. A later pass repairs changes
+that move beyond the current window.
+
+Only the final page returns a checkpoint. The client saves it after every
+page and local commit succeeds. A failed read keeps the prior checkpoint.
+Neither an initial read nor delta completion establishes absence. The client
+must not remove unseen rows. A fresh access grant replays older current
+heads from that channel. A move retains its source channel in the existing
+revision ledger, so a reader who cannot read the destination receives a
+current revalidation result without destination metadata.
+
+### Current reads and write confirmation
+
+```json
+[{"artifact":"incremental","action":"current","query":{"artifact":"current","#type":["buzz.task"]},"artifactIds":["22222222-2222-4222-8222-222222222222"]}]
+```
+
+The response has `version`, database `startedAt`, and `changes`. It contains
+exactly one upsert or remove for each requested ID, in request order.
+The request permits 1–100 unique nonempty strings, each at most 256 UTF-8
+bytes. A string that is not a canonical artifact UUID returns remove.
+Duplicates and invalid bounds fail with `incremental_invalid`. The server does not
+truncate the request.
+
+Clients serialize a full delta pass and its commits before a current-ID read.
+Live revision pushes request a current-ID read; they do not replace confirmed
+rows directly. A current-ID read that starts after publication acceptance
+reads that commit or a later state on the writer. It can return a later head
+or remove. An empty delta does not confirm an accepted edit.
+
+### Access recovery and bounds
+
+Relevant channel access changes atomically advance one community policy
+stamp, including transitions on empty channels. Ordinary artifact writes do
+not update this stamp. A different stamp
+returns HTTP 409 `incremental_reset` with `reason: "policy_changed"`, without naming
+private channels. A checkpoint older than 30 days returns the same code with
+`reason: "checkpoint_expired"`.
+
+Recovery runs a new initial read to discover current readable records and
+bounded current-ID reads for the IDs already saved locally. These reads
+revalidate known IDs without a channel roster or an absence scan. Save new
+progress only after discovery, revalidation, and local commits succeed.
+Preserve preferences when a record becomes unavailable.
+
+The server retains task heads, membership removal rows, and move-source
+ledger records. Removing this recovery history requires an explicit policy
+reset before a client can resume. Whole-community deletion closes admission
+and purges these rows through the existing deletion path.
+
+NIP-11 advertises:
+
+```json
+{"version":1,"overlapSeconds":120,"pageRows":100,"currentRows":100,"responseBytes":8388608,"permanentChannelsOnly":true,"checkpointLifetimeSeconds":2592000}
+```
+
+Pages shrink to the response byte bound. A single oversized result returns
+HTTP 413 `incremental_limit`. A current-ID batch can return that error; the client
+can split the batch. No page or batch silently truncates its result. The
+server permits four concurrent operations per process, a two-second SQL
+statement budget, and an eight-second operation budget. There is no
+identity-wide membership count limit on this path.
+
+Only matching readable artifacts in permanent channels are supported.
+A matching TTL artifact returns HTTP 422 `incremental_unsupported_scope`. An
+unrelated TTL channel does not block incremental task reads. HTTP 400 `incremental_invalid`
+rejects invalid requests or tokens. HTTP 503 `incremental_unavailable` reports a
+service or work-budget failure. These failures do not advance progress.
+
+The rollout gate is `BUZZ_ARTIFACT_INCREMENTAL_ENABLED`, off by default. Follow
+[artifact-sync-deployment.md](../artifact-sync-deployment.md) before enabling
+it. Incremental completion does not establish a live subscription to every channel.

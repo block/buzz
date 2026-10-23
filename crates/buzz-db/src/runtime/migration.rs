@@ -770,7 +770,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 68);
+        assert_eq!(migrations.len(), 71);
         assert_eq!(migrations[67].version, 68);
         assert!(migrations[67]
             .sql
@@ -2888,6 +2888,10 @@ mod postgres_tests {
             "relay_admin_outbox",
             "relay_operator_audit",
             "entity_deletion_requests",
+            "artifact_heads",
+            "artifact_revisions",
+            "channel_members",
+            "communities",
         ] {
             assert_eq!(
                 columns(&desired, table).await,

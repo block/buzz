@@ -170,10 +170,15 @@ fn wait_for_relay_metrics(process: &mut RelayProcess, port: u16) -> String {
 fn wait_for_scraped_metric(process: &mut RelayProcess, port: u16, needle: &str) -> String {
     let deadline = Instant::now() + METRICS_SCRAPE_DEADLINE;
     loop {
-        assert!(
-            process.try_wait().is_none(),
-            "relay exited before exporting {needle}"
-        );
+        if let Some(status) = process.try_wait() {
+            let stdout = join_capture(process.stdout.take(), "stdout");
+            let stderr = join_capture(process.stderr.take(), "stderr");
+            panic!(
+                "relay exited before exporting {needle}: {status}; stdout={}; stderr={}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
         if let Ok(response) = scrape_metrics(port) {
             if response.contains(needle) {
                 return response;

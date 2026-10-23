@@ -116,6 +116,8 @@ pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
 /// Relay runtime configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Enable incremental artifact reads after every serving writer is upgraded.
+    pub artifact_incremental_enabled: bool,
     /// Address the relay HTTP/WebSocket server binds to.
     pub bind_addr: SocketAddr,
     /// Postgres database connection URL.
@@ -770,6 +772,9 @@ impl Config {
             .unwrap_or(false);
 
         let require_relay_membership = std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let artifact_incremental_enabled = std::env::var("BUZZ_ARTIFACT_INCREMENTAL_ENABLED")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
@@ -1427,6 +1432,7 @@ impl Config {
             partition_manager_advance_enabled,
             pubkey_allowlist_enabled,
             require_relay_membership,
+            artifact_incremental_enabled,
             huddle_audio_available,
             mesh,
             mesh_demo_echo,

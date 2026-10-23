@@ -192,6 +192,7 @@ pub async fn create_dm(
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
             VALUES ($1, $2, $3, 'member', $4)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+                sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
