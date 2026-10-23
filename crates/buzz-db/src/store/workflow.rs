@@ -589,6 +589,11 @@ pub async fn latest_scheduled_workflow_fire(
 /// boundary. If run creation succeeds, callers should attach the run id before
 /// spawning execution. If run creation fails, leaving `workflow_run_id` NULL is
 /// intentional: the schedule instant was claimed and must not duplicate later.
+///
+/// Returns `false` when no unlinked claim matches, or the run is missing or
+/// belongs to another workflow. Workflow delete removes only its own fires
+/// before its runs, and the fire→run FK is NO ACTION, so a cross-workflow link
+/// would block that delete.
 pub async fn attach_scheduled_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
@@ -610,6 +615,10 @@ pub async fn attach_scheduled_workflow_run(
           AND workflow_id = $2
           AND scheduled_for = $3
           AND workflow_run_id IS NULL
+          AND EXISTS (
+              SELECT 1 FROM workflow_runs
+              WHERE community_id = $1 AND workflow_id = $2 AND id = $4
+          )
         "#,
     )
     .bind(community_id.as_uuid())
@@ -2486,6 +2495,43 @@ mod postgres_tests {
             !reattached,
             "attach must not overwrite an already-linked claim row"
         );
+    }
+
+    /// A claim for workflow B cannot point at A's run. Such a link has a valid
+    /// run FK but would block A's explicit run delete with no FK action.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn attach_rejects_run_from_another_workflow() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_a, _) = make_workflow_in(&pool, community).await;
+        let (workflow_b, _) = make_workflow_in(&pool, community).await;
+        let scheduled_for = Utc.with_ymd_and_hms(2026, 6, 27, 0, 3, 0).unwrap();
+        claim_scheduled_workflow_fire(&pool, community, workflow_b, scheduled_for)
+            .await
+            .expect("claim B")
+            .expect("claim wins");
+        let run_a = create_workflow_run(&pool, community, workflow_a, None, None)
+            .await
+            .expect("create A run");
+
+        assert!(
+            !attach_scheduled_workflow_run(&pool, community, workflow_b, scheduled_for, run_a)
+                .await
+                .expect("reject cross-workflow link"),
+            "B's fire must not reference A's run"
+        );
+        let linked: Option<Uuid> = sqlx::query_scalar(
+            "SELECT workflow_run_id FROM scheduled_workflow_fires \
+             WHERE community_id = $1 AND workflow_id = $2 AND scheduled_for = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow_b)
+        .bind(scheduled_for)
+        .fetch_one(&pool)
+        .await
+        .expect("read B fire");
+        assert_eq!(linked, None);
     }
 
     /// Documents the retention-vs-interval coupling Sami flagged for §5c:
