@@ -29,7 +29,8 @@
     /*
      * Default conversation type and comfy spacing for channels, DMs, threads,
      * Inbox, and the composer. Font size changes the type tokens only;
-     * Conversation density overrides only spacing.
+     * Conversation density overrides spacing and leading, never font size —
+     * the two preferences stay composable because they touch disjoint tokens.
      */
     --conversation-message-font-size: calc(var(--buzz-type-rem) * 0.875);
     --conversation-message-line-height: calc(var(--buzz-type-rem) * 1.25);
@@ -59,10 +60,17 @@
   }
 
   :root[data-conversation-density="spacious"] {
+    /*
+     * Leading carries most of the airiness here, not the block gaps: at
+     * 0.875rem type, 1.5rem leading is a 1.71 ratio against the 1.43 default.
+     * Font size is deliberately untouched — Spacious changes rhythm, not scale,
+     * so it composes with the Font size preference instead of fighting it.
+     */
+    --conversation-message-line-height: calc(var(--buzz-type-rem) * 1.5);
     --conversation-body-gap: 0.25rem;
     --conversation-row-padding-block: 0.5rem;
-    --conversation-paragraph-gap: 0.625rem;
-    --conversation-list-item-gap: 0.5rem;
+    --conversation-paragraph-gap: 0.875rem;
+    --conversation-list-item-gap: 0.625rem;
   }
 
   body {
