@@ -1,5 +1,10 @@
 import * as React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { isRateLimited } from "@/shared/api/relayRateLimitGate";
@@ -193,31 +198,37 @@ export function usePresenceSubscription() {
   }, [queryClient]);
 }
 
+async function publishPresence(
+  queryClient: QueryClient,
+  normalizedPubkey: string,
+  status: PresenceStatus,
+) {
+  await relayClient.sendPresence(status);
+  if (normalizedPubkey.length > 0) {
+    queryClient.setQueriesData<PresenceLookup>(
+      {
+        queryKey: ["presence"],
+        // A successful self heartbeat is not a fresh roster snapshot.
+        predicate: (query) =>
+          query.state.status === "success" &&
+          presenceQueryWantsPubkey(query.queryKey, normalizedPubkey),
+      },
+      (old) => mergePresenceUpdate(old, normalizedPubkey, status),
+    );
+  }
+  return {
+    status,
+    ttlSeconds: status === "offline" ? 0 : PRESENCE_TTL_SECONDS,
+  };
+}
+
 export function useSetPresenceMutation(pubkey?: string) {
   const queryClient = useQueryClient();
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
 
   return useMutation({
-    mutationFn: async (status: PresenceStatus) => {
-      await relayClient.sendPresence(status);
-      return {
-        status,
-        ttlSeconds: status === "offline" ? 0 : PRESENCE_TTL_SECONDS,
-      };
-    },
-    onSuccess: ({ status }) => {
-      if (normalizedPubkey.length === 0) return;
-      queryClient.setQueriesData<PresenceLookup>(
-        {
-          queryKey: ["presence"],
-          // A successful self heartbeat is not a fresh roster snapshot.
-          predicate: (query) =>
-            query.state.status === "success" &&
-            presenceQueryWantsPubkey(query.queryKey, normalizedPubkey),
-        },
-        (old) => mergePresenceUpdate(old, normalizedPubkey, status),
-      );
-    },
+    mutationFn: (status: PresenceStatus) =>
+      publishPresence(queryClient, normalizedPubkey, status),
   });
 }
 
@@ -227,6 +238,7 @@ export function usePresenceSession(pubkey?: string) {
     normalizedPubkey.length > 0 ? [normalizedPubkey] : [],
     { enabled: normalizedPubkey.length > 0 },
   );
+  const queryClient = useQueryClient();
   const setPresenceMutation = useSetPresenceMutation(normalizedPubkey);
   const [presencePreference, setPresencePreference] =
     React.useState<PresencePreference>(() =>
@@ -383,8 +395,11 @@ export function usePresenceSession(pubkey?: string) {
     [presencePreference, setPresenceMutation],
   );
 
+  // Automatic syncs and heartbeats bypass the mutation observer: its state
+  // feeds `isPending`, so each background publish would re-render the caller
+  // (AppShell) on every heartbeat for a status picker nobody touched.
   const syncPresence = React.useEffectEvent((status: PresenceStatus) => {
-    void setPresenceMutation.mutateAsync(status).catch(() => {
+    void publishPresence(queryClient, normalizedPubkey, status).catch(() => {
       return;
     });
   });
