@@ -380,6 +380,13 @@ pub fn run() {
             if let Err(error) = ensure_nest() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
+            // Install the agent sandbox profiles after the nest exists: their
+            // names derive from the nest directory. Non-fatal here; a sandboxed
+            // spawn refuses to start without them.
+            #[cfg(unix)]
+            if let Err(error) = managed_agents::sandbox_profile::ensure_sandbox_profiles() {
+                eprintln!("buzz-desktop: failed to install agent sandbox profiles: {error}");
+            }
             archive::spawn_warm_init(app_handle.clone());
 
             // Resolve the REPOS symlink from the persisted repos_dir BEFORE
@@ -729,6 +736,10 @@ pub fn run() {
             put_agent_session_config,
             get_global_agent_config,
             set_global_agent_config,
+            set_agent_sandbox_enabled,
+            get_agent_sandbox_status,
+            open_agent_sandbox_profile,
+            reset_agent_sandbox_profile,
             mesh_start_node,
             mesh_stop_node,
             mesh_node_status,

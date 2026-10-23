@@ -80,10 +80,14 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // for same-session sweep decisions.
     "BUZZ_MANAGED_AGENT",
     "BUZZ_MANAGED_AGENT_START_NONCE",
+    // Agent sandbox marker: a forged value would make buzz-acp disable an
+    // agent's own sandbox outside nono.
+    "BUZZ_ACP_OUTER_SANDBOX",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {
     is_reserved_git_config_key(key)
+        || is_reserved_nono_key(key)
         || RESERVED_ENV_KEYS
             .iter()
             .any(|reserved| reserved.eq_ignore_ascii_case(key))
@@ -107,4 +111,12 @@ pub(crate) fn is_reserved_env_key(key: &str) -> bool {
 fn is_reserved_git_config_key(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
     upper == "GIT_CONFIG" || upper.starts_with("GIT_CONFIG_")
+}
+
+/// The `NONO_*` env family is reserved. Sandboxed agents launch through
+/// `nono wrap`, which reads `NONO_ALLOW`, `NONO_PROFILE`, `NONO_BLOCK_NET`, and
+/// friends as command-line flags, so a user or imported-persona value could
+/// silently widen the agent sandbox. A prefix rule covers flags nono adds later.
+fn is_reserved_nono_key(key: &str) -> bool {
+    key.to_ascii_uppercase().starts_with("NONO_")
 }

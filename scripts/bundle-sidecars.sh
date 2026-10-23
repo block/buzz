@@ -51,4 +51,6 @@ for bin in "${SIDECARS[@]}"; do
         chmod 755 "$destination"
     fi
 done
+# The agent sandbox (nono) is a pinned upstream release, not a workspace crate.
+"$(dirname "${BASH_SOURCE[0]}")/fetch-nono.sh" "$TARGET"
 echo "Sidecars bundled for $TARGET"
