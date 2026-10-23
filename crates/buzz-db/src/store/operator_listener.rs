@@ -1,11 +1,13 @@
 //! Deployment-global operator-listener mention registrations and delivery outbox.
 
 use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, TimeDelta, Utc};
 use nostr::Event;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row as _};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -125,7 +127,43 @@ pub(crate) async fn enqueue_mentions_in_transaction(
     }
     separated.push_unseparated(") ON CONFLICT DO NOTHING");
 
-    Ok(query.build().execute(tx.conn()).await?.rows_affected())
+    query.push(" RETURNING id");
+
+    let ids: Vec<Uuid> = query.build_query_scalar().fetch_all(tx.conn()).await?;
+    let enqueued = ids.len() as u64;
+    tx.record_operator_listener_deliveries(ids);
+    Ok(enqueued)
+}
+
+/// Hands outbox rows to this process's delivery worker once their
+/// transaction commits, so a mention is sent without waiting for the poll.
+///
+/// Best effort: rows are durable before the hand-off, and a full or missing
+/// worker leaves them for the poll. Shared across [`Db`] clones.
+#[derive(Clone, Debug, Default)]
+pub struct CommittedDeliveries {
+    worker: Arc<OnceLock<mpsc::Sender<Uuid>>>,
+}
+
+impl CommittedDeliveries {
+    /// Connect the delivery worker. Returns `None` if one is already
+    /// connected.
+    fn subscribe(&self, capacity: usize) -> Option<mpsc::Receiver<Uuid>> {
+        let (sender, receiver) = mpsc::channel(capacity);
+        self.worker.set(sender).ok().map(|()| receiver)
+    }
+
+    pub(crate) fn submit(&self, ids: Vec<Uuid>) {
+        let Some(worker) = self.worker.get() else {
+            return;
+        };
+        for id in ids {
+            if worker.try_send(id).is_err() {
+                // The worker is at capacity; the poll claims the rest.
+                break;
+            }
+        }
+    }
 }
 
 /// Register target pubkeys for one deployment-global listener.
@@ -206,36 +244,75 @@ pub async fn claim_deliveries(
     limit: i64,
     lease_until: DateTime<Utc>,
 ) -> Result<Vec<ClaimedDelivery>> {
+    claim(pool, limit, lease_until, None).await
+}
+
+/// Claim the given deliveries if they are still due, under the same
+/// conditions and row locks as [`claim_deliveries`], so a row claimed here is
+/// never claimed by a concurrent poll.
+pub async fn claim_deliveries_by_id(
+    pool: &PgPool,
+    ids: &[Uuid],
+    lease_until: DateTime<Utc>,
+) -> Result<Vec<ClaimedDelivery>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    claim(pool, ids.len() as i64, lease_until, Some(ids)).await
+}
+
+/// The claim statement, with an extra candidate filter. One text per
+/// filter, so the poll and the by-id claim each get their own prepared plan,
+/// while sharing every due, lease and locking condition.
+macro_rules! claim_sql {
+    ($filter:literal) => {
+        concat!(
+            "WITH candidates AS ( \
+                 SELECT o.id, o.community_id \
+                 FROM operator_listener_outbox o \
+                 WHERE o.attempts < $2 \
+                   AND o.next_attempt_at <= now() \
+                   AND o.created_at >= $4 \
+                   AND (o.state = 'pending' OR (o.state = 'sending' AND o.lease_until < now())) ",
+            $filter,
+            " ORDER BY o.next_attempt_at, o.created_at, o.id \
+                 FOR UPDATE OF o SKIP LOCKED \
+                 LIMIT $3 \
+             ) \
+             UPDATE operator_listener_outbox o \
+             SET state = 'sending', claim_id = $1, lease_until = $5, attempts = o.attempts + 1 \
+             FROM candidates c \
+             JOIN communities community ON community.id = c.community_id \
+             WHERE o.id = c.id \
+             RETURNING o.id, o.claim_id, o.listener_pubkey, o.target_pubkey, o.community_id, \
+                       community.host, o.event_id, o.event_kind, o.event_created_at, o.attempts"
+        )
+    };
+}
+
+async fn claim(
+    pool: &PgPool,
+    limit: i64,
+    lease_until: DateTime<Utc>,
+    only: Option<&[Uuid]>,
+) -> Result<Vec<ClaimedDelivery>> {
     let claim_id = Uuid::new_v4();
     let cutoff = Utc::now() - OUTBOX_RETENTION;
-    let mut connection = acquire_maintenance_writer(pool).await?;
-    let rows = sqlx::query(
-        "WITH candidates AS ( \
-             SELECT o.id, o.community_id \
-             FROM operator_listener_outbox o \
-             WHERE o.attempts < $2 \
-               AND o.next_attempt_at <= now() \
-               AND o.created_at >= $4 \
-               AND (o.state = 'pending' OR (o.state = 'sending' AND o.lease_until < now())) \
-             ORDER BY o.next_attempt_at, o.created_at, o.id \
-             FOR UPDATE OF o SKIP LOCKED \
-             LIMIT $3 \
-         ) \
-         UPDATE operator_listener_outbox o \
-         SET state = 'sending', claim_id = $1, lease_until = $5, attempts = o.attempts + 1 \
-         FROM candidates c \
-         JOIN communities community ON community.id = c.community_id \
-         WHERE o.id = c.id \
-         RETURNING o.id, o.claim_id, o.listener_pubkey, o.target_pubkey, o.community_id, \
-                   community.host, o.event_id, o.event_kind, o.event_created_at, o.attempts",
-    )
+    let query = match only {
+        None => sqlx::query(claim_sql!("")),
+        Some(_) => sqlx::query(claim_sql!("AND o.id = ANY($6)")),
+    }
     .bind(claim_id)
     .bind(MAX_DELIVERY_ATTEMPTS)
     .bind(limit)
     .bind(cutoff)
-    .bind(lease_until)
-    .fetch_all(&mut *connection)
-    .await?;
+    .bind(lease_until);
+    let query = match only {
+        None => query,
+        Some(ids) => query.bind(ids),
+    };
+    let mut connection = acquire_maintenance_writer(pool).await?;
+    let rows = query.fetch_all(&mut *connection).await?;
 
     rows.into_iter()
         .map(|row| {
@@ -447,6 +524,30 @@ impl Db {
         claim_deliveries(&self.pool, limit, lease_until).await
     }
 
+    /// Claim the given operator-listener deliveries if they are still due.
+    #[datastore_span(
+        name = "claim_operator_listener_deliveries_by_id",
+        system = "postgresql"
+    )]
+    pub async fn claim_operator_listener_deliveries_by_id(
+        &self,
+        ids: &[Uuid],
+        lease_until: DateTime<Utc>,
+    ) -> Result<Vec<ClaimedDelivery>> {
+        claim_deliveries_by_id(&self.pool, ids, lease_until).await
+    }
+
+    /// Receive the ids of outbox rows as their event transactions commit
+    /// through this handle or its clones, holding at most `capacity` unread.
+    ///
+    /// Only one receiver exists per handle family; later calls return `None`.
+    pub fn subscribe_operator_listener_commits(
+        &self,
+        capacity: usize,
+    ) -> Option<mpsc::Receiver<Uuid>> {
+        self.operator_listener_commits.subscribe(capacity)
+    }
+
     /// Load a claimed delivery's event if its target may still receive it.
     #[datastore_span(name = "load_operator_listener_delivery_event", system = "postgresql")]
     pub async fn load_operator_listener_delivery_event(
@@ -614,6 +715,201 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn committed_event_hands_its_outbox_rows_to_the_worker() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community_id = Uuid::new_v4();
+        let listener = Keys::generate();
+        let target = Keys::generate();
+
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!(
+                "operator-listener-handoff-test-{}.example",
+                community_id.simple()
+            ))
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+        register_pubkeys(
+            &pool,
+            listener.public_key().as_bytes(),
+            &[target.public_key().to_bytes().to_vec()],
+        )
+        .await
+        .expect("register listener target");
+        let mut committed = db
+            .subscribe_operator_listener_commits(8)
+            .expect("subscribe to committed deliveries");
+        assert!(
+            db.clone().subscribe_operator_listener_commits(8).is_none(),
+            "handle clones share one worker"
+        );
+
+        let event = EventBuilder::new(Kind::Custom(9), "mention")
+            .tag(Tag::public_key(target.public_key()))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign test event");
+        db.insert_event(CommunityId::from_uuid(community_id), &event, None)
+            .await
+            .expect("insert event");
+
+        let outbox_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM operator_listener_outbox WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community_id)
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read outbox row");
+        assert_eq!(committed.try_recv().ok(), Some(outbox_id));
+        assert!(committed.try_recv().is_err());
+
+        let unmentioned = EventBuilder::new(Kind::Custom(9), "no mention")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign test event");
+        db.insert_event(CommunityId::from_uuid(community_id), &unmentioned, None)
+            .await
+            .expect("insert event without mention");
+        assert!(committed.try_recv().is_err());
+
+        for statement in [
+            "DELETE FROM operator_listener_outbox WHERE community_id = $1",
+            "DELETE FROM event_mentions WHERE community_id = $1",
+            "DELETE FROM events WHERE community_id = $1",
+            "DELETE FROM communities WHERE id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(community_id)
+                .execute(&pool)
+                .await
+                .expect("clean up test rows");
+        }
+        sqlx::query("DELETE FROM operator_listener_pubkeys WHERE listener_pubkey = $1")
+            .bind(listener.public_key().as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .expect("delete test registration");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn poll_and_committed_claims_never_claim_the_same_row() {
+        const ROWS: usize = 200;
+        let pool = setup_pool().await;
+        let community_id = Uuid::new_v4();
+        let listener = Keys::generate();
+        let target = Keys::generate();
+        let lease_until = Utc::now() + TimeDelta::seconds(30);
+
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!(
+                "operator-listener-race-test-{}.example",
+                community_id.simple()
+            ))
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+        let ids: Vec<Uuid> = (0..ROWS).map(|_| Uuid::new_v4()).collect();
+        for (index, id) in ids.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO operator_listener_outbox \
+                 (id, listener_pubkey, target_pubkey, community_id, event_id, event_kind, \
+                  event_created_at) \
+                 VALUES ($1, $2, $3, $4, $5, 9, now())",
+            )
+            .bind(id)
+            .bind(listener.public_key().as_bytes().as_slice())
+            .bind(target.public_key().as_bytes().as_slice())
+            .bind(community_id)
+            .bind(Uuid::from_u128(index as u128).as_bytes().repeat(2))
+            .execute(&pool)
+            .await
+            .expect("insert test delivery");
+        }
+
+        // Pods polling and pods claiming their own commits, all at once.
+        let start = Arc::new(tokio::sync::Barrier::new(8));
+        let pollers = (0..4).map(|_| {
+            let pool = pool.clone();
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                let mut claimed = Vec::new();
+                loop {
+                    let batch = claim_deliveries(&pool, 3, lease_until)
+                        .await
+                        .expect("poll claim");
+                    if batch.is_empty() {
+                        return claimed;
+                    }
+                    claimed.extend(batch.into_iter().map(|delivery| delivery.id));
+                }
+            })
+        });
+        let committers = (0..4).map(|offset| {
+            let pool = pool.clone();
+            let ids = ids.clone();
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                let mut claimed = Vec::new();
+                for chunk in ids[offset..].chunks(2) {
+                    let batch = claim_deliveries_by_id(&pool, chunk, lease_until)
+                        .await
+                        .expect("committed claim");
+                    claimed.extend(batch.into_iter().map(|delivery| delivery.id));
+                }
+                claimed
+            })
+        });
+        let pollers: Vec<_> = pollers.collect();
+        let committers: Vec<_> = committers.collect();
+        let mut claimed = Vec::new();
+        let mut committed_claims = 0;
+        for task in pollers {
+            claimed.extend(task.await.expect("poller"));
+        }
+        for task in committers {
+            let batch = task.await.expect("committer");
+            committed_claims += batch.len();
+            claimed.extend(batch);
+        }
+
+        let mut unique = claimed.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), claimed.len(), "a row was claimed twice");
+        assert_eq!(unique.len(), ROWS, "every row is claimed once");
+        assert!(committed_claims > 0, "the committed path raced the poll");
+        let attempts: Vec<i32> = sqlx::query_scalar(
+            "SELECT DISTINCT attempts FROM operator_listener_outbox WHERE community_id = $1",
+        )
+        .bind(community_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read attempts");
+        assert_eq!(attempts, vec![1]);
+        assert!(claim_deliveries_by_id(&pool, &ids, lease_until)
+            .await
+            .expect("claim leased rows")
+            .is_empty());
+
+        sqlx::query("DELETE FROM operator_listener_outbox WHERE community_id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("delete test deliveries");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("delete test community");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn thread_metadata_insert_fans_out_once_to_matching_listeners() {
         let pool = setup_pool().await;
         let community_id = Uuid::new_v4();
@@ -750,18 +1046,24 @@ mod postgres_tests {
             .sign_with_keys(&Keys::generate())
             .expect("sign test event");
 
-        let mut tx = crate::begin_community_event_write_transaction(
-            &pool,
-            CommunityId::from_uuid(community_id),
-            crate::observability::WriterOperation::EventWrite,
-        )
-        .await
-        .expect("begin event transaction");
+        let db = Db::from_pool(pool.clone());
+        let mut committed = db
+            .subscribe_operator_listener_commits(8)
+            .expect("subscribe to committed deliveries");
+
+        let mut tx = db
+            .begin_event_write_transaction(CommunityId::from_uuid(community_id))
+            .await
+            .expect("begin event transaction");
         let (_, inserted) = crate::event::insert_event_in_transaction(&mut tx, &event, None)
             .await
             .expect("insert event and enqueue mention");
         assert!(inserted);
         tx.rollback().await.expect("roll back event transaction");
+        assert!(
+            committed.try_recv().is_err(),
+            "a rolled-back delivery must not reach the worker"
+        );
 
         let event_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")

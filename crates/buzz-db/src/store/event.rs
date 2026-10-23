@@ -2268,7 +2268,7 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        tx.set_push_enqueue(self.push_enqueue.clone());
+        tx.set_post_commit(self);
         let result = crate::event::insert_event_in_transaction(&mut tx, event, channel_id).await?;
         if result.1 {
             crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
@@ -2794,7 +2794,7 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        tx.set_push_enqueue(self.push_enqueue.clone());
+        tx.set_post_commit(self);
         crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
         let result = crate::event::insert_event_with_thread_metadata_tx(
             &mut tx,
