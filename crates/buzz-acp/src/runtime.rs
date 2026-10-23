@@ -86,6 +86,7 @@ fn make_prompt_context(
         mcp_servers: build_mcp_servers(config),
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
+        background_idle_timeout: Duration::from_secs(config.background_idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
         turn_liveness_interval: Duration::from_secs(config.turn_liveness_secs),
         dedup_mode: config.dedup_mode,
@@ -121,5 +122,6 @@ fn make_prompt_context(
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        resume: Default::default(),
     })
 }

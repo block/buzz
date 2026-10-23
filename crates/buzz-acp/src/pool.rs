@@ -890,6 +890,9 @@ pub struct PromptContext {
     pub mcp_servers: Vec<McpServer>,
     pub initial_message: Option<String>,
     pub idle_timeout: Duration,
+    /// Idle limit for a turn held open by an outstanding background subagent
+    /// (`--background-idle-timeout`). Equal to `idle_timeout` when disabled.
+    pub background_idle_timeout: Duration,
     pub max_turn_duration: Duration,
     /// Interval between per-turn `turn_liveness` observer pings. `Duration::ZERO`
     /// disables emission. This is the desktop crash-backstop signal — distinct
@@ -937,6 +940,8 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Resume journal (`crate::resume`); `Default` is disabled.
+    pub(crate) resume: crate::resume::ResumeJournal,
 }
 
 impl AgentPool {
@@ -1902,6 +1907,9 @@ pub(crate) async fn run_isolated_prompt(
     );
     agent
         .acp
+        .set_background_idle_timeout(ctx.background_idle_timeout);
+    agent
+        .acp
         .session_prompt_with_idle_timeout(&session_id, &prompt, ctx.idle_timeout, max_duration)
         .await
 }
@@ -2390,6 +2398,12 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    if let PromptSource::Channel(scope) = &source {
+        agent.acp.resume.turn_ended(
+            scope,
+            crate::resume::TurnEnd::from_outcome(&outcome, batch.is_some()),
+        );
+    }
     let _ = result_tx.send(PromptResult {
         agent,
         source,
@@ -2453,6 +2467,10 @@ pub async fn run_prompt_task(
         turn_started_payload["threadRootEventId"] = serde_json::json!(root);
     }
     agent.acp.observe("turn_started", turn_started_payload);
+    // Applies to every prompt this turn sends (initial message included).
+    agent
+        .acp
+        .set_background_idle_timeout(ctx.background_idle_timeout);
 
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult. It must be
@@ -3169,6 +3187,9 @@ pub async fn run_prompt_task(
         });
     }
 
+    let prompt_sections =
+        crate::resume::with_resume_note(prompt_sections, batch.as_ref(), &ctx.resume);
+
     // Slash-command pass-through sends the bare command as the first text
     // block (so connector detection fires), then each prompt section as its
     // own block. Per-section blocks let the observer size trimmer elide a
@@ -3219,6 +3240,12 @@ pub async fn run_prompt_task(
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
     //
+    // Resume journal: remember this scope's request and which session
+    // answers it, so background work the turn leaves running is attributed.
+    if let Some(b) = &batch {
+        agent.acp.resume.begin_turn(&ctx.resume, &session_id, b);
+    }
+
     let prompt_result = match control_rx {
         None => {
             // Heartbeat / non-cancellable path.
@@ -7197,6 +7224,58 @@ pub(crate) mod tests {
         }
     }
 
+    /// `PromptContext::background_idle_timeout` reaches the client through
+    /// `run_prompt_task`: a turn that launches a background subagent and then
+    /// goes quiet past the plain idle timeout still completes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_prompt_task_applies_background_idle_timeout_to_held_turns() {
+        let script = r#"IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"live-session","update":{"sessionUpdate":"tool_call","toolCallId":"a1","name":"Agent","_meta":{"claudeCode":{"toolName":"Agent","subagent":true}},"rawInput":{"description":"long job","run_in_background":true}}}}'
+sleep 3
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+while read -r _; do :; done"#;
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script.to_string()], &[], false)
+            .await
+            .expect("spawn background-hold ACP script");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent.state.heartbeat_session = Some("live-session".into());
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.idle_timeout = Duration::from_secs(1);
+        ctx.background_idle_timeout = Duration::from_secs(30);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            None,
+            Some("wait for the helper".into()),
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "held-turn".into(),
+            Default::default(),
+        )
+        .await;
+        let mut result = result_rx.recv().await.expect("prompt result");
+        assert!(
+            matches!(result.outcome, PromptOutcome::Ok(StopReason::EndTurn)),
+            "held turn must outlive the 1s idle timeout"
+        );
+        result.agent.acp.shutdown().await;
+    }
+
     #[tokio::test]
     async fn run_prompt_task_commits_standing_context_only_after_acp_success() {
         let capture = std::env::temp_dir().join(format!(
@@ -7295,6 +7374,313 @@ done"#
             "heartbeat-3",
             "turn after ACP success must omit standing context"
         );
+    }
+
+    fn resume_test_agent(acp: AcpClient, scope: &SessionScope) -> OwnedAgent {
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "legacy-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        agent
+            .state
+            .sessions
+            .insert(scope.clone(), "live-session".into());
+        agent
+            .state
+            .deliveries
+            .insert(scope.clone(), ChannelDeliveryState::default());
+        agent
+    }
+
+    fn resume_test_batch(scope: &SessionScope, text: &str) -> FlushBatch {
+        FlushBatch {
+            channel_id: scope.channel_id(),
+            scope: scope.clone(),
+            events: vec![crate::queue::BatchEvent {
+                edit: None,
+                event: EventBuilder::new(Kind::Custom(9), text)
+                    .sign_with_keys(&Keys::generate())
+                    .unwrap(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    // A turn that leaves an AIR async task running is journaled as background
+    // work for its scope; a later prompt that reads the task's terminal update
+    // deletes the entry (and the file).
+    #[tokio::test]
+    async fn run_prompt_task_journals_background_task_until_terminal_update() {
+        // Payloads as claude-agent-acp 0.79.0 `async-tasks.js` publishes them.
+        let script = r#"count=0
+while IFS= read -r line; do
+  count=$((count + 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"live-session","update":{"sessionUpdate":"async_task_spawned","asyncTaskId":"bash-1","name":"sleep 300","taskType":"Shell","description":"sleep 300","showInTranscript":true,"canStop":true,"outputFilePath":"/tmp/bash-1.output","toolCallId":"toolu_1"}}}'
+  else
+    printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"live-session","update":{"sessionUpdate":"async_task_state_update","asyncTaskId":"bash-1","state":"completed","outputFilePath":"/tmp/bash-1.output"}}}'
+  fi
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$((count - 1)),\"result\":{\"stopReason\":\"end_turn\"}}"
+done"#;
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script.to_string()], &[], false)
+            .await
+            .expect("spawn async-task ACP script");
+        let scope = conv(Uuid::new_v4());
+        let mut agent = resume_test_agent(acp, &scope);
+
+        let path = std::env::temp_dir().join(format!("buzz-resume-t4-{}.json", Uuid::new_v4()));
+        let journal = crate::resume::ResumeJournal::load(Some(path.clone()));
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.resume = journal.clone();
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        for turn in 1..=2 {
+            run_prompt_task(
+                agent,
+                Some(resume_test_batch(&scope, &format!("turn-{turn}"))),
+                None,
+                Arc::clone(&ctx),
+                result_tx.clone(),
+                None,
+                format!("turn-{turn}"),
+                Default::default(),
+            )
+            .await;
+            let result = result_rx.recv().await.expect("prompt result");
+            assert!(matches!(
+                result.outcome,
+                PromptOutcome::Ok(StopReason::EndTurn)
+            ));
+            agent = result.agent;
+            if turn == 1 {
+                let (tasks, _, durable) = journal
+                    .snapshot(&scope)
+                    .expect("background entry for the scope");
+                assert!(durable);
+                assert_eq!(tasks.len(), 1);
+                assert_eq!(tasks[0].id, "bash-1");
+                assert_eq!(tasks[0].output_file.as_deref(), Some("/tmp/bash-1.output"));
+                assert!(path.exists(), "background work is on disk");
+            }
+        }
+        assert!(
+            journal.snapshot(&scope).is_none(),
+            "terminal update deletes the entry"
+        );
+        assert!(!path.exists(), "no outstanding work leaves no journal file");
+        agent.acp.shutdown().await;
+    }
+
+    // claude-agent-acp self-wakes an idle session when a background shell
+    // finishes after `end_turn`; that unprompted turn's updates arrive while
+    // NO prompt is reading stdout. The main loop's idle drain must feed them
+    // to the journal (spawn recorded, completion removes the entry) and must
+    // answer an agent-initiated permission request — with no shutdown drain.
+    #[tokio::test]
+    async fn idle_slot_drain_journals_updates_emitted_after_end_turn() {
+        let capture =
+            std::env::temp_dir().join(format!("buzz-idle-drain-perm-{}.ndjson", Uuid::new_v4()));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let update = |body: &str| {
+            format!(
+                r#"printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"live-session","update":{body}}}}}'"#
+            )
+        };
+        let spawned_1 = update(
+            r#"{"sessionUpdate":"async_task_spawned","asyncTaskId":"bash-1","name":"sleep 30","outputFilePath":"/tmp/bash-1.output"}"#,
+        );
+        let spawned_2 = update(
+            r#"{"sessionUpdate":"async_task_spawned","asyncTaskId":"bash-2","name":"cargo build","outputFilePath":"/tmp/bash-2.output"}"#,
+        );
+        let done_1 = update(
+            r#"{"sessionUpdate":"async_task_state_update","asyncTaskId":"bash-1","state":"completed"}"#,
+        );
+        let done_2 = update(
+            r#"{"sessionUpdate":"async_task_state_update","asyncTaskId":"bash-2","state":"completed"}"#,
+        );
+        // Turn 1 spawns bash-1 and ends. Then, unprompted: bash-1 completes,
+        // the self-woken turn spawns bash-2, asks for a permission (and waits
+        // for the answer), and later bash-2 completes.
+        let script = format!(
+            r#"read -r line
+{spawned_1}
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
+sleep 0.3
+{done_1}
+{spawned_2}
+printf '%s\n' '{{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{{"sessionId":"live-session","options":[{{"optionId":"yes","kind":"allow_once"}},{{"optionId":"no","kind":"reject_once"}}]}}}}'
+read -r reply
+printf '%s\n' "$reply" >> '{quoted_capture}'
+sleep 1
+{done_2}
+while read -r _; do :; done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn self-waking ACP script");
+        let scope = conv(Uuid::new_v4());
+        let agent = resume_test_agent(acp, &scope);
+
+        let path = std::env::temp_dir().join(format!("buzz-resume-idle-{}.json", Uuid::new_v4()));
+        let journal = crate::resume::ResumeJournal::load(Some(path.clone()));
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.resume = journal.clone();
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(resume_test_batch(&scope, "start the build")),
+            None,
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "turn-1".into(),
+            Default::default(),
+        )
+        .await;
+        let result = result_rx.recv().await.expect("prompt result");
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        let task_ids = |journal: &crate::resume::ResumeJournal| {
+            journal
+                .snapshot(&scope)
+                .map(|(tasks, _, _)| tasks.into_iter().map(|t| t.id).collect::<Vec<_>>())
+        };
+        assert_eq!(task_ids(&journal), Some(vec!["bash-1".to_string()]));
+
+        // The slot is now idle in the pool. Only the idle drain reads it.
+        let mut pool = AgentPool::from_slots(vec![Some(result.agent)]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !capture.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "idle drain never answered the permission request; journal = {:?}",
+                task_ids(&journal)
+            );
+            crate::drain_idle_agent_slots(&mut pool).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let reply: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(&capture)
+                .expect("read permission reply")
+                .trim(),
+        )
+        .expect("permission reply is JSON");
+        assert_eq!(reply["id"], "perm-1");
+        assert_eq!(reply["result"]["outcome"]["optionId"], "yes");
+        assert_eq!(
+            task_ids(&journal),
+            Some(vec!["bash-2".to_string()]),
+            "idle updates: bash-1 completion cleared, self-woken bash-2 recorded"
+        );
+
+        while task_ids(&journal).is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "bash-2 completion never reached the journal: {:?}",
+                task_ids(&journal)
+            );
+            crate::drain_idle_agent_slots(&mut pool).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!path.exists(), "no outstanding work leaves no journal file");
+
+        let _ = std::fs::remove_file(&capture);
+        let mut agent = pool.agents_mut()[0].take().expect("slot still idle");
+        agent.acp.shutdown().await;
+    }
+
+    // The resume batch's prompt, as actually sent on the wire, carries the
+    // resume framing AND the journal's list of the work that was stopped.
+    #[tokio::test]
+    async fn run_prompt_task_sends_resume_note_for_resume_batch() {
+        let capture =
+            std::env::temp_dir().join(format!("buzz-acp-resume-prompt-{}.ndjson", Uuid::new_v4()));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"count=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$count,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+  count=$((count + 1))
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn resume ACP script");
+        let scope = conv(Uuid::new_v4());
+        let mut agent = resume_test_agent(acp, &scope);
+
+        // A previous process left a background shell running on this scope.
+        let path = std::env::temp_dir().join(format!("buzz-resume-note-{}.json", Uuid::new_v4()));
+        let now = crate::resume::now_secs();
+        {
+            let previous = crate::resume::ResumeJournal::load(Some(path.clone()));
+            previous.begin_turn(&resume_test_batch(&scope, "build the release"), now);
+            previous.task_started(
+                &scope,
+                crate::resume::BackgroundTask {
+                    id: "bash-9".into(),
+                    title: "cargo build --release".into(),
+                    output_file: Some("/tmp/bash-9.output".into()),
+                    tool_call_id: None,
+                },
+                now,
+            );
+        }
+        let journal = crate::resume::ResumeJournal::load(Some(path.clone()));
+        let resume_batch = journal.take_startup(now).pop().expect("resume batch");
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.resume = journal.clone();
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(resume_batch),
+            None,
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "turn-resume".into(),
+            Default::default(),
+        )
+        .await;
+        let result = result_rx.recv().await.expect("prompt result");
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        agent = result.agent;
+        agent.acp.shutdown().await;
+
+        let sent = std::fs::read_to_string(&capture).expect("captured requests");
+        std::fs::remove_file(&capture).ok();
+        assert!(sent.contains("what-you-were-working-on-before-your-session-ended"));
+        assert!(sent.contains("build the release"));
+        assert!(
+            sent.contains("cargo build --release (output: /tmp/bash-9.output)"),
+            "stopped-work note reaches the agent: {sent}"
+        );
+        assert!(
+            journal.snapshot(&scope).is_none(),
+            "a completed resume turn with no new work clears the entry"
+        );
+        assert!(!path.exists());
     }
 
     #[tokio::test]
@@ -10451,6 +10837,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             mcp_servers: vec![],
             initial_message: None,
             idle_timeout: Duration::from_secs(60),
+            background_idle_timeout: Duration::from_secs(60),
             max_turn_duration: Duration::from_secs(120),
             turn_liveness_interval: Duration::ZERO,
             dedup_mode: DedupMode::Drop,
@@ -10483,6 +10870,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            resume: Default::default(),
         }
     }
 
