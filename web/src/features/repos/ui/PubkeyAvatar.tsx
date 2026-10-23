@@ -17,7 +17,7 @@ export function PubkeyAvatar({
   size?: "sm" | "md";
 }) {
   const hue = pubkeyToHue(pubkey);
-  const sizeClasses = size === "sm" ? "h-6 w-6 text-[10px]" : "h-8 w-8 text-xs";
+  const sizeClasses = size === "sm" ? "h-6 w-6 text-2xs" : "h-8 w-8 text-xs";
 
   return (
     <Tooltip>
