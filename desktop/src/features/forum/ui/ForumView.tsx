@@ -2,6 +2,8 @@ import { MessageSquareText } from "lucide-react";
 import * as React from "react";
 
 import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
+import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
+
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
@@ -31,9 +33,12 @@ type ForumViewProps = {
   onTargetReached?: (messageId: string) => void;
   selectedPostId: string | null;
   targetReplyId: string | null;
+  typingEntries?: TypingIndicatorEntry[];
   targetSearchMessageId?: string;
   targetSearchQuery?: string;
 };
+
+const EMPTY_TYPING_ENTRIES: TypingIndicatorEntry[] = [];
 
 function canDelete(postPubkey: string, currentPubkey?: string): boolean {
   if (!currentPubkey) return false;
@@ -50,6 +55,7 @@ export function ForumView({
   onTargetReached,
   selectedPostId,
   targetReplyId,
+  typingEntries = EMPTY_TYPING_ENTRIES,
   targetSearchMessageId,
   targetSearchQuery,
 }: ForumViewProps) {
@@ -77,7 +83,7 @@ export function ForumView({
   // chips resolve names from this same lookup, and a mentioned user who
   // never authored a post would otherwise render as a dead chip.
   const allPubkeys = React.useMemo(() => {
-    const pubkeys = new Set<string>();
+    const pubkeys = new Set<string>(typingEntries.map((entry) => entry.pubkey));
     const addMentionPubkeys = (tags?: string[][]) => {
       for (const tag of tags ?? []) {
         const pubkey = getMentionTagPubkey(tag);
@@ -104,7 +110,7 @@ export function ForumView({
       }
     }
     return [...pubkeys];
-  }, [posts, threadQuery.data]);
+  }, [posts, threadQuery.data, typingEntries]);
 
   const profilesQuery = useUsersBatchQuery(allPubkeys, {
     enabled: allPubkeys.length > 0,
@@ -166,6 +172,9 @@ export function ForumView({
         targetSearchMessageId={targetSearchMessageId}
         targetSearchQuery={targetSearchQuery}
         thread={threadQuery.data}
+        typingPubkeys={typingEntries
+          .filter((entry) => entry.threadHeadId === selectedPostId)
+          .map((entry) => entry.pubkey)}
       />
     );
   }
