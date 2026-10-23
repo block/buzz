@@ -43,34 +43,39 @@ class CustomEmojiImage extends StatelessWidget {
   }
 }
 
-/// gpt_markdown inline component that replaces `:shortcode:` with an inline
+/// gpt_markdown inline pattern that replaces `:shortcode:` with an inline
 /// [CustomEmojiImage] for *known* shortcodes only. Unknown `:foo:` is left as
 /// plain text. Matched case-insensitively; resolved via the lowercase palette.
 ///
-/// Parallel to the `_MentionMd` / `_ChannelLinkMd` components in
-/// message_content.dart — add an instance to a `GptMarkdown.inlineComponents`
-/// list (before the default components) to enable custom emoji in any markdown
-/// surface.
-class CustomEmojiMd extends InlineMd {
-  final Map<String, String> _urlByShortcode;
-  final double size;
-  late final RegExp _exp = _buildPattern(_urlByShortcode.keys);
-
+/// Parallel to the mention and channel patterns in message_content.dart — add
+/// an instance to `GptMarkdown.inlinePatterns` to enable custom emoji in any
+/// markdown surface. The inherited default scopes keep it out of link labels:
+/// its [WidgetSpan] nested inside a link's placeholder does not paint on iOS,
+/// so an authored `[:emoji:](url)` would render as nothing.
+class CustomEmojiPattern extends InlinePattern {
   /// Only include shortcodes present in the rendered [content]. gpt_markdown
-  /// embeds this pattern in a combined regex for every parsed text segment, so
-  /// unrelated community emoji must not make every message expensive to parse.
-  CustomEmojiMd(
+  /// matches this pattern against every parsed text segment, so unrelated
+  /// community emoji must not make every message expensive to parse.
+  factory CustomEmojiPattern(
     List<CustomEmoji> palette, {
     required String content,
-    this.size = kCustomEmojiInlineSize,
-  }) : _urlByShortcode = _referencedUrls(palette, content);
+    double size = kCustomEmojiInlineSize,
+  }) => CustomEmojiPattern._(_referencedUrls(palette, content), size);
 
-  /// Excluded from link labels: this component renders a [WidgetSpan], and a
-  /// placeholder nested inside the link's own placeholder does not paint on
-  /// iOS — an authored `[:emoji:](url)` renders as nothing. Link resolution
-  /// wins over token detection inside a label.
-  @override
-  Set<MarkdownScope> get scopes => MarkdownComponent.allScopesExceptLinkLabel;
+  CustomEmojiPattern._(Map<String, String> urlByShortcode, double size)
+    : super(
+        pattern: _buildPattern(urlByShortcode.keys),
+        builder: (context, match, style) {
+          final raw = match.group(0)!;
+          final shortcode = raw.substring(1, raw.length - 1).toLowerCase();
+          final url = urlByShortcode[shortcode];
+          if (url == null) return TextSpan(text: raw, style: style);
+          return WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: CustomEmojiImage(shortcode: shortcode, url: url, size: size),
+          );
+        },
+      );
 
   // Look ahead so adjacent tokens sharing a colon are both considered:
   // :unknown:known: must still allow the known token to match.
@@ -94,34 +99,17 @@ class CustomEmojiMd extends InlineMd {
     };
   }
 
-  @override
-  RegExp get exp => _exp;
-
-  @override
-  InlineSpan span(BuildContext context, String text, GptMarkdownConfig config) {
-    final raw = exp.firstMatch(text.trim())?.group(0);
-    if (raw == null) {
-      return TextSpan(text: text, style: config.style);
-    }
-    final shortcode = raw.substring(1, raw.length - 1).toLowerCase();
-    final url = _urlByShortcode[shortcode];
-    if (url == null) {
-      return TextSpan(text: text, style: config.style);
-    }
-    return WidgetSpan(
-      alignment: PlaceholderAlignment.middle,
-      child: CustomEmojiImage(shortcode: shortcode, url: url, size: size),
-    );
-  }
-
   /// Build a regex matching `:shortcode:` for any known shortcode, longest
   /// first so a longer name isn't shadowed by a shorter prefix. Matches nothing
   /// when the palette is empty (a regex that can never match).
+  ///
+  /// Not [InlinePattern.buildDelimitedPattern]: its word-boundary lookbehind
+  /// would stop `:unknown:wave:` from rendering the known `:wave:`.
   static RegExp _buildPattern(Iterable<String> shortcodes) {
     final sorted = shortcodes.where((s) => s.trim().isNotEmpty).toSet().toList()
       ..sort((a, b) => b.length.compareTo(a.length));
     if (sorted.isEmpty) {
-      // Never matches — gpt_markdown skips this component entirely.
+      // Never matches — gpt_markdown skips this pattern entirely.
       return RegExp(r'(?!x)x');
     }
     final alternatives = sorted.map(RegExp.escape).join('|');
