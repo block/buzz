@@ -1,0 +1,380 @@
+[
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-1",
+      "actionVersion": 1,
+      "action": "channel.read",
+      "args": {
+        "channelId": "5df7dfa8-e919-43df-8efd-f1dcb8af7071",
+        "limit": 1
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-1",
+      "status": "succeeded",
+      "action": "channel.read",
+      "outcome": {
+        "messages": []
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-2",
+      "actionVersion": 1,
+      "action": "message.post",
+      "args": {
+        "channelId": "5df7dfa8-e919-43df-8efd-f1dcb8af7071",
+        "content": "hello",
+        "mentions": [
+          "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        ]
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-2",
+      "status": "succeeded",
+      "action": "message.post",
+      "outcome": {
+        "eventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": 9,
+        "createdAt": 1787675471
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-3",
+      "actionVersion": 1,
+      "action": "message.reply",
+      "args": {
+        "channelId": "5df7dfa8-e919-43df-8efd-f1dcb8af7071",
+        "content": "reply",
+        "replyToEventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-3",
+      "status": "succeeded",
+      "action": "message.reply",
+      "outcome": {
+        "eventId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "kind": 9,
+        "createdAt": 1787675471
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-4",
+      "actionVersion": 1,
+      "action": "reaction.add",
+      "args": {
+        "channelId": "5df7dfa8-e919-43df-8efd-f1dcb8af7071",
+        "targetEventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reaction": "👍"
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-4",
+      "status": "succeeded",
+      "action": "reaction.add",
+      "outcome": {
+        "eventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": 7,
+        "createdAt": 1787675471
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-5",
+      "actionVersion": 1,
+      "action": "profile.set",
+      "args": {
+        "displayName": "Example"
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-5",
+      "status": "succeeded",
+      "action": "profile.set",
+      "outcome": {
+        "eventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": 0,
+        "createdAt": 1787675471
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-6",
+      "actionVersion": 1,
+      "action": "storage.address",
+      "args": {
+        "slug": "mem/example"
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-6",
+      "status": "succeeded",
+      "action": "storage.address",
+      "outcome": {
+        "authorPubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "kind": 30174,
+        "dTag": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-7",
+      "actionVersion": 1,
+      "action": "storage.get",
+      "args": {
+        "slug": "core"
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-7",
+      "status": "succeeded",
+      "action": "storage.get",
+      "outcome": {
+        "value": "example profile"
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-8",
+      "actionVersion": 1,
+      "action": "storage.put",
+      "args": {
+        "slug": "mem/example",
+        "value": "hello"
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-8",
+      "status": "succeeded",
+      "action": "storage.put",
+      "outcome": {
+        "eventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": 30174,
+        "createdAt": 1787675471
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-9",
+      "actionVersion": 1,
+      "action": "presence.set",
+      "args": {
+        "status": "online"
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-9",
+      "status": "succeeded",
+      "action": "presence.set",
+      "outcome": {
+        "eventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": 20001,
+        "createdAt": 1787675471
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-10",
+      "actionVersion": 1,
+      "action": "typing.set",
+      "args": {
+        "channelId": "5df7dfa8-e919-43df-8efd-f1dcb8af7071"
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-10",
+      "status": "succeeded",
+      "action": "typing.set",
+      "outcome": {
+        "eventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": 20002,
+        "createdAt": 1787675471
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-11",
+      "actionVersion": 1,
+      "action": "observer.emit",
+      "args": {
+        "frames": [
+          {
+            "kind": "acp_write",
+            "payload": "{\"message\":\"example\"}"
+          }
+        ]
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-11",
+      "status": "succeeded",
+      "action": "observer.emit",
+      "outcome": {
+        "accepted": 1
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-12",
+      "actionVersion": 1,
+      "action": "liveness.ping",
+      "args": {
+        "channelId": "5df7dfa8-e919-43df-8efd-f1dcb8af7071",
+        "turnId": "turn-1"
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-12",
+      "status": "succeeded",
+      "action": "liveness.ping",
+      "outcome": {
+        "eventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": 24200,
+        "createdAt": 1787675471
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-13",
+      "actionVersion": 1,
+      "action": "agents.create",
+      "args": {
+        "channelId": "5df7dfa8-e919-43df-8efd-f1dcb8af7071",
+        "displayName": "Example",
+        "systemPrompt": "Help with tests."
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-13",
+      "status": "succeeded",
+      "action": "agents.create",
+      "outcome": {
+        "agentPubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "displayName": "Example",
+        "channelId": "5df7dfa8-e919-43df-8efd-f1dcb8af7071"
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-14",
+      "actionVersion": 1,
+      "action": "agents.update",
+      "args": {
+        "target": {
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        },
+        "displayName": "Example"
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-14",
+      "status": "succeeded",
+      "action": "agents.update",
+      "outcome": {
+        "agentPubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "displayName": "Example",
+        "updatedFields": [
+          "displayName"
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "type": "broker_request",
+      "protocolVersion": 1,
+      "requestId": "example-15",
+      "actionVersion": 1,
+      "action": "agents.delete",
+      "args": {
+        "target": {
+          "name": "Example"
+        }
+      }
+    },
+    "result": {
+      "type": "broker_result",
+      "protocolVersion": 1,
+      "requestId": "example-15",
+      "status": "succeeded",
+      "action": "agents.delete",
+      "outcome": {
+        "agentPubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "displayName": "Example"
+      }
+    }
+  }
+]
