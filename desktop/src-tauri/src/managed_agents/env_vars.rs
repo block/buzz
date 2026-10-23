@@ -45,6 +45,51 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 // See `reserved_env_keys.rs` for why this is `include!`d rather than a module.
 include!("reserved_env_keys.rs");
 
+/// Decide which environment variables to set for agent arguments.
+///
+/// When an argument contains a comma, is empty, or has edge whitespace, the legacy
+/// `BUZZ_ACP_AGENT_ARGS` cannot represent it losslessly — the comma would
+/// be interpreted as a delimiter and normalization drops empty/trimmed bytes. Arguments are serialized
+/// as a JSON array into `BUZZ_ACP_AGENT_ARGS_JSON` (the canonical structured
+/// transport), and `BUZZ_ACP_AGENT_ARGS` is set to the default `"acp"` so the
+/// harness's conflict guard (legacy must be unset or default) passes.
+///
+/// When legacy normalization preserves every argument, the comma-delimited form is
+/// used for full backward compatibility with older harness builds.
+///
+/// Returns `(legacy_value, json_value)` where `legacy_value` is always set
+/// and `json_value` is `Some` only when the JSON transport is used.
+fn agent_args_env(agent_args: &[String]) -> (String, Option<String>) {
+    if agent_args
+        .iter()
+        .any(|a| a.contains(',') || a.is_empty() || a.trim() != a)
+    {
+        let json = serde_json::Value::Array(
+            agent_args
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        )
+        .to_string();
+        ("acp".to_string(), Some(json))
+    } else {
+        (agent_args.join(","), None)
+    }
+}
+
+/// Write agent arguments to the child process environment using the
+/// appropriate transport. See [`agent_args_env`] for the selection logic.
+pub(crate) fn set_agent_args_env(command: &mut std::process::Command, agent_args: &[String]) {
+    let (legacy, json) = agent_args_env(agent_args);
+    command.env("BUZZ_ACP_AGENT_ARGS", legacy);
+    if let Some(json) = json {
+        command.env("BUZZ_ACP_AGENT_ARGS_JSON", json);
+    } else {
+        command.env_remove("BUZZ_ACP_AGENT_ARGS_JSON");
+    }
+}
+
 /// Returns true if `key` is a well-formed POSIX-shaped env var name:
 /// `[A-Za-z_][A-Za-z0-9_]*`. This is a hard requirement, not a stylistic
 /// nit: Rust's `Command::env` will happily accept a key containing `=`
