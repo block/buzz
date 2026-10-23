@@ -56,6 +56,7 @@ import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
+import 'huddle_agents_provider.dart';
 import 'inline_agent_typing.dart';
 import 'typing_motion_preview.dart';
 import 'channel_ids_by_name_provider.dart';
