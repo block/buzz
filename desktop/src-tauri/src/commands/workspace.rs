@@ -252,6 +252,27 @@ pub async fn apply_workspace(
         // cannot advance it until this transaction releases the guard.
         assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
 
+        // Never carry an explicit screen-capture grant into another community
+        // or signer. Companion-window applies of the same scope preserve it.
+        let same_relay = match (
+            url::Url::parse(&crate::relay::relay_ws_url_with_override(&state)),
+            url::Url::parse(&relay_url),
+        ) {
+            (Ok(current), Ok(next)) => current == next,
+            _ => false,
+        };
+        let same_signer = match parsed_keys.as_ref() {
+            Some(next) => {
+                state.keys.lock().map_err(|e| e.to_string())?.public_key() == next.public_key()
+            }
+            None => true,
+        };
+        if !same_relay || !same_signer {
+            state.huddle()?.stop_screen_capture();
+            state.huddle()?.stop_camera_capture();
+            state.emit_huddle_state_changed();
+        }
+
         // ── Apply all state changes (nothing below can fail) ──────────────────
         {
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;

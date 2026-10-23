@@ -37,6 +37,7 @@ import {
   createMockSubscription,
   hasMockSubscription,
 } from "./e2eBridgeSubscriptions.ts";
+import { installMockHuddleCameraOwner } from "./e2eBridgeHuddleCamera.ts";
 export { mockSearchHitMatches };
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type {
@@ -15381,6 +15382,10 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_EMIT_TAURI_EVENT__ = (event, payload) =>
     emit(event, payload);
   mockIPC(handleMockCommand, { shouldMockEvents: true });
+  void installMockHuddleCameraOwner(
+    config.mock?.windowLabel,
+    () => mockHuddle?.state.ephemeral_channel_id ?? null,
+  );
   const tauriInternals = (
     window as typeof window & {
       __TAURI_INTERNALS__: {

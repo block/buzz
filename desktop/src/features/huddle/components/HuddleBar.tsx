@@ -33,6 +33,9 @@ import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
+import { ScreenShareControl } from "./ScreenShareControl";
+import { CameraControl } from "./CameraControl";
+import { HuddleScreenViewer } from "./HuddleScreenViewer";
 import { beginChannelMembershipWrite } from "@/shared/api/channelMembershipWrites";
 import { truncateNpub } from "@/shared/lib/pubkey";
 
@@ -577,7 +580,7 @@ export function HuddleBar({
       aria-hidden={isDrawerClosing}
       data-state={isDrawerClosing ? "closing" : "open"}
       className={cn(
-        "buzz-huddle-drawer grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 px-5 py-3 text-foreground",
+        "buzz-huddle-drawer grid min-w-0 grid-cols-[auto_minmax(max-content,1fr)_auto] items-center gap-3 px-5 py-3 text-foreground",
         isDrawerClosing && "pointer-events-none",
         className,
       )}
@@ -759,6 +762,9 @@ export function HuddleBar({
 
       <div className="flex shrink-0 items-center gap-2 justify-self-center">
         <div className="flex items-center gap-2">
+          <ScreenShareControl />
+          <CameraControl />
+          {mode === "main" ? <HuddleScreenViewer compact /> : null}
           <Popover
             onOpenChange={setIsReactionPickerOpen}
             open={isReactionPickerOpen}

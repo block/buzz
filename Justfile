@@ -532,6 +532,8 @@ test-unit:
         # (JWKS source + refresh-loop composition), which `--lib` cannot reach
         # because they live in the binary target; the nested
         # `tests::postgres_tests::` stays in the PostgreSQL lane.
+        cargo nextest run -p buzz-relay --lib \
+            -E 'test(/^handlers::event::huddle_screen_tests::/)'
         # The fourth clause adds the startup step timers (startup_steps) and the
         # env- and log-capture tests in telemetry and config. All three modules
         # are infra-free; config parses env into a struct and never connects.

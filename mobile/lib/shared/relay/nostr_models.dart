@@ -27,6 +27,8 @@ abstract final class EventKind {
   static const auth = 22242;
   static const agentObserverFrame = 24200;
   static const huddleReaction = 24810;
+  static const huddleScreen = 24811;
+  static const huddleCamera = 24812;
   static const readState = 30078;
   static const eventReminder = 30300;
   static const userStatus = 30315;

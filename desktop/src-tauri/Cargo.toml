@@ -55,6 +55,10 @@ notify-rust = "4"
 # to the exact version wry links so both resolve to one webkit2gtk-sys and we
 # don't get duplicate symbols; bump in lockstep with wry.
 webkit2gtk = { version = "=2.0.2", features = ["v2_22"] }
+ashpd = { version = "0.13", features = ["screencast"] }
+gstreamer = "0.24"
+gstreamer-app = "0.24"
+gstreamer-video = "0.24"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6", default-features = false, features = ["std"] }
@@ -139,6 +143,8 @@ png = "0.18"
 # target-gated inside arboard; at runtime X11 sessions still fall back to X11.
 arboard = { version = "3", features = ["wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+xcap = "0.9"
+openh264 = "0.9"
 zip = "9"
 flate2 = "1"
 sherpa-onnx = "1.12"

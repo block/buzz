@@ -2,12 +2,14 @@ import type { RelaySubscription } from "./relayClientShared";
 
 /** Session-owned hints; CLOSED never establishes archive or membership state. */
 export class RelayChannelAccessRevocations {
-  private listeners = new Set<() => void>();
+  private listeners = new Set<{ listener: () => void; channel?: string }>();
 
-  subscribe(listener: () => void) {
-    this.listeners.add(listener);
+  /** Optionally restrict hints to one channel without changing unscoped consumers. */
+  subscribe(listener: () => void, channel?: string) {
+    const entry = { listener, channel };
+    this.listeners.add(entry);
     return () => {
-      this.listeners.delete(listener);
+      this.listeners.delete(entry);
     };
   }
 
@@ -22,7 +24,14 @@ export class RelayChannelAccessRevocations {
       (subscription.filter["#h"]?.length ?? 0) > 0 &&
       reason === "restricted: channel access revoked"
     ) {
-      for (const listener of this.listeners) listener();
+      for (const entry of this.listeners) {
+        if (
+          entry.channel === undefined ||
+          subscription.filter["#h"]?.includes(entry.channel)
+        ) {
+          entry.listener();
+        }
+      }
     }
   }
 }

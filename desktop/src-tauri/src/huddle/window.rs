@@ -1,8 +1,25 @@
 //! Native companion-window lifecycle for an active Huddle.
 
-use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    utils::config::{BackgroundThrottlingPolicy, WindowConfig},
+    Emitter, Manager, State, WebviewWindowBuilder,
+};
 
 use crate::app_state::AppState;
+
+fn companion_config(label: String) -> WindowConfig {
+    WindowConfig {
+        label,
+        title: "Huddle".into(),
+        width: 960.0,
+        height: 720.0,
+        min_width: Some(720.0),
+        min_height: Some(520.0),
+        // Match the capture owner: hidden macOS rooms must not suspend live media.
+        background_throttling: Some(BackgroundThrottlingPolicy::Disabled),
+        ..WindowConfig::default()
+    }
+}
 
 /// Close the companion belonging to an ended huddle. The native lifecycle is
 /// authoritative here because a webview can be suspended while it is closing.
@@ -57,11 +74,25 @@ pub async fn open_huddle_window(
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(&app, label, WebviewUrl::App("index.html".into()))
-        .title("Huddle")
-        .inner_size(960.0, 720.0)
-        .min_inner_size(720.0, 520.0)
+    WebviewWindowBuilder::from_config(&app, &companion_config(label))
+        .map_err(|error| error.to_string())?
         .build()
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_companions_keep_the_owners_background_media_policy() {
+        let config = companion_config("huddle-latency-regression".into());
+        assert_eq!(
+            config.background_throttling,
+            Some(BackgroundThrottlingPolicy::Disabled)
+        );
+        assert_eq!(config.url, tauri::WebviewUrl::App("index.html".into()));
+        assert_eq!(config.label, "huddle-latency-regression");
+    }
 }
