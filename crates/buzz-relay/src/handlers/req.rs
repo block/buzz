@@ -1523,7 +1523,7 @@ async fn handle_huddle_liveness_req(
 /// owner token, register for fan-out (replacing any same-ID entry), retain its
 /// topics, and release the replaced scope's. Returns the owner token, or
 /// `None` once the connection is closing — the caller then exits silently.
-async fn claim_live_subscription(
+pub(crate) async fn claim_live_subscription(
     sub_id: &str,
     filters: &[Filter],
     channel_ids: Option<&[uuid::Uuid]>,

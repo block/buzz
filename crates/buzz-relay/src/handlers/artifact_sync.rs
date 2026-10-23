@@ -437,8 +437,9 @@ const OVER_MAX_EVENTS: &str = "error: sync set exceeds max_events";
 
 /// Refuse a sync `REQ` with `CLOSED reason`. A `REQ` replaces whatever held
 /// its ID (NIP-01), and `CLOSED` tells the client the ID is closed, so the
-/// old holder is retired before the frame, under the lifecycle lock.
-async fn refuse(sub_id: &str, reason: &str, conn: &ConnectionState, state: &AppState) {
+/// old holder is retired before the frame, under the lifecycle lock. Every
+/// refusal of a sync `REQ` goes through here, before or inside the handler.
+pub(crate) async fn refuse(sub_id: &str, reason: &str, conn: &ConnectionState, state: &AppState) {
     let mut subs = conn.subscriptions.lock().await;
     super::close::retire_locked(&mut subs, sub_id, conn, state).await;
     conn.send(RelayMessage::closed(sub_id, reason));
