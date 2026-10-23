@@ -45,6 +45,8 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   // Sources: https://github.com/openclaw/openclaw,
   // https://docs.openclaw.ai/start/getting-started
   openclaw: "A personal AI assistant that runs on your own devices.",
+  // Source: https://github.com/deepseek-ai/deepseek-harness
+  dsh: "DeepSeek Harness's coding agent, connected to Buzz through its ACP server.",
 };
 
 /**
