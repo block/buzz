@@ -1,0 +1,338 @@
+{
+  "boundary": "actual fan_out_scoped, exactly one first h, canonical varied UUIDv4, eight held-out configurations; fixture/registry allocation outside timing; projection/result allocation inside",
+  "rows": [
+    {
+      "batch_seconds": [
+        0.06275597,
+        0.06262311,
+        0.062713171,
+        0.062992189,
+        0.062533113,
+        0.062665394,
+        0.062727286,
+        0.062417922,
+        0.062685949
+      ],
+      "case": "heldout_n1_h50_middle",
+      "iterations_per_batch": 65536,
+      "max_ns": 961.1845245361329,
+      "median_ns": 956.5116729736329,
+      "min_ns": 952.4219055175781,
+      "ns_per_fanout": [
+        957.580108642578,
+        955.5528259277343,
+        956.9270477294922,
+        961.1845245361329,
+        954.1795806884766,
+        956.1980285644531,
+        957.1424255371093,
+        952.4219055175781,
+        956.5116729736329
+      ],
+      "ranks": [
+        "heldout_n1_h50_rank25"
+      ],
+      "registry": "final",
+      "sequence_length": 1
+    },
+    {
+      "batch_seconds": [
+        0.064762539,
+        0.064849963,
+        0.065580798,
+        0.065004399,
+        0.064959662,
+        0.065207426,
+        0.065195551,
+        0.064966373,
+        0.064943782
+      ],
+      "case": "heldout_n1_h50_seeded16",
+      "iterations_per_batch": 4096,
+      "max_ns": 1000.6835632324218,
+      "median_ns": 991.3081817626952,
+      "min_ns": 988.1979217529296,
+      "ns_per_fanout": [
+        988.1979217529296,
+        989.5319061279297,
+        1000.6835632324218,
+        991.888412475586,
+        991.2057800292969,
+        994.9863586425781,
+        994.805160522461,
+        991.3081817626952,
+        990.9634704589845
+      ],
+      "ranks": [
+        "heldout_n1_h50_rank33",
+        "heldout_n1_h50_rank32",
+        "heldout_n1_h50_rank3",
+        "heldout_n1_h50_rank10",
+        "heldout_n1_h50_rank21",
+        "heldout_n1_h50_rank36",
+        "heldout_n1_h50_rank7",
+        "heldout_n1_h50_rank14",
+        "heldout_n1_h50_rank9",
+        "heldout_n1_h50_rank40",
+        "heldout_n1_h50_rank11",
+        "heldout_n1_h50_rank2",
+        "heldout_n1_h50_rank29",
+        "heldout_n1_h50_rank44",
+        "heldout_n1_h50_rank47",
+        "heldout_n1_h50_rank38"
+      ],
+      "registry": "final",
+      "sequence_length": 16
+    },
+    {
+      "batch_seconds": [
+        0.04613144,
+        0.046197213,
+        0.045960659,
+        0.046111325,
+        0.046167238,
+        0.046423897,
+        0.04642437,
+        0.046390159,
+        0.046414142
+      ],
+      "case": "heldout_n100_h50_middle",
+      "iterations_per_batch": 2048,
+      "max_ns": 22668.1494140625,
+      "median_ns": 22557.23291015625,
+      "min_ns": 22441.72802734375,
+      "ns_per_fanout": [
+        22525.1171875,
+        22557.23291015625,
+        22441.72802734375,
+        22515.29541015625,
+        22542.5966796875,
+        22667.91845703125,
+        22668.1494140625,
+        22651.44482421875,
+        22663.1552734375
+      ],
+      "ranks": [
+        "heldout_n100_h50_rank25"
+      ],
+      "registry": "final",
+      "sequence_length": 1
+    },
+    {
+      "batch_seconds": [
+        0.049456846,
+        0.049408815,
+        0.049450809,
+        0.049457613,
+        0.049373446,
+        0.049872602,
+        0.050116733,
+        0.050048201,
+        0.050120144
+      ],
+      "case": "heldout_n100_h50_seeded16",
+      "iterations_per_batch": 128,
+      "max_ns": 24472.7265625,
+      "median_ns": 24149.22509765625,
+      "min_ns": 24108.1279296875,
+      "ns_per_fanout": [
+        24148.8505859375,
+        24125.39794921875,
+        24145.90283203125,
+        24149.22509765625,
+        24108.1279296875,
+        24351.8564453125,
+        24471.06103515625,
+        24437.59814453125,
+        24472.7265625
+      ],
+      "ranks": [
+        "heldout_n100_h50_rank33",
+        "heldout_n100_h50_rank32",
+        "heldout_n100_h50_rank3",
+        "heldout_n100_h50_rank10",
+        "heldout_n100_h50_rank21",
+        "heldout_n100_h50_rank36",
+        "heldout_n100_h50_rank7",
+        "heldout_n100_h50_rank14",
+        "heldout_n100_h50_rank9",
+        "heldout_n100_h50_rank40",
+        "heldout_n100_h50_rank11",
+        "heldout_n100_h50_rank2",
+        "heldout_n100_h50_rank29",
+        "heldout_n100_h50_rank44",
+        "heldout_n100_h50_rank47",
+        "heldout_n100_h50_rank38"
+      ],
+      "registry": "final",
+      "sequence_length": 16
+    },
+    {
+      "batch_seconds": [
+        0.066191561,
+        0.066112031,
+        0.066358193,
+        0.066336479,
+        0.066320158,
+        0.065940906,
+        0.066091828,
+        0.068466463,
+        0.066607343
+      ],
+      "case": "heldout_n1_h128_middle",
+      "iterations_per_batch": 65536,
+      "max_ns": 1044.715316772461,
+      "median_ns": 1011.965301513672,
+      "min_ns": 1006.1783752441405,
+      "ns_per_fanout": [
+        1010.0030670166014,
+        1008.7895355224609,
+        1012.545669555664,
+        1012.214340209961,
+        1011.965301513672,
+        1006.1783752441405,
+        1008.4812622070314,
+        1044.715316772461,
+        1016.3473968505859
+      ],
+      "ranks": [
+        "heldout_n1_h128_rank64"
+      ],
+      "registry": "final",
+      "sequence_length": 1
+    },
+    {
+      "batch_seconds": [
+        0.068297416,
+        0.06830791,
+        0.068277586,
+        0.068303101,
+        0.06822031,
+        0.068329377,
+        0.068464638,
+        0.068339752,
+        0.068348302
+      ],
+      "case": "heldout_n1_h128_seeded16",
+      "iterations_per_batch": 4096,
+      "max_ns": 1044.6874694824219,
+      "median_ns": 1042.2959899902344,
+      "min_ns": 1040.9593200683594,
+      "ns_per_fanout": [
+        1042.1358642578125,
+        1042.2959899902344,
+        1041.8332824707031,
+        1042.2226104736328,
+        1040.9593200683594,
+        1042.623550415039,
+        1044.6874694824219,
+        1042.7818603515625,
+        1042.9123229980469
+      ],
+      "ranks": [
+        "heldout_n1_h128_rank27",
+        "heldout_n1_h128_rank86",
+        "heldout_n1_h128_rank33",
+        "heldout_n1_h128_rank58",
+        "heldout_n1_h128_rank27",
+        "heldout_n1_h128_rank66",
+        "heldout_n1_h128_rank25",
+        "heldout_n1_h128_rank44",
+        "heldout_n1_h128_rank105",
+        "heldout_n1_h128_rank22",
+        "heldout_n1_h128_rank77",
+        "heldout_n1_h128_rank116",
+        "heldout_n1_h128_rank71",
+        "heldout_n1_h128_rank8",
+        "heldout_n1_h128_rank59",
+        "heldout_n1_h128_rank32"
+      ],
+      "registry": "final",
+      "sequence_length": 16
+    },
+    {
+      "batch_seconds": [
+        0.060977297,
+        0.060956013,
+        0.060795865,
+        0.060903744,
+        0.060978371,
+        0.061228519,
+        0.061254703,
+        0.06121117,
+        0.061190352
+      ],
+      "case": "heldout_n100_h128_middle",
+      "iterations_per_batch": 2048,
+      "max_ns": 29909.52294921875,
+      "median_ns": 29774.59521484375,
+      "min_ns": 29685.48095703125,
+      "ns_per_fanout": [
+        29774.07080078125,
+        29763.67822265625,
+        29685.48095703125,
+        29738.15625,
+        29774.59521484375,
+        29896.73779296875,
+        29909.52294921875,
+        29888.2666015625,
+        29878.1015625
+      ],
+      "ranks": [
+        "heldout_n100_h128_rank64"
+      ],
+      "registry": "final",
+      "sequence_length": 1
+    },
+    {
+      "batch_seconds": [
+        0.065427518,
+        0.065358789,
+        0.065438643,
+        0.066507526,
+        0.065539256,
+        0.065594566,
+        0.065594096,
+        0.065628844,
+        0.06563888
+      ],
+      "case": "heldout_n100_h128_seeded16",
+      "iterations_per_batch": 128,
+      "max_ns": 32474.3779296875,
+      "median_ns": 32028.367187500004,
+      "min_ns": 31913.47119140625,
+      "ns_per_fanout": [
+        31947.030273437504,
+        31913.47119140625,
+        31952.462402343754,
+        32474.3779296875,
+        32001.589843750004,
+        32028.596679687504,
+        32028.367187500004,
+        32045.333984375004,
+        32050.234375
+      ],
+      "ranks": [
+        "heldout_n100_h128_rank27",
+        "heldout_n100_h128_rank86",
+        "heldout_n100_h128_rank33",
+        "heldout_n100_h128_rank58",
+        "heldout_n100_h128_rank27",
+        "heldout_n100_h128_rank66",
+        "heldout_n100_h128_rank25",
+        "heldout_n100_h128_rank44",
+        "heldout_n100_h128_rank105",
+        "heldout_n100_h128_rank22",
+        "heldout_n100_h128_rank77",
+        "heldout_n100_h128_rank116",
+        "heldout_n100_h128_rank71",
+        "heldout_n100_h128_rank8",
+        "heldout_n100_h128_rank59",
+        "heldout_n100_h128_rank32"
+      ],
+      "registry": "final",
+      "sequence_length": 16
+    }
+  ],
+  "trials": 9
+}

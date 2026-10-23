@@ -1,0 +1,94 @@
+{
+  "source": "independent normal locked-workspace validation of the retained final runtime",
+  "recorded_at_utc": "2026-10-15T01:42:55.986300+00:00",
+  "checkout": "/tmp/buzz-djinn-v2-validation",
+  "base": "71d7aa04369a6e86e158dc6d46246c8a3ce6d166",
+  "solution_sha256": "c4ddd3602eb5c65e9e04ac639f68cd3d7fb34b468b28f61775638579cab509bd",
+  "runtime_sha256": {
+    "crates/buzz-core/src/lib.rs": "2ca89688d1759bfbb10d5511dcac6e8b52a81b177656615e8b4f91c6ff419e29",
+    "crates/buzz-core/src/filter.rs": "26f8e8f0eb55d399aaf158190de60371014ae7c0ab2e5ee2275081c01c8a9bd5",
+    "crates/buzz-core/src/filter/contract_tests.rs": "c1c902022cc49249a5fefd0ab4292713e264e4b5d058ece27ef081a69385316f",
+    "crates/buzz-core/src/prepared_filter.rs": "f1d486f5bd371ef6a394598510420cc4075db90515e78cb5799cbd5f83af01f1",
+    "crates/buzz-relay/src/subscription.rs": "841ae020858cecee3bf3ad264a5b0b91ac11765eba5ee9775629fc3b4d113353",
+    "crates/buzz-core/djinn-relay-filter/src/input.rs": "7b382b2f32579fc543c5be2422e9a656b9255fc698db9e1eaf9432af74f96cbf",
+    "crates/buzz-core/djinn-relay-filter/src/adapter.rs": "b64d8c726eff9083dd113d724420394b44ad2631e35ce4e6ec7aad7a8772602d",
+    "crates/buzz-core/djinn-relay-filter/djinn/solution/mod.rs": "c4ddd3602eb5c65e9e04ac639f68cd3d7fb34b468b28f61775638579cab509bd"
+  },
+  "snapshot_checks": "Both independent remote file reads matched; all eight runtime hashes match the reviewed export and remained unchanged after tests; all 25 active source/proof hashes match final-hashes.json.",
+  "toolchain": "normal repository Hermit Rust/Cargo 1.95.0 on macOS; workspace manifests, lockfiles and registry configuration unchanged",
+  "results": [
+    {
+      "command": "cargo test -p buzz-core --lib filter --locked",
+      "result": "11 passed; 0 failed; 268 filtered",
+      "build_seconds": 2.03,
+      "test_seconds": 0.19
+    },
+    {
+      "command": "cargo test -p buzz-relay --lib subscription::tests --locked",
+      "result": "35 passed; 0 failed; 1845 filtered",
+      "build_seconds": 28.46,
+      "test_seconds": 2.01
+    },
+    {
+      "command": "cargo clippy -p buzz-core -p buzz-relay --all-targets --locked -- -D warnings",
+      "result": "passed",
+      "seconds": 23.8
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    }
+  ],
+  "proof_provenance": "Source hashes were checked against the Blox final proof manifest; these native tests are not a formal proof.",
+  "limits": "This focused record does not establish the complete pre-push hook suites, a live relay workflow, other platforms or human acceptance. Docker organization sign-in blocks the local relay workflow; no services or identities were changed.",
+  "historical_in_progress_snapshot": {
+    "source": "parent-provided independent local validation, 2026-10-15",
+    "checkout": "/tmp/buzz-djinn-v2-validation",
+    "base": "71d7aa04369a6e86e158dc6d46246c8a3ce6d166",
+    "solution_sha256": "8faf27b088b1ce82a0daff1bc024620cc846ced9e787c33a410537708fdd0b96",
+    "proof_provenance": "in-progress optimization candidate, not accepted/final proof snapshot",
+    "results": {
+      "core_filter_tests": "11/11 pass",
+      "relay_subscription_library_module": "35/35 pass",
+      "core_relay_clippy_all_targets_D_warnings": "pass",
+      "normal_manifests_lock_registry": "unchanged"
+    },
+    "hook_preparation": "default18-package+extra feature graphs+Tauri test binaries built --no-run; not test-pass claims; Tauri Clippy default/mesh-llm pass; bootstrap regression and8auth/dbdoctests pass, existing ignored example unchanged",
+    "limits": "parent will refresh final reviewed export and rerun focused checks; no local relay/human acceptance; Docker organization sign-in blocks local workflow"
+  },
+  "archive_packaging": {
+    "reason": "Preserve exact archived proof bytes while satisfying normal diff whitespace checks; presentation logs retain exactly one final newline.",
+    "proof_archive": {
+      "original_path": "crates/buzz-core/djinn-relay-filter/evidence/cycle1/djinn/proofs/RelayFilter/Proofs.lean",
+      "stored_path": "crates/buzz-core/djinn-relay-filter/evidence/cycle1/djinn/proofs/RelayFilter/Proofs.lean.gz",
+      "original_sha256": "01ec4bad6482326737e29f4e63aa1df530753cec50574e1ee6bac44a42bff082",
+      "gzip_sha256": "e6f5a2d1f7b76daa96fb7c65e7ad4f8fb328e272f17463312f7ca9b091ff0695",
+      "gzip_mtime": 0,
+      "decompression_verification": "byte-for-byte equal to the source-owner export and original checkpoint hash"
+    },
+    "test_logs": [
+      {
+        "path": "crates/buzz-core/djinn-relay-filter/evidence/final-owner-tests.log",
+        "original_sha256": "ab359fd750133e3ca0e0e566ae78f23ce79211b4c31a3f66e6e975e3ca336a67",
+        "packaged_sha256": "3bce46250b21c65482c483df0022c09a2e5541e7f9396fea909ac3cef0c46b00",
+        "change": "Removed only excess blank lines at EOF; actual test output text is unchanged."
+      },
+      {
+        "path": "crates/buzz-core/djinn-relay-filter/evidence/prior-selected/final-owner-tests.log",
+        "original_sha256": "598c497e95c764a440315c95ba78d0831c7677746b48a651ed8dba9b0447181c",
+        "packaged_sha256": "3365c71ecf99c2dbb9830e677310acb92872e3c5c060f803503d48821e9ab57f",
+        "change": "Removed only excess blank lines at EOF; actual test output text is unchanged."
+      }
+    ],
+    "active_sources": "All 25 active source/proof hashes remain unchanged."
+  },
+  "publication_presentation": {
+    "path": "crates/buzz-core/djinn-relay-filter/.gitattributes",
+    "purpose": "Mark generated artifacts, recorded JSON/log evidence and frozen owner snapshots for GitHub diff collapse; handwritten specification, data adapter, inputs, workloads and Markdown remain visible.",
+    "effect": "GitHub Linguist presentation metadata only; no source, CI or validation gate changes."
+  }
+}
