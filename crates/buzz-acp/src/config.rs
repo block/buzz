@@ -272,6 +272,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
+    /// Newline-separated additional MCP commands, shell-split per line.
+    /// Prefix a command with `name=` to keep its server identity stable.
+    /// Malformed quoting fails startup without echoing command contents.
+    #[arg(long, env = "BUZZ_ACP_EXTRA_MCP_COMMANDS", value_delimiter = '\n')]
+    pub extra_mcp_commands: Vec<String>,
+
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
@@ -550,6 +556,7 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    pub extra_mcp_commands: Vec<String>,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -1189,6 +1196,7 @@ impl Config {
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            extra_mcp_commands: args.extra_mcp_commands,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1575,6 +1583,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            extra_mcp_commands: vec![],
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -3243,6 +3252,21 @@ channels = "ALL"
             violations.is_empty(),
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
+        );
+    }
+    #[test]
+    fn extra_mcp_cli_splits_lines_without_splitting_commas() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--extra-mcp-commands",
+            "memory=npx server --filter 'a,b'\nsearch=npx search",
+        ])
+        .expect("extra MCP command list");
+        assert_eq!(
+            args.extra_mcp_commands,
+            ["memory=npx server --filter 'a,b'", "search=npx search"]
         );
     }
 }
