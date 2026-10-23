@@ -16,6 +16,7 @@ import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageCo
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import type { TimelineMessage } from "@/features/messages/types";
+import { useThreadTitleLiveSync } from "@/features/threads/hooks";
 import type { VideoReviewPresentation } from "@/features/messages/lib/videoReviewContext";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
@@ -207,6 +208,7 @@ export function MessageThreadPanel({
   splitPaneClamp,
   showBackButton,
   testId = "message-thread-panel",
+  threadTitleEditable = true,
   widthPx,
   transparentChrome = false,
   autoSendDraftKey = null,
@@ -223,6 +225,20 @@ export function MessageThreadPanel({
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
   const threadHeadId = threadHead?.id ?? null;
+  // A sub-thread head can be a nested reply; the title belongs to the root.
+  const threadRootId = threadHead ? (threadHead.rootId ?? threadHead.id) : null;
+  const threadTitleTarget = React.useMemo(
+    () =>
+      channelId && threadRootId && !disabled && threadTitleEditable
+        ? { channelId, rootId: threadRootId }
+        : null,
+    [channelId, disabled, threadRootId, threadTitleEditable],
+  );
+  const titleSyncChannels = React.useMemo(
+    () => (isHuddleTranscript || !channelId ? [] : [channelId]),
+    [channelId, isHuddleTranscript],
+  );
+  useThreadTitleLiveSync(titleSyncChannels);
   useEscapeKey(
     onClose,
     !isHuddleTranscript && (isOverlay || isSinglePanelView || isFocusMode),
@@ -916,6 +932,7 @@ export function MessageThreadPanel({
               onClose={onClose}
               onHeaderTitleClick={onHeaderTitleClick}
               showBackButton={showBackButton}
+              threadTitleTarget={threadTitleTarget}
             />
           )
         }
