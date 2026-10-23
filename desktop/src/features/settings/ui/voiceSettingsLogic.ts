@@ -4,6 +4,8 @@ export type VoiceAvailability =
   | "downloadable"
   | "unavailable";
 
+export type SpeechLanguage = "en" | "de";
+
 export type VoiceRegistryEntry = {
   key: string;
   displayName: string;
@@ -40,6 +42,14 @@ export function selectedVoiceForBackend(
     if (voice) return voice;
   }
   return voices.find((voice) => voice.fallbackKey === null) ?? voices[0];
+}
+
+export function speechLanguageLabel(language: SpeechLanguage): string {
+  return language === "de" ? "Deutsch" : "English (Original)";
+}
+
+export function activeTtsBackend(language: SpeechLanguage): "pocket" | "kokoro" {
+  return language === "de" ? "kokoro" : "pocket";
 }
 
 export function voiceOptionLabel(

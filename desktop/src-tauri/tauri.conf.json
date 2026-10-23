@@ -10,7 +10,7 @@
       "wait": false
     },
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && bash ../scripts/bundle-espeak-ng.sh",
     "frontendDist": "../dist"
   },
   "app": {
@@ -52,6 +52,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "resources/espeak-ng/": "espeak-ng/"
+    },
     "externalBin": [
       "binaries/buzz-acp",
       "binaries/buzz-agent",

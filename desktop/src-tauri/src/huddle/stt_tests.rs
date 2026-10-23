@@ -1,8 +1,9 @@
 use std::sync::{atomic::AtomicBool, mpsc, Arc, Barrier};
 
 use super::{
-    has_enough_voiced_audio, run_stt_receive_loop, vad_flush_allowed, HumanFloor, SttAudioInput,
-    SttAudioOrigin, SttLoopInput, VadEndpoint, VadFrameAction, MIN_VOICED_FRAMES,
+    has_enough_voiced_audio, run_stt_receive_loop, silence_flush_frames, vad_flush_allowed,
+    with_kroko_tail_padding, AsrBackend, HumanFloor, SttAudioInput, SttAudioOrigin, SttLoopInput,
+    VadEndpoint, VadFrameAction, KROKO_SILENCE_FLUSH_FRAMES, KROKO_TAIL_SAMPLES, MIN_VOICED_FRAMES,
     SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES, VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
 };
 
@@ -70,6 +71,26 @@ fn worker_channel_disconnect_releases_local_floor_for_replacement() {
 
 fn frame(value: f32) -> Vec<f32> {
     vec![value; VAD_FRAME_SAMPLES]
+}
+
+#[test]
+fn german_kroko_waits_about_one_second_of_silence() {
+    assert_eq!(silence_flush_frames(AsrBackend::Parakeet), SILENCE_FLUSH_FRAMES);
+    assert_eq!(
+        silence_flush_frames(AsrBackend::Kroko),
+        KROKO_SILENCE_FLUSH_FRAMES
+    );
+    let flush_ms =
+        silence_flush_frames(AsrBackend::Kroko) * VAD_FRAME_SAMPLES * 1000 / 16_000;
+    assert!(flush_ms >= 950 && flush_ms <= 1_050);
+}
+
+#[test]
+fn kroko_tail_padding_appends_half_second_of_silence() {
+    let padded = with_kroko_tail_padding(&[1.0, 0.5]);
+    assert_eq!(padded.len(), 2 + KROKO_TAIL_SAMPLES);
+    assert_eq!(&padded[..2], &[1.0, 0.5]);
+    assert!(padded[2..].iter().all(|sample| *sample == 0.0));
 }
 
 #[test]
@@ -257,4 +278,22 @@ fn held_push_to_talk_never_silence_flushes() {
     assert!(!vad_flush_allowed(true, true, true));
     // Manually open mic with the shortcut up: normal VAD behavior.
     assert!(vad_flush_allowed(true, true, false));
+}
+
+#[test]
+fn create_installed_kroko_does_not_abort() {
+    let dir = std::path::Path::new("/Users/cyberblade/.buzz/models/kroko-de");
+    if !dir.join("encoder.onnx").is_file() {
+        return;
+    }
+    let created = super::create_kroko(dir);
+    eprintln!("kroko create: {}", created.is_some());
+    let Some(recognizer) = created else {
+        return;
+    };
+    let samples: Vec<f32> = (0..16_000)
+        .map(|i| ((i as f32) * 0.05).sin() * 0.2)
+        .collect();
+    let text = super::decode_kroko(&recognizer, &samples);
+    eprintln!("kroko decode sine: {text:?}");
 }
