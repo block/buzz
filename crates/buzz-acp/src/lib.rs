@@ -569,6 +569,7 @@ mod inbound_author_gate {
     async fn author_allowed(
         respond_to: &RespondTo,
         allowlist: &HashSet<String>,
+        strict_allowlist: bool,
         author: &str,
         is_dm: bool,
         owner_cache: &OwnerCache,
@@ -577,6 +578,9 @@ mod inbound_author_gate {
         if is_dm {
             return match respond_to {
                 RespondTo::Nobody => false,
+                // DM allowlist admission is tracked in #7642. Until that lands,
+                // strict mode must not fall back to implicit owner/sibling trust.
+                RespondTo::Allowlist if strict_allowlist => false,
                 _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
             };
         }
@@ -584,6 +588,7 @@ mod inbound_author_gate {
             RespondTo::Anyone => true,
             RespondTo::Nobody => false,
             RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
+            RespondTo::Allowlist if strict_allowlist => allowlist.contains(author),
             RespondTo::Allowlist => {
                 allowlist.contains(author)
                     || is_owner_or_sibling(author, owner_cache, rest_client).await
@@ -603,6 +608,7 @@ mod inbound_author_gate {
         author_allowed(
             respond_to,
             allowlist,
+            false,
             author,
             is_dm,
             owner_cache,
@@ -613,6 +619,7 @@ mod inbound_author_gate {
 
     pub(crate) struct InboundAuthorGate {
         agent_pubkey_hex: String,
+        strict_allowlist: bool,
         relay_self: Option<String>,
         // None means no authoritative NIP-11 result yet, including at startup.
         refreshed_generation: Option<u64>,
@@ -628,10 +635,12 @@ mod inbound_author_gate {
             rest_client: &relay::RestClient,
             agent_pubkey_hex: &str,
             context: &str,
+            strict_allowlist: bool,
         ) -> Self {
             let (relay_self, completed) = refresh_relay_self(rest_client, None, context).await;
             Self {
                 agent_pubkey_hex: agent_pubkey_hex.to_string(),
+                strict_allowlist,
                 relay_self,
                 refreshed_generation: completed.then_some(0),
             }
@@ -680,15 +689,28 @@ mod inbound_author_gate {
                 }
             }
             let is_dm = is_dm_channel(buzz_event.channel_id, channel_info).await;
-            self.evaluate_with_channel_trust(
-                &buzz_event.event,
-                respond_to,
-                allowlist,
-                is_dm,
-                owner_cache,
-                rest_client,
-            )
-            .await
+            let mut decision = self
+                .evaluate_with_channel_trust(
+                    &buzz_event.event,
+                    respond_to,
+                    allowlist,
+                    is_dm,
+                    owner_cache,
+                    rest_client,
+                )
+                .await;
+            if self.strict_allowlist && matches!(respond_to, RespondTo::Allowlist) {
+                // The existing boolean DM resolver treats unknown channel types
+                // as non-DMs. Strict mode requires an authoritative type.
+                let known = matches!(
+                    channel_info.resolve_channel_metadata(buzz_event.channel_id).await,
+                    Some(info) if matches!(info.channel_type.as_str(), "dm" | "stream" | "forum" | "private")
+                );
+                if !known {
+                    decision.allowed = false;
+                }
+            }
+            decision
         }
 
         async fn evaluate_with_channel_trust(
@@ -705,6 +727,7 @@ mod inbound_author_gate {
             let allowed = author_allowed(
                 respond_to,
                 allowlist,
+                self.strict_allowlist,
                 &effective_author,
                 is_dm,
                 owner_cache,
@@ -2920,8 +2943,13 @@ async fn run_harness(
     tracing::info!("connected to relay at {}", config.relay_url);
 
     let relay_rest_client = relay.rest_client();
-    let mut author_gate_ctx =
-        InboundAuthorGate::connect(&relay_rest_client, &pubkey_hex, "startup").await;
+    let mut author_gate_ctx = InboundAuthorGate::connect(
+        &relay_rest_client,
+        &pubkey_hex,
+        "startup",
+        config.strict_allowlist,
+    )
+    .await;
 
     relay
         .subscribe_membership_notifications()
@@ -7446,7 +7474,7 @@ mod author_gate_tests {
         tokio::task::JoinHandle<()>,
     ) {
         let (rest_client, server) = nip11_server(serde_json::json!({ "self": relay_hex })).await;
-        let gate = InboundAuthorGate::connect(&rest_client, agent, "test").await;
+        let gate = InboundAuthorGate::connect(&rest_client, agent, "test", false).await;
         (gate, rest_client, server)
     }
 
@@ -7470,6 +7498,7 @@ mod author_gate_tests {
 
     struct ListenerBoundaryScenario<'a> {
         listener: ListenerBoundary,
+        strict_allowlist: bool,
         relay_keys: &'a nostr::Keys,
         workflow_owner: &'a str,
         responses: std::collections::VecDeque<Result<serde_json::Value, ()>>,
@@ -7486,6 +7515,7 @@ mod author_gate_tests {
     ) -> (Option<String>, bool) {
         let ListenerBoundaryScenario {
             listener,
+            strict_allowlist,
             relay_keys,
             workflow_owner,
             responses,
@@ -7499,7 +7529,9 @@ mod author_gate_tests {
         let relay_hex = relay_keys.public_key().to_hex();
         let agent = nostr::Keys::generate().public_key().to_hex();
         let (rest_client, server) = nip11_scripted_server(responses).await;
-        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "listener startup").await;
+        let mut gate =
+            InboundAuthorGate::connect(&rest_client, &agent, "listener startup", strict_allowlist)
+                .await;
         let configured_owner = if cache_owner {
             Some(workflow_owner.to_string())
         } else if cache_sibling {
@@ -7574,6 +7606,47 @@ mod author_gate_tests {
         }
     }
 
+    #[tokio::test]
+    async fn strict_allowlist_rejects_implicit_principals_at_both_listener_boundaries() {
+        for listener in [ListenerBoundary::Normal, ListenerBoundary::Setup] {
+            for channel_type in ["stream", "private", "dm", "unexpected"] {
+                for principal in ["external", "owner", "sibling"] {
+                    let relay_keys = nostr::Keys::generate();
+                    let relay_hex = relay_keys.public_key().to_hex();
+                    let author = nostr::Keys::generate().public_key().to_hex();
+                    for listed in [true, false] {
+                        let result = listener_boundary_scenario(ListenerBoundaryScenario {
+                            listener,
+                            strict_allowlist: true,
+                            relay_keys: &relay_keys,
+                            workflow_owner: &author,
+                            responses: std::collections::VecDeque::from([Ok(
+                                serde_json::json!({ "self": relay_hex }),
+                            )]),
+                            event_generation: 0,
+                            channel_type,
+                            respond_to: RespondTo::Allowlist,
+                            allowlist: if listed {
+                                HashSet::from([author.clone()])
+                            } else {
+                                HashSet::new()
+                            },
+                            cache_owner: principal == "owner",
+                            cache_sibling: principal == "sibling",
+                        })
+                        .await;
+                        assert_eq!(
+                            result.1,
+                            listed && matches!(channel_type, "stream" | "private"),
+                            "{} {channel_type} {principal} listed={listed}",
+                            listener.name()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Both production listener callables must attribute relay-signed workflow
     /// events to the workflow owner and enforce policy there. A local
     /// `allowed: true` replacement at either call site makes the Nobody case
@@ -7586,6 +7659,7 @@ mod author_gate_tests {
             let accepted_workflow_owner = nostr::Keys::generate().public_key().to_hex();
             let accepted = listener_boundary_scenario(ListenerBoundaryScenario {
                 listener,
+                strict_allowlist: false,
                 relay_keys: &relay_keys,
                 workflow_owner: &accepted_workflow_owner,
                 responses: std::collections::VecDeque::from([Ok(
@@ -7616,6 +7690,7 @@ mod author_gate_tests {
             let denied_workflow_owner = nostr::Keys::generate().public_key().to_hex();
             let denied = listener_boundary_scenario(ListenerBoundaryScenario {
                 listener,
+                strict_allowlist: false,
                 relay_keys: &relay_keys,
                 workflow_owner: &denied_workflow_owner,
                 responses: std::collections::VecDeque::from([Ok(
@@ -7650,6 +7725,7 @@ mod author_gate_tests {
             let external_allowlist = HashSet::from([external.clone()]);
             let denied_external = listener_boundary_scenario(ListenerBoundaryScenario {
                 listener,
+                strict_allowlist: false,
                 relay_keys: &relay_keys,
                 workflow_owner: &external,
                 responses: std::collections::VecDeque::from([Ok(
@@ -7674,6 +7750,7 @@ mod author_gate_tests {
             let stranger = nostr::Keys::generate().public_key().to_hex();
             let denied_stranger = listener_boundary_scenario(ListenerBoundaryScenario {
                 listener,
+                strict_allowlist: false,
                 relay_keys: &relay_keys,
                 workflow_owner: &stranger,
                 responses: std::collections::VecDeque::from([Ok(
@@ -7711,6 +7788,7 @@ mod author_gate_tests {
                 let relay_hex = relay_keys.public_key().to_hex();
                 let allowed = listener_boundary_scenario(ListenerBoundaryScenario {
                     listener,
+                    strict_allowlist: false,
                     relay_keys: &relay_keys,
                     workflow_owner: &principal,
                     responses: std::collections::VecDeque::from([Ok(
@@ -7736,6 +7814,7 @@ mod author_gate_tests {
             let owner = nostr::Keys::generate().public_key().to_hex();
             let denied_nobody = listener_boundary_scenario(ListenerBoundaryScenario {
                 listener,
+                strict_allowlist: false,
                 relay_keys: &relay_keys,
                 workflow_owner: &owner,
                 responses: std::collections::VecDeque::from([Ok(
@@ -7768,6 +7847,7 @@ mod author_gate_tests {
             let workflow_owner = nostr::Keys::generate().public_key().to_hex();
             let result = listener_boundary_scenario(ListenerBoundaryScenario {
                 listener,
+                strict_allowlist: false,
                 relay_keys: &relay_keys,
                 workflow_owner: &workflow_owner,
                 responses: std::collections::VecDeque::from([
@@ -7815,7 +7895,7 @@ mod author_gate_tests {
         let agent = nostr::Keys::generate().public_key().to_hex();
         let (rest_client, server) = nip11_server(serde_json::json!({ "self": relay_hex })).await;
 
-        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "test").await;
+        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "test", false).await;
         assert!(
             gate.has_relay_identity(),
             "the gate must load the relay signing identity during construction"
@@ -7877,7 +7957,7 @@ mod author_gate_tests {
         // A NIP-11 document with no `self` key: attribution is unavailable.
         let (rest_client, server) = nip11_server(serde_json::json!({ "name": "relay" })).await;
 
-        let gate = InboundAuthorGate::connect(&rest_client, &agent, "test").await;
+        let gate = InboundAuthorGate::connect(&rest_client, &agent, "test", false).await;
         assert!(
             !gate.has_relay_identity(),
             "a NIP-11 document without `self` must leave attribution unavailable"
@@ -7926,7 +8006,7 @@ mod author_gate_tests {
             keys: nostr::Keys::generate(),
             auth_tag_json: None,
         };
-        let mut gate = InboundAuthorGate::connect(&unreachable, &agent, "test").await;
+        let mut gate = InboundAuthorGate::connect(&unreachable, &agent, "test", false).await;
         assert!(!gate.has_relay_identity());
 
         let (rest_client, server) = nip11_server(serde_json::json!({ "self": relay_hex })).await;
@@ -7996,7 +8076,7 @@ mod author_gate_tests {
             Ok(serde_json::json!({ "self": relay_hex.clone() })),
         ]))
         .await;
-        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "startup").await;
+        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "startup", false).await;
         assert!(!gate.has_relay_identity());
         let channel_id = Uuid::new_v4();
         let owner_cache = OwnerCache::new(Some(workflow_owner.clone()));
@@ -8058,7 +8138,7 @@ mod author_gate_tests {
             }
             responses.push_back(Ok(serde_json::json!({ "self": next_relay_hex.clone() })));
             let (rest_client, server) = nip11_scripted_server(responses).await;
-            let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "startup").await;
+            let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "startup", false).await;
             assert_eq!(gate.relay_identity_for_test(), identity.as_deref());
             let channel_id = Uuid::new_v4();
             let channel_info = pool::ChannelInfoResolver::new(
@@ -8134,7 +8214,7 @@ mod author_gate_tests {
             Ok(serde_json::json!({ "self": new_relay_hex.clone() })),
         ]))
         .await;
-        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "test").await;
+        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "test", false).await;
         let owner_cache = OwnerCache::new(Some(workflow_owner.clone()));
         owner_cache.cache_sibling(old_relay_hex.clone(), false);
         owner_cache.cache_sibling(new_relay_hex.clone(), false);
@@ -10138,6 +10218,7 @@ mod build_mcp_servers_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
+            strict_allowlist: false,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,
@@ -11275,6 +11356,7 @@ mod error_outcome_emission_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            strict_allowlist: false,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,
