@@ -26,5 +26,9 @@ subtle            = { workspace = true }
 zeroize           = { workspace = true }
 percent-encoding  = "2.3"
 url               = { workspace = true }
+h264-reader = "0.9"
+
+[dev-dependencies]
+openh264 = "0.9"
 
 # NO tokio, NO sqlx, NO redis, NO axum — zero I/O dependencies

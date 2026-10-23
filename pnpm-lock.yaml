@@ -192,6 +192,9 @@ importers:
       jdenticon:
         specifier: ^3.3.0
         version: 3.3.0
+      jmuxer:
+        specifier: 2.1.4
+        version: 2.1.4
       linkifyjs:
         specifier: ^4.3.2
         version: 4.3.2
@@ -2687,6 +2690,9 @@ packages:
   jiti@2.7.0:
     resolution: {integrity: sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==}
     hasBin: true
+
+  jmuxer@2.1.4:
+    resolution: {integrity: sha512-4BfC1K8rVU1m2MgNhks4GvhAk4HYSdmc/XJB4m58tcSRgPNydwgYnPNlWiEpYjzJVGuiUQKvNbovCUejcC/8Jw==}
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
@@ -5908,6 +5914,8 @@ snapshots:
       canvas-renderer: 2.2.1
 
   jiti@2.7.0: {}
+
+  jmuxer@2.1.4: {}
 
   js-tokens@4.0.0: {}
 
