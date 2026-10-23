@@ -15,6 +15,8 @@ import {
 } from "@/shared/api/relayRateLimitGate";
 
 const RECONNECT_REPLAY_SKEW_SECS = 5;
+
+type LiveSubscription = Extract<RelaySubscription, { mode: "live" }>;
 /**
  * Legacy cursors are event-time maxima, so cover relay future tolerance (900s)
  * plus the channel-row storage fence and margin (960s + 5s).
@@ -153,11 +155,15 @@ export async function replayReconnectHistoryPages({
 
     if (!isActive()) return false;
 
+    let dispatched = false;
     for (const event of events) {
       if (shouldDispatchSubscriptionEvent(subscription, event)) {
         subscription.onEvent(event);
+        dispatched = true;
       }
     }
+    // Repair pages bypass the session event buffer, so close the batch here.
+    if (dispatched) subscription.onFlush?.();
     if (events.length < RECONNECT_REPLAY_PAGE_LIMIT) return true;
 
     const terminal = events.at(-1);
@@ -176,6 +182,137 @@ export async function replayReconnectHistoryPages({
     beforeId = terminal.id;
   }
   return true;
+}
+
+/**
+ * Lower bound for re-requesting a live subscription's missed window.
+ *
+ * Shared by reconnect replay and CLOSED retry so both resume from an author
+ * timestamp the relay already accepted, never from the renderer clock.
+ */
+export function reconnectReplaySince(
+  subscription: LiveSubscription,
+  shouldPageReplay: boolean,
+) {
+  const cursorSince =
+    subscription.lastSeenCreatedAt === undefined
+      ? undefined
+      : Math.max(
+          0,
+          subscription.lastSeenCreatedAt -
+            (shouldPageReplay
+              ? RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS
+              : RECONNECT_REPLAY_SKEW_SECS),
+        );
+  // A pinned floor from a previously failed backfill takes precedence
+  // over the cursor: live events kept advancing `lastSeenCreatedAt`
+  // while the older window stayed unresolved, and starting from the
+  // cursor would skip it permanently.
+  const replayFloor =
+    cursorSince === undefined
+      ? subscription.pendingReplaySince
+      : Math.min(cursorSince, subscription.pendingReplaySince ?? Infinity);
+  // Native repair bypasses the original WS filter, so preserve its lower
+  // bound explicitly. Otherwise a from-now subscription can replay older
+  // rows and surface stale unread or notification activity on reconnect.
+  return replayFloor === undefined
+    ? undefined
+    : Math.max(replayFloor, subscription.filter.since ?? 0);
+}
+
+/** Start restored-live/repair dedupe. Call before the restored live REQ. */
+export function beginReconnectRepair(
+  subscription: LiveSubscription,
+  generation: number,
+) {
+  subscription.reconnectReplay = {
+    generation,
+    seenEventIds: new Set(),
+    liveEose: false,
+    repairDone: false,
+  };
+}
+
+/**
+ * Best-effort paged repair of one channel subscription's missed window.
+ * Never throws: see {@link PAGE_REPLAY_MAX_ATTEMPTS}.
+ */
+export async function repairChannelSubscription({
+  subId,
+  subscription,
+  subscriptions,
+  channelId,
+  replaySince,
+  generation,
+  isActive,
+  requestRepair,
+}: {
+  subId: string;
+  subscription: LiveSubscription;
+  subscriptions: Map<string, RelaySubscription>;
+  channelId: string;
+  replaySince: number;
+  generation: number;
+  isActive: () => boolean;
+  requestRepair: (
+    request: ChannelReconnectRepairRequest,
+  ) => Promise<RelayEvent[]>;
+}) {
+  // Backfill is best-effort: a failure here (typically a `rate-limited:`
+  // CLOSED on a history REQ) must never escape to the session and tear
+  // down the healthy, authenticated socket carrying the live REQs — that
+  // is the connect→drop flap loop. Retry behind the gate a bounded number
+  // of times, then degrade to live-only for this connection.
+  //
+  // Pin the window's lower bound before the first attempt: events on the
+  // already-restored live REQ advance `lastSeenCreatedAt` independently
+  // of backfill success, so without the pin an exhausted backfill
+  // followed by one live event would make the next reconnect skip the
+  // unresolved window permanently. Cleared only on a completed pass.
+  subscription.pendingReplaySince = replaySince;
+  for (let attempt = 1; attempt <= PAGE_REPLAY_MAX_ATTEMPTS; attempt++) {
+    try {
+      const completed = await replayReconnectHistoryPages({
+        subscription,
+        channelId,
+        since: replaySince,
+        // Do not trust the renderer clock as the upper bound. The relay's
+        // newest matching row starts the keyset walk.
+        until: undefined,
+        // Both guards are required. The identity check catches the sub
+        // being torn down/replaced; the outer isActive() catches
+        // connection supersession, which bumps the generation while the
+        // SAME subscription key and object survive in the map — identity
+        // alone stays true and a stale pass could complete and clear the
+        // floor the superseding connection needs.
+        isActive: () => isActive() && subscriptions.get(subId) === subscription,
+        requestRepair,
+      });
+      // A stale-connection abort is NOT completion: the superseding
+      // connection shares this subscription object and still needs the
+      // pinned floor for its own replay. Only a genuinely completed
+      // window may release it.
+      if (completed) {
+        subscription.pendingReplaySince = undefined;
+        markReconnectRepairDone(subscription, generation);
+      }
+      return;
+    } catch (error) {
+      console.warn(
+        `[reconnect replay] history backfill attempt ${attempt}/${PAGE_REPLAY_MAX_ATTEMPTS} failed for ${subId}:`,
+        error,
+      );
+      if (attempt === PAGE_REPLAY_MAX_ATTEMPTS) {
+        markReconnectRepairDone(subscription, generation);
+        return;
+      }
+      // The failed REQ's CLOSED handler arms the rate-limit gate before
+      // rejecting; wait for it (no-op when the failure wasn't back-pressure)
+      // and re-check that this replay's connection is still current.
+      if (isRateLimited()) await waitForRateLimit();
+      if (subscriptions.get(subId) !== subscription || !isActive()) return;
+    }
+  }
 }
 
 export async function replayLiveSubscriptions({
@@ -233,41 +370,10 @@ export async function replayLiveSubscriptions({
       const shouldPageReplay =
         channelId !== undefined &&
         shouldPageReconnectReplay(subscription.filter);
-      const cursorSince =
-        subscription.lastSeenCreatedAt === undefined
-          ? undefined
-          : Math.max(
-              0,
-              subscription.lastSeenCreatedAt -
-                (shouldPageReplay
-                  ? RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS
-                  : RECONNECT_REPLAY_SKEW_SECS),
-            );
-      // A pinned floor from a previously failed backfill takes precedence
-      // over the cursor: live events kept advancing `lastSeenCreatedAt`
-      // while the older window stayed unresolved, and starting from the
-      // cursor would skip it permanently.
-      const replayFloor =
-        cursorSince === undefined
-          ? subscription.pendingReplaySince
-          : Math.min(cursorSince, subscription.pendingReplaySince ?? Infinity);
-      // Native repair bypasses the original WS filter, so preserve its lower
-      // bound explicitly. Otherwise a from-now subscription can replay older
-      // rows and surface stale unread or notification activity on reconnect.
-      const replaySince =
-        replayFloor === undefined
-          ? undefined
-          : Math.max(replayFloor, subscription.filter.since ?? 0);
+      const replaySince = reconnectReplaySince(subscription, shouldPageReplay);
       const willRepair = shouldPageReplay && replaySince !== undefined;
-      if (willRepair) {
-        // Install before the restored live REQ: a live frame may beat page one.
-        subscription.reconnectReplay = {
-          generation,
-          seenEventIds: new Set(),
-          liveEose: false,
-          repairDone: false,
-        };
-      }
+      // Install before the restored live REQ: a live frame may beat page one.
+      if (willRepair) beginReconnectRepair(subscription, generation);
 
       return {
         subId,
@@ -349,63 +455,16 @@ export async function replayLiveSubscriptions({
         request.replaySince !== undefined,
     ),
     pageReplayConcurrency,
-    async ({ subId, subscription, channelId, replaySince }) => {
-      // Backfill is best-effort: a failure here (typically a `rate-limited:`
-      // CLOSED on a history REQ) must never escape to the session and tear
-      // down the healthy, authenticated socket carrying the live REQs — that
-      // is the connect→drop flap loop. Retry behind the gate a bounded number
-      // of times, then degrade to live-only for this connection.
-      //
-      // Pin the window's lower bound before the first attempt: events on the
-      // already-restored live REQ advance `lastSeenCreatedAt` independently
-      // of backfill success, so without the pin an exhausted backfill
-      // followed by one live event would make the next reconnect skip the
-      // unresolved window permanently. Cleared only on a completed pass.
-      subscription.pendingReplaySince = replaySince;
-      for (let attempt = 1; attempt <= PAGE_REPLAY_MAX_ATTEMPTS; attempt++) {
-        try {
-          const completed = await replayReconnectHistoryPages({
-            subscription,
-            channelId,
-            since: replaySince,
-            // Do not trust the renderer clock as the upper bound. The relay's
-            // newest matching row starts the keyset walk.
-            until: undefined,
-            // Both guards are required. The identity check catches the sub
-            // being torn down/replaced; the outer isActive() catches
-            // connection supersession, which bumps the generation while the
-            // SAME subscription key and object survive in the map — identity
-            // alone stays true and a stale pass could complete and clear the
-            // floor the superseding connection needs.
-            isActive: () =>
-              isActive() && subscriptions.get(subId) === subscription,
-            requestRepair,
-          });
-          // A stale-connection abort is NOT completion: the superseding
-          // connection shares this subscription object and still needs the
-          // pinned floor for its own replay. Only a genuinely completed
-          // window may release it.
-          if (completed) {
-            subscription.pendingReplaySince = undefined;
-            markReconnectRepairDone(subscription, generation);
-          }
-          return;
-        } catch (error) {
-          console.warn(
-            `[reconnect replay] history backfill attempt ${attempt}/${PAGE_REPLAY_MAX_ATTEMPTS} failed for ${subId}:`,
-            error,
-          );
-          if (attempt === PAGE_REPLAY_MAX_ATTEMPTS) {
-            markReconnectRepairDone(subscription, generation);
-            return;
-          }
-          // The failed REQ's CLOSED handler arms the rate-limit gate before
-          // rejecting; wait for it (no-op when the failure wasn't back-pressure)
-          // and re-check that this replay's connection is still current.
-          if (isRateLimited()) await waitForRateLimit();
-          if (subscriptions.get(subId) !== subscription || !isActive()) return;
-        }
-      }
-    },
+    ({ subId, subscription, channelId, replaySince }) =>
+      repairChannelSubscription({
+        subId,
+        subscription,
+        subscriptions,
+        channelId,
+        replaySince,
+        generation,
+        isActive,
+        requestRepair,
+      }),
   );
 }
