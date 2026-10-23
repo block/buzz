@@ -267,7 +267,32 @@ pub struct DeliveryAdmission {
     pub require_allowlist: bool,
 }
 
-/// Load the event for a claimed delivery if the target may still receive it.
+/// The channel a deliverable event belongs to, read with its access check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryChannel {
+    /// Channel id, the event's `h` tag.
+    pub id: Uuid,
+    /// Channel name as stored; DMs may have an empty name.
+    pub name: String,
+    /// Channel type: `stream`, `forum`, `dm`, `workflow` or `system`.
+    pub channel_type: String,
+    /// Channel visibility: `open` or `private`.
+    pub visibility: String,
+    /// Channel description, published as the kind:39000 `about` tag.
+    pub about: Option<String>,
+}
+
+/// An event a claimed delivery may send, with its channel when it has one.
+#[derive(Debug, Clone)]
+pub struct DeliverableEvent {
+    /// The stored mentioning event.
+    pub stored: StoredEvent,
+    /// The event's channel, or `None` for a channel-less event.
+    pub channel: Option<DeliveryChannel>,
+}
+
+/// Load the event for a claimed delivery, with its channel, if the target
+/// may still receive it.
 ///
 /// Returns `None` when the registration was removed, the community is no
 /// longer active, the event was deleted, the target or its recorded owner is
@@ -279,7 +304,7 @@ pub async fn load_deliverable_event(
     pool: &PgPool,
     delivery: &ClaimedDelivery,
     admission: DeliveryAdmission,
-) -> Result<Option<StoredEvent>> {
+) -> Result<Option<DeliverableEvent>> {
     let mut connection = acquire_maintenance_writer(pool).await?;
     let row = sqlx::query(
         "WITH principals AS ( \
@@ -289,11 +314,14 @@ pub async fn load_deliverable_event(
              WHERE community_id = $3 AND pubkey = $2 AND agent_owner_pubkey IS NOT NULL \
          ) \
          SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, \
-                e.received_at, e.channel_id \
+                e.received_at, e.channel_id, c.name AS channel_name, \
+                c.channel_type::text AS channel_type, c.visibility::text AS channel_visibility, \
+                c.description AS channel_about \
          FROM operator_listener_pubkeys r \
          JOIN communities co ON co.id = $3 AND co.archived_at IS NULL \
              AND co.deleted_at IS NULL AND co.deletion_state = 'active' \
          JOIN events e ON e.community_id = $3 AND e.created_at = $4 AND e.id = $5 \
+         LEFT JOIN channels c ON c.community_id = e.community_id AND c.id = e.channel_id \
          WHERE r.listener_pubkey = $1 AND r.target_pubkey = $2 \
            AND e.deleted_at IS NULL \
            AND (NOT $8 OR EXISTS ( \
@@ -308,14 +336,12 @@ pub async fn load_deliverable_event(
                WHERE rm.community_id = $3 AND rm.pubkey IN ( \
                    SELECT encode(p.pubkey, 'hex') FROM principals p \
                    WHERE $7 OR p.pubkey = $2))) \
-           AND (e.channel_id IS NULL OR EXISTS ( \
-               SELECT 1 FROM channels c \
-               WHERE c.community_id = e.community_id AND c.id = e.channel_id \
-                 AND c.deleted_at IS NULL \
-                 AND (c.visibility = 'open' OR EXISTS ( \
-                     SELECT 1 FROM channel_members m \
-                     WHERE m.community_id = c.community_id AND m.channel_id = c.id \
-                       AND m.pubkey = r.target_pubkey AND m.removed_at IS NULL))))",
+           AND (e.channel_id IS NULL OR ( \
+               c.id IS NOT NULL AND c.deleted_at IS NULL \
+               AND (c.visibility = 'open' OR EXISTS ( \
+                   SELECT 1 FROM channel_members m \
+                   WHERE m.community_id = c.community_id AND m.channel_id = c.id \
+                     AND m.pubkey = r.target_pubkey AND m.removed_at IS NULL))))",
     )
     .bind(&delivery.listener_pubkey)
     .bind(&delivery.target_pubkey)
@@ -327,10 +353,21 @@ pub async fn load_deliverable_event(
     .bind(admission.require_allowlist)
     .fetch_optional(&mut *connection)
     .await?;
-    match row {
-        Some(row) => crate::event::row_to_stored_event(row),
-        None => Ok(None),
-    }
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    // The channel columns are NOT NULL, so a name means the join matched.
+    let channel = match row.try_get::<Option<String>, _>("channel_name")? {
+        Some(name) => Some(DeliveryChannel {
+            id: row.try_get("channel_id")?,
+            name,
+            channel_type: row.try_get("channel_type")?,
+            visibility: row.try_get("channel_visibility")?,
+            about: row.try_get("channel_about")?,
+        }),
+        None => None,
+    };
+    Ok(crate::event::row_to_stored_event(row)?.map(|stored| DeliverableEvent { stored, channel }))
 }
 
 /// Release a delivery claim that this pod cannot route.
@@ -447,13 +484,13 @@ impl Db {
         claim_deliveries(&self.pool, limit, lease_until).await
     }
 
-    /// Load a claimed delivery's event if its target may still receive it.
+    /// Load a claimed delivery's event and channel if its target may still receive it.
     #[datastore_span(name = "load_operator_listener_delivery_event", system = "postgresql")]
     pub async fn load_operator_listener_delivery_event(
         &self,
         delivery: &ClaimedDelivery,
         admission: DeliveryAdmission,
-    ) -> Result<Option<StoredEvent>> {
+    ) -> Result<Option<DeliverableEvent>> {
         load_deliverable_event(&self.pool, delivery, admission).await
     }
 
@@ -1156,14 +1193,16 @@ mod postgres_tests {
             (other_channel, "private"),
         ] {
             sqlx::query(
-                "INSERT INTO channels (community_id, id, name, visibility, channel_type, created_by) \
-                 VALUES ($1, $2, $3, $4::channel_visibility, 'stream', $5)",
+                "INSERT INTO channels \
+                 (community_id, id, name, visibility, channel_type, created_by, description) \
+                 VALUES ($1, $2, $3, $4::channel_visibility, 'stream', $5, $6)",
             )
             .bind(community.as_uuid())
             .bind(channel)
             .bind(channel.to_string())
             .bind(visibility)
             .bind(author.public_key().to_bytes().as_slice())
+            .bind(format!("about {visibility}"))
             .execute(&pool)
             .await
             .expect("insert test channel");
@@ -1186,11 +1225,13 @@ mod postgres_tests {
         .await
         .expect("register target");
 
+        let dangling_channel = Uuid::new_v4();
         let mut deliveries = HashMap::new();
         for channel in [
             Some(open_channel),
             Some(member_channel),
             Some(other_channel),
+            Some(dangling_channel),
             None,
         ] {
             let event = EventBuilder::new(Kind::Custom(9), format!("hello {channel:?}"))
@@ -1237,20 +1278,39 @@ mod postgres_tests {
 
         let open = load(open_channel).await.expect("open channel is readable");
         assert_eq!(
-            open.event.id.as_bytes().as_slice(),
+            open.stored.event.id.as_bytes().as_slice(),
             deliveries[&Some(open_channel)].event_id.as_slice()
         );
-        open.event
+        open.stored
+            .event
             .verify()
             .expect("stored event round-trips with a valid signature");
-        assert!(load(member_channel).await.is_some(), "member may read");
+        assert_eq!(
+            open.channel,
+            Some(DeliveryChannel {
+                id: open_channel,
+                name: open_channel.to_string(),
+                channel_type: "stream".to_owned(),
+                visibility: "open".to_owned(),
+                about: Some("about open".to_owned()),
+            })
+        );
+        let member = load(member_channel).await.expect("member may read");
+        assert_eq!(
+            member
+                .channel
+                .map(|channel| (channel.id, channel.visibility)),
+            Some((member_channel, "private".to_owned()))
+        );
         assert!(load(other_channel).await.is_none(), "non-member may not");
         assert!(
-            load_with(deliveries[&None].clone(), OPEN_RELAY)
-                .await
-                .is_some(),
-            "channel-less event"
+            load(dangling_channel).await.is_none(),
+            "missing channel row"
         );
+        let channel_less = load_with(deliveries[&None].clone(), OPEN_RELAY)
+            .await
+            .expect("channel-less event");
+        assert_eq!(channel_less.channel, None);
         let mut other_community = deliveries[&Some(open_channel)].clone();
         other_community.community = CommunityId::from_uuid(Uuid::new_v4());
         assert!(load_with(other_community, OPEN_RELAY).await.is_none());
