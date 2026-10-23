@@ -1619,6 +1619,7 @@ pub(crate) fn format_event_block(
     channel_info: Option<&PromptChannelInfo>,
     be: &BatchEvent,
     profile_lookup: Option<&PromptProfileLookup>,
+    transcript: Option<&str>,
 ) -> String {
     let hex = be.event.pubkey.to_hex();
     let npub = be.event.pubkey.to_bech32().unwrap_or_else(|_| hex.clone());
@@ -1653,6 +1654,12 @@ pub(crate) fn format_event_block(
     let tags_json: Vec<&[String]> = be.event.tags.iter().map(|t| t.as_slice()).collect();
     if let Ok(tags_str) = serde_json::to_string(&tags_json) {
         block.push_str(&format!("\nTags: {tags_str}"));
+    }
+
+    // A voice note's words, when they could be recovered. Without this the
+    // agent sees only a media URL and cannot know what was said.
+    if let Some(transcript) = transcript.map(str::trim).filter(|t| !t.is_empty()) {
+        block.push_str(&format!("\nTranscript: {transcript}"));
     }
 
     // An edit's structural fields describe its original message: the edit
@@ -2203,7 +2210,6 @@ fn format_conversation_context(
 }
 
 /// Arguments for [`format_prompt`] beyond the required [`FlushBatch`].
-#[derive(Default)]
 pub struct FormatPromptArgs<'a> {
     pub agent_core: Option<&'a str>,
     /// Owner-signed instructions for an active huddle channel.
@@ -2215,6 +2221,11 @@ pub struct FormatPromptArgs<'a> {
     /// Trigger-only context does not set it.
     pub conversation_context_had_session_events: bool,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
+    /// Transcripts recovered from voice notes, keyed by event id.
+    ///
+    /// Empty when no voice note was present or none could be transcribed.
+    pub transcripts: &'a std::collections::HashMap<String, String>,
+
     /// When true, base_prompt and system_prompt are delivered via the system
     /// role (session/new) and omitted from the user message. When false
     /// (legacy agents), they are injected as `<base>` and `<agent-instructions>` sections.
@@ -2237,6 +2248,30 @@ pub struct FormatPromptArgs<'a> {
     /// Defaults to `false` so a caller that never sets it behaves as if this
     /// were the session's first message.
     pub standing_context_sent: bool,
+}
+
+impl Default for FormatPromptArgs<'_> {
+    fn default() -> Self {
+        // The transcripts map is a reference, so it cannot derive Default. An
+        // empty map is the correct default: no voice note means no transcript.
+        static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+            std::sync::OnceLock::new();
+        Self {
+            agent_core: None,
+            huddle_instructions: None,
+            channel_info: None,
+            conversation_context: None,
+            conversation_context_had_session_events: false,
+            profile_lookup: None,
+            transcripts: EMPTY.get_or_init(std::collections::HashMap::new),
+            has_system_prompt_support: false,
+            base_prompt: None,
+            system_prompt: None,
+            team_instructions: None,
+            agent_canvas: None,
+            standing_context_sent: false,
+        }
+    }
 }
 
 /// The prompt sections that do not change for the life of a session: base
@@ -2445,7 +2480,15 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
                 "--- Event {} ({}) ---\n{}",
                 i + 1,
                 be.prompt_tag,
-                format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
+                format_event_block(
+                    batch.channel_id,
+                    args.channel_info,
+                    be,
+                    args.profile_lookup,
+                    args.transcripts
+                        .get(&be.event.id.to_hex())
+                        .map(String::as_str),
+                )
             ));
         }
         sections.push(crate::prompt_framing::semantic_section(
@@ -2467,7 +2510,10 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
                         batch.channel_id,
                         args.channel_info,
                         be,
-                        args.profile_lookup
+                        args.profile_lookup,
+                        args.transcripts
+                            .get(&be.event.id.to_hex())
+                            .map(String::as_str)
                     )
                 ),
             )
@@ -2475,7 +2521,15 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             crate::prompt_framing::semantic_section_with_attributes(
                 "buzz-event",
                 &[("type", be.prompt_tag.as_str())],
-                &format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup),
+                &format_event_block(
+                    batch.channel_id,
+                    args.channel_info,
+                    be,
+                    args.profile_lookup,
+                    args.transcripts
+                        .get(&be.event.id.to_hex())
+                        .map(String::as_str),
+                ),
             )
         }
     } else {
@@ -2488,7 +2542,15 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
                 "--- Event {} ({}) ---\n{}",
                 i + 1,
                 be.prompt_tag,
-                format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
+                format_event_block(
+                    batch.channel_id,
+                    args.channel_info,
+                    be,
+                    args.profile_lookup,
+                    args.transcripts
+                        .get(&be.event.id.to_hex())
+                        .map(String::as_str),
+                )
             ));
         }
         let count = batch.events.len().to_string();
@@ -5458,6 +5520,7 @@ mod tests {
                 received_at: Instant::now(),
             },
             None,
+            None,
         );
 
         assert!(direct_block.contains(&format!("Event ID: {direct_event_id}")));
@@ -5485,6 +5548,7 @@ mod tests {
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
             },
+            None,
             None,
         );
 

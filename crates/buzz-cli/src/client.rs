@@ -37,7 +37,12 @@ pub struct BlobDescriptor {
 }
 
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
-pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
+///
+/// `filename` is the original client-side name. The relay is content-addressed,
+/// so the name carries no storage meaning — it is a display label that lets a
+/// receiver identify the attachment (a `voice-note-*.mp4` renders as an audio
+/// bubble instead of a video player).
+pub fn build_imeta_tag(d: &BlobDescriptor, filename: Option<&str>) -> Vec<String> {
     let mut tag = vec![
         "imeta".to_string(),
         format!("url {}", d.url),
@@ -45,6 +50,11 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
         format!("x {}", d.sha256),
         format!("size {}", d.size),
     ];
+    if let Some(name) = filename {
+        if !name.is_empty() {
+            tag.push(format!("filename {name}"));
+        }
+    }
     if let Some(ref dim) = d.dim {
         tag.push(format!("dim {dim}"));
     }
@@ -2415,10 +2425,44 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        normalize_events, BuzzClient,
+        advance_query_cursor, build_imeta_tag, create_response_with_id_if_accepted,
+        extract_relay_response_field, normalize_events, BlobDescriptor, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn descriptor() -> BlobDescriptor {
+        BlobDescriptor {
+            url: "https://relay.example.com/media/abc.mp4".to_string(),
+            sha256: "a".repeat(64),
+            size: 42,
+            mime_type: "video/mp4".to_string(),
+            uploaded: 1,
+            dim: Some("16x16".to_string()),
+            blurhash: None,
+            thumb: None,
+            duration: Some(3.0),
+        }
+    }
+
+    #[test]
+    fn imeta_carries_the_original_filename_when_given() {
+        let tag = build_imeta_tag(&descriptor(), Some("voice-note-123.mp4"));
+        assert!(tag.contains(&"filename voice-note-123.mp4".to_string()));
+        // The other fields are unchanged.
+        assert!(tag.contains(&"m video/mp4".to_string()));
+        assert!(tag.contains(&"dim 16x16".to_string()));
+    }
+
+    #[test]
+    fn imeta_omits_the_filename_when_absent_or_empty() {
+        for name in [None, Some("")] {
+            let tag = build_imeta_tag(&descriptor(), name);
+            assert!(
+                !tag.iter().any(|part| part.starts_with("filename ")),
+                "no filename tag for {name:?}: {tag:?}"
+            );
+        }
+    }
 
     #[test]
     fn normalize_events_preserves_the_complete_signed_event_shape() {
