@@ -257,19 +257,14 @@ export function AnimatedAvatarCapture({
   }, [releaseCamera]);
   React.useEffect(() => releaseBitmaps, [releaseBitmaps]);
 
+  // Enumerate once when the capture UI mounts. No `devicechange` listener:
+  // in WebKitGTK every `enumerateDevices()` call starts fresh device-monitor
+  // machinery whose startup re-announces devices as `devicechange`, so an
+  // event-driven re-enumeration is a self-sustaining FD-leaking loop (see
+  // docs/linux-media-device-enumeration-loop.md). The list refreshes again
+  // only when the user switches camera source (refreshCameraDevices changes).
   React.useEffect(() => {
     void refreshCameraDevices();
-    const mediaDevices = navigator.mediaDevices;
-    if (!mediaDevices?.addEventListener) {
-      return;
-    }
-    const handleDeviceChange = () => {
-      void refreshCameraDevices();
-    };
-    mediaDevices.addEventListener("devicechange", handleDeviceChange);
-    return () => {
-      mediaDevices.removeEventListener("devicechange", handleDeviceChange);
-    };
   }, [refreshCameraDevices]);
 
   // Review preview mirrors the final avatar: the selected poster frame is
