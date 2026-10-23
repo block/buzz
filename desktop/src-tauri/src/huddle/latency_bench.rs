@@ -155,6 +155,7 @@ fn baseline_stt_fake_llm_tts_first_audio() {
     let t = Instant::now();
     let (stt, mut text_rx) = SttPipeline::new(
         stt_dir,
+        super::models::SttFamily::NemoCtc,
         None,
         None,
         super::human_floor::HumanFloor::new(),
