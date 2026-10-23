@@ -178,6 +178,59 @@ pub fn read_or_stdin(value: &str) -> Result<String, CliError> {
     }
 }
 
+/// Resolve a `--content -` style argument, reading stdin for the `-` sentinel.
+///
+/// Unlike [`read_or_stdin`] this applies the hygiene that publish-shaped
+/// commands need, matching `notes set` and `mem set`:
+///
+/// * the read is capped at `max_bytes` so a runaway producer cannot OOM the
+///   CLI (no Nostr kind caps event size for us), and
+/// * an empty read is refused unless `allow_empty` — an empty pipe almost
+///   always means an upstream pipeline step failed, and publishing the empty
+///   result is both wrong and, for immutable kinds, awkward to undo.
+///
+/// Values other than `-` are returned verbatim, including an empty string:
+/// only stdin reads are subject to the guardrails.
+pub fn read_stdin_sentinel(
+    value: &str,
+    max_bytes: usize,
+    allow_empty: bool,
+) -> Result<String, CliError> {
+    if value != "-" {
+        return Ok(value.to_string());
+    }
+    read_sentinel_from(std::io::stdin().lock(), max_bytes, allow_empty)
+}
+
+/// The reader half of [`read_stdin_sentinel`], split out so the guardrails are
+/// testable without a process-global stdin.
+fn read_sentinel_from(
+    reader: impl std::io::Read,
+    max_bytes: usize,
+    allow_empty: bool,
+) -> Result<String, CliError> {
+    use std::io::Read;
+    let mut buf = String::new();
+    reader
+        .take(max_bytes as u64 + 1)
+        .read_to_string(&mut buf)
+        .map_err(|e| CliError::Other(format!("stdin read failed: {e}")))?;
+
+    if buf.len() > max_bytes {
+        return Err(CliError::Usage(format!(
+            "stdin body exceeds {max_bytes}-byte limit"
+        )));
+    }
+    if buf.is_empty() && !allow_empty {
+        return Err(CliError::Usage(
+            "refusing to publish an empty body from stdin (an upstream pipeline step \
+             likely failed). Pass --allow-empty to confirm."
+                .into(),
+        ));
+    }
+    Ok(buf)
+}
+
 /// Read content from a file path, or stdin if the value is "-".
 ///
 /// Unlike [`read_or_stdin`], `value` is never treated as literal content —
@@ -474,6 +527,72 @@ mod tests {
     #[test]
     fn read_or_stdin_passthrough_empty_string() {
         assert_eq!(super::read_or_stdin("").unwrap(), "");
+    }
+
+    // --- read_stdin_sentinel ---
+    //
+    // Regression coverage for issue #4905: `social publish --content -` used to
+    // publish a literal one-character `-` note and report success, discarding
+    // the piped body.
+
+    #[test]
+    fn read_stdin_sentinel_passes_literal_values_through_untouched() {
+        // Only `-` means stdin. Everything else is the body verbatim, including
+        // values that merely contain a dash.
+        assert_eq!(
+            super::read_stdin_sentinel("hello", 1024, false).unwrap(),
+            "hello"
+        );
+        assert_eq!(super::read_stdin_sentinel("-x", 1024, false).unwrap(), "-x");
+        assert_eq!(
+            super::read_stdin_sentinel("a - b", 1024, false).unwrap(),
+            "a - b"
+        );
+    }
+
+    #[test]
+    fn read_stdin_sentinel_passes_empty_literal_through_without_the_guard() {
+        // The empty-body guard exists to catch a failed upstream pipe, so it
+        // applies to stdin reads only — an explicitly passed "" is the caller's
+        // choice and is not second-guessed.
+        assert_eq!(super::read_stdin_sentinel("", 1024, false).unwrap(), "");
+    }
+
+    #[test]
+    fn read_sentinel_from_reads_the_whole_body() {
+        let body = "expected multiline note body\nsecond line";
+        assert_eq!(
+            super::read_sentinel_from(body.as_bytes(), 1024, false).unwrap(),
+            body
+        );
+    }
+
+    #[test]
+    fn read_sentinel_from_rejects_empty_unless_allowed() {
+        let err = super::read_sentinel_from(&b""[..], 1024, false).unwrap_err();
+        assert!(
+            err.to_string().contains("--allow-empty"),
+            "error should point at the opt-out: {err}"
+        );
+        assert_eq!(super::read_sentinel_from(&b""[..], 1024, true).unwrap(), "");
+    }
+
+    #[test]
+    fn read_sentinel_from_enforces_the_byte_cap() {
+        // Exactly at the cap is fine; one byte over is refused rather than
+        // silently truncated.
+        let at_cap = "a".repeat(8);
+        assert_eq!(
+            super::read_sentinel_from(at_cap.as_bytes(), 8, false).unwrap(),
+            at_cap
+        );
+
+        let over_cap = "a".repeat(9);
+        let err = super::read_sentinel_from(over_cap.as_bytes(), 8, false).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "error should name the limit: {err}"
+        );
     }
 
     // --- read_file_or_stdin ---
