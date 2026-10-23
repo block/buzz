@@ -478,6 +478,106 @@ fn verify_hunks_at_declared_position(
     Ok(())
 }
 
+/// Refuse patches whose result is byte-identical to the current value.
+///
+/// A no-op patch would publish a fresh head event carrying identical
+/// content: the command would echo the input diff, print `wrote …` with a
+/// sha256 equal to the base-hash (by construction), and exit 0 — while the
+/// stored value never changes and the event chain still advances. Neither
+/// `wrote` nor a new event id is mutation evidence; the only evidence is
+/// post-write hash inequality, which a no-op can never produce. Refusing
+/// here keeps the failure loud and prevents the new head event from being
+/// published at all.
+fn ensure_patch_changes_value(current: &str, new_value: &str) -> Result<(), String> {
+    if current == new_value {
+        return Err(
+            "patch is a no-op: the result is byte-identical to the current value. \
+             Nothing was written and no event was published. If the edit was expected \
+             to change the value, the patch was likely generated against a value that \
+             already contains it — re-fetch (`buzz mem get`) and re-diff."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Refuse range-less hunk headers before parsing.
+///
+/// diffy accepts a bare `@@` (or any `@@` header without
+/// `-start[,count] +start[,count]` ranges) as a zero-hunk patch: `apply`
+/// returns the input unchanged, so a real content edit under a range-less
+/// header is silently dropped while the command reports success with the
+/// base-hash sha256 (the pre-#7654 binary then publishes a fresh head event
+/// carrying identical content). A hand-written hunk header without line
+/// ranges is always a mistake, so fail loud at parse time, before any store
+/// access. (Six-seat silent no-op class, 2026-10-18: bare-`@@` repros at
+/// the CTO/AS/DIR/EXP/Dev seats against a binary that predates PR #7654.)
+fn ensure_hunk_headers_carry_ranges(diff_text: &str) -> Result<(), String> {
+    for (idx, line) in diff_text.lines().enumerate() {
+        // Hunk headers start at column 0; a context line whose content
+        // begins with "@@" carries a leading diff-prefix character and is
+        // not a header.
+        if !line.starts_with("@@") {
+            continue;
+        }
+        if !hunk_header_has_ranges(line) {
+            return Err(format!(
+                "line {} is a hunk header without `-start[,count] +start[,count]` \
+                 ranges (`{line}`); a range-less `@@` parses as a zero-hunk \
+                 no-op patch, so nothing would be applied. Regenerate the \
+                 patch with a real diff tool (diff -u / git diff).",
+                idx + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `@@ -12,3 +12,3 @@ [section]` — true iff the header carries both
+/// `-start[,count]` and `+start[,count]` ranges.
+fn hunk_header_has_ranges(header: &str) -> bool {
+    let rest = &header[2..];
+    let span = rest.split("@@").next().unwrap_or("").trim();
+    let mut chars = span.chars();
+    if chars.next() != Some('-') {
+        return false;
+    }
+    if !take_digits(&mut chars) {
+        return false;
+    }
+    match chars.next() {
+        Some(',') => {
+            if !take_digits(&mut chars) {
+                return false;
+            }
+            if chars.next() != Some(' ') {
+                return false;
+            }
+        }
+        Some(' ') => {}
+        _ => return false,
+    }
+    if chars.next() != Some('+') {
+        return false;
+    }
+    if !take_digits(&mut chars) {
+        return false;
+    }
+    if chars.next() == Some(',') && !take_digits(&mut chars) {
+        return false;
+    }
+    chars.next().is_none()
+}
+
+fn take_digits(chars: &mut std::str::Chars<'_>) -> bool {
+    let mut any = false;
+    while chars.clone().next().is_some_and(|c| c.is_ascii_digit()) {
+        chars.next();
+        any = true;
+    }
+    any
+}
+
 /// Extract the current slug value as a `String` (or return `NotFound`).
 /// Used by `mem hash` and `mem patch` — they both need "the value or fail".
 /// Returns `(head_event, value)` so the caller can preserve monotonic ordering.
@@ -626,6 +726,17 @@ pub async fn cmd_patch(
     let patch = diffy::Patch::from_str(&diff_text)
         .map_err(|e| CliError::Usage(format!("malformed unified diff: {e}")))?;
 
+    // Row 1 of the fix spec (2026-10-18 six-seat arc): a range-less `@@`
+    // hunk header parses as a zero-hunk patch, and a real content edit under
+    // it would be silently dropped (row 2's byte-identity guard refuses the
+    // result later, but this refuses the malformed form at parse, naming
+    // the line — the failure the operator actually needs).
+    ensure_hunk_headers_carry_ranges(&diff_text).map_err(|msg| {
+        CliError::Usage(format!(
+            "malformed hunk header in patch for slug `{slug}`: {msg}"
+        ))
+    })?;
+
     // Strict positional check — diffy's `apply` allows the hunk to slide
     // forward/backward in the file if it finds the preimage elsewhere. For
     // memory edits we want the stronger guarantee: the hunk must apply at
@@ -647,6 +758,13 @@ pub async fn cmd_patch(
              Context must match the current value verbatim — no fuzz, no offset."
         ))
     })?;
+
+    // No-op refusal: a byte-identical result must never publish a new head
+    // event (it would advance the event chain while changing nothing, and
+    // report `wrote` + a sha256 equal to the base-hash). Checked before the
+    // dry-run branch so a no-op is refused in both modes.
+    ensure_patch_changes_value(&current, &new_value)
+        .map_err(|msg| CliError::Usage(format!("patch did not change slug `{slug}`: {msg}")))?;
 
     if new_value.len() > engram::NIP44_PLAINTEXT_MAX {
         return Err(CliError::Usage(format!(
@@ -1041,5 +1159,147 @@ mod tests {
         let multi = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n\
                      --- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n";
         assert_eq!(multi.lines().filter(|l| l.starts_with("--- ")).count(), 2);
+    }
+
+    // No-op refusal: `mem patch` must refuse any patch whose result is
+    // byte-identical to the current value. Left unchecked, a no-op patch
+    // publishes a fresh head event with identical content, echoes the input
+    // diff, prints `wrote …` with a sha256 equal to the base-hash (by
+    // construction), and exits 0 — the exact silent-no-op failure observed
+    // in the wild (context-only hunks after a prior identical edit landed).
+    // These tests pin the three shapes that produce a byte-identical result:
+    // context-only hunks, delete-then-reinsert pairs, and self-canceling edits.
+
+    #[test]
+    fn noop_refusal_context_only_hunks() {
+        let current = "alpha\nbeta\ngamma\n";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ alpha
+ beta
+ gamma
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let new_value = diffy::apply(current, &patch).unwrap();
+        let err = ensure_patch_changes_value(current, &new_value).unwrap_err();
+        assert!(err.contains("no-op"), "got: {err}");
+    }
+
+    #[test]
+    fn noop_refusal_delete_reinsert_pair() {
+        let current = "alpha\nbeta\ngamma\n";
+        // Deletes beta and reinserts the identical line.
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++beta
+ gamma
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let new_value = diffy::apply(current, &patch).unwrap();
+        assert_eq!(new_value, current);
+        let err = ensure_patch_changes_value(current, &new_value).unwrap_err();
+        assert!(err.contains("no-op"), "got: {err}");
+    }
+
+    #[test]
+    fn noop_refusal_empty_diff_applies_to_nothing() {
+        let current = "alpha\nbeta\ngamma\n";
+        // `diff -u current current` emits only the file headers, no hunks.
+        // diffy accepts this as a valid zero-hunk patch, and `apply` returns
+        // the input unchanged — the third no-op shape the guard must catch
+        // (and the one `diff -u` naturally produces when a re-diff finds
+        // nothing left to change).
+        let patch_text = "--- a/x\n+++ b/x\n";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let new_value = diffy::apply(current, &patch).unwrap();
+        assert_eq!(new_value, current);
+        let err = ensure_patch_changes_value(current, &new_value).unwrap_err();
+        assert!(err.contains("no-op"), "got: {err}");
+    }
+
+    #[test]
+    fn noop_refusal_allows_real_change() {
+        let current = "alpha\nbeta\ngamma\n";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++delta
+ gamma
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let new_value = diffy::apply(current, &patch).unwrap();
+        assert_ne!(new_value, current);
+        assert!(ensure_patch_changes_value(current, &new_value).is_ok());
+    }
+
+    // Range-less `@@` hunk headers (fix row 1, 2026-10-18 six-seat arc):
+    // a bare `@@` parses as a zero-hunk patch whose `apply` result is
+    // byte-identical to the input, so a real content edit under it is
+    // silently dropped while the command reports success with the
+    // base-hash sha256. The guard refuses the malformed form at parse,
+    // naming the line.
+
+    #[test]
+    fn bare_at_hunk_header_refused_named() {
+        // The six-seat repro shape verbatim.
+        let patch_text =
+            "--- a\n+++ b\n@@\n-REPRO LINE ONE. marker=A.\n+REPRO LINE ONE. marker=B.\n";
+        // diffy itself accepts this form — the trap the guard exists for.
+        assert!(diffy::Patch::from_str(patch_text).is_ok());
+        let err = ensure_hunk_headers_carry_ranges(patch_text).unwrap_err();
+        assert!(err.contains("line 3"), "got: {err}");
+        assert!(err.contains("range-less"), "got: {err}");
+    }
+
+    #[test]
+    fn well_formed_hunk_headers_pass() {
+        // Standard multi-line form, including a trailing section heading.
+        let patch_text = "--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@ alpha\n alpha\n-beta\n+delta\n gamma\n";
+        assert!(ensure_hunk_headers_carry_ranges(patch_text).is_ok());
+        // Count-optional single-line form is well-formed (git emits `-1 +1`).
+        let single = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-alpha\n+delta\n";
+        assert!(ensure_hunk_headers_carry_ranges(single).is_ok());
+    }
+
+    #[test]
+    fn partial_range_headers_refused() {
+        // Every malformed header a human might hand-type between the
+        // well-formed and the fully-bare forms.
+        for patch_text in [
+            "--- a\n+++ b\n@@ -1 +\n-alpha\n+beta\n",
+            "--- a\n+++ b\n@@ - +1\n-alpha\n+beta\n",
+            "--- a\n+++ b\n@@ -1,3\n-alpha\n+beta\n",
+            "--- a\n+++ b\n@@ 1 1\n-alpha\n+beta\n",
+        ] {
+            let err = ensure_hunk_headers_carry_ranges(patch_text)
+                .expect_err("partial-range header must be refused");
+            assert!(err.contains("line 3"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn bare_at_real_edit_caught_by_both_guards() {
+        // Row 1 (parse): the malformed header itself is refused up front.
+        let patch_text = "--- a\n+++ b\n@@\n-alpha\n+beta\n";
+        assert!(ensure_hunk_headers_carry_ranges(patch_text).is_err());
+        // Row 2 (byte-identity): even if the header form were accepted,
+        // diffy parses zero hunks, `apply` returns the input unchanged,
+        // and the no-op guard refuses — the mechanism-agnostic backstop
+        // that also covers class (ii) and future parser regressions.
+        let current = "alpha\n";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        let new_value = diffy::apply(current, &patch).unwrap();
+        assert_eq!(new_value, current);
+        let err = ensure_patch_changes_value(current, &new_value).unwrap_err();
+        assert!(err.contains("no-op"), "got: {err}");
     }
 }
