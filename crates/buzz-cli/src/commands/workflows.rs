@@ -5,6 +5,7 @@ use crate::client::{
     BuzzClient,
 };
 use crate::error::CliError;
+use crate::limits::{truncation_notice, Paging, ReadLimits};
 use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
 
 // TODO(phase-4): Replace raw nostr::EventBuilder usage with buzz-sdk builder functions
@@ -57,6 +58,13 @@ pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<
     Ok(())
 }
 
+/// `workflows runs` takes `--workflow` and `--limit`, nothing else.
+const RUNS_LIMITS: ReadLimits = ReadLimits {
+    default: 20,
+    max: 100,
+    paging: Paging::None,
+};
+
 /// Get workflow run history — query kinds [46001, 46002, 46003].
 ///
 /// NOTE: The relay does not currently emit workflow execution events (46001-46003).
@@ -66,10 +74,10 @@ pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<
 pub async fn cmd_get_workflow_runs(
     client: &BuzzClient,
     workflow_id: &str,
-    limit: Option<u32>,
+    requested_limit: Option<u32>,
 ) -> Result<(), CliError> {
     validate_uuid(workflow_id)?;
-    let limit = limit.unwrap_or(20).min(100);
+    let limit = RUNS_LIMITS.effective(requested_limit);
     let filter = serde_json::json!({
         "kinds": [46001, 46002, 46003],
         "#d": [workflow_id],
@@ -91,6 +99,9 @@ pub async fn cmd_get_workflow_runs(
         .collect();
     let output = serde_json::to_string(&normalized).unwrap_or_default();
     println!("{output}");
+    if let Some(notice) = truncation_notice(normalized.len(), requested_limit, RUNS_LIMITS) {
+        eprintln!("{notice}");
+    }
     Ok(())
 }
 
