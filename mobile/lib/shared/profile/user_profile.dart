@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../text/initial.dart';
 import '../utils/string_utils.dart';
 
 @immutable
@@ -48,10 +49,10 @@ class UserProfile {
   /// First letter for fallback avatar.
   String get initial {
     final name = displayName?.trim();
-    if (name != null && name.isNotEmpty) return name[0].toUpperCase();
+    if (name != null && name.isNotEmpty) return avatarInitial(name);
     // Hex-derived (not npub-derived) so unnamed identities keep distinct
     // initials instead of every npub rendering `N`.
-    return pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?';
+    return avatarInitial(pubkey);
   }
 }
 
