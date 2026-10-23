@@ -133,7 +133,10 @@ export function useChannelIntro({
       description: getChannelIntroDescription(activeChannel),
       hideBeginning: projectHome,
       icon: projectHome ? (
-        <ProjectChannelIcon className="h-7 w-7" />
+        <ProjectChannelIcon
+          className="h-7 w-7"
+          private={activeChannel.visibility === "private"}
+        />
       ) : undefined,
     };
   }, [
