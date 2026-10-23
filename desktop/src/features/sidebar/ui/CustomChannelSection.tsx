@@ -4,7 +4,9 @@ import {
   ArrowUpDown,
   CheckCheck,
   ChevronDown,
+  CornerUpLeft,
   EllipsisVertical,
+  FolderPlus,
   Pencil,
   Plus,
   Trash2,
@@ -131,6 +133,8 @@ export function SectionActionsMenu({
   onNewMessage,
   newMessageLabel,
   onRenameSection,
+  onCreateSubsection,
+  onPromoteSection,
   onMoveSectionUp,
   onMoveSectionDown,
   onDeleteSection,
@@ -152,6 +156,10 @@ export function SectionActionsMenu({
   onNewMessage?: () => void;
   newMessageLabel?: string;
   onRenameSection?: () => void;
+  /** Top-level sections only — the sidebar nests one level. */
+  onCreateSubsection?: () => void;
+  /** Subsections only — lifts the section back to the top level. */
+  onPromoteSection?: () => void;
   onMoveSectionUp?: () => void;
   onMoveSectionDown?: () => void;
   onDeleteSection?: () => void;
@@ -221,6 +229,22 @@ export function SectionActionsMenu({
               >
                 <Pencil className="h-4 w-4" />
                 <span>Rename section</span>
+              </DropdownMenuItem>
+            ) : null}
+            {onCreateSubsection ? (
+              <DropdownMenuItem
+                onSelect={() => deferMenuAction(onCreateSubsection)}
+              >
+                <FolderPlus className="h-4 w-4" />
+                <span>New subsection...</span>
+              </DropdownMenuItem>
+            ) : null}
+            {onPromoteSection ? (
+              <DropdownMenuItem
+                onSelect={() => deferMenuAction(onPromoteSection)}
+              >
+                <CornerUpLeft className="h-4 w-4" />
+                <span>Move out of subsection</span>
               </DropdownMenuItem>
             ) : null}
             {onMoveSectionUp ? (
@@ -536,6 +560,33 @@ export function ChannelGroupSection({
   );
 }
 
+/**
+ * Drag wrapper for a section header. Only top-level sections take part in the
+ * sortable list; a subsection keeps its place under its parent and is reordered
+ * from its menu instead.
+ */
+function SectionDragShell({
+  sectionId,
+  sortable,
+  children,
+}: {
+  sectionId: string;
+  sortable: boolean;
+  children: (props: {
+    dragHandleProps: React.HTMLAttributes<HTMLElement>;
+    isDragging: boolean;
+  }) => React.ReactNode;
+}) {
+  if (!sortable) {
+    return <>{children({ dragHandleProps: {}, isDragging: false })}</>;
+  }
+  return (
+    <SortableSectionShell sectionId={sectionId}>
+      {children}
+    </SortableSectionShell>
+  );
+}
+
 export function CustomChannelSection({
   section,
   channels,
@@ -561,6 +612,8 @@ export function CustomChannelSection({
   onCreateSectionForChannel,
   onCreateChannel,
   onRenameSection,
+  onCreateSubsection,
+  onPromoteSection,
   onDeleteSection,
   onMoveSectionUp,
   onMoveSectionDown,
@@ -600,6 +653,10 @@ export function CustomChannelSection({
   onCreateSectionForChannel: (channelId: string) => void;
   onCreateChannel: () => void;
   onRenameSection: () => void;
+  /** Opens the create dialog with this section as the parent (top level only). */
+  onCreateSubsection?: () => void;
+  /** Lifts this subsection back to the top level (subsections only). */
+  onPromoteSection?: () => void;
   onDeleteSection: () => void;
   onMoveSectionUp: () => void;
   onMoveSectionDown: () => void;
@@ -614,16 +671,19 @@ export function CustomChannelSection({
 }) {
   const contentId = `sidebar-section-${section.id}`;
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const isSubsection = Boolean(section.parentId);
 
   return (
-    <SortableSectionShell sectionId={section.id}>
+    <SectionDragShell sectionId={section.id} sortable={!isSubsection}>
       {({ dragHandleProps, isDragging }) => (
         <DroppableSectionBody sectionId={section.id}>
           <SidebarGroup
             className={cn(
               "group/sidebar-section select-none transition-[opacity,transform] duration-100 ease-out motion-reduce:transition-none",
+              isSubsection && "ml-3 border-l border-sidebar-border/60 pl-1",
               isDragging && "opacity-30",
             )}
+            data-sidebar-subsection={isSubsection || undefined}
             data-section-actions-open={actionsMenuOpen || undefined}
             data-sidebar-drag-state={isDragging ? "dragging" : undefined}
           >
@@ -689,6 +749,8 @@ export function CustomChannelSection({
                       hasUnread={hasUnread}
                       onMarkAllRead={onMarkSectionRead}
                       onRenameSection={onRenameSection}
+                      onCreateSubsection={onCreateSubsection}
+                      onPromoteSection={onPromoteSection}
                       onMoveSectionUp={onMoveSectionUp}
                       onMoveSectionDown={onMoveSectionDown}
                       onDeleteSection={onDeleteSection}
@@ -705,6 +767,18 @@ export function CustomChannelSection({
                   <Pencil className="h-4 w-4" />
                   Rename section
                 </ContextMenuItem>
+                {onCreateSubsection ? (
+                  <ContextMenuItem onClick={onCreateSubsection}>
+                    <FolderPlus className="h-4 w-4" />
+                    New subsection...
+                  </ContextMenuItem>
+                ) : null}
+                {onPromoteSection ? (
+                  <ContextMenuItem onClick={onPromoteSection}>
+                    <CornerUpLeft className="h-4 w-4" />
+                    Move out of subsection
+                  </ContextMenuItem>
+                ) : null}
                 <ContextMenuItem disabled={isFirst} onClick={onMoveSectionUp}>
                   <ArrowUp className="h-4 w-4" />
                   Move up
@@ -780,6 +854,6 @@ export function CustomChannelSection({
           </SidebarGroup>
         </DroppableSectionBody>
       )}
-    </SortableSectionShell>
+    </SectionDragShell>
   );
 }
