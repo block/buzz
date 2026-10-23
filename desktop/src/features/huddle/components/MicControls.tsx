@@ -1,4 +1,4 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 import { Check, ChevronUp, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import * as React from "react";
 import type { CSSProperties } from "react";
@@ -301,7 +301,7 @@ export function MicControls({
                   <Button
                     className="mt-2 h-7 border-foreground/15 bg-foreground/10 px-2 text-xs text-foreground hover:bg-foreground/15"
                     onClick={() => {
-                      void openUrl(MIC_PERMISSION_SETTINGS_URL).catch(
+                      void openExternalUrl(MIC_PERMISSION_SETTINGS_URL).catch(
                         (error) => {
                           console.error(
                             "[huddle] Failed to open microphone settings:",

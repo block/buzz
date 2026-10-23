@@ -276,7 +276,7 @@ pub(crate) async fn start_builderlab_login(
     });
 
     let login_url = login_url(&return_to)?;
-    if let Err(error) = app.opener().open_url(login_url.as_str(), None::<&str>) {
+    if let Err(error) = crate::linux_url_opener::open_external_url_for_app(&app, login_url.as_str()) {
         server.abort();
         return Err(format!("could not open Builderlab authentication: {error}"));
     }
