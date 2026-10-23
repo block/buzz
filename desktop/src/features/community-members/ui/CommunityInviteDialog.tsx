@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   Dialog,
   DialogContent,
@@ -24,6 +25,7 @@ export function CommunityInviteDialog({
   open: boolean;
 }) {
   const [ttlSecs, setTtlSecs] = React.useState(DEFAULT_INVITE_TTL_SECS);
+  const communityName = useCommunities().activeCommunity?.name;
 
   React.useEffect(() => {
     // Reset after the link section has unmounted so reopening never mints an
@@ -40,7 +42,11 @@ export function CommunityInviteDialog({
         <DialogHeader>
           <DialogTitle>Invite to community</DialogTitle>
           <DialogDescription>
-            Add someone directly or share a link they can use to join.
+            Add someone to{" "}
+            <span className="font-medium text-foreground">
+              {communityName ?? "this community"}
+            </span>{" "}
+            directly or share a link they can use to join.
           </DialogDescription>
         </DialogHeader>
 

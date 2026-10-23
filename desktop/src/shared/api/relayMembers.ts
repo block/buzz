@@ -148,8 +148,18 @@ export async function getMyRelayMembership(): Promise<RelayMember | null> {
 async function publishRelayAdminEvent(
   kind: number,
   targetPubkey: string,
+  relayUrl: string | undefined,
   role?: string,
 ): Promise<void> {
+  // The receiving relay applies the change to its own community, so an admin
+  // event sent over a socket left on another community changes that one.
+  const connectedRelayUrl = relayClient.getRelayUrl();
+  if (!relayUrl || connectedRelayUrl !== relayUrl) {
+    throw new Error(
+      `Relay access was not changed: the relay connection (${connectedRelayUrl ?? "none"}) is not the selected community (${relayUrl ?? "none"}).`,
+    );
+  }
+
   const tags = [["p", normalizePubkey(targetPubkey)]];
   if (role) {
     tags.push(["role", role]);
@@ -161,31 +171,60 @@ async function publishRelayAdminEvent(
     tags,
   });
 
+  // Re-checked before every send, so a switch during signing cancels it.
   await relayClient.publishEvent(
     event,
     "Timed out while updating relay access.",
     "Failed to update relay access.",
+    () => relayClient.getRelayUrl() === relayUrl,
   );
 }
 
+/**
+ * Adds `targetPubkey` to the community on `relayUrl`. Refuses to publish when
+ * the relay connection is to any other relay.
+ */
 export async function addRelayMember(
   targetPubkey: string,
   role: string,
+  relayUrl: string | undefined,
 ): Promise<void> {
-  await publishRelayAdminEvent(KIND_RELAY_ADMIN_ADD_MEMBER, targetPubkey, role);
+  await publishRelayAdminEvent(
+    KIND_RELAY_ADMIN_ADD_MEMBER,
+    targetPubkey,
+    relayUrl,
+    role,
+  );
 }
 
-export async function removeRelayMember(targetPubkey: string): Promise<void> {
-  await publishRelayAdminEvent(KIND_RELAY_ADMIN_REMOVE_MEMBER, targetPubkey);
+/**
+ * Removes `targetPubkey` from the community on `relayUrl`. Refuses to publish
+ * when the relay connection is to any other relay.
+ */
+export async function removeRelayMember(
+  targetPubkey: string,
+  relayUrl: string | undefined,
+): Promise<void> {
+  await publishRelayAdminEvent(
+    KIND_RELAY_ADMIN_REMOVE_MEMBER,
+    targetPubkey,
+    relayUrl,
+  );
 }
 
+/**
+ * Changes the role of `targetPubkey` in the community on `relayUrl`. Refuses
+ * to publish when the relay connection is to any other relay.
+ */
 export async function changeRelayMemberRole(
   targetPubkey: string,
   newRole: string,
+  relayUrl: string | undefined,
 ): Promise<void> {
   await publishRelayAdminEvent(
     KIND_RELAY_ADMIN_CHANGE_ROLE,
     targetPubkey,
+    relayUrl,
     newRole,
   );
 }
