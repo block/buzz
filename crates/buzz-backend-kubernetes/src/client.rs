@@ -132,11 +132,13 @@ mod tests {
     /// race every other test in the binary.
     #[test]
     fn plugin_directories_are_prepended_in_order() {
-        let joined = prepended_path(
-            Some(Path::new("/tmp/fake-home")),
-            std::ffi::OsStr::new("/inherited/bin:/usr/bin"),
-        )
-        .unwrap();
+        // Built with `join_paths` rather than a literal "a:b": the PATH
+        // separator is `;` on Windows, so a hard-coded colon made
+        // `split_paths` see one entry and this test failed on every Windows
+        // host without saying anything about the ordering it checks.
+        let inherited =
+            std::env::join_paths([Path::new("/inherited/bin"), Path::new("/usr/bin")]).unwrap();
+        let joined = prepended_path(Some(Path::new("/tmp/fake-home")), &inherited).unwrap();
         let dirs: Vec<PathBuf> = std::env::split_paths(&joined).collect();
         assert_eq!(
             dirs,
@@ -174,9 +176,15 @@ mod tests {
         );
     }
 
+    /// An absolute path is answered from the filesystem, not from PATH.
+    ///
+    /// The positive case uses this test binary rather than `/bin/sh`, which
+    /// does not exist on Windows and made the assertion fail there for a
+    /// reason unrelated to what it checks.
     #[test]
     fn resolves_absolute_paths_directly() {
-        assert!(resolves_on_path("/bin/sh"));
+        let exe = std::env::current_exe().expect("current exe");
+        assert!(resolves_on_path(&exe.to_string_lossy()));
         assert!(!resolves_on_path("/nonexistent/plugin-binary"));
     }
 }
