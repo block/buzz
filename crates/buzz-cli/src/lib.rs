@@ -3,6 +3,7 @@ mod client;
 mod commands;
 mod error;
 mod help_tree;
+mod private_key;
 mod links;
 mod validate;
 
@@ -39,7 +40,11 @@ where
     // double-install returns Err and is harmless.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let cli = match parse_args(args) {
+    let argv: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+    let private_key_from_argv =
+        private_key::private_key_flag_on_argv(argv.iter().filter_map(|s| s.to_str()));
+
+    let cli = match parse_args(argv) {
         Ok(cli) => cli,
         Err(e) => {
             if e.use_stderr() {
@@ -52,7 +57,7 @@ where
             }
         }
     };
-    match run(cli).await {
+    match run(cli, private_key_from_argv).await {
         Ok(()) => 0,
         Err(e) => {
             error::print_error(&e);
@@ -125,9 +130,13 @@ Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
-  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [preferred over --private-key]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
   BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
+
+Identity secrets: prefer BUZZ_PRIVATE_KEY, --private-key-file, or
+--private-key-stdin. Passing --private-key on argv is deprecated (shell
+history / process listings).
 
 The 'pack' subcommand runs locally and does not require a relay connection.
 
@@ -139,9 +148,19 @@ struct Cli {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "http://localhost:3000")]
     relay: String,
 
-    /// Nostr private key (hex or nsec). This is the CLI's identity.
+    /// Nostr private key (hex or nsec). Prefer `BUZZ_PRIVATE_KEY`,
+    /// `--private-key-file`, or `--private-key-stdin` — passing the secret on
+    /// argv leaks into shell history and `ps` (deprecated).
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
+
+    /// Read the Nostr private key from a file (mode 0600 recommended).
+    #[arg(long, value_name = "PATH")]
+    private_key_file: Option<std::path::PathBuf>,
+
+    /// Read the Nostr private key from stdin (trim surrounding whitespace).
+    #[arg(long, default_value_t = false)]
+    private_key_stdin: bool,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
@@ -2198,7 +2217,7 @@ fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
-async fn run(cli: Cli) -> Result<(), CliError> {
+async fn run(cli: Cli, private_key_from_argv: bool) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
     // Pack commands are local-only — no relay connection needed.
@@ -2211,8 +2230,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
+    let private_key_str = private_key::resolve_private_key(private_key::PrivateKeyInputs {
+        private_key: cli.private_key,
+        private_key_file: cli.private_key_file,
+        private_key_stdin: cli.private_key_stdin,
+        private_key_from_argv,
     })?;
     let keys = Keys::parse(&private_key_str)
         .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
