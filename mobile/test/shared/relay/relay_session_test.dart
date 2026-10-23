@@ -815,7 +815,7 @@ void main() {
   });
 
   test(
-    'resume reconnects a stale connected session after a long pause',
+    'resume reconnects a stale session and holds requests until AUTH',
     () async {
       final sockets = <_ControlledRelaySocket>[];
       final keychain = nostr.Keys.generate();
@@ -868,6 +868,22 @@ void main() {
       expect(sockets, hasLength(2));
       expect(sockets.first.disposeCalls, 1);
       expect(session.state.status, SessionStatus.reconnecting);
+
+      // The relay rejects a REQ sent before AUTH, so the session holds it.
+      final history = session.fetchHistory(
+        NostrFilter(kinds: const [0], authors: [keychain.public]),
+      );
+      unawaited(session.subscribe(NostrFilter(kinds: const [9]), (_) {}));
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets.last.sent, isEmpty);
+      sockets.last.connectSuccessfully();
+      final reqs = sockets.last.sent;
+      expect(reqs.map((message) => message.first), ['REQ', 'REQ']);
+      final historyReq = reqs.singleWhere(
+        (message) => (message[2] as Map)['kinds'].contains(0),
+      );
+      session.debugHandleSocketMessageForTest(['EOSE', historyReq[1]]);
+      expect(await history, isEmpty);
     },
   );
 
@@ -1961,6 +1977,7 @@ class _ControlledRelaySocket extends RelaySocket {
   final void Function() _connected;
   final void Function(Object? error) _disconnected;
   int disposeCalls = 0;
+  final sent = <List<dynamic>>[];
 
   _ControlledRelaySocket({
     required super.wsUrl,
@@ -1973,6 +1990,9 @@ class _ControlledRelaySocket extends RelaySocket {
 
   @override
   Future<void> connect() async {}
+
+  @override
+  void send(List<dynamic> payload) => sent.add(payload);
 
   @override
   void dispose() {

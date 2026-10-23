@@ -167,9 +167,16 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Re-fetch when the app returns to foreground so channels created on
     // another device while mobile was backgrounded appear immediately.
     ref.listen(appLifecycleProvider, (prev, next) {
-      if (next == AppLifecycleState.resumed) {
-        refresh();
-      }
+      if (next != AppLifecycleState.resumed) return;
+      // Resume is published before the session hears it. Let the session
+      // decide first: one that reconnects reconciles when it connects, so
+      // refreshing here too would fetch the same list twice.
+      scheduleMicrotask(() {
+        if (!ref.mounted) return;
+        if (ref.read(relaySessionProvider).status == SessionStatus.connected) {
+          refresh();
+        }
+      });
     });
 
     ref.onDispose(() {

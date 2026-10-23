@@ -166,10 +166,17 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     unawaited(_unreadCatchUp);
 
     _backstopTimer?.cancel();
-    _backstopTimer = Timer.periodic(
-      ChannelsNotifier._backstopInterval,
-      (_) => _backstopRefresh(),
-    );
+    _backstopTimer = Timer.periodic(ChannelsNotifier._backstopInterval, (_) {
+      // A backgrounded app polls nothing, and a reconnecting session
+      // reconciles when it connects. After an OS suspension the missed tick
+      // fires before the app hears it has resumed, so check both.
+      if (_lifecycleRef.read(appLifecycleProvider) ==
+              AppLifecycleState.resumed &&
+          _lifecycleRef.read(relaySessionProvider).status ==
+              SessionStatus.connected) {
+        unawaited(_backstopRefresh());
+      }
+    });
   }
 
   void _handleLiveChunkClosed(String chunkKey, int generation, String message) {

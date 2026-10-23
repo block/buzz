@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -16,6 +18,16 @@ part 'channel_messages_provider/pagination.dart';
 // Channel history keeps partial reply evidence; full threads stay route-scoped.
 const _maxCachedRepliesPerRoot = 256;
 const _maxCachedReplies = 2048;
+
+/// How long a chat nobody shows keeps its live subscription. A brief cover,
+/// such as a profile pushed over the chat, returns without a catch-up fetch.
+const _liveDetachDelay = Duration(seconds: 30);
+
+/// How far back the live subscription opens, the same skew reconnect replay
+/// uses. The relay admits a REQ only after its access checks, so a message
+/// signed just before the chat opened can commit after the window read but
+/// before the subscription exists; replay from a little earlier covers it.
+const _liveOverlapSeconds = 5;
 
 const _channelLiveEventKinds = [
   ...EventKind.channelEventKinds,
@@ -59,6 +71,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ref.read(relaySessionProvider).status == SessionStatus.connected,
   );
   bool _hasListeners = true;
+  Timer? _liveDetachTimer;
+  bool _liveDetached = false;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
     refresh: _refreshOverflowSummary,
     canRun: () =>
@@ -115,18 +129,38 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   @override
   AsyncValue<List<NostrEvent>> build() {
     final sessionState = ref.watch(relaySessionProvider);
+    // Riverpod defers rebuilding a provider nobody is listening to until it
+    // is listened to or read again, and then skips onResume. So a build
+    // always means the chat is wanted.
+    _hasListeners = true;
+    _liveDetached = false;
     ref.onCancel(() {
       _hasListeners = false;
       _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
+      _liveDetachTimer?.cancel();
+      _liveDetachTimer = Timer(_liveDetachDelay, _detachLive);
     });
     ref.onResume(() {
       _hasListeners = true;
+      _liveDetachTimer?.cancel();
+      _liveDetachTimer = null;
+      if (_liveDetached) {
+        // Keep the cached timeline on screen while a rebuild resubscribes
+        // and catches up, as it does after a reconnect. Life-cycle callbacks
+        // can't use ref, so rebuild just after.
+        _liveDetached = false;
+        Future.microtask(() {
+          if (ref.mounted) ref.invalidateSelf();
+        });
+      }
       Future.microtask(_summaryRefreshes.resume);
       Future.microtask(_deletionOwnerQueue.resume);
     });
     ref.onDispose(() {
       _initVersion++;
+      _liveDetachTimer?.cancel();
+      _liveDetachTimer = null;
       _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
       _clearSubscription();
@@ -169,29 +203,38 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     try {
       final session = ref.read(relaySessionProvider.notifier);
 
-      try {
-        final unsubscribe = await session.subscribe(
-          NostrFilter(
-            kinds: _channelLiveEventKinds,
-            tags: {
-              '#h': [channelId],
-            },
-            since: _currentUnixSeconds(),
-            limit: 200,
-          ),
-          _handleLiveEvent,
-        );
-        if (!_isCurrentInit(initVersion)) {
-          unsubscribe();
-          return;
-        }
-        _unsubscribe = unsubscribe;
-      } catch (error) {
-        if (!_isCurrentInit(initVersion)) return;
-        debugPrint(
-          '[ChannelMessagesNotifier] live subscription failed for $channelId: $error',
-        );
-      }
+      // History doesn't wait a round trip for the live subscription's EOSE.
+      // The two overlap because the subscription replays from a few seconds
+      // back; duplicates merge by id.
+      unawaited(
+        session
+            .subscribe(
+              NostrFilter(
+                kinds: _channelLiveEventKinds,
+                tags: {
+                  '#h': [channelId],
+                },
+                since: _currentUnixSeconds() - _liveOverlapSeconds,
+                limit: 200,
+              ),
+              _handleLiveEvent,
+            )
+            .then(
+              (unsubscribe) {
+                if (_isCurrentInit(initVersion)) {
+                  _unsubscribe = unsubscribe;
+                } else {
+                  unsubscribe();
+                }
+              },
+              onError: (Object error) {
+                if (!_isCurrentInit(initVersion)) return;
+                debugPrint(
+                  '[ChannelMessagesNotifier] live subscription failed for $channelId: $error',
+                );
+              },
+            ),
+      );
 
       final historyVersion = ++_threadQuerySerial;
       final history = await _fetchNewestHistory(session);
@@ -867,6 +910,18 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   bool _isCurrentInit(int initVersion) => initVersion == _initVersion;
+
+  /// Stops live work for a chat that stayed hidden; resume catches it up.
+  void _detachLive() {
+    _liveDetachTimer = null;
+    _liveDetached = true;
+    // Retire an unfinished init so its subscription can't install later.
+    _initVersion++;
+    _initInFlight = false;
+    _initialWindowQueryInFlight = false;
+    _liveSummaryRootsDuringInitialWindowQuery.clear();
+    _clearSubscription();
+  }
 
   void _clearSubscription() {
     _unsubscribe?.call();
