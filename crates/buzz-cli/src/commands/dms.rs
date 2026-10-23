@@ -1,40 +1,66 @@
 use uuid::Uuid;
 
-use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
+use crate::client::{extract_d_tag, extract_p_tags, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{parse_uuid, sdk_err, validate_hex64};
 
-/// List DM conversations by querying kind:41001 (relay-confirmed DMs) filtered by our pubkey.
+/// List DM conversations.
+///
+/// DMs are NIP-29 channels with `channel_type = "dm"` — the relay never emits a
+/// kind:41001 confirmation event (that kind is reserved but unused), so this
+/// follows the same discovery path as `channels list --member`: find channel
+/// ids from our kind:39002 membership events, then fetch kind:39000 metadata
+/// for those ids and keep only the ones tagged `["t", "dm"]`.
 pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(), CliError> {
     let my_pk = client.keys().public_key().to_hex();
     let limit = limit.unwrap_or(50).min(200);
-    let filter = serde_json::json!({
-        "kinds": [41001],
+
+    let member_filter = serde_json::json!({
+        "kinds": [39002],
         "#p": [my_pk],
-        "limit": limit
     });
-    let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    let dms: Vec<serde_json::Value> = events
+    let member_events = client.query_paginated(member_filter, limit).await?;
+    let channel_ids: Vec<String> = member_events
         .iter()
+        .map(extract_d_tag)
+        .filter(|id| !id.is_empty())
+        .collect();
+    if channel_ids.is_empty() {
+        println!("[]");
+        return Ok(());
+    }
+
+    let metadata_filter = serde_json::json!({
+        "kinds": [39000],
+        "#d": channel_ids,
+    });
+    let metadata_events = client.query_paginated(metadata_filter, limit).await?;
+
+    let is_dm = |e: &serde_json::Value| -> bool {
+        e.get("tags")
+            .and_then(|t| t.as_array())
+            .map(|tags| {
+                tags.iter().any(|tag| {
+                    tag.as_array()
+                        .map(|a| {
+                            a.first().and_then(|v| v.as_str()) == Some("t")
+                                && a.get(1).and_then(|v| v.as_str()) == Some("dm")
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    };
+
+    let mut dms: Vec<serde_json::Value> = metadata_events
+        .iter()
+        .filter(|e| is_dm(e))
         .map(|e| {
             let dm_id = extract_d_tag(e);
-            let participants: Vec<String> = e
-                .get("tags")
-                .and_then(|t| t.as_array())
-                .map(|tags| {
-                    tags.iter()
-                        .filter_map(|tag| {
-                            let arr = tag.as_array()?;
-                            if arr.first()?.as_str()? == "p" {
-                                arr.get(1)?.as_str().map(|s| s.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let participants: Vec<String> = extract_p_tags(e)
+                .into_iter()
+                .filter_map(|p| p.get("pubkey")?.as_str().map(|s| s.to_string()))
+                .collect();
             serde_json::json!({
                 "dm_id": dm_id,
                 "participants": participants,
@@ -42,6 +68,12 @@ pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(),
             })
         })
         .collect();
+    dms.sort_by(|a, b| {
+        let a_ts = a.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let b_ts = b.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        b_ts.cmp(&a_ts)
+    });
+
     let output = serde_json::to_string(&dms).unwrap_or_default();
     println!("{output}");
     Ok(())
