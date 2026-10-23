@@ -614,6 +614,7 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
 6. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
 7. **`pgschema` omits seed DML and some storage parameters** — `schema/schema.sql` is an ordered `\i` manifest: `schema/tables/public/<table>.sql` holds only that table's `CREATE TABLE` and `CREATE INDEX` statements (one table per file, the shape out-of-band schema tools read), and types, functions, partitions, triggers, and seed rows live in the sibling `schema/` directories. Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script, and must run pgschema from the repository root so it reads `.pgschemaignore`; from any other directory a re-apply plans to drop the partitions the relay created at runtime. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
+8. **`@mentions` after CJK do wake agents** — the SDK opens a mention when `@` is not preceded by an ASCII letter/digit, so `交给@Scout处理` emits a `p` tag. Emails (`user@host`) still do not. See [`docs/mention-boundaries.md`](docs/mention-boundaries.md).
 
 ---
 
@@ -816,6 +817,7 @@ maintain, so each one must protect a distinct user outcome or invariant.
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
+- [docs/mention-boundaries.md](docs/mention-boundaries.md) — `@name` extraction boundaries (CJK vs email)
 - [README.md](README.md) — project overview and quick start
 
 ### Mention editor contract
