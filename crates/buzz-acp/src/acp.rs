@@ -219,6 +219,10 @@ pub struct AcpClient {
     goose_usage: UsageTracker,
     /// Per-turn prompt-response usage and Claude's optional cumulative cost.
     standard_usage: StandardUsageTracker,
+    /// Tool calls / skill invocations seen this turn (NIP-AM `tools`/`skills`).
+    tool_counts: crate::tool_counts::ToolCallCounter,
+    /// Context-window occupancy at the last report this turn (NIP-AM `context`).
+    context_usage: Option<buzz_core::agent_turn_metric::ContextUsage>,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
     /// Ask Claude Code for summarized thinking on `session/new`. Opus omits
@@ -592,6 +596,7 @@ impl AcpClient {
                     Some(StandardAdapterKind::Claude)
                 }
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
+                "hermes" | "hermes-agent" | "hermes-acp" => Some(StandardAdapterKind::Hermes),
                 _ => None,
             };
         cmd.envs(launch_env.iter().cloned());
@@ -632,6 +637,8 @@ impl AcpClient {
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
+            tool_counts: Default::default(),
+            context_usage: None,
             standard_adapter,
             claude_thinking_summaries,
         })
@@ -872,6 +879,8 @@ impl AcpClient {
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
         self.standard_usage.begin_turn(session_id);
+        self.tool_counts.begin_turn();
+        self.context_usage = None;
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -967,9 +976,42 @@ impl AcpClient {
     /// exclusive cumulative path; standard ACP prompt usage is used only when
     /// goose emitted nothing for this turn.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
+        // `take()` ends the in-flight turn, so read its session id first.
+        let in_flight_session = self.standard_usage.in_flight_session().map(str::to_owned);
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
-        goose_usage.or(standard_usage)
+        let (tools, skills) = self.tool_counts.take();
+        let activity = crate::usage::TurnActivity {
+            tools,
+            skills,
+            context: self.context_usage.take(),
+        };
+        let mut usage = match goose_usage.or(standard_usage) {
+            Some(usage) => usage,
+            // No tokens reported (e.g. codex-acp or pi): publish a usage-null
+            // record only when other turn data exists. It never touches the
+            // token trackers' baselines or sequence numbers.
+            None if !activity.is_empty() => TurnUsage::tokenless(in_flight_session?),
+            None => return None,
+        };
+        usage.activity = activity;
+        Some(usage)
+    }
+
+    /// Whether a `session/update` belongs to the in-flight turn's session.
+    fn is_in_flight(&self, session_id: Option<&str>) -> bool {
+        session_id.is_some_and(|id| self.standard_usage.in_flight_session() == Some(id))
+    }
+
+    /// Record a context-window snapshot for the in-flight turn; a zero window
+    /// means unknown and other sessions are ignored. Latest report wins.
+    fn record_context(&mut self, session_id: &str, used: u64, window: u64) {
+        if window > 0 && self.is_in_flight(Some(session_id)) {
+            self.context_usage = Some(buzz_core::agent_turn_metric::ContextUsage {
+                used_tokens: used,
+                window_tokens: window,
+            });
+        }
     }
 
     /// Notify the usage tracker that buzz-acp just spawned a new session.
@@ -1840,6 +1882,9 @@ impl AcpClient {
                 false
             }
             "tool_call" => {
+                if self.is_in_flight(msg["params"]["sessionId"].as_str()) {
+                    self.tool_counts.observe(update, true);
+                }
                 let title = update
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -1852,6 +1897,9 @@ impl AcpClient {
                 true
             }
             "tool_call_update" => {
+                if self.is_in_flight(msg["params"]["sessionId"].as_str()) {
+                    self.tool_counts.observe(update, false);
+                }
                 let tool_id = update
                     .get("toolCallId")
                     .and_then(|v| v.as_str())
@@ -1934,12 +1982,9 @@ impl AcpClient {
     }
 
     /// Record the standard ACP cumulative cost notification when emitted by
-    /// Claude. Unlike Goose's payload, `used`/`size` are context occupancy and
-    /// are intentionally not mapped to token accounting.
+    /// Claude. `used`/`size` are context occupancy (any adapter) and are not
+    /// mapped to token accounting.
     fn handle_standard_usage_update(&mut self, msg: &serde_json::Value) {
-        if self.standard_adapter != Some(StandardAdapterKind::Claude) {
-            return;
-        }
         let session_id = match msg
             .pointer("/params/sessionId")
             .and_then(serde_json::Value::as_str)
@@ -1947,6 +1992,18 @@ impl AcpClient {
             Some(session_id) => session_id,
             None => return,
         };
+        // Context occupancy is reported by every standard adapter.
+        if let (Some(used), Some(size)) = (
+            msg.pointer("/params/update/used")
+                .and_then(serde_json::Value::as_u64),
+            msg.pointer("/params/update/size")
+                .and_then(serde_json::Value::as_u64),
+        ) {
+            self.record_context(session_id, used, size);
+        }
+        if self.standard_adapter != Some(StandardAdapterKind::Claude) {
+            return;
+        }
         let cost = match msg
             .pointer("/params/update/cost/amount")
             .and_then(serde_json::Value::as_f64)
@@ -1990,6 +2047,7 @@ impl AcpClient {
                         cached = payload.accumulated_cached_input_tokens,
                         "goose usage update"
                     );
+                    self.record_context(&notif.session_id, payload.used, payload.context_limit);
                     self.goose_usage.record(&notif.session_id, payload);
                 }
             }
@@ -4811,7 +4869,7 @@ sleep 1"#,
         assert_eq!(stop, StopReason::EndTurn);
 
         let usage = client.take_turn_usage().expect("wire usage");
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         assert_eq!(usage.turn_input_tokens, Some(9));
         assert_eq!(usage.turn_output_tokens, Some(3));
         assert_eq!(usage.turn_cost_usd, Some(0.5));
@@ -4829,7 +4887,7 @@ sleep 1"#,
         client.handle_session_update(&standard_cost_update("cost-only-session", 0.125));
 
         let usage = client.take_turn_usage().expect("cost-only usage");
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         assert!(usage.delta_reliable);
         assert_eq!(usage.turn_input_tokens, None);
         assert_eq!(usage.turn_cost_usd, Some(0.125));
@@ -4880,7 +4938,7 @@ sleep 1"#,
             .unwrap();
         let user = client.take_turn_usage().expect("user prompt usage");
 
-        assert_eq!((initial.turn_seq, user.turn_seq), (1, 2));
+        assert_eq!((initial.turn_seq, user.turn_seq), (Some(1), Some(2)));
         assert_eq!(
             (initial.turn_input_tokens, user.turn_input_tokens),
             (Some(10), Some(20))
@@ -4960,7 +5018,7 @@ sleep 1"#,
             .take_turn_usage()
             .expect("usage should be present after notification");
         assert_eq!(usage.session_id, "s1");
-        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_seq, Some(1));
         assert!(!usage.delta_reliable, "first turn must be unreliable");
         assert_eq!(usage.cumulative_input_tokens, Some(1000));
         assert_eq!(usage.cumulative_output_tokens, Some(200));
@@ -4987,6 +5045,307 @@ sleep 1"#,
         assert!(usage.delta_reliable);
         assert_eq!(usage.turn_input_tokens, Some(800));
         assert_eq!(usage.turn_output_tokens, Some(250));
+    }
+
+    fn tool_update(update: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"jsonrpc":"2.0","method":"session/update",
+            "params":{"sessionId":"s1","update":update}})
+    }
+
+    #[tokio::test]
+    async fn tool_and_skill_counts_flow_through_session_update_and_reset_per_turn() {
+        use serde_json::json;
+        let mut client = spawn_inert_client().await;
+        client.goose_usage.begin_turn("s1");
+        client.standard_usage.begin_turn("s1");
+        client.tool_counts.begin_turn();
+        // Another session's tool call is not this turn's.
+        let mut other = tool_update(
+            serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"o","title":"shell"}),
+        );
+        other["params"]["sessionId"] = "other".into();
+        client.handle_session_update(&other);
+        for u in [
+            // An update for a call started before this turn (e.g. cancelled) is not counted.
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"stale","status":"cancelled",
+                "_meta":{"claudeCode":{"toolName":"Bash"}}}),
+            json!({"sessionUpdate":"tool_call","toolCallId":"a","title":"Read src/x.rs","kind":"read",
+                "_meta":{"claudeCode":{"toolName":"Read"}}}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"a","status":"completed"}),
+            json!({"sessionUpdate":"tool_call","toolCallId":"b","title":"load_skill","kind":"other"}),
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"b","rawInput":{"name":"git"}}),
+            json!({"sessionUpdate":"tool_call","toolCallId":"c","title":"load_skill","kind":"other",
+                "rawInput":{"name":"git/refs/a.md"}}),
+        ] {
+            client.handle_session_update(&tool_update(u));
+        }
+        client.handle_goose_usage_update(&goose_usage_update_msg("s1", 10, 5, None));
+        let usage = client.take_turn_usage().expect("usage");
+        assert_eq!(
+            usage.activity.tools.unwrap(),
+            [("Read".into(), 1), ("load_skill".into(), 2)].into()
+        );
+        assert_eq!(usage.activity.skills.unwrap(), [("git".into(), 1)].into());
+
+        // Next turn starts clean: counts never leak.
+        client.goose_usage.begin_turn("s1");
+        client.standard_usage.begin_turn("s1");
+        client.tool_counts.begin_turn();
+        client.handle_goose_usage_update(&goose_usage_update_msg("s1", 20, 9, None));
+        let usage = client.take_turn_usage().expect("usage");
+        assert!(usage.activity.tools.is_none() && usage.activity.skills.is_none());
+    }
+
+    /// Binds the production per-turn reset in `session_prompt_blocks_with_idle_timeout`:
+    /// turn 1 records a tool call and context occupancy but its usage is never
+    /// drained (an Err turn end), and turn 2 must not inherit either.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn undrained_turn_activity_does_not_leak_into_next_prompt() {
+        let script = r#"
+            for N in 1 2; do
+                read -r REQ
+                ID=$(printf '%s' "$REQ" | sed -E 's/.*"id":([0-9]+).*/\1/')
+                if [ "$N" = 1 ]; then
+                    echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"a","title":"Tool: shell","kind":"execute"}}}'
+                    echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"usage_update","used":50000,"size":200000}}}'
+                fi
+                echo '{"jsonrpc":"2.0","id":'"$ID"',"result":{"stopReason":"end_turn"}}'
+            done
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let timeout = std::time::Duration::from_secs(5);
+        // Turn 1 records activity; its usage is never drained (Err turn end).
+        client
+            .session_prompt_blocks_with_idle_timeout("s1", &["hi"], timeout, timeout)
+            .await
+            .expect("turn 1");
+        assert!(client.context_usage.is_some(), "turn 1 recorded context");
+        client
+            .session_prompt_blocks_with_idle_timeout("s1", &["hi"], timeout, timeout)
+            .await
+            .expect("turn 2");
+        assert!(
+            client.take_turn_usage().is_none(),
+            "turn 1 tools/context must not leak into turn 2"
+        );
+    }
+
+    fn codex_style_turn(
+        client: &mut AcpClient,
+        session: &str,
+        with_tool: bool,
+        with_context: bool,
+    ) {
+        client.goose_usage.begin_turn(session);
+        client.standard_usage.begin_turn(session);
+        client.tool_counts.begin_turn();
+        if with_tool {
+            client.handle_session_update(&tool_update(serde_json::json!({
+                "sessionUpdate":"tool_call","toolCallId":"a","title":"Tool: shell","kind":"execute"
+            })));
+        }
+        if with_context {
+            client.handle_session_update(&standard_context_update(session));
+        }
+    }
+
+    #[tokio::test]
+    async fn tokenless_turn_publishes_usage_null_record_with_tools_and_context() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Codex);
+        codex_style_turn(&mut client, "s1", true, true);
+        // Prompt response carries no `usage`.
+        client
+            .parse_prompt_response("s1", &serde_json::json!({"stopReason":"end_turn"}))
+            .unwrap();
+        let usage = client.take_turn_usage().expect("usage-null record");
+        assert_eq!(usage.session_id, "s1");
+        assert_eq!(usage.turn_seq, None);
+        assert!(!usage.delta_reliable);
+        assert_eq!(
+            crate::pool::build_turn_metric_counts(&usage),
+            (None, None),
+            "no fabricated token counts"
+        );
+        assert_eq!(usage.activity.tools.unwrap(), [("shell".into(), 1)].into());
+        assert_eq!(usage.activity.context.unwrap().used_tokens, 50_000);
+        assert!(client.take_turn_usage().is_none(), "drained");
+    }
+
+    #[tokio::test]
+    async fn turn_with_no_data_publishes_nothing() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Codex);
+        codex_style_turn(&mut client, "s1", false, false);
+        assert!(client.take_turn_usage().is_none());
+    }
+
+    #[tokio::test]
+    async fn usage_null_record_does_not_advance_goose_baseline_or_seq() {
+        let mut client = spawn_inert_client().await;
+        client.goose_usage.begin_turn("s1");
+        client.handle_goose_usage_update(&goose_usage_update_msg("s1", 1000, 200, None));
+        assert_eq!(client.take_turn_usage().unwrap().turn_seq, Some(1));
+
+        codex_style_turn(&mut client, "s1", true, false);
+        let null = client.take_turn_usage().expect("usage-null record");
+        assert_eq!(null.turn_seq, None);
+
+        client.goose_usage.begin_turn("s1");
+        client.handle_goose_usage_update(&goose_usage_update_msg("s1", 1800, 450, None));
+        let usage = client.take_turn_usage().expect("goose turn 3");
+        assert_eq!(usage.turn_seq, Some(2), "null record consumed no seq");
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, Some(800));
+        assert_eq!(usage.turn_output_tokens, Some(250));
+    }
+
+    #[tokio::test]
+    async fn hermes_session_cumulative_usage_becomes_inclusive_turn_deltas() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Hermes);
+        client.notify_session_spawned("h1");
+
+        // Hermes: inputTokens = prompt_tokens (already includes cache reads),
+        // all counters session-cumulative.
+        client.standard_usage.begin_turn("h1");
+        client
+            .parse_prompt_response(
+                "h1",
+                &prompt_response_usage(1000, 200, 1200, Some(300), None),
+            )
+            .unwrap();
+        let t1 = client.take_turn_usage().expect("turn 1");
+        assert_eq!(t1.turn_seq, Some(1));
+        assert!(t1.delta_reliable, "spawned session starts from zero");
+        assert_eq!(t1.turn_input_tokens, Some(1000), "no cache added on top");
+        assert_eq!(t1.turn_output_tokens, Some(200));
+        assert_eq!(t1.turn_cache_read_tokens, Some(300));
+        assert_eq!(t1.turn_total_tokens, None, "hermes total is a derived sum");
+        assert_eq!(t1.turn_cost_usd, None);
+        assert_eq!(t1.cumulative_input_tokens, Some(1000));
+
+        client.standard_usage.begin_turn("h1");
+        client
+            .parse_prompt_response(
+                "h1",
+                &prompt_response_usage(1700, 260, 1960, Some(300), None),
+            )
+            .unwrap();
+        let t2 = client.take_turn_usage().expect("turn 2");
+        assert_eq!(t2.turn_seq, Some(2));
+        assert_eq!(t2.turn_input_tokens, Some(700));
+        assert_eq!(t2.turn_output_tokens, Some(60));
+        assert_eq!(
+            t2.turn_cache_read_tokens, None,
+            "zero cache delta is omitted"
+        );
+        assert_eq!(t2.cumulative_input_tokens, Some(1700));
+        assert_eq!(t2.cumulative_cache_read_tokens, Some(300));
+
+        // Counter reset (agent restart): delta unknown, never negative.
+        client.standard_usage.begin_turn("h1");
+        client
+            .parse_prompt_response("h1", &prompt_response_usage(50, 5, 55, Some(0), None))
+            .unwrap();
+        let t3 = client.take_turn_usage().expect("turn 3");
+        assert!(!t3.delta_reliable);
+        assert_eq!(t3.turn_input_tokens, None);
+        assert_eq!(t3.cumulative_cache_read_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn hermes_unseeded_session_first_turn_is_cumulative_only() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Hermes);
+        client.standard_usage.begin_turn("h2");
+        client
+            .parse_prompt_response("h2", &prompt_response_usage(900, 90, 990, Some(0), None))
+            .unwrap();
+        let t = client.take_turn_usage().expect("turn");
+        assert!(!t.delta_reliable);
+        assert_eq!(t.turn_input_tokens, None);
+        assert_eq!(t.cumulative_input_tokens, Some(900));
+    }
+
+    fn standard_context_update(session_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "usage_update",
+                    "used": 50000,
+                    "size": 200000,
+                    "cost": {"amount": 0.1, "currency": "USD"}
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn context_occupancy_flows_from_standard_and_goose_updates_and_resets() {
+        use buzz_core::agent_turn_metric::ContextUsage;
+        let want = |used| {
+            Some(ContextUsage {
+                used_tokens: used,
+                window_tokens: 200_000,
+            })
+        };
+        for adapter in [StandardAdapterKind::Claude, StandardAdapterKind::Codex] {
+            let mut client = spawn_inert_client().await;
+            client.standard_adapter = Some(adapter);
+            client.goose_usage.begin_turn("s1");
+            client.standard_usage.begin_turn("s1");
+            client.standard_usage.begin_turn("s1");
+            client.handle_session_update(&standard_context_update("s1"));
+            // Another session's report is ignored.
+            client.handle_session_update(&standard_context_update("other"));
+            client.handle_goose_usage_update(&goose_usage_update_msg("s1", 10, 5, None));
+            // Latest snapshot wins: goose reported used = 15.
+            let usage = client.take_turn_usage().expect("usage");
+            assert_eq!(usage.activity.context, want(15));
+
+            // Next turn starts clean.
+            client.goose_usage.begin_turn("s1");
+            client.standard_usage.begin_turn("s1");
+            let mut next = goose_usage_update_msg("s1", 20, 9, None);
+            next["params"]["update"]
+                .as_object_mut()
+                .unwrap()
+                .remove("contextLimit");
+            client.handle_goose_usage_update(&next);
+            let usage = client.take_turn_usage().expect("usage");
+            assert!(usage.activity.context.is_none());
+        }
+
+        // Claude: a cost-only turn still carries the standard snapshot.
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.standard_usage.begin_turn("s1");
+        client.standard_usage.begin_turn("s1");
+        client.handle_session_update(&standard_context_update("s1"));
+        let usage = client.take_turn_usage().expect("cost-only usage");
+        assert_eq!(usage.activity.context, want(50_000));
+    }
+
+    #[tokio::test]
+    async fn context_unknown_when_window_absent() {
+        let mut client = spawn_inert_client().await;
+        client.goose_usage.begin_turn("s1");
+        client.standard_usage.begin_turn("s1");
+        // buzz-agent style: `used` but no `contextLimit`.
+        let mut msg = goose_usage_update_msg("s1", 10, 5, None);
+        msg["params"]["update"]
+            .as_object_mut()
+            .unwrap()
+            .remove("contextLimit");
+        client.handle_goose_usage_update(&msg);
+        let usage = client.take_turn_usage().expect("usage");
+        assert!(usage.activity.context.is_none());
     }
 
     #[tokio::test]
