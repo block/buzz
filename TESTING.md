@@ -217,6 +217,38 @@ keep it closed until it is active and repaired, then recheck zero before admitti
 traffic. After repair, timeouts/mutes only block temporarily; active bans still
 revoke permanently. A rollback to code that ignores `revoked_at` requires
 invitation admission paused, using the same traffic/writer controls if needed.
+The separately approved companion provides the operator command:
+
+```bash
+psql -X -v ON_ERROR_STOP=1 -f scripts/maintenance/backfill_invite_revocations.sql
+```
+
+Run it as a top-level script, outside any caller transaction. The final query
+must report `0` unrepaired invites in active communities. Run it twice; the
+second run must keep zero and leave revocation timestamps and markers unchanged.
+Review fenced communities separately and keep their admission closed until they
+can be repaired under the same controls.
+
+Use a **fresh disposable database through migration 0068**, the complete
+pre-change schema including channel join roles and entity deletion intake, for upgrade testing. Do not reuse
+an older database that applied the invitation migration numbered 0067 or a
+different 0068/0069 checksum; reconcile it separately without resetting a user's
+database. Seed legacy links for a restricted issuer and an unrelated issuer;
+lift the first restriction before
+upgrade. Apply schema-only 0069 and confirm it rewrites no invite rows. Before
+repair, signed claims reject historical legacy candidates lazily. Run the actual
+repair script twice, checking selective revocation, cleared markers, zero
+remaining active-community legacy rows and idempotence. The populated automated
+fixtures also exercise real `bin/pgschema apply --file schema/schema.sql`, then
+`scripts/reconcile-schema-after-pgschema.sql` twice, for outcome parity.
+
+After repair, a newly applied timeout/mute must temporarily block claims without
+durable revocation; after expiry the same link works. Ban via the authorized
+owner path and verify permanent rejection, even after unban and relay restart.
+A fresh replacement minted by an unrestricted issuer must work. Include current
+owner restrictions, noncanonical issuers, community/deletion fences, and the
+marker-clearing lock-serialization tests in the full PostgreSQL lane.
+
 Legacy owner attribution uses the agent's currently recorded
 `agent_owner_pubkey`; deleting an owner user row out of band clears that link
 through its foreign key, so a later repair cannot recover the former

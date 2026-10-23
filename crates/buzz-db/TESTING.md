@@ -68,5 +68,6 @@ Invite upgrade tests start from the complete schema through migration 0068,
 including channel join roles and entity deletion intake. They exercise the
 invitation schema expansion (migration 0069) through both migration and
 desired-state paths against populated
-data, retaining a non-default channel join role. Historical repair is validated
-separately from the application/schema change.
+data, retaining a non-default channel join role. They also execute the operator
+repair script with `psql`; make sure the PostgreSQL client is installed and
+resolves on `PATH`.
