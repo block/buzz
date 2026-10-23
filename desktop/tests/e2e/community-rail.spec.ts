@@ -477,6 +477,52 @@ test.describe("community rail", () => {
       .toBe(COMMUNITY_B.id);
   });
 
+  test("Linux WebKit switches communities repeatedly without native snapshots", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        value: "Linux x86_64",
+      });
+      Object.defineProperty(navigator, "userAgent", {
+        configurable: true,
+        value:
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 Version/60.5 Safari/605.1.15",
+      });
+      let calls = 0;
+      Object.defineProperty(window, "__communitySnapshotCalls", {
+        get: () => calls,
+      });
+      Object.defineProperty(document, "startViewTransition", {
+        configurable: true,
+        value: () => {
+          calls += 1;
+          throw new Error("Unsafe Linux WebKit snapshot path entered");
+        },
+      });
+    });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await page.goto("/");
+
+    for (const community of [COMMUNITY_B, COMMUNITY_A, COMMUNITY_B]) {
+      const button = page.getByTestId(`community-rail-button-${community.id}`);
+      await button.click();
+      await expect(button).toHaveAttribute("aria-current", "true");
+      await expect
+        .poll(() =>
+          page.evaluate(() => localStorage.getItem("buzz-active-community-id")),
+        )
+        .toBe(community.id);
+    }
+    expect(
+      await page.evaluate(() =>
+        Reflect.get(window, "__communitySnapshotCalls"),
+      ),
+    ).toBe(0);
+  });
+
   test("community switch cancels a send after its link preview settles", async ({
     page,
   }) => {

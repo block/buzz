@@ -1,3 +1,5 @@
+import { isLinuxPlatform } from "../shared/lib/platform";
+
 const COMMUNITY_TRANSITION_TIMEOUT_MS = 5_000;
 
 let finishPendingTransition: (() => void) | null = null;
@@ -17,7 +19,15 @@ export async function runCommunityViewTransition(
   update: () => Promise<void> | void,
   options: { timeoutMs?: number } = {},
 ): Promise<void> {
-  if (!document.startViewTransition) {
+  // Linux WebKitGTK can SIGSEGV while creating the composited snapshot on
+  // NVIDIA (buzz#3654), even with the safe-rendering environment overrides.
+  // Keep the navigation/teardown barrier, but never enter that native path.
+  // Chromium also advertises AppleWebKit, so exclude Chromium-family browsers.
+  const isLinuxWebKit =
+    isLinuxPlatform() &&
+    /AppleWebKit/i.test(navigator.userAgent) &&
+    !/(?:Chrome|Chromium|Edg|OPR)\//i.test(navigator.userAgent);
+  if (!document.startViewTransition || isLinuxWebKit) {
     try {
       await update();
     } catch (error) {
