@@ -1,10 +1,12 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Pause, Play } from "lucide-react";
 
 import {
   playNotificationSound,
+  preloadNotificationSound,
   SOUND_NAMES,
   type SoundName,
+  type SoundPlayback,
 } from "@/features/notifications/lib/sound";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -64,21 +66,25 @@ export function SoundPicker({
 }) {
   const items = sortedSounds(recommended);
   const [isPlaying, setIsPlaying] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const playbackRef = useRef<SoundPlayback | null>(null);
+
+  // Warm the Web Audio buffer for the selected sound so the first preview
+  // plays through Web Audio (not the HTMLAudioElement fallback, which the OS
+  // media keys can capture).
+  useEffect(() => {
+    preloadNotificationSound(value);
+  }, [value]);
 
   function togglePreview() {
     if (isPlaying) {
-      audioRef.current?.pause();
+      playbackRef.current?.stop();
       setIsPlaying(false);
       return;
     }
-    const audio = playNotificationSound(value);
-    if (!audio) return;
-    audioRef.current = audio;
+    const playback = playNotificationSound(value);
+    playbackRef.current = playback;
     setIsPlaying(true);
-    const stop = () => setIsPlaying(false);
-    audio.addEventListener("ended", stop, { once: true });
-    audio.addEventListener("pause", stop, { once: true });
+    playback.onEnded(() => setIsPlaying(false));
   }
 
   return (
