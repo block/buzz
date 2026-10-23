@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { formatHuddleActionError } from "./huddleError.ts";
+import { MICROPHONE_UNAVAILABLE_ERROR } from "./mediaDevices.ts";
 
 const AUDIO_UNAVAILABLE_MESSAGE =
   "Huddle audio isn’t available on this server. Ask an administrator to turn it on.";
+
+const MICROPHONE_UNAVAILABLE_MESSAGE =
+  "Microphone access isn’t available in this window. Try restarting Buzz.";
 
 test("maps the relay deployment rejection to actionable copy", () => {
   assert.equal(
@@ -20,6 +24,17 @@ test("recognizes the relay error code when present", () => {
   assert.equal(
     formatHuddleActionError("huddle_audio_unavailable", "start"),
     AUDIO_UNAVAILABLE_MESSAGE,
+  );
+});
+
+test("maps the missing-mediaDevices sentinel to actionable copy", () => {
+  assert.equal(
+    formatHuddleActionError(new Error(MICROPHONE_UNAVAILABLE_ERROR), "join"),
+    MICROPHONE_UNAVAILABLE_MESSAGE,
+  );
+  assert.equal(
+    formatHuddleActionError(MICROPHONE_UNAVAILABLE_ERROR, "start"),
+    MICROPHONE_UNAVAILABLE_MESSAGE,
   );
 });
 
