@@ -42,6 +42,11 @@ import { RelayChannelAccessRevocations } from "./relayChannelAccessRevocations";
 import { publishSessionEvent } from "@/shared/api/relayEventPublisher";
 import { activateRateLimitIfSignalled } from "@/shared/api/relayRateLimitGate";
 import {
+  assertWithinFrameLimit,
+  isOversizedFrameError,
+} from "@/shared/api/relayFrameLimit";
+import { noteFrameTooLargeLimit } from "@/shared/api/relayClientTransport";
+import {
   fetchChunkedHistory,
   requestFirstEventGated,
   requestHistoryGated,
@@ -101,6 +106,8 @@ export class RelayClient {
   private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
   private authOkTracker = new AuthOkTracker();
+  /** Server-advertised maximum frame size in bytes; null until first NOTICE. */
+  private maxFrameBytes: number | null = null;
   private terminal = false;
 
   private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
@@ -139,6 +146,7 @@ export class RelayClient {
     this.terminal = false;
     this.visibleChannelId = null;
     this.authOkTracker.reset();
+    this.maxFrameBytes = null;
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
@@ -443,6 +451,7 @@ export class RelayClient {
     // terminal latch and AUTH rejection streak, and bypasses backoff once.
     this.terminal = false;
     this.authOkTracker.reset();
+    this.maxFrameBytes = null;
     this.keepAliveRequested = true;
     await this.connectBypassingBackoff();
   }
@@ -708,6 +717,9 @@ export class RelayClient {
     if (this.wsId === null) {
       throw new Error("Relay socket is not connected.");
     }
+    if (this.maxFrameBytes !== null) {
+      assertWithinFrameLimit(payload, this.maxFrameBytes);
+    }
 
     await invoke("plugin:websocket|send", {
       id: this.wsId,
@@ -721,6 +733,9 @@ export class RelayClient {
   private async sendRawForGeneration(payload: unknown[], generation: number) {
     if (generation !== this.connectionGeneration || this.wsId === null) {
       throw new Error("Relay publish was superseded by a session change.");
+    }
+    if (this.maxFrameBytes !== null) {
+      assertWithinFrameLimit(payload, this.maxFrameBytes);
     }
     const wsId = this.wsId;
     await invoke("plugin:websocket|send", {
@@ -804,6 +819,11 @@ export class RelayClient {
         // Live entries survive reset and belong to the new connection's replay.
         // A late old-socket failure must not tear down that retained ownership.
         if (subscription?.mode === "live") return;
+        throw error;
+      }
+      if (isOversizedFrameError(error)) {
+        throw error;
+      }
         throw error;
       }
       const normalizedError = this.recoverFromSocketFailure(
@@ -941,8 +961,14 @@ export class RelayClient {
     }
 
     if (type === "NOTICE" && typeof rest[0] === "string") {
+      const notice = rest[0];
       // Connection-scoped back-pressure — arm the gate until it expires.
-      activateRateLimitIfSignalled(rest[0]);
+      activateRateLimitIfSignalled(notice);
+      const newMax = noteFrameTooLargeLimit(notice, this.maxFrameBytes);
+      if (newMax !== null) {
+        this.maxFrameBytes = newMax;
+        console.warn(`[relay] Frame size limit updated to ${newMax} bytes`);
+      }
     }
   }
 
