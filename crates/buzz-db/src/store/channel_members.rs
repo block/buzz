@@ -743,6 +743,38 @@ pub async fn put_member(
     requested: Option<MemberRole>,
     invited_by: Option<&[u8]>,
 ) -> Result<MemberRecord> {
+    put_member_with_prior_role(
+        pool,
+        community_id,
+        channel_id,
+        pubkey,
+        requested,
+        invited_by,
+    )
+    .await
+    .map(|put| put.member)
+}
+
+/// A [`put_member`] write, and the role the member held just before it.
+#[derive(Debug, Clone)]
+pub struct PutMemberResult {
+    /// The membership row after the write.
+    pub member: MemberRecord,
+    /// The active role before the write; `None` when they were not an active
+    /// member. Read under the same lock as the write.
+    pub prior_role: Option<String>,
+}
+
+/// [`put_member`], also reporting the member's role before the write, so a
+/// caller can tell an add from a role change from a no-op.
+pub async fn put_member_with_prior_role(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    requested: Option<MemberRole>,
+    invited_by: Option<&[u8]>,
+) -> Result<PutMemberResult> {
     if pubkey.len() != 32 {
         return Err(DbError::InvalidData(format!(
             "pubkey must be 32 bytes, got {}",
@@ -838,9 +870,12 @@ pub async fn put_member(
     .fetch_one(tx.conn())
     .await?;
 
-    let record = row_to_member_record(row)?;
+    let member = row_to_member_record(row)?;
     tx.commit().await?;
-    Ok(record)
+    Ok(PutMemberResult {
+        member,
+        prior_role: current_role,
+    })
 }
 
 /// The client-visible reason for a [`buzz_core::channel::MemberPutDenial`].
@@ -1949,6 +1984,28 @@ impl Db {
         invited_by: Option<&[u8]>,
     ) -> Result<MemberRecord> {
         put_member(
+            &self.pool,
+            community_id,
+            channel_id,
+            pubkey,
+            requested,
+            invited_by,
+        )
+        .await
+    }
+
+    /// [`Db::put_member`], also reporting the member's role before the write
+    /// (see [`put_member_with_prior_role`]).
+    #[datastore_span(name = "put_member", system = "postgresql")]
+    pub async fn put_member_with_prior_role(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        requested: Option<MemberRole>,
+        invited_by: Option<&[u8]>,
+    ) -> Result<PutMemberResult> {
+        put_member_with_prior_role(
             &self.pool,
             community_id,
             channel_id,

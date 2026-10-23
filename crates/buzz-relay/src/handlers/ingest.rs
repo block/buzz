@@ -2998,11 +2998,22 @@ async fn ingest_event_inner(
 
     validate_huddle_lifecycle_event(tenant, state, &event, kind_u32).await?;
 
-    if crate::handlers::side_effects::is_admin_kind(kind_u32) {
-        crate::handlers::side_effects::validate_admin_event(tenant, kind_u32, &event, state)
-            .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-    }
+    // kind:9000 is checked person by person; the plan carries each result
+    // through storage to `apply_put_user`.
+    let put_user = if kind_u32 == KIND_NIP29_PUT_USER {
+        Some(
+            crate::handlers::side_effects::validate_put_user(tenant, &event, state)
+                .await
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?,
+        )
+    } else {
+        if crate::handlers::side_effects::is_admin_kind(kind_u32) {
+            crate::handlers::side_effects::validate_admin_event(tenant, kind_u32, &event, state)
+                .await
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        }
+        None
+    };
 
     // Processed here (verify consent, mutate archived_identities, emit the
     // relay-signed 8002/8003 delta + 13535 snapshot), then — unlike the
@@ -3628,7 +3639,11 @@ async fn ingest_event_inner(
     // Workflow deletion and kind:9002 applied their changes in the insert's
     // own transaction above.
     let persisted_atomically = workflow_deletion || kind_u32 == KIND_NIP29_EDIT_METADATA;
-    if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
+    let mut message = String::new();
+    if let Some(plan) = put_user {
+        message = crate::handlers::side_effects::apply_put_user(tenant, &event, state, plan).await;
+    } else if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32)
+    {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
                 .await
@@ -3701,7 +3716,7 @@ async fn ingest_event_inner(
     Ok(IngestResult {
         event_id: event_id_hex,
         accepted: true,
-        message: String::new(),
+        message,
     })
 }
 
