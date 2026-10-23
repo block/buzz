@@ -1,6 +1,11 @@
 import { captureRelayRemovals } from "@/features/agents/managedAgentRelayCleanup";
 import { sendChannelMessage } from "@/shared/api/tauri";
-import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
+import type {
+  Channel,
+  ManagedAgent,
+  PresenceStatus,
+  RelayAgent,
+} from "@/shared/api/types";
 import type { AgentAvailabilityReader } from "./useAgentAvailability";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -28,17 +33,49 @@ export type ManagedAgentActionResult = {
   noticeMessage?: string;
 };
 
-/** Lifecycle action routing only; deployed is a retained receipt, not presence. */
+/** Control-plane bookkeeping only; deployed is a retained receipt, not presence.
+ * Use {@link isManagedAgentLive} for whether the agent is actually running. */
 export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
-export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
+/**
+ * Whether the agent is actually running, for lifecycle routing and status
+ * display. A local agent's `running` is its live process. A provider's
+ * `deployed` is a receipt the desktop never clears (I3 in
+ * docs/remote-agents.md: presence is the status), so it outlives a shut-down or
+ * reaped body: established `offline` presence overrides it and the surface
+ * offers Deploy, which re-converges the provider, rather than a Shutdown aimed
+ * at nothing. Unknown presence keeps the receipt.
+ */
+export function isManagedAgentLive(
+  agent: Pick<ManagedAgent, "status">,
+  availability: PresenceStatus | undefined,
+) {
+  if (agent.status === "deployed") return availability !== "offline";
+  return agent.status === "running";
+}
+
+/** The status to display: a `deployed` receipt whose agent is established
+ * offline reads as stopped, the same as a local agent that is not running. */
+export function displayedManagedAgentStatus(
+  status: ManagedAgent["status"],
+  availability?: PresenceStatus,
+): ManagedAgent["status"] {
+  return status === "deployed" && !isManagedAgentLive({ status }, availability)
+    ? "stopped"
+    : status;
+}
+
+export function getManagedAgentPrimaryActionLabel(
+  agent: ManagedAgent,
+  availability?: PresenceStatus,
+) {
   if (agent.backend.type === "provider") {
-    return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
+    return isManagedAgentLive(agent, availability) ? "Shutdown" : "Deploy";
   }
 
-  if (isManagedAgentActive(agent)) {
+  if (isManagedAgentLive(agent, availability)) {
     return "Stop";
   }
 

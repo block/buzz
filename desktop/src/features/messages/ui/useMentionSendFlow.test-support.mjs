@@ -111,6 +111,9 @@ export async function setup({ lifecycle = false } = {}) {
         },
       },
     ),
+    "@/features/agents/lib/useAgentAvailability": {
+      fetchAgentAvailability: async () => undefined,
+    },
     "@/features/communities/useCommunities": {
       useCommunities: () => ({
         activeCommunity: { relayUrl: "wss://test.example" },
