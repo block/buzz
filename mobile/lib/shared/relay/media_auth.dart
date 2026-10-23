@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -14,6 +17,16 @@ const _mediaGetAuthLifetimeSeconds = 60;
 /// With a 60-second lifetime, the margin equals the lifetime: each request
 /// mints a fresh token (mint-per-request pattern for NIP-FI compliance).
 const _mediaGetAuthRefreshMarginSeconds = 60;
+
+/// Queue saturation with a shared signal for the already-admitted work to drain.
+class MediaAuthQueueFull extends StateError {
+  /// Completes when the queue snapshot that rejected this request has drained.
+  final Future<void> drained;
+
+  /// Retains only the existing queue tail, not another signing job.
+  MediaAuthQueueFull(this.drained)
+    : super('Media authentication queue is full');
+}
 
 /// Builds BUD-01 Blossom `t=get` auth headers for relay-host media URLs.
 ///
@@ -36,6 +49,12 @@ class MediaGetAuthService {
 
   Map<String, String>? _cachedHeaders;
   DateTime? _refreshAt;
+  // Includes the running job. Bound retained work during rapid history scrolls.
+  static const _maxPendingSignatures = 64;
+  int _pendingSignatures = 0;
+  static const _maxPendingRetries = 64;
+  int _pendingRetries = 0;
+  Future<void> _signingTail = Future<void>.value();
 
   MediaGetAuthService({
     required String baseUrl,
@@ -52,6 +71,76 @@ class MediaGetAuthService {
     final relayUri = Uri.tryParse(_baseUrl);
     if (uri == null || relayUri == null) return false;
     return _isRelayMediaUrl(uri, relayUri);
+  }
+
+  /// Mints fetch-time auth without doing cryptography on the UI isolate.
+  ///
+  /// Image loading starts during layout. Serialize signing per auth scope so a
+  /// viewport full of uncached images does not spawn an isolate per row at once.
+  /// At most 64 requests may be outstanding. Excess requests fail explicitly
+  /// without spawning or retaining a signing job. Consumers can use
+  /// [headersForAsyncWithRetry] for one retry after the queue drains.
+  /// Timestamp proofs when their queued jobs start.
+  Future<Map<String, String>> headersForAsync(String url) {
+    final nsec = _nsec;
+    if (nsec == null || nsec.isEmpty || !isRelayMediaUrl(url)) {
+      return Future.value(const {});
+    }
+    if (_pendingSignatures >= _maxPendingSignatures) {
+      return Future.error(MediaAuthQueueFull(_signingTail));
+    }
+    _pendingSignatures++;
+    final released = Completer<void>();
+    final result = _signingTail.then((_) async {
+      try {
+        return await compute(_mediaHeadersInBackground, (
+          baseUrl: _baseUrl,
+          nsec: nsec,
+          url: url,
+          now: _now(),
+        ), debugLabel: 'media-get-auth');
+      } finally {
+        // A failed worker must propagate to its fetch without blocking later
+        // requests in the queue.
+        _pendingSignatures--;
+        released.complete();
+      }
+    });
+    _signingTail = released.future;
+    return result;
+  }
+
+  /// Keeps a consumer pending through one saturation or worker-startup retry.
+  ///
+  /// Waits for the existing queue snapshot, then competes for normal admission.
+  /// At most 64 consumers may wait or retry in addition to the 64 signing jobs.
+  /// Excess waiters and second failures are terminal. Only isolate spawn failures
+  /// are retried: signing/configuration errors and ambiguous remote runtime
+  /// errors are not evidence of a transient worker-startup failure.
+  Future<Map<String, String>> headersForAsyncWithRetry(String url) async {
+    try {
+      return await headersForAsync(url);
+    } on MediaAuthQueueFull catch (error) {
+      return _retryAfter(url, error.drained);
+    } on IsolateSpawnException {
+      return _retryAfter(url, _signingTail);
+    }
+  }
+
+  Future<Map<String, String>> _retryAfter(
+    String url,
+    Future<void> drained,
+  ) async {
+    if (_pendingRetries >= _maxPendingRetries) {
+      throw MediaAuthQueueFull(drained);
+    }
+    _pendingRetries++;
+    try {
+      await drained;
+      return await headersForAsync(url);
+    } finally {
+      _pendingRetries--;
+    }
   }
 
   Map<String, String> headersFor(String url) {
@@ -131,6 +220,14 @@ class MediaGetAuthService {
     );
   }
 }
+
+Map<String, String> _mediaHeadersInBackground(
+  ({String baseUrl, String nsec, String url, DateTime now}) request,
+) => MediaGetAuthService(
+  baseUrl: request.baseUrl,
+  nsec: request.nsec,
+  now: () => request.now,
+).headersFor(request.url);
 
 final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
   final config = ref.watch(relayConfigProvider);
