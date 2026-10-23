@@ -582,6 +582,21 @@ void main() {
         expect(_findRich('Hello world'), findsOneWidget);
       });
 
+      testWidgets('hides an unused link reference definition', (tester) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  '[AGENT-RESULT:claude.alice:update-1]: #\n\n'
+                  'Review-ready in MR !12.',
+            ),
+          ),
+        );
+
+        expect(_findRich('Review-ready in MR !12.'), findsOneWidget);
+        expect(_findRich('AGENT-RESULT'), findsNothing);
+      });
+
       testWidgets('renders empty content', (tester) async {
         await tester.pumpWidget(_testable(const MessageContent(content: '')));
 
