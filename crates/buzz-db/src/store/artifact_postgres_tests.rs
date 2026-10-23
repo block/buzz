@@ -782,12 +782,20 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
         Err(super::artifact_query::SnapshotDenied::Restricted)
     ));
 
-    let head =
+    let (head, is_deletion) =
         f.db.artifact_head(f.community, reader.as_bytes(), ids[4], &[])
             .await
             .unwrap()
             .unwrap();
     assert_eq!(head.event.id, deleted.id);
+    assert!(is_deletion);
+    let (head, is_deletion) =
+        f.db.artifact_head(f.community, reader.as_bytes(), ids[0], &[])
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(head.event.id, heads[0].id);
+    assert!(!is_deletion);
     let (view, _) = f
         .query(
             &f.owner,

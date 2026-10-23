@@ -18,25 +18,17 @@ pub struct ArtifactSyncFilter {
     pub tags: Vec<(String, Vec<String>)>,
 }
 
-/// Tags NIP-AR fixes at creation. A head that fails a predicate on one of
-/// them was never in scope and never will be.
-const IMMUTABLE_TAGS: [&str; 2] = ["d", "type"];
-
 impl ArtifactSyncFilter {
-    /// Whether `head` fails a predicate on an immutable tag, so no change to
-    /// it can be in scope (NIP-AR sync rule 3). Mutable tags are left to the
-    /// client's match rule: a head that stopped matching must still be sent.
-    pub fn never_in_scope(&self, head: &nostr::Event) -> bool {
-        self.tags
-            .iter()
-            .filter(|(name, _)| IMMUTABLE_TAGS.contains(&name.as_str()))
-            .any(|(name, values)| {
-                let first = head.tags.iter().find_map(|tag| match tag.as_slice() {
-                    [tag_name, value, ..] if tag_name == name => Some(value),
-                    _ => None,
-                });
-                !first.is_some_and(|value| values.contains(value))
+    /// Whether `head` matches every predicate with the NIP-AR match rule: a
+    /// tag with that name whose first value is one of the requested values.
+    /// The same rule the current-state query applies (NIP-AR sync rule 3).
+    pub fn matches(&self, head: &nostr::Event) -> bool {
+        self.tags.iter().all(|(name, values)| {
+            head.tags.iter().any(|tag| match tag.as_slice() {
+                [tag_name, value, ..] => tag_name == name && values.contains(value),
+                _ => false,
             })
+        })
     }
 }
 
@@ -101,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn never_in_scope_checks_only_immutable_tags() {
+    fn matches_applies_every_predicate() {
         let h = Uuid::new_v4().to_string();
         let filter = parse_sync(
             &json!({"artifact":"current","#h":[h],"#type":["work.set"],"#status":["open"]}),
@@ -114,20 +106,27 @@ mod tests {
                 .sign_with_keys(&keys)
                 .unwrap()
         };
-        // Another type: never in scope, whatever its other tags.
-        assert!(filter.never_in_scope(&head(&[
-            ["h", &h],
-            ["type", "work.goals"],
-            ["status", "open"]
-        ])));
-        assert!(filter.never_in_scope(&head(&[["h", &h]])));
-        // Same type but a mutable tag no longer matches: still sent, so the
-        // client can drop it.
-        assert!(!filter.never_in_scope(&head(&[
+        assert!(filter.matches(&head(&[
             ["h", &h],
             ["type", "work.set"],
-            ["status", "done"]
+            ["status", "open"]
         ])));
-        assert!(!filter.never_in_scope(&head(&[["h", &h], ["type", "work.set"]])));
+        // A mutable tag that does not match, a missing tag, another type or
+        // another channel: not in scope.
+        for tags in [
+            &[["h", &h], ["type", "work.set"], ["status", "done"]][..],
+            &[["h", &h], ["type", "work.set"]][..],
+            &[["h", &h], ["type", "work.goals"], ["status", "open"]][..],
+            &[["h", "other"], ["type", "work.set"], ["status", "open"]][..],
+        ] {
+            assert!(!filter.matches(&head(tags)), "{tags:?}");
+        }
+        // Any tag of the name can match, as in the query.
+        assert!(filter.matches(&head(&[
+            ["h", &h],
+            ["type", "work.set"],
+            ["status", "done"],
+            ["status", "open"]
+        ])));
     }
 }

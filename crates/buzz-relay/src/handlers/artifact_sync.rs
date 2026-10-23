@@ -4,7 +4,7 @@
 //! says that one `d` changed; the sync task then reads that artifact's current
 //! head and sends it (NIP-AR Sync rules 3 and 4). Any possible loss of a live
 //! entry ends the sync with `CLOSED "resync: ..."` (rule 5).
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
@@ -92,6 +92,15 @@ impl Pending {
     }
 }
 
+/// The artifact identity (`d`) of a revision or removal.
+fn artifact_id(event: &Event) -> Option<Uuid> {
+    event
+        .tags
+        .iter()
+        .find(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
+        .and_then(|tag| tag.as_slice().get(1)?.parse().ok())
+}
+
 /// One live sync's signal inbox. Fan-out and loss detection write to it; the
 /// sync's own task is its only reader.
 pub struct SyncHandle {
@@ -126,13 +135,7 @@ impl SyncHandle {
         if ACCESS_KINDS.contains(&kind) {
             return self.resync("resync: channel access changed");
         }
-        let Some(d) = stored
-            .event
-            .tags
-            .iter()
-            .find(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
-            .and_then(|tag| tag.as_slice().get(1)?.parse::<Uuid>().ok())
-        else {
+        let Some(d) = artifact_id(&stored.event) else {
             return;
         };
         let removal = (kind == 45011).then(|| stored.event.clone());
@@ -236,6 +239,14 @@ impl ArtifactSyncs {
     }
 }
 
+#[cfg(test)]
+impl ArtifactSyncs {
+    /// Install an idle sync on `sub`, as a sync claim does.
+    pub(crate) fn insert_idle(&self, conn: ConnId, sub: &str) {
+        self.insert(conn, sub, Arc::new(SyncHandle::new()));
+    }
+}
+
 /// Resync every sync on this node whenever its Redis link may have lost a
 /// message (rule 5). A sync records the epoch its interest was confirmed on,
 /// so any later change reaches it here. Runs until the link owner stops.
@@ -329,44 +340,35 @@ pub async fn handle_sync(
     let filter = match filter {
         Ok(filter) => filter,
         Err(reason) => {
-            conn.send(RelayMessage::closed(&sub_id, &format!("invalid: {reason}")));
+            refuse(&sub_id, &format!("invalid: {reason}"), &conn, &state).await;
             return;
         }
     };
     let reader = match conn.auth_state_snapshot() {
         AuthState::Authenticated(ctx) => {
             if !ctx.scopes.is_empty() && !ctx.scopes.contains(&Scope::MessagesRead) {
-                conn.send(RelayMessage::closed(
-                    &sub_id,
-                    "restricted: insufficient scope",
-                ));
+                refuse(&sub_id, "restricted: insufficient scope", &conn, &state).await;
                 return;
             }
             // A channel-scoped token reaches only its own channels; outside
             // them the answer matches an unreadable channel.
             if let Some(allowed) = ctx.channel_ids.as_deref() {
                 if filter.channels.iter().any(|id| !allowed.contains(id)) {
-                    conn.send(RelayMessage::closed(&sub_id, RESTRICTED));
+                    refuse(&sub_id, RESTRICTED, &conn, &state).await;
                     return;
                 }
             }
             ctx.pubkey.to_bytes().to_vec()
         }
         _ => {
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "auth-required: not authenticated",
-            ));
+            refuse(&sub_id, "auth-required: not authenticated", &conn, &state).await;
             return;
         }
     };
     let _effect = match conn.nip_fi_gate.acquire_effect().await {
         Ok(permit) => permit,
         Err(crate::nip_fi_gate::SessionExpired) => {
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "restricted: authorization denied",
-            ));
+            refuse(&sub_id, "restricted: authorization denied", &conn, &state).await;
             return;
         }
     };
@@ -393,9 +395,10 @@ pub async fn handle_sync(
     // time budget and the cancellation race, so a slow reader cannot hold
     // the handler slot past the budget or get EOSE after retirement.
     let initial = async {
-        send_initial_set(&sub_id, owner, &filter, &reader, &conn, &state).await?;
+        let sent = send_initial_set(&sub_id, owner, &filter, &reader, &conn, &state).await?;
         // A resync requested before EOSE is queued ends the sync without it.
-        send_eose(&sub_id, owner, &handle, &conn).await
+        send_eose(&sub_id, owner, &handle, &conn).await?;
+        Ok::<_, Stop>(sent)
     };
     let outcome = tokio::select! {
         biased;
@@ -403,7 +406,7 @@ pub async fn handle_sync(
         () = handle.cancel.cancelled() => return,
         out = tokio::time::timeout(SNAPSHOT_BUDGET, initial) => Some(out),
     };
-    match outcome {
+    let in_set = match outcome {
         None => {
             super::close::close_if_owner(&sub_id, owner, None, &conn, &state).await;
             return;
@@ -418,15 +421,28 @@ pub async fn handle_sync(
             close(&sub_id, owner, reason, &conn, &state).await;
             return;
         }
-        Some(Ok(Ok(()))) => {}
-    }
+        Some(Ok(Ok(sent))) => sent,
+    };
     drop(_effect);
     drop(permit);
 
-    run_live(&sub_id, owner, &filter, &reader, &handle, &conn, &state).await;
+    run_live(
+        &sub_id, owner, &filter, &reader, in_set, &handle, &conn, &state,
+    )
+    .await;
 }
 
 const RESTRICTED: &str = "restricted: channel not readable";
+const OVER_MAX_EVENTS: &str = "error: sync set exceeds max_events";
+
+/// Refuse a sync `REQ` with `CLOSED reason`. A `REQ` replaces whatever held
+/// its ID (NIP-01), and `CLOSED` tells the client the ID is closed, so the
+/// old holder is retired before the frame, under the lifecycle lock.
+async fn refuse(sub_id: &str, reason: &str, conn: &ConnectionState, state: &AppState) {
+    let mut subs = conn.subscriptions.lock().await;
+    super::close::retire_locked(&mut subs, sub_id, conn, state).await;
+    conn.send(RelayMessage::closed(sub_id, reason));
+}
 
 /// Why a sync stops sending.
 enum Stop {
@@ -499,8 +515,8 @@ async fn confirm(channels: &[Uuid], epoch: u64, conn: &ConnectionState, state: &
         .unwrap_or(false)
 }
 
-/// Read and send every head in scope from one snapshot. After an `Err`
-/// nothing more is sent.
+/// Read and send every head in scope from one snapshot, and return their
+/// `d`. After an `Err` nothing more is sent.
 async fn send_initial_set(
     sub_id: &str,
     owner: u64,
@@ -508,7 +524,7 @@ async fn send_initial_set(
     reader: &[u8],
     conn: &ConnectionState,
     state: &AppState,
-) -> Result<(), Stop> {
+) -> Result<HashSet<Uuid>, Stop> {
     let mut snapshot = match state
         .db
         .open_artifact_snapshot(conn.tenant.community(), reader, &filter.channels)
@@ -521,7 +537,7 @@ async fn send_initial_set(
             return Err(Stop::Close("error: sync read failed"));
         }
     };
-    let mut sent = 0usize;
+    let mut sent = HashSet::new();
     loop {
         let page = snapshot
             .next_page(&filter.tags, SNAPSHOT_PAGE)
@@ -533,11 +549,11 @@ async fn send_initial_set(
         if page.is_empty() {
             break;
         }
-        sent += page.len();
-        if sent > MAX_SYNC_EVENTS {
-            return Err(Stop::Close("error: sync set exceeds max_events"));
+        if sent.len() + page.len() > MAX_SYNC_EVENTS {
+            return Err(Stop::Close(OVER_MAX_EVENTS));
         }
         for stored in page {
+            sent.extend(artifact_id(&stored.event));
             send_owned(
                 sub_id,
                 owner,
@@ -551,7 +567,7 @@ async fn send_initial_set(
         .finish()
         .await
         .map_err(|_| Stop::Close("error: sync read failed"))?;
-    Ok(())
+    Ok(sent)
 }
 
 /// Queue a frame while this request owns `sub_id`, waiting for room: the
@@ -635,12 +651,15 @@ async fn try_send_owned(
 }
 
 /// Rules 3–5 after `EOSE`: read each changed head, one read at a time, and
-/// send it. A dropped frame or a resync request ends the sync.
+/// send it. A dropped frame or a resync request ends the sync. `in_set` is
+/// the client's copy as this sync sent it: the `d` of each artifact in scope.
+#[allow(clippy::too_many_arguments)]
 async fn run_live(
     sub_id: &str,
     owner: u64,
     filter: &ArtifactSyncFilter,
     reader: &[u8],
+    mut in_set: HashSet<Uuid>,
     handle: &SyncHandle,
     conn: &ConnectionState,
     state: &AppState,
@@ -668,16 +687,18 @@ async fn run_live(
                     return;
                 }
             };
-            // A head of another type (or `d`) was never in scope; the change
-            // signal is per channel, so it reaches every sync there.
-            if head
+            // Rule 3: send a change only for an artifact in scope before it
+            // (in the client's copy) or after it (a live head that matches
+            // every predicate). The change signal is per channel, so it
+            // reaches syncs that never matched this artifact.
+            let in_scope = head
                 .as_ref()
-                .is_some_and(|head| filter.never_in_scope(&head.event))
-            {
+                .is_some_and(|(head, deleted)| !deleted && filter.matches(&head.event));
+            if !in_scope && !in_set.contains(&d) {
                 continue;
             }
             // A head the reader cannot read leaves only the source removal.
-            let Some(event) = head.map(|head| head.event).or(removal) else {
+            let Some(event) = head.map(|(head, _)| head.event).or(removal) else {
                 continue;
             };
             #[cfg(test)]
@@ -692,6 +713,13 @@ async fn run_live(
                     close(sub_id, owner, reason, conn, state).await;
                     return;
                 }
+            }
+            if !in_scope {
+                in_set.remove(&d);
+            } else if in_set.insert(d) && in_set.len() > MAX_SYNC_EVENTS {
+                // A new sync of this set would be refused the same way.
+                close(sub_id, owner, OVER_MAX_EVENTS, conn, state).await;
+                return;
             }
         }
         tokio::select! {

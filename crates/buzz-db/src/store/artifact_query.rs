@@ -222,23 +222,31 @@ impl Db {
     }
 
     /// The current head of one artifact, including a deletion, when the
-    /// reader can read the head's channel. `named_channels` are the system
-    /// channels the caller's request names.
+    /// reader can read the head's channel, with whether it is a deletion.
+    /// `named_channels` are the system channels the caller's request names.
     pub async fn artifact_head(
         &self,
         community: CommunityId,
         reader: &[u8],
         artifact: Uuid,
         named_channels: &[Uuid],
-    ) -> Result<Option<StoredEvent>> {
+    ) -> Result<Option<(StoredEvent, bool)>> {
         let mut connection = read_connection(self).await?;
-        let mut qb = QueryBuilder::<Postgres>::new(EVENT_COLUMNS);
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "SELECT e.id,e.pubkey,e.created_at,e.kind,e.tags,e.content,e.sig,e.received_at,e.channel_id,a.deleted FROM events e ",
+        );
         qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.artifact_id=")
             .push_bind(artifact)
             .push(" ");
         push_scope(&mut qb, community, reader, &[], named_channels.to_vec());
-        let rows = qb.build().fetch_all(&mut *connection).await?;
-        Ok(rows_to_events(rows)?.into_iter().next())
+        let Some(row) = qb.build().fetch_optional(&mut *connection).await? else {
+            return Ok(None);
+        };
+        let deleted: bool = sqlx::Row::try_get(&row, "deleted")?;
+        Ok(rows_to_events(vec![row])?
+            .into_iter()
+            .next()
+            .map(|head| (head, deleted)))
     }
 
     /// Open a sync snapshot over `channels`, after confirming in the same

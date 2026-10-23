@@ -199,6 +199,93 @@ fn sync_filter(channels: &[Uuid]) -> Value {
     json!({"artifact": "current", "#h": channels, "#type": ["buzz.task"]})
 }
 
+/// Accept one `buzz.task` revision with a `status` tag and return it.
+async fn status_revision(
+    f: &Fixture,
+    keys: &Keys,
+    home: Uuid,
+    d: Uuid,
+    status: &str,
+    prev: Option<&Event>,
+) -> Event {
+    let op = if prev.is_some() { "update" } else { "create" };
+    let mut tags = vec![
+        vec!["ar".to_owned(), "1".into()],
+        vec!["d".into(), d.to_string()],
+        vec!["h".into(), home.to_string()],
+        vec!["type".into(), "buzz.task".into()],
+        vec!["op".into(), op.into()],
+        vec!["title".into(), "Sync task".into()],
+        vec!["status".into(), status.into()],
+    ];
+    if let Some(prev) = prev {
+        tags.push(vec!["prev".into(), prev.id.to_hex()]);
+    }
+    let event = EventBuilder::new(Kind::Custom(45010), "body")
+        .tags(tags.into_iter().map(|t| Tag::parse(t).unwrap()))
+        .sign_with_keys(keys)
+        .unwrap();
+    ingest(f, keys, event.clone()).await;
+    event
+}
+
+async fn live_event(rx: &mut mpsc::Receiver<WsMessage>) -> String {
+    let message = frame(rx).await;
+    assert_eq!(message[0].as_str(), Some("EVENT"), "{message}");
+    message[2]["id"].as_str().unwrap().to_owned()
+}
+
+/// Rule 3 with a mutable predicate: a live head goes out only for an
+/// artifact in scope before the change (in the client's copy) or after it.
+/// A head that never matched never crosses the socket; one that stops
+/// matching is sent once, so the client can drop it. Mutation: send every
+/// same-type head (the old `never_in_scope` check) → the `done` task is
+/// sent → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn live_heads_follow_every_predicate() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let home = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+    let open = status_revision(&f, &owner, home, Uuid::new_v4(), "open", None).await;
+
+    let (conn, mut rx) = connect(&f, &owner);
+    let filter =
+        json!({"artifact": "current", "#h": [home], "#type": ["buzz.task"], "#status": ["open"]});
+    let task = start_sync(&f, &conn, filter);
+    assert_eq!(initial_set(&mut rx).await, vec![open.id.to_hex()]);
+
+    // Never in scope: not sent.
+    let other = Uuid::new_v4();
+    let done = status_revision(&f, &owner, home, other, "done", None).await;
+    no_frame(&mut rx).await;
+    // Leaves the set: sent once.
+    let d = open
+        .tags
+        .iter()
+        .find_map(|t| match t.as_slice() {
+            [name, value, ..] if name == "d" => value.parse().ok(),
+            _ => None,
+        })
+        .unwrap();
+    let closed = status_revision(&f, &owner, home, d, "done", Some(&open)).await;
+    assert_eq!(live_event(&mut rx).await, closed.id.to_hex());
+    let again = status_revision(&f, &owner, home, d, "done", Some(&closed)).await;
+    no_frame(&mut rx).await;
+    // Enters the set: sent.
+    let reopened = status_revision(&f, &owner, home, other, "open", Some(&done)).await;
+    assert_eq!(live_event(&mut rx).await, reopened.id.to_hex());
+    let back = status_revision(&f, &owner, home, d, "open", Some(&again)).await;
+    assert_eq!(live_event(&mut rx).await, back.id.to_hex());
+
+    super::close::handle_close("s".into(), Arc::clone(&conn), Arc::clone(&f.state)).await;
+    assert_eq!(frame(&mut rx).await, json!(["CLOSED", "s", ""]));
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("sync task ends on CLOSE")
+        .unwrap();
+}
+
 /// Rules 2–4 over the real pipeline: the initial set in `d` order, `EOSE`,
 /// then the current head of each later change (including a deletion), and
 /// no live entry ever arrives as the published event before `EOSE`.
