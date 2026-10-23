@@ -6,6 +6,7 @@ import {
   getGroupedInboxItemIds,
   hasRemainingChannelUnreadOverride,
   hasGroupedUnreadOverride,
+  projectInboxDoneSet,
   resolveInboxItemReadAt,
 } from "./useHomeInboxReadState.ts";
 
@@ -18,7 +19,9 @@ function feedItem(overrides) {
     pubkey: "author",
     content: "hello",
     createdAt: overrides.createdAt,
-    channelId: overrides.channelId ?? CHANNEL_ID,
+    channelId: Object.hasOwn(overrides, "channelId")
+      ? overrides.channelId
+      : CHANNEL_ID,
     channelName: "buzz-bugs",
     tags: overrides.tags ?? [["h", CHANNEL_ID]],
     category: overrides.category ?? "activity",
@@ -30,6 +33,7 @@ function inboxItem(groupItems, item = groupItems.at(-1)) {
     id: item.id,
     item,
     groupItems,
+    latestActivityAt: Math.max(...groupItems.map((entry) => entry.createdAt)),
   };
 }
 
@@ -253,4 +257,127 @@ test("parent-only replies use their parent as the thread read context", () => {
     150,
   );
   assert.equal(resolvedRootId, "parent-event");
+});
+
+test("unknown channel markers before NIP-RS hydrate are done, not unread", () => {
+  const channelRow = inboxItem([
+    feedItem({
+      id: "channel-event",
+      createdAt: 200,
+    }),
+  ]);
+  const threadRow = inboxItem([
+    feedItem({
+      id: "reply-event",
+      createdAt: 200,
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", "root-event", "", "root"],
+        ["e", "parent-event", "", "reply"],
+      ],
+    }),
+  ]);
+
+  const done = projectInboxDoneSet([channelRow, threadRow], {
+    getChannelReadAt: () => null,
+    getMessageReadAt: () => null,
+    getThreadReadAt: () => null,
+    isReadStateReady: false,
+    localDoneSet: new Set(),
+    localUnreadSet: new Set(),
+  });
+
+  assert.equal(done.has("channel-event"), true);
+  assert.equal(done.has("reply-event"), true);
+});
+
+test("unknown channel markers after NIP-RS hydrate stay unread", () => {
+  const channelRow = inboxItem([
+    feedItem({
+      id: "channel-event",
+      createdAt: 200,
+    }),
+  ]);
+
+  const done = projectInboxDoneSet([channelRow], {
+    getChannelReadAt: () => null,
+    getMessageReadAt: () => null,
+    getThreadReadAt: () => null,
+    isReadStateReady: true,
+    localDoneSet: new Set(),
+    localUnreadSet: new Set(),
+  });
+
+  assert.equal(done.has("channel-event"), false);
+});
+
+test("known unread markers stay unread during NIP-RS hydrate", () => {
+  const channelRow = inboxItem([
+    feedItem({
+      id: "channel-event",
+      createdAt: 200,
+    }),
+  ]);
+
+  const done = projectInboxDoneSet([channelRow], {
+    getChannelReadAt: () => 100,
+    getMessageReadAt: () => null,
+    getThreadReadAt: () => null,
+    isReadStateReady: false,
+    localDoneSet: new Set(),
+    localUnreadSet: new Set(),
+  });
+
+  assert.equal(done.has("channel-event"), false);
+});
+
+test("local unread override still wins during NIP-RS hydrate", () => {
+  const channelRow = inboxItem([
+    feedItem({
+      id: "channel-event",
+      createdAt: 200,
+    }),
+  ]);
+
+  const done = projectInboxDoneSet([channelRow], {
+    getChannelReadAt: () => null,
+    getMessageReadAt: () => null,
+    getThreadReadAt: () => null,
+    isReadStateReady: false,
+    localDoneSet: new Set(),
+    localUnreadSet: new Set(["channel-event"]),
+  });
+
+  assert.equal(done.has("channel-event"), false);
+});
+
+test("non-channel rows still use the local done-set during NIP-RS hydrate", () => {
+  const reminderRow = inboxItem([
+    feedItem({
+      id: "reminder-event",
+      channelId: null,
+      createdAt: 200,
+      tags: [],
+    }),
+  ]);
+
+  const unread = projectInboxDoneSet([reminderRow], {
+    getChannelReadAt: () => null,
+    getMessageReadAt: () => null,
+    getThreadReadAt: () => null,
+    isReadStateReady: false,
+    localDoneSet: new Set(),
+    localUnreadSet: new Set(),
+  });
+  const done = projectInboxDoneSet([reminderRow], {
+    getChannelReadAt: () => null,
+    getMessageReadAt: () => null,
+    getThreadReadAt: () => null,
+    isReadStateReady: false,
+    localDoneSet: new Set(["reminder-event"]),
+    localUnreadSet: new Set(),
+  });
+
+  assert.equal(unread.has("reminder-event"), false);
+  assert.equal(done.has("reminder-event"), true);
 });
