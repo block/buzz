@@ -117,6 +117,7 @@ export type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
   avatarUrl?: string | null;
+  credentialPersistence?: RawManagedAgent["credential_persistence"];
   personaId?: string | null;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
   runtime?: string | null;
@@ -964,6 +965,9 @@ type RawRelayAgent = {
 };
 
 type RawManagedAgent = {
+  credential_persistence?:
+    | import("@/shared/api/types").CredentialPersistence
+    | null;
   pubkey: string;
   name: string;
   persona_id: string | null;
@@ -1975,6 +1979,7 @@ function cloneRelayAgent(agent: RawRelayAgent): RawRelayAgent {
 
 function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
   return {
+    credential_persistence: agent.credential_persistence ?? null,
     pubkey: agent.pubkey,
     name: agent.name,
     persona_id: agent.persona_id,
@@ -2571,6 +2576,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     backend_agent_id: null,
     respond_to: seed.respondTo ?? "owner-only",
     respond_to_allowlist: seed.respondToAllowlist ?? [],
+    credential_persistence: seed.credentialPersistence ?? null,
     private_key_nsec: `nsec1mock${seed.pubkey.slice(0, 20)}`,
     log_lines: [
       `buzz-acp starting: relay=${DEFAULT_RELAY_WS_URL} agent_pubkey=${seed.pubkey} parallelism=1`,
