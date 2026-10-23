@@ -49,21 +49,6 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
       [onCancel],
     );
 
-    useEffect(() {
-      final subscription = ref.listenManual(appLifecycleProvider, (
-        previous,
-        next,
-      ) {
-        if (next != AppLifecycleState.paused &&
-            next != AppLifecycleState.detached) {
-          return;
-        }
-        unawaited(recorder.cancel());
-        if (context.mounted) onCancel();
-      });
-      return subscription.close;
-    }, [recorder, onCancel]);
-
     final route = ModalRoute.of(context);
     useEffect(() {
       if (route != null) voiceNoteRouteObserver.subscribe(routeAware, route);
@@ -88,6 +73,31 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
         }
       }
     }
+
+    // Backgrounding (including iOS Auto-Lock) must not silently discard a
+    // running recording: keep what was captured as the composer attachment.
+    // Recordings that never started, and detach, are still cancelled.
+    useEffect(() {
+      final subscription = ref.listenManual(appLifecycleProvider, (
+        previous,
+        next,
+      ) {
+        if (next != AppLifecycleState.paused &&
+            next != AppLifecycleState.detached) {
+          return;
+        }
+        if (next == AppLifecycleState.paused &&
+            isStarted.value &&
+            !isStopping.value &&
+            error.value == null) {
+          unawaited(finish());
+          return;
+        }
+        unawaited(recorder.cancel());
+        if (context.mounted) onCancel();
+      });
+      return subscription.close;
+    }, [recorder, onCancel]);
 
     useEffect(() {
       var active = true;
