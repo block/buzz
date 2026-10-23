@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
+import 'package:buzz/shared/crypto/event_signer.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/hosted/hosted_flow_provider.dart';
 import '../../shared/hosted/hosted_environment.dart';
@@ -839,7 +840,7 @@ class PairingNotifier extends Notifier<PairingState> {
     final jitter = math.Random.secure().nextInt(31);
     final createdAt = (DateTime.now().millisecondsSinceEpoch ~/ 1000) - jitter;
 
-    final event = nostr.Event.from(
+    final event = signEvent(
       kind: kind,
       content: content,
       tags: tags,

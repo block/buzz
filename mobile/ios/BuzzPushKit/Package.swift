@@ -13,7 +13,7 @@ let package = Package(
     targets: [
         .target(
             name: "CSecp256k1",
-            sources: ["vendor/src/secp256k1.c", "vendor/src/precomputed_ecmult.c", "vendor/src/precomputed_ecmult_gen.c"],
+            sources: ["buzz_signer.c", "vendor/src/secp256k1.c", "vendor/src/precomputed_ecmult.c", "vendor/src/precomputed_ecmult_gen.c"],
             publicHeadersPath: "include",
             cSettings: [.define("ENABLE_MODULE_EXTRAKEYS"), .define("ENABLE_MODULE_SCHNORRSIG")]
         ),

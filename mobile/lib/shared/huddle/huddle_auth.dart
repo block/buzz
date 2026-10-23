@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import 'package:buzz/shared/crypto/event_signer.dart';
 import '../relay/nostr_models.dart';
 import 'huddle_wire.dart';
 
@@ -66,7 +67,7 @@ abstract final class HuddleAuthV2 {
     }
 
     final secretKey = _decodeSecretKey(parameters.nsec);
-    final event = nostr.Event.from(
+    final event = signEvent(
       kind: EventKind.auth,
       content: '',
       tags: [

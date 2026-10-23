@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:nostr/nostr.dart' as nostr;
 
+import 'package:buzz/shared/crypto/event_signer.dart';
 import 'nostr_models.dart';
 import 'relay_session.dart';
 import 'relay_socket.dart';
@@ -46,7 +47,7 @@ class SignedEventRelay {
       throw Exception('Invalid nsec');
     }
 
-    final event = nostr.Event.from(
+    final event = signEvent(
       kind: kind,
       content: content,
       tags: tags,
@@ -76,7 +77,7 @@ Future<NostrEvent> submitSignedEventOnce({
 }) async {
   final privateKey = nostr.Nip19.decode(payload: nsec).data;
   if (privateKey.isEmpty) throw const FormatException('Invalid nsec');
-  final signed = nostr.Event.from(
+  final signed = signEvent(
     kind: kind,
     content: content,
     tags: tags,

@@ -27,3 +27,6 @@ BUZZ_APP_ATTEST_ENVIRONMENT = development
 // later-include-wins is per variable, so a personal signing identity beats the
 // worktree default while unset variables still fall through to tracked values.
 #include? "AppOverrides.xcconfig"
+
+// Keep the Dart FFI entry points visible in the app executable.
+OTHER_LDFLAGS = $(inherited) -Wl,-u,_buzz_signer_create -Wl,-u,_buzz_signer_sign -Wl,-u,_buzz_signer_destroy

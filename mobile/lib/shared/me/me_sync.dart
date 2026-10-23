@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:buzz/shared/crypto/event_signer.dart';
 import '../theme/theme_provider.dart';
 
 import '../crypto/nip44.dart';
@@ -470,7 +471,7 @@ class MeSync {
       }
       check();
       final signed = NostrEvent.fromJson(
-        nostr.Event.from(
+        signEvent(
           kind: 30078,
           content: content,
           secretKey: privateHex,

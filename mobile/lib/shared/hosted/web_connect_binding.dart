@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../crypto/event_signer.dart';
 import '../deeplink/deep_link.dart';
 import 'hosted_environment.dart';
 
@@ -51,7 +52,7 @@ class WebConnectBindingService {
       if (keys.public.toLowerCase() != expectedPubkey.toLowerCase()) {
         throw const FormatException('Identity does not match');
       }
-      final event = nostr.Event.from(
+      final event = signEvent(
         kind: 24243,
         content: '',
         tags: [
@@ -69,6 +70,7 @@ class WebConnectBindingService {
             [field, request.fields[field]!],
         ],
         secretKey: keys.secret,
+        pubkey: keys.public,
         verify: false,
       );
       // Encode through the library's canonical event representation.

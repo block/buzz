@@ -12,6 +12,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
+import 'package:buzz/shared/crypto/event_signer.dart';
 import 'animated_image_sanitizer.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
@@ -702,7 +703,7 @@ class MediaUploadService {
       ['server', serverAuthority],
     ];
 
-    return nostr.Event.from(
+    return signEvent(
       kind: _uploadAuthKind,
       content: 'Upload buzz-media',
       tags: tags,

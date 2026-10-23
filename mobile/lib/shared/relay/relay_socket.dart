@@ -7,6 +7,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'package:buzz/shared/crypto/event_signer.dart';
 import 'nostr_models.dart';
 import 'relay_websocket.dart';
 
@@ -224,7 +225,7 @@ class RelaySocket {
       ];
 
       // Create and sign the kind:22242 AUTH event.
-      final event = nostr.Event.from(
+      final event = signEvent(
         kind: EventKind.auth,
         content: '',
         tags: tags,

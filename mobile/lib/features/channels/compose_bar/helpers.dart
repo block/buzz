@@ -396,7 +396,7 @@ void _sendTypingIndicator(
         ['e', threadHeadId, '', 'reply'],
     ];
 
-    final event = nostr.Event.from(
+    final event = signEvent(
       kind: EventKind.typingIndicator,
       content: '',
       tags: tags,

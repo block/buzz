@@ -1,3 +1,4 @@
+import 'package:buzz/shared/crypto/event_signer.dart';
 import 'composer_send_origin.dart';
 import 'dart:async';
 import 'dart:collection';

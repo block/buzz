@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import 'package:buzz/shared/crypto/event_signer.dart';
 import '../../features/age_gate/age_signal_provider.dart';
 import '../auth/auth.dart';
 import '../hosted/hosted_relay_auth.dart';

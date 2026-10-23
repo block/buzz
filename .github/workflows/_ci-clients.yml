@@ -212,6 +212,9 @@ jobs:
       - name: Test
         if: matrix.lane == 'native'
         run: swift test --package-path mobile/ios/BuzzPushKit
+      - name: Test native event signing through Dart FFI
+        if: matrix.lane == 'native'
+        run: /bin/bash scripts/test-mobile-native-signing.sh
       - name: Test native pagination geometry
         if: matrix.lane == 'native'
         run: /bin/bash scripts/test-mobile-pagination.sh
@@ -245,11 +248,22 @@ jobs:
           tail -n 5 "$build_log"
           "${xcode[@]}" -parallel-testing-enabled NO -only-testing:RunnerTests \
             test-without-building
+          /bin/bash scripts/test-mobile-linked-signing.sh "$device"
       - name: Build complete unsigned iOS release
         if: matrix.lane == 'release'
         run: |
           /bin/bash scripts/test-mobile-gateway-recipes.sh
           cd mobile && flutter build ios --release --no-codesign --no-pub
+          # Flutter does not support Release mode on the simulator. Check the
+          # actual device Release executable's exported symbols separately.
+          # Archive applies install-time stripping that a plain build omits.
+          xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath /tmp/BuzzSigning.xcarchive CODE_SIGNING_ALLOWED=NO archive
+          nm -gU /tmp/BuzzSigning.xcarchive/Products/Applications/Buzz.app/Buzz > /tmp/buzz-release-symbols
+          for symbol in buzz_signer_create buzz_signer_sign buzz_signer_destroy; do
+            grep -Eq "[[:space:]]_${symbol}$" /tmp/buzz-release-symbols
+          done
 
   results:
     name: Results

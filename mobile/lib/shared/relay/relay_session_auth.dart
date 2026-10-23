@@ -20,7 +20,7 @@ String buildNip98AuthHeader({
       .process(Uint8List.fromList(bodyBytes))
       .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
       .join();
-  final event = nostr.Event.from(
+  final event = signEvent(
     kind: 27235,
     content: '',
     tags: [

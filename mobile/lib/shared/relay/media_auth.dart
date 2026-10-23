@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import 'package:buzz/shared/crypto/event_signer.dart';
 import 'relay_provider.dart';
 
 const _mediaGetAuthKind = 24242;
@@ -120,7 +121,7 @@ class MediaGetAuthService {
         ['server', authority],
     ];
 
-    return nostr.Event.from(
+    return signEvent(
       kind: _mediaGetAuthKind,
       content: 'Get buzz-media',
       tags: tags,
