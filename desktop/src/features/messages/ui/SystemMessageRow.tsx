@@ -221,13 +221,56 @@ function membershipActivityPubkeys(payload: SystemMessagePayload): string[] {
   const pubkeys =
     payload.type === "members_arrived"
       ? (payload.targets ?? [])
-      : payload.type === "member_removed"
-        ? [payload.target ?? payload.actor]
-        : [payload.target ?? payload.actor];
+      : payload.type === "members_changed"
+        ? [...(payload.addedTargets ?? []), ...(payload.removedTargets ?? [])]
+        : payload.type === "member_removed"
+          ? [payload.target ?? payload.actor]
+          : [payload.target ?? payload.actor];
 
   return [
     ...new Set(pubkeys.filter((pubkey): pubkey is string => Boolean(pubkey))),
   ];
+}
+
+function describeGroupedMembershipChanges({
+  agentPubkeys,
+  currentPubkey,
+  payload,
+  personaLookup,
+  profiles,
+}: {
+  agentPubkeys?: ReadonlySet<string>;
+  currentPubkey: string | undefined;
+  payload: SystemMessagePayload;
+  personaLookup?: Map<string, string>;
+  profiles: UserProfileLookup | undefined;
+}): SystemMessageDescription | null {
+  const addedTargets = payload.addedTargets ?? [];
+  const removedTargets = payload.removedTargets ?? [];
+  if (addedTargets.length === 0 && removedTargets.length === 0) return null;
+
+  const names = (targets: string[]) => (
+    <MemberNamesInlineList
+      agentPubkeys={agentPubkeys}
+      currentPubkey={currentPubkey}
+      personaLookup={personaLookup}
+      profiles={profiles}
+      targets={targets}
+    />
+  );
+
+  if (addedTargets.length > 0 && removedTargets.length > 0) {
+    return {
+      title: names(addedTargets),
+      action: <>added; {names(removedTargets)} removed</>,
+    };
+  }
+
+  if (addedTargets.length > 0) {
+    return { title: names(addedTargets), action: "added" };
+  }
+
+  return { title: names(removedTargets), action: "removed" };
 }
 
 function MembershipPersonName({
@@ -561,6 +604,14 @@ function describeSystemEvent(
         personaLookup,
         profiles,
       });
+    case "members_changed":
+      return describeGroupedMembershipChanges({
+        agentPubkeys,
+        currentPubkey,
+        payload,
+        personaLookup,
+        profiles,
+      });
     case "member_joined_then_left":
       if (!payload.target) return null;
       return {
@@ -743,6 +794,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     payload.type === "member_joined" || payload.type === "members_arrived";
   const isMembershipActivity =
     isMembershipArrival ||
+    payload.type === "members_changed" ||
     payload.type === "member_joined_then_left" ||
     payload.type === "member_left" ||
     payload.type === "member_removed";
