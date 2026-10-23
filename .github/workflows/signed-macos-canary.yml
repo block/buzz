@@ -160,6 +160,15 @@ jobs:
           path: ${{ github.workspace }}/.cache/mesh-llama
           key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
 
+      # The `!desktop/src-tauri/target/**/release/bundle` entry in the cache
+      # path list does not exclude the bundle directory: in actions/cache,
+      # negating a subpath of an already-included directory is a no-op, so DMGs
+      # do enter the tar and a cache hit restores the previous run's DMG. Left
+      # in place, `find … | head -1` below can pick that stale file, and the
+      # rest of this job signs and notarizes it as this run's canary.
+      - name: Remove stale bundle output
+        run: rm -rf desktop/src-tauri/target/release/bundle
+
       - name: Build unsigned Tauri app
         run: cd desktop && pnpm tauri build --verbose --no-sign --features mesh-llm --config src-tauri/tauri.canary.conf.json
         env:
@@ -236,8 +245,10 @@ jobs:
         if: always()
         run: du -sh ~/.cargo/registry ~/.cargo/git target desktop/src-tauri/target 2>/dev/null || true
 
-      # Only this trusted, main-bound canary writes the cache. Excluding bundle
-      # output prevents installers or signed artifacts from entering it.
+      # Only this trusted, main-bound canary writes the cache. The
+      # `!…/release/bundle` entry below does not keep installers or signed
+      # artifacts out of it — see the "Remove stale bundle output" step, which
+      # clears them before the build instead.
       - name: Save exact release Cargo cache
         if: steps.rust_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
