@@ -41,8 +41,13 @@ type StarterChannelsClient = {
 
 export type StarterChannelsResult = {
   channels: Channel[];
-  generalChannel: Channel;
-  welcomeChannel: Channel;
+  /**
+   * Null when the community's starter channel no longer matches the spec
+   * (renamed, private, archived, or forum). Starter channels are best-effort
+   * for joiners of established communities — a missing match is not an error.
+   */
+  generalChannel: Channel | null;
+  welcomeChannel: Channel | null;
 };
 
 type WelcomeChannelOptions = {
@@ -86,21 +91,17 @@ function findStarterChannel(channels: Channel[], name: string) {
 
 export function findStarterChannels(
   channels: Channel[],
-): Omit<StarterChannelsResult, "channels"> | null {
-  const generalChannel = findStarterChannel(
-    channels,
-    STARTER_GENERAL_CHANNEL_NAME,
-  );
-  const welcomeChannel = findStarterChannel(
-    channels,
-    STARTER_WELCOME_CHANNEL_NAME,
-  );
+): Omit<StarterChannelsResult, "channels"> {
+  return {
+    generalChannel: findStarterChannel(channels, STARTER_GENERAL_CHANNEL_NAME),
+    welcomeChannel: findStarterChannel(channels, STARTER_WELCOME_CHANNEL_NAME),
+  };
+}
 
-  if (!generalChannel || !welcomeChannel) {
-    return null;
-  }
-
-  return { generalChannel, welcomeChannel };
+function hasAllStarterChannels(
+  starters: Omit<StarterChannelsResult, "channels">,
+) {
+  return starters.generalChannel !== null && starters.welcomeChannel !== null;
 }
 
 function hasOnlyCurrentOrAllowedMembers(
@@ -262,22 +263,22 @@ export async function ensureStarterChannels(
 ): Promise<StarterChannelsResult> {
   const existingChannels = await client.getChannels();
   const existingStarters = findStarterChannels(existingChannels);
-  if (existingStarters) {
+  if (hasAllStarterChannels(existingStarters)) {
     return {
       channels: existingChannels,
       ...existingStarters,
     };
   }
 
+  // Best-effort: in an established community the starter channels may have
+  // been renamed, made private, archived, or converted — the ensure command
+  // creates whatever is genuinely missing and returns what this member can
+  // see. A partial (or empty) starter set is fine; it must not fail a
+  // joiner's onboarding.
   const ensuredChannels = await client.ensureStarterChannels();
-  const ensuredStarters = findStarterChannels(ensuredChannels);
-  if (!ensuredStarters) {
-    throw new Error("Starter channels were not available after setup");
-  }
-
   return {
     channels: ensuredChannels,
-    ...ensuredStarters,
+    ...findStarterChannels(ensuredChannels),
   };
 }
 
