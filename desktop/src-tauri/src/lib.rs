@@ -124,7 +124,11 @@ pub fn run() {
     }
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // Focus the existing window when a duplicate instance launches.
+            // A duplicate launch (another copy of the app, e.g. one still on the mounted DMG) hands over
+            // to this instance: show the main window too, since closing it on macOS only hides it.
+            #[cfg(target_os = "macos")]
+            show_main_window(app);
+            #[cfg(not(target_os = "macos"))]
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
             }
