@@ -67,7 +67,9 @@ jobs:
       - name: Set up isolated test secrets
         uses: ./.github/actions/setup-test-secrets
       - name: Unit tests
-        run: just test-unit
+        run: |
+          export PATH="$RUNNER_TEMP/daz-secrets:$PATH"
+          just test-unit
 
   server-cross-compile:
     name: Server Cross-Compile

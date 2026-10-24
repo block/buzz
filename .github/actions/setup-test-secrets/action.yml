@@ -20,7 +20,6 @@ runs:
           go build -trimpath -o "$RUNNER_TEMP/daz-secrets/daz-secrets" ./cmd/daz-secrets
         )
         chmod 0755 "$RUNNER_TEMP/daz-secrets/buzz-ci-provider" "$RUNNER_TEMP/daz-secrets/daz-secrets"
-        printf '%s\n' "$RUNNER_TEMP/daz-secrets" >> "$GITHUB_PATH"
         printf '%s\n' \
           'version = 1' \
           "provider_path = \"$RUNNER_TEMP/daz-secrets/buzz-ci-provider\"" \

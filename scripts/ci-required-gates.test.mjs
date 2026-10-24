@@ -174,4 +174,10 @@ test("credential integration lanes configure the real protocol provider before t
   assert.match(action, /provider_id = "conformance"/);
   assert.match(action, /cd \.ci\/daz-secrets/);
   assert.match(action, /cmd\/daz-secrets\n/);
+  assert.doesNotMatch(action, /GITHUB_PATH/);
+  const rust = readFileSync(
+    new URL("../.github/workflows/_ci-rust.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(rust, /export PATH="\$RUNNER_TEMP\/daz-secrets:\$PATH"\n {10}just test-unit/);
 });
