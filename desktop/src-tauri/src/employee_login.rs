@@ -34,33 +34,10 @@ const MAX_RESPONSE: usize = 64 * 1024;
 /// The integration is disabled unless the operator explicitly opts in.
 #[tauri::command]
 pub(crate) fn employee_sign_in_available() -> bool {
-    configured_relay().ok().flatten().is_some()
-}
-
-/// Deployment-owned exact relay opt-in. A selected community never selects the identity service.
-pub(crate) fn configured_relay() -> Result<Option<String>, String> {
-    if !std::env::var("BUZZ_EMPLOYEE_NATIVE_SIGN_IN").is_ok_and(|value| value == "1") {
-        return Ok(None);
-    }
-    let value = std::env::var("BUZZ_EMPLOYEE_NATIVE_RELAY_URL")
-        .map_err(|_| "Square relay is not configured")?;
-    let parsed = Url::parse(&value).map_err(|_| "Square relay is invalid")?;
-    let canonical = format!(
-        "wss://{}",
-        &parsed[url::Position::BeforeHost..url::Position::AfterPort]
-    );
-    if parsed.scheme() != "wss"
-        || parsed.host_str().is_none()
-        || parsed.port() == Some(80)
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-        || value != canonical
-    {
-        return Err("Square relay must be one canonical WSS origin".to_owned());
-    }
-    Ok(Some(value))
+    crate::employee_relay_policy::configured()
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 fn random_parameter() -> Result<String, String> {
@@ -196,8 +173,10 @@ pub(crate) async fn start_employee_login(
     if !employee_sign_in_available() {
         return Err("Square employee sign-in is not enabled".to_owned());
     }
-    let relay = configured_relay()?.ok_or("Square sign-in is not configured")?;
-    if crate::relay::relay_ws_url_with_override(&app_state) != relay {
+    let selected = crate::relay::relay_ws_url_with_override(&app_state);
+    let relay = crate::employee_relay_policy::relay_for_url(&selected)?
+        .ok_or("Select a configured Square community before signing in")?;
+    if selected != relay {
         return Err("Select the configured Square community before signing in".to_owned());
     }
     let workspace_generation = app_state

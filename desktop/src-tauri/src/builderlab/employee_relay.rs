@@ -1,4 +1,4 @@
-//! Exact configured-relay transport. Session and assertion credentials remain native.
+//! Configured Square relay transport. Session and assertion credentials remain native.
 use super::*;
 use nostr::Keys;
 use tauri::Manager;
@@ -11,22 +11,7 @@ pub(crate) struct EmployeeEvidence {
 }
 
 pub(crate) fn requires_employee(value: &str) -> Result<bool, String> {
-    let Some(configured) = crate::employee_login::configured_relay()? else {
-        return Ok(false);
-    };
-    let parsed = Url::parse(value).map_err(|_| "Invalid relay URL")?;
-    let authority = &parsed[url::Position::BeforeHost..url::Position::AfterPort];
-    if format!("wss://{authority}") != configured {
-        return Ok(false);
-    }
-    if !matches!(parsed.scheme(), "https" | "wss")
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err("Employee relay requires its exact TLS origin".to_owned());
-    }
-    Ok(true)
+    Ok(crate::employee_relay_policy::relay_for_url(value)?.is_some())
 }
 
 /// Refuses operator sessions and other signing keys on the configured employee relay.
@@ -38,8 +23,8 @@ pub(crate) async fn employee_evidence(
     if !requires_employee(relay_or_url)? {
         return Ok(None);
     }
-    let configured =
-        crate::employee_login::configured_relay()?.ok_or("Square relay is not configured")?;
+    let configured = crate::employee_relay_policy::relay_for_url(relay_or_url)?
+        .ok_or("Square relay is not configured")?;
     if crate::relay::relay_ws_url_with_override(app_state) != configured
         || app_state.signing_keys()?.public_key() != keys.public_key()
     {

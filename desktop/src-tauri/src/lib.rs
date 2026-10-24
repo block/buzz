@@ -10,6 +10,7 @@ mod deep_link;
 mod egress_guard;
 mod employee_api;
 mod employee_login;
+mod employee_relay_policy;
 mod event_sync;
 mod events;
 #[cfg_attr(not(test), allow(dead_code))]

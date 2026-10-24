@@ -570,3 +570,39 @@ async fn transient_assertion_refresh_failure_can_retry_without_another_login() {
     assert!(fixture.session.employee_expiry(&fixture.state).is_some());
     assert!(!fixture.session.employee_can_retry(&fixture.state));
 }
+
+#[tokio::test]
+async fn staging_namespace_merchants_cannot_reuse_another_community_session_or_assertion() {
+    let first = "wss://viva3.communities.square.builderlabstaging.xyz";
+    let second = "wss://merchant-0123456789abcdef0123456789abcdef0123456789abcdef.communities.square.builderlabstaging.xyz";
+    for (current, next) in [(first, second), (second, first)] {
+        let mut fixture = Fixture::new(false, false).await;
+        fixture.relay = current.to_owned();
+        *fixture.state.relay_url_override.lock().unwrap() = Some(current.to_owned());
+        fixture
+            .session
+            .0
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .employee
+            .as_mut()
+            .unwrap()
+            .relay = current.to_owned();
+        let evidence = fixture.evidence().await.unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&fixture.stub.captured.lock().unwrap()[0].1).unwrap();
+        assert_eq!(body["relay_url"], current);
+        fixture.relay = next.to_owned();
+        *fixture.state.relay_url_override.lock().unwrap() = Some(next.to_owned());
+        assert!(fixture.evidence().await.is_err());
+        assert!(evidence.cancel.is_cancelled());
+        assert!(fixture.session.0.lock().unwrap().is_none());
+        assert_eq!(
+            fixture.stub.captured.lock().unwrap().len(),
+            1,
+            "old credential must never request authority for the next merchant"
+        );
+    }
+}
