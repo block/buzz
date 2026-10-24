@@ -204,6 +204,7 @@ struct TrayActionQueue {
 }
 
 struct TrayMenuState<R: Runtime> {
+    menu: Mutex<Menu<R>>,
     activity_items: Mutex<Vec<TrayActivityMenuItem<R>>>,
     action_queue: Mutex<TrayActionQueue>,
 }
@@ -307,11 +308,23 @@ fn build_menu<R: Runtime>(
     let mut activity_items =
         Vec::with_capacity(activities.len().saturating_add(recent_activities.len()));
 
-    let running = MenuItem::new(app, "Running", false, None::<&str>)?;
+    let running = MenuItem::with_id(
+        app,
+        "language:Running",
+        crate::app_language::text("Running", "실행 중"),
+        false,
+        None::<&str>,
+    )?;
     menu.append(&running)?;
 
     if activities.is_empty() {
-        let empty = MenuItem::new(app, "No agents are running", false, None::<&str>)?;
+        let empty = MenuItem::with_id(
+            app,
+            "language:Empty",
+            crate::app_language::text("No agents are running", "실행 중인 에이전트 없음"),
+            false,
+            None::<&str>,
+        )?;
         menu.append(&empty)?;
     } else {
         append_activity_items(app, &menu, activities, &mut activity_items)?;
@@ -319,7 +332,13 @@ fn build_menu<R: Runtime>(
 
     if !recent_activities.is_empty() {
         append_separator(app, &menu)?;
-        let recent = MenuItem::new(app, "Recent", false, None::<&str>)?;
+        let recent = MenuItem::with_id(
+            app,
+            "language:Recent",
+            crate::app_language::text("Recent", "최근 활동"),
+            false,
+            None::<&str>,
+        )?;
         menu.append(&recent)?;
         append_activity_items(app, &menu, recent_activities, &mut activity_items)?;
     }
@@ -328,7 +347,7 @@ fn build_menu<R: Runtime>(
     menu.append(&MenuItem::with_id(
         app,
         NEW_CHANNEL_ID,
-        "New Channel",
+        crate::app_language::text("New Channel", "새 채널"),
         true,
         None::<&str>,
     )?)?;
@@ -336,7 +355,7 @@ fn build_menu<R: Runtime>(
     menu.append(&MenuItem::with_id(
         app,
         OPEN_BUZZ_ID,
-        "Open Buzz",
+        crate::app_language::text("Open Buzz", "Buzz 열기"),
         true,
         None::<&str>,
     )?)?;
@@ -344,7 +363,7 @@ fn build_menu<R: Runtime>(
     menu.append(&MenuItem::with_id(
         app,
         QUIT_ID,
-        "Quit Buzz",
+        crate::app_language::text("Quit Buzz", "Buzz 종료"),
         true,
         None::<&str>,
     )?)?;
@@ -480,6 +499,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let recent_activities = preview_recent_activities.as_deref().unwrap_or(&[]);
     let (menu, activity_items) = build_menu(app, activities, recent_activities)?;
     app.manage(TrayMenuState {
+        menu: Mutex::new(menu.clone()),
         activity_items: Mutex::new(activity_items),
         action_queue: Mutex::new(TrayActionQueue {
             community_generation: 0,
@@ -605,10 +625,39 @@ pub fn update_tray_agent_activity<R: Runtime>(
     let tray = app
         .tray_by_id(TRAY_ID)
         .ok_or_else(|| "Buzz tray icon is not available".to_string())?;
-    tray.set_menu(Some(menu))
+    tray.set_menu(Some(menu.clone()))
         .map_err(|error| error.to_string())?;
+    *state
+        .menu
+        .lock()
+        .map_err(|_| "Buzz tray menu state is unavailable".to_string())? = menu;
     apply_activity_presentation(&tray, activities, recent_activities)?;
     *activity_items = next_activity_items;
+    Ok(())
+}
+
+/// Update only app-owned labels, retaining activity items and queued actions.
+pub fn refresh_language<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let state = app.state::<TrayMenuState<R>>();
+    let menu = state
+        .menu
+        .lock()
+        .map_err(|_| "Buzz tray menu state is unavailable".to_string())?;
+    for item in menu.items().map_err(|error| error.to_string())? {
+        let labels = match item.id().as_ref() {
+            "language:Running" => Some(("Running", "실행 중")),
+            "language:Empty" => Some(("No agents are running", "실행 중인 에이전트 없음")),
+            "language:Recent" => Some(("Recent", "최근 활동")),
+            NEW_CHANNEL_ID => Some(("New Channel", "새 채널")),
+            OPEN_BUZZ_ID => Some(("Open Buzz", "Buzz 열기")),
+            QUIT_ID => Some(("Quit Buzz", "Buzz 종료")),
+            _ => None,
+        };
+        if let (Some((english, korean)), Some(item)) = (labels, item.as_menuitem()) {
+            item.set_text(crate::app_language::text(english, korean))
+                .map_err(|error| error.to_string())?;
+        }
+    }
     Ok(())
 }
 
