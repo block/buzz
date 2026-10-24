@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { flushSync } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -157,6 +159,8 @@ export function OnboardingFlow({
   initialProfile,
   initialProfileDecisionSettled,
 }: OnboardingFlowProps) {
+  useUiLanguage();
+
   const { complete, skipForNow } = actions;
   const { activeCommunity } = useCommunities();
   const queryClient = useQueryClient();
@@ -271,7 +275,9 @@ export function OnboardingFlow({
         if (membershipStatus === "error") {
           setMembershipError({
             kind: "error",
-            message: "Server error — try again",
+            get message() {
+              return uiT("Server error — try again");
+            },
           });
           return;
         }
@@ -429,7 +435,7 @@ export function OnboardingFlow({
       setPersistError(
         error instanceof Error
           ? error.message
-          : "Failed to create a new identity. Please try again.",
+          : uiT("Failed to create a new identity. Please try again."),
       );
     }
   }, [queryClient]);
@@ -460,10 +466,10 @@ export function OnboardingFlow({
         ? {
             label:
               keyImportStage === "backup-password"
-                ? "Back"
+                ? uiT("Back")
                 : identityLost
-                  ? "Start new identity"
-                  : "Back",
+                  ? uiT("Start new identity")
+                  : uiT("Back"),
             disabled: isKeyImporting,
             onClick: handleKeyImportBack,
           }
@@ -518,10 +524,10 @@ export function OnboardingFlow({
               {membershipError.kind === "unreachable" ? (
                 <>
                   <p className="font-medium text-destructive">
-                    Can't reach this relay
+                    {uiT("Can't reach this relay")}
                   </p>
                   <p className="mt-1 text-muted-foreground">
-                    Check your connection or change your community.
+                    {uiT("Check your connection or change your community.")}
                   </p>
                   <Button
                     className="mt-3"
@@ -529,16 +535,16 @@ export function OnboardingFlow({
                     size="sm"
                     variant="outline"
                   >
-                    Change community
+                    {uiT("Change community")}
                   </Button>
                 </>
               ) : (
                 <>
                   <p className="font-medium text-destructive">
-                    {membershipError.message ?? "Something went wrong"}
+                    {membershipError.message ?? uiT("Something went wrong")}
                   </p>
                   <p className="mt-1 text-muted-foreground">
-                    The relay returned an error. Try again.
+                    {uiT("The relay returned an error. Try again.")}
                   </p>
                 </>
               )}
@@ -573,24 +579,23 @@ export function OnboardingFlow({
                 {identityLost ? (
                   <>
                     <h1 className="text-title font-normal text-foreground">
-                      Re-import your key
+                      {uiT("Re-import your key")}
                     </h1>
                     <p className="mt-5 text-sm leading-6 text-muted-foreground">
-                      Your identity is no longer in the system keyring.
-                      Re-import your nsec to restore it — Buzz will restart to
-                      finish recovery. Or go back to start a new identity with a
-                      fresh key.
+                      {uiT(
+                        "Your identity is no longer in the system keyring. Re-import your nsec to restore it — Buzz will restart to finish recovery. Or go back to start a new identity with a fresh key.",
+                      )}
                     </p>
                   </>
                 ) : (
                   <>
                     <h1 className="text-title font-normal text-foreground">
-                      Use your existing key
+                      {uiT("Use your existing key")}
                     </h1>
                     <p className="mt-5 text-sm leading-6 text-muted-foreground">
-                      Import your Nostr private key to use that identity with
-                      Buzz. If this key already has a profile on the relay, your
-                      name and avatar are restored automatically.
+                      {uiT(
+                        "Import your Nostr private key to use that identity with Buzz. If this key already has a profile on the relay, your name and avatar are restored automatically.",
+                      )}
                     </p>
                   </>
                 )}

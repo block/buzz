@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
@@ -10,6 +12,8 @@ import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
  * wait until setup finishes so only the user's final identity is admitted.
  */
 export function PendingInviteGate() {
+  useUiLanguage();
+
   const { transaction, update, clear } = useCommunityOnboarding();
   const systemColorScheme = useSystemColorScheme();
 
@@ -25,10 +29,12 @@ export function PendingInviteGate() {
       <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
         <FlappingBee className="h-auto w-24" />
         <h1 className="mt-6 text-3xl font-semibold tracking-tight">
-          Opening community link
+          {uiT("Opening community link")}
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          You’ll connect to {transaction.communityName} once setup is finished.
+          {uiT("You’ll connect to {0} once setup is finished.", {
+            p0: transaction.communityName,
+          })}
         </p>
         <div className="mt-8 flex w-full max-w-[300px] flex-col gap-3">
           <Button
@@ -37,7 +43,7 @@ export function PendingInviteGate() {
             onClick={() => update({ acknowledged: true })}
             type="button"
           >
-            Continue setup
+            {uiT("Continue setup")}
           </Button>
           <Button
             className="h-10 w-full"
@@ -46,7 +52,7 @@ export function PendingInviteGate() {
             type="button"
             variant="ghost"
           >
-            Cancel
+            {uiT("Cancel")}
           </Button>
         </div>
       </div>

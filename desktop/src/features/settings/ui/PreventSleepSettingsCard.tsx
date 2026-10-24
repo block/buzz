@@ -1,8 +1,12 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { usePreventSleepContext } from "@/features/agents/usePreventSleep";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 
 export function PreventSleepSettingsCard() {
+  useUiLanguage();
+
   const { enabled, setEnabled, hasRunningAgents, expired, clearExpired } =
     usePreventSleepContext();
 
@@ -10,7 +14,7 @@ export function PreventSleepSettingsCard() {
     <div className="min-w-0 space-y-3">
       <SettingsOptionGroup
         data-testid="agents-preferences-card"
-        title="Preferences"
+        title={uiT("Preferences")}
       >
         <SettingsOptionRow>
           <div className="min-w-0">
@@ -18,15 +22,15 @@ export function PreventSleepSettingsCard() {
               className="text-sm font-medium"
               htmlFor="prevent-sleep-switch"
             >
-              Keep awake while agents are active
+              {uiT("Keep awake while agents are active")}
             </label>
             <p
               className="text-sm font-normal text-muted-foreground/70"
               data-settings-subcopy
             >
-              Prevents your computer from sleeping while local agents are
-              running. Automatically releases when all agents stop or after 1
-              hour without agent activity.
+              {uiT(
+                "Prevents your computer from sleeping while local agents are running. Automatically releases when all agents stop or after 1 hour without agent activity.",
+              )}
             </p>
           </div>
           <Switch
@@ -45,15 +49,15 @@ export function PreventSleepSettingsCard() {
 
       {enabled && !hasRunningAgents && (
         <p className="mt-3 text-sm text-muted-foreground">
-          Waiting for agents to start
+          {uiT("Waiting for agents to start")}
         </p>
       )}
 
       {expired && (
         <p className="mt-3 rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-700 dark:text-yellow-400">
-          Sleep prevention expired after 1 hour without agent activity. It will
-          resume on the next agent activity, or toggle off and on to re-enable
-          now.
+          {uiT(
+            "Sleep prevention expired after 1 hour without agent activity. It will resume on the next agent activity, or toggle off and on to re-enable now.",
+          )}
         </p>
       )}
     </div>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
@@ -63,6 +65,8 @@ const WANDER_X = 26;
 const WANDER_Y = 20;
 
 export function LandingBees() {
+  useUiLanguage();
+
   const fieldRef = React.useRef<HTMLDivElement>(null);
   const beeRefs = React.useRef<(HTMLSpanElement | null)[]>([]);
   const pointer = React.useRef<{ x: number; y: number } | null>(null);

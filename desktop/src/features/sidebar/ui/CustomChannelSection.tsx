@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   ArrowDown,
   ArrowUp,
@@ -70,8 +72,18 @@ const SECTION_LABEL_CHEVRON_ICON_CLASS =
   "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
 
 const SORT_OPTIONS: { value: ChannelSortMode; label: string }[] = [
-  { value: "recent", label: "Recent" },
-  { value: "alpha", label: "A–Z" },
+  {
+    value: "recent",
+    get label() {
+      return uiT("Recent");
+    },
+  },
+  {
+    value: "alpha",
+    get label() {
+      return uiT("A–Z");
+    },
+  },
 ];
 
 /**
@@ -160,6 +172,8 @@ export function SectionActionsMenu({
   sortMode?: ChannelSortMode;
   onSortModeChange?: (mode: ChannelSortMode) => void;
 }) {
+  useUiLanguage();
+
   const triggerRef = useRef<HTMLButtonElement>(null);
   const showSectionManagement = Boolean(onRenameSection || onDeleteSection);
   const showSort = Boolean(sortMode && onSortModeChange);
@@ -168,7 +182,7 @@ export function SectionActionsMenu({
     <DropdownMenu onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>
         <button
-          aria-label={`More actions for ${sectionLabel}`}
+          aria-label={uiT("More actions for {0}", { p0: sectionLabel })}
           className={cn(SECTION_ICON_BUTTON_CLASS, visibilityClassName)}
           data-testid={testId}
           onClick={(event) => event.stopPropagation()}
@@ -189,19 +203,19 @@ export function SectionActionsMenu({
         {hasUnread && onMarkAllRead ? (
           <DropdownMenuItem onSelect={() => deferMenuAction(onMarkAllRead)}>
             <CheckCheck className="h-4 w-4" />
-            <span>Mark all as read</span>
+            <span>{uiT("Mark all as read")}</span>
           </DropdownMenuItem>
         ) : null}
         {onNewMessage ? (
           <DropdownMenuItem onSelect={() => deferMenuAction(onNewMessage)}>
             <Plus className="h-4 w-4" />
-            <span>{newMessageLabel ?? "New message"}</span>
+            <span>{newMessageLabel ?? uiT("New message")}</span>
           </DropdownMenuItem>
         ) : null}
         {onBrowse ? (
           <DropdownMenuItem onSelect={() => deferMenuAction(onBrowse)}>
             <HashSearch className="h-4 w-4" />
-            <span>{browseLabel ?? "Browse channels"}</span>
+            <span>{browseLabel ?? uiT("Browse channels")}</span>
             <DropdownMenuShortcut>
               {getPlatformKeysById("browse-channels")}
             </DropdownMenuShortcut>
@@ -210,7 +224,7 @@ export function SectionActionsMenu({
         {onCreate ? (
           <DropdownMenuItem onSelect={() => deferMenuAction(onCreate)}>
             <Plus className="h-4 w-4" />
-            <span>{createLabel ?? "Create channel"}</span>
+            <span>{createLabel ?? uiT("Create channel")}</span>
           </DropdownMenuItem>
         ) : null}
         {showSectionManagement ? (
@@ -220,7 +234,7 @@ export function SectionActionsMenu({
                 onSelect={() => deferMenuAction(onRenameSection)}
               >
                 <Pencil className="h-4 w-4" />
-                <span>Rename section</span>
+                <span>{uiT("Rename section")}</span>
               </DropdownMenuItem>
             ) : null}
             {onMoveSectionUp ? (
@@ -229,7 +243,7 @@ export function SectionActionsMenu({
                 onSelect={() => deferMenuAction(onMoveSectionUp)}
               >
                 <ArrowUp className="h-4 w-4" />
-                <span>Move up</span>
+                <span>{uiT("Move up")}</span>
               </DropdownMenuItem>
             ) : null}
             {onMoveSectionDown ? (
@@ -238,7 +252,7 @@ export function SectionActionsMenu({
                 onSelect={() => deferMenuAction(onMoveSectionDown)}
               >
                 <ArrowDown className="h-4 w-4" />
-                <span>Move down</span>
+                <span>{uiT("Move down")}</span>
               </DropdownMenuItem>
             ) : null}
           </>
@@ -249,7 +263,7 @@ export function SectionActionsMenu({
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
                 <ArrowUpDown className="h-4 w-4" />
-                <span>Sort</span>
+                <span>{uiT("Sort")}</span>
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
                 <DropdownMenuRadioGroup
@@ -279,7 +293,7 @@ export function SectionActionsMenu({
               onSelect={() => deferMenuAction(onDeleteSection)}
             >
               <Trash2 className="h-4 w-4" />
-              <span>Delete section</span>
+              <span>{uiT("Delete section")}</span>
             </DropdownMenuItem>
           </>
         ) : null}
@@ -422,6 +436,8 @@ export function ChannelGroupSection({
   onDeleteChannel?: (channel: Channel) => void;
   onLeaveChannel?: (channel: Channel) => void;
 }) {
+  useUiLanguage();
+
   const contentId = `sidebar-${listTestId}`;
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
 
@@ -500,7 +516,7 @@ export function ChannelGroupSection({
           <>
             {showQuickCreate && (onQuickCreateClick ?? onCreateClick) ? (
               <SectionQuickAction
-                label={quickCreateLabel ?? createLabel ?? "Create channel"}
+                label={quickCreateLabel ?? createLabel ?? uiT("Create channel")}
                 onClick={(onQuickCreateClick ?? onCreateClick) as () => void}
                 testId={
                   actionsTestId ? `${actionsTestId}-quick-create` : undefined
@@ -612,6 +628,8 @@ export function CustomChannelSection({
   onDeleteChannel?: (channel: Channel) => void;
   onLeaveChannel?: (channel: Channel) => void;
 }) {
+  useUiLanguage();
+
   const contentId = `sidebar-section-${section.id}`;
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
 
@@ -678,7 +696,7 @@ export function CustomChannelSection({
                   </SidebarGroupLabel>
                   <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
                     <SectionQuickAction
-                      label={`Add channel to ${section.name}`}
+                      label={uiT("Add channel to {0}", { p0: section.name })}
                       onClick={onCreateChannel}
                       testId={`section-actions-${section.id}-quick-create`}
                     />
@@ -703,15 +721,15 @@ export function CustomChannelSection({
               <ContextMenuContent>
                 <ContextMenuItem onClick={onRenameSection}>
                   <Pencil className="h-4 w-4" />
-                  Rename section
+                  {uiT("Rename section")}
                 </ContextMenuItem>
                 <ContextMenuItem disabled={isFirst} onClick={onMoveSectionUp}>
                   <ArrowUp className="h-4 w-4" />
-                  Move up
+                  {uiT("Move up")}
                 </ContextMenuItem>
                 <ContextMenuItem disabled={isLast} onClick={onMoveSectionDown}>
                   <ArrowDown className="h-4 w-4" />
-                  Move down
+                  {uiT("Move down")}
                 </ContextMenuItem>
                 <ContextMenuSeparator />
                 <ContextMenuItem
@@ -719,7 +737,7 @@ export function CustomChannelSection({
                   onClick={onDeleteSection}
                 >
                   <Trash2 className="h-4 w-4" />
-                  Delete section
+                  {uiT("Delete section")}
                 </ContextMenuItem>
               </ContextMenuContent>
             </ContextMenu>

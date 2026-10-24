@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { relaunch } from "@tauri-apps/plugin-process";
 
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
@@ -13,6 +15,8 @@ export function RecoveryScreen({
   title: string;
   body: string;
 }) {
+  useUiLanguage();
+
   const systemColorScheme = useSystemColorScheme();
 
   return (
@@ -33,7 +37,7 @@ export function RecoveryScreen({
           }}
           type="button"
         >
-          Relaunch Buzz
+          {uiT("Relaunch Buzz")}
         </Button>
       </div>
     </div>

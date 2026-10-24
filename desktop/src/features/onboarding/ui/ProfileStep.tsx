@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
@@ -37,6 +39,8 @@ function OnboardingRelayConnectionErrorCard({
   isSaving: boolean;
   message: string;
 }) {
+  useUiLanguage();
+
   const {
     isPending: isReconnectPending,
     isWaitingOnReconnectHook,
@@ -126,7 +130,9 @@ function OnboardingRelayConnectionErrorCard({
         .catch((error) => {
           hadActiveReconnectRef.current = false;
           const detail = error instanceof Error ? error.message : String(error);
-          toast.error(`Could not reconnect to the relay. ${detail}`);
+          toast.error(
+            uiT("Could not reconnect to the relay. {0}", { p0: detail }),
+          );
         })
         .finally(() => {
           reconnectActionPendingRef.current = false;
@@ -198,6 +204,8 @@ export function ProfileStep({
   state,
   usesExistingIdentity = false,
 }: ProfileStepProps) {
+  useUiLanguage();
+
   const {
     advanceWithoutSaving,
     back,
@@ -231,11 +239,12 @@ export function ProfileStep({
     >
       <div className="w-full max-w-2xl">
         <h1 className="text-title font-normal text-foreground">
-          What should we call you?
+          {uiT("What should we call you?")}
         </h1>
         <p className="mt-5 text-sm leading-6 text-muted-foreground">
-          Pick the name people and agents will see in Buzz. You can change it
-          anytime.
+          {uiT(
+            "Pick the name people and agents will see in Buzz. You can change it anytime.",
+          )}
         </p>
       </div>
 
@@ -244,9 +253,9 @@ export function ProfileStep({
           className="mt-8 block w-full text-sm font-medium text-foreground"
           htmlFor="onboarding-display-name"
         >
-          <span className="mb-2 block">Name</span>
+          <span className="mb-2 block">{uiT("Name")}</span>
           <OnboardingInput
-            aria-label="Name"
+            aria-label={uiT("Name")}
             autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
@@ -260,7 +269,7 @@ export function ProfileStep({
                 submit();
               }
             }}
-            placeholder="Enter your name"
+            placeholder={uiT("Enter your name")}
             ref={inputRef}
             spellCheck={false}
             value={displayNameDraft}
@@ -271,7 +280,7 @@ export function ProfileStep({
           className="mt-12 flex w-full cursor-text flex-col items-center"
           htmlFor="onboarding-display-name"
         >
-          <span className="sr-only">Name</span>
+          <span className="sr-only">{uiT("Name")}</span>
           <div className="relative h-20 w-full max-w-[576px]">
             {!hasDisplayNameDraft ? (
               <div
@@ -283,12 +292,12 @@ export function ProfileStep({
                     aria-hidden="true"
                     className="buzz-onboarding-name-placeholder-caret h-[0.9em] w-0.5 rounded-full bg-primary"
                   />
-                  Enter your name
+                  {uiT("Enter your name")}
                 </span>
               </div>
             ) : null}
             <input
-              aria-label="Name"
+              aria-label={uiT("Name")}
               autoCapitalize="none"
               autoComplete="off"
               autoCorrect="off"
@@ -327,11 +336,14 @@ export function ProfileStep({
           type="button"
         >
           {isSaving ? (
-            <Spinner aria-label="Saving profile" className="h-4 w-4 border-2" />
+            <Spinner
+              aria-label={uiT("Saving profile")}
+              className="h-4 w-4 border-2"
+            />
           ) : usesExistingIdentity ? (
-            "Continue"
+            uiT("Continue")
           ) : (
-            "Create an identity key"
+            uiT("Create an identity key")
           )}
         </Button>
 
@@ -344,7 +356,7 @@ export function ProfileStep({
             type="button"
             variant="ghost"
           >
-            Back
+            {uiT("Back")}
           </Button>
         ) : null}
 
@@ -357,7 +369,7 @@ export function ProfileStep({
             type="button"
             variant="ghost"
           >
-            I already have a key
+            {uiT("I already have a key")}
           </Button>
         ) : null}
 
@@ -372,7 +384,7 @@ export function ProfileStep({
                 type="button"
                 variant="ghost"
               >
-                Skip for now
+                {uiT("Skip for now")}
               </Button>
             ) : null}
             {saveRecovery.canAdvanceWithoutSaving ? (
@@ -383,7 +395,7 @@ export function ProfileStep({
                 type="button"
                 variant="ghost"
               >
-                Continue without saving
+                {uiT("Continue without saving")}
               </Button>
             ) : null}
             <div className="flex-1" />

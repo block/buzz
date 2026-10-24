@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useQueryClient, type QueryStatus } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -592,10 +594,12 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
 
   const showStarterRetryToast = React.useCallback(
     (reason: string) => {
-      toast.error("Couldn't set up starter channels", {
+      toast.error(uiT("Couldn't set up starter channels"), {
         id: STARTER_CHANNEL_SETUP_TOAST_ID,
         action: {
-          label: "Retry",
+          get label() {
+            return uiT("Retry");
+          },
           onClick: (event) => {
             event.preventDefault();
             void requestStarterChannels(true).then((result) => {

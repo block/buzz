@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   Check,
   ChevronRight,
@@ -77,6 +79,8 @@ export function BackupStep({
   optionsExpanded,
   returningFromSecurity,
 }: BackupStepProps) {
+  useUiLanguage();
+
   const reduceMotion = useReducedMotion() ?? false;
   const cardLayout = useOnboardingCardLayout();
   const [created, setCreated] = React.useState(introPlayed || reduceMotion);
@@ -124,7 +128,7 @@ export function BackupStep({
         setCopyError(
           err instanceof Error
             ? err.message
-            : "Failed to retrieve private key.",
+            : uiT("Failed to retrieve private key."),
         );
       });
   }, []);
@@ -147,23 +151,31 @@ export function BackupStep({
       if (cancelledRef.current) return;
       setCopyState("idle");
       setCopyError(
-        err instanceof Error ? err.message : "Failed to retrieve private key.",
+        err instanceof Error
+          ? err.message
+          : uiT("Failed to retrieve private key."),
       );
     }
   }, [nsec]);
 
   const storageDescription =
     identityStorage === "system-keyring"
-      ? "Buzz keeps your identity key in your system keychain. Your computer may ask for your password when Buzz needs to read the key."
+      ? uiT(
+          "Buzz keeps your identity key in your system keychain. Your computer may ask for your password when Buzz needs to read the key.",
+        )
       : identityStorage === "local-file"
-        ? "Your system keychain wasn’t available, so Buzz keeps your identity key in a private file on this device."
-        : "Buzz keeps your identity key protected on this device. Make a separate backup in case you lose access.";
+        ? uiT(
+            "Your system keychain wasn’t available, so Buzz keeps your identity key in a private file on this device.",
+          )
+        : uiT(
+            "Buzz keeps your identity key protected on this device. Make a separate backup in case you lose access.",
+          );
   const storageTitle =
     identityStorage === "system-keyring"
-      ? "Protected by your system keychain"
+      ? uiT("Protected by your system keychain")
       : identityStorage === "local-file"
-        ? "Stored in private device storage"
-        : "Protected in private device storage";
+        ? uiT("Stored in private device storage")
+        : uiT("Protected in private device storage");
   if (optionsExpanded) {
     return (
       <OnboardingSlideTransition
@@ -182,7 +194,7 @@ export function BackupStep({
           )}
         >
           <h1 className="text-title font-normal text-foreground">
-            Backup options
+            {uiT("Backup options")}
           </h1>
           <p
             className={cn(
@@ -190,9 +202,9 @@ export function BackupStep({
               cardLayout ? "mt-2 text-base" : "mt-5 text-sm",
             )}
           >
-            Your identity key works like a password for your Buzz account. Keep
-            a copy somewhere safe. You can create a backup file and lock it with
-            a password you can remember.
+            {uiT(
+              "Your identity key works like a password for your Buzz account. Keep a copy somewhere safe. You can create a backup file and lock it with a password you can remember.",
+            )}
           </p>
         </div>
 
@@ -233,11 +245,12 @@ export function BackupStep({
               data-testid="backup-option-panel"
             >
               <span className="text-lg font-medium">
-                Saved in your password manager
+                {uiT("Saved in your password manager")}
               </span>
               <span className="mt-3 block text-sm leading-6 text-foreground/65">
-                Copy your identity key, then save it in a password manager like
-                1Password.
+                {uiT(
+                  "Copy your identity key, then save it in a password manager like 1Password.",
+                )}
               </span>
               <Button
                 className={cn(
@@ -258,10 +271,10 @@ export function BackupStep({
                   <Copy className="h-4 w-4" aria-hidden="true" />
                 )}
                 {copyState === "copying"
-                  ? "Copying…"
+                  ? uiT("Copying…")
                   : copyState === "copied"
-                    ? "Copied to clipboard"
-                    : "Copy to clipboard"}
+                    ? uiT("Copied to clipboard")
+                    : uiT("Copy to clipboard")}
               </Button>
             </div>
 
@@ -274,11 +287,12 @@ export function BackupStep({
               data-testid="backup-option-panel"
             >
               <span className="text-lg font-medium">
-                Locked in a backup file
+                {uiT("Locked in a backup file")}
               </span>
               <span className="mt-3 block text-sm leading-6 text-foreground/65">
-                Create a backup file and choose a password you can remember.
-                You’ll need both to restore your account.
+                {uiT(
+                  "Create a backup file and choose a password you can remember. You’ll need both to restore your account.",
+                )}
               </span>
               <Button
                 className={cn(
@@ -291,7 +305,7 @@ export function BackupStep({
                 variant="ghost"
               >
                 <ShieldCheck className="h-5 w-5" aria-hidden="true" />
-                Create locked backup
+                {uiT("Create locked backup")}
               </Button>
             </div>
           </div>
@@ -301,8 +315,10 @@ export function BackupStep({
               className="mt-4 text-center text-sm text-destructive"
               data-testid="backup-copy-error"
             >
-              Could not retrieve your private key: {copyError}. You can continue
-              and find it later in Settings &gt; Profile &gt; Identity.
+              {uiT(
+                "Could not retrieve your private key: {0}. You can continue and find it later in Settings > Profile > Identity.",
+                { p0: copyError },
+              )}
             </p>
           ) : null}
         </div>
@@ -332,7 +348,9 @@ export function BackupStep({
           className={`text-title font-normal text-foreground ${REVEAL_ANIMATION_CLASS}`}
           key={created ? "created" : "creating"}
         >
-          {created ? "Your private identity key" : "Creating your identity key"}
+          {created
+            ? uiT("Your private identity key")
+            : uiT("Creating your identity key")}
         </h1>
         {created ? (
           <p
@@ -343,7 +361,9 @@ export function BackupStep({
               REVEAL_ANIMATION_CLASS,
             )}
           >
-            Don’t share this key. Anyone who has it can access your account.
+            {uiT(
+              "Don’t share this key. Anyone who has it can access your account.",
+            )}
           </p>
         ) : null}
       </div>
@@ -354,7 +374,7 @@ export function BackupStep({
           data-testid="backup-intro-logo"
         >
           <FuzzyLogo
-            ariaLabel="Creating your identity key"
+            ariaLabel={uiT("Creating your identity key")}
             className="w-20! text-foreground"
             fuzz
             loop
@@ -403,10 +423,10 @@ export function BackupStep({
                   <Copy aria-hidden className="h-4 w-4" />
                 )}
                 {copyState === "copying"
-                  ? "Copying…"
+                  ? uiT("Copying…")
                   : copyState === "copied"
-                    ? "Copied to clipboard"
-                    : "Copy to clipboard"}
+                    ? uiT("Copied to clipboard")
+                    : uiT("Copy to clipboard")}
               </Button>
             </div>
 
@@ -420,7 +440,7 @@ export function BackupStep({
             >
               <span className="flex min-w-0 items-center gap-3">
                 <FileLock2 aria-hidden className="size-6" />
-                <span>Create locked backup</span>
+                <span>{uiT("Create locked backup")}</span>
               </span>
               <ChevronRight aria-hidden className="size-5 text-primary" />
             </Button>
@@ -433,9 +453,10 @@ export function BackupStep({
                 )}
                 data-testid="backup-copy-error"
               >
-                Could not retrieve your private key: {copyError}. You can
-                continue and find it later in Settings &gt; Profile &gt;
-                Identity.
+                {uiT(
+                  "Could not retrieve your private key: {0}. You can continue and find it later in Settings > Profile > Identity.",
+                  { p0: copyError },
+                )}
               </p>
             ) : null}
           </div>
@@ -450,7 +471,7 @@ export function BackupStep({
           onClick={onNext}
           type="button"
         >
-          Continue
+          {uiT("Continue")}
         </Button>
       </OnboardingFooter>
     </OnboardingSlideTransition>

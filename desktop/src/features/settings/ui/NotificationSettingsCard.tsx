@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 
@@ -48,6 +50,8 @@ export function NotificationSettingsCard({
   onSetNotifyWhileViewing: (enabled: boolean) => void;
   onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;
 }) {
+  useUiLanguage();
+
   const permissionBlocked =
     notificationPermission === "denied" ||
     notificationPermission === "unsupported";
@@ -66,22 +70,24 @@ export function NotificationSettingsCard({
   return (
     <section className="min-w-0" data-testid="settings-notifications">
       <SettingsSectionHeader
-        title="Notifications"
-        description="Desktop alerts are on by default. Fine-tune what gets through below."
+        title={uiT("Notifications")}
+        description={uiT(
+          "Desktop alerts are on by default. Fine-tune what gets through below.",
+        )}
       />
 
       <span className="sr-only" data-testid="notifications-desktop-state">
         {notificationPermission === "unsupported"
-          ? "Unavailable"
+          ? uiT("Unavailable")
           : notificationPermission === "denied"
-            ? "Blocked"
+            ? uiT("Blocked")
             : notificationSettings.desktopEnabled
               ? "On"
-              : "Off"}
+              : uiT("Off")}
       </span>
 
       <SettingsOptionGroupList>
-        <SettingsOptionGroup title="Desktop">
+        <SettingsOptionGroup title={uiT("Desktop")}>
           <SettingsOptionRow>
             <div className="min-w-0">
               <label
@@ -89,16 +95,20 @@ export function NotificationSettingsCard({
                 htmlFor="desktop-alerts-switch"
               >
                 {isUpdatingDesktopNotifications
-                  ? "Requesting..."
-                  : "Desktop alerts"}
+                  ? uiT("Requesting...")
+                  : uiT("Desktop alerts")}
               </label>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
                 {notificationSettings.desktopEnabled
-                  ? "Native desktop alerts are enabled for the categories you have armed below."
-                  : "Request OS permission and surface new mentions or needs-action items outside the app."}
+                  ? uiT(
+                      "Native desktop alerts are enabled for the categories you have armed below.",
+                    )
+                  : uiT(
+                      "Request OS permission and surface new mentions or needs-action items outside the app.",
+                    )}
               </p>
             </div>
             <Switch
@@ -118,14 +128,15 @@ export function NotificationSettingsCard({
                 className="text-sm font-medium"
                 htmlFor="notify-while-viewing-switch"
               >
-                Notify while viewing
+                {uiT("Notify while viewing")}
               </label>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Also alert for direct messages in the conversation you have
-                open.
+                {uiT(
+                  "Also alert for direct messages in the conversation you have open.",
+                )}
               </p>
             </div>
             <Switch
@@ -145,20 +156,20 @@ export function NotificationSettingsCard({
 
         {notificationSettings.desktopEnabled ? (
           <>
-            <SettingsOptionGroup title="Sound">
+            <SettingsOptionGroup title={uiT("Sound")}>
               <SettingsOptionRow>
                 <div className="min-w-0">
                   <label
                     className="text-sm font-medium"
                     htmlFor="notification-sound-switch"
                   >
-                    Sound
+                    {uiT("Sound")}
                   </label>
                   <p
                     className="text-sm font-normal text-muted-foreground/70"
                     data-settings-subcopy
                   >
-                    Alert with a sound for the events below.
+                    {uiT("Alert with a sound for the events below.")}
                   </p>
                 </div>
                 <Switch
@@ -174,7 +185,7 @@ export function NotificationSettingsCard({
 
             {anyAlertsOn ? (
               <div className="space-y-4">
-                <SettingsOptionGroup title="Alert sounds">
+                <SettingsOptionGroup title={uiT("Alert sounds")}>
                   {visibleSlots.map((slot) => {
                     const comingSoon = COMING_SOON_SLOTS.has(slot);
                     const alertsOn =
@@ -192,7 +203,7 @@ export function NotificationSettingsCard({
                             {SLOT_LABELS[slot]}
                             {comingSoon ? (
                               <span className="rounded-full bg-muted/70 px-2 py-0.5 text-2xs font-normal uppercase tracking-wide text-muted-foreground">
-                                Coming soon
+                                {uiT("Coming soon")}
                               </span>
                             ) : null}
                           </span>
@@ -243,12 +254,12 @@ export function NotificationSettingsCard({
                     {showComingSoon ? (
                       <>
                         <ChevronUp className="h-4 w-4" />
-                        Show less
+                        {uiT("Show less")}
                       </>
                     ) : (
                       <>
                         <ChevronDown className="h-4 w-4" />
-                        View all
+                        {uiT("View all")}
                       </>
                     )}
                   </Button>
@@ -258,21 +269,22 @@ export function NotificationSettingsCard({
           </>
         ) : null}
 
-        <SettingsOptionGroup title="Badges">
+        <SettingsOptionGroup title={uiT("Badges")}>
           <SettingsOptionRow>
             <div className="min-w-0">
               <label
                 className="text-sm font-medium"
                 htmlFor="home-badge-switch"
               >
-                Home badge
+                {uiT("Home badge")}
               </label>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Show a Home badge for mentions and needs-action items in the
-                sidebar.
+                {uiT(
+                  "Show a Home badge for mentions and needs-action items in the sidebar.",
+                )}
               </p>
             </div>
             <Switch
@@ -290,8 +302,12 @@ export function NotificationSettingsCard({
       {permissionBlocked && (
         <p className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {notificationPermission === "unsupported"
-            ? "Desktop notifications are not supported in this environment."
-            : "Desktop notifications are blocked. Enable them in your system settings."}
+            ? uiT(
+                "Desktop notifications are not supported in this environment.",
+              )
+            : uiT(
+                "Desktop notifications are blocked. Enable them in your system settings.",
+              )}
         </p>
       )}
 

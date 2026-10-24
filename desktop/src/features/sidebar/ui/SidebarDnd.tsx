@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 // biome-ignore format: keep compact to stay within file size limit
 import {
   DndContext,
@@ -34,6 +36,8 @@ export function DraggableChannelRow({
   channelId: string;
   children: React.ReactNode;
 }) {
+  useUiLanguage();
+
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: channelId,
     data: { type: "channel", channelId } satisfies DndChannelData,
@@ -65,6 +69,8 @@ export function DroppableSectionBody({
   children: React.ReactNode;
   className?: string;
 }) {
+  useUiLanguage();
+
   const droppableId = `section-drop:${sectionId}`;
   const { setNodeRef, isOver } = useDroppable({
     id: droppableId,
@@ -92,6 +98,8 @@ export function DroppableUngroupedBody({
   children: React.ReactNode;
   className?: string;
 }) {
+  useUiLanguage();
+
   const { setNodeRef, isOver } = useDroppable({
     id: "ungrouped",
     data: { type: "ungrouped" } satisfies DndUngroupedData,
@@ -122,6 +130,8 @@ export function SortableSectionShell({
     style: React.CSSProperties;
   }) => React.ReactNode;
 }) {
+  useUiLanguage();
+
   const {
     attributes,
     listeners,
@@ -198,6 +208,8 @@ export function SidebarDndContext({
   onUnassignChannel: (channelId: string) => void;
   onReorderSections: (orderedIds: string[]) => void;
 }) {
+  useUiLanguage();
+
   const [activeDragItem, setActiveDragItem] =
     React.useState<SidebarDragItem | null>(null);
   const sensors = useSensors(
