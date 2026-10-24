@@ -7,6 +7,16 @@ fn dev_keyring_service(configured: Option<String>) -> String {
 }
 
 pub(crate) fn keyring_service() -> &'static str {
+    // Confined child-process tests use disposable provider namespaces even
+    // while exercising demo/release build flags. Never enabled in app builds.
+    #[cfg(test)]
+    if let Ok(service) = std::env::var("BUZZ_DEV_KEYRING_SERVICE") {
+        if service.starts_with("buzz-desktop-dev.") {
+            static TEST_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            return TEST_SERVICE.get_or_init(|| service).as_str();
+        }
+    }
+
     if crate::build_identity::is_demo_build() {
         static DEMO_SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         DEMO_SERVICE
