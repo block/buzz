@@ -273,7 +273,7 @@ pub(super) async fn fetch_blob_bytes_with_cap(
         req = req.header("authorization", auth);
     }
 
-    let request = req.send();
+    let request = crate::builderlab::send_employee_media_request(state, url, req);
     let resp = if let Some(cancellation) = cancellation {
         tokio::select! {
             _ = cancellation.cancelled() => return Err("media fetch cancelled".to_string()),
@@ -281,8 +281,7 @@ pub(super) async fn fetch_blob_bytes_with_cap(
         }
     } else {
         request.await
-    }
-    .map_err(|e| classify_request_error(&e))?;
+    }?;
 
     if let Some(err) = redirect_refusal_error(resp.status()) {
         return Err(err);
@@ -306,15 +305,19 @@ pub(super) async fn fetch_blob_bytes_with_cap(
     // Stream the response with a running byte count to enforce the size cap
     // even when Content-Length is missing or dishonest.
     let mut bytes = Vec::new();
+    let scope = resp
+        .extensions()
+        .get::<crate::builderlab::ProtectedAssertion>()
+        .cloned();
     let mut stream = resp.bytes_stream();
     loop {
         let next = if let Some(cancellation) = cancellation {
             tokio::select! {
                 _ = cancellation.cancelled() => return Err("media fetch cancelled".to_string()),
-                next = stream.next() => next,
+                next = crate::builderlab::guard_employee_response(scope.clone(), stream.next()) => next?,
             }
         } else {
-            stream.next().await
+            crate::builderlab::guard_employee_response(scope.clone(), stream.next()).await?
         };
         let Some(chunk) = next else {
             break;

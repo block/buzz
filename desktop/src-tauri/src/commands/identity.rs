@@ -475,6 +475,7 @@ pub(crate) fn commit_imported_identity(
         *active_keys = keys;
         state.set_identity_storage(storage);
     }
+    crate::builderlab::invalidate_changed_employee_context(state);
 
     // Clear both recovery flags — an import is valid in either lost or
     // keyring-locked state and resolves both. In the locked case the

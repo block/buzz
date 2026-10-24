@@ -131,15 +131,39 @@ async fn open_connection(
     manager: &WebSocketManager,
     url: &str,
     on_message: Channel<InvokeResponseBody>,
+    employee: Option<crate::builderlab::EmployeeEvidence>,
+    connect_generation: Option<CancellationToken>,
 ) -> Result<Id, String> {
-    let connect_cancel = manager.connect_cancel.lock().await.clone();
+    let connect_cancel = match connect_generation {
+        Some(token) => token,
+        None => manager.connect_cancel.lock().await.clone(),
+    };
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = url.into_client_request().map_err(|_| "Invalid relay URL")?;
+    if let Some(evidence) = &employee {
+        request
+            .headers_mut()
+            .insert("Nostr-Federated-Identity", evidence.header.clone());
+    }
+    let protected = employee.is_some();
+    let employee_cancel = employee
+        .as_ref()
+        .map(|value| value.cancel.clone())
+        .unwrap_or_default();
     let (socket, _) = tokio::select! {
+        biased;
+        _ = employee_cancel.cancelled() => return Err("Square sign-in changed".to_owned()),
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
-        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url)) => result
+        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request)) => result
             .map_err(|_| "WebSocket connection timed out".to_string())?
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| if protected { "Employee relay connection refused".to_owned() } else { error.to_string() })?,
     };
 
+    if employee.as_ref().is_some_and(|value| {
+        value.cancel.is_cancelled() || value.expires_at <= chrono::Utc::now().timestamp()
+    }) {
+        return Err("Square sign-in changed".to_owned());
+    }
     // Serialize registration with disconnect_all so a reload cannot miss a
     // connection that finished its handshake concurrently with teardown.
     let current_connect_cancel = manager.connect_cancel.lock().await;
@@ -155,6 +179,23 @@ async fn open_connection(
     };
     let (sender, receiver) = mpsc::channel(SEND_QUEUE_CAPACITY);
     let cancel = CancellationToken::new();
+    let assertion = employee
+        .as_ref()
+        .and_then(|value| value.header.to_str().ok())
+        .map(|value| value.trim_start_matches("Bearer ").to_owned());
+    if let Some(evidence) = employee {
+        let connection_cancel = cancel.clone();
+        tauri::async_runtime::spawn(async move {
+            let delay = Duration::from_secs(
+                evidence
+                    .expires_at
+                    .saturating_sub(chrono::Utc::now().timestamp())
+                    .max(0) as u64,
+            );
+            tokio::select! { _ = evidence.cancel.cancelled()=>{}, _ = tokio::time::sleep(delay)=>{}, _ = connection_cancel.cancelled()=>return }
+            connection_cancel.cancel();
+        });
+    }
     let handle = Arc::new(ConnectionHandle {
         sender,
         cancel: cancel.clone(),
@@ -171,6 +212,7 @@ async fn open_connection(
         cancel,
         on_message,
         task_manager,
+        assertion,
     ));
     *task_slot = Some(task);
     drop(task_slot);
@@ -181,11 +223,30 @@ async fn open_connection(
 #[tauri::command]
 async fn connect(
     manager: tauri::State<'_, WebSocketManager>,
+    app_state: tauri::State<'_, crate::app_state::AppState>,
     url: String,
     on_message: Channel<InvokeResponseBody>,
     _config: Option<serde_json::Value>,
 ) -> Result<Id, String> {
-    open_connection(manager.inner(), &url, on_message).await
+    let connect_generation = manager.connect_cancel.lock().await.clone();
+    let employee = if crate::builderlab::requires_employee(&url)? {
+        let keys = app_state.signing_keys()?;
+        tokio::select! {
+            biased;
+            _ = connect_generation.cancelled() => return Err("WebSocket connection cancelled".to_owned()),
+            result = crate::builderlab::employee_evidence(&app_state, &keys, &url) => result?,
+        }
+    } else {
+        None
+    };
+    open_connection(
+        manager.inner(),
+        &url,
+        on_message,
+        employee,
+        Some(connect_generation),
+    )
+    .await
 }
 
 pub(crate) async fn send_message(
@@ -269,6 +330,7 @@ async fn run_connection<S>(
     cancel: CancellationToken,
     on_message: Channel<InvokeResponseBody>,
     manager: WebSocketManager,
+    protected_assertion: Option<String>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -276,6 +338,10 @@ async fn run_connection<S>(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
+                if let Ok(frame) = serde_json::to_string(&OutboundMessage::Close(None)) {
+                    batch.push(frame);
+                    batch.flush(&on_message);
+                }
                 let _ = tokio::time::timeout(
                     SHUTDOWN_TIMEOUT,
                     socket.send(Message::Close(Some(CloseFrame {
@@ -291,15 +357,23 @@ async fn run_connection<S>(
                 let result = tokio::time::timeout(WRITE_TIMEOUT, socket.send(request.message))
                     .await
                     .map_err(|_| "WebSocket send timed out".to_string())
-                    .and_then(|result| result.map_err(|error| error.to_string()));
+                    .and_then(|result| result.map_err(|error| if protected_assertion.is_some() { "Employee relay write failed".to_owned() } else { error.to_string() }));
                 let failed = result.is_err();
                 let _ = request.result.send(result);
                 if failed { break; }
             }
             incoming = socket.next() => {
                 let message = match incoming {
-                    Some(Ok(message)) => outbound_message(message),
-                    Some(Err(error)) => OutboundMessage::Error(error.to_string()),
+                    Some(Ok(message)) => {
+                        let reflected = protected_assertion.as_ref().is_some_and(|token|match &message {
+                            Message::Text(text)=>text.contains(token) || serde_json::from_str::<serde_json::Value>(text).ok().is_some_and(|value| contains_assertion(&value, token)),
+                            Message::Binary(bytes) | Message::Ping(bytes) | Message::Pong(bytes)=>bytes.windows(token.len()).any(|window|window==token.as_bytes()),
+                            Message::Close(Some(frame))=>frame.reason.contains(token),
+                            _=>false,
+                        });
+                        if reflected { OutboundMessage::Error("Invalid employee relay response".to_owned()) } else { outbound_message(message) }
+                    },
+                    Some(Err(error)) => OutboundMessage::Error(if protected_assertion.is_some() { "Employee relay connection failed".to_owned() } else { error.to_string() }),
                     None => OutboundMessage::Close(None),
                 };
                 let terminal = matches!(message, OutboundMessage::Close(_) | OutboundMessage::Error(_));
@@ -332,7 +406,21 @@ async fn run_connection<S>(
     // A terminal frame already flushed; this covers cancellation and send
     // failure, which must not strand frames the relay already delivered.
     batch.flush(&on_message);
+    cancel.cancel();
     manager.remove(id).await;
+}
+
+fn contains_assertion(value: &serde_json::Value, token: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value.contains(token),
+        serde_json::Value::Array(values) => {
+            values.iter().any(|value| contains_assertion(value, token))
+        }
+        serde_json::Value::Object(values) => values
+            .iter()
+            .any(|(key, value)| key.contains(token) || contains_assertion(value, token)),
+        _ => false,
+    }
 }
 
 fn outbound_message(message: Message) -> OutboundMessage {
@@ -381,7 +469,7 @@ mod tests {
 
     /// Records each delivery as its raw JSON payload, so tests assert on what
     /// the renderer actually receives rather than on internal batch state.
-    fn recording_channel() -> (
+    pub(super) fn recording_channel() -> (
         Channel<InvokeResponseBody>,
         Arc<std::sync::Mutex<Vec<String>>>,
     ) {
@@ -434,6 +522,7 @@ mod tests {
                 cancel.clone(),
                 channel,
                 manager,
+                None,
             ));
             Self {
                 server,
@@ -580,6 +669,7 @@ mod tests {
             handle.cancel.clone(),
             channel,
             manager.clone(),
+            None,
         ));
         *handle.task.lock().await = Some(task);
 
@@ -640,9 +730,15 @@ mod tests {
         });
 
         let manager = WebSocketManager::default();
-        let id = open_connection(&manager, &format!("ws://{address}"), silent_channel())
-            .await
-            .unwrap();
+        let id = open_connection(
+            &manager,
+            &format!("ws://{address}"),
+            silent_channel(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         send_message(&manager, id, WebSocketMessage::Text("live-probe".into()))
             .await
             .unwrap();
@@ -684,6 +780,7 @@ mod tests {
             handle.cancel.clone(),
             silent_channel(),
             manager.clone(),
+            None,
         ));
         *handle.task.lock().await = Some(task);
 
@@ -805,3 +902,6 @@ mod tests {
         drop(blocked_receiver);
     }
 }
+
+#[cfg(test)]
+mod employee_tests;

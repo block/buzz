@@ -446,6 +446,7 @@ async fn stalled_query_request_times_out_with_classified_error() {
             None,
             b"[]".to_vec(),
             Duration::from_millis(200),
+            None,
         ),
     )
     .await
@@ -506,6 +507,7 @@ async fn stalled_response_body_times_out_with_classified_error() {
             None,
             b"[]".to_vec(),
             Duration::from_millis(200),
+            None,
         ),
     )
     .await
@@ -567,6 +569,7 @@ async fn stalled_error_response_body_times_out_with_classified_error() {
             None,
             b"[]".to_vec(),
             Duration::from_millis(200),
+            None,
         ),
     )
     .await
@@ -624,6 +627,7 @@ async fn non_stalled_error_response_yields_status_message() {
             None,
             b"[]".to_vec(),
             Duration::from_millis(200),
+            None,
         ),
     )
     .await

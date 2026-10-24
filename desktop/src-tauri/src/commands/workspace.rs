@@ -266,6 +266,8 @@ pub async fn apply_workspace(
             *keys_guard = keys;
         }
 
+        crate::builderlab::invalidate_changed_employee_context(&state);
+
         // Keep the backend-side reconcile guard aligned with the frontend
         // experiment before launch-time restore can spawn any agents. Missing
         // means the stable behavior: desktop remains authoritative.

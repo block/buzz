@@ -6,7 +6,7 @@ use std::{
 use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
 
-use crate::{app_state::AppState, relay::classify_request_error};
+use crate::app_state::AppState;
 
 #[derive(Default)]
 struct MediaUploadCancellations {
@@ -84,7 +84,8 @@ pub(super) async fn send_upload_attempt(
     } = attempt;
     let req = state
         .http_client
-        .put(url)
+        .put(&url)
+        .timeout(std::time::Duration::from_secs(5 * 60))
         .header("Authorization", auth_header)
         .header("Content-Type", mime)
         .header("X-SHA-256", sha256);
@@ -109,8 +110,8 @@ pub(super) async fn send_upload_attempt(
         }));
         let request = req
             .header(reqwest::header::CONTENT_LENGTH, total)
-            .body(reqwest::Body::wrap_stream(stream))
-            .send();
+            .body(reqwest::Body::wrap_stream(stream));
+        let request = crate::builderlab::send_employee_media_request(state, &url, request);
         if let Some(cancellation) = cancellation {
             tokio::select! {
                 _ = cancellation.cancelled() => return Err("upload cancelled".to_string()),
@@ -120,7 +121,7 @@ pub(super) async fn send_upload_attempt(
             request.await
         }
     } else {
-        let request = req.body(body).send();
+        let request = crate::builderlab::send_employee_media_request(state, &url, req.body(body));
         if let Some(cancellation) = cancellation {
             tokio::select! {
                 _ = cancellation.cancelled() => return Err("upload cancelled".to_string()),
@@ -130,7 +131,7 @@ pub(super) async fn send_upload_attempt(
             request.await
         }
     };
-    response.map_err(|error| classify_request_error(&error))
+    response
 }
 
 pub(super) fn emit_media_upload_phase(

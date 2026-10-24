@@ -6,7 +6,7 @@ use axum::{
     routing::get,
     Router,
 };
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use tauri::{http, Manager};
 use tokio::net::TcpListener;
 
@@ -69,12 +69,15 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
         }
     }
 
-    let resp = match upstream.send().await {
-        Ok(r) => r,
-        Err(_) => {
-            return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
-        }
-    };
+    let resp =
+        match crate::builderlab::send_employee_media_request(&app_state, &upstream_url, upstream)
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
+            }
+        };
 
     // Re-mint and retry once on an auth failure (401 missing_evidence or 403
     // evidence_rejected). Under NIP-FI strict mode a read token expires after
@@ -95,7 +98,9 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
                     retry = retry.header("range", v);
                 }
             }
-            match retry.send().await {
+            match crate::builderlab::send_employee_media_request(&app_state, &upstream_url, retry)
+                .await
+            {
                 Ok(r) => r,
                 Err(_) => {
                     return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
@@ -150,7 +155,14 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
     }
 
     // Stream the body — no buffering.
-    let stream = resp.bytes_stream().map_err(std::io::Error::other);
+    let scope = resp
+        .extensions()
+        .get::<crate::builderlab::ProtectedAssertion>()
+        .cloned();
+    let stream = resp
+        .bytes_stream()
+        .take_until(crate::builderlab::employee_response_end(scope))
+        .map_err(std::io::Error::other);
     let body = Body::from_stream(stream);
 
     (status, headers, body).into_response()
@@ -229,7 +241,8 @@ pub async fn handle_buzz_media(
         }
     }
 
-    let result = upstream.send().await;
+    let result =
+        crate::builderlab::send_employee_media_request(&state, &upstream_url, upstream).await;
 
     // Re-mint and retry once on auth failure (401/403) for range requests.
     // Under NIP-FI strict mode a read token expires after 60s, exhausting
@@ -251,7 +264,7 @@ pub async fn handle_buzz_media(
                         retry = retry.header("range", v);
                     }
                 }
-                retry.send().await
+                crate::builderlab::send_employee_media_request(&state, &upstream_url, retry).await
             } else {
                 Ok(resp)
             }
@@ -323,7 +336,15 @@ pub async fn handle_buzz_media(
                 }
             }
 
-            match resp.bytes().await {
+            let scope = resp
+                .extensions()
+                .get::<crate::builderlab::ProtectedAssertion>()
+                .cloned();
+            let body = match crate::builderlab::guard_employee_response(scope, resp.bytes()).await {
+                Ok(result) => result,
+                Err(_) => return error_response(401, "Square authorization changed"),
+            };
+            match body {
                 Ok(bytes) => {
                     let mut builder = http::Response::builder()
                         .status(status)
