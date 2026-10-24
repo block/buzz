@@ -200,7 +200,7 @@ export function NotificationSettingsCard({
                       >
                         <div className="min-w-0">
                           <span className="flex items-center gap-2 text-sm font-medium">
-                            {SLOT_LABELS[slot]}
+                            {uiT(SLOT_LABELS[slot])}
                             {comingSoon ? (
                               <span className="rounded-full bg-muted/70 px-2 py-0.5 text-2xs font-normal uppercase tracking-wide text-muted-foreground">
                                 {uiT("Coming soon")}
@@ -211,7 +211,7 @@ export function NotificationSettingsCard({
                             className="text-sm font-normal text-muted-foreground/70"
                             data-settings-subcopy
                           >
-                            {SLOT_DESCRIPTIONS[slot]}
+                            {uiT(SLOT_DESCRIPTIONS[slot])}
                           </p>
                         </div>
                         <span className="flex items-center gap-3">

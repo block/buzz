@@ -1,5 +1,5 @@
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
-import { uiT } from "@/shared/i18n/uiTranslation";
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronRight, Folders } from "lucide-react";
 import type * as React from "react";
 
@@ -30,6 +30,7 @@ export function ProjectDetailChrome({
   project: Project;
   repository?: Repository | null;
 }) {
+  useUiLanguage();
   const repositoryCrumb = repository ? (
     activeWorkItemCrumb ? (
       <>
@@ -47,7 +48,7 @@ export function ProjectDetailChrome({
           onClick={activeWorkItemCrumb.clear}
           type="button"
         >
-          {activeWorkItemCrumb.category}
+          {uiT(activeWorkItemCrumb.category)}
         </button>
         <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
         <span
@@ -72,7 +73,7 @@ export function ProjectDetailChrome({
           aria-current="page"
           className="min-w-0 truncate px-0.5 font-medium opacity-60"
         >
-          {activeTabCrumb}
+          {uiT(activeTabCrumb)}
         </span>
       </>
     ) : (

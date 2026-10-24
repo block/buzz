@@ -4,7 +4,7 @@ This v1 manifest contains the English source strings extracted from the bounded 
 
 The Korean development branch additionally uses the `ui` namespace (`en.ui.json`,
 `ko.ui.json`, and `ui-keys.json`) for authored UI strings across desktop 0.5.28.
-Its catalogue currently contains 4,279 entries. This is a resource count, not a
+Its catalogue currently contains 4,282 entries. This is a resource count, not a
 claim that every visible string has been translated or reviewed. Source call
 sites provide the rendering context; `ko.grammar-slots.json` records English
 grammatical slots expressed directly in Korean. Provenance is documented in
