@@ -4,6 +4,9 @@
 
 mod admission;
 mod build_info;
+#[cfg(test)]
+#[path = "community_membership_acceptance.rs"]
+mod community_membership_postgres_tests;
 mod rejection;
 
 /// Shared NIP-FI assertion evaluation, denial rendering, and key pairing.
