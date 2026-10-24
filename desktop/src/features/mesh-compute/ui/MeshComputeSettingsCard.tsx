@@ -610,7 +610,7 @@ function MeshModelOptionLabel({ entry }: { entry: MeshCatalogEntry }) {
       <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
       <span className="shrink-0 text-muted-foreground">{entry.size}</span>
       <span className={cn("shrink-0", FIT_CLASS[entry.fit])}>
-        {FIT_LABEL[entry.fit]}
+        {uiT(FIT_LABEL[entry.fit])}
       </span>
       {entry.recommended ? (
         <span className="shrink-0 rounded bg-primary/15 px-1.5 text-2xs font-medium text-primary">

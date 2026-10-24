@@ -207,7 +207,10 @@ export function setAppLanguage(preference: AppLanguagePreference) {
   return applyLanguagePreference(preference, true);
 }
 
-if (typeof window !== "undefined") {
+if (
+  typeof window !== "undefined" &&
+  typeof window.addEventListener === "function"
+) {
   window.addEventListener("storage", (event) => {
     if (event.key !== null && event.key !== LANGUAGE_STORAGE_KEY) return;
     if (event.storageArea && event.storageArea !== getLanguageStorage()) return;

@@ -345,7 +345,7 @@ function AuxiliaryPanelHeaderCloseAction() {
 
   return (
     <Button
-      aria-label={AUXILIARY_PANEL_CLOSE_LABEL}
+      aria-label={uiT(AUXILIARY_PANEL_CLOSE_LABEL)}
       className="shrink-0"
       data-testid={AUXILIARY_PANEL_CLOSE_TEST_ID}
       onClick={panelContext.onClose}

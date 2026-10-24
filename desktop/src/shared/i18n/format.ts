@@ -11,15 +11,28 @@ export function uiDateFormatter(options: Intl.DateTimeFormatOptions) {
   };
 }
 
+/** Reusable relative-time formatting that follows the current UI language. */
+export function uiRelativeTimeFormatter(
+  options: Intl.RelativeTimeFormatOptions,
+) {
+  const english = new Intl.RelativeTimeFormat("en-US", options);
+  const korean = new Intl.RelativeTimeFormat("ko-KR", options);
+  return {
+    format(value: number, unit: Intl.RelativeTimeFormatUnit): string {
+      return (i18n.resolvedLanguage === "ko" ? korean : english).format(
+        value,
+        unit,
+      );
+    },
+  };
+}
+
+const relativeTime = uiRelativeTimeFormatter({ numeric: "always" });
+
 /** Locale-aware relative time for display only. */
 export function uiRelativeTime(
   value: number,
   unit: Intl.RelativeTimeFormatUnit,
 ): string {
-  return new Intl.RelativeTimeFormat(
-    i18n.resolvedLanguage === "ko" ? "ko-KR" : "en-US",
-    {
-      numeric: "always",
-    },
-  ).format(value, unit);
+  return relativeTime.format(value, unit);
 }

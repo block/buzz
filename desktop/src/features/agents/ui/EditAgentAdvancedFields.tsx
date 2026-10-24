@@ -286,7 +286,7 @@ export function EditAgentAdvancedFields({
           />
         </div>
         <p className="text-xs text-muted-foreground">
-          {EDIT_AGENT_PARALLELISM_HELP}
+          {uiT(EDIT_AGENT_PARALLELISM_HELP)}
         </p>
         {parallelismHint !== null ? (
           <p className="text-xs text-amber-600 dark:text-amber-400">

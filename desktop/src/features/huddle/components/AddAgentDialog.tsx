@@ -145,7 +145,7 @@ export function AddAgentDialog({
       <ChooserDialogContent
         className="max-w-xl"
         data-testid="add-huddle-agent-dialog"
-        headerSubtitle="Choose an agent to join this huddle."
+        headerSubtitle={uiT("Choose an agent to join this huddle.")}
         scrollAreaClassName="space-y-5"
         title={uiT("Add agents")}
       >

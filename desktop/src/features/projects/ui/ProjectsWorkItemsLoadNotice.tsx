@@ -1,5 +1,5 @@
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
-import { uiT } from "@/shared/i18n/uiTranslation";
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { AlertCircle } from "lucide-react";
 
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
@@ -28,6 +28,7 @@ export function ProjectsWorkItemsLoadNotice({
   onRetry,
   subject,
 }: ProjectsWorkItemsLoadNoticeProps) {
+  useUiLanguage();
   if (!error && failedSections.length === 0) return null;
 
   const displaySubject =
@@ -43,14 +44,16 @@ export function ProjectsWorkItemsLoadNotice({
         ? "task"
         : subject;
   const title = error
-    ? uiT("Could not load {0}.", { p0: displaySubject })
-    : uiT("Some {0} details could not be loaded.", { p0: detailSubject });
+    ? uiT("Could not load {0}.", { p0: uiT(displaySubject) })
+    : uiT("Some {0} details could not be loaded.", { p0: uiT(detailSubject) });
   const description = error
     ? error instanceof Error
       ? error.message
       : uiT("The relay request failed.")
     : uiT("Missing {0}. The available results are shown below.", {
-        p0: failedSections.map((section) => SECTION_LABELS[section]).join(", "),
+        p0: failedSections
+          .map((section) => uiT(SECTION_LABELS[section]))
+          .join(", "),
       });
 
   return (

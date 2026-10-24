@@ -56,7 +56,7 @@ export function ChannelTypePicker({
   const [internalOpen, setInternalOpen] = React.useState(false);
   const pickerOpen = open ?? internalOpen;
   const setPickerOpen = onOpenChange ?? setInternalOpen;
-  const label = LIFECYCLE_LABEL[lifecycle];
+  const label = uiT(LIFECYCLE_LABEL[lifecycle]);
   const Icon = lifecycle === "project" ? null : LIFECYCLE_ICON[lifecycle];
   const projectLocked = lifecycle === "project";
 

@@ -268,7 +268,9 @@ export function DirectActionsProvider({
         if (result.state === "pending") {
           setPending(true);
         } else {
-          toast.success(uiT("{0}: done", { p0: ACTION_LABELS[intent.action] }));
+          toast.success(
+            uiT("{0}: done", { p0: uiT(ACTION_LABELS[intent.action]) }),
+          );
           setFrozen(null);
           setDraft(emptyDraft(intent.communityHost));
         }
@@ -289,7 +291,7 @@ export function DirectActionsProvider({
         if (shownHost.current !== intent.communityHost) {
           toast.error(
             uiT("{0} in {1} failed: {2}", {
-              p0: ACTION_LABELS[intent.action],
+              p0: uiT(ACTION_LABELS[intent.action]),
               p1: intent.communityHost,
               p2: message,
             }),
@@ -478,7 +480,7 @@ export function ActionsSection({ community }: { community: CommunityRef }) {
             type="button"
             variant={a === draft.action ? "default" : "outline"}
           >
-            {ACTION_LABELS[a]}
+            {uiT(ACTION_LABELS[a])}
           </Button>
         ))}
       </div>
@@ -560,7 +562,7 @@ function ConfirmStep({ readOnly = false }: { readOnly?: boolean }) {
         <NotConnectedWarning host={intent.communityHost} />
       </p>
       <p>
-        {ACTION_LABELS[intent.action]}{" "}
+        {uiT(ACTION_LABELS[intent.action])}{" "}
         {intent.action === "delete" ? (
           <code>{intent.target}</code>
         ) : (

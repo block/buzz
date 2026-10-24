@@ -1,5 +1,5 @@
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
-import { uiT } from "@/shared/i18n/uiTranslation";
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { createPortal } from "react-dom";
 
 import type {
@@ -16,10 +16,6 @@ const MODE_TAB_LABELS: Record<AvatarMode, string> = {
   emoji: "Emoji",
   image: "Image",
 };
-const MODE_SEGMENT_OPTIONS = MODE_TAB_ORDER.map((value) => ({
-  label: MODE_TAB_LABELS[value],
-  value,
-}));
 
 type ProfileAvatarModeTabsProps = {
   disabled: boolean;
@@ -36,6 +32,11 @@ export function ProfileAvatarModeTabs({
   presentation,
   portalContainer,
 }: ProfileAvatarModeTabsProps) {
+  useUiLanguage();
+  const modeOptions = MODE_TAB_ORDER.map((value) => ({
+    label: uiT(MODE_TAB_LABELS[value]),
+    value,
+  }));
   const isOnboardingModal = presentation === "onboarding-modal";
   const isOnboardingInline = presentation === "onboarding-inline";
   const tabs = isOnboardingInline ? (
@@ -46,7 +47,7 @@ export function ProfileAvatarModeTabs({
       legend={uiT("Avatar type")}
       onValueChange={onModeChange}
       optionTestIdPrefix="onboarding-avatar-mode"
-      options={MODE_SEGMENT_OPTIONS}
+      options={modeOptions}
       testId="onboarding-avatar-mode-control"
       value={mode}
     />
@@ -91,7 +92,7 @@ export function ProfileAvatarModeTabs({
             key={tabMode}
             value={tabMode}
           >
-            {MODE_TAB_LABELS[tabMode]}
+            {uiT(MODE_TAB_LABELS[tabMode])}
           </TabsTrigger>
         ))}
       </TabsList>

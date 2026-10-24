@@ -1,3 +1,4 @@
+import { uiDateFormatter } from "@/shared/i18n/format";
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
@@ -35,14 +36,16 @@ function truncateContent(content: string | null): string {
     : normalized;
 }
 
+const absoluteTimeFormatter = uiDateFormatter({
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 function formatTimestamp(unixSeconds: number | null): string | null {
   if (unixSeconds === null) return null;
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(unixSeconds * 1_000));
+  return absoluteTimeFormatter.format(new Date(unixSeconds * 1_000));
 }
 
 export function WorkflowMessagePicker({

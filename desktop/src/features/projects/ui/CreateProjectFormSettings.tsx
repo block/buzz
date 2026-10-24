@@ -79,7 +79,7 @@ export function CreateProjectFormSettings({
           <DropdownMenuTrigger asChild>
             <Button
               aria-label={uiT("Template: {0}", {
-                p0: selectedTemplate?.name ?? "None",
+                p0: selectedTemplate?.name ?? uiT("None"),
               })}
               className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[60%] justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
               data-testid="create-project-template"
@@ -135,7 +135,7 @@ export function CreateProjectFormSettings({
           <DropdownMenuTrigger asChild>
             <Button
               aria-label={uiT("Team: {0}", {
-                p0: selectedTeam?.name ?? "None",
+                p0: selectedTeam?.name ?? uiT("None"),
               })}
               className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[60%] justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
               data-testid="create-project-team"

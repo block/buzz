@@ -433,7 +433,7 @@ export function AgentConfigSurfaceRows({
                   field={field}
                   fieldKey={key}
                   key={key}
-                  label={NORMALIZED_LABELS[key]}
+                  label={uiT(NORMALIZED_LABELS[key])}
                   onEdit={onEdit}
                   variant="profile"
                 />
@@ -484,7 +484,7 @@ export function AgentConfigSurfaceRows({
           normalizedEntries.map(([key, field]) => (
             <NormalizedRow
               fieldKey={key}
-              label={NORMALIZED_LABELS[key]}
+              label={uiT(NORMALIZED_LABELS[key])}
               field={field}
               key={key}
               variant="compact"

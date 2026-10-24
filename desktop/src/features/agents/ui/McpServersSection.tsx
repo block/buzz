@@ -1,5 +1,5 @@
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
-import { uiT } from "@/shared/i18n/uiTranslation";
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 import type { ExtensionEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -28,7 +28,9 @@ export function shouldRenderMcpServers(
 export function mcpConfigFileCaption(
   mcpConfigFilePath: string | null | undefined,
 ): string | null {
-  return mcpConfigFilePath ? `From config file (${mcpConfigFilePath})` : null;
+  return mcpConfigFilePath
+    ? uiT("From config file ({0})", { p0: mcpConfigFilePath })
+    : null;
 }
 
 export function McpServersSection({
@@ -38,6 +40,7 @@ export function McpServersSection({
   runtimeId,
   variant = "compact",
 }: McpServersSectionProps) {
+  useUiLanguage();
   const isBuzzAgent = runtimeId === "buzz-agent";
 
   if (!shouldRenderMcpServers(runtimeId, extensions)) {

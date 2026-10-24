@@ -1,5 +1,6 @@
+import { uiDateFormatter } from "@/shared/i18n/format";
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
-import { uiT } from "@/shared/i18n/uiTranslation";
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 import {
   ArrowRight,
@@ -191,27 +192,29 @@ function truncateContent(content: string) {
   return `${trimmed.slice(0, 177)}...`;
 }
 
+const absoluteTimeFormatter = uiDateFormatter({
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 function formatRelativeTime(unixSeconds: number) {
   const diff = Math.floor(Date.now() / 1_000) - unixSeconds;
 
   if (diff < 60) {
-    return "just now";
+    return uiT("just now");
   }
 
   if (diff < 60 * 60) {
-    return `${Math.floor(diff / 60)}m ago`;
+    return uiT("{0}m ago", { p0: Math.floor(diff / 60) });
   }
 
   if (diff < 60 * 60 * 24) {
-    return `${Math.floor(diff / (60 * 60))}h ago`;
+    return uiT("{0}h ago", { p0: Math.floor(diff / (60 * 60)) });
   }
 
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(unixSeconds * 1_000));
+  return absoluteTimeFormatter.format(new Date(unixSeconds * 1_000));
 }
 
 export function MessageResultBody({
@@ -223,6 +226,7 @@ export function MessageResultBody({
   hit: SearchHit;
   resultProfiles?: UserProfileLookup;
 }) {
+  useUiLanguage();
   const authorLabel = resolveUserLabel({
     pubkey: hit.pubkey,
     currentPubkey,

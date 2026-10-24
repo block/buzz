@@ -98,22 +98,24 @@ function formatRelativeTime(timestamp: number): string {
 
   if (diff < 0) {
     const absDiff = Math.abs(diff);
-    if (absDiff < 60) return "just now";
-    if (absDiff < 3600) return `${Math.floor(absDiff / 60)}m overdue`;
-    if (absDiff < 86400) return `${Math.floor(absDiff / 3600)}h overdue`;
-    return `${Math.floor(absDiff / 86400)}d overdue`;
+    if (absDiff < 60) return uiT("just now");
+    if (absDiff < 3600)
+      return uiT("{0}m overdue", { p0: Math.floor(absDiff / 60) });
+    if (absDiff < 86400)
+      return uiT("{0}h overdue", { p0: Math.floor(absDiff / 3600) });
+    return uiT("{0}d overdue", { p0: Math.floor(absDiff / 86400) });
   }
 
-  if (diff < 60) return "in less than a minute";
-  if (diff < 3600) return `in ${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `in ${Math.floor(diff / 3600)}h`;
-  return `in ${Math.floor(diff / 86400)}d`;
+  if (diff < 60) return uiT("in less than a minute");
+  if (diff < 3600) return uiT("in {0}m", { p0: Math.floor(diff / 60) });
+  if (diff < 86400) return uiT("in {0}h", { p0: Math.floor(diff / 3600) });
+  return uiT("in {0}d", { p0: Math.floor(diff / 86400) });
 }
 
 function formatReminderSourceLocation(source: ReminderSource): string {
-  if (!source.channel) return source.channelLabel;
+  if (!source.channel) return uiT(UNKNOWN_CHANNEL_LABEL);
   return source.channel.channelType === "dm"
-    ? `DM with ${source.channelLabel}`
+    ? uiT("DM with {0}", { p0: source.channelLabel })
     : `#${source.channelLabel}`;
 }
 

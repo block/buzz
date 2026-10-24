@@ -289,8 +289,8 @@ export function NumericTuningFields({
     <div className="grid gap-4 md:grid-cols-2">
       {descriptors.map((d) => {
         const key = d.currentPersistence.key;
-        const label = NUMERIC_KIND_LABELS[d.kind];
-        const description = NUMERIC_KIND_DESCRIPTIONS[d.kind];
+        const label = uiT(NUMERIC_KIND_LABELS[d.kind]);
+        const description = uiT(NUMERIC_KIND_DESCRIPTIONS[d.kind]);
         const testId = NUMERIC_KIND_TEST_IDS[d.kind];
         const inheritedVal = inheritedEnvVars[key];
         return (

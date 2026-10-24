@@ -12,6 +12,7 @@ const write = process.argv.includes("--write");
 const visible = new Set([
   "label",
   "title",
+  "headerSubtitle",
   "description",
   "placeholder",
   "aria-label",
@@ -53,7 +54,7 @@ function visibleName(name) {
   if (["typeLabel", "kindLabel"].includes(name)) return false;
   return (
     visible.has(name) ||
-    /(?:Title|Description|Label|Action|Hint|Placeholder|Message|Caption|Tooltip|Subcopy)$/.test(
+    /(?:Title|Subtitle|Description|Label|Action|Hint|Placeholder|Message|Caption|Tooltip|Subcopy)$/.test(
       name,
     )
   );
@@ -80,6 +81,21 @@ const copyModules = new Set([
   "features/projects/lib/projectLabels.ts",
 ]);
 const copyFunctions = {
+  "features/channels/lib/ephemeralChannel.ts": [
+    "formatCompactRemaining",
+    "formatVerboseRemaining",
+    "formatCompactTtl",
+    "formatVerboseTtl",
+    "getEphemeralChannelDisplay",
+  ],
+  "features/home/ui/FeedSection.tsx": ["feedHeadline"],
+  "features/messages/ui/DraftsPanel.tsx": ["formatDraftCreatedAt"],
+  "features/reminders/ui/RemindersPanel.tsx": [
+    "formatRelativeTime",
+    "formatReminderSourceLocation",
+  ],
+  "features/search/ui/SearchResultItem.tsx": ["formatRelativeTime"],
+  "features/search/ui/TopbarSearch.tsx": ["formatRelativeTime"],
   "features/agents/lib/formatAgentModelLabel.ts": ["formatAgentModelLabel"],
   "features/agents/lib/managedAgentControlActions.ts": [
     "getManagedAgentPrimaryActionLabel",

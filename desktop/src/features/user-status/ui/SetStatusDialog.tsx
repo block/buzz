@@ -380,7 +380,7 @@ export function SetStatusDialog({
         }
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
-        headerSubtitle="Let others know what you're up to."
+        headerSubtitle={uiT("Let others know what you're up to.")}
         title={uiT("Set a status")}
       >
         <div className="flex min-h-12 items-stretch rounded-xl border border-input focus-within:ring-1 focus-within:ring-ring">

@@ -582,7 +582,7 @@ export function WorkflowDialog({
           <DialogHeader className="flex flex-shrink-0 flex-row items-center justify-between gap-6 space-y-0 px-6 pt-3 pb-2 text-left">
             <div className="space-y-0">
               <DialogTitle className="text-lg leading-tight">
-                {TITLES[mode]}
+                {uiT(TITLES[mode])}
               </DialogTitle>
               <DialogDescription className="sr-only">
                 {mode === "edit"
@@ -808,8 +808,8 @@ export function WorkflowDialog({
                   type="button"
                 >
                   {mutation.isPending
-                    ? PENDING_LABELS[mode]
-                    : SUBMIT_LABELS[mode]}
+                    ? uiT(PENDING_LABELS[mode])
+                    : uiT(SUBMIT_LABELS[mode])}
                 </Button>
               )}
             </div>

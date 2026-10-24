@@ -82,7 +82,7 @@ export function NotificationSettingsCard({
           : notificationPermission === "denied"
             ? uiT("Blocked")
             : notificationSettings.desktopEnabled
-              ? "On"
+              ? uiT("On")
               : uiT("Off")}
       </span>
 

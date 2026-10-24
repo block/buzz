@@ -288,7 +288,7 @@ export function WorkflowTriggerConditions({
             const expanded = expandedField === field.value;
             const error = conditionValueError(field.value, condition.value);
             const summary = existing
-              ? `${OPERATOR_LABELS[condition.operator]}${condition.value ? ` ${compact(condition.value)}` : ""}`
+              ? `${uiT(OPERATOR_LABELS[condition.operator])}${condition.value ? ` ${compact(condition.value)}` : ""}`
               : "Any";
             const authorSummary =
               existing &&
@@ -405,7 +405,7 @@ export function WorkflowTriggerConditions({
                                 }}
                                 type="button"
                               >
-                                {OPERATOR_LABELS[operator]}
+                                {uiT(OPERATOR_LABELS[operator])}
                               </button>
                             );
                           },

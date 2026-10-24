@@ -15,8 +15,7 @@ import {
   BUZZ_AGENT_THINKING_EFFORT,
 } from "./buzzAgentConfig";
 import {
-  AGENT_PARALLELISM_HELP,
-  AGENT_PARALLELISM_PLACEHOLDER,
+  DEFAULT_AGENT_PARALLELISM,
   parallelismCapHint,
 } from "../lib/agentParallelism";
 import {
@@ -248,13 +247,18 @@ export function PersonaAdvancedFields({
                   parallelism: event.target.value,
                 })
               }
-              placeholder={AGENT_PARALLELISM_PLACEHOLDER}
+              placeholder={uiT("App default ({0})", {
+                p0: DEFAULT_AGENT_PARALLELISM,
+              })}
               type="number"
               value={behaviorDraft.parallelism}
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            {AGENT_PARALLELISM_HELP}
+            {uiT(
+              "Leave blank to use the app default (currently {0}). Custom values may be 1–32.",
+              { p0: DEFAULT_AGENT_PARALLELISM },
+            )}
           </p>
           {personaParallelismHint !== null ? (
             <p className="text-xs text-amber-600 dark:text-amber-400">

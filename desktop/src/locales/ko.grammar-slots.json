@@ -248,5 +248,26 @@
     "source": "{0}, {1}, then {2} more {3}",
     "omitted": ["p3"],
     "reason": "English grammatical suffix or fixed step noun only; all counts and user values are retained."
+  },
+  "mb1c755b8a835cb2b": {
+    "omitted": ["p1"],
+    "reason": "English plural suffix only; Korean unit nouns keep the p0 count and do not inflect for plural."
+  },
+  "mef3d336c8b2588e9": {
+    "omitted": ["p1"],
+    "reason": "English plural suffix only; Korean unit nouns keep the p0 count and do not inflect for plural."
+  },
+  "m0df4dd9aae9d62d3": {
+    "omitted": ["p1"],
+    "reason": "English plural suffix only; Korean unit nouns keep the p0 count and do not inflect for plural."
+  },
+  "mcf3ec6d31da427ef": {
+    "omitted": ["p1"],
+    "reason": "English plural suffix only; Korean unit nouns keep the p0 count and do not inflect for plural."
+  },
+  "mc2e0216832389653": {
+    "source": "{0} runs at most {1} parallel conversation{2} — this agent will run {3}.",
+    "omitted": ["p2"],
+    "reason": "The p2 slot is only the English plural suffix; Korean expresses the unit directly and retains the harness and both limits."
   }
 }

@@ -1,3 +1,4 @@
+import { uiDateFormatter } from "@/shared/i18n/format";
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { FileText, Lock, Pencil, Send, Trash2 } from "lucide-react";
@@ -67,7 +68,7 @@ const UNKNOWN_DRAFT_SOURCE: DraftSource = {
   label: UNKNOWN_CHANNEL_LABEL,
 };
 
-const draftTimeFormatter = new Intl.DateTimeFormat("en-US", {
+const draftTimeFormatter = uiDateFormatter({
   month: "short",
   day: "numeric",
   hour: "numeric",
@@ -82,7 +83,7 @@ function parseDraftTime(value: string): number {
 export function formatDraftCreatedAt(draft: DraftState): string {
   const time = parseDraftTime(draft.createdAt);
   return time === 0
-    ? "Unknown time"
+    ? uiT("Unknown time")
     : draftTimeFormatter.format(new Date(time));
 }
 
@@ -355,6 +356,7 @@ function DraftRow({
   selected: boolean;
   source: DraftSource;
 }) {
+  useUiLanguage();
   const isSent = entry.draft.status === "sent";
   const isOrphaned = rootStatus === "deleted";
   const canOpen = canOpenDraft(entry.draft, source) && !isOrphaned;
@@ -365,7 +367,7 @@ function DraftRow({
     ? isDm
       ? source.label
       : `#${source.label}`
-    : UNKNOWN_CHANNEL_LABEL;
+    : uiT(UNKNOWN_CHANNEL_LABEL);
 
   return (
     <div
@@ -636,7 +638,7 @@ export function DraftsPanel({
   const sendDialogIsDm = sendDialogSource.channel?.channelType === "dm";
   const sendDialogChannelLabel = sendDialogSource.channel
     ? sendDialogSource.label
-    : UNKNOWN_CHANNEL_LABEL;
+    : uiT(UNKNOWN_CHANNEL_LABEL);
 
   if (items.length === 0) {
     return (
