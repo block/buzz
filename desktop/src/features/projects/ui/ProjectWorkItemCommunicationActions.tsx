@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Bot } from "lucide-react";
 import * as React from "react";
 
@@ -14,6 +16,8 @@ export function ProjectWorkItemCommunicationActions({
   item: ProjectSelectionItem;
   onChatWithAgent: (items: ProjectSelectionItem[]) => void;
 }) {
+  useUiLanguage();
+
   const items = React.useMemo(() => [item], [item]);
   const discussInChannel = useProjectDiscussInChannel(items);
 
@@ -31,7 +35,7 @@ export function ProjectWorkItemCommunicationActions({
         variant="ghost"
       >
         <Bot className="h-3.5 w-3.5" />
-        Chat with an agent
+        {uiT("Chat with an agent")}
       </Button>
       <ProjectSelectionDiscussAction
         items={items}

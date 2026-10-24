@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   ArrowRight,
   CalendarClock,
@@ -93,7 +95,7 @@ function StatusToggle({
 }) {
   return (
     <Switch
-      aria-label={enabled ? "Disable workflow" : "Enable workflow"}
+      aria-label={enabled ? uiT("Disable workflow") : uiT("Enable workflow")}
       checked={enabled}
       disabled={disabled}
       onCheckedChange={(checked) => {
@@ -116,6 +118,8 @@ function ActionTile({
   emoji: string | null;
   index: number;
 }) {
+  useUiLanguage();
+
   const ActionIcon = ACTION_ICONS[action];
   const accent = ACTION_ACCENTS[action];
   const reduceMotion = useReducedMotion();
@@ -206,6 +210,8 @@ export function WorkflowCard({
   onDuplicate,
   onDelete,
 }: WorkflowCardProps) {
+  useUiLanguage();
+
   const [triggerAnimationSequence, setTriggerAnimationSequence] =
     React.useState(0);
   const isEnabled = getWorkflowEnabled(workflow.definition);
@@ -238,7 +244,9 @@ export function WorkflowCard({
         onClick={() => onView(workflow)}
         type="button"
       >
-        <span className="sr-only">View {workflow.name}</span>
+        <span className="sr-only">
+          {uiT("View {0}", { p0: workflow.name })}
+        </span>
       </button>
 
       <div className="pointer-events-none relative z-10 flex min-h-48 flex-1 flex-col">

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import { normalizeRelayUrl } from "@/features/communities/communityStorage";
@@ -25,6 +27,8 @@ export function ProjectDetailRightPanel({
   mode: ProjectRightPanelMode;
   onClose: () => void;
 }) {
+  useUiLanguage();
+
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
   if (mode === "chat") {

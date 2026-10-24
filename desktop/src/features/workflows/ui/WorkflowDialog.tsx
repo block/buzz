@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Check, Code, Pencil, X } from "lucide-react";
 import { useBlocker } from "@tanstack/react-router";
@@ -121,6 +123,8 @@ function WorkflowNameEditor({
   onCommit: (name: string) => boolean;
   onEditingChange?: (editing: boolean) => void;
 }) {
+  useUiLanguage();
+
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(name);
   const inputRef = React.useRef<HTMLInputElement>(null);
@@ -151,7 +155,7 @@ function WorkflowNameEditor({
     return (
       <div className="flex h-6 items-center gap-1.5">
         <Input
-          aria-label="Workflow name"
+          aria-label={uiT("Workflow name")}
           autoCapitalize="off"
           autoCorrect="off"
           className="h-6 w-72 px-2 font-mono text-sm"
@@ -171,7 +175,7 @@ function WorkflowNameEditor({
           defaultValue={name}
         />
         <Button
-          aria-label="Save workflow name"
+          aria-label={uiT("Save workflow name")}
           className="text-muted-foreground"
           disabled={disabled || !draft.trim()}
           onClick={commit}
@@ -182,7 +186,7 @@ function WorkflowNameEditor({
             commit();
           }}
           size="icon-xs"
-          title="Save workflow name"
+          title={uiT("Save workflow name")}
           type="button"
           variant="ghost"
         >
@@ -195,15 +199,17 @@ function WorkflowNameEditor({
   return (
     <div className="inline-flex h-6 max-w-full min-w-0 items-center gap-1.5 font-mono text-sm text-muted-foreground">
       <span className="min-w-0 truncate">
-        {generating ? "Generating name…" : name || "Untitled workflow"}
+        {generating
+          ? uiT("Generating name…")
+          : name || uiT("Untitled workflow")}
       </span>
       <Button
-        aria-label="Edit workflow name"
+        aria-label={uiT("Edit workflow name")}
         className="text-muted-foreground [&_svg]:size-3"
         disabled={disabled || generating}
         onClick={() => changeEditing(true)}
         size="icon-xs"
-        title="Edit workflow name"
+        title={uiT("Edit workflow name")}
         type="button"
         variant="ghost"
       >
@@ -227,6 +233,8 @@ export function WorkflowDialog({
   pane,
   workflow,
 }: WorkflowDialogProps) {
+  useUiLanguage();
+
   const formBuilderRef = React.useRef<WorkflowFormBuilderHandle>(null);
   const workflowSnapshotRef = React.useRef(workflow);
   const workflowSnapshot = workflowSnapshotRef.current;
@@ -578,10 +586,12 @@ export function WorkflowDialog({
               </DialogTitle>
               <DialogDescription className="sr-only">
                 {mode === "edit"
-                  ? "Update when this workflow runs and what it does."
+                  ? uiT("Update when this workflow runs and what it does.")
                   : mode === "duplicate"
-                    ? "Copy this workflow and adjust its details."
-                    : "Automate actions when something happens in a channel."}
+                    ? uiT("Copy this workflow and adjust its details.")
+                    : uiT(
+                        "Automate actions when something happens in a channel.",
+                      )}
               </DialogDescription>
               <div className="flex items-center gap-2">
                 <WorkflowNameEditor
@@ -613,16 +623,18 @@ export function WorkflowDialog({
                     */}
                     <PopoverContent
                       align="end"
-                      aria-label="Run history"
+                      aria-label={uiT("Run history")}
                       className="flex max-h-[min(32rem,var(--radix-popover-content-available-height))] w-96 max-w-[calc(100vw-2rem)] flex-col overflow-hidden p-0"
                       data-testid="workflow-history-dropdown"
                       sideOffset={8}
                     >
                       <div className="flex-shrink-0 border-b px-5 py-3">
                         <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                          Workflow
+                          {uiT("Workflow")}
                         </p>
-                        <h3 className="text-base font-semibold">Run history</h3>
+                        <h3 className="text-base font-semibold">
+                          {uiT("Run history")}
+                        </h3>
                       </div>
                       <div className="min-h-0 flex-1">
                         <WorkflowDetailPanel
@@ -656,7 +668,7 @@ export function WorkflowDialog({
               ) : null}
               <DialogClose asChild>
                 <Button
-                  aria-label="Close"
+                  aria-label={uiT("Close")}
                   className="h-8 w-8 text-muted-foreground"
                   size="icon"
                   type="button"
@@ -707,7 +719,9 @@ export function WorkflowDialog({
                     />
                     {channels.length === 0 ? (
                       <p className="text-center text-xs text-muted-foreground">
-                        Join or create a channel before adding a workflow.
+                        {uiT(
+                          "Join or create a channel before adding a workflow.",
+                        )}
                       </p>
                     ) : null}
                   </div>
@@ -742,13 +756,16 @@ export function WorkflowDialog({
 
           <div className="flex flex-shrink-0 items-center justify-between gap-4 px-6 pt-2 pb-4">
             <Tabs onValueChange={handleEditorModeChange} value={editorMode}>
-              <TabsList aria-label="Workflow editor mode" className="h-8 p-0.5">
+              <TabsList
+                aria-label={uiT("Workflow editor mode")}
+                className="h-8 p-0.5"
+              >
                 <TabsTrigger
                   className="h-7 px-3 text-xs"
                   disabled={mutation.isPending}
                   value="form"
                 >
-                  Form
+                  {uiT("Form")}
                 </TabsTrigger>
                 <TabsTrigger
                   className="h-7 gap-1.5 px-3 text-xs"
@@ -766,17 +783,17 @@ export function WorkflowDialog({
                 type="button"
                 variant="outline"
               >
-                Cancel
+                {uiT("Cancel")}
               </Button>
               {isAddingFirstStep ? (
                 <Button
-                  aria-label="Add first step"
+                  aria-label={uiT("Add first step")}
                   data-testid="workflow-dialog-primary-action"
                   disabled={!selectedChannelId || mutation.isPending}
                   onClick={() => formBuilderRef.current?.addFirstStep()}
                   type="button"
                 >
-                  Add step
+                  {uiT("Add step")}
                 </Button>
               ) : (
                 <Button
@@ -810,17 +827,19 @@ export function WorkflowDialog({
         <AlertDialogContent data-testid="workflow-activation-confirmation">
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {activationWarning?.title ?? "Turn on this workflow?"}
+              {activationWarning?.title ?? uiT("Turn on this workflow?")}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {activationWarning?.description ??
-                "Turn it on to let it run immediately, or keep it off until you’re ready."}
+                uiT(
+                  "Turn it on to let it run immediately, or keep it off until you’re ready.",
+                )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel asChild>
               <Button type="button" variant="ghost">
-                Back
+                {uiT("Back")}
               </Button>
             </AlertDialogCancel>
             <Button
@@ -828,14 +847,14 @@ export function WorkflowDialog({
               type="button"
               variant="outline"
             >
-              Keep off
+              {uiT("Keep off")}
             </Button>
             <AlertDialogAction asChild>
               <Button
                 onClick={() => handleCreateActivation(true)}
                 type="button"
               >
-                Turn on
+                {uiT("Turn on")}
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -860,15 +879,15 @@ export function WorkflowDialog({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Discard changes?</AlertDialogTitle>
+            <AlertDialogTitle>{uiT("Discard changes?")}</AlertDialogTitle>
             <AlertDialogDescription>
-              Your unsaved workflow changes will be lost.
+              {uiT("Your unsaved workflow changes will be lost.")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel asChild>
               <Button type="button" variant="outline">
-                Keep editing
+                {uiT("Keep editing")}
               </Button>
             </AlertDialogCancel>
             <AlertDialogAction asChild>
@@ -894,7 +913,7 @@ export function WorkflowDialog({
                 type="button"
                 variant="destructive"
               >
-                Discard changes
+                {uiT("Discard changes")}
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -916,16 +935,19 @@ export function WorkflowDialog({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Continue without this secret?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {uiT("Continue without this secret?")}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              This private webhook secret cannot be recovered. Copy and store it
-              before continuing, or explicitly leave it behind.
+              {uiT(
+                "This private webhook secret cannot be recovered. Copy and store it before continuing, or explicitly leave it behind.",
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel asChild>
               <Button type="button" variant="outline">
-                Go back
+                {uiT("Go back")}
               </Button>
             </AlertDialogCancel>
             <AlertDialogAction asChild>
@@ -943,7 +965,7 @@ export function WorkflowDialog({
                 type="button"
                 variant="destructive"
               >
-                Continue
+                {uiT("Continue")}
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
   Project,
   ProjectActivitySummary,
@@ -269,10 +271,30 @@ export function relativeTime(
 ) {
   const elapsedSeconds = Math.max(1, Math.floor(nowSeconds - createdAt));
   const units = [
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "minute", seconds: 60 },
-    { label: "second", seconds: 1 },
+    {
+      get label() {
+        return uiT("day");
+      },
+      seconds: 24 * 60 * 60,
+    },
+    {
+      get label() {
+        return uiT("hour");
+      },
+      seconds: 60 * 60,
+    },
+    {
+      get label() {
+        return uiT("minute");
+      },
+      seconds: 60,
+    },
+    {
+      get label() {
+        return uiT("second");
+      },
+      seconds: 1,
+    },
   ];
 
   if (elapsedSeconds >= 7 * 24 * 60 * 60) {
@@ -345,7 +367,7 @@ export function normalizeRepositoryUrl(url: string) {
 
 export function getClonePathLabel(project: Project) {
   const cloneUrl = selectProjectRepository(project, null)?.cloneUrls[0];
-  if (!cloneUrl) return "Clone path pending";
+  if (!cloneUrl) return uiT("Clone path pending");
 
   try {
     const parsed = new URL(cloneUrl);
@@ -371,7 +393,7 @@ export function uniqueRepositories(projects: Project[]) {
 
 export function getActivityLabel(summary: ProjectActivitySummary | undefined) {
   if (!summary || summary.activityCount === 0) {
-    return "No activity yet";
+    return uiT("No activity yet");
   }
 
   return [

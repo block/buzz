@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronRight } from "lucide-react";
 import * as React from "react";
 
@@ -99,7 +101,7 @@ function AuthorConditionSummary({
         {excluded ? <ExclusionStrike /> : null}
       </span>
       <span className="sr-only">
-        {excluded ? "Excluded author: " : "Selected author: "}
+        {excluded ? uiT("Excluded author:") : uiT("Selected author:")}
         {label}
       </span>
     </span>
@@ -120,7 +122,9 @@ function EmojiConditionSummary({
       </span>
       {excluded ? <ExclusionStrike /> : null}
       <span className="sr-only">
-        {excluded ? "Excluded reaction emoji: " : "Selected reaction emoji: "}
+        {excluded
+          ? uiT("Excluded reaction emoji:")
+          : uiT("Selected reaction emoji:")}
         {emoji}
       </span>
     </span>
@@ -147,6 +151,8 @@ export function WorkflowTriggerConditions({
   value: string;
   workflowChannelId?: string | null;
 }) {
+  useUiLanguage();
+
   const parsedValue = React.useMemo(
     () => parseConditionExpressions(value, triggerType),
     [triggerType, value],
@@ -215,21 +221,21 @@ export function WorkflowTriggerConditions({
       value={mode}
     >
       <TabsList
-        aria-label="Condition editor mode"
+        aria-label={uiT("Condition editor mode")}
         className="grid h-9 w-full grid-cols-2 p-0.5"
       >
         <TabsTrigger className="h-8" disabled={disabled} value="basic">
-          Basic
+          {uiT("Basic")}
         </TabsTrigger>
         <TabsTrigger className="h-8" disabled={disabled} value="advanced">
-          Advanced
+          {uiT("Advanced")}
         </TabsTrigger>
       </TabsList>
 
       {mode === "advanced" ? (
         <div className="space-y-2">
           <Input
-            aria-label="Advanced expression"
+            aria-label={uiT("Advanced expression")}
             autoCapitalize="off"
             autoCorrect="off"
             disabled={disabled}
@@ -238,19 +244,21 @@ export function WorkflowTriggerConditions({
               localValue.current = event.target.value;
               onChange(event.target.value.trim());
             }}
-            placeholder='e.g. trigger_author == "…"'
+            placeholder={uiT('e.g. trigger_author == "…"')}
             value={value}
           />
           <p className="text-xs text-muted-foreground">
-            Use an evalexpr expression. Existing custom expressions stay
-            unchanged.
+            {uiT(
+              "Use an evalexpr expression. Existing custom expressions stay unchanged.",
+            )}
           </p>
         </div>
       ) : parsedValue === null && value.trim() ? (
         <div className="space-y-3 rounded-md border border-border/70 p-3">
           <p className="text-xs text-muted-foreground">
-            An advanced expression is active. Replacing it with basic filters
-            cannot be undone.
+            {uiT(
+              "An advanced expression is active. Replacing it with basic filters cannot be undone.",
+            )}
           </p>
           <button
             className="text-sm font-medium text-destructive hover:underline"
@@ -262,7 +270,7 @@ export function WorkflowTriggerConditions({
             }}
             type="button"
           >
-            Replace with basic filters
+            {uiT("Replace with basic filters")}
           </button>
         </div>
       ) : (
@@ -369,7 +377,7 @@ export function WorkflowTriggerConditions({
                     )}
                   >
                     <fieldset>
-                      <legend className="sr-only">Match</legend>
+                      <legend className="sr-only">{uiT("Match")}</legend>
                       <div className="grid grid-cols-2 gap-2.5">
                         {conditionOperatorsForField(field.value).map(
                           (operator) => {
@@ -407,8 +415,8 @@ export function WorkflowTriggerConditions({
                     {conditionOperatorNeedsValue(condition.operator) ? (
                       field.value === "trigger_emoji" ? (
                         <WorkflowEmojiField
-                          ariaLabel="Choose trigger emoji"
-                          clearAriaLabel="Clear trigger emoji"
+                          ariaLabel={uiT("Choose trigger emoji")}
+                          clearAriaLabel={uiT("Clear trigger emoji")}
                           disabled={disabled}
                           id="wf-trigger-emoji"
                           onChange={(emoji) =>
@@ -520,7 +528,7 @@ export function WorkflowTriggerConditions({
                         }
                         type="button"
                       >
-                        Clear filter
+                        {uiT("Clear filter")}
                       </button>
                     ) : null}
                   </div>

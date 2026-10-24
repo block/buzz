@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   CircleAlert,
   CloudOff,
@@ -40,7 +42,7 @@ function RepositoryOwnerReference({
   ownerName?: string;
 }) {
   if (!ownerName) {
-    return <>the repository owner</>;
+    return <>{uiT("the repository owner")}</>;
   }
   return (
     <>
@@ -63,7 +65,7 @@ function RepositoryOwnerReference({
           {ownerName}
         </span>
       </span>
-      , the repository owner,
+      {uiT(", the repository owner,")}
     </>
   );
 }
@@ -79,6 +81,8 @@ function AccessRestrictedDescription({
   ownerIsAgent?: boolean;
   ownerName?: string;
 }) {
+  useUiLanguage();
+
   const { goChannel } = useAppNavigation();
   const channel = useChannelReference(accessChannelId);
   const isOpenable = isChannelReferenceOpenable(channel);
@@ -86,35 +90,39 @@ function AccessRestrictedDescription({
   if (!isOpenable) {
     return (
       <>
-        Repository access is granted through a channel you can’t see. Ask{" "}
+        {uiT(
+          "Repository access is granted through a channel you can’t see. Ask",
+        )}{" "}
         <RepositoryOwnerReference
           ownerAvatarUrl={ownerAvatarUrl}
           ownerIsAgent={ownerIsAgent}
           ownerName={ownerName}
         />{" "}
-        for an invite.
+        {uiT("for an invite.")}
       </>
     );
   }
 
   return (
     <>
-      Repository access is granted through{" "}
+      {uiT("Repository access is granted through")}{" "}
       <button
-        aria-label={`Open repository access channel #${channel.name}`}
+        aria-label={uiT("Open repository access channel #{0}", {
+          p0: channel.name,
+        })}
         className="font-medium text-foreground underline-offset-2 hover:underline"
         onClick={() => void goChannel(channel.id)}
         type="button"
       >
         #{channel.name}
       </button>
-      , and you’re not a member. Join the channel or ask{" "}
+      {uiT(", and you’re not a member. Join the channel or ask")}{" "}
       <RepositoryOwnerReference
         ownerAvatarUrl={ownerAvatarUrl}
         ownerIsAgent={ownerIsAgent}
         ownerName={ownerName}
       />{" "}
-      for an invite.
+      {uiT("for an invite.")}
     </>
   );
 }
@@ -177,13 +185,13 @@ export function ProjectRepositoryUnavailableState({
             ) : (
               <RefreshCw className="h-4 w-4" />
             )}
-            {retryPending ? "Retrying…" : "Retry"}
+            {retryPending ? uiT("Retrying…") : uiT("Retry")}
           </Button>
         ) : null}
         {reason === "access" && onAskForAccess ? (
           <Button onClick={onAskForAccess} size="sm">
             <MessageCircle className="h-4 w-4" />
-            Ask for access
+            {uiT("Ask for access")}
           </Button>
         ) : null}
       </div>

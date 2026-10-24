@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   Check,
   ChevronDown,
@@ -168,7 +170,7 @@ function CommitHashChip({
   }
   return (
     <button
-      aria-label={`View commit ${short}`}
+      aria-label={uiT("View commit {0}", { p0: short })}
       className="shrink-0 rounded-md bg-background/55 px-2 py-1 font-mono text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
       onClick={() => onOpenCommit(hash)}
       type="button"
@@ -215,7 +217,7 @@ function PullRequestCommitRow({
           />
           <span className="truncate">
             <ProfileAuthorName pubkey={author}>{authorLabel}</ProfileAuthorName>{" "}
-            authored
+            {uiT("authored")}
           </span>
           {branch ? (
             <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border/60 px-1.5 py-0.5 font-mono text-2xs">
@@ -235,7 +237,7 @@ function PullRequestCommitRow({
               <ProjectFeedRowMonoCell
                 label={hash.slice(0, 7)}
                 onClick={openCommit}
-                title={`View commit ${hash.slice(0, 7)}`}
+                title={uiT("View commit {0}", { p0: hash.slice(0, 7) })}
               />
               <CopyCommitHashButton hash={hash} />
             </ProjectFeedRowCluster>
@@ -287,7 +289,7 @@ function PullRequestRow({
     <ProjectWorkItemRow
       eventId={pullRequest.id}
       identifier={`#${pullRequest.id.slice(0, 8)}`}
-      identifierTitle="View review"
+      identifierTitle={uiT("View review")}
       metadata={
         pullRequest.branchName ? (
           <span className="inline-flex min-w-0 items-center gap-1">
@@ -316,8 +318,10 @@ function PullRequestRow({
             <button
               aria-label={
                 pullRequest.comments.length > 0
-                  ? `View ${pullRequest.comments.length} comments`
-                  : "View comments"
+                  ? uiT("View {0} comments", {
+                      p0: pullRequest.comments.length,
+                    })
+                  : uiT("View comments")
               }
               className={`flex items-center gap-1 rounded-md text-xs hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring ${
                 pullRequest.comments.length > 0
@@ -370,7 +374,7 @@ export function PullRequestDetailHeader({
         </span>
         <ShareLinkButton
           className="ml-1 inline-flex h-7 w-7 align-text-bottom"
-          label="Copy review link"
+          label={uiT("Copy review link")}
           link={pullRequestShareLink(pullRequest)}
           testId="project-pull-request-copy-link"
         />
@@ -379,7 +383,7 @@ export function PullRequestDetailHeader({
         className="flex flex-wrap items-center gap-x-1 gap-y-1 text-xs text-muted-foreground"
         data-testid="project-pull-request-detail-metadata"
       >
-        <span data-project-metadata-phrase>Review opened</span>
+        <span data-project-metadata-phrase>{uiT("Review opened")}</span>
         <span
           className="shrink-0 whitespace-nowrap"
           data-project-metadata-phrase
@@ -420,6 +424,8 @@ export function ProjectPullRequestDetail({
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
+  useUiLanguage();
+
   const identityQuery = useIdentityQuery();
   const commentMutation = useCreateProjectPullRequestCommentMutation(project);
   const [
@@ -460,12 +466,14 @@ export function ProjectPullRequestDetail({
         });
         toast.success(
           decision === "request-changes"
-            ? "Changes requested."
-            : "Comment posted.",
+            ? uiT("Changes requested.")
+            : uiT("Comment posted."),
         );
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to post comment.",
+          error instanceof Error
+            ? error.message
+            : uiT("Failed to post comment."),
         );
         throw error;
       }
@@ -528,7 +536,7 @@ export function ProjectPullRequestDetail({
         pullRequest={pullRequest}
       />
       {pullRequest.content || pullRequest.updates.length > 0 ? (
-        <ProjectDetailSection defaultOpen title="Description">
+        <ProjectDetailSection defaultOpen title={uiT("Description")}>
           {pullRequest.content ? (
             <ProjectRichContent
               content={pullRequest.content}
@@ -539,7 +547,9 @@ export function ProjectPullRequestDetail({
             <div
               className={pullRequest.content ? "mt-4 space-y-4" : "space-y-4"}
             >
-              <h4 className="text-sm font-semibold text-foreground">Updates</h4>
+              <h4 className="text-sm font-semibold text-foreground">
+                {uiT("Updates")}
+              </h4>
               {pullRequest.updates.map((update) => (
                 <article className="space-y-1" key={update.id}>
                   <div className="flex min-w-0 items-center justify-between gap-3">
@@ -580,7 +590,7 @@ export function ProjectPullRequestDetail({
           onOpenChange={setFilesOpen}
           open={filesOpen}
           testId="project-detail-section-files"
-          title="Files changed"
+          title={uiT("Files changed")}
         >
           <div className="-mx-6">{filesChanged}</div>
         </ProjectDetailSection>
@@ -588,7 +598,7 @@ export function ProjectPullRequestDetail({
       <ProjectDetailSection
         count={commitCount}
         defaultOpen={false}
-        title="Commits"
+        title={uiT("Commits")}
       >
         <div className="-mx-6">
           <PullRequestCommitRow
@@ -607,22 +617,22 @@ export function ProjectPullRequestDetail({
               createdAt={update.createdAt}
               hash={update.commit}
               key={update.id}
-              message={update.content.trim() || "Updated review branch"}
+              message={update.content.trim() || uiT("Updated review branch")}
               onOpenCommit={onOpenCommit}
               profiles={profiles}
             />
           ))}
         </div>
       </ProjectDetailSection>
-      <ProjectDetailSection defaultOpen={false} title="Checks">
+      <ProjectDetailSection defaultOpen={false} title={uiT("Checks")}>
         <p className="text-sm text-muted-foreground">
-          No checks have been reported for this review yet.
+          {uiT("No checks have been reported for this review yet.")}
         </p>
       </ProjectDetailSection>
-      <ProjectDetailSection defaultOpen title="Activity">
+      <ProjectDetailSection defaultOpen title={uiT("Activity")}>
         <div className="space-y-3">
           <DiscussedInChannels
-            entityLabel="this review"
+            entityLabel={uiT("this review")}
             originChannelId={pullRequest.channelId}
             originCreatedAt={pullRequest.createdAt}
             originPubkey={pullRequest.author}
@@ -660,10 +670,14 @@ export function ProjectPullRequestDetail({
                 </span>
                 <span className="flex min-h-5 min-w-0 flex-1 items-center text-left">
                   {reviewHistoryCollapsed
-                    ? `Show ${reviewHistory.length} earlier ${
-                        reviewHistory.length === 1 ? "activity" : "activities"
-                      }`
-                    : "Collapse review history"}
+                    ? uiT("Show {0} earlier {1}", {
+                        p0: reviewHistory.length,
+                        p1:
+                          reviewHistory.length === 1
+                            ? "activity"
+                            : "activities",
+                      })
+                    : uiT("Collapse review history")}
                 </span>
                 {reviewHistoryCollapsed ? (
                   <ChevronDown className="mt-0.5 h-3.5 w-3.5" />
@@ -694,8 +708,13 @@ export function ProjectPullRequestDetail({
                   </span>
                 </span>
                 <span className="min-w-0 flex-1 text-left">
-                  Show {earlierReviewHistoryCount} earlier{" "}
-                  {earlierReviewHistoryCount === 1 ? "activity" : "activities"}
+                  {uiT("Show {0} earlier {1}", {
+                    p0: earlierReviewHistoryCount,
+                    p1:
+                      earlierReviewHistoryCount === 1
+                        ? "activity"
+                        : "activities",
+                  })}
                 </span>
               </button>
             ) : null}
@@ -760,13 +779,15 @@ export function ProjectPullRequestDetail({
                             {" "}
                             {timelineKind === "approved"
                               ? isHistoricalDecision
-                                ? "approved an earlier commit"
-                                : "approved these changes"
+                                ? uiT("approved an earlier commit")
+                                : uiT("approved these changes")
                               : timelineKind === "changes-requested"
                                 ? isHistoricalDecision
-                                  ? "requested changes on an earlier commit"
-                                  : "requested changes"
-                                : trimmedContent || "requested a review"}
+                                  ? uiT(
+                                      "requested changes on an earlier commit",
+                                    )
+                                  : uiT("requested changes")
+                                : trimmedContent || uiT("requested a review")}
                           </>
                         ) : null}
                       </span>
@@ -786,7 +807,14 @@ export function ProjectPullRequestDetail({
                     ) : null}
                     {item.anchor ? (
                       <button
-                        aria-label={`Open ${item.anchor.path} ${item.anchor.side} line ${item.anchor.line} in Files changed`}
+                        aria-label={uiT(
+                          "Open {0} {1} line {2} in Files changed",
+                          {
+                            p0: item.anchor.path,
+                            p1: item.anchor.side,
+                            p2: item.anchor.line,
+                          },
+                        )}
                         className="mt-1 inline-flex min-w-0 items-center gap-1 rounded-md bg-muted/65 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                         onClick={() => {
                           if (item.anchor) onOpenInlineComment?.(item.anchor);
@@ -801,7 +829,7 @@ export function ProjectPullRequestDetail({
                         </span>
                         {item.inlineCommentStatus === "outdated" ? (
                           <span className="shrink-0 text-destructive">
-                            Outdated
+                            {uiT("Outdated")}
                           </span>
                         ) : null}
                       </button>
@@ -833,9 +861,9 @@ export function ProjectPullRequestDetail({
             canRequestChanges ? handleChangeRequestSubmit : undefined
           }
           onSubmit={handleCommentSubmit}
-          placeholder="Add a comment…"
+          placeholder={uiT("Add a comment…")}
           profiles={profiles}
-          secondarySubmitLabel="Request changes"
+          secondarySubmitLabel={uiT("Request changes")}
         />
       </div>
     </div>

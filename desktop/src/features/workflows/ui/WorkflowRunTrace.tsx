@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Check, Clock, SkipForward, X } from "lucide-react";
 
 import type { WorkflowApproval, WorkflowRun } from "@/shared/api/types";
@@ -62,7 +64,7 @@ export function WorkflowRunTrace({
   if (run.executionTrace.length === 0) {
     return (
       <p className="rounded-xl border border-dashed border-border/70 bg-background/60 px-4 py-6 text-center text-sm text-muted-foreground">
-        No steps recorded yet.
+        {uiT("No steps recorded yet.")}
       </p>
     );
   }
@@ -95,7 +97,7 @@ export function WorkflowRunTrace({
             {Object.keys(step.output).length > 0 ? (
               <div className="mt-3">
                 <p className="mb-1 text-2xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
-                  Output
+                  {uiT("Output")}
                 </p>
                 <pre className="max-h-32 overflow-auto rounded-lg bg-muted/40 px-3 py-2 font-mono text-xs text-muted-foreground">
                   {JSON.stringify(step.output, null, 2)}
@@ -105,7 +107,7 @@ export function WorkflowRunTrace({
             {step.error ? (
               <div className="mt-3">
                 <p className="mb-1 text-2xs font-medium uppercase tracking-[0.16em] text-red-400">
-                  Error
+                  {uiT("Error")}
                 </p>
                 <pre className="max-h-32 overflow-auto rounded-lg bg-red-500/10 px-3 py-2 font-mono text-xs text-red-400">
                   {step.error}
@@ -115,7 +117,7 @@ export function WorkflowRunTrace({
             {pendingApproval ? (
               <div className="mt-3">
                 <p className="mb-2 text-2xs font-medium uppercase tracking-[0.16em] text-amber-600">
-                  Pending approval
+                  {uiT("Pending approval")}
                 </p>
                 <WorkflowApprovalCard approval={pendingApproval} />
               </div>

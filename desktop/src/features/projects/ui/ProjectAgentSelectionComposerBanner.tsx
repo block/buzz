@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronDown } from "lucide-react";
 import * as React from "react";
 
@@ -48,6 +50,8 @@ export function ProjectAgentSelectionComposerBanner({
 }: {
   items: NonNullable<ProjectDetailAgentContext["selection"]>;
 }) {
+  useUiLanguage();
+
   const [expanded, setExpanded] = React.useState(true);
   const visibleItems = items.slice(0, MAX_VISIBLE_ITEMS);
   const overflowItems = items.slice(MAX_VISIBLE_ITEMS);
@@ -88,7 +92,7 @@ export function ProjectAgentSelectionComposerBanner({
                     type="button"
                     variant="ghost"
                   >
-                    {overflowItems.length} more
+                    {uiT("{0} more", { p0: overflowItems.length })}
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent

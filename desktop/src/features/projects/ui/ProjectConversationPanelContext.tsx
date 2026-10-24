@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { SearchHit } from "@/shared/api/searchTypes";
@@ -22,6 +24,8 @@ export function ProjectConversationPanelProvider({
   children: React.ReactNode;
   onOpenConversation: (hit: SearchHit) => void;
 }) {
+  useUiLanguage();
+
   const value = React.useMemo(
     () => ({ openConversation: onOpenConversation }),
     [onOpenConversation],
@@ -65,6 +69,8 @@ export function ProjectConversationPanelController({
   sharedHeaderBackdrop?: boolean;
   widthPx: number;
 }) {
+  useUiLanguage();
+
   const sidebar = useOptionalSidebar();
   const [hit, setHit] = React.useState<SearchHit | null>(null);
   const previousResetKeyRef = React.useRef(resetKey);

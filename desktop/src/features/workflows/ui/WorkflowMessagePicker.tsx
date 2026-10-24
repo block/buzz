@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { Check, LoaderCircle, Search } from "lucide-react";
 import * as React from "react";
@@ -58,6 +60,8 @@ export function WorkflowMessagePicker({
   onEscape?: () => void;
   value: string;
 }) {
+  useUiLanguage();
+
   const optionRefs = React.useRef(new Map<string, HTMLButtonElement>());
   const [query, setQuery] = React.useState("");
   const [activeIndex, setActiveIndex] = React.useState<number | null>(null);
@@ -235,7 +239,7 @@ export function WorkflowMessagePicker({
               : undefined
           }
           aria-controls={listId}
-          aria-label="Search messages or paste a message ID"
+          aria-label={uiT("Search messages or paste a message ID")}
           aria-expanded="true"
           autoCapitalize="none"
           autoComplete="off"
@@ -286,8 +290,8 @@ export function WorkflowMessagePicker({
           }}
           placeholder={
             channelId
-              ? "Search messages or paste a message ID…"
-              : "Choose a channel first"
+              ? uiT("Search messages or paste a message ID…")
+              : uiT("Choose a channel first")
           }
           role="combobox"
           spellCheck={false}
@@ -298,18 +302,18 @@ export function WorkflowMessagePicker({
         searchEventsFetching ||
         exactQuery.isFetching ? (
           <LoaderCircle
-            aria-label="Loading messages"
+            aria-label={uiT("Loading messages")}
             className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground"
           />
         ) : null}
       </div>
       {invalidDirectResult ? (
         <p className="shrink-0 border-b border-border/70 px-3 py-2 text-xs text-destructive">
-          That message is not available in this channel.
+          {uiT("That message is not available in this channel.")}
         </p>
       ) : null}
       <div
-        aria-label="Messages"
+        aria-label={uiT("Messages")}
         className="min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain p-2"
         data-testid="workflow-message-picker-results"
         id={listId}
@@ -352,15 +356,16 @@ export function WorkflowMessagePicker({
             className="flex items-center justify-center gap-2 px-3 py-8 text-sm text-muted-foreground"
             role="status"
           >
-            <LoaderCircle className="h-4 w-4 animate-spin" /> Loading messages…
+            <LoaderCircle className="h-4 w-4 animate-spin" />{" "}
+            {uiT(" Loading messages…")}
           </p>
         ) : visibleCandidates.length === 0 ? (
           <p className="px-3 py-8 text-center text-sm text-muted-foreground">
             {failed
-              ? "Couldn’t load messages."
+              ? uiT("Couldn’t load messages.")
               : normalizedQuery
-                ? "No messages found."
-                : "No messages yet."}
+                ? uiT("No messages found.")
+                : uiT("No messages yet.")}
           </p>
         ) : null}
         {failed ? (
@@ -376,7 +381,7 @@ export function WorkflowMessagePicker({
             }}
             type="button"
           >
-            Couldn’t load all messages. Retry
+            {uiT("Couldn’t load all messages. Retry")}
           </button>
         ) : null}
         {!normalizedQuery && historyQuery.hasNextPage ? (
@@ -387,8 +392,8 @@ export function WorkflowMessagePicker({
             type="button"
           >
             {historyQuery.isFetchingNextPage
-              ? "Loading older messages…"
-              : "Load older messages"}
+              ? uiT("Loading older messages…")
+              : uiT("Load older messages")}
           </button>
         ) : null}
       </div>

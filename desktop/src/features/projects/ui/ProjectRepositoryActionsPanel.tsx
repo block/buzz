@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   CheckCircle2,
   CircleDot,
@@ -166,6 +168,8 @@ export function ProjectRepositoryActionsPanel({
   terminalTitle,
   widthPx,
 }: ProjectRepositoryActionsPanelProps) {
+  useUiLanguage();
+
   const selection = useProjectSelection();
   const selectionPresentation = projectSelectionPresentation(
     selection?.items ?? [],
@@ -320,17 +324,21 @@ export function ProjectRepositoryActionsPanel({
                           ) : (
                             <DownloadCloud className="h-3.5 w-3.5" />
                           )}
-                          {sourceControls.clonePending ? "Cloning…" : "Clone"}
+                          {sourceControls.clonePending
+                            ? uiT("Cloning…")
+                            : uiT("Clone")}
                         </RepositoryActionButton>
                       ) : null}
                       {sourceControls.remoteUnavailableReason === "access" &&
                       sourceControls.onAskForAccess ? (
                         <RepositoryActionButton
                           onClick={sourceControls.onAskForAccess}
-                          title="Open project chat to ask for repository access"
+                          title={uiT(
+                            "Open project chat to ask for repository access",
+                          )}
                         >
                           <MessageCircle className="h-3.5 w-3.5" />
-                          Ask for access
+                          {uiT("Ask for access")}
                         </RepositoryActionButton>
                       ) : null}
                       {fetchAction ? (
@@ -339,12 +347,13 @@ export function ProjectRepositoryActionsPanel({
                           onClick={fetchAction}
                           title={sourceControls.fetchTitle}
                         >
-                          {sourceControls.fetchPending ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <RefreshCw className="h-3.5 w-3.5" />
-                          )}
-                          Fetch
+                          {uiMessage("{0} Fetch", {
+                            p0: sourceControls.fetchPending ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-3.5 w-3.5" />
+                            ),
+                          })}
                         </RepositoryActionButton>
                       ) : null}
                       {pullAction ? (
@@ -353,15 +362,16 @@ export function ProjectRepositoryActionsPanel({
                           onClick={pullAction}
                           title={sourceControls.pullTitle}
                         >
-                          {sourceControls.pullPending ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <DownloadCloud className="h-3.5 w-3.5" />
-                          )}
-                          Pull
-                          {sourceControls.behindCount
-                            ? ` ${sourceControls.behindCount}`
-                            : ""}
+                          {uiMessage("{0} Pull{1}", {
+                            p0: sourceControls.pullPending ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <DownloadCloud className="h-3.5 w-3.5" />
+                            ),
+                            p1: sourceControls.behindCount
+                              ? ` ${sourceControls.behindCount}`
+                              : "",
+                          })}
                         </RepositoryActionButton>
                       ) : null}
                       {pushAction ? (
@@ -370,31 +380,32 @@ export function ProjectRepositoryActionsPanel({
                           onClick={pushAction}
                           title={sourceControls.pushTitle}
                         >
-                          {sourceControls.pushPending ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <UploadCloud className="h-3.5 w-3.5" />
-                          )}
-                          Push
-                          {sourceControls.aheadCount
-                            ? ` ${sourceControls.aheadCount}`
-                            : ""}
+                          {uiMessage("{0} Push {1}", {
+                            p0: sourceControls.pushPending ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <UploadCloud className="h-3.5 w-3.5" />
+                            ),
+                            p1: sourceControls.aheadCount
+                              ? ` ${sourceControls.aheadCount}`
+                              : "",
+                          })}
                         </RepositoryActionButton>
                       ) : null}
                       <RepositoryActionButton
                         onClick={onOpenTerminal}
-                        title={terminalTitle ?? "Open terminal"}
+                        title={terminalTitle ?? uiT("Open terminal")}
                       >
                         <SquareTerminal className="h-3.5 w-3.5" />
-                        Terminal
+                        {uiT("Terminal")}
                       </RepositoryActionButton>
                       {sourceControls.source === "local" ? (
                         <RepositoryActionButton
                           onClick={onOpenLocalRepository}
-                          title="Open local repository folder"
+                          title={uiT("Open local repository folder")}
                         >
                           <FolderOpen className="h-3.5 w-3.5" />
-                          Open
+                          {uiT("Open")}
                         </RepositoryActionButton>
                       ) : externalOpenUrl ? (
                         <Button
@@ -409,7 +420,7 @@ export function ProjectRepositoryActionsPanel({
                             target="_blank"
                           >
                             <ExternalLink className="h-3.5 w-3.5" />
-                            Open
+                            {uiT("Open")}
                           </a>
                         </Button>
                       ) : null}
@@ -422,16 +433,18 @@ export function ProjectRepositoryActionsPanel({
                     onClick={onCreateTask}
                   >
                     <Plus className="h-3.5 w-3.5" />
-                    Create task
+                    {uiT("Create task")}
                   </RepositoryActionButton>
                 ) : null}
                 {showCreateReview && onCreatePullRequest ? (
                   <RepositoryActionButton
                     onClick={onCreatePullRequest}
-                    title="Create review — choose a repository and branches to compare"
+                    title={uiT(
+                      "Create review — choose a repository and branches to compare",
+                    )}
                   >
                     <Plus className="h-3.5 w-3.5" />
-                    Create review
+                    {uiT("Create review")}
                   </RepositoryActionButton>
                 ) : null}
               </RepositoryPanelSection>
@@ -440,14 +453,14 @@ export function ProjectRepositoryActionsPanel({
             <RepositoryPanelSection
               divided={showActions}
               testId="project-context-details"
-              title="Details"
+              title={uiT("Details")}
             >
               {branchScoped ? (
                 <dl className="text-sm [&>div]:h-7 [&_dd]:ml-auto [&_dd]:tabular-nums [&_dt]:gap-3 [&_dt]:text-foreground [&_dt_svg]:h-4 [&_dt_svg]:w-4 [&_dt_svg]:shrink-0 [&_dt_svg]:text-muted-foreground">
                   <div className="flex items-center justify-between gap-3">
                     <dt className="flex items-center gap-3 text-muted-foreground">
                       <GitCommitHorizontal className="h-3.5 w-3.5" />
-                      Latest
+                      {uiT("Latest")}
                     </dt>
                     <dd className="font-mono text-xs text-foreground">
                       {latestCommit ? latestCommit.hash.slice(0, 7) : "—"}
@@ -456,7 +469,7 @@ export function ProjectRepositoryActionsPanel({
                   <div className="flex items-center justify-between gap-3">
                     <dt className="flex items-center gap-3 text-muted-foreground">
                       <FileCode2 className="h-3.5 w-3.5" />
-                      Files
+                      {uiT("Files")}
                     </dt>
                     <dd
                       className="font-medium text-foreground"
@@ -468,7 +481,7 @@ export function ProjectRepositoryActionsPanel({
                   <div className="flex items-center justify-between gap-3">
                     <dt className="flex items-center gap-3 text-muted-foreground">
                       <Users className="h-3.5 w-3.5" />
-                      Contributors
+                      {uiT("Contributors")}
                     </dt>
                     <dd className="font-medium text-foreground">
                       {snapshot ? contributors.length : "—"}
@@ -489,7 +502,9 @@ export function ProjectRepositoryActionsPanel({
                       <div className="flex items-center justify-between gap-3">
                         <dt className="flex items-center gap-3 text-muted-foreground">
                           <CircleDot className="h-3.5 w-3.5" />
-                          {activeTab === "issues" ? "Tasks" : "Active tasks"}
+                          {activeTab === "issues"
+                            ? uiT("Tasks")
+                            : uiT("Active tasks")}
                         </dt>
                         <dd className="font-medium text-foreground">
                           {activeTab === "issues"
@@ -502,7 +517,7 @@ export function ProjectRepositoryActionsPanel({
                           <div className="flex items-center justify-between gap-3">
                             <dt className="flex items-center gap-3 text-muted-foreground">
                               <CircleDot className="h-3.5 w-3.5" />
-                              Active
+                              {uiT("Active")}
                             </dt>
                             <dd className="font-medium text-foreground">
                               {taskActivity.active}
@@ -511,7 +526,7 @@ export function ProjectRepositoryActionsPanel({
                           <div className="flex items-center justify-between gap-3">
                             <dt className="flex items-center gap-3 text-muted-foreground">
                               <CheckCircle2 className="h-3.5 w-3.5" />
-                              Completed
+                              {uiT("Completed")}
                             </dt>
                             <dd className="font-medium text-foreground">
                               {taskActivity.completed}
@@ -528,7 +543,9 @@ export function ProjectRepositoryActionsPanel({
                       <div className="flex items-center justify-between gap-3">
                         <dt className="flex items-center gap-3 text-muted-foreground">
                           <GitPullRequest className="h-3.5 w-3.5" />
-                          {activeTab === "prs" ? "Reviews" : "Open reviews"}
+                          {activeTab === "prs"
+                            ? uiT("Reviews")
+                            : uiT("Open reviews")}
                         </dt>
                         <dd className="font-medium text-foreground">
                           {activeTab === "prs"
@@ -541,7 +558,7 @@ export function ProjectRepositoryActionsPanel({
                           <div className="flex items-center justify-between gap-3">
                             <dt className="flex items-center gap-3 text-muted-foreground">
                               <GitPullRequest className="h-3.5 w-3.5" />
-                              Open
+                              {uiT("Open")}
                             </dt>
                             <dd className="font-medium text-foreground">
                               {reviewActivity.open}
@@ -550,7 +567,7 @@ export function ProjectRepositoryActionsPanel({
                           <div className="flex items-center justify-between gap-3">
                             <dt className="flex items-center gap-3 text-muted-foreground">
                               <GitMerge className="h-3.5 w-3.5" />
-                              Merged
+                              {uiT("Merged")}
                             </dt>
                             <dd className="font-medium text-foreground">
                               {reviewActivity.merged}

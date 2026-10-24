@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { Markdown } from "@/shared/ui/markdown";
@@ -18,6 +20,8 @@ export function ProjectRichContent({
   hardLineBreaks?: boolean;
   tags?: string[][];
 }) {
+  useUiLanguage();
+
   const imetaByUrl = React.useMemo(
     () => (tags ? parseImetaTags(tags) : undefined),
     [tags],
