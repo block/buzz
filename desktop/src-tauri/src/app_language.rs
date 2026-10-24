@@ -25,5 +25,9 @@ pub fn set_desktop_language<R: Runtime>(app: AppHandle<R>, language: String) -> 
     #[cfg(target_os = "macos")]
     app.set_menu(crate::app_menu::build(&app).map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
-    crate::tray_menu::refresh_language(&app)
+    #[cfg(target_os = "macos")]
+    crate::tray_menu::refresh_language(&app)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+    Ok(())
 }

@@ -269,5 +269,15 @@
     "source": "{0} runs at most {1} parallel conversation{2} — this agent will run {3}.",
     "omitted": ["p2"],
     "reason": "The p2 slot is only the English plural suffix; Korean expresses the unit directly and retains the harness and both limits."
+  },
+  "m20b7a579dee1c271": {
+    "source": "{0} agent{1}",
+    "omitted": ["p1"],
+    "reason": "English plural suffix is unnecessary in Korean."
+  },
+  "ma3abc0d846909941": {
+    "source": "{0} team{1}",
+    "omitted": ["p1"],
+    "reason": "English plural suffix is unnecessary in Korean."
   }
 }

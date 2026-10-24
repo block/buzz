@@ -1,3 +1,4 @@
+import { uiDateFormatter } from "@/shared/i18n/format";
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
@@ -25,18 +26,20 @@ import {
 import { AddMemberDialog } from "./AddMemberDialog";
 import { ConfirmRemoveDialog } from "./ConfirmRemoveDialog";
 
+const memberDate = uiDateFormatter({});
+
 function formatRelativeDate(dateString: string): string {
   const date = new Date(dateString);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffMins = Math.floor(diffMs / 60_000);
-  if (diffMins < 1) return "just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffMins < 1) return uiT("just now");
+  if (diffMins < 60) return uiT("{0}m ago", { p0: diffMins });
   const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffHours < 24) return uiT("{0}h ago", { p0: diffHours });
   const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 30) return `${diffDays}d ago`;
-  return date.toLocaleDateString();
+  if (diffDays < 30) return uiT("{0}d ago", { p0: diffDays });
+  return memberDate.format(date);
 }
 
 function RoleBadge({ role }: { role: RelayMemberRole }) {

@@ -58,13 +58,13 @@ function formatMessageAge(createdAt: number): string {
     0,
     Math.floor((Date.now() - createdAt * 1_000) / 60_000),
   );
-  if (elapsedMinutes < 1) return "just now";
-  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  if (elapsedMinutes < 1) return uiT("just now");
+  if (elapsedMinutes < 60) return uiT("{0}m ago", { p0: elapsedMinutes });
   const elapsedHours = Math.floor(elapsedMinutes / 60);
-  if (elapsedHours < 24) return `${elapsedHours}h ago`;
+  if (elapsedHours < 24) return uiT("{0}h ago", { p0: elapsedHours });
   const elapsedDays = Math.floor(elapsedHours / 24);
-  if (elapsedDays < 7) return `${elapsedDays}d ago`;
-  return `${Math.floor(elapsedDays / 7)}w ago`;
+  if (elapsedDays < 7) return uiT("{0}d ago", { p0: elapsedDays });
+  return uiT("{0}w ago", { p0: Math.floor(elapsedDays / 7) });
 }
 
 function MessageLinkMetadataTooltip({

@@ -1,3 +1,4 @@
+import { uiDateFormatter } from "@/shared/i18n/format";
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
@@ -146,7 +147,7 @@ export function AgentSessionThreadPanel({
     latestActivityAt === null
       ? undefined
       : uiT("Last updated {0}", {
-          p0: new Date(latestActivityAt).toLocaleString(),
+          p0: activityDate.format(new Date(latestActivityAt)),
         });
 
   const { fetchOlderArchived, hasOlderArchived } =
@@ -589,6 +590,11 @@ function getLatestActivityTimestamp(
   return latest;
 }
 
+const activityDate = uiDateFormatter({
+  dateStyle: "short",
+  timeStyle: "medium",
+});
+
 function formatLastUpdatedLabel(timestamp: number | null, now: number): string {
   if (timestamp === null) {
     return "No updates yet";
@@ -602,24 +608,24 @@ function formatRelativeActivityTime(timestamp: number, now: number): string {
   const totalSeconds = Math.floor(elapsedMs / 1_000);
 
   if (totalSeconds < 60) {
-    return "just now";
+    return uiT("just now");
   }
 
   const totalMinutes = Math.floor(totalSeconds / 60);
   if (totalMinutes < 60) {
-    return `${totalMinutes}m ago`;
+    return uiT("{0}m ago", { p0: totalMinutes });
   }
 
   const totalHours = Math.floor(totalMinutes / 60);
   if (totalHours < 24) {
-    return `${totalHours}h ago`;
+    return uiT("{0}h ago", { p0: totalHours });
   }
 
   const totalDays = Math.floor(totalHours / 24);
   if (totalDays < 7) {
-    return `${totalDays}d ago`;
+    return uiT("{0}d ago", { p0: totalDays });
   }
 
   const totalWeeks = Math.floor(totalDays / 7);
-  return `${totalWeeks}w ago`;
+  return uiT("{0}w ago", { p0: totalWeeks });
 }

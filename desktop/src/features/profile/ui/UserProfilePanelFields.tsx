@@ -39,6 +39,8 @@ function runtimeLabel(command: string): string {
 }
 
 export type ProfileField = {
+  /** Stable discriminator; never translate or derive it from the label. */
+  id: string;
   copyValue?: string;
   displayValue: string;
   displayNode?: React.ReactNode;
@@ -49,35 +51,31 @@ export type ProfileField = {
   trailingNode?: React.ReactNode;
 };
 
-const AGENT_INFO_LABELS = new Set([
-  "Public key",
-  "Managed by",
-  "NIP-05",
-  "Agent type",
-  "Capabilities",
-  "Backend",
+const AGENT_INFO_IDS = new Set([
+  "public-key",
+  "managed-by",
+  "nip05",
+  "agent-type",
+  "capabilities",
+  "backend",
 ]);
-const AGENT_SETTINGS_LABELS = new Set([
-  "Runtime",
-  "Agent profile",
-  "Who can send instructions",
-  "ACP command",
-  "MCP command",
-  "Start on launch",
+const AGENT_SETTINGS_IDS = new Set([
+  "runtime",
+  "agent-profile",
+  "respond-to",
+  "acp-command",
+  "mcp-command",
+  "start-on-launch",
 ]);
-const DIAGNOSTICS_LABELS = new Set(["Status", "Last error"]);
+const DIAGNOSTICS_IDS = new Set(["status", "last-error"]);
 
 export function bucketProfileFields(fields: ProfileField[]) {
   return {
-    agentInfoFields: fields.filter((field) =>
-      AGENT_INFO_LABELS.has(field.label),
-    ),
+    agentInfoFields: fields.filter((field) => AGENT_INFO_IDS.has(field.id)),
     agentSettingsFields: fields.filter((field) =>
-      AGENT_SETTINGS_LABELS.has(field.label),
+      AGENT_SETTINGS_IDS.has(field.id),
     ),
-    diagnosticsFields: fields.filter((field) =>
-      DIAGNOSTICS_LABELS.has(field.label),
-    ),
+    diagnosticsFields: fields.filter((field) => DIAGNOSTICS_IDS.has(field.id)),
   };
 }
 
@@ -112,6 +110,8 @@ export function useProfileFieldBuckets({
   pubkey: string | null;
   relayAgent: RelayAgent | undefined;
 }) {
+  const language = useUiLanguage();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Display values depend on the active UI language.
   return React.useMemo(() => {
     const metadataFields = [
       ...buildPublicFields({ pubkey, profile, relayAgent, isBot, persona }),
@@ -133,6 +133,7 @@ export function useProfileFieldBuckets({
     ];
     return bucketProfileFields(metadataFields);
   }, [
+    language,
     isBot,
     isOwner,
     managedAgent,
@@ -180,6 +181,7 @@ export function buildPublicFields({
         />
       ),
       icon: Fingerprint,
+      id: "public-key",
       get label() {
         return uiT("Public key");
       },
@@ -192,6 +194,7 @@ export function buildPublicFields({
       copyValue: profile.nip05Handle,
       displayValue: profile.nip05Handle,
       icon: UserRound,
+      id: "nip05",
       label: "NIP-05",
       testId: "user-profile-nip05",
     });
@@ -202,6 +205,7 @@ export function buildPublicFields({
       copyValue: relayAgent.agentType,
       displayValue: runtimeLabel(relayAgent.agentType),
       icon: Cpu,
+      id: "agent-type",
       get label() {
         return uiT("Agent type");
       },
@@ -211,8 +215,9 @@ export function buildPublicFields({
 
   if (!pubkey && persona) {
     fields.push({
-      displayValue: "Not deployed",
+      displayValue: uiT("Not deployed"),
       icon: Activity,
+      id: "status",
       get label() {
         return uiT("Status");
       },
@@ -225,6 +230,7 @@ export function buildPublicFields({
       copyValue: relayAgent.capabilities.join(", "),
       displayValue: relayAgent.capabilities.join(", "),
       icon: Server,
+      id: "capabilities",
       get label() {
         return uiT("Capabilities");
       },
@@ -265,11 +271,11 @@ export function buildOwnerFields({
   const respondToDisplayValue = respondTo
     ? respondTo === "owner-only"
       ? ownerDisplayName
-        ? `Only ${ownerDisplayName} (owner)`
-        : "Only the owner"
+        ? uiT("Only {0} (owner)", { p0: ownerDisplayName })
+        : uiT("Only the owner")
       : respondTo === "allowlist"
-        ? "Selected people"
-        : "Anyone"
+        ? uiT("Selected people")
+        : uiT("Anyone")
     : null;
 
   const ownerClickable = Boolean(onOpenProfile && ownerProfilePubkey);
@@ -288,6 +294,7 @@ export function buildOwnerFields({
       displayValue: ownerDisplayName,
       displayNode: <span className="truncate">{ownerDisplayName}</span>,
       icon: UserRound,
+      id: "managed-by",
       get label() {
         return uiT("Managed by");
       },
@@ -308,6 +315,7 @@ export function buildOwnerFields({
       copyValue: managedAgent.agentCommand,
       displayValue: runtimeLabel(managedAgent.agentCommand),
       icon: Terminal,
+      id: "runtime",
       get label() {
         return uiT("Runtime");
       },
@@ -318,6 +326,7 @@ export function buildOwnerFields({
       copyValue: relayAgent.agentType,
       displayValue: runtimeLabel(relayAgent.agentType),
       icon: Terminal,
+      id: "runtime",
       get label() {
         return uiT("Runtime");
       },
@@ -328,6 +337,7 @@ export function buildOwnerFields({
       copyValue: persona.runtime,
       displayValue: runtimeLabel(persona.runtime),
       icon: Terminal,
+      id: "runtime",
       get label() {
         return uiT("Runtime");
       },
@@ -336,8 +346,9 @@ export function buildOwnerFields({
   } else if (ownerPubkey) {
     fields.push({
       copyValue: canonicalNpub(ownerPubkey) ?? undefined,
-      displayValue: "Declared owner verified",
+      displayValue: uiT("Declared owner verified"),
       icon: UserRound,
+      id: "agent-profile",
       get label() {
         return uiT("Agent profile");
       },
@@ -360,6 +371,7 @@ export function buildOwnerFields({
         />
       ),
       icon: Activity,
+      id: "status",
       get label() {
         return uiT("Status");
       },
@@ -372,6 +384,7 @@ export function buildOwnerFields({
       copyValue: managedAgent.acpCommand,
       displayValue: managedAgent.acpCommand,
       icon: Terminal,
+      id: "acp-command",
       get label() {
         return uiT("ACP command");
       },
@@ -384,6 +397,7 @@ export function buildOwnerFields({
       copyValue: managedAgent.mcpCommand,
       displayValue: managedAgent.mcpCommand,
       icon: Terminal,
+      id: "mcp-command",
       get label() {
         return uiT("MCP command");
       },
@@ -397,6 +411,7 @@ export function buildOwnerFields({
       copyValue: backendLabel,
       displayValue: backendLabel,
       icon: Server,
+      id: "backend",
       get label() {
         return uiT("Backend");
       },
@@ -406,8 +421,9 @@ export function buildOwnerFields({
 
   if (managedAgent) {
     fields.push({
-      displayValue: managedAgent.startOnAppLaunch ? "Yes" : "No",
+      displayValue: managedAgent.startOnAppLaunch ? uiT("Yes") : uiT("No"),
       icon: Server,
+      id: "start-on-launch",
       get label() {
         return uiT("Start on launch");
       },
@@ -419,6 +435,7 @@ export function buildOwnerFields({
     fields.push({
       displayValue: respondToDisplayValue,
       icon: Ear,
+      id: "respond-to",
       get label() {
         return uiT("Who can send instructions");
       },
@@ -431,6 +448,7 @@ export function buildOwnerFields({
       copyValue: managedAgent.lastError,
       displayValue: managedAgent.lastError,
       icon: Activity,
+      id: "last-error",
       get label() {
         return uiT("Last error");
       },
@@ -442,28 +460,24 @@ export function buildOwnerFields({
 }
 
 function orderProfileFields(fields: ProfileField[]) {
-  const visibilityLabel = uiT("Visibility");
-  const publicKeyLabel = uiT("Public key");
-  const managedByLabel = uiT("Managed by");
-  const statusLabel = uiT("Status");
   return [
-    ...fields.filter((field) => field.label === visibilityLabel),
-    ...fields.filter((field) => field.label === publicKeyLabel),
-    ...fields.filter((field) => field.label === managedByLabel),
+    ...fields.filter((field) => field.id === "visibility"),
+    ...fields.filter((field) => field.id === "public-key"),
+    ...fields.filter((field) => field.id === "managed-by"),
     ...fields.filter(
       (field) =>
-        field.label !== visibilityLabel &&
-        field.label !== publicKeyLabel &&
-        field.label !== managedByLabel &&
+        field.id !== "visibility" &&
+        field.id !== "public-key" &&
+        field.id !== "managed-by" &&
         field.copyValue,
     ),
-    ...fields.filter((field) => field.label === statusLabel),
+    ...fields.filter((field) => field.id === "status"),
     ...fields.filter((field) => {
       if (
-        field.label === visibilityLabel ||
-        field.label === publicKeyLabel ||
-        field.label === managedByLabel ||
-        field.label === statusLabel
+        field.id === "visibility" ||
+        field.id === "public-key" ||
+        field.id === "managed-by" ||
+        field.id === "status"
       ) {
         return false;
       }
@@ -482,11 +496,7 @@ export function ProfileFieldRows({
   return (
     <>
       {orderProfileFields(fields).map((field) => (
-        <ProfileFieldRow
-          field={field}
-          key={field.testId ?? field.label}
-          variant={variant}
-        />
+        <ProfileFieldRow field={field} key={field.id} variant={variant} />
       ))}
     </>
   );
@@ -541,7 +551,7 @@ function ProfileFieldRow({
   const isCopyable = Boolean(field.copyValue);
   const isActionable = Boolean(field.onClick);
   const isTrailingDisplay =
-    variant === "runtime" && field.label === "Status" && field.displayNode;
+    variant === "runtime" && field.id === "status" && field.displayNode;
   const { copied, copy } = useCopyFeedback({
     label: field.label,
     value: field.copyValue ?? "",

@@ -1,3 +1,4 @@
+import { NostrBindButtonLabel } from "./NostrBindButtonLabel";
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
@@ -30,8 +31,6 @@ const VERIFICATION_CODE_LENGTH = 6;
 const VERIFICATION_CODE_DIGIT_KEYS = ["1", "2", "3", "4", "5", "6"] as const;
 const VERIFICATION_CODE_MISMATCH_MESSAGE =
   "That code doesn't match. Check the code and try again.";
-const COPY_BUTTON_LABEL_CLASS =
-  "col-start-1 row-start-1 transition-[opacity,transform] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:translate-y-0 motion-reduce:duration-0";
 const NOSTR_BIND_PREVIEW_PAYLOAD: NostrBindDeepLinkPayload = {
   challengeId: "550e8400-e29b-41d4-a716-446655440000",
   nonce: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
@@ -146,15 +145,16 @@ async function returnSignedResponseToBrowser(
 
 function SignedResponseControls({
   copyFailed,
-  copyLabel,
+  isCopied,
   onCopy,
   signedResponse,
 }: {
   copyFailed: boolean;
-  copyLabel: string;
+  isCopied: boolean;
   onCopy: () => void;
   signedResponse: string;
 }) {
+  const copyLabel = isCopied ? uiT("Copied") : uiT("Copy response");
   return (
     <div className="space-y-4" data-testid="nostr-bind-manual-fallback-content">
       <pre
@@ -182,31 +182,11 @@ function SignedResponseControls({
         <span aria-live="polite" className="sr-only">
           {copyLabel}
         </span>
-        <span
-          aria-hidden="true"
-          className="inline-grid h-5 place-items-center overflow-hidden"
-        >
-          <span
-            className={cn(
-              COPY_BUTTON_LABEL_CLASS,
-              copyLabel === "Copy response"
-                ? "translate-y-0 opacity-100"
-                : "-translate-y-0.5 opacity-0",
-            )}
-          >
-            {uiT("Copy response")}
-          </span>
-          <span
-            className={cn(
-              COPY_BUTTON_LABEL_CLASS,
-              copyLabel === "Copied"
-                ? "translate-y-0 opacity-100"
-                : "translate-y-0.5 opacity-0",
-            )}
-          >
-            {uiT("Copied")}
-          </span>
-        </span>
+        <NostrBindButtonLabel
+          active={isCopied}
+          idleLabel={uiT("Copy response")}
+          activeLabel={uiT("Copied")}
+        />
       </Button>
     </div>
   );
@@ -250,7 +230,6 @@ export function NostrBindConsentDialog() {
   const isVerificationCodeValid =
     payload !== null && enteredVerificationCode === payload.verificationCode;
   const copyButtonLabel = isSigning ? uiT("Signing…") : uiT("Continue");
-  const finishCopyButtonLabel = isCopied ? uiT("Copied") : uiT("Copy response");
 
   const clearCopiedState = React.useCallback(() => {
     if (copiedTimerRef.current) {
@@ -714,7 +693,7 @@ export function NostrBindConsentDialog() {
                         </p>
                         <SignedResponseControls
                           copyFailed={copyFailed}
-                          copyLabel={finishCopyButtonLabel}
+                          isCopied={isCopied}
                           onCopy={handleCopyAgain}
                           signedResponse={signedResponse}
                         />
@@ -724,7 +703,7 @@ export function NostrBindConsentDialog() {
                     <div className="mt-10 w-full">
                       <SignedResponseControls
                         copyFailed={copyFailed}
-                        copyLabel={finishCopyButtonLabel}
+                        isCopied={isCopied}
                         onCopy={handleCopyAgain}
                         signedResponse={signedResponse}
                       />
@@ -901,31 +880,11 @@ export function NostrBindConsentDialog() {
                       <span aria-live="polite" className="sr-only">
                         {copyButtonLabel}
                       </span>
-                      <span
-                        aria-hidden="true"
-                        className="inline-grid h-5 place-items-center overflow-hidden"
-                      >
-                        <span
-                          className={cn(
-                            COPY_BUTTON_LABEL_CLASS,
-                            copyButtonLabel === "Continue"
-                              ? "translate-y-0 opacity-100"
-                              : "-translate-y-0.5 opacity-0",
-                          )}
-                        >
-                          {uiT("Continue")}
-                        </span>
-                        <span
-                          className={cn(
-                            COPY_BUTTON_LABEL_CLASS,
-                            copyButtonLabel === "Signing…"
-                              ? "translate-y-0 opacity-100"
-                              : "translate-y-0.5 opacity-0",
-                          )}
-                        >
-                          {uiT("Signing…")}
-                        </span>
-                      </span>
+                      <NostrBindButtonLabel
+                        active={isSigning}
+                        idleLabel={uiT("Continue")}
+                        activeLabel={uiT("Signing…")}
+                      />
                     </Button>
                     <Button
                       className="h-10 w-full text-muted-foreground hover:text-accent-foreground"

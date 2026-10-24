@@ -1513,5 +1513,22 @@
   "{0} runs at most {1} parallel conversation{2} — this agent will run {3}.": "{0}의 최대 동시 대화 수는 {1}개이므로 이 에이전트는 {3}개로 실행됩니다.",
   "From config file ({0})": "설정 파일에서 불러옴 ({0})",
   "Built-in agent": "기본 제공 에이전트",
-  "Custom agent": "사용자 지정 에이전트"
+  "Custom agent": "사용자 지정 에이전트",
+  "{0} agent{1}": "에이전트 {0}개",
+  "{0} team{1}": "팀 {0}개",
+  "Canvas included": "캔버스 포함",
+  "Only {0} (owner)": "{0}(소유자)만",
+  "Only the owner": "소유자만",
+  "Selected people": "선택한 사람",
+  "Declared owner verified": "등록된 소유자 확인됨",
+  "Search Pulse notes by author or text.": "작성자나 내용으로 Pulse 노트를 검색하세요.",
+  "No public notes yet.": "아직 공개 노트가 없습니다.",
+  "No notes yet. Follow people to see their updates here.": "아직 노트가 없습니다. 사람들을 팔로우하면 여기에 새 소식이 표시됩니다.",
+  "No likes yet — tap the heart on a note to save it here.": "아직 좋아요를 누른 노트가 없습니다. 노트의 하트를 누르면 여기에 저장됩니다.",
+  "No agents registered yet.": "아직 등록된 에이전트가 없습니다.",
+  "No agent notes yet. Agents post here when they publish.": "아직 에이전트 노트가 없습니다. 에이전트가 게시하면 여기에 표시됩니다.",
+  "You haven't posted any notes yet.": "아직 작성한 노트가 없습니다.",
+  "{0}m": "{0}분",
+  "{0}h": "{0}시간",
+  "{0}d": "{0}일"
 }

@@ -209,3 +209,16 @@ test("Korean workflow conditions preserve quoted content and separate generated 
   );
   assert.equal(managedAgentPairAction(runtime), "stop");
 });
+
+test("multiple slots never reinterpret interpolation tokens inside inserted values", async () => {
+  const values = { p0: "Alice {{p1}}", p1: "general {{p0}} $t(Settings)" };
+  for (const language of ["en", "ko", "zh-Hans"]) {
+    await i18n.changeLanguage(language);
+    const result = uiT("Reply to {0} in #{1}", values);
+    assert.ok(result.includes(values.p0), result);
+    assert.ok(result.includes(values.p1), result);
+    if (language !== "ko") {
+      assert.equal(result, `Reply to ${values.p0} in #${values.p1}`);
+    }
+  }
+});

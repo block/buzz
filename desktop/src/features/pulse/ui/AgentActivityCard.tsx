@@ -1,3 +1,4 @@
+import { uiDateFormatter } from "@/shared/i18n/format";
 import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { Bot, ChevronDown, ChevronRight } from "lucide-react";
@@ -16,19 +17,21 @@ type AgentActivityCardProps = {
   agentStatus?: "online" | "away" | "offline" | "unknown";
 };
 
+const noteDate = uiDateFormatter({
+  month: "short",
+  day: "numeric",
+});
+
 function formatRelativeTime(unixSeconds: number): string {
   const now = Date.now() / 1_000;
   const diff = now - unixSeconds;
 
-  if (diff < 60) return "just now";
-  if (diff < 3_600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86_400) return `${Math.floor(diff / 3_600)}h ago`;
-  if (diff < 604_800) return `${Math.floor(diff / 86_400)}d ago`;
+  if (diff < 60) return uiT("just now");
+  if (diff < 3_600) return uiT("{0}m ago", { p0: Math.floor(diff / 60) });
+  if (diff < 86_400) return uiT("{0}h ago", { p0: Math.floor(diff / 3_600) });
+  if (diff < 604_800) return uiT("{0}d ago", { p0: Math.floor(diff / 86_400) });
 
-  return new Date(unixSeconds * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
+  return noteDate.format(new Date(unixSeconds * 1_000));
 }
 
 function StatusDot({ status }: { status: "online" | "away" | "offline" }) {

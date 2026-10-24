@@ -27,11 +27,17 @@ export function uiT(
   const prefix = source.match(/^\s*/)?.[0] ?? "";
   const suffix = source.match(/\s*$/)?.[0] ?? "";
   const fallback = normalized.replace(/\{(\d+)\}/g, (_, n) => `{{p${n}}}`);
-  const translated = i18n.t(key, {
-    ...values,
-    ns: "ui",
-    defaultValue: fallback,
-  });
+  // Substitute only slots in the authored template. Values may themselves
+  // contain i18next syntax and must never be parsed a second time.
+  const template =
+    i18n.getResource(i18n.resolvedLanguage ?? "en", "ui", key) ||
+    i18n.getResource("en", "ui", key) ||
+    fallback;
+  const translated = String(template).replace(
+    /\{\{(p\d+)\}\}/g,
+    (slot, name) =>
+      Object.hasOwn(values, name) ? String(values[name] ?? "") : slot,
+  );
   return `${prefix}${translated}${suffix}`;
 }
 

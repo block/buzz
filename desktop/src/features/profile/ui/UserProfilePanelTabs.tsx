@@ -247,7 +247,8 @@ export function ProfileInfoTabContent({
     ? [
         ...agentInfoFields,
         {
-          displayValue: "Archived",
+          id: "visibility",
+          displayValue: uiT("Archived"),
           icon: Archive,
           get label() {
             return uiT("Visibility");
@@ -773,7 +774,7 @@ export function ProfileRuntimeTabContent({
   useUiLanguage();
 
   const startOnLaunchFieldIndex = configurationFields.findIndex(
-    (field) => field.label === "Start on launch",
+    (field) => field.id === "start-on-launch",
   );
   const startOnLaunchField = configurationFields[startOnLaunchFieldIndex];
   const StartOnLaunchIcon = startOnLaunchField?.icon;
@@ -788,7 +789,7 @@ export function ProfileRuntimeTabContent({
     onToggleStartOnLaunch?.();
   }, [onToggleStartOnLaunch, startOnLaunchPending]);
   const statusDiagnosticsFields = diagnosticsFields.filter(
-    (field) => field.label === "Status",
+    (field) => field.id === "status",
   );
   const hasActivityRows =
     statusDiagnosticsFields.length > 0 ||

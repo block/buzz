@@ -73,3 +73,39 @@ test("ephemeral channel status localizes future, missing, and expired deadlines 
     "Ephemeral channel. Cleanup is due now.",
   );
 });
+
+test("forum and project time displays follow language while preserving their timestamps", async () => {
+  const { formatRelativeTime } = await import(
+    "../../features/forum/lib/time.ts"
+  );
+  const { relativeTime, formatExactTimestamp } = await import(
+    "../../features/projects/lib/projectsViewHelpers.ts"
+  );
+  const now = Math.floor(Date.now() / 1000);
+  for (const language of ["en", "ko", "en"]) {
+    await setAppLanguage(language);
+    assert.equal(
+      formatRelativeTime(now),
+      language === "ko" ? "방금" : "just now",
+    );
+    assert.equal(
+      formatRelativeTime(now - 120),
+      language === "ko" ? "2분 전" : "2m ago",
+    );
+    assert.equal(
+      relativeTime(now - 120, now),
+      language === "ko" ? "2분 전" : "2 minutes ago",
+    );
+    assert.equal(
+      formatExactTimestamp(now),
+      new Intl.DateTimeFormat(language === "ko" ? "ko-KR" : "en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+      }).format(now * 1000),
+    );
+  }
+});

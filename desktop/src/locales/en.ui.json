@@ -4266,5 +4266,16 @@
   "mc2e0216832389653": "{{p0}} runs at most {{p1}} parallel conversation{{p2}} — this agent will run {{p3}}.",
   "m2c385af1aee9bc74": "From config file ({{p0}})",
   "m4bdd2857aa666efe": "Built-in agent",
-  "m9c454e6b9578811f": "Custom agent"
+  "m9c454e6b9578811f": "Custom agent",
+  "m20b7a579dee1c271": "{{p0}} agent{{p1}}",
+  "ma3abc0d846909941": "{{p0}} team{{p1}}",
+  "m40e9978c452eadf3": "Canvas included",
+  "mb37bdaf2b2e9026d": "Only {{p0}} (owner)",
+  "m0a47c1d51833ea47": "Only the owner",
+  "made4b222893bdbcf": "Declared owner verified",
+  "m653e477aaec68046": "No agents registered yet.",
+  "m0ff2f4a81de33fc3": "No agent notes yet. Agents post here when they publish.",
+  "m7f5ea983858ef801": "{{p0}}m",
+  "m360a8af5a7d27faa": "{{p0}}h",
+  "m6c61dd0357caa5d1": "{{p0}}d"
 }

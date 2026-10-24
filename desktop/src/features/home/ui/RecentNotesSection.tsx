@@ -1,5 +1,5 @@
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
-import { uiT } from "@/shared/i18n/uiTranslation";
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Activity, Bot } from "lucide-react";
 
 import type { UserNote } from "@/shared/api/socialTypes";
@@ -19,10 +19,10 @@ function formatRelativeTime(unixSeconds: number): string {
   const now = Date.now() / 1_000;
   const diff = now - unixSeconds;
 
-  if (diff < 60) return "just now";
-  if (diff < 3_600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86_400) return `${Math.floor(diff / 3_600)}h`;
-  return `${Math.floor(diff / 86_400)}d`;
+  if (diff < 60) return uiT("just now");
+  if (diff < 3_600) return uiT("{0}m", { p0: Math.floor(diff / 60) });
+  if (diff < 86_400) return uiT("{0}h", { p0: Math.floor(diff / 3_600) });
+  return uiT("{0}d", { p0: Math.floor(diff / 86_400) });
 }
 
 export function RecentNotesSection({
@@ -31,6 +31,7 @@ export function RecentNotesSection({
   agentPubkeys,
   onOpenPulse,
 }: RecentNotesSectionProps) {
+  useUiLanguage();
   if (notes.length === 0) return null;
 
   return (

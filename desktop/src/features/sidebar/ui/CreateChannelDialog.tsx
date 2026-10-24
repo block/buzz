@@ -58,7 +58,7 @@ export function CreateChannelDialog({
     onCreated: () => onOpenChange(false),
   });
 
-  const kindLabel = channelKind === "forum" ? "forum" : "channel";
+  const kindLabel = channelKind === "forum" ? uiT("forum") : uiT("channel");
 
   return (
     <Dialog

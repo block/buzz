@@ -55,13 +55,19 @@ export function CreateChannelFormFields({
   const selectedTemplateTeamCount = selectedTemplate?.agents.teams.length ?? 0;
   const selectedTemplateSummary = selectedTemplate
     ? [
-        form.visibility === "private" ? "Private" : "Open",
-        selectedTemplate.canvasTemplate ? "Canvas included" : null,
+        form.visibility === "private" ? uiT("Private") : uiT("Open"),
+        selectedTemplate.canvasTemplate ? uiT("Canvas included") : null,
         selectedTemplatePersonaCount > 0
-          ? `${selectedTemplatePersonaCount} ${selectedTemplatePersonaCount === 1 ? "agent" : "agents"}`
+          ? uiT("{0} agent{1}", {
+              p0: selectedTemplatePersonaCount,
+              p1: selectedTemplatePersonaCount === 1 ? "" : "s",
+            })
           : null,
         selectedTemplateTeamCount > 0
-          ? `${selectedTemplateTeamCount} ${selectedTemplateTeamCount === 1 ? "team" : "teams"}`
+          ? uiT("{0} team{1}", {
+              p0: selectedTemplateTeamCount,
+              p1: selectedTemplateTeamCount === 1 ? "" : "s",
+            })
           : null,
       ]
         .filter(Boolean)
@@ -123,7 +129,7 @@ export function CreateChannelFormFields({
             disabled={isCreating}
             id="create-channel-description"
             onChange={(event) => form.setDescription(event.target.value)}
-            placeholder={uiT("What this {0} is for", { p0: kindLabel })}
+            placeholder={uiT("What this {0} is for", { p0: uiT(kindLabel) })}
             rows={2}
             value={form.description}
           />
@@ -166,7 +172,7 @@ export function CreateChannelFormFields({
           <DropdownMenuTrigger asChild>
             <Button
               aria-label={uiT("Template: {0}", {
-                p0: selectedTemplate?.name ?? "None",
+                p0: selectedTemplate?.name ?? uiT("None"),
               })}
               className="-mr-2.5 ml-auto h-9 min-w-0 max-w-[60%] justify-end px-2.5 text-right text-sm font-medium text-foreground hover:bg-muted/50"
               data-testid="create-channel-template"
@@ -258,7 +264,7 @@ export function CreateChannelFormFooter({
       >
         {isCreating
           ? uiT("Creating...")
-          : (submitLabel ?? uiT("Create {0}", { p0: kindLabel }))}
+          : (submitLabel ?? uiT("Create {0}", { p0: uiT(kindLabel) }))}
       </Button>
     </div>
   );

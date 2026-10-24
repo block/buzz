@@ -23,7 +23,7 @@ import type {
   useUserProfileQuery,
 } from "@/features/profile/hooks";
 import type { ProfileField } from "@/features/profile/ui/UserProfilePanelFields";
-import { AGENT_DETAILS_FIELD_LABELS } from "@/features/profile/ui/UserProfilePanelAgentDetails";
+import { AGENT_DETAILS_FIELD_IDS } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 import {
   ProfileInfoTabContent,
   ProfileRuntimeTabContent,
@@ -219,10 +219,10 @@ export function ProfileSummaryView({
   const showChannelsTab =
     channelsLoading || channelCount > 0 || isBot || relayAgent !== undefined;
   const runtimeConfigurationFields = agentSettingsFields.filter((field) =>
-    AGENT_DETAILS_FIELD_LABELS.has(field.label),
+    AGENT_DETAILS_FIELD_IDS.has(field.id),
   );
   const runtimeSettingsFields = agentSettingsFields.filter(
-    (field) => !AGENT_DETAILS_FIELD_LABELS.has(field.label),
+    (field) => !AGENT_DETAILS_FIELD_IDS.has(field.id),
   );
   const runtimeFields = [
     ...runtimeConfigurationFields,
@@ -239,7 +239,7 @@ export function ProfileSummaryView({
       diagnosticsFields.length > 0 ||
       canOpenAgentLogs);
   const showDiagnosticsIngress =
-    diagnosticsFields.some((field) => field.label !== "Status") ||
+    diagnosticsFields.some((field) => field.id !== "status") ||
     canOpenAgentLogs;
   const showActivityIngress = canViewActivity;
   const showInfoTab =
@@ -252,7 +252,7 @@ export function ProfileSummaryView({
     !showRuntimeTab;
 
   const diagnosticsErrorField = diagnosticsFields.find(
-    (field) => field.label === "Last error",
+    (field) => field.id === "last-error",
   );
   const diagnosticsTrailing =
     diagnosticsErrorField !== undefined ? (

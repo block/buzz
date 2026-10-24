@@ -8,10 +8,10 @@ import {
   ProfileFieldRows,
 } from "@/features/profile/ui/UserProfilePanelFields";
 
-export const AGENT_DETAILS_FIELD_LABELS = new Set([
-  "Runtime",
-  "ACP command",
-  "MCP command",
+export const AGENT_DETAILS_FIELD_IDS = new Set([
+  "runtime",
+  "acp-command",
+  "mcp-command",
 ]);
 
 export function AgentConfigurationFocusedView({
@@ -20,7 +20,7 @@ export function AgentConfigurationFocusedView({
   fields: ProfileField[];
 }) {
   const runtimeConfigurationFields = fields.filter((field) =>
-    AGENT_DETAILS_FIELD_LABELS.has(field.label),
+    AGENT_DETAILS_FIELD_IDS.has(field.id),
   );
 
   return (

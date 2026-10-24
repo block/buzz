@@ -161,9 +161,9 @@ export function DiagnosticsFocusedView({
   managedAgent: ManagedAgent | undefined;
 }) {
   const hasLog = canOpenAgentLogs && managedAgent !== undefined;
-  const lastErrorField = fields.find((field) => field.label === "Last error");
+  const lastErrorField = fields.find((field) => field.id === "last-error");
   const detailFields = fields.filter(
-    (field) => field.label !== "Last error" && field.label !== "Status",
+    (field) => field.id !== "last-error" && field.id !== "status",
   );
 
   if (!lastErrorField && detailFields.length === 0 && !hasLog) {

@@ -1,3 +1,4 @@
+import { uiDateFormatter, uiRelativeTime } from "@/shared/i18n/format";
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
@@ -37,12 +38,7 @@ export const REPOSITORY_ENTRY_PAGE_SIZE = 200;
 
 export function formatLastChangedAt(timestamp: number | null) {
   if (!timestamp) return "—";
-  return new Date(timestamp * 1_000).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return projectChangedDate.format(new Date(timestamp * 1_000));
 }
 
 export function formatFileSize(size: number | null) {
@@ -259,10 +255,7 @@ export function listRowDescription(
 }
 
 export function formatCreatedDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
+  return projectShortDate.format(new Date(createdAt * 1_000));
 }
 
 export function relativeTime(
@@ -271,63 +264,34 @@ export function relativeTime(
 ) {
   const elapsedSeconds = Math.max(1, Math.floor(nowSeconds - createdAt));
   const units = [
-    {
-      get label() {
-        return uiT("day");
-      },
-      seconds: 24 * 60 * 60,
-    },
-    {
-      get label() {
-        return uiT("hour");
-      },
-      seconds: 60 * 60,
-    },
-    {
-      get label() {
-        return uiT("minute");
-      },
-      seconds: 60,
-    },
-    {
-      get label() {
-        return uiT("second");
-      },
-      seconds: 1,
-    },
-  ];
+    { unit: "day", seconds: 86400 },
+    { unit: "hour", seconds: 3600 },
+    { unit: "minute", seconds: 60 },
+    { unit: "second", seconds: 1 },
+  ] as const;
 
   if (elapsedSeconds >= 7 * 24 * 60 * 60) {
     const createdDate = new Date(createdAt * 1_000);
     const nowDate = new Date(nowSeconds * 1_000);
-    return createdDate.toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      ...(createdDate.getFullYear() === nowDate.getFullYear()
-        ? {}
-        : { year: "numeric" }),
-    });
+    return (
+      createdDate.getFullYear() === nowDate.getFullYear()
+        ? projectShortDate
+        : projectYearDate
+    ).format(createdDate);
   }
 
   for (const unit of units) {
     const value = Math.floor(elapsedSeconds / unit.seconds);
     if (value >= 1) {
-      return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
+      return uiRelativeTime(-value, unit.unit);
     }
   }
 
-  return "just now";
+  return uiT("just now");
 }
 
 export function formatExactTimestamp(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return projectExactDate.format(new Date(createdAt * 1_000));
 }
 
 export function projectPeople(
@@ -513,3 +477,30 @@ export function projectOwnerIsUser(
 ) {
   return profiles?.[normalizePubkey(project.owner)]?.isAgent !== true;
 }
+
+const projectChangedDate = uiDateFormatter({
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+const projectShortDate = uiDateFormatter({
+  month: "short",
+  day: "numeric",
+});
+
+const projectExactDate = uiDateFormatter({
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
+const projectYearDate = uiDateFormatter({
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});

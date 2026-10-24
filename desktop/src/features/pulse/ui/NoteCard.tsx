@@ -1,3 +1,4 @@
+import { uiDateFormatter } from "@/shared/i18n/format";
 // Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
@@ -123,19 +124,21 @@ function ReplyParentContext({
   );
 }
 
+const noteDate = uiDateFormatter({
+  month: "short",
+  day: "numeric",
+});
+
 function formatRelativeTime(unixSeconds: number): string {
   const now = Date.now() / 1_000;
   const diff = now - unixSeconds;
 
-  if (diff < 60) return "just now";
-  if (diff < 3_600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86_400) return `${Math.floor(diff / 3_600)}h`;
-  if (diff < 604_800) return `${Math.floor(diff / 86_400)}d`;
+  if (diff < 60) return uiT("just now");
+  if (diff < 3_600) return uiT("{0}m", { p0: Math.floor(diff / 60) });
+  if (diff < 86_400) return uiT("{0}h", { p0: Math.floor(diff / 3_600) });
+  if (diff < 604_800) return uiT("{0}d", { p0: Math.floor(diff / 86_400) });
 
-  return new Date(unixSeconds * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
+  return noteDate.format(new Date(unixSeconds * 1_000));
 }
 
 export function NoteCard({
