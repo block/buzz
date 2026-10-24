@@ -75,6 +75,26 @@ class ChannelDeepLink extends BuzzDeepLink {
   String toString() => 'ChannelDeepLink(channel: $channelId)';
 }
 
+/// A share-sheet hand-off from the iOS Share Extension.
+///
+/// Canonical form: `buzz://share?id=<payload-uuid>`. The id names a payload
+/// staged in the App Group inbox; the link itself carries no content.
+class ShareDeepLink extends BuzzDeepLink {
+  final String payloadId;
+
+  const ShareDeepLink({required this.payloadId});
+
+  @override
+  bool operator ==(Object other) =>
+      other is ShareDeepLink && other.payloadId == payloadId;
+
+  @override
+  int get hashCode => payloadId.hashCode;
+
+  @override
+  String toString() => 'ShareDeepLink(payload: $payloadId)';
+}
+
 /// A parsed `buzz://message` deep link.
 class MessageDeepLink extends BuzzDeepLink {
   /// Local community identifier for notification-originated links.
@@ -295,13 +315,37 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
   return null;
 }
 
+/// Parse a `buzz://share?id=<uuid>` Share Extension hand-off.
+///
+/// Only the exact shape is accepted: no path, fragment, credentials, port, or
+/// parameters other than a single lowercase UUID `id`.
+ShareDeepLink? parseShareDeepLink(Uri uri) {
+  if (uri.scheme != 'buzz' || uri.host != 'share') return null;
+  if (uri.path.isNotEmpty ||
+      uri.hasFragment ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasPort) {
+    return null;
+  }
+  final params = uri.queryParametersAll;
+  if (params.length != 1 || params['id']?.length != 1) return null;
+  final id = uri.queryParameters['id']!;
+  if (!RegExp(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+  ).hasMatch(id)) {
+    return null;
+  }
+  return ShareDeepLink(payloadId: id);
+}
+
 /// Parse any supported Buzz deep link.
 BuzzDeepLink? parseBuzzDeepLink(Uri uri) =>
     parseNostrBindDeepLink(uri) ??
     parseAddCommunityDeepLink(uri) ??
     parseInviteDeepLink(uri) ??
     parseChannelDeepLink(uri) ??
-    parseMessageDeepLink(uri);
+    parseMessageDeepLink(uri) ??
+    parseShareDeepLink(uri);
 
 /// A validated Buzz repository, pull request, or issue permalink.
 class EntityDeepLink extends BuzzDeepLink {
