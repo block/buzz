@@ -7,8 +7,8 @@ use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
-    event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
+    event_kind_u32, is_ephemeral, is_unshared_gated_event, KIND_AGENT_OBSERVER_FRAME,
+    KIND_AGENT_PRESENCE, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_TYPING_INDICATOR,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -46,7 +46,7 @@ pub(crate) fn bounded_kind_label(kind: u32) -> String {
         44200 => kind.to_string(),
         45001..=45003 => kind.to_string(),
         46001..=46012 | 46020 | 46030..=46031 => kind.to_string(),
-        48001 | 48100..=48103 | 48106 => kind.to_string(),
+        48001 | 48100..=48104 | 48106 => kind.to_string(),
         49001 => kind.to_string(),
         _ => "other".to_string(),
     }
@@ -136,7 +136,7 @@ pub async fn filter_fanout_by_access(
     // only paths that route author-only kinds — so no such delivery can bypass
     // it. It runs before (and independent of) the channel-membership filter
     // below because author-only kinds are stored globally (channel_id = None).
-    let matches = if AUTHOR_ONLY_KINDS.contains(&event_kind_u32(&stored_event.event)) {
+    let matches = if buzz_core::kind::is_author_only_event_kind(&stored_event.event) {
         let author = stored_event.event.pubkey.to_bytes();
         matches
             .into_iter()
@@ -168,6 +168,31 @@ pub async fn filter_fanout_by_access(
                 }
                 // Foreign connection: allowed only if the event is shared.
                 !is_unshared_gated_event(&stored_event.event, &pk)
+            })
+            .collect()
+    } else {
+        matches
+    };
+
+    // Owner-only kinds (`RESULT_GATED_KINDS`: DM visibility, agent turn
+    // metrics, membership notices) reach only the pubkey named in their `p`
+    // tag. Same predicate as the pull paths, applied here so local and Redis
+    // delivery share it — a kindless `ids:[…]` subscription can otherwise
+    // match these events.
+    let kind = event_kind_u32(&stored_event.event);
+    let matches = if buzz_core::kind::RESULT_GATED_KINDS.contains(&kind) {
+        matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                state
+                    .conn_manager
+                    .pubkey_for_conn(*conn_id)
+                    .is_some_and(|pk| {
+                        buzz_core::filter::reader_authorized_for_event(
+                            &stored_event.event,
+                            &hex::encode(pk),
+                        )
+                    })
             })
             .collect()
     } else {
@@ -234,10 +259,8 @@ pub async fn filter_fanout_by_access(
 ///
 /// All relay-local live fan-out routes through here. The two exceptions are
 /// `dispatch_persistent_event` (persistent ingest) and `fan_out_pubsub_event`
-/// (Redis cross-node), which call `filter_fanout_by_access` inline: the former
-/// layers an additional per-recipient DM-visibility-owner gate on top, the
-/// latter skips local echoes — both are equivalent to this helper plus their
-/// own extra step.
+/// (Redis cross-node), which call `filter_fanout_by_access` inline so the same
+/// access gate applies; the latter additionally skips local echoes.
 pub(crate) async fn fan_out_event_to_local_subscribers(
     state: &AppState,
     community_id: CommunityId,
@@ -415,6 +438,8 @@ async fn dispatch_persistent_event_inner(
         None => EventTopic::Global,
     };
     state.mark_local_event(tenant.community(), &stored_event.event.id);
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_event_publish(tenant.community());
     if let Err(e) = state
         .pubsub
         .publish_event(tenant, topic, &stored_event.event)
@@ -454,40 +479,9 @@ async fn dispatch_persistent_event_inner(
             return 0;
         }
     };
-    // For viewer-private events (kind:30622 DM visibility, kind:44200 agent turn
-    // metrics), live fan-out must reach only the owner — a kindless `ids:[…]`
-    // subscription can otherwise match it. Pull paths (HTTP /query, WS historical)
-    // are gated separately by reader_authorized_for_event.
-    let owner_only_kind = kind_u32 == buzz_core::kind::KIND_DM_VISIBILITY
-        || kind_u32 == buzz_core::kind::KIND_AGENT_TURN_METRIC;
-    let private_event_owner: Option<String> = owner_only_kind
-        .then(|| {
-            let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
-            stored_event
-                .event
-                .tags
-                .filter(nostr::TagKind::SingleLetter(p))
-                .find_map(|t| t.content().map(|s| s.to_string()))
-        })
-        .flatten();
-    // Author-only delivery gating (NIP-ER reminders) is enforced centrally in
-    // filter_fanout_by_access, applied to `matches` above before this loop. The
-    // DM visibility owner gate is an additional delivery fence, so build shared
-    // frames only after applying it to the already access-filtered recipient set.
     let recipients: Vec<_> = matches
         .iter()
-        .filter_map(|(target_conn_id, sub_id)| {
-            if let Some(ref owner_hex) = private_event_owner {
-                let is_owner = state
-                    .conn_manager
-                    .pubkey_for(*target_conn_id)
-                    .is_some_and(|pk| hex::encode(pk) == *owner_hex);
-                if !is_owner {
-                    return None;
-                }
-            }
-            Some((*target_conn_id, sub_id.as_str()))
-        })
+        .map(|(target_conn_id, sub_id)| (*target_conn_id, sub_id.as_str()))
         .collect();
     let frames = fanout_frame_cache(recipients.iter().map(|(_, sub_id)| *sub_id), &event_json);
     let drop_count = send_fanout_frames(state, recipients, &frames);
@@ -632,8 +626,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     .increment(1);
 
     let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
-        let auth = conn.auth_state.read().await;
-        match &*auth {
+        match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => (
                 conn.conn_id,
                 ctx.pubkey.to_bytes().to_vec(),
@@ -677,6 +670,36 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    // Observer frames and ephemeral kinds return before ingest, so they take
+    // the ban / timeout write-block here, over a short-TTL cache because it
+    // runs per frame. Persistent kinds get the uncached check in ingest, and
+    // so does NIP-43 leave (28936), which is ephemeral-range but ingested.
+    if kind_u32 == KIND_AGENT_OBSERVER_FRAME
+        || (is_ephemeral(kind_u32) && kind_u32 != buzz_core::kind::KIND_NIP43_LEAVE_REQUEST)
+    {
+        if let Err(e) = super::ingest::enforce_cached_write_restriction(
+            &state,
+            &conn.tenant,
+            kind_u32,
+            &auth_pubkey,
+        )
+        .await
+        {
+            let (message, reason) = match e {
+                IngestError::Internal(_) => (
+                    "error: internal error checking restriction state".to_string(),
+                    "error",
+                ),
+                IngestError::AuthFailed(m)
+                | IngestError::Rejected(m)
+                | IngestError::CanvasConflict(m) => (m, "auth"),
+            };
+            reject(reason);
+            conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+            return;
+        }
+    }
+
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
@@ -687,6 +710,31 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
+        // P1-b: acquire an effect permit before the observer handler's
+        // side effects (owner/cache checks, local_event_ids update, Redis
+        // fan-out, OK ack). Without this, a frame accepted just before
+        // expiry can complete post-expiry effects past identity revocation.
+        // [FI-TRACE-LEASE-BOUND]
+        //
+        // Test hook: fires immediately before acquire_effect.
+        // [nip_fi_test_hooks::observer_event_hook]
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::before_observer_event(conn.tenant.community()).await;
+        let _observer_permit = match conn.nip_fi_gate.acquire_effect().await {
+            Ok(permit) => permit,
+            Err(crate::nip_fi_gate::SessionExpired) => {
+                // Fix 4: post-upgrade expiry is an authorization_denied event when
+                // an FI assertion is present. Gate is off_mode when no assertion
+                // exists, so SessionExpired here always implies an active FI session.
+                // [FI-TRACE-DENIAL-ORACLE, NIP-FI §authorization_denied]
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "restricted: authorization denied",
+                ));
+                return;
+            }
+        };
         handle_agent_observer_event(event, conn_id, &event_id_hex, conn, state).await;
         return;
     }
@@ -695,7 +743,11 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     // Persistent events skip this gate and rely on
     // ingest_event()'s per-kind scope allowlist instead, so a token with
     // only ChannelsWrite can still submit kind:9002 via WS.
-    if is_ephemeral(kind_u32) {
+    //
+    // NIP-43 leave (28936) sits in the ephemeral range but is a membership
+    // command: it must reach ingest, which removes membership and revokes
+    // live access.
+    if is_ephemeral(kind_u32) && kind_u32 != buzz_core::kind::KIND_NIP43_LEAVE_REQUEST {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
             conn.send(RelayMessage::ok(
@@ -705,16 +757,80 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        handle_ephemeral_event(
+        // Cached (10s): this runs per ephemeral event. Persistent ingest keeps
+        // the uncached read as its durable write fence.
+        match state
+            .is_serving_active_cached(conn.tenant.community())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                reject("restricted");
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "restricted: community writes are fenced",
+                ));
+                return;
+            }
+            Err(error) => {
+                reject("error");
+                tracing::warn!(%error, event_id = %event_id_hex, "failed to check ephemeral-event community lifecycle");
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "error: internal server error",
+                ));
+                return;
+            }
+        }
+        // B2: acquire effect permit immediately before the irreversible
+        // ephemeral publication (Redis/local fan-out or presence mutation).
+        // [FI-TRACE-LEASE-BOUND, B2 seam: ephemeral EVENT]
+        let _event_permit = match conn.nip_fi_gate.acquire_effect().await {
+            Ok(permit) => permit,
+            Err(crate::nip_fi_gate::SessionExpired) => {
+                // Fix 4: [FI-TRACE-DENIAL-ORACLE]
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "restricted: authorization denied",
+                ));
+                return;
+            }
+        };
+        match handle_ephemeral_event(
             event,
             conn_id,
-            &event_id_hex,
             pubkey_bytes,
             auth_pubkey,
-            conn,
+            Arc::clone(&conn),
             state,
         )
-        .await;
+        .await
+        {
+            Ok(()) => {
+                conn.send(RelayMessage::ok(&event_id_hex, true, ""));
+            }
+            Err(e) => {
+                // Rejections carry the ingest taxonomy so backend failures
+                // count as `error` — a Redis presence-storage outage is a
+                // server fault, not client misbehavior — while genuine
+                // client-input rejections (bad signature, non-member
+                // sender) stay `invalid`. The ephemeral handler only emits
+                // fixed, sanitized message strings, so unlike the
+                // persistent arm below, `Internal` text is safe to forward
+                // verbatim.
+                let (message, reason) = match e {
+                    IngestError::Rejected(message) => (message, "invalid"),
+                    IngestError::CanvasConflict(message) => (message, "invalid"),
+                    IngestError::AuthFailed(message) => (message, "auth"),
+                    IngestError::Internal(message) => (message, "error"),
+                };
+                reject(reason);
+                conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+            }
+        }
         return;
     }
 
@@ -723,6 +839,29 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         scopes,
         channel_ids,
         conn_id,
+    };
+
+    // B2: acquire effect permit immediately before the persistent ingest call.
+    // The permit is held through ingest_event() (DB write + side effects +
+    // fan-out) and the OK send.
+    // [FI-TRACE-LEASE-BOUND, B2 seam: persistent EVENT]
+    //
+    // Test hook: fires immediately before acquire_effect so a test can arm
+    // expiry in the async gap between handler dispatch and permit acquisition.
+    // [nip_fi_test_hooks::event_ingest_hook]
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_event_ingest(conn.tenant.community()).await;
+    let _event_permit = match conn.nip_fi_gate.acquire_effect().await {
+        Ok(permit) => permit,
+        Err(crate::nip_fi_gate::SessionExpired) => {
+            // Fix 4: [FI-TRACE-DENIAL-ORACLE]
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                "restricted: authorization denied",
+            ));
+            return;
+        }
     };
 
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
@@ -749,6 +888,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             // Sanitize internal errors — don't leak DB/system details over WS.
             let (msg, reason) = match &e {
                 IngestError::Rejected(m) => (m.clone(), "invalid"),
+                IngestError::CanvasConflict(m) => (m.clone(), "invalid"),
                 IngestError::AuthFailed(m) => (m.clone(), "auth"),
                 IngestError::Internal(_) => ("error: internal server error".to_string(), "error"),
             };
@@ -758,37 +898,35 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     }
 }
 
-/// Handle ephemeral events (kind 20000–29999) — WS-only, never stored.
+/// Handle ephemeral events (kind 20000–29999) submitted over WebSocket —
+/// never stored. Typing indicators may also arrive over HTTP; see
+/// [`publish_http_typing`].
+///
+/// Rejections are typed with the ingest taxonomy: [`IngestError::Rejected`]
+/// is a client-input refusal (stays `invalid` in the rejection counter),
+/// while [`IngestError::Internal`] is a backend failure — e.g. a Redis
+/// presence-storage outage — which the dispatcher counts as `error`. Every
+/// message is a fixed, sanitized string that is forwarded verbatim.
 async fn handle_ephemeral_event(
     event: Event,
     conn_id: uuid::Uuid,
-    event_id_hex: &str,
     pubkey_bytes: Vec<u8>,
     auth_pubkey: nostr::PublicKey,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
-) {
+) -> Result<(), IngestError> {
     let event_clone = event.clone();
+    let event_id = event.id.to_hex();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
 
     match verify_result {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                &format!("invalid: {e}"),
-            ));
-            return;
-        }
-        Err(_) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                "error: internal error",
-            ));
-            return;
-        }
+        Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
+        Err(_) => return Err(IngestError::Internal("error: internal error".to_string())),
+    }
+
+    if event_kind_u32(&event) == KIND_AGENT_PRESENCE {
+        return set_agent_presence(&state, &conn.tenant, &event, &auth_pubkey).await;
     }
 
     // Special handling for presence events (kind:20001).
@@ -810,16 +948,45 @@ async fn handle_ephemeral_event(
             raw
         };
 
+        // Presence mutation is the inclusion contract for the live fan-out
+        // below: a client that observes the fanned-out event treats a later
+        // snapshot as reflecting it (see `synthesize_presence` in
+        // `api/bridge.rs`, which reads Redis). If the mutation failed we
+        // published nothing — so we must also fan out nothing and reject the
+        // ACK, or a snapshot later "confirms" stale storage over a live event
+        // the sender believes was delivered.
         if status == "offline" {
-            let _ = state
+            if let Err(e) = state
                 .pubsub
                 .clear_presence(&conn.tenant, &auth_pubkey)
-                .await;
-        } else {
-            let _ = state
-                .pubsub
-                .set_presence(&conn.tenant, &auth_pubkey, &status)
-                .await;
+                .await
+            {
+                warn!(
+                    conn_id = %conn_id,
+                    event_id = %event_id,
+                    "Presence clear failed, refusing publish and fan-out: {e}"
+                );
+                // Internal, not Rejected: a storage outage is a server
+                // failure, so the dispatcher must count it under the
+                // `error` reason, not as client-invalid input.
+                return Err(IngestError::Internal(
+                    "error: presence storage unavailable".to_string(),
+                ));
+            }
+        } else if let Err(e) = state
+            .pubsub
+            .set_presence(&conn.tenant, &auth_pubkey, &status)
+            .await
+        {
+            warn!(
+                conn_id = %conn_id,
+                event_id = %event_id,
+                "Presence set failed, refusing publish and fan-out: {e}"
+            );
+            // Internal for the same reason as the clear arm above.
+            return Err(IngestError::Internal(
+                "error: presence storage unavailable".to_string(),
+            ));
         }
 
         // Presence is a channel-less ephemeral event. After updating Redis
@@ -827,42 +994,8 @@ async fn handle_ephemeral_event(
         // publish/fan-out path below so other relay nodes receive the live delta.
     }
 
-    // Check channel membership before publishing other ephemeral events.
     if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
-        if let Err(msg) = super::ingest::check_channel_membership(
-            &conn.tenant,
-            &state,
-            ch_id,
-            &pubkey_bytes,
-            None,
-        )
-        .await
-        {
-            conn.send(RelayMessage::ok(event_id_hex, false, &msg));
-            return;
-        }
-
-        // Mark as local before Redis publish to prevent double-delivery when
-        // the event comes back through the Redis subscriber loop.
-        state.mark_local_event(conn.tenant.community(), &event.id);
-
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&conn.tenant, EventTopic::Channel(ch_id), &event)
-            .await
-        {
-            state
-                .local_event_ids
-                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id_hex, "Ephemeral publish failed: {e}");
-        }
-
-        // Direct fan-out to local WS subscribers, through the guarded send path
-        // so a stale subscription on a removed/non-member connection cannot
-        // receive this private-channel ephemeral event.
-        // Pass the channel_id so fan_out() uses the channel-kind index.
-        let stored_event = StoredEvent::new(event.clone(), Some(ch_id));
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        publish_channel_ephemeral(&state, &conn.tenant, event, ch_id, &pubkey_bytes).await?;
     } else {
         // Channel-less ephemeral events (e.g., NIP-AB pairing kind:24134).
         //
@@ -882,7 +1015,7 @@ async fn handle_ephemeral_event(
             state
                 .local_event_ids
                 .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
-            warn!(conn_id = %conn_id, event_id = %event_id_hex, "Ephemeral global publish failed: {e}");
+            warn!(conn_id = %conn_id, event_id = %event_id, "Ephemeral global publish failed: {e}");
         }
 
         // Direct fan-out to local WS subscribers through the guarded send path.
@@ -893,7 +1026,190 @@ async fn handle_ephemeral_event(
         fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
     }
 
-    conn.send(RelayMessage::ok(event_id_hex, true, ""));
+    Ok(())
+}
+
+/// Most agents one agent presence event (kind:20003) may name.
+const MAX_AGENT_PRESENCE: usize = 256;
+
+/// The status and distinct agents an agent presence event names.
+fn agent_presence_request(event: &Event) -> Result<(&str, Vec<PublicKey>), IngestError> {
+    let status = event.content.as_str();
+    if !matches!(status, "online" | "away" | "offline") {
+        return Err(IngestError::Rejected(
+            "invalid: agent presence must be online, away or offline".into(),
+        ));
+    }
+    let mut agents = Vec::new();
+    for tag in event.tags.iter() {
+        let values = tag.as_slice();
+        if values.first().map(String::as_str) != Some("p") {
+            continue;
+        }
+        let agent = values
+            .get(1)
+            .and_then(|hex| PublicKey::from_hex(hex).ok())
+            .ok_or_else(|| IngestError::Rejected("invalid: agent presence p tag".into()))?;
+        if !agents.contains(&agent) {
+            agents.push(agent);
+        }
+    }
+    if agents.is_empty() || agents.len() > MAX_AGENT_PRESENCE {
+        return Err(IngestError::Rejected(format!(
+            "invalid: agent presence must name 1 to {MAX_AGENT_PRESENCE} agents"
+        )));
+    }
+    Ok((status, agents))
+}
+
+/// Stores an owner's presence for its agents (kind:20003), the way each
+/// agent's own kind:20001 would be stored, so the presence snapshot reads it
+/// back unchanged. Agents the signer does not own are skipped rather than
+/// failing the rest, as an owner's list can be briefly stale. Not fanned out:
+/// live presence is matched by author, and the author here is the owner.
+async fn set_agent_presence(
+    state: &AppState,
+    tenant: &TenantContext,
+    event: &Event,
+    owner: &PublicKey,
+) -> Result<(), IngestError> {
+    let (status, agents) = agent_presence_request(event)?;
+    let community = tenant.community();
+    let owner_bytes = owner.to_bytes().to_vec();
+    let key = |agent: &PublicKey| (community, agent.to_bytes().to_vec(), owner_bytes.clone());
+    // An owner link never changes once made, so a cached `true` is final. A
+    // missing one may just not be made yet (an agent that has not signed in),
+    // so only `true` is cached here and the rest are asked again, in one query
+    // bounded by the event's own agents.
+    let (mut owned, unknown): (Vec<_>, Vec<_>) = agents
+        .into_iter()
+        .partition(|agent| state.observer_owner_cache.get(&key(agent)) == Some(true));
+    if !unknown.is_empty() {
+        let candidates: Vec<Vec<u8>> = unknown.iter().map(|a| a.to_bytes().to_vec()).collect();
+        let linked = state
+            .db
+            .owned_agents_among(community, &owner_bytes, &candidates)
+            .await
+            .map_err(|e| {
+                warn!(event_id = %event.id.to_hex(), "agent presence owner lookup failed: {e}");
+                IngestError::Internal("error: agent ownership unavailable".into())
+            })?;
+        for agent in unknown {
+            if linked.iter().any(|pubkey| pubkey[..] == agent.to_bytes()) {
+                state.observer_owner_cache.insert(key(&agent), true);
+                owned.push(agent);
+            }
+        }
+    }
+    let stored = if status == "offline" {
+        state.pubsub.clear_presence_many(tenant, &owned).await
+    } else {
+        state.pubsub.set_presence_many(tenant, &owned, status).await
+    };
+    stored.map_err(|e| {
+        warn!(event_id = %event.id.to_hex(), "agent presence storage failed: {e}");
+        IngestError::Internal("error: presence storage unavailable".into())
+    })
+}
+
+/// Publishes a verified channel-scoped ephemeral event to the channel's live
+/// subscribers, on this node and through Redis to the others. The sender must
+/// be a channel member.
+async fn publish_channel_ephemeral(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    ch_id: uuid::Uuid,
+    pubkey_bytes: &[u8],
+) -> Result<(), IngestError> {
+    // Membership refusals are client-input rejections, and the shared
+    // gate's message text is surfaced verbatim.
+    super::ingest::check_channel_membership(
+        tenant.community(),
+        state,
+        ch_id,
+        pubkey_bytes,
+        None,
+        super::ingest::ChannelWrite::Post,
+    )
+    .await
+    .map_err(IngestError::Rejected)?;
+
+    // Mark as local before Redis publish to prevent double-delivery when
+    // the event comes back through the Redis subscriber loop.
+    state.mark_local_event(tenant.community(), &event.id);
+
+    if let Err(e) = state
+        .pubsub
+        .publish_event(tenant, EventTopic::Channel(ch_id), &event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(event_id = %event.id.to_hex(), "Ephemeral publish failed: {e}");
+    }
+
+    // Direct fan-out to local WS subscribers, through the guarded send path
+    // so a stale subscription on a removed/non-member connection cannot
+    // receive this private-channel ephemeral event.
+    // Pass the channel_id so fan_out() uses the channel-kind index.
+    let stored_event = StoredEvent::new(event, Some(ch_id));
+    fan_out_event_to_local_subscribers(state, tenant.community(), &stored_event).await;
+    Ok(())
+}
+
+/// Upper bound on the serialized JSON of an HTTP typing indicator. Real
+/// indicators carry empty content and at most three short tags (`h`, root
+/// `e`, reply `e`), about 600 bytes with id, pubkey and sig. Measuring the
+/// serialized event, not just content and tag values, also counts tag
+/// structure, so many empty tags cannot slip a near-body-limit event past the
+/// cap and into fan-out to every subscriber.
+const MAX_HTTP_TYPING_BYTES: usize = 2048;
+
+/// Publishes a typing indicator (kind:20002) submitted through HTTP
+/// `POST /events`, for clients that sign but hold no WebSocket, such as
+/// app-hosted agents. Applies the gates the WebSocket path applies to
+/// ephemeral events, then the same channel publish. The caller has already
+/// authenticated `auth_pubkey` and enforced relay membership.
+pub(crate) async fn publish_http_typing(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    auth_pubkey: PublicKey,
+) -> Result<(), IngestError> {
+    if event.pubkey != auth_pubkey {
+        return Err(IngestError::AuthFailed(
+            "invalid: event pubkey does not match authenticated identity".into(),
+        ));
+    }
+    let ch_id = super::ingest::extract_channel_id(&event).ok_or_else(|| {
+        IngestError::Rejected("invalid: typing indicator needs a channel UUID h tag".into())
+    })?;
+    if nostr::JsonUtil::as_json(&event).len() > MAX_HTTP_TYPING_BYTES {
+        return Err(IngestError::Rejected(format!(
+            "invalid: typing indicator too large (max {MAX_HTTP_TYPING_BYTES} bytes serialized)"
+        )));
+    }
+    let event_clone = event.clone();
+    match tokio::task::spawn_blocking(move || verify_event(&event_clone)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
+        Err(_) => return Err(IngestError::Internal("error: internal error".into())),
+    }
+    // Same short-TTL caches as the WebSocket ephemeral path: this runs per
+    // typing pulse, and persistent ingest keeps the uncached durable fence.
+    super::ingest::enforce_cached_write_restriction(
+        state,
+        tenant,
+        KIND_TYPING_INDICATOR,
+        &auth_pubkey,
+    )
+    .await?;
+    super::ingest::map_serving_fence_state(
+        state.is_serving_active_cached(tenant.community()).await,
+    )?;
+    publish_channel_ephemeral(state, tenant, event, ch_id, auth_pubkey.as_bytes()).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -998,8 +1314,7 @@ async fn handle_agent_observer_event(
     // Fast path: if this connection authenticated via NIP-OA and the verified
     // owner matches the observer frame's target owner, skip the DB lookup entirely.
     let session_owner_match = {
-        let auth = conn.auth_state.read().await;
-        if let crate::connection::AuthState::Authenticated(ctx) = &*auth {
+        if let crate::connection::AuthState::Authenticated(ctx) = conn.auth_state_snapshot() {
             ctx.agent_owner_pubkey.as_ref() == Some(&route.owner)
         } else {
             false
@@ -1169,7 +1484,7 @@ mod tests {
         OBSERVER_FRAME_TELEMETRY,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
-    use tokio::sync::{mpsc, Mutex, RwLock};
+    use tokio::sync::{mpsc, Mutex};
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
@@ -1236,6 +1551,48 @@ mod tests {
             !super::super::ingest::requires_h_channel_scope(KIND_PRESENCE_UPDATE),
             "presence updates are global/ephemeral"
         );
+    }
+
+    #[test]
+    fn agent_presence_request_names_distinct_agents_with_a_known_status() {
+        let owner = Keys::generate();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = |status: &str, tags: Vec<Vec<String>>| {
+            EventBuilder::new(Kind::Custom(super::KIND_AGENT_PRESENCE as u16), status)
+                .tags(tags.into_iter().map(|tag| Tag::parse(tag).unwrap()))
+                .sign_with_keys(&owner)
+                .unwrap()
+        };
+        let p = |hex: &str| vec!["p".to_string(), hex.to_string()];
+
+        let ok = event(
+            "away",
+            vec![p(&agent), p(&agent), vec!["h".into(), "x".into()]],
+        );
+        let (status, agents) = super::agent_presence_request(&ok).unwrap();
+        assert_eq!(status, "away");
+        assert_eq!(agents.len(), 1, "duplicates collapse, other tags ignored");
+
+        for bad in [
+            event("busy", vec![p(&agent)]),
+            event("online", vec![]),
+            event("online", vec![p("not-a-pubkey")]),
+            event(
+                "online",
+                (0..=super::MAX_AGENT_PRESENCE)
+                    .map(|_| p(&Keys::generate().public_key().to_hex()))
+                    .collect(),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    super::agent_presence_request(&bad),
+                    Err(super::IngestError::Rejected(_))
+                ),
+                "{:?} must be rejected",
+                bad.content
+            );
+        }
     }
 
     #[test]
@@ -1382,11 +1739,12 @@ mod tests {
 
         let (send_tx, mut send_rx) = mpsc::channel(1);
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
+        let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel(1);
         let conn = Arc::new(crate::connection::ConnectionState {
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::TenantContext::resolved(community_b, "b.example"),
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
-            auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+            auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
                 buzz_auth::AuthContext {
                     pubkey: agent.public_key(),
                     scopes: vec![],
@@ -1398,9 +1756,18 @@ mod tests {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx,
             ctrl_tx,
+            terminal_ctrl_tx,
             cancel: CancellationToken::new(),
             backpressure_count: Arc::new(AtomicU8::new(0)),
             grace_limit: 3,
+            nip_fi_assertion: None,
+            session_deadline: None,
+            nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
+                CancellationToken::new(),
+            ),
+            community_control: crate::state::CommunityConnectionControl::new(
+                CancellationToken::new(),
+            ),
         });
 
         super::handle_agent_observer_event(
@@ -1424,6 +1791,475 @@ mod tests {
             frame[3],
             "restricted: observer frame is not authorized for this agent owner"
         );
+    }
+
+    // PostgreSQL/Redis tests are discovered by the isolated postgres-ci lane.
+    mod presence_storage_postgres_tests {
+        use super::*;
+        use buzz_core::{CommunityId, TenantContext};
+        use nostr::Filter;
+
+        async fn exercise(storage_available: bool, statuses: &[&str]) {
+            let redis_url = std::env::var("REDIS_URL").expect("test Redis URL required");
+            // Pick an unused local endpoint for a real connection failure.
+            let dead_socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let dead_port = dead_socket.local_addr().unwrap().port();
+            drop(dead_socket);
+            let dead_url = format!("redis://127.0.0.1:{dead_port}");
+            let state = fanout_access::test_state_with_redis_url(if storage_available {
+                &redis_url
+            } else {
+                &dead_url
+            })
+            .await;
+            let pool = sqlx::PgPool::connect(&state.config.database_url)
+                .await
+                .unwrap();
+            let community_uuid = Uuid::new_v4();
+            let host = format!("presence-storage-{}.example", community_uuid.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_uuid)
+                .bind(&host)
+                .execute(&pool)
+                .await
+                .expect("seed active community");
+            let tenant = TenantContext::resolved(CommunityId::from_uuid(community_uuid), host);
+            let keys = Keys::generate();
+            let (send_tx, mut send_rx) = mpsc::channel(10);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: tenant.clone(),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: keys.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: Arc::new(Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx: {
+                    let (tx, _) = mpsc::channel(1);
+                    tx
+                },
+                cancel: CancellationToken::new(),
+                backpressure_count: Arc::new(AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: None,
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
+                    CancellationToken::new(),
+                ),
+                community_control: crate::state::CommunityConnectionControl::new(
+                    CancellationToken::new(),
+                ),
+            });
+            let watcher = Uuid::new_v4();
+            let (tx, mut rx) = mpsc::channel(10);
+            let (ctrl, _ctrl_rx) = mpsc::channel(10);
+            state.conn_manager.register(
+                watcher,
+                tx,
+                ctrl,
+                tokio::sync::mpsc::channel(1).0,
+                None,
+                CancellationToken::new(),
+                tenant.community(),
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+            );
+            state.sub_registry.register_scoped(
+                tenant.community(),
+                watcher,
+                "presence".into(),
+                vec![Filter::new().kind(Kind::Custom(KIND_PRESENCE_UPDATE as u16))],
+                None,
+            );
+            // Online followed by offline also proves DEL removes an existing value.
+            for &status in statuses {
+                let event = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
+                    .sign_with_keys(&keys)
+                    .unwrap();
+                super::super::handle_event(event.clone(), conn.clone(), state.clone()).await;
+                let axum::extract::ws::Message::Text(text) = send_rx.try_recv().expect("ACK")
+                else {
+                    panic!("expected text ACK");
+                };
+                let ack: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(ack[0], "OK");
+                assert_eq!(ack[1], event.id.to_hex());
+                assert_eq!(ack[2], storage_available);
+                if storage_available {
+                    assert_eq!(ack[3], "");
+                    let stored = state
+                        .pubsub
+                        .get_presence(&tenant, &keys.public_key())
+                        .await
+                        .unwrap();
+                    assert_eq!(stored.as_deref(), (status != "offline").then_some(status));
+                    let axum::extract::ws::Message::Text(text) =
+                        rx.try_recv().expect("live fanout")
+                    else {
+                        panic!("expected text event");
+                    };
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(frame[0], "EVENT");
+                    assert_eq!(frame[2]["id"], event.id.to_hex());
+                } else {
+                    assert_eq!(ack[3], "error: presence storage unavailable");
+                    assert!(state
+                        .local_event_ids
+                        .get(&(tenant.community(), event.id.to_bytes()))
+                        .is_none());
+                }
+                assert!(rx.try_recv().is_err(), "no extra or rejected-event fanout");
+                assert!(send_rx.try_recv().is_err(), "exactly one ACK");
+            }
+            sqlx::query("DELETE FROM communities WHERE id = $1")
+                .bind(community_uuid)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL and Redis"]
+        async fn rejects_online_when_presence_storage_fails() {
+            exercise(false, &["online"]).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL and Redis"]
+        async fn rejects_offline_when_presence_storage_fails() {
+            exercise(false, &["offline"]).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL and Redis"]
+        async fn accepts_stores_and_fans_out_online_and_offline() {
+            exercise(true, &["online", "offline"]).await;
+        }
+
+        /// An owner's batch (kind:20003) stores presence for the agents it
+        /// owns, skips any it does not, and never touches its own presence.
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL and Redis"]
+        async fn agent_presence_stores_only_owned_agents() {
+            let redis_url = std::env::var("REDIS_URL").expect("test Redis URL required");
+            let state = fanout_access::test_state_with_redis_url(&redis_url).await;
+            let pool = sqlx::PgPool::connect(&state.config.database_url)
+                .await
+                .unwrap();
+            let community_uuid = Uuid::new_v4();
+            let host = format!("agent-presence-{}.example", community_uuid.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_uuid)
+                .bind(&host)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let tenant = TenantContext::resolved(CommunityId::from_uuid(community_uuid), host);
+            let owner = Keys::generate();
+            let other = Keys::generate();
+            let (mine, theirs) = (Keys::generate(), Keys::generate());
+            for (user, user_owner) in [
+                (&owner, None),
+                (&other, None),
+                (&mine, Some(&owner)),
+                (&theirs, Some(&other)),
+            ] {
+                sqlx::query(
+                    "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) VALUES ($1, $2, $3)",
+                )
+                .bind(community_uuid)
+                .bind(user.public_key().to_bytes().to_vec())
+                .bind(user_owner.map(|key| key.public_key().to_bytes().to_vec()))
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            let (send_tx, _send_rx) = mpsc::channel(10);
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: tenant.clone(),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: owner.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: Arc::new(Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx: mpsc::channel(1).0,
+                terminal_ctrl_tx: mpsc::channel(1).0,
+                cancel: CancellationToken::new(),
+                backpressure_count: Arc::new(AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: None,
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
+                    CancellationToken::new(),
+                ),
+                community_control: crate::state::CommunityConnectionControl::new(
+                    CancellationToken::new(),
+                ),
+            });
+            let send = |status: &str| {
+                let event = EventBuilder::new(
+                    Kind::Custom(super::super::KIND_AGENT_PRESENCE as u16),
+                    status,
+                )
+                .tags([
+                    Tag::parse(["p", &mine.public_key().to_hex()]).unwrap(),
+                    Tag::parse(["p", &theirs.public_key().to_hex()]).unwrap(),
+                ])
+                .sign_with_keys(&owner)
+                .unwrap();
+                super::super::handle_ephemeral_event(
+                    event,
+                    conn.conn_id,
+                    owner.public_key().to_bytes().to_vec(),
+                    owner.public_key(),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                )
+            };
+            let everyone = [mine.public_key(), theirs.public_key(), owner.public_key()];
+            // A `false` cached before the link existed must not hide it now.
+            for agent in [&mine, &theirs] {
+                state.observer_owner_cache.insert(
+                    (
+                        tenant.community(),
+                        agent.public_key().to_bytes().to_vec(),
+                        owner.public_key().to_bytes().to_vec(),
+                    ),
+                    false,
+                );
+            }
+
+            send("online").await.expect("owner batch accepted");
+            let stored = state
+                .pubsub
+                .get_presence_bulk(&tenant, &everyone)
+                .await
+                .unwrap();
+            assert_eq!(
+                stored.get(&mine.public_key().to_hex()).map(String::as_str),
+                Some("online")
+            );
+            assert_eq!(stored.len(), 1, "only the owned agent: {stored:?}");
+
+            send("offline").await.expect("owner clear accepted");
+            let stored = state
+                .pubsub
+                .get_presence_bulk(&tenant, &everyone)
+                .await
+                .unwrap();
+            assert!(stored.is_empty(), "offline clears it: {stored:?}");
+        }
+
+        /// Production-seam regression for the rejection classification: a
+        /// Redis presence-storage outage must count as a server `error`,
+        /// never as client `invalid`, while a genuinely invalid event
+        /// through the same seam stays `invalid`. Both rejections still ACK
+        /// `false` with no fan-out and no local-event marker (the shared
+        /// storage guard is unchanged); only the counter routing is under
+        /// test here.
+        ///
+        /// The recorder guard form (not `metrics::with_local_recorder`,
+        /// whose closure cannot host an await) keeps the thread-local
+        /// recorder installed across the `.await` points of this
+        /// single-threaded test runtime — the same convention as the
+        /// buzz-db route-decision counter tests. The isolated postgres-ci
+        /// lane runs each test in its own nextest process, so no parallel
+        /// test can race this counter snapshot.
+        #[tokio::test]
+        #[ignore = "requires PostgreSQL"]
+        async fn counts_presence_storage_failure_as_error_not_invalid() {
+            // Pick an unused local endpoint for a real connection failure.
+            let dead_socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let dead_port = dead_socket.local_addr().unwrap().port();
+            drop(dead_socket);
+            let dead_url = format!("redis://127.0.0.1:{dead_port}");
+            let state = fanout_access::test_state_with_redis_url(&dead_url).await;
+            let pool = sqlx::PgPool::connect(&state.config.database_url)
+                .await
+                .unwrap();
+            let community_uuid = Uuid::new_v4();
+            let host = format!("presence-metrics-{}.example", community_uuid.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_uuid)
+                .bind(&host)
+                .execute(&pool)
+                .await
+                .expect("seed active community");
+            let tenant = TenantContext::resolved(CommunityId::from_uuid(community_uuid), host);
+            let keys = Keys::generate();
+            let (send_tx, mut send_rx) = mpsc::channel(10);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: tenant.clone(),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: keys.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: Arc::new(Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx: {
+                    let (tx, _) = mpsc::channel(1);
+                    tx
+                },
+                cancel: CancellationToken::new(),
+                backpressure_count: Arc::new(AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: None,
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::off_mode(
+                    CancellationToken::new(),
+                ),
+                community_control: crate::state::CommunityConnectionControl::new(
+                    CancellationToken::new(),
+                ),
+            });
+            // Same watcher registration as the ACK/fan-out cases, proving
+            // the storage failure still reaches no subscriber while its
+            // rejection is counted under `error`.
+            let watcher = Uuid::new_v4();
+            let (tx, mut rx) = mpsc::channel(10);
+            let (ctrl, _ctrl_rx) = mpsc::channel(10);
+            state.conn_manager.register(
+                watcher,
+                tx,
+                ctrl,
+                tokio::sync::mpsc::channel(1).0,
+                None,
+                CancellationToken::new(),
+                tenant.community(),
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
+            );
+            state.sub_registry.register_scoped(
+                tenant.community(),
+                watcher,
+                "presence".into(),
+                vec![Filter::new().kind(Kind::Custom(KIND_PRESENCE_UPDATE as u16))],
+                None,
+            );
+
+            let valid = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), "online")
+                .sign_with_keys(&keys)
+                .unwrap();
+            // Invalid control through the same production seam: identical
+            // event, signature no longer verifies. The id is unchanged (it
+            // does not cover the signature), so ACKs are told apart by
+            // order and message text below.
+            use nostr::JsonUtil as _;
+            let mut json: serde_json::Value =
+                serde_json::from_str(&valid.as_json()).expect("parse event json");
+            json["sig"] = serde_json::Value::String("0".repeat(128));
+            let tampered = nostr::Event::from_json(json.to_string()).expect("parse tampered");
+
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let acks: Vec<serde_json::Value> = {
+                let _guard = metrics::set_default_local_recorder(&recorder);
+                super::super::handle_event(valid.clone(), conn.clone(), state.clone()).await;
+                super::super::handle_event(tampered, conn.clone(), state.clone()).await;
+                (0..2)
+                    .map(|_| {
+                        let axum::extract::ws::Message::Text(text) =
+                            send_rx.try_recv().expect("ACK")
+                        else {
+                            panic!("expected text ACK");
+                        };
+                        serde_json::from_str(&text).unwrap()
+                    })
+                    .collect()
+            };
+
+            // Storage failure: rejected ACK, no fan-out frame, no marker.
+            assert_eq!(acks[0][0], "OK");
+            assert_eq!(acks[0][1], valid.id.to_hex());
+            assert_eq!(acks[0][2], false);
+            assert_eq!(acks[0][3], "error: presence storage unavailable");
+            // Invalid control through the same dispatcher arm.
+            assert_eq!(acks[1][0], "OK");
+            assert_eq!(acks[1][1], valid.id.to_hex());
+            assert_eq!(acks[1][2], false);
+            assert!(
+                acks[1][3].as_str().unwrap().starts_with("invalid:"),
+                "tampered control must stay an invalid rejection, got: {}",
+                acks[1][3]
+            );
+            assert!(rx.try_recv().is_err(), "no fan-out for either rejection");
+            assert!(send_rx.try_recv().is_err(), "exactly two ACKs");
+            assert!(state
+                .local_event_ids
+                .get(&(tenant.community(), valid.id.to_bytes()))
+                .is_none());
+
+            let mut rejections: Vec<(String, String, u64)> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_events_rejected_total")
+                .map(|(key, _, _, value)| {
+                    let metrics_util::debugging::DebugValue::Counter(count) = value else {
+                        panic!("buzz_events_rejected_total must be a counter");
+                    };
+                    let labels: Vec<_> = key.key().labels().collect();
+                    let label = |name: &str| {
+                        labels
+                            .iter()
+                            .find(|l| l.key() == name)
+                            .map(|l| l.value().to_owned())
+                            .unwrap_or_default()
+                    };
+                    (label("transport"), label("reason"), count)
+                })
+                .collect();
+            rejections.sort();
+            assert_eq!(
+                rejections,
+                vec![
+                    ("ws".to_owned(), "error".to_owned(), 1),
+                    ("ws".to_owned(), "invalid".to_owned(), 1),
+                ],
+                "storage outage must count as reason=\"error\" and the tampered \
+                 control as reason=\"invalid\"; got {rejections:?}"
+            );
+
+            sqlx::query("DELETE FROM communities WHERE id = $1")
+                .bind(community_uuid)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
     }
 
     mod pubsub_fanout {
@@ -1459,11 +2295,16 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                tokio::sync::mpsc::channel(1).0,
+                None,
                 CancellationToken::new(),
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             );
             if let Some(pubkey) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pubkey);
@@ -1524,6 +2365,126 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(&text).expect("EVENT frame JSON");
             assert_eq!(v[0], "EVENT");
             serde_json::from_value(v[2].clone()).expect("nostr event")
+        }
+
+        /// Owner-only kinds arriving over Redis reach only the `p`-tagged owner,
+        /// even through a kindless `ids:[…]` subscription on a foreign
+        /// connection, and fail closed when no owner is tagged.
+        #[tokio::test]
+        async fn pubsub_owner_only_kinds_reach_only_the_owner() {
+            for kind in [
+                buzz_core::kind::KIND_DM_VISIBILITY,
+                buzz_core::kind::KIND_AGENT_TURN_METRIC,
+            ] {
+                let state = test_state().await;
+                let owner = Keys::generate();
+                let stranger = Keys::generate();
+                let tagged = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .tags([nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p")])
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let untagged = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let ids_sub = |who: &Keys| {
+                    register_global_sub(
+                        &state,
+                        "ids",
+                        Filter::new().ids([tagged.id, untagged.id]),
+                        Some(who.public_key().to_bytes().to_vec()),
+                    )
+                    .1
+                };
+                let mut owner_rx = ids_sub(&owner);
+                let mut stranger_rx = ids_sub(&stranger);
+
+                for event in [tagged.clone(), untagged] {
+                    fan_out_pubsub_event(
+                        &state,
+                        ChannelEvent {
+                            community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                            topic: EventTopic::Global,
+                            event,
+                        },
+                    )
+                    .await;
+                }
+
+                let delivered =
+                    event_from_ws_message(owner_rx.try_recv().expect("owner delivered"));
+                assert_eq!(delivered.id, tagged.id, "kind {kind}");
+                assert!(
+                    owner_rx.try_recv().is_err(),
+                    "kind {kind}: untagged event must not deliver"
+                );
+                assert!(
+                    stranger_rx.try_recv().is_err(),
+                    "kind {kind}: stranger must not receive"
+                );
+            }
+        }
+
+        /// Same-pod dispatch applies the owner-only gate: owner-only kinds
+        /// published on this pod reach only the `p`-tagged owner, never a
+        /// foreign kindless `ids:[…]` subscription, and no one when untagged.
+        #[tokio::test]
+        async fn dispatch_owner_only_kinds_reach_only_the_owner() {
+            for kind in [
+                buzz_core::kind::KIND_DM_VISIBILITY,
+                buzz_core::kind::KIND_AGENT_TURN_METRIC,
+            ] {
+                let state = test_state().await;
+                let tenant = buzz_core::tenant::TenantContext::resolved(
+                    buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                    "dispatch.test",
+                );
+                let owner = Keys::generate();
+                let stranger = Keys::generate();
+                let tagged = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .tags([nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p")])
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let untagged = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let ids_sub = |who: &Keys| {
+                    register_global_sub(
+                        &state,
+                        "ids",
+                        Filter::new().ids([tagged.id, untagged.id]),
+                        Some(who.public_key().to_bytes().to_vec()),
+                    )
+                    .1
+                };
+                let mut owner_rx = ids_sub(&owner);
+                let mut stranger_rx = ids_sub(&stranger);
+
+                for event in [tagged.clone(), untagged] {
+                    let author = event.pubkey.to_hex();
+                    super::super::dispatch_persistent_event_inner(
+                        &tenant,
+                        &state,
+                        &buzz_core::StoredEvent::new(event, None),
+                        kind,
+                        &author,
+                        false,
+                        None,
+                    )
+                    .await;
+                }
+
+                let delivered =
+                    event_from_ws_message(owner_rx.try_recv().expect("owner delivered"));
+                assert_eq!(delivered.id, tagged.id, "kind {kind}");
+                assert!(
+                    owner_rx.try_recv().is_err(),
+                    "kind {kind}: untagged event must not deliver"
+                );
+                assert!(
+                    stranger_rx.try_recv().is_err(),
+                    "kind {kind}: stranger must not receive"
+                );
+            }
         }
 
         #[tokio::test]
@@ -1995,7 +2956,7 @@ mod tests {
         use crate::state::AppState;
 
         pub(super) fn test_config() -> crate::config::Config {
-            let mut config = crate::config::Config::from_env().expect("default config loads");
+            let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
             config.require_relay_membership = false;
             config.redis_url = "redis://127.0.0.1:1".to_string();
             config
@@ -2098,11 +3059,16 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                tokio::sync::mpsc::channel(1).0,
+                None,
                 CancellationToken::new(),
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             );
             if let Some(pk) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pk);
@@ -2131,6 +3097,41 @@ mod tests {
             )
             .await;
             assert_eq!(out, matches);
+        }
+
+        /// The shared gate used by same-pod dispatch and Redis delivery keeps
+        /// only the `p`-tagged owner for owner-only kinds.
+        #[tokio::test]
+        async fn owner_only_kinds_keep_only_the_owner() {
+            let state = test_state().await;
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+            let owner = Keys::generate();
+            let owner_conn = register_conn(&state, Some(owner.public_key().to_bytes().to_vec()));
+            let stranger_conn = register_conn(&state, Some(vec![9u8; 32]));
+            let anon_conn = register_conn(&state, None);
+            let matches = vec![
+                (owner_conn, "s".to_string()),
+                (stranger_conn, "s".to_string()),
+                (anon_conn, "s".to_string()),
+            ];
+            for kind in [
+                buzz_core::kind::KIND_DM_VISIBILITY,
+                buzz_core::kind::KIND_AGENT_TURN_METRIC,
+            ] {
+                let event = EventBuilder::new(Kind::Custom(kind as u16), "{}")
+                    .tags([nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p")])
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign");
+                let out = filter_fanout_by_access(
+                    &state,
+                    community_id,
+                    &StoredEvent::new(event, None),
+                    matches.clone(),
+                    None,
+                )
+                .await;
+                assert_eq!(out, vec![(owner_conn, "s".to_string())], "kind {kind}");
+            }
         }
 
         #[tokio::test]
@@ -2423,11 +3424,16 @@ mod tests {
                 conn_id,
                 tx,
                 ctrl_tx,
+                tokio::sync::mpsc::channel(1).0,
+                None,
                 CancellationToken::new(),
                 community_id,
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
+                crate::state::CommunityConnectionControl::new(
+                    tokio_util::sync::CancellationToken::new(),
+                ),
             );
             if let Some(pk) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pk);
@@ -2479,6 +3485,708 @@ mod tests {
                 "Inv_NonInterference: a connection bound to community A \
                  must not receive a community-B event. Got: {out:?}"
             );
+        }
+    }
+
+    // ── W2 (event barrier): expiry fired mid-flight blocks persistent EVENT ingest ──
+    //
+    // Arms `before_event_ingest` — the hook immediately before `acquire_effect()`
+    // in the persistent EVENT path. Dispatches `handle_event` with a live gate,
+    // waits for the hook to signal the handler reached the permit boundary,
+    // fires the gate expiry (cancel), then releases the hook. The handler tries
+    // `acquire_effect()` and gets `SessionExpired`, returns without calling
+    // `ingest_event()` (no DB write, no fan-out).
+    //
+    // The mutation evidence proves the permit sits at the ingest boundary:
+    //   A) Delete `before_event_ingest(...)` from event.rs → handler never
+    //      stalls at the hook → cancel fires before acquire_effect (race).
+    //      Without the hook the test is non-deterministic.
+    //   B) Remove `acquire_effect()` from event.rs → handler calls `ingest_event`
+    //      despite the cancel → DB write is attempted → `send_rx` gets OK(true)
+    //      or a DB error response, NOT a "session expired" OK(false) → assertion panics.
+    //   C) Swap the gate to off_mode → acquire_effect always succeeds after cancel
+    //      → same as (B), assertion panics.
+    //
+    // This test also lives in `postgres_tests` (ignored, requiring real Postgres):
+    // the durable DB assertion and publication-counter assertion are wired there.
+    // See `postgres_tests::w2_event_ingest_barrier_expiry_mid_flight_blocks_persistence`
+    // below for the full witness including the publication oracle.
+
+    // ── postgres_tests: W2 durable + publication oracle ───────────────────────
+    //
+    // Selected by the `postgres-ci` nextest profile filter
+    // (`test(/postgres_tests::/)`) which also passes `--run-ignored ignored-only`.
+    // These tests require a real Postgres instance; the URL is resolved from
+    // `state.config.database_url` (set by `DATABASE_URL` env var in CI, same
+    // source `test_state()` uses — no hard-coded URL).
+    mod postgres_tests {
+
+        /// An authenticated WebSocket connection for `keys` in `tenant`, and
+        /// the receiver its OK frames land on.
+        fn authed_conn(
+            keys: &nostr::Keys,
+            tenant: buzz_core::tenant::TenantContext,
+            scopes: Vec<buzz_auth::Scope>,
+        ) -> (
+            std::sync::Arc<crate::connection::ConnectionState>,
+            tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+        ) {
+            use tokio::sync::mpsc;
+            use tokio_util::sync::CancellationToken;
+            let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+            let cancel = CancellationToken::new();
+            let (send_tx, send_rx) = mpsc::channel(8);
+            let (ctrl_tx, _) = mpsc::channel(8);
+            let (terminal_ctrl_tx, _) = mpsc::channel(1);
+            let conn = std::sync::Arc::new(crate::connection::ConnectionState {
+                conn_id: uuid::Uuid::new_v4(),
+                tenant,
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: keys.public_key(),
+                        scopes,
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+                cancel: cancel.clone(),
+                backpressure_count: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: Some(deadline),
+                nip_fi_gate: crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel),
+            });
+            (conn, send_rx)
+        }
+
+        /// Send `event` on a fresh connection for `keys` and return its OK frame.
+        async fn ok_frame(
+            state: &std::sync::Arc<crate::state::AppState>,
+            tenant: &buzz_core::tenant::TenantContext,
+            keys: &nostr::Keys,
+            event: nostr::Event,
+        ) -> String {
+            ok_frame_scoped(state, tenant, keys, event, vec![]).await
+        }
+
+        /// [`ok_frame`] with explicit token scopes, so a stored kind gets past
+        /// ingest's scope check to the restriction and fence checks.
+        async fn ok_frame_scoped(
+            state: &std::sync::Arc<crate::state::AppState>,
+            tenant: &buzz_core::tenant::TenantContext,
+            keys: &nostr::Keys,
+            event: nostr::Event,
+            scopes: Vec<buzz_auth::Scope>,
+        ) -> String {
+            let (conn, mut rx) = authed_conn(keys, tenant.clone(), scopes);
+            super::super::handle_event(event, conn, std::sync::Arc::clone(state)).await;
+            match rx
+                .try_recv()
+                .expect("handle_event must answer with an OK frame")
+            {
+                axum::extract::ws::Message::Text(t) => t.to_string(),
+                other => panic!("expected a Text frame, got {other:?}"),
+            }
+        }
+
+        /// Fresh community with an agent owned by a banned owner.
+        async fn banned_owner_fixture() -> (
+            std::sync::Arc<crate::state::AppState>,
+            buzz_core::tenant::TenantContext,
+            nostr::Keys,
+            nostr::Keys,
+        ) {
+            let state = crate::state::tests::test_state().await;
+            let host = format!("ws-ban-gate-{}.test", uuid::Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community")
+                .id;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community, host);
+            let (owner, agent) = (nostr::Keys::generate(), nostr::Keys::generate());
+            for keys in [&owner, &agent] {
+                state
+                    .db
+                    .ensure_user(community, keys.public_key().as_bytes())
+                    .await
+                    .expect("ensure user");
+            }
+            state
+                .db
+                .set_agent_owner(
+                    community,
+                    agent.public_key().as_bytes(),
+                    owner.public_key().as_bytes(),
+                )
+                .await
+                .expect("set agent owner");
+            let owner_bytes = owner.public_key().to_bytes();
+            state
+                .db
+                .ban_community_member(community, &owner_bytes, &owner_bytes, None, None)
+                .await
+                .expect("ban owner");
+            (state, tenant, owner, agent)
+        }
+
+        /// Ephemeral events return before ingest, so they carry their own ban
+        /// gate: a banned sender's ephemeral event is refused.
+        /// Mutation: drop the ephemeral/observer gate in `handle_event` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn banned_sender_ephemeral_event_is_refused() {
+            let (state, tenant, owner, _agent) = banned_owner_fixture().await;
+            let ephemeral = nostr::EventBuilder::new(nostr::Kind::Custom(20_555), "typing")
+                .sign_with_keys(&owner)
+                .expect("sign ephemeral");
+            let frame = ok_frame(&state, &tenant, &owner, ephemeral).await;
+            assert!(
+                frame.contains("false") && frame.contains("blocked: you are banned"),
+                "banned sender's ephemeral event must be refused; got {frame}"
+            );
+        }
+
+        /// Observer frames return before ingest too: one from a banned
+        /// owner's agent is refused.
+        /// Mutation: drop the ephemeral/observer gate in `handle_event` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn banned_owners_agent_observer_frame_is_refused() {
+            let (state, tenant, owner, agent) = banned_owner_fixture().await;
+            // A well-formed telemetry frame, so only the ban gate can refuse it.
+            let encrypted = super::encrypt_observer_payload(
+                &agent,
+                &owner.public_key(),
+                &serde_json::json!({"type": "acp_read"}),
+            )
+            .expect("encrypt observer payload");
+            let observer = nostr::EventBuilder::new(
+                nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16),
+                encrypted,
+            )
+            .tags([
+                nostr::Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
+                nostr::Tag::parse([super::OBSERVER_AGENT_TAG, &agent.public_key().to_hex()])
+                    .expect("agent tag"),
+                nostr::Tag::parse([super::OBSERVER_FRAME_TAG, super::OBSERVER_FRAME_TELEMETRY])
+                    .expect("frame tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign observer frame");
+            let frame = ok_frame(&state, &tenant, &agent, observer).await;
+            assert!(
+                frame.contains("false") && frame.contains("blocked: you are banned"),
+                "banned owner's agent observer frame must be refused; got {frame}"
+            );
+        }
+
+        /// Fresh community with one unrestricted user.
+        async fn unrestricted_fixture() -> (
+            std::sync::Arc<crate::state::AppState>,
+            buzz_core::tenant::TenantContext,
+            nostr::Keys,
+        ) {
+            let state = crate::state::tests::test_state().await;
+            let host = format!("ws-cache-gate-{}.test", uuid::Uuid::new_v4().simple());
+            let community = state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community")
+                .id;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community, host);
+            let user = nostr::Keys::generate();
+            state
+                .db
+                .ensure_user(community, user.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+            (state, tenant, user)
+        }
+
+        fn typing_event(keys: &nostr::Keys) -> nostr::Event {
+            nostr::EventBuilder::new(nostr::Kind::Custom(20_555), "typing")
+                .sign_with_keys(keys)
+                .expect("sign ephemeral")
+        }
+
+        /// The ephemeral gate reads the cached restriction row: a cached ban
+        /// refuses a sender Postgres has never restricted, and a cached
+        /// timeout that has since expired admits (the verdict is taken now).
+        /// Mutation: call the uncached `enforce_write_restriction` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn ephemeral_gate_uses_cached_restriction_row() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            let key = (tenant.community(), user.public_key().to_bytes().to_vec());
+
+            state.restriction_cache.insert(
+                key.clone(),
+                buzz_db::moderation::RestrictionState {
+                    banned: true,
+                    muted_until: None,
+                },
+            );
+            let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert!(
+                frame.contains("false") && frame.contains("blocked: you are banned"),
+                "a cached ban must refuse the ephemeral event; got {frame}"
+            );
+
+            state.restriction_cache.insert(
+                key,
+                buzz_db::moderation::RestrictionState {
+                    banned: false,
+                    muted_until: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+                },
+            );
+            let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert!(
+                frame.contains(",true,"),
+                "a cached timeout that has expired must not refuse; got {frame}"
+            );
+        }
+
+        /// The ephemeral community fence reads the cached serving state.
+        /// Mutation: call the uncached `is_serving_active` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn ephemeral_fence_uses_cached_serving_state() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            state.serving_active_cache.insert(tenant.community(), false);
+            let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert!(
+                frame.contains("false") && frame.contains("community writes are fenced"),
+                "a cached fenced community must refuse the ephemeral event; got {frame}"
+            );
+        }
+
+        /// A miss fills both caches from Postgres, so the next pulse skips it.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn ephemeral_gates_fill_caches_on_miss() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            ok_frame(&state, &tenant, &user, typing_event(&user)).await;
+            assert_eq!(
+                state.serving_active_cache.get(&tenant.community()),
+                Some(true)
+            );
+            assert_eq!(
+                state
+                    .restriction_cache
+                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec())),
+                Some(buzz_db::moderation::RestrictionState::default())
+            );
+        }
+
+        fn text_note(keys: &nostr::Keys) -> nostr::Event {
+            nostr::EventBuilder::new(nostr::Kind::TextNote, "stored")
+                .sign_with_keys(keys)
+                .expect("sign text note")
+        }
+
+        /// Stored writes, and NIP-43 leave, skip the cached restriction row:
+        /// a cached ban on a sender Postgres has never restricted refuses
+        /// neither. The leave reaches ingest's later membership check, past
+        /// its uncached restriction check.
+        /// Mutation: make ingest call `enforce_cached_write_restriction`, or
+        /// drop the 28936 carve-out from the `handle_event` gate → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn stored_writes_ignore_cached_ban() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            state.restriction_cache.insert(
+                (tenant.community(), user.public_key().to_bytes().to_vec()),
+                buzz_db::moderation::RestrictionState {
+                    banned: true,
+                    muted_until: None,
+                },
+            );
+            let scopes = buzz_auth::Scope::all_non_admin();
+
+            let frame =
+                ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
+            assert!(
+                frame.contains(",true,"),
+                "a stored write must read the restriction from Postgres; got {frame}"
+            );
+
+            let leave = nostr::EventBuilder::new(
+                nostr::Kind::Custom(buzz_core::kind::KIND_NIP43_LEAVE_REQUEST as u16),
+                "",
+            )
+            .sign_with_keys(&user)
+            .expect("sign leave");
+            let frame = ok_frame_scoped(&state, &tenant, &user, leave, scopes).await;
+            assert!(
+                frame.contains("relay membership is not enabled"),
+                "NIP-43 leave must skip the cached gate and pass ingest's uncached one; got {frame}"
+            );
+        }
+
+        /// Stored writes skip the cached serving state: a cached "fenced"
+        /// for a community Postgres says is active does not refuse them.
+        /// Mutation: make ingest's fence call `is_serving_active_cached` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn stored_writes_ignore_cached_fence() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            state.serving_active_cache.insert(tenant.community(), false);
+            let frame = ok_frame_scoped(
+                &state,
+                &tenant,
+                &user,
+                text_note(&user),
+                buzz_auth::Scope::all_non_admin(),
+            )
+            .await;
+            assert!(
+                frame.contains(",true,"),
+                "a stored write must read the serving state from Postgres; got {frame}"
+            );
+        }
+
+        // W2 full witness: event-ingest barrier + durable absence + publication oracle.
+        //
+        // Extends the unit-level W2 barrier test with two Postgres-required assertions:
+        //   1. Durable DB absence: the event row is NOT in the `events` table.
+        //   2. Publication oracle: `before_event_publish` counter is 0, proving
+        //      `dispatch_persistent_event_inner` (and thus `publish_event`) was never
+        //      called — not a proxy, the real publication boundary.
+        //
+        // Mutation evidence:
+        //   Remove `acquire_effect()` from event.rs → ingest_event is called →
+        //   dispatch_persistent_event_inner runs → before_event_publish fires →
+        //   publish_count = 1 → `assert_eq!(publish_count, 0)` panics.
+        //   AND: the row IS in the DB → COUNT(*) = 1 → DB assertion panics.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn w2_event_ingest_barrier_expiry_mid_flight_blocks_persistence() {
+            use std::collections::HashMap;
+            use std::sync::atomic::Ordering;
+            use std::sync::Arc;
+            use tokio::sync::mpsc;
+            use tokio_util::sync::CancellationToken;
+            use uuid::Uuid;
+
+            let key = nostr::Keys::generate();
+            let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+
+            let cancel = CancellationToken::new();
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
+
+            let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+
+            let (send_tx, mut send_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+            let (terminal_ctrl_tx, _terminal_ctrl_rx) =
+                mpsc::channel::<axum::extract::ws::Message>(1);
+
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: buzz_core::tenant::TenantContext::resolved(
+                    community,
+                    "test.local".to_string(),
+                ),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: key.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        agent_owner_pubkey: None,
+                    },
+                )),
+                subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
+                backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: Some(deadline),
+                nip_fi_gate: gate,
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+            });
+
+            // Kind:1 TextNote with no #h tag — no DB calls before before_event_ingest.
+            let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "w2 postgres barrier test")
+                .sign_with_keys(&key)
+                .unwrap();
+            let event_id_bytes = event.id.to_bytes();
+
+            let state = crate::state::tests::test_state().await;
+
+            // Register the publication counter BEFORE arming the hook, so any
+            // concurrent dispatch for this community is also counted.
+            let publish_count =
+                crate::nip_fi_test_hooks::event_publish_counter::register(community);
+
+            // Arm the barrier at the persistent EVENT seam.
+            let (arrived_rx, release) = crate::nip_fi_test_hooks::event_ingest_hook::arm(community);
+
+            let conn2 = Arc::clone(&conn);
+            let state2 = Arc::clone(&state);
+            let handle = tokio::spawn(async move {
+                super::super::handle_event(event, conn2, state2).await;
+            });
+
+            // Wait for the handler to reach before_event_ingest.
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+                .await
+                .expect("W2: handler must reach before_event_ingest within 5s")
+                .expect("arrived channel closed");
+
+            // Fire expiry: cancel so acquire_effect returns SessionExpired.
+            cancel.cancel();
+
+            // Release — handler resumes, calls acquire_effect(), gets SessionExpired.
+            release.notify_one();
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("W2: handle_event must return within 5s")
+                .expect("handle_event task must not panic");
+
+            // ── Frame assertions ───────────────────────────────────────────────────
+            let frame = send_rx
+                .try_recv()
+                .expect("W2: an 'authorization denied' OK(false) must be sent on gate denial");
+            match frame {
+                axum::extract::ws::Message::Text(t) => {
+                    assert!(
+                        t.contains("authorization denied"),
+                        "W2: frame must contain 'authorization denied'; got: {t}"
+                    );
+                    assert!(t.contains("false"), "W2: frame must be OK(false); got: {t}");
+                }
+                other => panic!("W2: expected Text frame, got {other:?}"),
+            }
+            assert!(
+                send_rx.try_recv().is_err(),
+                "W2: no additional frames must be sent after session-expired denial"
+            );
+
+            // ── Publication oracle: real publication boundary ──────────────────────
+            //
+            // `before_event_publish` fires immediately before `publish_event` in
+            // `dispatch_persistent_event_inner`. Zero calls proves `publish_event`
+            // was never reached — not a proxy, the actual publication boundary.
+            //
+            // Mutation evidence:
+            //   Remove `acquire_effect()` → dispatch_persistent_event_inner runs →
+            //   before_event_publish fires → publish_count = 1 → assertion panics.
+            let publish_attempts = publish_count.load(Ordering::Relaxed);
+            crate::nip_fi_test_hooks::event_publish_counter::deregister(community);
+            assert_eq!(
+                publish_attempts, 0,
+                "W2: publish_event must NOT be called — \
+                 dispatch_persistent_event_inner must not have been reached \
+                 when acquire_effect returns SessionExpired; \
+                 got {publish_attempts} publish attempt(s)"
+            );
+
+            // ── Durable DB assertion ───────────────────────────────────────────────
+            //
+            // Requires real Postgres. Confirms the event row is absent from `events`.
+            // Connects to the same database `test_state()` built its pool from
+            // (`state.config.database_url` ← `DATABASE_URL` env var in CI).
+            //
+            // Mutation evidence:
+            //   Remove `acquire_effect()` → ingest_event is attempted → with a real DB,
+            //   the row IS inserted → COUNT(*) = 1 → assertion panics.
+            let pool = sqlx::PgPool::connect(&state.config.database_url)
+                .await
+                .expect("W2: Postgres must be reachable at state.config.database_url");
+            let event_id_hex = hex::encode(event_id_bytes);
+            let row_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE id = decode($1, 'hex')")
+                    .bind(&event_id_hex)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("W2: event row count query");
+
+            assert_eq!(
+                row_count, 0,
+                "W2: event row must NOT be in the DB — \
+                 ingest_event must not have been called when acquire_effect returns SessionExpired; \
+                 found {row_count} row(s)"
+            );
+        }
+
+        // ── P1-b: agent-observer EVENT gate — barrier expiry blocks fan-out + ack ─────
+        //
+        // Arms `before_observer_event` — the hook immediately before `acquire_effect()`
+        // in the `KIND_AGENT_OBSERVER_FRAME` branch of `handle_event`. Dispatches
+        // `handle_event` with a valid NIP-44-encrypted agent telemetry event and the
+        // authenticated session's `agent_owner_pubkey` set to the event's owner (fast
+        // path: skips DB ownership lookup). Waits for the hook, fires expiry, then
+        // releases. The handler must return OK(false, "restricted: authorization denied").
+        //
+        // With the permit REMOVED, the handler proceeds into `handle_agent_observer_event`:
+        // owner fast-path succeeds → rate limit passes → `mark_local_event` + `publish_event`
+        // + `fan_out_event_to_local_subscribers` + `conn.send(OK(true, ""))` are reached.
+        // The OK(true) response differs from the expected "authorization denied" → assertion panics.
+        // This proves the permit gate blocked at the real fan-out + ack seam.
+        //
+        // Hook location: `handlers/event.rs`, immediately before `acquire_effect()`
+        // in the KIND_AGENT_OBSERVER_FRAME branch.
+        //
+        // Mutation evidence:
+        //   A) Delete `#[cfg(test)] before_observer_event(...)` from event.rs →
+        //      hook never fires → `arrived_rx` times out → test panics.
+        //   B) Remove `acquire_effect()` from the observer branch →
+        //      handler proceeds to fan-out → OK(true, "") sent →
+        //      `t.contains("authorization denied")` assertion panics.
+        //   C) Change gate to `off_mode` → `acquire_effect()` always succeeds →
+        //      same as (B).
+        #[tokio::test]
+        #[ignore = "requires Postgres: the observer write gate reads restriction state"]
+        async fn p1b_agent_observer_event_barrier_expiry_blocks_fanout_and_ack() {
+            use crate::handlers::event::handle_event;
+            use buzz_core::kind::KIND_AGENT_OBSERVER_FRAME;
+            use buzz_core::observer::{
+                encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG,
+                OBSERVER_FRAME_TELEMETRY,
+            };
+            use nostr::{EventBuilder, Keys, Kind, Tag};
+            use std::collections::HashMap;
+            use std::sync::Arc;
+            use tokio::sync::mpsc;
+            use tokio_util::sync::CancellationToken;
+            use uuid::Uuid;
+
+            // agent sends, owner receives — agent is the conn's authenticating key.
+            let agent_keys = Keys::generate();
+            let owner_keys = Keys::generate();
+            let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+
+            let cancel = CancellationToken::new();
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(deadline, cancel.clone());
+
+            // Distinct community to avoid hook interference with other tests.
+            let community =
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0x0000_0001_1B00_0000));
+
+            let (send_tx, mut send_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(8);
+            let (terminal_ctrl_tx, _terminal_ctrl_rx) =
+                mpsc::channel::<axum::extract::ws::Message>(1);
+
+            let conn = Arc::new(crate::connection::ConnectionState {
+                conn_id: Uuid::new_v4(),
+                tenant: buzz_core::tenant::TenantContext::resolved(
+                    community,
+                    "test.local".to_string(),
+                ),
+                remote_addr: "127.0.0.1:1234".parse().unwrap(),
+                auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
+                    buzz_auth::AuthContext {
+                        pubkey: agent_keys.public_key(),
+                        scopes: vec![],
+                        channel_ids: None,
+                        auth_method: buzz_auth::AuthMethod::Nip42,
+                        // Fast path: session owner matches the event's target owner,
+                        // so `handle_agent_observer_event` skips the DB ownership lookup.
+                        agent_owner_pubkey: Some(owner_keys.public_key()),
+                    },
+                )),
+                subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                send_tx,
+                ctrl_tx,
+                terminal_ctrl_tx,
+                cancel: cancel.clone(),
+                backpressure_count: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                grace_limit: 3,
+                nip_fi_assertion: None,
+                session_deadline: Some(deadline),
+                nip_fi_gate: gate,
+                community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
+            });
+
+            // Build a valid KIND_AGENT_OBSERVER_FRAME telemetry event:
+            //   - content: NIP-44 encrypted (passes content_looks_like_nip44 length check)
+            //   - tags: p = owner, agent = agent, frame = "telemetry"
+            //   - signed by agent key (event.pubkey == agent, recipient != agent → Telemetry)
+            // Without the permit, the handler reaches mark_local_event + publish + fanout + OK(true).
+            let encrypted = encrypt_observer_payload(
+                &agent_keys,
+                &owner_keys.public_key(),
+                &serde_json::json!({"type": "p1b_barrier_test"}),
+            )
+            .expect("P1-b: encrypt observer payload");
+
+            let event =
+                EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+                    .tags([
+                        Tag::parse(["p", &owner_keys.public_key().to_hex()]).expect("p tag"),
+                        Tag::parse([OBSERVER_AGENT_TAG, &agent_keys.public_key().to_hex()])
+                            .expect("agent tag"),
+                        Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY])
+                            .expect("frame tag"),
+                    ])
+                    .sign_with_keys(&agent_keys)
+                    .unwrap();
+
+            let state = crate::state::tests::test_state().await;
+
+            // Arm the barrier: fires when handle_event reaches before_observer_event.
+            let (arrived_rx, release) =
+                crate::nip_fi_test_hooks::observer_event_hook::arm(community);
+
+            let conn2 = Arc::clone(&conn);
+            let state2 = Arc::clone(&state);
+            let handle = tokio::spawn(async move { handle_event(event, conn2, state2).await });
+
+            // Wait for the handler to reach the permit boundary.
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived_rx)
+                .await
+                .expect("P1-b: handler must reach before_observer_event within 5s")
+                .expect("arrived channel closed");
+
+            // Fire expiry.
+            cancel.cancel();
+
+            // Release — handler tries acquire_effect(), gets SessionExpired.
+            release.notify_one();
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("P1-b: handle_event must return within 5s after hook release")
+                .expect("handle_event task must not panic");
+
+            // An OK(false, "restricted: authorization denied") frame must have been sent.
+            // Mutation-red (remove acquire_effect): handler reaches fan-out → OK(true, "") →
+            // `t.contains("authorization denied")` fails → test panics.
+            let frame = send_rx
+                .try_recv()
+                .expect("P1-b: handler must send OK(false) on expired gate");
+            match frame {
+                axum::extract::ws::Message::Text(t) => {
+                    assert!(
+                        t.contains("authorization denied"),
+                        "P1-b: OK frame must contain 'authorization denied'; got: {t}"
+                    );
+                    assert!(
+                        t.contains("false"),
+                        "P1-b: OK frame must be OK(false); got: {t}"
+                    );
+                }
+                other => panic!("P1-b: expected Text OK frame, got {other:?}"),
+            }
         }
     }
 }

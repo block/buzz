@@ -45,7 +45,7 @@ export function formatModelDiscoveryErrorStatus(
   error: unknown,
   provider: string,
   agentLabel?: string,
-): PersonaModelDiscoveryStatus | null {
+): PersonaModelDiscoveryStatus {
   const message = errorMessage(error);
 
   if (provider.trim() === "relay-mesh") {
@@ -116,12 +116,31 @@ export function formatModelDiscoveryErrorStatus(
     };
   }
 
+  // Desktop discovers Databricks models in-process whenever DATABRICKS_HOST
+  // is set, so either error from the harness fallback means the host is missing.
   if (
     message.includes("DATABRICKS_HOST required") ||
-    message.includes("DATABRICKS_MODEL required") ||
-    message.includes("BUZZ_AGENT_PROVIDER is required")
+    message.includes("DATABRICKS_MODEL required")
   ) {
-    return null;
+    return {
+      message:
+        "Set DATABRICKS_HOST to your Databricks workspace URL under Advanced to load Databricks models.",
+      tone: "warning",
+    };
+  }
+
+  if (message.includes("BUZZ_AGENT_PROVIDER is required")) {
+    return { message: "Choose a provider to load models.", tone: "muted" };
+  }
+
+  // Databricks transparent auth (agent_models_databricks.rs). The backend
+  // launches the browser OAuth flow itself from every discovery surface, so
+  // these are terminal outcomes the user should see, not raw error text.
+  // Matched on the stable error strings the backend emits (string matching is
+  // this file's convention until typed error codes arrive).
+  const databricksStatus = formatDatabricksAuthStatus(message);
+  if (databricksStatus !== null) {
+    return databricksStatus;
   }
 
   return {
@@ -130,4 +149,36 @@ export function formatModelDiscoveryErrorStatus(
     )}.`,
     tone: "warning",
   };
+}
+
+/**
+ * Maps the terminal Databricks sign-in states to user-facing guidance, or null
+ * when the error is not a Databricks sign-in outcome. "Sign-in required" is a
+ * quiet muted note (a passive surface hit its cooldown, or an unsaved draft
+ * can't launch the browser); a failed, cancelled, or timed-out sign-in is a
+ * warning that points the user at the explicit retry path.
+ */
+function formatDatabricksAuthStatus(
+  message: string,
+): PersonaModelDiscoveryStatus | null {
+  if (message.includes("Databricks sign-in is required")) {
+    return {
+      message:
+        "Databricks sign-in is required. Open the model picker to sign in, or run `buzz-agent auth databricks` in a terminal.",
+      tone: "muted",
+    };
+  }
+
+  if (
+    message.includes("Databricks sign-in failed") ||
+    message.includes("Databricks sign-in timed out")
+  ) {
+    return {
+      message:
+        "Databricks sign-in didn't complete. Open the model picker to retry, or run `buzz-agent auth databricks` in a terminal.",
+      tone: "warning",
+    };
+  }
+
+  return null;
 }

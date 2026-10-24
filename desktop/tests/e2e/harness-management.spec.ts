@@ -21,7 +21,6 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
-import { passThroughBackupStep } from "../helpers/onboarding";
 
 // ── Shared catalog fixtures ───────────────────────────────────────────────────
 
@@ -617,74 +616,4 @@ test("not-ready custom harness row shows status, no install action", async ({
   await expect(
     page.getByTestId("doctor-runtime-ready-my-custom-agent"),
   ).toHaveCount(0);
-});
-
-// ── F8: onboarding navigate-after-complete ────────────────────────────────────
-//
-// Verifies the parent-owned route intent introduced in B-8:
-//   1. User reaches the machine-onboarding setup page.
-//   2. Clicks "More harnesses" (onboarding-setup-more-harnesses).
-//   3. App completes onboarding and immediately navigates to Settings → Agents.
-//
-// This test exercises the real App.tsx effect that gates router.navigate() on
-// machine.stage === "ready", which the pure-logic tests in
-// postOnboardingNav.test.mjs cannot cover (they simulate the predicate, not
-// the real render path).
-
-test("onboarding setup More-harnesses click navigates to Settings → Agents", async ({
-  page,
-}) => {
-  // Start with a fresh machine (no machine-onboarding-complete flag).
-  // skipCommunitySeed: true so the user goes through machine onboarding.
-  // skipOnboardingSeed: true so the community/identity banner doesn't appear.
-  await installMockBridge(page, undefined, {
-    skipCommunitySeed: true,
-    skipOnboardingSeed: true,
-  });
-  // Seed a community stamped with a *foreign* pubkey. This is the only shape
-  // that satisfies both preconditions of this test at once:
-  //   - machine onboarding must still run, so the community must NOT vouch for
-  //     the active identity (migrateMachineOnboardingCompletion only accepts a
-  //     community whose recorded pubkey matches — see machineOnboarding.ts:70).
-  //   - after onboarding completes, useCommunityInit must NOT report
-  //     needsSetup, or App.tsx:499 renders WelcomeSetup instead of the router
-  //     and the navigation lands on a screen that has no settings tree.
-  // The default seed vouches (it uses the active pubkey) and skipping it
-  // entirely leaves zero communities, so neither default gets there.
-  await page.addInitScript(() => {
-    const communityId = "e2e-default-community";
-    window.localStorage.setItem(
-      "buzz-communities",
-      JSON.stringify([
-        {
-          id: communityId,
-          name: "E2E Test",
-          relayUrl: "ws://127.0.0.1:7777",
-          pubkey: "f".repeat(64),
-          addedAt: new Date().toISOString(),
-        },
-      ]),
-    );
-    window.localStorage.setItem("buzz-active-community-id", communityId);
-  });
-  await page.goto("/");
-
-  // Reach setup by creating a new identity key and continuing past the
-  // created-key page without opening the optional backup options.
-  await page.getByRole("button", { name: "Create a new identity key" }).click();
-  await passThroughBackupStep(page);
-
-  // Now on the setup page.
-  await expect(
-    page.getByRole("heading", { name: "Set up your agent harnesses" }),
-  ).toBeVisible({ timeout: 10_000 });
-
-  // Click the "More harnesses" link — fires navigateToAgentSettings.
-  await page.getByTestId("onboarding-setup-more-harnesses").click();
-
-  // After onboarding completes + router mounts, the app must land on
-  // Settings → Agents (consolidated harnesses section visible).
-  await expect(page.getByTestId("settings-harnesses")).toBeVisible({
-    timeout: 15_000,
-  });
 });

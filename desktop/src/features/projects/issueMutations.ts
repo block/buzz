@@ -5,10 +5,12 @@ import { signRelayEvent } from "@/shared/api/tauri";
 import { KIND_GIT_ISSUE } from "@/shared/constants/kinds";
 import type { Repository as Project } from "./hooks";
 import { buildGitIssueTags } from "./projectIssues.mjs";
+import type { ProjectTaskCategory } from "./projectTaskCategories";
 
 type CreateProjectIssueInput = {
   title: string;
   body: string;
+  category?: ProjectTaskCategory;
 };
 
 export async function publishProjectIssue(
@@ -22,12 +24,13 @@ export async function publishProjectIssue(
       repoAddress: project.repoAddress,
       repoOwner: project.owner,
       title: input.title,
+      labels: [input.category ?? "issue"],
     }),
   });
   await relayClient.publishEvent(
     event,
-    "Timed out creating issue.",
-    "Failed to create issue.",
+    "Timed out creating task.",
+    "Failed to create task.",
   );
   return event.id;
 }

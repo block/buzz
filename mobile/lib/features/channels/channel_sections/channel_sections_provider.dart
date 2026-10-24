@@ -1,5 +1,5 @@
+import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:nostr/nostr.dart' as nostr;
 
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme_provider.dart';
@@ -23,11 +23,13 @@ class ChannelSectionsState {
 
 class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
   ChannelSectionsManager? _manager;
+  bool _isInitialized = false;
 
   @override
   ChannelSectionsState build() {
     _manager?.dispose(flushPending: false);
     _manager = null;
+    _isInitialized = false;
 
     final relayConfig = ref.watch(relayConfigProvider);
     final sessionState = ref.watch(relaySessionProvider);
@@ -39,15 +41,9 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
       return const ChannelSectionsState();
     }
 
-    final pubkey = _safePubkeyFromNsec(nsec);
-    if (pubkey == null || pubkey.isEmpty) {
-      return const ChannelSectionsState();
-    }
-
-    final ChannelSectionsCrypto crypto;
-    try {
-      crypto = ChannelSectionsCrypto(nsec, pubkey);
-    } catch (_) {
+    final pubkey = ref.watch(myPubkeyProvider);
+    final crypto = ref.watch(channelSectionsCryptoProvider);
+    if (pubkey == null || crypto == null) {
       return const ChannelSectionsState();
     }
 
@@ -60,6 +56,7 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     late final ChannelSectionsManager manager;
     manager = ChannelSectionsManager(
       pubkey: pubkey,
+      relayUrl: relayConfig.baseUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),
@@ -68,6 +65,11 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
       onChanged: () => _emitManagerState(manager),
     );
     _manager = manager;
+
+    // Resume re-read catches an EVENT a healthy socket never delivered.
+    ref.listen(appLifecycleProvider, (_, next) {
+      if (next == AppLifecycleState.resumed) manager.refreshFromRelay();
+    });
 
     ref.onDispose(() {
       manager.dispose();
@@ -79,6 +81,7 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     Future.microtask(() async {
       await manager.initialize();
       if (_manager != manager) return;
+      _isInitialized = true;
       _emitManagerState(manager);
     });
 
@@ -110,7 +113,7 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
   void _emitManagerState(ChannelSectionsManager manager) {
     if (_manager != manager) return;
     state = ChannelSectionsState(
-      isReady: true,
+      isReady: _isInitialized,
       store: manager.store,
       version: state.version + 1,
     );
@@ -122,12 +125,16 @@ final channelSectionsProvider =
       ChannelSectionsNotifier.new,
     );
 
-String? _safePubkeyFromNsec(String nsec) {
+/// Identity-scoped crypto survives connection status changes. A community or
+/// signing-key change replaces it through [relayConfigProvider].
+final channelSectionsCryptoProvider = Provider<ChannelSectionsCrypto?>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final pubkey = ref.watch(myPubkeyProvider);
+  final nsec = config.nsec?.trim();
+  if (nsec == null || nsec.isEmpty || pubkey == null) return null;
   try {
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) return null;
-    return nostr.Keys(privkeyHex).public;
+    return ChannelSectionsCrypto(nsec, pubkey);
   } catch (_) {
     return null;
   }
-}
+});

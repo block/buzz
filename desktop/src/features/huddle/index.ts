@@ -1,4 +1,8 @@
-export { HuddleProvider, useHuddle } from "./HuddleContext";
+export {
+  HuddleProvider,
+  useHuddle,
+  useHuddleLevels,
+} from "./HuddleContext";
 export { setupAudioWorklet } from "./lib/audioWorklet";
 export { HuddleBar } from "./components/HuddleBar";
 export { HuddleProfileControl } from "./components/HuddleProfileControl";

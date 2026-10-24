@@ -193,6 +193,7 @@ export function toInboxContextMessage(
   const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
     message.tags ?? [],
     context.profiles,
+    message.body,
   );
   return {
     id: message.id,
@@ -228,6 +229,7 @@ export function toInboxContextMessage(
 export function toTimelineMessage(
   message: InboxContextMessage,
 ): TimelineMessage {
+  const threadReference = getThreadReference(message.tags ?? []);
   return {
     id: message.id,
     author: message.authorLabel,
@@ -239,8 +241,10 @@ export function toTimelineMessage(
     createdAt: message.createdAt,
     depth: message.depth,
     kind: message.kind,
+    parentId: message.parentId ?? threadReference.parentId,
     pubkey: message.authorPubkey,
     reactions: message.reactions ?? [],
+    rootId: message.rootId ?? threadReference.rootId,
     signerPubkey: message.signerPubkey,
     tags: message.tags,
     time: message.timeLabel ?? message.fullTimestampLabel,

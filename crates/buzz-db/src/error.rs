@@ -45,10 +45,104 @@ pub enum DbError {
     #[error("invalid data: {0}")]
     InvalidData(String),
 
+    /// A partition the catalog audit had already listed was dropped before the
+    /// audit finished. A fresh snapshot sees a consistent catalog.
+    #[error("partition catalog changed mid-audit: {0}")]
+    PartitionDroppedMidAudit(String),
+
+    /// A serving write admitted before the lifecycle transition is still live.
+    /// This is an ordinary retryable drain condition, not a safety violation.
+    #[error(
+        "community {community_id} still has {active_count} active serving write lease(s): {operations:?}"
+    )]
+    ServingWritesNotDrained {
+        /// Community whose lifecycle transition must retry.
+        community_id: uuid::Uuid,
+        /// Number of currently unexpired serving-write leases.
+        active_count: i64,
+        /// Distinct operation categories holding those leases.
+        operations: Vec<String>,
+    },
+
+    /// A deletion safety invariant is structurally violated and requires
+    /// operator/code remediation rather than blind retry.
+    #[error("deletion safety error: {0}")]
+    DeletionSafety(String),
+
+    /// A complete read-state snapshot exceeds its bounded resource budget.
+    #[error("read-state snapshot exceeds event or byte limit")]
+    ReadStateSnapshotTooLarge,
+
+    /// A complete thread window exceeds its request-wide work allowance.
+    #[error("thread window exceeds {0} budget")]
+    ThreadWindowBudgetExceeded(&'static str),
+
     /// A stored timestamp value could not be interpreted.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
+
+    /// A roster mutation would remove the last effective relay Operator,
+    /// leaving no one able to administer the deployment through the API.
+    /// The transaction is rolled back and the caller must add a replacement
+    /// Operator before demoting or deleting the current one.
+    #[error("operation would remove the last relay operator")]
+    LastOperator,
+}
+
+impl DbError {
+    /// Whether Postgres cancelled the statement (SQLSTATE 57014:
+    /// `statement_timeout` or an explicit cancel).
+    ///
+    /// Replica-routed reads surface a cancel instead of re-running on the
+    /// writer. Usually the cancel means expensive work that the writer would
+    /// only repeat at the primary's cost. It can also mean the replica waited
+    /// on a lock that only it holds (a replayed `ACCESS EXCLUSIVE` from
+    /// primary DDL), when the writer would have answered quickly. That miss is
+    /// the accepted price of keeping runaway reads off the primary. Per-call
+    /// routed reads record it as the `statement_cancelled` route reason;
+    /// `ReadSession` reads return it to the relay, which logs the failed read.
+    pub fn is_statement_cancelled(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlx(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
+        )
+    }
+
+    /// Whether the failure is about reaching the database at all (pool
+    /// acquire timeout, closed pool, or socket I/O) rather than about the
+    /// statement or its tenant. Every later query on the pool is expected to
+    /// fail the same way.
+    pub fn is_connection_unavailable(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlx(sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_))
+        )
+    }
 }
 
 /// Convenience alias for `Result<T, DbError>`.
 pub type Result<T> = std::result::Result<T, DbError>;
+
+#[cfg(test)]
+mod tests {
+    use super::DbError;
+
+    #[test]
+    fn connection_unavailable_covers_only_pool_and_io_failures() {
+        for error in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            assert!(DbError::Sqlx(error).is_connection_unavailable());
+        }
+        for error in [
+            DbError::Sqlx(sqlx::Error::RowNotFound),
+            DbError::Sqlx(sqlx::Error::Protocol("bad frame".into())),
+            DbError::AccessDenied("write-fenced".into()),
+            DbError::InvalidData("bad row".into()),
+        ] {
+            assert!(!error.is_connection_unavailable(), "{error:?}");
+        }
+    }
+}

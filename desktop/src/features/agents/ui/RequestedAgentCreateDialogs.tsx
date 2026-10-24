@@ -6,7 +6,6 @@ import {
   type OpenCreateAgentOptions,
 } from "@/features/agents/openCreateAgentEvent";
 import { AgentDialog } from "./AgentDialog";
-import { SecretRevealDialog } from "./SecretRevealDialog";
 import { usePersonaActions } from "./usePersonaActions";
 
 /** App-level create flow so contextual entry points do not navigate away. */
@@ -51,8 +50,14 @@ export function RequestedAgentCreateDialogs() {
               setTargetChannel(null);
             }
           }}
-          onSubmitDefinition={(input, intent, backendIntent) =>
-            personas.handleSubmit(input, intent, backendIntent, targetChannel)
+          onSubmitDefinition={(input, intent, backendIntent, effortLevel) =>
+            personas.handleSubmit(
+              input,
+              intent,
+              backendIntent,
+              effortLevel,
+              targetChannel,
+            )
           }
           runtimes={personas.acpRuntimesQuery.data ?? []}
           runtimeCatalogStatus={
@@ -62,19 +67,6 @@ export function RequestedAgentCreateDialogs() {
                 ? "error"
                 : "ready"
           }
-        />
-      ) : null}
-      {personas.createdAgent ? (
-        <SecretRevealDialog
-          attachmentFailure={personas.attachmentFailure}
-          created={personas.createdAgent}
-          isRetryingAttachment={personas.isRetryingAttachment}
-          onOpenChange={(open) => {
-            if (!open) personas.dismissCreatedAgent();
-          }}
-          onRetryAttachment={() => {
-            void personas.retryAttachment();
-          }}
         />
       ) : null}
     </>

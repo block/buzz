@@ -29,6 +29,9 @@ secp256k1        = { version = "0.31", features = ["global-context"] }
 sha2             = "0.11"
 
 [dev-dependencies]
+buzz-core = { path = "../buzz-core" }
+nostr = { workspace = true }
+zeroize = { workspace = true }
 tokio            = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = { workspace = true }
 secp256k1        = { version = "0.31", features = ["global-context", "rand", "std"] }

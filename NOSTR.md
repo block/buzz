@@ -50,27 +50,28 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Reactions (kind:7)** | ✅ | Standard NIP-25; channel derived from target event's `#e` tag (client `#h` ignored) |
 | **Deletions (kind:5)** | ✅ | Standard NIP-09; self-authored only. `#h` optional, `#e` required |
 | **User profiles (kind:0)** | ✅ | NIP-01 metadata; synced to users table (display_name, avatar, about, NIP-05). NIP-05 handles must canonicalize to this relay's domain — off-domain or invalid handles are silently cleared. If a NIP-05 handle collides with another user's (UNIQUE constraint), the handle is skipped but other profile fields (display_name, avatar, about) are still synced. |
-| **Group creation (kind:9007)** | ✅ | NIP-29; include `name` tag, optional `visibility` and `channel_type` |
-| **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. |
+| **Group creation (kind:9007)** | ✅ | NIP-29; include `name` tag, optional `visibility`, `channel_type` and label `t` tags |
+| **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. A guest cannot add anyone. A new member with no role tag gets the channel's `join_role`; a non-member adding themselves may ask for `join_role` or a lower role. |
 | **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin only. |
-| **Edit group metadata (kind:9002)** | ✅ | `name`/`about` tags: owner/admin. `topic`/`purpose` tags: any member. |
+| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
 | **Admin delete event (kind:9005)** | ✅ | Event author can always delete own. Otherwise owner/admin required. Target must be in same channel. |
 | **Group deletion (kind:9008)** | ✅ | Owner only. |
 | **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. |
-| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `closed` tags; `about` only if description non-empty; `private` if applicable; `hidden` for DM channels |
-| **Group admins (kind:39001)** | ✅ | Relay-signed; `d` tag + `p` tags with roles (`owner`, `admin`) |
-| **Group members (kind:39002)** | ✅ | Relay-signed; `d` tag + `p` tags for all members |
+| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `t`, `P`, `created_at`, `join_role`; `public` or `private`; `restricted` and `closed` per the access flags below; `about` only if description non-empty; `hidden` for DM channels and private system channels |
+| **Group admins (kind:39001)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags with roles (`owner`, `admin`) |
+| **Group members (kind:39002)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags for all members |
 | **Membership notifications** | ✅ | kind:44100 (added) / kind:44101 (removed); relay-signed, community-global scope (`channel_id=None` inside the connected community) |
 | **Presence (kind:20001)** | ✅ | Ephemeral; arbitrary status string (truncated to 128 chars); writes to Redis (`set_presence`/`clear_presence` on `"offline"`), then fan-out to local subscribers. In multi-community mode presence is scoped to the connected community. |
+| **Agent presence (kind:20003)** | ✅ | Ephemeral; an owner's presence for the agents it owns, named by `p` tags (at most 256); `online`/`away` set and `offline` clears each agent's presence as its own kind:20001 would. Not fanned out. |
 | **Typing indicators (kind:20002)** | ✅ | Ephemeral, not stored; published via Redis pub/sub (multi-node capable unlike presence fan-out) |
 | **NIP-42 authentication** | ✅ | Proactive challenge; optional pubkey allowlist |
 | **NIP-11 relay info** | ✅ | `GET /` with `Accept: application/nostr+json` |
 | **Blossom media** | ✅ | `PUT /media/upload` (BUD-02), `GET /media/{sha256}.{ext}` (BUD-01) |
-| **NIP-50 search** | ✅ | One-shot search REQs: `{"search":"query","kinds":[9],"#h":["<uuid>"]}` → relevance-sorted results → EOSE. Not registered as persistent subscriptions. |
+| **NIP-50 search** | ✅ | One-shot search REQs: `{"search":"query","kinds":[9],"#h":["<uuid>"]}` → relevance-sorted results → EOSE. Not registered as persistent subscriptions. HTTP `POST /query` also accepts `search_sort: "newest"` (advertised as `buzz-search-sort` in NIP-11 `supported_extensions`) for newest-first results, paged with `page`. |
 | **NIP-10 threads** | ✅ | WS-submitted replies with `["e","<root>","","reply"]` tags create `thread_metadata` atomically. Visible in REST thread queries. Unknown parents rejected. |
 | **NIP-17 DMs (gift wrap)** | ✅ | kind:1059 accepted with ephemeral signing keys. Stored community-globally (`channel_id=None` inside the connected community). Delivered via `#p`-filtered subscriptions. Not indexed in search. |
 | **DM discovery** | ✅ | DM creation emits kind:39000 (with `hidden` tag) + kind:44100 membership notifications. NIP-29 clients discover DMs via standard group discovery flow. |
-| **Join request (kind:9021)** | ✅ | Open channels only. Adds member, emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
+| **Join request (kind:9021)** | ✅ | Open channels only. Adds the joiner with the channel's `join_role` (`member` by default), emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
 | **Edits (kind:40003)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 | **Rich content (kind:40002)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 
@@ -99,16 +100,122 @@ relay to specific external Nostr identities without granting full access.
   SELECT encode(pubkey, 'hex'), added_at, note FROM pubkey_allowlist;
   ```
 
+### Announce channels
+
+Roles have the same permissions in every channel. A channel's settings
+decide only who can join and which role a new person gets:
+
+- `visibility` (`open` | `private`) decides who can find, join and read.
+- `join_role` (`member` | `guest`) is the role a person gets when nobody
+  picks one: a self-join (kind:9021, or a kind:9000 self-add), or a kind:9000
+  add with no `role` tag. The default, `member`, keeps today's behavior.
+
+An open channel with `join_role = guest` is an **announce channel**: anyone
+can find, read and join it, but people who join are guests and cannot write.
+
+What each role can do:
+
+| Action | Guest | Member or bot | Admin / owner |
+|--------|-------|---------------|---------------|
+| Read, leave | Yes | Yes | Yes |
+| Post, reply, edit, delete own, react, artifacts, canvas, forum, pins, typing, workflow messages, huddles | No | Yes | Yes |
+| Topic, purpose (kind:9002) | No | Yes | Yes |
+| Add people (kind:9000) | No | Yes, as member, guest or bot | Yes, any role |
+| Push to the channel's git repositories | No | Yes | Yes |
+| Name, about, visibility, TTL, `join_role` | No | No | Yes |
+
+A non-member may write only where joining would give a role that can write:
+an open channel with `join_role = member`. A refused write gets
+`restricted: only members can post in this channel`.
+
+Other rules:
+
+- A non-member adding themselves with kind:9000 may ask for `join_role` or a
+  lower role. A higher role is refused.
+- Any member who can write (member, bot, owner or admin) can make a guest a
+  member with kind:9000 (`role` `member`). This is the same for a person and
+  an agent. Only owners and admins can make any other role change.
+- The human owner of an agent can edit (kind:40003) and delete (kind:9005)
+  that agent's messages, also as a guest or a non-member. This is existing
+  behavior. It lets a person correct or remove what their agent posted; it
+  does not let them post.
+- Owners and admins change the setting with kind:9002
+  `["join_role", "guest"]` or `["join_role", "member"]`. A missing tag means
+  "no change". Changing it does not change anyone's role: existing members
+  can still write after a change to `guest`, and existing guests stay
+  read-only after a change to `member`. A stored value the relay does not
+  know is treated as `guest`.
+
+kind:39000 publishes the NIP-29 access flags from these settings, and an
+explicit `["join_role", ...]` tag so clients can tell what joining gives:
+
+| `visibility` | `join_role` | `private` | `public` | `restricted` | `closed` |
+|--------------|-------------|-----------|----------|--------------|----------|
+| open | `member` | | ✓ | | |
+| open | `guest` | | ✓ | ✓ | |
+| private | either | ✓ | | ✓ | ✓ |
+
 ### Group Discovery
 
 The relay emits NIP-29 group state events when channels are created, updated, or membership changes.
+[NIP-CL](docs/nips/NIP-CL.md) defines the channel identity tags on these events and how clients
+use them to find channels.
 All discovery events include a `d` tag set to the channel UUID (NIP-29 addressable event convention):
 
 | Kind | Tags | Content |
 |------|------|---------|
-| **39000** | `d=<uuid>`, `name`, `closed` (always); `about` (if description non-empty); `private` (if applicable); `hidden` (DM channels only) | Group metadata. **Note:** `closed` is always emitted per NIP-29 convention (Buzz channels require explicit membership), but open channels are still readable/writable by non-members at runtime. The tag reflects the membership model, not access enforcement. |
-| **39001** | `d=<uuid>`, `p` tags with role label (`owner`, `admin`) | Admin list |
-| **39002** | `d=<uuid>`, `p` tags for all members | Member list |
+| **39000** | `d=<uuid>`, `name`, `t=<channel_type>`, `P=<creator>`, `created_at=<unix seconds>`, `join_role` (always); `public` or `private`; `restricted` (private channels, and `join_role=guest`); `closed` (private channels only); `about` (if description non-empty); `hidden` (DM channels and private system channels) | Group metadata. The access flags follow the channel settings (see [Announce channels](#announce-channels)). |
+| **39001** | `d=<uuid>`, `t=<channel_type>`, `P=<creator>`, `p` tags with role label (`owner`, `admin`) | Admin list |
+| **39002** | `d=<uuid>`, `t=<channel_type>`, `P=<creator>`, `p` tags for all members | Member list |
+
+On all three kinds the channel type `t` tag comes first, then one `t` tag
+per channel label, then `P`. Clients read the first `t` value as the
+channel type. `P` is
+the public key that signed the channel's kind:9007. The relay writes it
+from the database, and it does not change when ownership moves. Uppercase
+`P` follows NIP-22, NIP-34 and NIP-72, where it names the author of the root
+object; lowercase `p` already lists members and DM participants on these
+kinds.
+
+kind:39000 also carries `["created_at", <unix seconds>]`: the time the
+channel was created. The event's own `created_at` is the time of the last
+edit, so use the tag to find the older of two channels.
+
+**Channel labels.** A label groups channels across channel types, for
+example `["t", "workspace"]`. Set labels with `["t", <label>]` tags on
+kind:9007. On kind:9002 the `t` tags replace the whole set, and
+`["t", ""]` with no other `t` tag clears it; a kind:9002 without `t` tags
+leaves the labels as they are. Only an owner or admin may change labels.
+The relay refuses a label set with more than 8 distinct labels, a label
+that is not 1-64 characters from `a-z`, `0-9`, `.`, `:` and `-`, or a
+label equal to a channel type name (`stream`, `forum`, `dm`, `workflow`,
+`system`).
+
+**System channels.** A channel with `channel_type` `system` exists only for
+access control, for example to hold config that only an agent and its owner
+can read. It is an ordinary channel in every other way, but queries leave it
+out unless they ask for it:
+
+- A filter that does not name it, for example a REQ with no `#h`, a COUNT,
+  a NIP-50 search, or kind:39002 `#p:[me]`, does not return it. Such a
+  filter returns only the legacy channel types (`stream`, `forum`, `dm`,
+  `workflow`), so a channel type added later is also left out.
+- A filter that names it with `#h`, or with `#d` on kinds 39000–39003, reads
+  it under the ordinary rules: the reader is a member, or it is open. A
+  channel of a type added later is read the same way.
+- A filter on kinds 39000–39003 with `#t:["system"]` or any `#P` also
+  returns the system channels the reader can read, then matches as usual.
+  It does not return channels of a type added later.
+  For example, `{kinds:[39000], #P:[<creator>], #t:[<label>]}` finds one
+  creator's labeled channel, system or not. Values in one tag filter
+  combine with OR, so `#t:["system", <label>]` does not mean "a system
+  channel with this label".
+
+Push notifications use the same rule: a lease filter pushes events from a
+system channel only when its `#h` names that channel. Every kind:44100/44101
+membership notification carries its channel type as `t`, and a filter without
+`#t` sees only the legacy types, so system channel notices reach only a filter
+with `#t:["system"]` (see NIP-CL).
 
 Events are stored **channel-scoped** so access control applies — private channel member lists are
 only visible to members. Discover groups via historical REQ:
@@ -133,6 +240,11 @@ The relay emits relay-signed notifications when members are added or removed:
 |------|---------|------|-------|
 | **44100** | Member added | `p` = target pubkey, `h` = channel UUID | Community-global |
 | **44101** | Member removed | `p` = target pubkey, `h` = channel UUID | Community-global |
+
+Each notice also has `t` = the channel type (`stream`, `forum`, `dm`,
+`workflow`, `system`). A filter with `#t` gets only the types it names. A
+filter without `#t` gets only `stream`, `forum`, `dm` and `workflow`, and so
+does an untagged notice stored before the tag existed (NIP-CL).
 
 Stored community-globally (`channel_id = None` inside the connected community) so agents and clients can subscribe without knowing channel
 UUIDs in advance. Client-submitted kind:44100/44101 events are rejected — only the relay keypair
@@ -243,6 +355,9 @@ docker compose exec relay buzz-admin add-member --pubkey npub1abc...
 docker compose exec relay buzz-admin add-member --pubkey npub1abc... --role admin
 docker compose exec relay buzz-admin remove-member --pubkey npub1abc...
 docker compose exec relay buzz-admin list-members
+# Rewrite the kind:13534 member list from the stored members (repairs a missing or stale list)
+# Repairs only the community RELAY_URL maps to; on a multi-community relay, run it once per community host
+docker compose exec relay buzz-admin republish-members
 ```
 
 **Exit codes:**

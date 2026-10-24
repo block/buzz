@@ -4,6 +4,7 @@ import { useHomeFeedQuery } from "@/features/home/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import { scheduleAfterForegroundReady } from "@/shared/lib/foregroundReady";
 import {
   getDesktopNotificationPermissionState,
   requestDesktopNotificationAccess,
@@ -210,14 +211,23 @@ export function useNotificationSettings(pubkey?: string) {
   }, [normalizedPubkey]);
 
   React.useEffect(() => {
+    let cancelPendingRefresh: (() => void) | null = null;
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") {
-        void refreshPermission();
+      if (document.visibilityState !== "visible") {
+        cancelPendingRefresh?.();
+        cancelPendingRefresh = null;
+        return;
       }
+      if (cancelPendingRefresh) return;
+      cancelPendingRefresh = scheduleAfterForegroundReady(() => {
+        cancelPendingRefresh = null;
+        if (document.visibilityState === "visible") void refreshPermission();
+      });
     };
     document.addEventListener("visibilitychange", refreshWhenVisible);
     window.addEventListener("focus", refreshWhenVisible);
     return () => {
+      cancelPendingRefresh?.();
       document.removeEventListener("visibilitychange", refreshWhenVisible);
       window.removeEventListener("focus", refreshWhenVisible);
     };

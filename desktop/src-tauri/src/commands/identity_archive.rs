@@ -12,16 +12,49 @@
 //! see §Owner-of-Agent Requests and §Relay Processing Algorithm.
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::{
     app_state::AppState,
     events,
+    managed_agents::try_regenerate_nest,
     relay::{
-        classify_request_error, query_relay, relay_http_base_url, relay_ws_url_with_override,
-        submit_event, SubmitEventResponse,
+        classify_request_error, query_relay, query_relay_at, relay_api_base_url,
+        relay_http_base_url, relay_ws_url, relay_ws_url_with_override, submit_event,
+        workspace_relay_override, SubmitEventResponse,
     },
 };
+
+/// A relay target resolved from a single workspace-override read, so a caller
+/// that performs several relay requests cannot mix two relays if the workspace
+/// override changes mid-flight.
+///
+/// `relay_ws_url_with_override` and `relay_api_base_url_with_override` each read
+/// the override independently; a workspace switch between two such reads can
+/// pair one relay's NIP-11 signer with another relay's snapshot query.
+/// Capturing both fields from one read — matching those two functions' exact
+/// precedence, including the standalone `BUZZ_RELAY_HTTP` path when no override
+/// is set — guarantees the pair is internally consistent.
+pub(crate) struct RelayTarget {
+    /// Relay WebSocket URL (drives the NIP-11 fetch and the rendered footer).
+    pub ws_url: String,
+    /// Relay HTTP API base URL (drives `/query`).
+    pub api_base_url: String,
+}
+
+/// Capture the effective relay target once, before any network work.
+pub(crate) fn capture_relay_target(state: &AppState) -> RelayTarget {
+    match workspace_relay_override(state) {
+        Some(url) => RelayTarget {
+            api_base_url: relay_http_base_url(&url),
+            ws_url: url,
+        },
+        None => RelayTarget {
+            ws_url: relay_ws_url(),
+            api_base_url: relay_api_base_url(),
+        },
+    }
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -139,44 +172,116 @@ pub struct UnarchiveRequest {
     pub reason: Option<String>,
 }
 
-/// Submit a `kind:9035` archive request to the relay. Consent path is selected
-/// by the relay — we just attach the owner-of-agent `auth` tag when the live
-/// `kind:0` proves we own the target, so the relay can choose the `owner`
-/// path. Self and admin paths require no auth tag.
-#[tauri::command]
-pub async fn archive_identity(
-    req: ArchiveRequest,
-    state: State<'_, AppState>,
-) -> Result<SubmitEventResponse, String> {
-    let auth_tag = maybe_owner_auth_tag(&state, &req.target_pubkey).await?;
-    let auth_ref = auth_tag.as_ref();
+/// Roster refresh a successful archive/unarchive triggers. Binding the action
+/// to a *type* rather than a closure selected at each call site is what closes
+/// the regression Thufir found: the command wrapper passes a value (`&app`)
+/// with no callback to construct, so the "regenerate on success" selection
+/// lives entirely inside the cores below — where the tests traverse it. The
+/// production binding is the single, irreducible `AppHandle` adapter.
+pub(crate) trait NestRegenTrigger {
+    fn trigger(&self);
+}
 
+impl NestRegenTrigger for AppHandle {
+    fn trigger(&self) {
+        try_regenerate_nest(self);
+    }
+}
+
+/// Submit `builder` to the active workspace relay, then trigger `on_success`
+/// exactly once iff the relay accepted the event.
+///
+/// This pins the shared half of the archive/unarchive → AGENTS.md-regeneration
+/// contract: regeneration is best-effort roster maintenance, so it must fire on
+/// a successful submission and must NOT fire when the submit is rejected (a
+/// rejected request changed nothing to re-render).
+async fn submit_then_regenerate(
+    builder: nostr::EventBuilder,
+    state: &AppState,
+    on_success: impl FnOnce(),
+) -> Result<SubmitEventResponse, String> {
+    let response = submit_event(builder, state).await?;
+    on_success();
+    Ok(response)
+}
+
+/// `AppHandle`-free core of [`archive_identity`]: resolve the owner-of-agent
+/// `auth` tag, build the real `kind:9035` request, submit it, and trigger
+/// `regen` so a successful archive refreshes the roster.
+///
+/// The command wrapper is untestable (it needs a live Tauri runtime for its
+/// `AppHandle`), so this core owns the whole orchestration — including *binding*
+/// the regeneration trigger onto the successful-submit path. The wrapper only
+/// hands it the `AppHandle` as the trigger; a test drives the exact archive
+/// wiring with a counting trigger over a loopback relay. RED-on-revert: change
+/// `|| regen.trigger()` to `|| {}` here and
+/// `archive_core_fires_regen_only_on_accepted_submit` fails while the unarchive
+/// core test stays green.
+async fn archive_identity_core(
+    req: &ArchiveRequest,
+    state: &AppState,
+    regen: &impl NestRegenTrigger,
+) -> Result<SubmitEventResponse, String> {
+    let auth_tag = maybe_owner_auth_tag(state, &req.target_pubkey).await?;
     let builder = events::build_archive_identity_request(
         &req.target_pubkey,
         &req.content,
         req.reason.as_deref(),
         req.replaced_by.as_deref(),
-        auth_ref,
+        auth_tag.as_ref(),
     )?;
-    submit_event(builder, &state).await
+    submit_then_regenerate(builder, state, || regen.trigger()).await
 }
 
-/// Submit a `kind:9036` unarchive request to the relay.
-#[tauri::command]
-pub async fn unarchive_identity(
-    req: UnarchiveRequest,
-    state: State<'_, AppState>,
+/// `AppHandle`-free core of [`unarchive_identity`]: builds the real `kind:9036`
+/// request and triggers `regen` on acceptance. See [`archive_identity_core`]
+/// for why this seam is extracted. RED-on-revert: change `|| regen.trigger()`
+/// to `|| {}` here and `unarchive_core_fires_regen_only_on_accepted_submit`
+/// fails while the archive core test stays green.
+async fn unarchive_identity_core(
+    req: &UnarchiveRequest,
+    state: &AppState,
+    regen: &impl NestRegenTrigger,
 ) -> Result<SubmitEventResponse, String> {
-    let auth_tag = maybe_owner_auth_tag(&state, &req.target_pubkey).await?;
-    let auth_ref = auth_tag.as_ref();
-
+    let auth_tag = maybe_owner_auth_tag(state, &req.target_pubkey).await?;
     let builder = events::build_unarchive_identity_request(
         &req.target_pubkey,
         &req.content,
         req.reason.as_deref(),
-        auth_ref,
+        auth_tag.as_ref(),
     )?;
-    submit_event(builder, &state).await
+    submit_then_regenerate(builder, state, || regen.trigger()).await
+}
+
+/// Submit a `kind:9035` archive request to the relay. Consent path is selected
+/// by the relay — we just attach the owner-of-agent `auth` tag when the live
+/// `kind:0` proves we own the target, so the relay can choose the `owner`
+/// path. Self and admin paths require no auth tag.
+///
+/// On acceptance, refresh AGENTS.md so a just-archived agent drops from the
+/// roster without waiting for the next unrelated edit or app restart. The
+/// regen is fire-and-forget and fail-open like every other mutation site; it
+/// races the relay's kind:13535 snapshot update, so a stale render self-heals
+/// on the next regen.
+#[tauri::command]
+pub async fn archive_identity(
+    req: ArchiveRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SubmitEventResponse, String> {
+    archive_identity_core(&req, &state, &app).await
+}
+
+/// Submit a `kind:9036` unarchive request to the relay. See
+/// [`archive_identity`]: refresh the roster so an unarchived agent reappears
+/// promptly, fail-open against the same snapshot race.
+#[tauri::command]
+pub async fn unarchive_identity(
+    req: UnarchiveRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SubmitEventResponse, String> {
+    unarchive_identity_core(&req, &state, &app).await
 }
 
 /// If the current user is the verified NIP-OA owner of `target`, return the
@@ -228,8 +333,42 @@ struct RelayInformationDocument {
 }
 
 pub(crate) async fn fetch_relay_self(state: &AppState) -> Result<Option<String>, String> {
-    let relay_url = relay_ws_url_with_override(state);
-    let http_url = relay_http_base_url(&relay_url);
+    fetch_relay_self_at(state, &relay_ws_url_with_override(state)).await
+}
+
+/// How long a fetched NIP-11 `self` pubkey stays valid in
+/// [`AppState::relay_self_cache`]. The relay's signing identity changes only
+/// on an operator-driven key rotation, so minutes of staleness are safe; the
+/// TTL exists so even that rare rotation converges without an app restart.
+pub(crate) const RELAY_SELF_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Read a still-fresh cached `self` pubkey for `relay_url`, if any. Fails open
+/// (cache miss) on a poisoned lock — the fetch path never depends on the cache.
+fn cached_relay_self(state: &AppState, relay_url: &str) -> Option<String> {
+    let cache = state.relay_self_cache.lock().ok()?;
+    let (fetched_at, relay_self) = cache.get(relay_url)?;
+    (fetched_at.elapsed() < RELAY_SELF_CACHE_TTL).then(|| relay_self.clone())
+}
+
+/// Like [`fetch_relay_self`] but reads NIP-11 from an explicit relay WS URL
+/// instead of re-resolving the workspace override. Used by
+/// [`fetch_archived_pubkeys_at`] so the advertised signer and the snapshot
+/// query belong to the same captured relay target.
+///
+/// Successful lookups are cached per relay URL for [`RELAY_SELF_CACHE_TTL`]:
+/// send-time agent revalidation calls this on every agent-mention send, and
+/// the uncached GET was a measurable slice of that latency. Only a verified
+/// `Some` is cached — `Ok(None)` covers transient states (non-2xx status, a
+/// document momentarily missing `self`) that must be re-tried, not pinned.
+pub(crate) async fn fetch_relay_self_at(
+    state: &AppState,
+    relay_url: &str,
+) -> Result<Option<String>, String> {
+    if let Some(cached) = cached_relay_self(state, relay_url) {
+        return Ok(Some(cached));
+    }
+
+    let http_url = relay_http_base_url(relay_url);
     let response = state
         .http_client
         .get(&http_url)
@@ -252,6 +391,12 @@ pub(crate) async fn fetch_relay_self(state: &AppState) -> Result<Option<String>,
     };
 
     if relay_self.len() == 64 && relay_self.chars().all(|c| c.is_ascii_hexdigit()) {
+        if let Ok(mut cache) = state.relay_self_cache.lock() {
+            cache.insert(
+                relay_url.to_string(),
+                (std::time::Instant::now(), relay_self.clone()),
+            );
+        }
         Ok(Some(relay_self))
     } else {
         Ok(None)
@@ -275,46 +420,71 @@ fn archived_pubkeys_from_snapshot(snapshot: &nostr::Event) -> Vec<String> {
         .collect()
 }
 
-/// Read the relay's latest valid `kind:13535` archive snapshot. The frontend
-/// caches this and tests membership client-side to drive the "Archived" flair.
+/// Read the relay's latest valid `kind:13535` archive snapshot as lowercase
+/// hex pubkeys. Shared by the `list_archived_identities` command (frontend
+/// flair) and the backend nest regen (excluding archived agents from
+/// `AGENTS.md`).
 ///
 /// Per NIP-IA §Client Behavior and §Snapshot and Delta Consistency, only a
 /// snapshot signed by the relay identity advertised in NIP-11 `self` can affect
-/// archive state. If the relay has no stable `self`, fail open with an empty
-/// snapshot rather than trusting unauthenticated relay-authoritative state.
-#[tauri::command]
-pub async fn list_archived_identities(
-    state: State<'_, AppState>,
-) -> Result<ArchivedIdentitiesSnapshot, String> {
-    let Some(relay_self) = fetch_relay_self(&state).await? else {
-        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+/// archive state. Every failure path — no stable `self`, no snapshot, a bad
+/// signature or wrong author, or a query error — **fails open** with an empty
+/// set rather than trusting unauthenticated relay-authoritative state.
+pub(crate) async fn fetch_archived_pubkeys(state: &AppState) -> Vec<String> {
+    fetch_archived_pubkeys_at(state, &capture_relay_target(state)).await
+}
+
+/// Like [`fetch_archived_pubkeys`] but resolves both the NIP-11 signer and the
+/// snapshot query against one captured [`RelayTarget`] instead of re-reading
+/// the workspace override for each. This keeps a regeneration's advertised
+/// signer and its snapshot query on the same relay even if the workspace
+/// override changes between the two awaits.
+pub(crate) async fn fetch_archived_pubkeys_at(
+    state: &AppState,
+    target: &RelayTarget,
+) -> Vec<String> {
+    let Ok(Some(relay_self)) = fetch_relay_self_at(state, &target.ws_url).await else {
+        return vec![];
     };
 
-    let events = query_relay(
-        &state,
+    let query = query_relay_at(
+        state,
+        &target.api_base_url,
         &[serde_json::json!({
             "authors": [relay_self.clone()],
             "kinds": [13535],
             "limit": 1,
         })],
     )
-    .await?;
+    .await;
+    let Ok(events) = query else {
+        return vec![];
+    };
 
     let Some(snapshot) = events.into_iter().next() else {
-        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+        return vec![];
     };
 
     // Defense-in-depth: the filter should already restrict author, but the
     // client must still reject malformed or wrongly signed relay state.
     if !snapshot.verify_id() || !snapshot.verify_signature() {
-        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+        return vec![];
     }
     if !snapshot.pubkey.to_hex().eq_ignore_ascii_case(&relay_self) {
-        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+        return vec![];
     }
 
+    archived_pubkeys_from_snapshot(&snapshot)
+}
+
+/// Read the relay's latest valid `kind:13535` archive snapshot. The frontend
+/// caches this and tests membership client-side to drive the "Archived" flair.
+#[tauri::command]
+pub async fn list_archived_identities(
+    state: State<'_, AppState>,
+) -> Result<ArchivedIdentitiesSnapshot, String> {
     Ok(ArchivedIdentitiesSnapshot {
-        archived: archived_pubkeys_from_snapshot(&snapshot),
+        archived: fetch_archived_pubkeys(&state).await,
     })
 }
 
@@ -336,6 +506,28 @@ pub async fn get_relay_self(state: State<'_, AppState>) -> Result<Option<String>
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counting [`NestRegenTrigger`] double: records how many times the core
+    /// fires regeneration on the successful-submit path, standing in for the
+    /// production `AppHandle` binding without a live Tauri runtime.
+    #[cfg(not(target_os = "windows"))]
+    #[derive(Default)]
+    struct CountingRegen(AtomicUsize);
+
+    #[cfg(not(target_os = "windows"))]
+    impl CountingRegen {
+        fn count(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    impl NestRegenTrigger for CountingRegen {
+        fn trigger(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     /// Build a fake `kind:0` with a valid NIP-OA auth tag for a fresh owner.
     fn kind0_with_auth(agent: &Keys, owner: &Keys) -> nostr::Event {
@@ -412,6 +604,107 @@ mod tests {
         );
     }
 
+    /// Spawn a loopback NIP-11 endpoint that counts hits and serves `self_hex`
+    /// (or a bare 503 when `self_hex` is `None`). Returns the `ws://` base and
+    /// the shared hit counter.
+    async fn spawn_nip11_relay(self_hex: Option<String>) -> (String, std::sync::Arc<AtomicUsize>) {
+        use axum::{http::StatusCode, routing::get, Json, Router};
+
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let route_hits = hits.clone();
+        let router = Router::new().route(
+            "/",
+            get(move || {
+                let self_hex = self_hex.clone();
+                let route_hits = route_hits.clone();
+                async move {
+                    route_hits.fetch_add(1, Ordering::SeqCst);
+                    match self_hex {
+                        Some(self_hex) => Ok(Json(serde_json::json!({ "self": self_hex }))),
+                        None => Err(StatusCode::SERVICE_UNAVAILABLE),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        (format!("ws://{addr}"), hits)
+    }
+
+    /// The send path revalidates agent mentions on every agent-mention send,
+    /// and each pass used to re-GET the NIP-11 document. A second lookup
+    /// within the TTL must be served from [`AppState::relay_self_cache`]
+    /// without touching the relay. RED-on-revert: drop the `cached_relay_self`
+    /// check and the hit counter reads 2.
+    #[tokio::test]
+    async fn relay_self_second_fetch_within_ttl_is_served_from_cache() {
+        let self_hex = Keys::generate().public_key().to_hex();
+        let (relay_url, hits) = spawn_nip11_relay(Some(self_hex.clone())).await;
+        let state = crate::app_state::build_app_state();
+
+        let first = fetch_relay_self_at(&state, &relay_url).await.unwrap();
+        let second = fetch_relay_self_at(&state, &relay_url).await.unwrap();
+
+        assert_eq!(first.as_deref(), Some(self_hex.as_str()));
+        assert_eq!(second.as_deref(), Some(self_hex.as_str()));
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the second in-TTL lookup must not re-GET the NIP-11 document"
+        );
+    }
+
+    /// A non-success NIP-11 response yields `Ok(None)` and MUST stay
+    /// retryable: caching the outage would blank the agent directory (and
+    /// every send-time revalidation) for the full TTL after one relay blip.
+    #[tokio::test]
+    async fn relay_self_non_success_response_is_not_cached() {
+        let (relay_url, hits) = spawn_nip11_relay(None).await;
+        let state = crate::app_state::build_app_state();
+
+        assert_eq!(fetch_relay_self_at(&state, &relay_url).await.unwrap(), None);
+        assert_eq!(fetch_relay_self_at(&state, &relay_url).await.unwrap(), None);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "a failed lookup must retry the relay, never pin the outage"
+        );
+    }
+
+    /// An entry older than [`RELAY_SELF_CACHE_TTL`] must be refetched so a
+    /// relay-side key rotation converges without an app restart.
+    #[tokio::test]
+    async fn relay_self_expired_cache_entry_is_refetched() {
+        let self_hex = Keys::generate().public_key().to_hex();
+        let (relay_url, hits) = spawn_nip11_relay(Some(self_hex.clone())).await;
+        let state = crate::app_state::build_app_state();
+        // `Instant` is opaque, so expiry is staged by planting an already-stale
+        // entry rather than sleeping through the TTL. Skip (vacuous pass) if
+        // the platform clock cannot represent an instant that far back.
+        let Some(stale_instant) = std::time::Instant::now()
+            .checked_sub(RELAY_SELF_CACHE_TTL + std::time::Duration::from_secs(1))
+        else {
+            return;
+        };
+        state
+            .relay_self_cache
+            .lock()
+            .unwrap()
+            .insert(relay_url.clone(), (stale_instant, "b".repeat(64)));
+
+        let refreshed = fetch_relay_self_at(&state, &relay_url).await.unwrap();
+
+        assert_eq!(refreshed.as_deref(), Some(self_hex.as_str()));
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "an expired entry must be refetched from the relay"
+        );
+    }
+
     /// Spec test-vector regression for gotcha #3: the NIP-OA preimage subject
     /// is the *target/agent* pubkey, not the request signer. The vectors in
     /// `docs/nips/NIP-IA.md` §Test Vectors fix concrete values; verifying the
@@ -477,5 +770,224 @@ mod tests {
         assert_eq!(minimal.target_pubkey, "abc");
         assert_eq!(minimal.content, "");
         assert!(minimal.reason.is_none());
+    }
+
+    /// Regression for the cross-relay capture defect: `fetch_archived_pubkeys_at`
+    /// must resolve BOTH the NIP-11 signer and the `/query` snapshot against the
+    /// single captured [`RelayTarget`], never re-reading the live workspace
+    /// override. Two loopback relays advertise distinct signers and archive
+    /// distinct pubkeys; we capture relay A, then mutate the override to relay B
+    /// before the fetch. Because capture happens once up front, the override's
+    /// value at any later instant — including between the two archive awaits —
+    /// is irrelevant by construction, so setting it to B is the strongest form
+    /// of that perturbation. A must supply both the signer and the snapshot.
+    ///
+    /// RED-on-revert: restore `fetch_archived_pubkeys` to read the override for
+    /// each leg (`fetch_relay_self` + `query_relay`) and this returns B's pubkey.
+    #[tokio::test]
+    async fn archived_fetch_never_crosses_relays_mid_flight() {
+        use crate::app_state::build_app_state;
+        use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
+        use axum::{routing::get, routing::post, Json, Router};
+
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        // Build a loopback relay that advertises `relay_keys` as its NIP-11
+        // `self` and serves a relay-signed 13535 snapshot archiving `archived`.
+        async fn spawn_relay(relay_keys: Keys, archived: String) -> String {
+            let self_hex = relay_keys.public_key().to_hex();
+            let snapshot = EventBuilder::new(Kind::Custom(13535), "")
+                .tags([
+                    Tag::parse(["-"]).unwrap(),
+                    Tag::parse(["p", &archived]).unwrap(),
+                ])
+                .sign_with_keys(&relay_keys)
+                .unwrap();
+            let snapshot_json = serde_json::to_value(&snapshot).unwrap();
+
+            let router = Router::new()
+                .route(
+                    "/",
+                    get(move || {
+                        let self_hex = self_hex.clone();
+                        async move { Json(serde_json::json!({ "self": self_hex })) }
+                    }),
+                )
+                .route(
+                    "/query",
+                    post(move || {
+                        let snapshot_json = snapshot_json.clone();
+                        async move { Json(serde_json::json!([snapshot_json])) }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, router).await.ok();
+            });
+            format!("ws://{addr}")
+        }
+
+        let relay_a_keys = Keys::generate();
+        let relay_b_keys = Keys::generate();
+        // Distinct archived pubkeys, unrelated to either relay's signing key —
+        // nostr 0.37's EventBuilder silently drops a `p` tag that references the
+        // event's own signer, so the archived key must not equal the relay key.
+        let archived_on_a = Keys::generate().public_key().to_hex();
+        let archived_on_b = Keys::generate().public_key().to_hex();
+        let relay_a = spawn_relay(relay_a_keys, archived_on_a.clone()).await;
+        let relay_b = spawn_relay(relay_b_keys, archived_on_b.clone()).await;
+
+        let state = build_app_state();
+
+        // Capture relay A, then swap the override to relay B before the fetch.
+        *state.relay_url_override.lock().unwrap() = Some(relay_a.clone());
+        let target = capture_relay_target(&state);
+        *state.relay_url_override.lock().unwrap() = Some(relay_b.clone());
+
+        let archived = fetch_archived_pubkeys_at(&state, &target).await;
+
+        assert_eq!(
+            archived,
+            vec![archived_on_a],
+            "signer and snapshot must both come from the captured relay A, \
+             never the mutated override (relay B)"
+        );
+        reset_rate_limit_gate();
+    }
+
+    /// Spawn a loopback `/events` relay that answers every submit with the
+    /// given `accepted` verdict, so the archive/unarchive cores see a real
+    /// success or rejection over the wire. Returns the `ws://` base.
+    ///
+    /// The literal `/events` route below is why this file carries an
+    /// `EVENTS_INVENTORY` row (one occurrence, zero guard calls): a test
+    /// loopback, never a production egress site.
+    #[cfg(not(target_os = "windows"))]
+    async fn spawn_submit_relay(accepted: bool) -> String {
+        use axum::{routing::post, Json, Router};
+
+        let router = Router::new()
+            .route(
+                "/events",
+                post(move || async move {
+                    Json(serde_json::json!({
+                        "event_id": "e".repeat(64),
+                        "accepted": accepted,
+                        "message": if accepted { "" } else { "rejected by relay" },
+                    }))
+                }),
+            )
+            // The cores resolve the owner-of-agent auth tag first, which reads
+            // the target's live kind:0; answer with an empty result set so that
+            // read resolves to "no owner tag" without a live upstream relay.
+            .route("/query", post(|| async { Json(serde_json::json!([])) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        format!("ws://{addr}")
+    }
+
+    /// Regression for the outsider-reported item 1, archive site: a successful
+    /// `kind:9035` archive MUST trigger nest regeneration, and a rejected
+    /// submit MUST NOT. This drives the production [`archive_identity_core`]
+    /// (the exact seam the command wrapper delegates to), forwarding a counting
+    /// hook against a loopback relay. RED-on-revert: replace the core's
+    /// forwarded `on_success` with `|| {}` and the "fires once" assertion fails;
+    /// this pins the archive command's callback independently of unarchive.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn archive_core_fires_regen_only_on_accepted_submit() {
+        use crate::app_state::build_app_state;
+        use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
+
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        let state = build_app_state();
+        let req = ArchiveRequest {
+            target_pubkey: Keys::generate().public_key().to_hex(),
+            content: String::new(),
+            reason: None,
+            replaced_by: None,
+        };
+
+        // Accepted archive → hook fires exactly once.
+        *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(true).await);
+        let regen = CountingRegen::default();
+        let response = archive_identity_core(&req, &state, &regen)
+            .await
+            .expect("accepted archive returns Ok");
+        assert!(response.accepted);
+        assert_eq!(
+            regen.count(),
+            1,
+            "an accepted archive must trigger regeneration exactly once"
+        );
+
+        // Rejected submit → error propagates, hook never fires.
+        *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(false).await);
+        let regen = CountingRegen::default();
+        let result = archive_identity_core(&req, &state, &regen).await;
+        assert!(result.is_err(), "a rejected archive must return an error");
+        assert_eq!(
+            regen.count(),
+            0,
+            "a rejected archive changed nothing, so regeneration must not fire"
+        );
+
+        reset_rate_limit_gate();
+    }
+
+    /// Regression for item 1, unarchive site: mirrors
+    /// [`archive_core_fires_regen_only_on_accepted_submit`] against the
+    /// `kind:9036` [`unarchive_identity_core`]. RED-on-revert: replace that
+    /// core's forwarded `on_success` with `|| {}` and this fails while the
+    /// archive test stays green — proving each command's callback is pinned
+    /// independently, not just the shared `submit_then_regenerate`.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn unarchive_core_fires_regen_only_on_accepted_submit() {
+        use crate::app_state::build_app_state;
+        use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
+
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        let state = build_app_state();
+        let req = UnarchiveRequest {
+            target_pubkey: Keys::generate().public_key().to_hex(),
+            content: String::new(),
+            reason: None,
+        };
+
+        // Accepted unarchive → hook fires exactly once.
+        *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(true).await);
+        let regen = CountingRegen::default();
+        let response = unarchive_identity_core(&req, &state, &regen)
+            .await
+            .expect("accepted unarchive returns Ok");
+        assert!(response.accepted);
+        assert_eq!(
+            regen.count(),
+            1,
+            "an accepted unarchive must trigger regeneration exactly once"
+        );
+
+        // Rejected submit → error propagates, hook never fires.
+        *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(false).await);
+        let regen = CountingRegen::default();
+        let result = unarchive_identity_core(&req, &state, &regen).await;
+        assert!(result.is_err(), "a rejected unarchive must return an error");
+        assert_eq!(
+            regen.count(),
+            0,
+            "a rejected unarchive changed nothing, so regeneration must not fire"
+        );
+
+        reset_rate_limit_gate();
     }
 }

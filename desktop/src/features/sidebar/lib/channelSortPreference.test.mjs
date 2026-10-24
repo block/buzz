@@ -2,13 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  DEFAULT_SORT_MODE,
-  DEFAULT_STORE,
   parseChannelSortPayload,
-  sectionSortGroupKey,
   sortChannelsForSidebar,
-  sortModeForGroup,
-  stripOrphanedSectionModes,
 } from "./channelSortPreference.ts";
 
 function makeChannel(id, name, lastMessageAt = null) {
@@ -78,97 +73,6 @@ test("parseChannelSortPayload: wrong version returns null", () => {
     null,
   );
 });
-
-test("parseChannelSortPayload: non-object input returns null", () => {
-  assert.equal(parseChannelSortPayload(null), null);
-  assert.equal(parseChannelSortPayload("alpha"), null);
-  assert.equal(parseChannelSortPayload(42), null);
-});
-
-// ── sortModeForGroup / defaults ──────────────────────────────────────────────
-
-test("default sort mode is alpha and default store has no overrides", () => {
-  assert.equal(DEFAULT_SORT_MODE, "alpha");
-  assert.deepEqual(DEFAULT_STORE.groups, {});
-});
-
-test("sortModeForGroup: unset group falls back to alpha", () => {
-  assert.equal(sortModeForGroup(DEFAULT_STORE, "channels"), "alpha");
-  assert.equal(sortModeForGroup(DEFAULT_STORE, "dms"), "alpha");
-});
-
-test("sortModeForGroup: set groups are independent", () => {
-  const store = {
-    version: 1,
-    groups: { channels: "recent", [sectionSortGroupKey("abc")]: "recent" },
-  };
-  assert.equal(sortModeForGroup(store, "channels"), "recent");
-  assert.equal(sortModeForGroup(store, sectionSortGroupKey("abc")), "recent");
-  assert.equal(sortModeForGroup(store, "forums"), "alpha");
-  assert.equal(sortModeForGroup(store, sectionSortGroupKey("xyz")), "alpha");
-});
-
-test("sectionSortGroupKey: namespaced by section id", () => {
-  assert.equal(sectionSortGroupKey("abc"), "section:abc");
-});
-
-// ── stripOrphanedSectionModes ────────────────────────────────────────────────
-
-test("stripOrphanedSectionModes: drops modes for deleted sections", () => {
-  const store = {
-    version: 1,
-    groups: {
-      channels: "recent",
-      [sectionSortGroupKey("live")]: "recent",
-      [sectionSortGroupKey("deleted")]: "alpha",
-    },
-  };
-  assert.deepEqual(stripOrphanedSectionModes(store, ["live"]), {
-    version: 1,
-    groups: { channels: "recent", [sectionSortGroupKey("live")]: "recent" },
-  });
-});
-
-test("stripOrphanedSectionModes: fixed groups survive with no live sections", () => {
-  const store = {
-    version: 1,
-    groups: {
-      starred: "recent",
-      channels: "alpha",
-      forums: "recent",
-      dms: "recent",
-      [sectionSortGroupKey("gone")]: "recent",
-    },
-  };
-  assert.deepEqual(stripOrphanedSectionModes(store, []), {
-    version: 1,
-    groups: {
-      starred: "recent",
-      channels: "alpha",
-      forums: "recent",
-      dms: "recent",
-    },
-  });
-});
-
-test("stripOrphanedSectionModes: returns same reference when nothing is stale", () => {
-  const store = {
-    version: 1,
-    groups: { channels: "recent", [sectionSortGroupKey("live")]: "recent" },
-  };
-  assert.equal(stripOrphanedSectionModes(store, ["live", "other"]), store);
-});
-
-test("stripOrphanedSectionModes: does not mutate the input store", () => {
-  const store = {
-    version: 1,
-    groups: { [sectionSortGroupKey("gone")]: "recent" },
-  };
-  stripOrphanedSectionModes(store, []);
-  assert.deepEqual(store.groups, { [sectionSortGroupKey("gone")]: "recent" });
-});
-
-// ── sortChannelsForSidebar ───────────────────────────────────────────────────
 
 test("alpha: sorts case-insensitively with deterministic code-unit collation", () => {
   const sorted = sortChannelsForSidebar(

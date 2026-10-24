@@ -49,7 +49,7 @@ final class NativeAttachmentPopoverViewController:
   private var isFinishing = false
   private var didNotifyDismissal = false
   private var keyboardDismissalOffset: CGFloat = 0
-  private var menuStackHeightConstraint: NSLayoutConstraint?
+  var menuStackHeightConstraint: NSLayoutConstraint?
 
   var onDismiss: (() -> Void)?
 
@@ -164,86 +164,6 @@ final class NativeAttachmentPopoverViewController:
     notifyDismissalIfNeeded()
   }
 
-  private func makeMenuView() -> UIView {
-    let container = UIView()
-    container.translatesAutoresizingMaskIntoConstraints = false
-
-    let scrollView = UIScrollView()
-    scrollView.alwaysBounceVertical = false
-    scrollView.translatesAutoresizingMaskIntoConstraints = false
-    container.addSubview(scrollView)
-
-    let stack = UIStackView()
-    stack.axis = .vertical
-    stack.distribution = .fillEqually
-    stack.spacing = NativeAttachmentMenuLayout.itemSpacing
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    scrollView.addSubview(stack)
-    let stackHeightConstraint = stack.heightAnchor.constraint(
-      equalToConstant: NativeAttachmentMenuLayout.itemsHeight(
-        compatibleWith: traitCollection
-      )
-    )
-    menuStackHeightConstraint = stackHeightConstraint
-    NSLayoutConstraint.activate([
-      scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-      scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-      scrollView.topAnchor.constraint(equalTo: container.topAnchor),
-      scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-      stack.leadingAnchor.constraint(
-        equalTo: scrollView.frameLayoutGuide.leadingAnchor,
-        constant: NativeAttachmentMenuLayout.contentPadding
-      ),
-      stack.trailingAnchor.constraint(
-        equalTo: scrollView.frameLayoutGuide.trailingAnchor,
-        constant: -NativeAttachmentMenuLayout.contentPadding
-      ),
-      stack.topAnchor.constraint(
-        equalTo: scrollView.contentLayoutGuide.topAnchor,
-        constant: NativeAttachmentMenuLayout.contentPadding
-      ),
-      stack.bottomAnchor.constraint(
-        equalTo: scrollView.contentLayoutGuide.bottomAnchor,
-        constant: -NativeAttachmentMenuLayout.contentPadding
-      ),
-      stackHeightConstraint,
-    ])
-
-    stack.addArrangedSubview(
-      makeNativeAttachmentMenuButton(
-        title: "Camera",
-        symbol: "camera",
-        action: { [weak self] in self?.showCamera() }
-      )
-    )
-    stack.addArrangedSubview(
-      makeNativeAttachmentMenuButton(
-        title: "Photos",
-        symbol: "photo.on.rectangle.angled",
-        action: { [weak self] in self?.showPhotos() }
-      )
-    )
-    stack.addArrangedSubview(
-      makeNativeAttachmentMenuButton(
-        title: "Video",
-        symbol: "video",
-        action: { [weak self] in
-          self?.finish(method: "pickVideo")
-        }
-      )
-    )
-    stack.addArrangedSubview(
-      makeNativeAttachmentMenuButton(
-        title: "Files",
-        symbol: "doc",
-        action: { [weak self] in
-          self?.finish(method: "pickFiles")
-        }
-      )
-    )
-    return container
-  }
-
   private func updateMenuLayout() {
     menuStackHeightConstraint?.constant =
       NativeAttachmentMenuLayout.itemsHeight(
@@ -254,7 +174,7 @@ final class NativeAttachmentPopoverViewController:
     }
   }
 
-  private func showPhotos() {
+  func showPhotos() {
     guard surface != .photos else { return }
     prepareForExpandedSurface()
     stopCamera()
@@ -314,7 +234,7 @@ final class NativeAttachmentPopoverViewController:
     transition(to: .photos, content: container)
   }
 
-  private func showCamera() {
+  func showCamera() {
     guard surface != .camera else { return }
     prepareForExpandedSurface()
     removePhotoPicker()
@@ -481,51 +401,6 @@ final class NativeAttachmentPopoverViewController:
 
       reveal()
     }
-  }
-
-  private func makeGlassControl(
-    title: String?,
-    symbol: String?,
-    accessibilityLabel: String,
-    prominent: Bool = false,
-    action: @escaping () -> Void
-  ) -> UIButton {
-    var configuration =
-      prominent
-      ? UIButton.Configuration.prominentGlass()
-      : UIButton.Configuration.glass()
-    configuration.title = title
-    if prominent {
-      configuration.baseBackgroundColor = .black
-    }
-    if let symbol {
-      configuration.image = UIImage(systemName: symbol)
-    }
-    configuration.imagePadding = 8
-    configuration.baseForegroundColor = .white
-    configuration.titleTextAttributesTransformer =
-      UIConfigurationTextAttributesTransformer { attributes in
-        var interAttributes = attributes
-        interAttributes.font = NativeAttachmentMenuTypography.font(
-          forTextStyle: .body
-        )
-        return interAttributes
-      }
-    configuration.contentInsets = NSDirectionalEdgeInsets(
-      top: 11,
-      leading: 15,
-      bottom: 11,
-      trailing: 15
-    )
-    let button = UIButton(
-      configuration: configuration,
-      primaryAction: UIAction { _ in
-        UISelectionFeedbackGenerator().selectionChanged()
-        action()
-      }
-    )
-    button.accessibilityLabel = accessibilityLabel
-    return button
   }
 
   private func makeCameraCaptureButton() -> UIButton {
@@ -1034,10 +909,11 @@ final class NativeAttachmentPopoverViewController:
     photoPickerViewController = nil
   }
 
-  private func finish(
+  func finish(
     method: String,
     arguments: Any? = nil,
-    temporaryPaths: [String] = []
+    temporaryPaths: [String] = [],
+    notifyBeforeDismissal: Bool = false
   ) {
     guard !isFinishing else {
       Self.removeTemporaryFiles(temporaryPaths)
@@ -1050,13 +926,20 @@ final class NativeAttachmentPopoverViewController:
     selectionTask?.cancel()
     selectionTask = nil
     stopCamera()
+    if notifyBeforeDismissal {
+      channel.invokeMethod(method, arguments: arguments) { _ in
+        Self.removeTemporaryFiles(temporaryPaths)
+      }
+    }
     dismiss(animated: true) { [weak self] in
       guard let self else {
         Self.removeTemporaryFiles(temporaryPaths)
         return
       }
-      self.channel.invokeMethod(method, arguments: arguments) { _ in
-        Self.removeTemporaryFiles(temporaryPaths)
+      if !notifyBeforeDismissal {
+        self.channel.invokeMethod(method, arguments: arguments) { _ in
+          Self.removeTemporaryFiles(temporaryPaths)
+        }
       }
       self.notifyDismissalIfNeeded()
     }

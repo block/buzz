@@ -7,10 +7,12 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'relay_provider.dart';
 
 const _mediaGetAuthKind = 24242;
-const _mediaGetAuthLifetimeSeconds = 600;
+const _mediaGetAuthLifetimeSeconds = 60;
 
 /// Re-sign this long before the cached auth event expires, so an in-flight
 /// request signed just before the boundary still lands well within validity.
+/// With a 60-second lifetime, the margin equals the lifetime: each request
+/// mints a fresh token (mint-per-request pattern for NIP-FI compliance).
 const _mediaGetAuthRefreshMarginSeconds = 60;
 
 /// Builds BUD-01 Blossom `t=get` auth headers for relay-host media URLs.
@@ -19,14 +21,17 @@ const _mediaGetAuthRefreshMarginSeconds = 60;
 /// so callers can safely use this on arbitrary profile/custom-emoji URLs without
 /// leaking Buzz credentials to third-party hosts.
 ///
-/// The signed header is memoized until [_mediaGetAuthRefreshMarginSeconds]
-/// before expiry: repeated calls return the byte-identical map instead of
-/// producing a fresh Schnorr signature per widget build. The service itself is
-/// rebuilt (dropping the memo) whenever the relay config — base URL or signing
-/// identity — changes, via [mediaGetAuthServiceProvider].
+/// With a 60-second proof lifetime the refresh margin equals the lifetime, so
+/// `_refreshAt == signedAt` and the cache never hits: every call mints a fresh
+/// proof (mint-per-request pattern). This is intentional for NIP-FI compliance
+/// — caching a 60-second token is staleness-prone and provides no meaningful
+/// reduction in signing work. The service itself is rebuilt whenever the relay
+/// config — base URL or signing identity — changes, via
+/// [mediaGetAuthServiceProvider].
 class MediaGetAuthService {
   final String _baseUrl;
   final String? _nsec;
+  final String? _pubkey;
   final DateTime Function() _now;
 
   Map<String, String>? _cachedHeaders;
@@ -35,9 +40,11 @@ class MediaGetAuthService {
   MediaGetAuthService({
     required String baseUrl,
     required String? nsec,
+    String? pubkey,
     DateTime Function()? now,
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
+       _pubkey = pubkey,
        _now = now ?? DateTime.now;
 
   bool isRelayMediaUrl(String url) {
@@ -118,6 +125,8 @@ class MediaGetAuthService {
       content: 'Get buzz-media',
       tags: tags,
       secretKey: privkeyHex,
+      // Deriving the pubkey costs about a third of a signature, per image.
+      pubkey: _pubkey,
       verify: false,
     );
   }
@@ -125,7 +134,11 @@ class MediaGetAuthService {
 
 final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
   final config = ref.watch(relayConfigProvider);
-  return MediaGetAuthService(baseUrl: config.baseUrl, nsec: config.nsec);
+  return MediaGetAuthService(
+    baseUrl: config.baseUrl,
+    nsec: config.nsec,
+    pubkey: ref.watch(myPubkeyProvider),
+  );
 });
 
 Map<String, String> mediaGetHeadersFor(WidgetRef ref, String url) {

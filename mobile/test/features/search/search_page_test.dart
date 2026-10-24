@@ -1,136 +1,191 @@
+import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
-import 'package:buzz/features/profile/user_cache_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/search/recent_searches_provider.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/search/search_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
-import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/widget_helpers.dart';
 
 void main() {
-  testWidgets('reselecting Search uses the field activation path', (
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final scale in [1.0, 2.0]) {
+      testWidgets('search controls stay fixed on $platform at scale $scale', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = platform;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            overrides: [
+              searchProvider.overrideWith(
+                () => _FakeSearchNotifier(const SearchState.initial()),
+              ),
+              recentSearchesProvider.overrideWith(
+                () => _FakeRecentSearchesNotifier(const []),
+              ),
+              profileProvider.overrideWith(() => _FakeProfileNotifier()),
+            ],
+            child: MediaQuery(
+              data: MediaQueryData(
+                textScaler: TextScaler.linear(scale),
+                padding: const EdgeInsets.only(top: 59),
+              ),
+              child: const SearchPage(),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final field = find.byKey(const Key('search-field-container'));
+        final filters = find.byKey(const Key('search-header-filters'));
+        final close = find.byKey(const Key('search-close'));
+        final fieldRect = tester.getRect(field);
+        final filtersRect = tester.getRect(filters);
+        expect(
+          find.descendant(of: field, matching: find.text('Search')),
+          findsOneWidget,
+        );
+        expect(find.text('Cancel'), findsNothing);
+        expect(fieldRect.top, greaterThanOrEqualTo(59));
+        expect(tester.getRect(close).right, lessThan(fieldRect.left));
+        expect(tester.getSize(close), const Size(48, 48));
+        for (final label in ['All', 'Messages', 'Channels', 'People']) {
+          expect(
+            platform == TargetPlatform.iOS
+                ? find.byTooltip(label)
+                : find.text(label).hitTestable(),
+            findsOneWidget,
+          );
+        }
+        final input = tester.element(find.byType(TextField));
+        await tester.tap(find.byType(TextField));
+        await tester.pumpAndSettle();
+        expect(tester.getRect(field), fieldRect);
+        expect(tester.getRect(filters), filtersRect);
+        expect(tester.element(find.byType(TextField)), same(input));
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
+          isTrue,
+        );
+        await tester.enterText(find.byType(TextField), 'design');
+        if (platform == TargetPlatform.iOS) {
+          await _pressNativeFilter(tester, 'Channels');
+        } else {
+          await tester.tap(find.text('Channels'));
+        }
+        await tester.pumpAndSettle();
+        expect(tester.getRect(field), fieldRect);
+        expect(tester.getRect(filters), filtersRect);
+        expect(
+          tester
+              .widget<ConcentricSheetSurface>(
+                find.byType(ConcentricSheetSurface),
+              )
+              .usesGlass,
+          isTrue,
+        );
+        expect(
+          find.byType(IosGlassNavigationButton),
+          platform == TargetPlatform.iOS ? findsNWidgets(5) : findsNothing,
+        );
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        debugDefaultTargetPlatformOverride = null;
+      });
+    }
+  }
+
+  testWidgets('iOS native filter press selects Channels and filters results', (
     tester,
   ) async {
-    final tabReselection = ValueNotifier(0);
-    addTearDown(tabReselection.dispose);
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final state = SearchState(
+      query: 'design',
+      channelResults: [
+        Channel(
+          id: 'design',
+          name: 'design',
+          channelType: 'stream',
+          visibility: 'open',
+          description: 'Design discussion',
+          memberCount: 4,
+          createdBy: 'test',
+          createdAt: DateTime(2025),
+          isMember: true,
+        ),
+      ],
+      userResults: const [DirectoryUser(pubkey: 'maya', displayName: 'Maya')],
+    );
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
-          searchProvider.overrideWith(
-            () => _FakeSearchNotifier(const SearchState.initial()),
-          ),
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
           recentSearchesProvider.overrideWith(
             () => _FakeRecentSearchesNotifier(const []),
           ),
           profileProvider.overrideWith(() => _FakeProfileNotifier()),
-        ],
-        child: SearchPage(tabReselection: tabReselection),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byKey(const Key('search-cancel')), findsNothing);
-    tabReselection.value++;
-    await tester.pump();
-    await tester.pump();
-
-    expect(find.byKey(const Key('search-cancel')), findsOneWidget);
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).focusNode?.hasFocus,
-      isTrue,
-    );
-
-    final focusNode = tester
-        .widget<TextField>(find.byType(TextField))
-        .focusNode!;
-    // Reproduce the real tab-tap ordering where the destination callback can
-    // run immediately before the same pointer gesture dismisses the field.
-    tabReselection.value++;
-    focusNode.unfocus();
-    await tester.pump();
-    await tester.pump();
-
-    expect(find.byKey(const Key('search-cancel')), findsOneWidget);
-    expect(focusNode.hasFocus, isTrue);
-    expect(
-      tester
-          .widget<AnimatedOpacity>(
-            find.byKey(const Key('search-header-title-opacity')),
-          )
-          .opacity,
-      0,
-      reason: 'The tab gesture must not paint a close-and-reopen flicker.',
-    );
-  });
-
-  testWidgets('uses the shared frosted navigation surface', (tester) async {
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [
-          searchProvider.overrideWith(
-            () => _FakeSearchNotifier(const SearchState.initial()),
-          ),
-          recentSearchesProvider.overrideWith(
-            () => _FakeRecentSearchesNotifier(const []),
-          ),
-          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+          channelsProvider.overrideWith(() => _FakeChannelsNotifier()),
         ],
         child: const SearchPage(),
       ),
     );
     await tester.pumpAndSettle();
+    final channel = find.byKey(const ValueKey('search-channel-row-design'));
+    final person = find.byKey(const ValueKey('search-person-row-maya'));
+    expect(channel, findsOneWidget);
+    expect(person, findsOneWidget);
+    expect(
+      tester.widget<IosGlassNavigationButton>(_nativeFilter('All')).isSelected,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<IosGlassNavigationButton>(_nativeFilter('Channels'))
+          .isSelected,
+      isFalse,
+    );
 
-    final appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
-    expect(appBar.gradient, isNull);
-    expect(appBar.frosted, isTrue);
-    expect(appBar.showBottomDivider, isTrue);
-    expect(appBar.bottomDividerOpacity, 0.06);
-    expect(appBar.bottomHeight, 57);
-    expect(appBar.leading, isNull);
-    expect(find.text('Search'), findsOneWidget);
-    final promptText = find.descendant(
-      of: find.byKey(const Key('search-field-container')),
-      matching: find.byType(Text),
+    await _pressNativeFilter(tester, 'Channels');
+    await tester.pumpAndSettle();
+
+    expect(
+      tester
+          .widget<IosGlassNavigationButton>(_nativeFilter('Channels'))
+          .isSelected,
+      isTrue,
     );
     expect(
-      tester.getRect(promptText).left,
-      closeTo(
-        tester.getRect(find.byKey(const Key('search-moving-icon'))).right +
-            Grid.xxs,
-        0.01,
-      ),
+      tester.widget<IosGlassNavigationButton>(_nativeFilter('All')).isSelected,
+      isFalse,
     );
-    expect(
-      tester.getRect(promptText).center.dy,
-      closeTo(
-        tester
-            .getRect(find.byKey(const Key('search-field-container')))
-            .center
-            .dy,
-        0.5,
-      ),
-    );
+    expect(channel, findsOneWidget);
+    expect(person, findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('empty state preserves large accessible text scaling', (
+  testWidgets('X dismisses search while the keyboard is focused', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(320, 640);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -143,233 +198,31 @@ void main() {
           profileProvider.overrideWith(() => _FakeProfileNotifier()),
         ],
         child: Builder(
-          builder: (context) => MediaQuery(
-            data: MediaQuery.of(
+          builder: (context) => TextButton(
+            onPressed: () => Navigator.of(
               context,
-            ).copyWith(textScaler: const TextScaler.linear(2)),
-            child: const SearchPage(),
+            ).push(MaterialPageRoute<void>(builder: (_) => const SearchPage())),
+            child: const Text('Open search'),
           ),
         ),
       ),
     );
+    await tester.tap(find.text('Open search'));
     await tester.pumpAndSettle();
-
-    final appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
-    final titleStyle = appBar.titleStyle!;
-    expect(titleStyle.fontSize, 22);
-    expect(
-      tester
-          .getSize(
-            find
-                .descendant(
-                  of: find.byType(FrostedAppBar),
-                  matching: find.byType(ClipRect),
-                )
-                .first,
-          )
-          .height,
-      closeTo(
-        frostedAppBarHeight(
-          tester.element(find.byType(FrostedAppBar)),
-          titleStyle: titleStyle,
-          bottomHeight: appBar.bottomHeight,
-        ),
-        0.01,
-      ),
-    );
-    final emptyState = find.byKey(const Key('search-empty-state'));
-    final searchField = find.byKey(const Key('search-field-container'));
-    final searchFieldContext = tester.element(searchField);
-    final bodyStyle = Theme.of(searchFieldContext).textTheme.bodyMedium!;
-    final scaledLineHeight =
-        MediaQuery.textScalerOf(searchFieldContext).scale(bodyStyle.fontSize!) *
-        bodyStyle.height!;
-
-    expect(
-      find.descendant(of: emptyState, matching: find.byType(FittedBox)),
-      findsNothing,
-    );
-    expect(
-      tester.getSize(searchField).height,
-      greaterThanOrEqualTo(scaledLineHeight + Grid.xxs * 2),
-    );
-    final prompt = tester.widget<Text>(
-      find.descendant(
-        of: find.byKey(const Key('search-field-container')),
-        matching: find.byType(Text),
-      ),
-    );
-    expect(prompt.style?.fontSize, 15);
-    expect(prompt.maxLines, 1);
-    expect(prompt.overflow, TextOverflow.ellipsis);
-    expect(
-      tester
-          .getSize(find.descendant(of: emptyState, matching: find.byType(Text)))
-          .height,
-      greaterThan(32),
-    );
-    expect(tester.takeException(), isNull);
+    await tester.tap(find.byType(TextField));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'draft');
+    await tester.tap(find.byTooltip('Close search'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SearchPage), findsNothing);
+    expect(find.text('Open search'), findsOneWidget);
   });
 
-  testWidgets('search filters grow with accessible text', (tester) async {
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [
-          searchProvider.overrideWith(
-            () => _FakeSearchNotifier(const SearchState.initial()),
-          ),
-          recentSearchesProvider.overrideWith(
-            () => _FakeRecentSearchesNotifier(const []),
-          ),
-          profileProvider.overrideWith(() => _FakeProfileNotifier()),
-        ],
-        child: Builder(
-          builder: (context) => MediaQuery(
-            data: MediaQuery.of(
-              context,
-            ).copyWith(textScaler: const TextScaler.linear(2)),
-            child: const SearchPage(),
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const Key('search-field')));
-    await tester.pumpAndSettle();
-
-    final filters = find.byKey(const Key('search-header-filters'));
-    final activeField = find.byKey(const Key('search-field-container'));
-    final cancel = find.byKey(const Key('search-cancel'));
-    expect(filters, findsOneWidget);
-    expect(cancel, findsOneWidget);
-    expect(
-      tester.getRect(activeField).right,
-      lessThanOrEqualTo(tester.getRect(cancel).left),
-      reason: 'Scaled Cancel must not overlap the active search field.',
-    );
-    expect(tester.getSize(filters).height, greaterThan(Grid.xl));
-    expect(
-      tester.getSize(filters).height,
-      greaterThanOrEqualTo(
-        tester.getSize(find.text('Messages')).height + Grid.xs * 2,
-      ),
-    );
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('focus slides Cancel in beside the search field', (tester) async {
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [
-          searchProvider.overrideWith(
-            () => _FakeSearchNotifier(const SearchState.initial()),
-          ),
-          recentSearchesProvider.overrideWith(
-            () => _FakeRecentSearchesNotifier(const []),
-          ),
-          profileProvider.overrideWith(() => _FakeProfileNotifier()),
-        ],
-        child: const SearchPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final searchField = find.byKey(const Key('search-field'));
-    final editingField = find.byType(TextField);
-    final searchFieldContainer = find.byKey(
-      const Key('search-field-container'),
-    );
-    final unfocusedWidth = tester.getSize(searchFieldContainer).width;
-    final unfocusedTop = tester.getRect(searchFieldContainer).top;
-    expect(find.byKey(const Key('search-cancel')), findsNothing);
-    await tester.tap(searchField);
-    await tester.pump();
-
-    final cancel = find.byKey(const Key('search-cancel'));
-    expect(cancel, findsOneWidget);
-    expect(
-      tester.getSize(cancel).height,
-      greaterThanOrEqualTo(Grid.xl),
-      reason: 'Cancel must keep a 48dp touch target.',
-    );
-    final input = tester.widget<TextField>(editingField);
-    expect(input.decoration?.hintText, isNull);
-    expect(input.textInputAction, TextInputAction.search);
-    expect(
-      input.focusNode?.hasFocus,
-      isTrue,
-      reason: 'Tapping the idle search field opens the native keyboard.',
-    );
-    final enteringSlide = tester.widget<SlideTransition>(
-      find.ancestor(of: cancel, matching: find.byType(SlideTransition)).first,
-    );
-    expect(enteringSlide.position.value.dx, greaterThan(0));
-
-    await tester.pump(const Duration(milliseconds: 160));
-    final focusedWidth = tester.getSize(searchFieldContainer).width;
-    final focusedRect = tester.getRect(searchFieldContainer);
-    expect(focusedWidth, lessThan(unfocusedWidth));
-    expect(
-      focusedRect.top,
-      lessThan(unfocusedTop),
-      reason: 'The active field translates upward into the title row.',
-    );
-    expect(find.byKey(const Key('search-header-filters')), findsOneWidget);
-    final settledSlide = tester.widget<SlideTransition>(
-      find.ancestor(of: cancel, matching: find.byType(SlideTransition)).first,
-    );
-    expect(settledSlide.position.value, Offset.zero);
-    final movingIcon = find.byKey(const Key('search-moving-icon'));
-    final iconScale = tester.widget<AnimatedScale>(
-      find.ancestor(of: movingIcon, matching: find.byType(AnimatedScale)),
-    );
-    final movingField = tester.widget<AnimatedPositioned>(
-      find.ancestor(of: movingIcon, matching: find.byType(AnimatedPositioned)),
-    );
-    expect(iconScale.scale, lessThan(1));
-    expect(movingField.top, Grid.half);
-    final appBarRect = tester.getRect(find.byType(FrostedAppBar));
-    expect(
-      appBarRect.contains(focusedRect.center),
-      isTrue,
-      reason: 'The translated field remains inside the app bar hit-test box.',
-    );
-
-    await tester.enterText(editingField, 'design');
-    await tester.tap(cancel);
-    await tester.pump();
-
-    final titleOpacity = tester.widget<AnimatedOpacity>(
-      find.byKey(const Key('search-header-title-opacity')),
-    );
-    expect(
-      titleOpacity.opacity,
-      1,
-      reason:
-          'The title fades beneath the returning field instead of appearing after it.',
-    );
-    await tester.pump(const Duration(milliseconds: 159));
-    expect(
-      tester
-          .widget<AnimatedOpacity>(
-            find.byKey(const Key('search-header-title-opacity')),
-          )
-          .opacity,
-      1,
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byKey(const Key('search-cancel')), findsNothing);
-    expect(
-      tester.getSize(searchFieldContainer).width,
-      closeTo(unfocusedWidth, 0.01),
-    );
-  });
-
-  testWidgets('keeps the search prompt calm until it is focused', (
+  testWidgets('reselecting Search restores input focus without moving tabs', (
     tester,
   ) async {
+    final reselection = ValueNotifier(0);
+    addTearDown(reselection.dispose);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -381,25 +234,24 @@ void main() {
           ),
           profileProvider.overrideWith(() => _FakeProfileNotifier()),
         ],
-        child: const SearchPage(),
+        child: SearchPage(tabReselection: reselection),
       ),
     );
     await tester.pumpAndSettle();
-
-    final searchField = find.byKey(const Key('search-field'));
-    final searchFieldContainer = find.byKey(
-      const Key('search-field-container'),
+    final filters = tester.getRect(
+      find.byKey(const Key('search-header-filters')),
     );
-    expect(find.text('Messages'), findsNothing);
-    expect(tester.getSize(searchFieldContainer).height, greaterThan(36));
-
-    await tester.tap(searchField);
+    reselection.value++;
     await tester.pumpAndSettle();
-
-    expect(find.text('Messages'), findsOneWidget);
+    final focus = tester.widget<TextField>(find.byType(TextField)).focusNode!;
+    expect(focus.hasFocus, isTrue);
+    reselection.value++;
+    focus.unfocus();
+    await tester.pumpAndSettle();
+    expect(focus.hasFocus, isTrue);
     expect(
-      tester.getSize(searchFieldContainer).height,
-      greaterThanOrEqualTo(36),
+      tester.getRect(find.byKey(const Key('search-header-filters'))),
+      filters,
     );
   });
 
@@ -426,7 +278,7 @@ void main() {
     await tester.tap(searchField);
     await tester.pumpAndSettle();
     await tester.enterText(searchField, 'draft');
-    await tester.tap(find.byKey(const Key('search-cancel')));
+    await tester.enterText(find.byKey(const Key('search-field')), '');
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('recent-searches-list')), findsNothing);
 
@@ -434,8 +286,12 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(searchField, 'design systems');
     await tester.testTextInput.receiveAction(TextInputAction.search);
-    await tester.pump();
-    await tester.tap(find.byKey(const Key('search-cancel')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('search-close')), findsOneWidget);
+    // Submission dismisses editing immediately. Reopen before clearing.
+    await tester.tap(searchField);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('search-field')), '');
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('recent-searches-list')), findsOneWidget);
@@ -484,7 +340,7 @@ void main() {
     expect(input.focusNode?.hasFocus, isTrue);
     expect(find.text("No results for 'launch plan'"), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('search-cancel')));
+    await tester.enterText(find.byKey(const Key('search-field')), '');
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('recent-search-0')), findsOneWidget);
     expect(find.text('launch plan'), findsOneWidget);
@@ -588,10 +444,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final results = tester.widget<ListView>(
-      find.byKey(const Key('search-results-list')),
+    final resultsPadding = tester.widget<SliverPadding>(
+      find.descendant(
+        of: find.byKey(const Key('search-results-list')),
+        matching: find.byType(SliverPadding),
+      ),
     );
-    final padding = results.padding! as EdgeInsets;
+    final padding = resultsPadding.padding as EdgeInsets;
 
     expect(padding.bottom, Grid.xl + footerClearance + keyboardInset);
   });
@@ -636,6 +495,44 @@ void main() {
     expect(noResults, findsOneWidget);
     expect(tester.getBottomLeft(message).dy, lessThan(keyboardTop));
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('same-name people results get distinct labels', (tester) async {
+    final first = 'a' * 64, second = 'b' * 64;
+    final state = SearchState(
+      query: 'scout',
+      channelResults: const [],
+      userResults: [
+        DirectoryUser(pubkey: first, displayName: 'Scout'),
+        DirectoryUser(pubkey: second, displayName: 'Scout'),
+      ],
+      messageResults: const [],
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+          channelsProvider.overrideWith(() => _FakeChannelsNotifier()),
+          userCacheProvider.overrideWith(
+            () => _FakeUserCacheNotifier(
+              UserProfile(pubkey: first, displayName: 'Scout'),
+            ),
+          ),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    String title(String pubkey) => tester
+        .widget<Text>(find.byKey(ValueKey('search-person-title-$pubkey')))
+        .data!;
+    expect(title(first), isNot(title(second)));
+    expect(title(first), isNot('Scout'));
   });
 
   testWidgets('uses compact content styles and keeps message time by author', (
@@ -863,7 +760,8 @@ void main() {
       memberCount: 2,
       isMember: true,
     );
-    const agentPubkey = 'agent-pubkey';
+    // Mention tags carry exact 64-hex keys; readers ignore anything else.
+    final agentPubkey = 'a9' * 32;
     const cachedProfile = UserProfile(pubkey: 'author-pubkey');
     final state = SearchState(
       query: 'helper',
@@ -901,7 +799,7 @@ void main() {
             channel.id,
           ).overrideWith((ref) async => {agentPubkey}),
           agentDirectoryDisplayNamesProvider.overrideWith(
-            (ref) => const {agentPubkey: 'Helper Bot'},
+            (ref) => {agentPubkey: 'Helper Bot'},
           ),
         ],
         child: const SearchPage(),
@@ -912,10 +810,68 @@ void main() {
     final content = tester.widget<MessageContent>(
       find.byKey(const ValueKey('search-message-body-message-1')),
     );
-    expect(content.mentionNames, const {agentPubkey: 'Helper Bot'});
+    expect(content.mentionNames, {agentPubkey: 'Helper Bot'});
     expect(content.agentMentionPubkeys, contains(agentPubkey));
-    expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+    expect(find.byType(BuzzAgentIcon), findsOneWidget);
   });
+
+  testWidgets('does not label an unjoined channel as having zero members', (
+    tester,
+  ) async {
+    final state = SearchState(
+      query: 'community',
+      channelResults: [
+        Channel(
+          id: 'community-help',
+          name: 'community-help',
+          channelType: 'stream',
+          visibility: 'open',
+          description: 'Help from the community',
+          createdBy: 'test',
+          createdAt: DateTime(2025),
+          memberCount: 0,
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(() => _FakeSearchNotifier(state)),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Open'), findsOneWidget);
+    expect(find.text('0 members'), findsNothing);
+  });
+}
+
+Finder _nativeFilter(String label) => find.byWidgetPredicate(
+  (widget) => widget is IosGlassNavigationButton && widget.label == label,
+);
+
+Future<void> _pressNativeFilter(WidgetTester tester, String label) async {
+  final view = tester.widget<UiKitView>(
+    find.descendant(of: _nativeFilter(label), matching: find.byType(UiKitView)),
+  );
+  // Simulate the engine creating this view, then deliver the native tap through
+  // the same per-view channel used by the production UIKit control.
+  const viewId = 42;
+  view.onPlatformViewCreated!(viewId);
+  await tester.pump();
+  const channel = MethodChannel('buzz/navigation_glass/$viewId');
+  await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+    channel.name,
+    channel.codec.encodeMethodCall(const MethodCall('pressed')),
+    (_) {},
+  );
 }
 
 class _FakeSearchNotifier extends SearchNotifier {

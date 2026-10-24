@@ -3,8 +3,8 @@
  * overlay work).
  *
  * Exercises:
- *   - Agent grid card and list-row badges at all three badge sites.
- *   - Hover tooltip with itemised before→after diff (capped at 6 + "and N more").
+ *   - Agent grid restart actions without a duplicate status badge.
+ *   - Profile badge tooltip with itemised before→after diff.
  *   - Runtime-tab banner with full uncapped diff list.
  *   - Side-panel badge visible on the default (Info) tab — not only Runtime.
  *   - DOM validity: tooltip trigger has no <button> ancestor.
@@ -80,31 +80,12 @@ const PERSONA_AGENT = {
   restartDiff: DIFF_ENTRIES,
 };
 
-/** Running agent with no config drift — badge must be absent. */
+/** Running agent with no config drift — restart action must be absent. */
 const NO_DRIFT_AGENT = {
   pubkey: TEST_IDENTITIES.tyler.pubkey,
   name: "Stable Agent",
   status: "running" as const,
   needsRestart: false,
-};
-
-/** Agent with only 3 diff entries — tooltip shows all, no "and N more". */
-const SHORT_DIFF_AGENT = {
-  pubkey: TEST_IDENTITIES.charlie.pubkey,
-  name: "Short Diff Agent",
-  status: "running" as const,
-  needsRestart: true,
-  restartDiff: [
-    {
-      field: "model",
-      change: { kind: "value" as const, before: null, after: "gpt-5" },
-    },
-    {
-      field: "some_unknown_field",
-      change: { kind: "value" as const, before: "old", after: "new" },
-    },
-    { field: "env.MY_TOKEN", change: { kind: "removed" as const } },
-  ],
 };
 
 /**
@@ -122,6 +103,21 @@ const INACTIVE_FRIENDLY_ERROR_AGENT = {
   lastErrorCode: -32002,
 };
 
+const RESTART_AGENT = {
+  pubkey: "cd".repeat(32),
+  name: "Restart Agent",
+  status: "running" as const,
+  needsRestart: true,
+  restartDiff: DIFF_ENTRIES,
+};
+
+const START_AGENT = {
+  pubkey: "ef".repeat(32),
+  name: "Start Agent",
+  status: "stopped" as const,
+  needsRestart: false,
+};
+
 async function gotoAgentsView(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.getByTestId("open-agents-view")).toBeVisible({
@@ -130,6 +126,86 @@ async function gotoAgentsView(page: import("@playwright/test").Page) {
   await page.getByTestId("open-agents-view").click();
   await expect(page.getByTestId("agents-library-personas")).toBeVisible({
     timeout: 10_000,
+  });
+}
+
+const WCAG_AA_NORMAL_TEXT_CONTRAST = 4.5;
+
+async function renderedTextContrast(
+  locator: import("@playwright/test").Locator,
+): Promise<number> {
+  return locator.evaluate((element) => {
+    type Rgba = { r: number; g: number; b: number; a: number };
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Could not create contrast test canvas");
+
+    const parseColor = (color: string): Rgba => {
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+      const [r, g, b, alpha] = context.getImageData(0, 0, 1, 1).data;
+      return { r, g, b, a: alpha / 255 };
+    };
+
+    const composite = (foreground: Rgba, background: Rgba): Rgba => {
+      const alpha = foreground.a + background.a * (1 - foreground.a);
+      if (alpha === 0) return { r: 0, g: 0, b: 0, a: 0 };
+
+      return {
+        r:
+          (foreground.r * foreground.a +
+            background.r * background.a * (1 - foreground.a)) /
+          alpha,
+        g:
+          (foreground.g * foreground.a +
+            background.g * background.a * (1 - foreground.a)) /
+          alpha,
+        b:
+          (foreground.b * foreground.a +
+            background.b * background.a * (1 - foreground.a)) /
+          alpha,
+        a: alpha,
+      };
+    };
+
+    const backgroundLayers: Rgba[] = [];
+    let current: Element | null = element;
+    while (current) {
+      backgroundLayers.push(
+        parseColor(window.getComputedStyle(current).backgroundColor),
+      );
+      current = current.parentElement;
+    }
+
+    let renderedBackground: Rgba = { r: 255, g: 255, b: 255, a: 1 };
+    for (const layer of backgroundLayers.reverse()) {
+      renderedBackground = composite(layer, renderedBackground);
+    }
+
+    const renderedForeground = composite(
+      parseColor(window.getComputedStyle(element).color),
+      renderedBackground,
+    );
+    const luminance = (color: Rgba) => {
+      const channels = [color.r, color.g, color.b].map((value) => {
+        const channel = value / 255;
+        return channel <= 0.04045
+          ? channel / 12.92
+          : ((channel + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+    };
+    const foregroundLuminance = luminance(renderedForeground);
+    const backgroundLuminance = luminance(renderedBackground);
+
+    return (
+      (Math.max(foregroundLuminance, backgroundLuminance) + 0.05) /
+      (Math.min(foregroundLuminance, backgroundLuminance) + 0.05)
+    );
   });
 }
 
@@ -159,17 +235,16 @@ test.describe("restart-diff screenshots", () => {
       `managed-agent-${STANDALONE_AGENT.pubkey}`,
     );
     await expect(agentCard).toBeVisible({ timeout: 10_000 });
-    await expect(
-      agentCard.getByText("Restart required", { exact: true }),
-    ).toBeVisible();
+    await expect(agentCard.getByText("Restart", { exact: true })).toBeVisible();
+    await expect(agentCard.getByTestId("restart-diff-badge")).toHaveCount(0);
 
     const stableCard = page.getByTestId(
       `managed-agent-${NO_DRIFT_AGENT.pubkey}`,
     );
     await expect(stableCard).toBeVisible({ timeout: 10_000 });
-    await expect(
-      stableCard.getByText("Restart required", { exact: true }),
-    ).toHaveCount(0);
+    await expect(stableCard.getByText("Restart", { exact: true })).toHaveCount(
+      0,
+    );
 
     await waitForAnimations(page);
     await agentCard.screenshot({
@@ -190,8 +265,9 @@ test.describe("restart-diff screenshots", () => {
     );
     await expect(personaCard).toBeVisible({ timeout: 10_000 });
     await expect(
-      personaCard.getByText("Restart required", { exact: true }),
+      personaCard.getByText("Restart", { exact: true }),
     ).toBeVisible();
+    await expect(personaCard.getByTestId("restart-diff-badge")).toHaveCount(0);
 
     await waitForAnimations(page);
     await personaCard.screenshot({
@@ -199,119 +275,101 @@ test.describe("restart-diff screenshots", () => {
     });
   });
 
-  // ── Tooltip on card badge + no-button-ancestor (B4: badge is sibling of the overlay button) ─
-
-  test("03-card-badge-tooltip-and-no-button-ancestor", async ({ page }) => {
+  test("03-running-restart-action", async ({ page }) => {
     await installMockBridge(page, {
-      managedAgents: [STANDALONE_AGENT, NO_DRIFT_AGENT],
+      managedAgents: [RESTART_AGENT],
     });
 
     await gotoAgentsView(page);
 
-    const agentCard = page.getByTestId(
-      `managed-agent-${STANDALONE_AGENT.pubkey}`,
-    );
+    const agentCard = page.getByTestId(`managed-agent-${RESTART_AGENT.pubkey}`);
     await expect(agentCard).toBeVisible({ timeout: 10_000 });
-
-    // B4: the tooltip trigger must have no <button> ancestor.
-    // In AgentIdentityCard the badge lives in a z-30 container that is a
-    // sibling of the z-10 overlay <button> — not a descendant of it.
-    const badgeLocator = agentCard.getByTestId("restart-diff-badge");
-    await expect(badgeLocator).toBeVisible();
-
-    const hasButtonAncestor = await badgeLocator.evaluate((el) => {
-      let node: Element | null = el.parentElement;
-      while (node) {
-        if (node.tagName === "BUTTON") return true;
-        node = node.parentElement;
-      }
-      return false;
-    });
-    expect(hasButtonAncestor).toBe(false);
-
-    // Hover to open tooltip
-    await badgeLocator.hover();
-    const tooltip = page.locator("[role=tooltip]");
-    await expect(tooltip).toBeVisible({ timeout: 5_000 });
-
-    // Tooltip is capped at 6 entries with "and 2 more" for 8-entry diff
-    await expect(tooltip.getByText("Model:")).toBeVisible();
-    await expect(tooltip.getByText("and 2 more")).toBeVisible();
-
-    // Array value rendered as JSON.stringify in the value slot
-    await expect(tooltip.getByText(/\["acp"\]/)).toBeVisible();
-
-    await waitForAnimations(page);
-    await page.screenshot({ path: `${SHOTS}/03-card-badge-tooltip.png` });
-  });
-
-  // ── Tooltip with short diff (no truncation) ─────────────────────────────────
-
-  test("04-card-tooltip-short-diff-no-truncation", async ({ page }) => {
-    await installMockBridge(page, {
-      managedAgents: [SHORT_DIFF_AGENT],
-    });
-
-    await gotoAgentsView(page);
-
-    const agentCard = page.getByTestId(
-      `managed-agent-${SHORT_DIFF_AGENT.pubkey}`,
+    const restartAction = page.getByTestId(
+      `agent-runtime-start-${RESTART_AGENT.pubkey}`,
     );
-    const badge = agentCard.getByTestId("restart-diff-badge");
-    await expect(badge).toBeVisible({ timeout: 10_000 });
-    await badge.hover();
-    const tooltip = page.locator("[role=tooltip]");
-    await expect(tooltip).toBeVisible({ timeout: 5_000 });
-
-    // All 3 entries visible
-    await expect(tooltip.getByText("Model:")).toBeVisible();
-    // Unknown field humanised generically
-    await expect(tooltip.getByText("Some unknown field:")).toBeVisible();
-    // No truncation line
-    await expect(tooltip.getByText(/and \d+ more/)).toHaveCount(0);
-
-    await waitForAnimations(page);
-    await page.screenshot({ path: `${SHOTS}/04-short-diff-no-truncation.png` });
-  });
-
-  // ── Keyboard focus shows tooltip ──────────────────────────────────────────
-
-  test("05-card-tooltip-keyboard-focus", async ({ page }) => {
-    await installMockBridge(page, {
-      managedAgents: [STANDALONE_AGENT],
-    });
-
-    await gotoAgentsView(page);
-
-    const badge = page
-      .getByTestId(`managed-agent-${STANDALONE_AGENT.pubkey}`)
-      .getByTestId("restart-diff-badge");
-    await badge.focus();
-    const tooltip = page.locator("[role=tooltip]");
-    await expect(tooltip).toBeVisible({ timeout: 5_000 });
-  });
-
-  // ── Persona card tooltip (AgentIdentityCard — pointer-events-auto) ─────────
-
-  test("06-persona-card-tooltip", async ({ page }) => {
-    await installMockBridge(page, {
-      activePersonaIds: ["builtin:fizz"],
-      managedAgents: [PERSONA_AGENT],
-    });
-
-    await gotoAgentsView(page);
-
-    const personaCard = page.getByTestId(
-      `persona-agent-row-${PERSONA_AGENT.personaId}`,
+    await expect(restartAction).toHaveText("Restart");
+    await expect(restartAction).toHaveAttribute("aria-label", "Restart Agent");
+    await expect(restartAction).toHaveClass(/bg-transparent/);
+    await expect(restartAction).toHaveClass(/text-amber-800/);
+    await expect(restartAction).toHaveClass(/dark:text-amber-400/);
+    await expect(restartAction.locator("svg")).toHaveCount(0);
+    await expect(restartAction).toHaveCSS("width", "72px");
+    await expect(restartAction).toHaveCSS("height", "36px");
+    await expect(agentCard.getByTestId("restart-diff-badge")).toHaveCount(0);
+    await expect(page.locator("html")).toHaveClass(/light/);
+    expect(await renderedTextContrast(restartAction)).toBeGreaterThanOrEqual(
+      WCAG_AA_NORMAL_TEXT_CONTRAST,
     );
-    const badge = personaCard.getByTestId("restart-diff-badge");
-    await expect(badge).toBeVisible({ timeout: 10_000 });
-    await badge.hover();
-    const tooltip = page.locator("[role=tooltip]");
-    await expect(tooltip).toBeVisible({ timeout: 5_000 });
 
     await waitForAnimations(page);
-    await page.screenshot({ path: `${SHOTS}/06-persona-card-tooltip.png` });
+    await agentCard.screenshot({
+      path: `${SHOTS}/03-running-restart-action.png`,
+    });
+  });
+
+  test("restart action meets WCAG AA contrast in dark mode", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("buzz-theme", "catppuccin-mocha");
+    });
+    await installMockBridge(page, {
+      managedAgents: [RESTART_AGENT],
+    });
+
+    await gotoAgentsView(page);
+
+    const restartAction = page.getByTestId(
+      `agent-runtime-start-${RESTART_AGENT.pubkey}`,
+    );
+    await expect(restartAction).toBeVisible();
+    await expect(page.locator("html")).toHaveClass(/dark/);
+    expect(await renderedTextContrast(restartAction)).toBeGreaterThanOrEqual(
+      WCAG_AA_NORMAL_TEXT_CONTRAST,
+    );
+  });
+
+  test("start and restart pills share geometry except for width", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: [START_AGENT, RESTART_AGENT],
+    });
+
+    await gotoAgentsView(page);
+
+    const startAction = page.getByTestId(
+      `agent-runtime-start-${START_AGENT.pubkey}`,
+    );
+    const restartAction = page.getByTestId(
+      `agent-runtime-start-${RESTART_AGENT.pubkey}`,
+    );
+    await expect(startAction).toHaveText("Start");
+    await expect(restartAction).toHaveText("Restart");
+
+    const relativeGeometry = async (locator: typeof startAction) =>
+      locator.evaluate((element) => {
+        const frame = element.parentElement?.parentElement?.parentElement;
+        if (!frame) throw new Error("Could not resolve avatar frame");
+        const bounds = element.getBoundingClientRect();
+        const frameBounds = frame.getBoundingClientRect();
+        return {
+          centerX: bounds.x + bounds.width / 2 - frameBounds.x,
+          centerY: bounds.y + bounds.height / 2 - frameBounds.y,
+          height: bounds.height,
+          width: bounds.width,
+        };
+      });
+
+    const [start, restart] = await Promise.all([
+      relativeGeometry(startAction),
+      relativeGeometry(restartAction),
+    ]);
+    expect(start.height).toBeCloseTo(restart.height, 2);
+    expect(start.centerX).toBeCloseTo(restart.centerX, 2);
+    expect(start.centerY).toBeCloseTo(restart.centerY, 2);
+    expect(start.width).toBeCloseTo(56, 2);
+    expect(restart.width).toBeCloseTo(72, 2);
   });
 
   // ── Runtime-tab banner with full uncapped diff ────────────────────────────

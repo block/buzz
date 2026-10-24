@@ -1,3 +1,4 @@
+import * as React from "react";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -16,9 +17,12 @@ type NonMemberMentionDialogProps = {
   isInvitePending: boolean;
   names: string[];
   onDismiss: () => void;
-  onDoNothing: () => void;
+  /** Omit when publication requires the intended recipients to be invited. */
+  onDoNothing?: () => void;
   onInvite: () => void;
   open: boolean;
+  /** Restore the initiating editor when it still owns the visible draft. */
+  onRestoreFocus?: () => void;
 };
 
 export function NonMemberMentionDialog({
@@ -30,7 +34,10 @@ export function NonMemberMentionDialog({
   onDoNothing,
   onInvite,
   open,
+  onRestoreFocus,
 }: NonMemberMentionDialogProps) {
+  const safeActionRef = React.useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = React.useRef(onRestoreFocus);
   return (
     <AlertDialog
       onOpenChange={(nextOpen) => {
@@ -40,7 +47,20 @@ export function NonMemberMentionDialog({
       }}
       open={open}
     >
-      <AlertDialogContent>
+      <AlertDialogContent
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          restoreFocusRef.current = onRestoreFocus;
+          safeActionRef.current?.focus();
+        }}
+        onCloseAutoFocus={(event) => {
+          if (!restoreFocusRef.current) return;
+          event.preventDefault();
+          // Pending state/inert is released by the async cancellation continuation.
+          // Wait for its React commit; the source checks that it is still visible.
+          requestAnimationFrame(() => restoreFocusRef.current?.());
+        }}
+      >
         <AlertDialogHeader>
           <AlertDialogTitle>
             Mention people outside this channel?
@@ -48,25 +68,37 @@ export function NonMemberMentionDialog({
           <AlertDialogDescription>
             {names.join(", ")} {names.length === 1 ? "is" : "are"} not in this
             channel.{" "}
-            {canInvite
-              ? "Invite them to the channel, or send without inviting them."
-              : `${PRIVATE_CHANNEL_ADD_DENIED_MESSAGE} You can still send without inviting them.`}
+            {onDoNothing
+              ? canInvite
+                ? "Invite them to the channel, or send without inviting them."
+                : `${PRIVATE_CHANNEL_ADD_DENIED_MESSAGE} You can still send without inviting them.`
+              : canInvite
+                ? "Invite them to the channel, or cancel to keep your draft."
+                : PRIVATE_CHANNEL_ADD_DENIED_MESSAGE}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {error ? (
-          <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <p
+            role="alert"
+            className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
             {error}
           </p>
         ) : null}
         <AlertDialogFooter>
           <Button
-            disabled={isInvitePending}
-            onClick={onDoNothing}
+            ref={safeActionRef}
+            disabled={Boolean(onDoNothing) && isInvitePending}
+            onClick={onDoNothing ?? onDismiss}
             size="sm"
             type="button"
             variant="outline"
           >
-            {canInvite ? "Do nothing" : "Send anyway"}
+            {onDoNothing
+              ? canInvite
+                ? "Do nothing"
+                : "Send anyway"
+              : "Cancel"}
           </Button>
           {canInvite ? (
             <Button

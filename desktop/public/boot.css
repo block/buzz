@@ -1,0 +1,18 @@
+/*
+ * Boot background — applied before the app bundle loads so the window never
+ * flashes an unstyled background on cold start. The inline script in
+ * index.html overwrites this with the cached theme color once ThemeProvider's
+ * state is available; on first-ever launch it falls back to this black default.
+ *
+ * Kept as a linked stylesheet (not an inline <style>) so that Tauri's
+ * build-time asset processing does not inject a nonce token into this element.
+ * Tauri nonces inline <style> elements and adds the corresponding 'nonce-…'
+ * source to style-src at runtime; per the CSP spec a nonce in a directive
+ * causes the browser to ignore 'unsafe-inline', which would block TipTap's
+ * runtime stylesheet injection and emoji-mart's shadow-root styles in packaged
+ * builds. The inline boot script is SHA-256 hashed (not nonced) — that path
+ * only applies to scripts, not stylesheets.
+ */
+html {
+  background-color: #000;
+}

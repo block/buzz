@@ -8,6 +8,8 @@ Agent Personas
 
 This NIP defines `kind:30175` persona events — public, addressable definitions that describe how to instantiate an AI agent. A persona carries identity (display name, avatar), behavioral configuration (system prompt, model, runtime), and an optional name pool. It is the "blueprint" from which agents are spawned.
 
+This NIP also defines teams of agents (see "Teams") and how an agent's and a team's config are stored as [NIP-AR](NIP-AR.md) artifacts in [NIP-CL](NIP-CL.md) system channels (see "Agent and team config").
+
 ## Kind
 
 This NIP claims `kind:30175` for agent persona definitions and `kind:30178` for the shareable team-catalog projection (see "Team catalog projection: kind:30178"). Both are in the NIP-33 parameterized replaceable range (30000–39999) per [NIP-01](01.md): addressed by `(pubkey, kind, d_tag)`, with only the latest event per address retained.
@@ -63,6 +65,7 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 {
   "display_name": "<string>",
   "system_prompt": "<string | null>",
+  "acp_command": "<string | null>",
   "avatar_url": "<string | null>",
   "runtime": "<string | null>",
   "model": "<string | null>",
@@ -70,7 +73,8 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
   "name_pool": ["<string>", ...],
   "respond_to": "<string | null>",
   "respond_to_allowlist": ["<64-hex pubkey>", ...],
-  "parallelism": "<integer | null>"
+  "parallelism": "<integer | null>",
+  "session_policy": "<channel | thread>"
 }
 ```
 
@@ -85,6 +89,7 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `system_prompt` | string \| null | `null` | The system prompt injected into agent sessions. Optional since the unified agent model: a definition can be pure configuration (e.g. provider/model only). Readers MUST treat an absent or `null` prompt as "no prompt". |
+| `acp_command` | string \| null | `"buzz-acp"` | ACP transport command, distinct from the runtime/harness. See transport portability below. |
 | `avatar_url` | string \| null | `null` | URL to an avatar image. |
 | `runtime` | string \| null | `null` | ACP runtime identifier (e.g. `"goose"`, `"claude-code"`). |
 | `model` | string \| null | `null` | Model identifier (e.g. `"claude-opus-4"`). |
@@ -93,22 +98,40 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 | `respond_to` | string \| null | `null` | **Reserved.** Default respond-to policy for instances spawned from this definition: `"anyone"`, `"owner-only"`, or `"allowlist"`. `null` defers to the client default. |
 | `respond_to_allowlist` | string[] | `[]` | **Reserved.** Allowlisted author pubkeys (64-char lowercase hex) when `respond_to` is `"allowlist"`. Ignored otherwise. |
 | `parallelism` | integer \| null | `null` | **Reserved.** Default max concurrent turns for spawned instances. `null` defers to the client default. |
+| `session_policy` | string | `"channel"` | ACP conversation boundary for instances launched from this definition. `"channel"` shares context across a channel; `"thread"` isolates context per channel thread. Direct messages remain conversation-scoped. |
 
-The behavioral fields (`respond_to`, `respond_to_allowlist`,
-`parallelism`) are definition-level *defaults*: a spawned instance copies them
-at creation and may be reconfigured independently afterwards. They were
-previously carried only on the kind:30177 projection (see
-"Slimming: kind:30177" below).
-
-**Status: reserved.** In the current implementation these behavioral fields are
-*parsed but not yet applied*: readers tolerate and preserve them at the wire
-layer, but the local definition store does not yet carry them and writers do
-not emit them. The instance-copy-at-creation behavior activates in a
-subsequent release (the create-path unification). Until then a definition
-carrying these fields round-trips through the wire type but the values do not
-survive a local edit-and-republish cycle.
+The behavioral fields are definition-level defaults. `respond_to`, its
+allowlist, and `parallelism` are copied when an instance is created.
+`session_policy` remains definition-authoritative: changing it marks running
+linked instances for restart, and the next restart launches with the current
+definition value without rewriting an already-deployed instance in place.
 
 Unknown fields MUST be ignored by readers (forward compatibility).
+
+### Transport portability
+
+`acp_command` is optional; legacy absence/null selects stock `buzz-acp` for
+new definitions. Portable commands are `buzz-acp` or a name of at most 255
+ASCII bytes matching `buzz-[A-Za-z0-9_-]+-acp`. Discovery resolves these aliases
+on the receiving device; publication does not guarantee local availability.
+
+Catalog publications carry `["shared", "true"]`. Their writers MUST omit
+nonportable commands (including machine-local paths), and MUST emit explicit
+`"buzz-acp"` when stock is selected. Foreign catalog readers MUST reject a
+present nonportable value, and use stock when the field is omitted/null.
+
+Owner-to-self synchronization of non-catalog heads retains existing custom
+command compatibility; it is not a foreign adoption path or a sandbox. On an
+owner's existing definition, absent/null transport on a shared head MUST
+preserve an existing nonportable local command, because that value may have
+been redacted. Otherwise absence selects stock. An explicit portable value,
+including `"buzz-acp"`, replaces the previous command. A shared custom command
+therefore remains local rather than synchronizing its path to another device.
+The `shared` tag is catalog presentation, not confidentiality: all kind:30175
+content remains plaintext, including non-catalog heads.
+
+Writers serialize optional `acp_command` after `system_prompt` and before
+`avatar_url`; omission preserves the existing reference vector's bytes.
 
 ### Prohibited: secrets in content
 
@@ -201,7 +224,9 @@ to carry only instance-level state:
   definition-backed.
 - Readers SHOULD continue to accept legacy "fat" kind:30177 events
   during the transition. Where the linked 30175 head and a legacy 30177
-  event both carry a field, the 30175 head is authoritative.
+  event both carry a field, the 30175 head is authoritative. For an
+  agent's instructions, its current `buzz.agent.instructions` artifact is
+  authoritative over both (see "Launch composition").
 - Deletion/retention rules for kind:30177 are unchanged so historical
   tombstones keep working.
 
@@ -220,7 +245,7 @@ Agents spawned from a persona carry [NIP-OA](NIP-OA.md) owner attestation — an
 
 ## Team catalog projection: kind:30178
 
-Kind `30178` is the **shareable projection of a team**: owner-authored, parameterized replaceable, addressed by `(pubkey_o, 30178, d)` where `d` is the team's stable local id. Its `content` is a versioned JSON body carrying sanitized team fields plus ordered, *embedded* member definition projections. The content schema is defined by the client that publishes it; this section specifies only the envelope and the relay's contract.
+Kind `30178` is the **shareable projection of a team**: owner-authored, parameterized replaceable, addressed by `(pubkey_o, 30178, d)` where `d` is the team id (see "Team identity"). Its `content` is a versioned JSON body carrying sanitized team fields plus ordered, *embedded* member definition projections. The content schema is defined by the client that publishes it; this section specifies only the envelope and the relay's contract.
 
 ```jsonc
 {
@@ -235,11 +260,180 @@ Kind `30178` is the **shareable projection of a team**: owner-authored, paramete
 }
 ```
 
-**Why a separate kind rather than a `shared` tag on the team event (kind:30176).** A team's members are `kind:30175` definitions, which are author-only unless individually shared — so a foreign reader of a shared team could never hydrate its members. Kind `30178` embeds the member projections instead of referencing them: the share is atomic, it covers built-in members that have no `30175` head at all, it is immune to local-id/`d`-tag divergence, and an unshared `30175` stays private. Kind `30176`'s wire body is untouched, so device sync keeps its contract.
+**Why a separate kind rather than a `shared` tag on the team event (kind:30176).** A team's members are `kind:30175` definitions, which are author-only unless individually shared — so a foreign reader of a shared team could never hydrate its members. Kind `30178` embeds the member projections instead of referencing them: the share is atomic, it covers built-in members that have no `30175` head at all, it is immune to local-id/`d`-tag divergence, and an unshared `30175` stays private.
 
-**The `d` tag is a team id, not a persona slug.** It is either a UUID or a built-in identifier such as `builtin-team:welcome`. The colon is illegal under the persona slug grammar, and rewriting ids to fit would break NIP-33 addressing against the team's own `kind:30176` head — so the relay applies a laxer rule (see below) to `30178` than to `30175`.
+**The `d` tag is a team id, not a persona slug.** It is either a UUID or a built-in identifier such as `builtin-team:welcome`. The colon is illegal under the persona slug grammar, and rewriting ids to fit would change the team's identity — so the relay applies a laxer rule (see below) to `30178` than to `30175`.
 
 **Content carries only sanitized fields.** No environment variables, no `respond_to` allowlist pubkeys, no source or local ids, no filesystem paths, no secrets. Sharing a team makes the team's and every member's instructions community-readable plaintext.
+
+**A share is a snapshot, never history.** A writer embeds the team's current instructions at the time it publishes (see "Team instructions") and no earlier revisions. Editing the team does not change an existing share; the owner updates a share by publishing a new head. A client MAY show the owner that a share is older than the team's current instructions. A reader that adopts a shared team creates a new team with a new id; the adopted team starts its own instructions history.
+
+## Teams
+
+A **team** is an owner-defined group of agents that share optional **team instructions**. A team's name and instructions live in its team config channel (see "Agent and team config"), and its members are agents in that channel. The shareable form of a team is `kind:30178`.
+
+### Team identity
+
+A team is identified by `(pubkey_o, community, team-id)`: the owner, the relay community holding the team's config channel, and the team id.
+
+A team id MUST be non-empty, MUST be at most 64 Unicode scalar values, and MUST NOT contain Unicode control or whitespace characters. This is the same grammar as the `kind:30178` `d` tag. Team ids are compared byte for byte, with no trimming, case folding, or Unicode normalization.
+
+Clients SHOULD mint a new UUID for each new team, including a team created by importing or adopting another team. A client MUST NOT give a new team the id of a deleted team.
+
+### Ownership
+
+An agent's owner is the owner that the relay has verified from the agent's [NIP-OA](NIP-OA.md) owner attestation. A tag on an arbitrary event does not establish ownership. A team's owner is the creator of its team config channel, as named by the channel's NIP-CL `P` tag.
+
+Changing an agent's or a team's owner is not supported. Transferring a config channel's owner role to someone else does not change who owns the agent or team, and a second attestation does not move an agent's config or history.
+
+### Membership
+
+A team's **members** are the agents in its team config channel whose owner is the team's owner. The owner, humans, and agents owned by anyone else can be in the channel but are not members. An agent's channel role does not affect membership: an agent made an admin or a guest of the channel is still a member.
+
+Team membership is channel membership, so it is also access: every member can read the team's config. A member follows the team's current instructions; it does not pin the text in effect when it joined. An agent MAY be a member of more than one team.
+
+Changing who is on a team is a change to the channel's membership, under the channel's role rules:
+
+- a member of the channel, other than a guest, can add someone who is not yet in the channel as a member or guest, subject to that person's add policy: a policy of only their owner admits additions by their owner alone, and a policy of nobody rejects every addition by someone else, including their owner;
+- only an owner or admin can add someone as an owner or admin, or change an existing member's role, up or down;
+- only an owner or admin can remove someone else, except that a member can remove an agent they own;
+- a guest can add and remove no one;
+- anyone can leave;
+- the channel's last owner cannot leave, be removed, or be demoted.
+
+### Team instructions
+
+A team's current instructions are the `instructions` field of its current `buzz.team` artifact (see "Config artifacts"). A team whose `buzz.team` artifact is absent has no name and empty instructions. A team whose `buzz.team` artifact is invalid, deleted, or unavailable has invalid instructions (see "Artifact state").
+
+### Launch with teams
+
+At each session start, the client resolves the current instructions of every team the agent is a member of. Each team reaches the agent as its own **team section**, which carries the team's name, its members, and its instructions. A team without instructions has empty instructions; its section still names the team and its members.
+
+The client MUST NOT merge, deduplicate, or compare the instructions of different teams, and MUST NOT refuse to start an agent because its teams' instructions differ. If a team's instructions are invalid, the client MUST NOT start the session, and SHOULD name the team. An active session need not be interrupted.
+
+An agent that is a member of no team has no team sections. Team sections are delivered after the agent's own instructions (see "Launch composition").
+
+### Deleting a team
+
+A client deletes a team by archiving its team config channel. Archiving keeps the channel and its artifacts, so the team can be recovered by unarchiving it. Purging the channel is a separate action. A team whose config channel is archived has no members.
+
+No later than each member's next session start, the client removes the deleted team's section and resolves the remaining teams' sections. An active session need not be interrupted, and a client MAY apply the removal sooner. A team config channel that cannot be read is not a deleted team.
+
+## Agent and team config
+
+An agent's config and a team's config are [NIP-AR](NIP-AR.md) artifacts. Each lives in its own private [NIP-CL](NIP-CL.md) system channel, the **config channel**, so channel membership decides who can read and edit it.
+
+### Relay support
+
+A client stores config on the relay only when the relay's [NIP-11](11.md) document shows that it supports both of these:
+
+- NIP-CL system channels and labels;
+- NIP-AR artifacts.
+
+How a relay advertises each one is defined by the specification of that feature. Otherwise the client MUST keep config local, and MUST NOT create config channels.
+
+### Config channels
+
+| Channel | One per | Created by | Family label | Subject label |
+| --- | --- | --- | --- | --- |
+| Agent config channel | agent | the agent's owner | `agent-config` | the agent's 64-character lowercase hex pubkey |
+| Team config channel | team | the team's owner | `team-config` | `team-` followed by the first 59 lowercase hex characters of the SHA-256 hash of the team id's UTF-8 bytes |
+
+The owner creates a config channel with a kind:9007 that carries `["channel_type", "system"]`, both labels as `t` tags, and no `visibility` or `ttl` tag. A config channel MUST be private and MUST NOT have a TTL. The owner MUST NOT change a config channel's labels.
+
+Both subject labels are 64 characters. A team id can contain characters a label cannot, so the team label is derived from a hash; the team id itself is stored on the `buzz.team` artifact (see "Config artifacts").
+
+An agent config channel's members are the owner, the agent, and any others the owner adds. A team config channel holds the owner and the team's members, and can hold others who are not members (see "Membership").
+
+### Discovery
+
+To find a config channel, a client queries by creator and subject label:
+
+```
+Agent: {kinds: [39000], "#P": [pubkey_o], "#t": [<agent-pubkey>]}
+Team:  {kinds: [39000], "#P": [pubkey_o], "#t": [<team-label>]}
+```
+
+To find the teams an agent is on, the agent's client queries the channels the agent belongs to, opting in to system channels:
+
+```
+{kinds: [39002], "#p": [<agent-pubkey>], "#t": ["system"]}
+```
+
+then reads those channels' kind:39000 by `#d`.
+
+In every case the client keeps only channels whose type is `system`, whose labels include the family label, and whose `P` is the expected owner. It MUST NOT put the family label in the same `#t` filter, because values in one filter combine with OR. When more than one channel remains for one agent or team, the client uses the oldest, by NIP-CL's "Choosing one channel" rule. A client creates a config channel only when this query returns none. A client MUST NOT delete or archive a config channel because it was not selected.
+
+### Config artifacts
+
+| Type | Channel | `title` | Extra tags | Content |
+| --- | --- | --- | --- | --- |
+| `buzz.agent.settings` | agent config | `Agent settings` | | `{"version": 1, "settings": { ... }}` |
+| `buzz.agent.instructions` | agent config | `Agent instructions` | | `{"version": 1, "text": "<string>"}` |
+| `buzz.team` | team config | the team name | `["team", "<team-id>"]` | `{"version": 1, "name": "<string>", "instructions": "<string>"}` |
+
+A config channel holds at most one artifact of each of its types. Its `d` is the UUIDv5 of the type name in the namespace of the channel's UUID, so two clients creating the same artifact collide on `d` and one create fails. The client whose create fails fetches the current revision and edits it; it MUST NOT choose a different `d`. A client accepts a config artifact only when its `d`, `type`, and `h` match the config channel it was read from. A `buzz.team` artifact has no member list; members come from the channel (see "Membership").
+
+**Team id.** A `buzz.team` artifact carries exactly one `team` tag, whose value is the team id. A client MUST check that the team id's subject label equals the channel's subject label, and MUST treat the artifact as invalid otherwise.
+
+**Team name.** `name` is also the artifact's `title`, so it MUST be nonblank and at most 512 UTF-8 bytes, and MUST equal the `title` tag.
+
+**Instructions.** `text` and `instructions` MAY be empty, which means "no instructions". They MUST be valid UTF-8 and MUST NOT contain U+0000.
+
+**Settings.** `settings` is a JSON object of the agent's launch configuration. Its fields are defined by the client and harness that launch the agent, not by this NIP. It MUST NOT contain credentials, secrets, machine-local paths, or device state. A client MUST NOT launch an agent with a setting it does not support silently replaced by a default; it shows the error instead.
+
+**Size.** A config artifact's `content` MUST NOT exceed 131,072 bytes after JSON encoding, and `buzz.agent.settings` content MUST NOT exceed 65,535 bytes. The signed event MUST also fit within the relay's advertised event-size limits. Writers check these limits on the encoded content and the signed event, reject an edit that exceeds them, and MUST NOT truncate.
+
+An artifact whose content does not parse, has an unknown `version`, or breaks these rules is **invalid**.
+
+### Artifact state
+
+When a client reads a config artifact, the artifact is in one of these states:
+
+- **present:** its current revision was read and is valid;
+- **invalid:** its current revision was read and is invalid;
+- **absent:** the relay confirmed that the artifact's address has never been used;
+- **deleted:** a lookup by `d` returned a deletion;
+- **unavailable:** anything else, including a failed read, an unreadable channel, an artifact moved to another channel, a redacted current revision, or a lookup that returns nothing without that confirmation.
+
+Only an absent artifact lets a client fall back to another source (see "Launch composition"). An invalid, deleted, or unavailable artifact blocks the start: the client MUST show the error and MUST NOT substitute an older revision, another source, or local config, except as "Offline start" below allows for an unavailable artifact. A deleted artifact is recovered with NIP-AR `restore`.
+
+**Offline start.** When the relay cannot be reached, because the read failed in transport rather than returning an answer, a client MAY start the agent from the last revision it confirmed as present and kept locally. It MUST NOT do so if the most recent answer it read from the relay showed that the artifact is invalid or deleted, that its current revision was redacted, that the config channel is archived, or that it has lost access to the channel, and it MUST NOT use any other source.
+
+### Editing
+
+Every channel member who is not a guest can edit the channel's artifacts. This includes members who are not on the team, such as humans and agents with another owner. On a relay whose guest roles are read-only, guests can only read them, and the owner can make an agent read-only for a config channel by giving it the guest role there.
+
+Every edit is a new NIP-AR revision and names the current revision in `prev`. On conflict, the client reconciles with the current revision as NIP-AR requires. An edit MUST keep any JSON fields and tags the client does not recognise.
+
+### History
+
+Every revision of a config artifact has a stable ID, its event ID. A config artifact's revisions are its history. History is kept until the owner deliberately purges it or a moderator removes a revision. Config channels MUST be exempt from age-based community retention, and a client MUST NOT configure a config artifact to keep only its latest revision. A client shows a removed revision as a gap in history, not as the absence of history.
+
+**Revert** publishes an older revision's content as an `op=update` revision carrying a complete, valid snapshot. Reverting a team's instructions keeps the team's current name. Clients MUST NOT redact revisions to roll back.
+
+### Launch composition
+
+An agent's own instructions layer is the first of these that exists:
+
+1. the `text` of its current `buzz.agent.instructions` artifact. Empty text yields no instructions and stops resolution. An invalid, deleted, or unavailable artifact blocks the start (see "Artifact state");
+2. while that artifact is absent, instructions held in local configuration;
+3. the `system_prompt` of its linked `kind:30175` definition;
+4. for a definition-less instance, the `system_prompt` in its legacy `kind:30177` event.
+
+A client moving local instructions to the relay MUST create the `buzz.agent.instructions` artifact and confirm that the relay accepted it before it stops using the local copy.
+
+Team sections are resolved independently (see "Launch with teams"). The client delivers the agent's own layer and each team section to the agent's harness separately, the agent's own first.
+
+A change to the agent's instructions or to any of its teams MUST take effect no later than the agent's next session start. A client MAY apply it sooner, including to an active session between turns, and MAY start a new session to apply it. An active session need not be interrupted. A client that lets local configuration override the resolved instructions SHOULD show the owner that an override is in effect.
+
+### Deleting an agent
+
+A client deletes an agent by archiving its agent config channel. A client MUST NOT start a new session for an agent whose config channel is archived. An active session need not be interrupted. The archived channel stays discoverable, so the agent can be recovered by unarchiving it. Purging the channel is a separate action. Deleting an agent never purges a team's config or history.
+
+### Older clients
+
+Clients that do not implement config channels do not see them, because NIP-CL leaves system channels out of reads that do not name them. They resolve an agent's instructions from `kind:30175` and `kind:30177` as before, so they launch agents with the definition's prompt rather than the agent's current instructions, and they do not see teams stored on the relay.
 
 ## Relay behavior
 
@@ -280,24 +474,25 @@ These rules are enforced at the following relay read surfaces (content and event
 - **COUNT** — the fast SQL `count_events()` path is bypassed when the filter can match a shared-gated kind. A per-event fallback applies the shared-tag check, preventing existence-leak via COUNT.
 - **NIP-98 HTTP bridge `/query`** — the same per-event visibility check is applied to the catchall post-processing loop. The SQL-level `shared_gated_reader` clause also applies before `LIMIT`, preventing older shared personas from being starved by newer private ones on paginated catalog queries. A foreign caller POSTing `{kinds:[30175],authors:[victim]}` or a kindless `{ids:[...]}` filter to `/query` receives no unshared persona content.
 - **NIP-98 HTTP bridge `/count`** — `needs_shared_gate_filtering` forces the per-event fallback path for any filter that can match a shared-gated kind; the fast SQL `count_events()` path is not used. Both the channel-scoped and unconstrained fallback loops apply `event_visible_to_reader`, preventing existence-leak via COUNT over HTTP.
-- **FTS (NIP-50 search) and `/search`** — no shared-gated kind is in the relay's FTS allowlist (migration 8 indexes only kinds `0, 9, 40002, 45001, 45003`); no FTS result can contain an unshared event. A defense-in-depth check is also present in the bridge search result loop so that a future FTS allowlist change cannot silently reopen the bypass.
+- **FTS (NIP-50 search) and `/search`** — every search result passes the same per-event visibility check before delivery, so no search result shows an unshared event to a foreign reader. Unshared events can still be indexed and returned to their author.
 
-**Device sync is unaffected.** The sync subscription (`{kinds:[30175], authors:[self]}`) reads the author's own events, which are always returned regardless of shared state.
+**Owner read access is unaffected.** The sync subscription (`{kinds:[30175], authors:[self]}`) reads the author's own events regardless of shared state. Shared heads redact nonportable transport commands, however, so those commands remain device-local under the transport replay rules above.
 
 **Opting in to community sharing.** Publish a NIP-33 replacement head for the persona with a `["shared", "true"]` tag. Unsharing is the reverse: republish without the tag. NIP-33 replacement semantics apply (newest `created_at` wins).
 
-**`shared` is a tag, not a content field.** Content bytes are hash-pinned as the NIP-01 event id and also used as the `source_version` for persona drift detection. A content-field toggle would look like a definition edit; a tag does not affect content bytes.
+**`shared` is a tag, not a content field.** The tag controls visibility, but sharing also changes the transport projection: stock becomes explicit and nonportable commands are omitted. NIP-01 hashes the published event, including those projected content bytes and tags. Local `source_version` drift detection instead hashes the unredacted, spawn-relevant definition content; it need not equal a hash of the catalog body. A sharing-only change does not change that local definition hash.
 
 **Non-goal: side-band existence oracles.** Reaction, report, and event-deletion validation resolves target events by id to check that they exist. These paths intentionally accept arbitrary event references by design — they leak one bit (existence) but never content, and exploiting them requires already possessing a 64-hex event id that unshared personas never expose through any gated read path. Gating these side-band resolvers would require teaching reaction/report validation about persona read semantics with no realistic attack mitigated. If a stricter "zero existence leakage" property is required in future, it is a separate scoped task.
 
 ## Security considerations
 
-- **No encryption.** System prompts, model names, runtime identifiers, and all configuration are stored unencrypted. Shared persona events are readable community-wide. Operators MUST NOT store secrets in persona event content.
+- **No encryption for definitions.** Persona and team-catalog events store system prompts, model names, runtime identifiers, and all configuration unencrypted. Shared persona events are readable community-wide. Operators MUST NOT store secrets in persona event content.
 - **System prompt protection.** System prompts and `respond_to_allowlist` pubkeys are sensitive. The relay's author-only-unless-shared gate ensures they are not visible to other community members unless the owner explicitly opts in by publishing a `["shared", "true"]` head. Shared persona events are readable community-wide; operators who need additional confidentiality should use relay-level access controls or choose not to share.
 - **Write authority.** Only the holder of `seckey_o` can publish or replace persona events. NIP-33 replacement is scoped by pubkey — no spoofing risk from other relay members.
 - **Slug collision across pubkeys.** Two different owners can publish personas with the same slug. Clients MUST always scope queries by author pubkey, not just slug.
 - **Metadata exposure.** The `(pubkey, kind:30175, slug)` triple reveals persona existence. Event timestamps reveal edit history.
 - **No owner write authority over agents.** Persona events define *what* an agent should be; they do not grant runtime control over a running agent. The agent consumes the persona at spawn time. Updates to the persona event do not automatically propagate to running agents.
+- **Config is readable by every config channel member.** Agent settings, agent instructions, and team instructions are not encrypted. Every member and guest of a config channel can read its artifacts and their history, so adding someone to a config channel shares that config with them. Every member who is not a guest can also edit it, including humans and agents that are not on the team. The relay operator can read them too. Removing someone, archiving the channel, or redacting a revision does not revoke copies already read, exported, or shared.
 - **Sharing a team shares every member's instructions.** A `kind:30178` head carrying `["shared","true"]` exposes the team's own fields *and* the embedded projection of every member — including members whose own `kind:30175` heads are unshared and therefore still private. Clients MUST make this explicit at the point of sharing; the relay cannot infer it.
 
 ## Reference test vectors

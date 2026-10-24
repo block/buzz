@@ -22,11 +22,17 @@ buzz-sdk = { workspace = true }
 buzz-persona = { path = "../buzz-persona" }
 daz-secrets = { workspace = true }
 
+# Git multicall helpers and ephemeral helper aliases
+git-credential-nostr = { path = "../git-credential-nostr" }
+git-sign-nostr = { path = "../git-sign-nostr" }
+tempfile = "3"
+zeroize = { workspace = true }
+
 # Nostr
 nostr = { workspace = true }
 
 # Async runtime
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-std"] }
 
 # WebSocket
 tokio-tungstenite = { workspace = true }
@@ -62,7 +68,6 @@ tracing-subscriber = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-zeroize = { workspace = true }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -76,8 +81,9 @@ evalexpr = { workspace = true }
 # Process-group kill (safe wrapper around killpg) — Unix-only; kill_process_group
 # has a #[cfg(not(unix))] fallback in acp.rs.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "user"] }
 
 [dev-dependencies]
+axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"

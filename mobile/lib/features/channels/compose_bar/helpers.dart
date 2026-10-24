@@ -1,20 +1,68 @@
 part of '../compose_bar.dart';
 
+String _composerDraftIdentity(WidgetRef ref) =>
+    '${ref.watch(relayConfigProvider).baseUrl}'
+    ':${ref.watch(myPubkeyProvider) ?? 'anon'}';
+
+void _useComposerFocusRestorer({
+  required ValueChanged<VoidCallback>? onChanged,
+  required ValueNotifier<bool> isExpanded,
+  required FocusNode focusNode,
+  required VoidCallback expand,
+}) {
+  useEffect(() {
+    if (onChanged == null) return null;
+
+    var isCurrent = true;
+    void restoreFocus() {
+      if (!isCurrent) return;
+      if (isExpanded.value) {
+        focusNode.requestFocus();
+      } else {
+        expand();
+      }
+    }
+
+    onChanged(restoreFocus);
+    return () => isCurrent = false;
+  }, [onChanged, focusNode]);
+}
+
+void _useComposerChannelNames(
+  _MarkdownEditingController controller,
+  AsyncValue<List<Channel>> channelsAsync,
+) {
+  final channelNames = {
+    for (final channel in channelsAsync.asData?.value ?? const <Channel>[])
+      channel.name.toLowerCase(): channel.id,
+  };
+  final channelNamesKey = channelNames.entries
+      .map((entry) => '${entry.key}\u0000${entry.value}')
+      .join('\u0001');
+  useEffect(() {
+    controller.setChannelNames(channelNames);
+    return null;
+  }, [controller, channelNamesKey]);
+}
+
 const _typingThrottleMs = 3000;
 
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
+  final VoidCallback onKeyboardShown;
   final VoidCallback onKeyboardHidden;
   bool _wasVisible;
 
   _ComposerKeyboardMetricsObserver({
     required this.view,
+    required this.onKeyboardShown,
     required this.onKeyboardHidden,
   }) : _wasVisible = view.viewInsets.bottom > 0;
 
   @override
   void didChangeMetrics() {
     final isVisible = view.viewInsets.bottom > 0;
+    if (!_wasVisible && isVisible) onKeyboardShown();
     if (_wasVisible && !isVisible) onKeyboardHidden();
     _wasVisible = isVisible;
   }
@@ -42,16 +90,145 @@ void _dismissComposerKeyboard(FocusNode focusNode) {
   unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.hide'));
 }
 
+void _chooseComposerAttachment(
+  BuildContext context,
+  ValueNotifier<_AttachmentSurface> attachmentSurface,
+  ValueNotifier<String?> uploadError,
+  Future<void> Function() choose, {
+  String? errorMessage,
+}) {
+  attachmentSurface.value = _AttachmentSurface.closed;
+  unawaited(() async {
+    try {
+      await choose();
+    } catch (error) {
+      if (context.mounted) {
+        uploadError.value = errorMessage ?? _formatUploadError(error);
+      }
+    }
+  }());
+}
+
+Duration _composerMotionDuration(
+  bool reducedMotion,
+  _AttachmentSurface surface,
+) => reducedMotion
+    ? Duration.zero
+    : Duration(
+        milliseconds:
+            surface == _AttachmentSurface.camera ||
+                surface == _AttachmentSurface.photos
+            ? 320
+            : 250,
+      );
+
+void _expandComposer({
+  required BuildContext context,
+  required ValueNotifier<bool> isExpanded,
+  required ValueNotifier<_AttachmentSurface> attachmentSurface,
+  required VoidCallback? onFocusRequested,
+  required FocusNode focusNode,
+  required FlutterView view,
+  required ValueNotifier<bool> androidImeTransitionStarted,
+  required ObjectRef<Timer?> androidImeFallbackTimer,
+}) {
+  if (isExpanded.value) return;
+  attachmentSurface.value = _AttachmentSurface.closed;
+  onFocusRequested?.call();
+  isExpanded.value = true;
+  // Attach the editor before requesting focus so native restoration cannot
+  // reopen a composer behind a popped route.
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (context.mounted && isExpanded.value) focusNode.requestFocus();
+  });
+  if (defaultTargetPlatform != TargetPlatform.android) return;
+  androidImeFallbackTimer.value?.cancel();
+  if (view.viewInsets.bottom > 0) {
+    androidImeTransitionStarted.value = true;
+    return;
+  }
+  androidImeTransitionStarted.value = false;
+  androidImeFallbackTimer.value = Timer(const Duration(milliseconds: 250), () {
+    if (context.mounted && isExpanded.value) {
+      androidImeTransitionStarted.value = true;
+    }
+  });
+}
+
+Widget _composerSuggestionPanel({
+  required List<Channel> channelSuggestions,
+  required List<MentionCandidate> mentionSuggestions,
+  required Set<String> unavailableMentions,
+  required bool mentionSearchFailed,
+  required VoidCallback onMentionSearchRetry,
+  required Map<String, UserProfile> userCache,
+  required String? currentPubkey,
+  required bool isDmChannel,
+  required ValueChanged<Channel> onChannelSelect,
+  required ValueChanged<MentionCandidate> onMentionSelect,
+}) => channelSuggestions.isNotEmpty
+    ? KeyedSubtree(
+        key: const ValueKey('channel-suggestions'),
+        child: _ChannelSuggestions(
+          suggestions: channelSuggestions,
+          onSelect: onChannelSelect,
+        ),
+      )
+    : mentionSuggestions.isNotEmpty || mentionSearchFailed
+    ? KeyedSubtree(
+        key: const ValueKey('mention-suggestions'),
+        child: _MentionSuggestions(
+          suggestions: mentionSuggestions,
+          unavailable: unavailableMentions,
+          searchFailed: mentionSearchFailed,
+          onRetry: onMentionSearchRetry,
+          userCache: userCache,
+          currentPubkey: currentPubkey,
+          isDmChannel: isDmChannel,
+          onSelect: onMentionSelect,
+        ),
+      )
+    : const SizedBox.shrink(key: ValueKey('no-suggestions'));
+
+Widget _composerAttachmentPanel({
+  required _AttachmentSurface surface,
+  required Widget suggestionPanel,
+  required VoidCallback onBack,
+  required VoidCallback onCamera,
+  required VoidCallback onPhotos,
+  required VoidCallback onVideo,
+  required VoidCallback onVoiceNote,
+  required VoidCallback onFiles,
+  required Future<void> Function(XFile image) onCapture,
+  required Future<List<XFile>> Function() onPickAllPhotos,
+  required Future<void> Function(List<XFile> photos) onChoosePhotos,
+  required Future<void> Function(List<XFile> photos) onChooseAllPhotos,
+}) => _AttachmentSurfacePanel(
+  key: ValueKey(
+    surface == _AttachmentSurface.closed
+        ? 'composer-suggestions'
+        : 'attachment-surface',
+  ),
+  surface: surface,
+  suggestionPanel: suggestionPanel,
+  onBack: onBack,
+  onCamera: onCamera,
+  onPhotos: onPhotos,
+  onVideo: onVideo,
+  onVoiceNote: onVoiceNote,
+  onFiles: onFiles,
+  onCapture: onCapture,
+  onPickAllPhotos: onPickAllPhotos,
+  onChoosePhotos: onChoosePhotos,
+  onChooseAllPhotos: onChooseAllPhotos,
+);
+
 const _pastedImageMimeTypes = <String>[
   'image/jpeg',
   'image/jpg',
   'image/png',
   'image/webp',
 ];
-
-/// Cap on ranked mention suggestions shown — matches desktop's
-/// `MENTION_SUGGESTION_LIMIT`.
-const _mentionSuggestionLimit = 50;
 
 /// Walk backward from [cursor] looking for [trigger] (e.g. `@` or `#`) at a
 /// word boundary. Returns the index of the trigger character, or `null` if none
@@ -100,9 +277,9 @@ void spliceAndMoveCursor(
 
   final before = text.substring(0, start);
   final after = text.substring(cursor);
-  controller.text = '$before$replacement$after';
-  controller.selection = TextSelection.collapsed(
-    offset: start + replacement.length,
+  controller.value = TextEditingValue(
+    text: '$before$replacement$after',
+    selection: TextSelection.collapsed(offset: start + replacement.length),
   );
   focusNode.requestFocus();
 }
@@ -124,9 +301,9 @@ void _insertTriggerAtCursor(
   final insert = needsSpace ? ' $trigger' : trigger;
   final before = text.substring(0, cursor);
   final after = text.substring(cursor);
-  controller.text = '$before$insert$after';
-  controller.selection = TextSelection.collapsed(
-    offset: cursor + insert.length,
+  controller.value = TextEditingValue(
+    text: '$before$insert$after',
+    selection: TextSelection.collapsed(offset: cursor + insert.length),
   );
   focusNode.requestFocus();
 }
@@ -279,7 +456,7 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
   ];
   if (pending.isEmpty) return _NonMemberAddOutcome.empty;
 
-  // A plain member of a private channel cannot add anyone: skip the doomed
+  // A non-member cannot add anyone to a private channel: skip the doomed
   // kind:9000 rather than trading it for a relay rejection.
   if (!canAddMembers) {
     return _NonMemberAddOutcome(
@@ -314,21 +491,26 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
 @immutable
 class _NonMemberMentionScan {
   final String channelId;
-  final List<String> agentPubkeys;
-  final List<MentionCandidate> humans;
+
+  /// Mentioned people and agents outside the channel, in draft order.
+  final List<MentionCandidate> outside;
   final bool canAddMembers;
+
+  /// Whether the destination is a DM. Nobody can be added to a DM, so its
+  /// outside people are sent as references without a prompt.
+  final bool isDm;
 
   const _NonMemberMentionScan({
     required this.channelId,
-    required this.agentPubkeys,
-    required this.humans,
+    required this.outside,
     required this.canAddMembers,
+    required this.isDm,
   });
 }
 
 /// Resolves which mentioned identities are non-members, and whether this
-/// identity may add them (see [Channel.canAddMembers]). DMs are skipped: their
-/// participant set is fixed at creation.
+/// identity may add them (see [Channel.canAddMembers]). A DM's participant set
+/// is fixed at creation, so nobody outside it can be added.
 Future<_NonMemberMentionScan> _scanNonMemberMentions(
   WidgetRef ref, {
   required String channelId,
@@ -337,20 +519,36 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
 }) async {
   final none = _NonMemberMentionScan(
     channelId: channelId,
-    agentPubkeys: const [],
-    humans: const [],
+    outside: const [],
     canAddMembers: true,
+    isDm: false,
   );
   if (selectedMentions.isEmpty) return none;
 
   final channel = (await ref.read(
     channelsProvider.future,
   )).firstWhere((candidate) => candidate.id == channelId);
-  if (channel.isDm) return none;
 
-  final members = await ref.read(channelMembersProvider(channelId).future);
+  // A DM decides who is inside it the way its send does: by current
+  // membership, or by the channel metadata when membership is unavailable.
+  // A channel needs its membership; a failure here reaches the send, which
+  // reports it and keeps the draft.
+  List<ChannelMember> members;
+  if (channel.isDm) {
+    try {
+      members = await ref.read(channelMembersProvider(channelId).future);
+    } catch (_) {
+      members = const [];
+    }
+  } else {
+    members = await ref.read(channelMembersProvider(channelId).future);
+  }
   final memberPubkeys = {
-    for (final member in members) member.pubkey.toLowerCase(),
+    if (channel.isDm)
+      for (final pubkey in dmParticipantPubkeys(channel, members))
+        pubkey.toLowerCase()
+    else
+      for (final member in members) member.pubkey.toLowerCase(),
   };
   String? selfRole;
   if (currentPubkey != null) {
@@ -363,24 +561,19 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
     }
   }
 
-  final agentPubkeys = <String>[];
-  final humans = <MentionCandidate>[];
+  final outside = <MentionCandidate>[];
   final seen = <String>{};
   for (final candidate in selectedMentions) {
     final pubkey = candidate.pubkey.toLowerCase();
     if (memberPubkeys.contains(pubkey) || !seen.add(pubkey)) continue;
-    if (candidate.isAgent) {
-      agentPubkeys.add(pubkey);
-    } else {
-      humans.add(candidate);
-    }
+    outside.add(candidate);
   }
 
   return _NonMemberMentionScan(
     channelId: channelId,
-    agentPubkeys: agentPubkeys,
-    humans: humans,
+    outside: outside,
     canAddMembers: channel.canAddMembers(selfRole),
+    isDm: channel.isDm,
   );
 }
 
@@ -392,7 +585,7 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
 class _OutgoingMentions {
   List<String> pubkeys;
   final List<List<String>> referenceTags = [];
-  List<String> _invitedHumanPubkeys = const [];
+  List<MentionCandidate> _invited = const [];
 
   _OutgoingMentions(List<MentionCandidate> selectedMentions)
     : pubkeys = LinkedHashSet<String>.from(
@@ -411,19 +604,17 @@ class _OutgoingMentions {
     ]);
   }
 
-  /// Applies the mention prompt's outcome: invite them, or send without.
-  void resolveHumanChoice(
+  /// Applies the mention prompt's outcome: invite everyone outside, or send
+  /// with them as references. Agents and people are treated the same.
+  void resolveOutsideChoice(
     _NonMemberMentionChoice choice,
-    List<MentionCandidate> humans,
+    List<MentionCandidate> outside,
   ) {
-    final humanPubkeys = [
-      for (final candidate in humans) candidate.pubkey.toLowerCase(),
-    ];
     switch (choice) {
       case _NonMemberMentionChoice.invite:
-        _invitedHumanPubkeys = humanPubkeys;
+        _invited = outside;
       case _NonMemberMentionChoice.sendWithoutInviting:
-        demote(humanPubkeys);
+        demote([for (final candidate in outside) candidate.pubkey]);
     }
   }
 
@@ -436,8 +627,14 @@ class _OutgoingMentions {
     final outcome = await _addMentionedNonMembers(
       channelActions,
       channelId: scan.channelId,
-      agentPubkeys: scan.agentPubkeys,
-      humanPubkeys: _invitedHumanPubkeys,
+      agentPubkeys: [
+        for (final candidate in _invited)
+          if (candidate.isAgent) candidate.pubkey.toLowerCase(),
+      ],
+      humanPubkeys: [
+        for (final candidate in _invited)
+          if (!candidate.isAgent) candidate.pubkey.toLowerCase(),
+      ],
       canAddMembers: scan.canAddMembers,
     );
     demote(outcome.notAdded);

@@ -184,6 +184,71 @@ void main() {
       expect(container.read(communityThemeProvider).theme, 'dracula');
     },
   );
+
+  test('complete preference writes one cache and outbox snapshot', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keys = nostr.Keys.generate();
+    final session = _ThemeRelaySession(keys.nsec, keys.public);
+    final storage = _RecordingThemeStorage(prefs);
+    final container = ProviderContainer(
+      overrides: [
+        communityThemeStorageProvider.overrideWithValue(storage),
+        relayConfigProvider.overrideWith(() => _RelayConfig(keys.nsec)),
+        relaySessionProvider.overrideWith(() => session),
+      ],
+    );
+    addTearDown(container.dispose);
+    final subscription = container.listen(
+      communityThemeProvider,
+      (_, _) {},
+      fireImmediately: true,
+    );
+    addTearDown(subscription.close);
+
+    await _waitUntil(() => storage.cacheWrites.isNotEmpty);
+    storage.cacheWrites.clear();
+    storage.outboxWrites.clear();
+
+    const selection = CommunityThemePreference(
+      theme: 'dracula',
+      accent: '#22c55e',
+      followSystem: false,
+    );
+    container.read(communityThemeProvider.notifier).setPreference(selection);
+    await _waitUntil(() => storage.outboxWrites.isNotEmpty);
+
+    expect(storage.cacheWrites, [selection]);
+    expect(storage.outboxWrites, [selection]);
+    expect(container.read(communityThemeProvider), selection);
+  });
+}
+
+class _RecordingThemeStorage extends CommunityThemeStorage {
+  _RecordingThemeStorage(super.prefs);
+
+  final cacheWrites = <CommunityThemePreference>[];
+  final outboxWrites = <CommunityThemePreference>[];
+
+  @override
+  Future<bool> write(
+    String pubkey,
+    String relayUrl,
+    CommunityThemePreference preference,
+  ) async {
+    cacheWrites.add(preference);
+    return super.write(pubkey, relayUrl, preference);
+  }
+
+  @override
+  Future<bool> writeOutbox(
+    String pubkey,
+    String relayUrl,
+    CommunityThemePreference preference,
+  ) async {
+    outboxWrites.add(preference);
+    return super.writeOutbox(pubkey, relayUrl, preference);
+  }
 }
 
 class _DelayedThemeStorage extends CommunityThemeStorage {

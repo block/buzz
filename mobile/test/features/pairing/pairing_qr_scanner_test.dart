@@ -164,8 +164,31 @@ void main() {
         const ValueKey('dynamic-island-qr-scanner-portal'),
       );
       expect(tester.getRect(portal), const Rect.fromLTWH(136.5, 11, 120, 36));
+      expect(
+        tester.widget<ClipRSuperellipse>(portal).borderRadius,
+        BorderRadius.circular(18),
+      );
+      expect(
+        tester.widget<ClipRSuperellipse>(portal).clipBehavior,
+        Clip.antiAlias,
+      );
 
-      await tester.pump(const Duration(milliseconds: 460));
+      await tester.pump(const Duration(milliseconds: 16));
+      final firstOpeningFrame = tester.getRect(portal);
+      expect(firstOpeningFrame.height, inExclusiveRange(36, 50));
+      await tester.pump(const Duration(milliseconds: 214));
+      final openingRadius =
+          (tester.widget<ClipRSuperellipse>(portal).borderRadius
+                  as BorderRadius)
+              .topLeft
+              .x;
+      expect(openingRadius, inExclusiveRange(18, 40));
+
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<ClipRSuperellipse>(portal).borderRadius,
+        BorderRadius.circular(40),
+      );
       expect(tester.getRect(portal).top, 11);
       expect(
         find.byKey(const ValueKey('dynamic-island-qr-scanner-close')),
@@ -175,12 +198,90 @@ void main() {
       await tester.tapAt(const Offset(196.5, 700));
       await tester.pump();
       expect(scannerClosed, isFalse);
+      expect(find.byType(MobileScanner), findsOneWidget);
 
-      await tester.pump(const Duration(milliseconds: 340));
+      await tester.pump(const Duration(milliseconds: 100));
+      final earlyClosingHeight = tester.getRect(portal).height;
+      expect(earlyClosingHeight, lessThan(280));
+      expect(find.byType(MobileScanner), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 200));
+      final lateClosingHeight = tester.getRect(portal).height;
+      // The camera is transparent here, but must not shut down mid-collapse.
+      expect(find.byType(MobileScanner), findsOneWidget);
+      expect(
+        tester
+            .widget<Opacity>(
+              find
+                  .ancestor(
+                    of: find.byType(MobileScanner),
+                    matching: find.byType(Opacity),
+                  )
+                  .first,
+            )
+            .opacity,
+        0,
+      );
+      expect(fakeScannerPlatform.stopCalls, 0);
+      expect(fakeScannerPlatform._isDisposed, isFalse);
+      expect(lateClosingHeight, lessThan(earlyClosingHeight));
+      expect(lateClosingHeight, greaterThan(36));
+      // The final approach is slower than the initial collapse, not an impact.
+      expect(lateClosingHeight - 36, lessThan((363 - earlyClosingHeight) / 4));
+      final closingRadius =
+          (tester.widget<ClipRSuperellipse>(portal).borderRadius
+                  as BorderRadius)
+              .topLeft
+              .x;
+      expect(closingRadius, inExclusiveRange(18, 40));
+      await tester.pump(const Duration(milliseconds: 170));
       await tester.pumpAndSettle();
       expect(scannerClosed, isTrue);
       expect(portal, findsNothing);
+      expect(fakeScannerPlatform._isDisposed, isTrue);
       debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'an early dismissal keeps its frame and settles back into the island',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(393, 852));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      var closeCount = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async {
+                await showDynamicIslandPairingQrScanner(context);
+                closeCount++;
+              },
+              child: const Text('Open scanner'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open scanner'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      final portal = find.byKey(
+        const ValueKey('dynamic-island-qr-scanner-portal'),
+      );
+      final beforeDismissal = tester.getRect(portal);
+      await tester.tapAt(const Offset(196.5, 700));
+      await tester.pump();
+      expect(tester.getRect(portal), beforeDismissal);
+      // Preserve the outgoing velocity briefly instead of abruptly flipping it.
+      await tester.pump(const Duration(milliseconds: 8));
+      final afterDismissal = tester.getRect(portal);
+      expect(afterDismissal.height, greaterThan(beforeDismissal.height));
+      expect(afterDismissal.height - beforeDismissal.height, lessThan(12));
+      await tester.tapAt(const Offset(196.5, 700));
+      await tester.pumpAndSettle();
+      expect(closeCount, 1);
+      expect(portal, findsNothing);
+      expect(find.text('Open scanner'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     },
   );
 
@@ -225,6 +326,10 @@ void main() {
       const ValueKey('dynamic-island-qr-scanner-portal'),
     );
     expect(tester.getRect(portal), const Rect.fromLTWH(15, 11, 363, 363));
+    expect(
+      tester.widget<ClipRSuperellipse>(portal).borderRadius,
+      BorderRadius.circular(40),
+    );
 
     await tester.tapAt(tester.getCenter(portal));
     await tester.pump();
@@ -239,6 +344,7 @@ void main() {
 class _FakeMobileScannerPlatform extends MobileScannerPlatform {
   final _barcodes = StreamController<BarcodeCapture?>.broadcast();
   var _isDisposed = false;
+  var stopCalls = 0;
 
   @override
   Stream<BarcodeCapture?> get barcodesStream => _barcodes.stream;
@@ -264,7 +370,9 @@ class _FakeMobileScannerPlatform extends MobileScannerPlatform {
   Widget buildCameraView() => const SizedBox.expand();
 
   @override
-  Future<void> stop() async {}
+  Future<void> stop() async {
+    stopCalls++;
+  }
 
   @override
   Future<void> dispose() async {

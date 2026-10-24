@@ -23,7 +23,11 @@ export type TerminalSpan = {
   clusters: readonly TerminalCluster[];
 };
 
-export type TerminalRow = { line: number; spans: readonly TerminalSpan[] };
+export type TerminalRow = {
+  line: number;
+  wrapped: boolean;
+  spans: readonly TerminalSpan[];
+};
 export type TerminalCursor = {
   line: number;
   column: number;
@@ -52,7 +56,17 @@ export const TERMINAL_CELL_METRICS = {
   boldFont: '700 14px "JetBrains Mono", monospace',
 } as const satisfies CellMetrics;
 
-type RetainedRow = readonly TerminalSpan[];
+export type TerminalSelectionRow = {
+  boundaries: readonly number[];
+  line: number;
+  text: string;
+  wrapped: boolean;
+};
+
+type RetainedRow = {
+  wrapped: boolean;
+  spans: readonly TerminalSpan[];
+};
 
 export type PaintContext = Pick<
   CanvasRenderingContext2D,
@@ -120,12 +134,96 @@ export class TerminalGrid {
 
   constructor(viewport: TerminalViewport) {
     this.#viewport = viewport;
-    this.#rows = Array.from({ length: viewport.screenLines }, () => []);
+    this.#rows = Array.from({ length: viewport.screenLines }, () => ({
+      wrapped: false,
+      spans: [],
+    }));
     this.markAllDirty();
   }
 
   get viewport(): TerminalViewport {
     return this.#viewport;
+  }
+
+  selectionRows(): readonly TerminalSelectionRow[] {
+    return this.#rows.map((row, line) => {
+      const cells = Array.from({ length: this.#viewport.columns }, () => " ");
+      for (const span of row.spans) {
+        for (const cluster of span.clusters) {
+          cells[cluster.column] = cluster.text;
+          for (let offset = 1; offset < cluster.width; offset++) {
+            cells[cluster.column + offset] = "";
+          }
+        }
+      }
+      const text = cells.join("");
+      const retainedText = row.wrapped ? text : text.trimEnd();
+      const boundaries = [0];
+      for (const segment of new Intl.Segmenter(undefined, {
+        granularity: "grapheme",
+      }).segment(retainedText)) {
+        boundaries.push(segment.index + segment.segment.length);
+      }
+      return {
+        boundaries,
+        line,
+        text: retainedText,
+        wrapped: row.wrapped,
+      };
+    });
+  }
+
+  normalizeSelectionOffset(
+    rowIndex: number,
+    offset: number,
+    edge: "start" | "end",
+  ): number {
+    const row = this.selectionRows()[rowIndex];
+    if (!row) return 0;
+    const clamped = Math.max(0, Math.min(offset, row.text.length));
+    if (edge === "start") {
+      for (let index = row.boundaries.length - 1; index >= 0; index--) {
+        if (row.boundaries[index] <= clamped) return row.boundaries[index];
+      }
+      return 0;
+    }
+    return (
+      row.boundaries.find((boundary) => boundary >= clamped) ?? row.text.length
+    );
+  }
+
+  selectionText(
+    startRow: number,
+    startOffset: number,
+    endRow: number,
+    endOffset: number,
+  ): string {
+    const rows = this.selectionRows();
+    if (
+      startRow < 0 ||
+      endRow < startRow ||
+      endRow >= rows.length ||
+      startOffset < 0 ||
+      endOffset < 0
+    ) {
+      return "";
+    }
+    let selected = "";
+    for (let index = startRow; index <= endRow; index++) {
+      const row = rows[index];
+      const from = index === startRow ? startOffset : 0;
+      const to = index === endRow ? endOffset : row.text.length;
+      selected += row.text.slice(from, to);
+      if (index < endRow && !row.wrapped) selected += "\n";
+    }
+    return selected;
+  }
+
+  text(): string {
+    return this.selectionRows()
+      .map((row) => (row.wrapped ? row.text : `${row.text}\n`))
+      .join("")
+      .replace(/\n$/, "");
   }
 
   apply(frame: TerminalFrame): boolean {
@@ -142,7 +240,7 @@ export class TerminalGrid {
     this.#dirty.add(this.#cursor.line);
     for (const row of frame.rows) {
       if (row.line < this.#rows.length) {
-        this.#rows[row.line] = row.spans;
+        this.#rows[row.line] = { wrapped: row.wrapped, spans: row.spans };
         this.#dirty.add(row.line);
       }
     }
@@ -151,7 +249,10 @@ export class TerminalGrid {
 
   resize(viewport: TerminalViewport): void {
     this.#viewport = viewport;
-    this.#rows = Array.from({ length: viewport.screenLines }, () => []);
+    this.#rows = Array.from({ length: viewport.screenLines }, () => ({
+      wrapped: false,
+      spans: [],
+    }));
     this.#cursor = { line: 0, column: 0, visible: false };
     this.markAllDirty();
   }
@@ -186,7 +287,7 @@ export class TerminalGrid {
         this.#viewport.columns * metrics.width,
         metrics.height,
       );
-      for (const span of this.#rows[line] ?? []) {
+      for (const span of this.#rows[line]?.spans ?? []) {
         const background = resolvePackedColor(
           span.style.bg,
           palette,

@@ -68,6 +68,7 @@ test("clusters draw at computed columns, never accumulated text width", () => {
       rows: [
         {
           line: 0,
+          wrapped: false,
           spans: [
             {
               style: { fg: 0x01000007, bg: 0x01000101, flags: 0 },
@@ -108,6 +109,7 @@ test("combining marks stay in one cluster and consume one cell", () => {
     rows: [
       {
         line: 0,
+        wrapped: false,
         spans: [
           {
             style: { fg: 0x01000007, bg: 0x01000101, flags: 0 },
@@ -164,4 +166,85 @@ test("cursor visibility can blink without a new terminal frame", () => {
   const restored = context();
   grid.paint(restored, metrics, palette);
   assert.ok(restored.fills.some((fill) => fill[0] === 20 && fill[2] === 1.2));
+});
+
+test("text preserves soft-wrap spaces and hard line breaks", () => {
+  const grid = new TerminalGrid({ generation: 0, columns: 5, screenLines: 3 });
+  grid.apply({
+    viewport: grid.viewport,
+    full: true,
+    cursor: { line: 0, column: 0, visible: false },
+    rows: [
+      {
+        line: 0,
+        wrapped: true,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [..."abcd "].map((text, column) => ({
+              column,
+              text,
+              width: 1,
+            })),
+          },
+        ],
+      },
+      {
+        line: 1,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [
+              { column: 0, text: "é", width: 1 },
+              { column: 1, text: "f", width: 1 },
+            ],
+          },
+        ],
+      },
+      {
+        line: 2,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [{ column: 0, text: "tail", width: 1 }],
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(grid.text(), "abcd éf\ntail");
+});
+
+test("selection offsets expand to complete grapheme clusters and clamp empty rows", () => {
+  const grid = new TerminalGrid({ generation: 0, columns: 5, screenLines: 2 });
+  grid.apply({
+    viewport: grid.viewport,
+    full: true,
+    cursor: { line: 0, column: 0, visible: false },
+    rows: [
+      {
+        line: 0,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [
+              { column: 0, text: "😀", width: 2 },
+              { column: 2, text: "é", width: 1 },
+            ],
+          },
+        ],
+      },
+      { line: 1, wrapped: false, spans: [] },
+    ],
+  });
+
+  assert.equal(grid.normalizeSelectionOffset(0, 1, "start"), 0);
+  assert.equal(grid.normalizeSelectionOffset(0, 1, "end"), 2);
+  assert.equal(grid.normalizeSelectionOffset(0, 3, "start"), 2);
+  assert.equal(grid.normalizeSelectionOffset(0, 3, "end"), 4);
+  assert.equal(grid.normalizeSelectionOffset(1, 1, "end"), 0);
 });

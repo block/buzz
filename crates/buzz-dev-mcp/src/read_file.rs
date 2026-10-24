@@ -72,7 +72,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn make_state(cwd: &std::path::Path) -> SharedState {
-        let shim = crate::shim::Shim::install_without_identity().expect("shim install");
+        let shim = crate::shim::Shim::install().expect("shim install");
         SharedState::new(
             cwd.to_path_buf(),
             shim,

@@ -118,27 +118,24 @@ class _EmptyFilterState extends StatelessWidget {
   Widget build(BuildContext context) {
     if (unreadOnly) {
       return const _EmptySurface(
-        icon: LucideIcons.mailOpen,
+        icon: BuzzIcons.mailOpen,
         message: 'No unread messages',
         detail: 'Turn off the unread filter to see read messages.',
       );
     }
     final (icon, message) = switch (filter) {
-      InboxFilter.mention => (LucideIcons.atSign, 'No mentions yet'),
-      InboxFilter.thread => (
-        LucideIcons.messageSquare,
-        'No thread replies yet',
-      ),
+      InboxFilter.mention => (BuzzIcons.atSign, 'No mentions yet'),
+      InboxFilter.thread => (BuzzIcons.messageSquare, 'No thread replies yet'),
       InboxFilter.needsAction => (
-        LucideIcons.circleAlert,
+        BuzzIcons.circleAlert,
         'Nothing needs your action',
       ),
       InboxFilter.activity => (
-        LucideIcons.activity,
+        BuzzIcons.activity,
         'No recent channel activity',
       ),
-      InboxFilter.agentActivity => (LucideIcons.bot, 'No agent updates'),
-      _ => (LucideIcons.bell, 'No activity yet'),
+      InboxFilter.agentActivity => (BuzzIcons.bot, 'No agent updates'),
+      _ => (BuzzIcons.bell, 'No activity yet'),
     };
     return _EmptySurface(icon: icon, message: message);
   }
@@ -156,7 +153,7 @@ class _ErrorView extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
-            LucideIcons.triangleAlert,
+            BuzzIcons.triangleAlert,
             size: Grid.lg,
             color: context.colors.error,
           ),
@@ -170,7 +167,7 @@ class _ErrorView extends StatelessWidget {
           const SizedBox(height: Grid.xs),
           FilledButton.icon(
             onPressed: () => unawaited(onRetry()),
-            icon: const Icon(LucideIcons.refreshCcw, size: 16),
+            icon: const Icon(BuzzIcons.refreshCcw, size: 16),
             label: const Text('Retry'),
           ),
         ],

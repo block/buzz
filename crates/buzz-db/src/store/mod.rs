@@ -1,0 +1,90 @@
+//! Domain-owned persistence implementations.
+
+/// Explicit deployment-global admin report reads.
+pub mod admin_moderation;
+/// Community-scoped authentication allowlist persistence.
+pub mod allowlist;
+/// API token storage and lookup.
+pub mod api_token;
+/// Relay-scoped archived identity persistence (NIP-IA).
+pub mod archived_identities;
+/// Channel lifecycle and metadata persistence.
+pub mod channel;
+/// Channel membership and roster persistence.
+pub mod channel_members;
+/// Community lifecycle and host-map persistence.
+pub mod community;
+/// Durable whole-community deletion lifecycle and PostgreSQL adapter.
+pub mod deletion;
+/// Direct message channel persistence.
+pub mod dm;
+/// Operator-global synthetic user-deletion request intake.
+pub mod entity_deletion;
+/// Event storage and retrieval.
+pub mod event;
+/// App-owned push enqueue and channel TTL refresh for inserted events.
+pub(crate) mod event_follow_up;
+/// Per-community NIP-FI issuer bindings.
+pub mod nip_fi_binding;
+
+#[cfg(test)]
+mod event_follow_up_postgres_tests;
+
+/// Home feed queries.
+pub mod feed;
+/// Git repository name registry (NIP-34 kind:30617).
+pub mod git_repo;
+/// Community moderation: reports, bans/timeouts, audit actions.
+pub mod moderation;
+/// Deployment-global operator-listener mention registrations and delivery queues.
+pub mod operator_listener;
+/// Monthly table partition management.
+pub mod partition;
+/// Private signer-owned accessory read progress.
+pub mod personal_read;
+/// Buzz product-feedback sidecar persistence.
+pub mod product_feedback;
+/// Community-scoped push lease and durable wake-outbox persistence.
+pub mod push;
+/// Reaction persistence.
+pub mod reaction;
+/// Complete own-author read-state snapshots.
+pub mod read_state;
+/// HTTP report-resolution enforcement state machine persistence.
+pub mod relay_admin_actions;
+/// Use-limited relay invite persistence (v2 opaque tokens).
+pub mod relay_invite;
+/// Relay-level membership persistence (NIP-43).
+pub mod relay_members;
+/// Deployment-global relay operator/moderator roster persistence.
+pub mod relay_operators;
+/// Event-reminder delivery query, claim, and release persistence.
+pub mod reminder;
+/// Replaceable-event persistence and coordinate locking.
+pub mod replaceable;
+/// Durable completed snapshots from the isolated media-storage worker.
+pub mod storage_accounting;
+/// Thread metadata persistence.
+pub mod thread;
+/// Strict newest-first thread windows and auxiliary scans.
+pub mod thread_window;
+/// Per-community usage rollup queries for Prometheus gauges.
+pub mod usage;
+/// User profile persistence.
+pub mod user;
+/// Workflow, run, and approval persistence.
+pub mod workflow;
+
+/// NIP-AR artifact lifecycle and durable delivery.
+pub mod artifact;
+
+mod artifact_query;
+
+#[cfg(test)]
+mod artifact_postgres_tests;
+
+#[cfg(test)]
+mod legacy_channel_types_postgres_tests;
+
+#[cfg(test)]
+mod admission_postgres_tests;

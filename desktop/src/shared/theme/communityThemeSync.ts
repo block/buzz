@@ -44,10 +44,21 @@ export function isNewerCommunityThemeCoordinate(
   );
 }
 
+export type CommunityThemeHydrationResult =
+  | { status: "valid"; remote: RemoteCommunityTheme }
+  | { status: "confirmed-absent" }
+  | { status: "invalid" | "unavailable" };
+
+export function communityThemeHydrationRemote(
+  result: CommunityThemeHydrationResult,
+): RemoteCommunityTheme | null {
+  return result.status === "valid" ? result.remote : null;
+}
+
 export function shouldSeedCommunityTheme(
-  result: RemoteCommunityThemeResult,
+  result: CommunityThemeHydrationResult,
 ): boolean {
-  return result.status === "absent";
+  return result.status === "confirmed-absent";
 }
 
 async function decryptAndParse(
@@ -70,6 +81,8 @@ export class CommunityThemeSyncManager {
   private destroyed = false;
   private lastRemoteCreatedAt = 0;
   private lastRemoteEventId = "";
+  private latestRemote: RemoteCommunityTheme | null = null;
+  private observedInvalidLiveRemote = false;
   private lastPublished: PublishedCommunityTheme | null = null;
   private pending: CommunityThemePreference | null = null;
   private publishInFlight = false;
@@ -107,8 +120,9 @@ export class CommunityThemeSyncManager {
       ) {
         this.lastRemoteCreatedAt = remote.createdAt;
         this.lastRemoteEventId = remote.eventId;
+        this.latestRemote = remote;
       }
-      return { status: "valid", remote };
+      return { status: "valid", remote: this.latestRemote ?? remote };
     } catch {
       return { status: "unavailable" };
     }
@@ -162,6 +176,7 @@ export class CommunityThemeSyncManager {
     ) {
       this.lastRemoteCreatedAt = remote.createdAt;
       this.lastRemoteEventId = remote.eventId;
+      this.latestRemote = remote;
     }
     const lastPublished = this.lastPublished;
     if (
@@ -284,6 +299,85 @@ export class CommunityThemeSyncManager {
     await Promise.allSettled([...this.remoteProcessing]);
   }
 
+  async subscribeAndFetch(
+    onUpdate: (remote: RemoteCommunityTheme) => void,
+  ): Promise<{
+    result: CommunityThemeHydrationResult;
+    unsubscribe: () => Promise<void>;
+  }> {
+    // Establish live delivery before querying history. A relay can deliver a
+    // replacement while an empty history query is in flight; subscribing
+    // second would leave a blind spot where the controller seeds defaults over
+    // an existing preference.
+    let unsubscribe: () => Promise<void> = async () => {};
+    const readiness = {
+      value: "failed" as "eose" | "closed" | "timeout" | "failed",
+    };
+    const setReadiness = (result: "eose" | "closed" | "timeout") => {
+      readiness.value = result;
+    };
+    try {
+      unsubscribe = await relayClient.subscribeLive(
+        {
+          kinds: [KIND_COMMUNITY_THEME],
+          authors: [this.pubkey],
+          "#d": [D_TAG],
+          limit: 0,
+        },
+        (event: RelayEvent) => this.processLiveEvent(event, onUpdate),
+        setReadiness,
+      );
+    } catch {
+      // History still provides a safe snapshot when live setup is temporarily
+      // unavailable; reconnect catch-up can still restore later relay state.
+    }
+    const result = await this.fetchRemote();
+    await this.waitForDeliveredRemotes();
+    let hydrationResult: CommunityThemeHydrationResult;
+    if (this.latestRemote) {
+      hydrationResult = { status: "valid", remote: this.latestRemote };
+    } else if (result.status === "valid") {
+      hydrationResult = result;
+    } else if (result.status === "invalid") {
+      hydrationResult = { status: "invalid" };
+    } else if (result.status === "unavailable") {
+      hydrationResult = { status: "unavailable" };
+    } else if (this.observedInvalidLiveRemote) {
+      hydrationResult = { status: "invalid" };
+    } else if (readiness.value === "eose") {
+      hydrationResult = { status: "confirmed-absent" };
+    } else {
+      hydrationResult = { status: "unavailable" };
+    }
+    return { result: hydrationResult, unsubscribe };
+  }
+
+  private processLiveEvent(
+    event: RelayEvent,
+    onUpdate: (remote: RemoteCommunityTheme) => void,
+  ): void {
+    if (event.pubkey !== this.pubkey || this.destroyed) return;
+    const processing = decryptAndParse(event).then((remote) => {
+      if (this.destroyed) return;
+      if (!remote) {
+        this.observedInvalidLiveRemote = true;
+        return;
+      }
+      if (
+        isNewerCommunityThemeCoordinate(remote, {
+          createdAt: this.lastRemoteCreatedAt,
+          eventId: this.lastRemoteEventId,
+        })
+      ) {
+        this.lastRemoteCreatedAt = remote.createdAt;
+        this.lastRemoteEventId = remote.eventId;
+        this.latestRemote = remote;
+      }
+      onUpdate(remote);
+    });
+    this.trackRemoteProcessing(processing);
+  }
+
   async subscribe(
     onUpdate: (remote: RemoteCommunityTheme) => void,
   ): Promise<() => Promise<void>> {
@@ -294,23 +388,7 @@ export class CommunityThemeSyncManager {
         "#d": [D_TAG],
         limit: 0,
       },
-      (event: RelayEvent) => {
-        if (event.pubkey !== this.pubkey || this.destroyed) return;
-        const processing = decryptAndParse(event).then((remote) => {
-          if (!remote || this.destroyed) return;
-          if (
-            isNewerCommunityThemeCoordinate(remote, {
-              createdAt: this.lastRemoteCreatedAt,
-              eventId: this.lastRemoteEventId,
-            })
-          ) {
-            this.lastRemoteCreatedAt = remote.createdAt;
-            this.lastRemoteEventId = remote.eventId;
-          }
-          onUpdate(remote);
-        });
-        this.trackRemoteProcessing(processing);
-      },
+      (event: RelayEvent) => this.processLiveEvent(event, onUpdate),
     );
   }
 

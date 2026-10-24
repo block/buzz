@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 import 'package:buzz/shared/crypto/nip_oa.dart';
+import 'package:buzz/shared/relay/nostr_models.dart';
 
 String _sha256Hex(String input) {
   final digest = SHA256Digest().process(Uint8List.fromList(utf8.encode(input)));
@@ -24,6 +25,46 @@ List<String> authTag(
 void main() {
   final owner = nostr.Keys.generate();
   final agent = nostr.Keys.generate();
+
+  for (final (conditions, expected) in [
+    ('', true),
+    ('kind=0&created_at>99&created_at<101', true),
+    ('kind=1', false),
+    ('created_at>100', false),
+    ('created_at<100', false),
+    ('kind=0&created_at>100', false),
+  ]) {
+    test('profile evaluates signed conditions $conditions', () {
+      final tag = authTag(owner, agent.public, conditions: conditions);
+      NostrEvent event(List<List<String>> tags, {int kind = 0}) =>
+          NostrEvent.fromJson(
+            nostr.Event.from(
+              kind: kind,
+              content: '{}',
+              secretKey: agent.secret,
+              createdAt: 100,
+              tags: tags,
+            ).toMap(),
+          );
+      expect(
+        verifiedProfileOaOwnerPubkey(event([tag])),
+        expected ? owner.public : null,
+      );
+      expect(
+        verifiedProfileOaOwnerPubkey(
+          event([
+            tag,
+            ['auth'],
+          ]),
+        ),
+        isNull,
+      );
+      expect(verifiedProfileOaOwnerPubkey(event([tag, tag])), isNull);
+      expect(verifiedProfileOaOwnerPubkey(event([tag], kind: 1)), isNull);
+      final forged = event([tag]).toJson()..['sig'] = '0' * 128;
+      expect(verifiedProfileOaOwnerPubkey(NostrEvent.fromJson(forged)), isNull);
+    });
+  }
 
   test('returns the owner pubkey for a valid auth tag', () {
     final tag = authTag(owner, agent.public);

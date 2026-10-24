@@ -233,6 +233,8 @@ export function MessageResultBody({
   });
   const avatarUrl =
     resultProfiles?.[hit.pubkey.toLowerCase()]?.avatarUrl ?? null;
+  const authorIsAgent =
+    resultProfiles?.[hit.pubkey.toLowerCase()]?.isAgent === true;
 
   return (
     <div className="min-w-0 flex-1">
@@ -245,6 +247,7 @@ export function MessageResultBody({
           <UserAvatar
             avatarUrl={avatarUrl}
             displayName={authorLabel}
+            shape={authorIsAgent ? "squircle" : "circle"}
             size="xs"
           />
           {authorLabel}

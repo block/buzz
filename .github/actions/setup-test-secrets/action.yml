@@ -1,0 +1,30 @@
+name: Set up isolated test secrets
+description: Build the pinned daz-secrets protocol conformance provider for credential integration tests
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      with:
+        repository: darrenoakey/daz-secrets
+        ref: ef01d96a2fa8d661a6a2ad7dace77fce0f2f60aa
+        path: .ci/daz-secrets
+        persist-credentials: false
+    - name: Configure isolated test credential provider
+      shell: bash
+      run: |
+        mkdir -p "$HOME/.config/daz-secrets" "$RUNNER_TEMP/daz-secrets"
+        (
+          cd .ci/daz-secrets
+          go build -trimpath -o "$RUNNER_TEMP/daz-secrets/buzz-ci-provider" \
+            ./cmd/daz-secrets-conformance-provider
+          go build -trimpath -o "$RUNNER_TEMP/daz-secrets/daz-secrets" ./cmd/daz-secrets
+        )
+        chmod 0755 "$RUNNER_TEMP/daz-secrets/buzz-ci-provider" "$RUNNER_TEMP/daz-secrets/daz-secrets"
+        printf '%s\n' "$RUNNER_TEMP/daz-secrets" >> "$GITHUB_PATH"
+        printf '%s\n' \
+          'version = 1' \
+          "provider_path = \"$RUNNER_TEMP/daz-secrets/buzz-ci-provider\"" \
+          'provider_id = "conformance"' \
+          'timeout_ms = 2000' \
+          > "$HOME/.config/daz-secrets/provider.toml"
+        chmod 0600 "$HOME/.config/daz-secrets/provider.toml"

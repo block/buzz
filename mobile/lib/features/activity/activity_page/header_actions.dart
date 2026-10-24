@@ -13,8 +13,6 @@ const _filterLabels = <InboxFilter, String>{
 
 class _ActivityActionsPill extends StatelessWidget {
   final InboxFilter filter;
-  final int dueReminderCount;
-  final int draftCount;
   final bool unreadOnly;
   final int unreadCount;
   final ValueChanged<InboxFilter> onFilterChanged;
@@ -23,8 +21,6 @@ class _ActivityActionsPill extends StatelessWidget {
 
   const _ActivityActionsPill({
     required this.filter,
-    required this.dueReminderCount,
-    required this.draftCount,
     required this.unreadOnly,
     required this.unreadCount,
     required this.onFilterChanged,
@@ -37,7 +33,7 @@ class _ActivityActionsPill extends StatelessWidget {
     borderRadius: BorderRadius.circular(Radii.full),
     child: DecoratedBox(
       decoration: BoxDecoration(
-        color: context.colors.primaryContainer,
+        color: context.controlSurface,
         borderRadius: BorderRadius.circular(Radii.full),
       ),
       child: Padding(
@@ -45,12 +41,7 @@ class _ActivityActionsPill extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _FilterMenuButton(
-              filter: filter,
-              dueReminderCount: dueReminderCount,
-              draftCount: draftCount,
-              onChanged: onFilterChanged,
-            ),
+            _FilterMenuButton(filter: filter, onChanged: onFilterChanged),
             _InboxOptionsButton(
               unreadOnly: unreadOnly,
               unreadCount: unreadCount,
@@ -68,16 +59,9 @@ class _ActivityActionsPill extends StatelessWidget {
 /// inbox filter menu (`FILTER_OPTIONS`).
 class _FilterMenuButton extends StatelessWidget {
   final InboxFilter filter;
-  final int dueReminderCount;
-  final int draftCount;
   final ValueChanged<InboxFilter> onChanged;
 
-  const _FilterMenuButton({
-    required this.filter,
-    required this.dueReminderCount,
-    required this.draftCount,
-    required this.onChanged,
-  });
+  const _FilterMenuButton({required this.filter, required this.onChanged});
 
   @override
   Widget build(BuildContext context) {
@@ -105,7 +89,7 @@ class _FilterMenuButton extends StatelessWidget {
                         width: Grid.sm,
                         child: entry.key == filter
                             ? Icon(
-                                LucideIcons.check,
+                                BuzzIcons.check,
                                 size: 16,
                                 color: context.colors.primary,
                               )
@@ -121,12 +105,6 @@ class _FilterMenuButton extends StatelessWidget {
                           ),
                         ),
                       ),
-                      if (entry.key == InboxFilter.reminders &&
-                          dueReminderCount > 0)
-                        _CountBadge(count: dueReminderCount)
-                      else if (entry.key == InboxFilter.drafts &&
-                          draftCount > 0)
-                        _CountBadge(count: draftCount),
                     ],
                   ),
                 ),
@@ -150,51 +128,13 @@ class _FilterMenuButton extends StatelessWidget {
                 ),
                 const SizedBox(width: Grid.quarter),
                 Icon(
-                  LucideIcons.chevronDown,
+                  BuzzIcons.chevronDown,
                   size: 16,
                   color: navigationPrimaryForeground(context),
                 ),
-                if (dueReminderCount > 0 || draftCount > 0) ...[
-                  const SizedBox(width: Grid.quarter),
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: context.colors.primary,
-                    ),
-                  ),
-                ],
               ],
             ),
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CountBadge extends StatelessWidget {
-  final int count;
-
-  const _CountBadge({required this.count});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: Grid.half + Grid.quarter,
-        vertical: Grid.quarter,
-      ),
-      decoration: BoxDecoration(
-        color: navigationPrimaryForeground(context),
-        borderRadius: BorderRadius.circular(Grid.xxs),
-      ),
-      child: Text(
-        '$count',
-        style: context.textTheme.labelSmall?.copyWith(
-          color: context.colors.onPrimary,
-          fontWeight: FontWeight.w600,
         ),
       ),
     );
@@ -221,14 +161,14 @@ class _InboxOptionsButton extends StatelessWidget {
     return Builder(
       builder: (buttonContext) => IconButton(
         key: const ValueKey('activity-options-menu'),
-        tooltip: 'Activity options',
+        tooltip: 'Inbox options',
         color: navigationPrimaryForeground(context),
         padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
         constraints: const BoxConstraints.tightFor(
           width: Grid.xl,
           height: Grid.xl,
         ),
-        icon: const Icon(LucideIcons.ellipsis, size: 20),
+        icon: const Icon(BuzzIcons.ellipsis, size: 20),
         onPressed: () async {
           final selected = await showAnchoredPopover<String>(
             context: buttonContext,
@@ -245,7 +185,7 @@ class _InboxOptionsButton extends StatelessWidget {
                     ),
                     if (unreadOnly)
                       Icon(
-                        LucideIcons.check,
+                        BuzzIcons.check,
                         size: 16,
                         color: context.colors.primary,
                       ),

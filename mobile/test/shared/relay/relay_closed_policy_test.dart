@@ -16,6 +16,7 @@ void main() {
       'unsupported: filter extension': RelayClosedClass.terminal,
       'error: mixed search and channel filter': RelayClosedClass.terminal,
       'error: too many subscriptions': RelayClosedClass.terminal,
+      'error: query timed out': RelayClosedClass.terminal,
       'error: relay temporarily unavailable': RelayClosedClass.retryable,
       'subscription closed by relay': RelayClosedClass.retryable,
     };

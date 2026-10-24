@@ -6,13 +6,14 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 
+import '../hosted/hosted_relay_auth.dart';
 import 'media_auth.dart';
 
 /// Shared, keep-alive HTTP client for media fetches. One client per container
 /// so TLS connections are reused across images instead of re-handshaking per
 /// fetch. Override in tests to stub the network.
 final mediaHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = ref.watch(hostedHttpClientFactoryProvider)();
   ref.onDispose(client.close);
   return client;
 });
@@ -38,14 +39,24 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   final double scale;
   final MediaGetAuthService auth;
 
+  /// Optional observer for bytes already fetched by the foreground image path.
+  /// Excluded from equality because it is a side effect, not cache identity.
+  final ValueChanged<Uint8List>? onBytesLoaded;
+
   /// Excluded from equality: transport, not identity.
   final http.Client client;
+
+  /// Deadline for the complete response, including a stalled response body.
+  /// Aborts the request without closing the shared client.
+  final Duration requestTimeout;
 
   const MediaImageProvider({
     required this.url,
     required this.auth,
     required this.client,
+    this.onBytesLoaded,
     this.scale = 1.0,
+    this.requestTimeout = const Duration(seconds: 30),
   });
 
   static const _defaultCooldown = Duration(seconds: 30);
@@ -92,7 +103,18 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       final uri = Uri.parse(url);
       final http.Response response;
       try {
-        response = await client.get(uri, headers: auth.headersFor(url));
+        final abort = Completer<void>();
+        final deadline = Timer(requestTimeout, abort.complete);
+        try {
+          final request = http.AbortableRequest(
+            'GET',
+            uri,
+            abortTrigger: abort.future,
+          )..headers.addAll(auth.headersFor(url));
+          response = await http.Response.fromStream(await client.send(request));
+        } finally {
+          deadline.cancel();
+        }
       } catch (_) {
         _cooldownUntil[url] = debugNow().add(_defaultCooldown);
         rethrow;
@@ -109,8 +131,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
         _cooldownUntil[url] = debugNow().add(_defaultCooldown);
         throw NetworkImageLoadException(statusCode: 200, uri: uri);
       }
+      onBytesLoaded?.call(bytes);
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-      return decode(buffer);
+      return await decode(buffer);
     } catch (_) {
       // Match NetworkImage: make sure an errored key is not retained in the
       // cache. The cooldown map (not the cache) throttles retries.
@@ -177,9 +200,11 @@ class MediaImage extends ConsumerWidget {
   final double? height;
   final String? semanticLabel;
   final ImageErrorWidgetBuilder? errorBuilder;
+  final ImageFrameBuilder? frameBuilder;
   final FilterQuality filterQuality;
   final double? decodeWidth;
   final bool boundDecodeToLayout;
+  final ValueChanged<Uint8List>? onBytesLoaded;
 
   const MediaImage({
     super.key,
@@ -189,9 +214,11 @@ class MediaImage extends ConsumerWidget {
     this.height,
     this.semanticLabel,
     this.errorBuilder,
+    this.frameBuilder,
     this.filterQuality = FilterQuality.medium,
     this.decodeWidth,
     this.boundDecodeToLayout = true,
+    this.onBytesLoaded,
   });
 
   @override
@@ -200,6 +227,7 @@ class MediaImage extends ConsumerWidget {
       url: url,
       auth: ref.watch(mediaGetAuthServiceProvider),
       client: ref.watch(mediaHttpClientProvider),
+      onBytesLoaded: onBytesLoaded,
     );
 
     if (decodeWidth != null) {
@@ -231,6 +259,7 @@ class MediaImage extends ConsumerWidget {
       height: height,
       semanticLabel: semanticLabel,
       errorBuilder: errorBuilder,
+      frameBuilder: frameBuilder,
       filterQuality: filterQuality,
       gaplessPlayback: true,
     );

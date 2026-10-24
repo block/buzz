@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, Weak,
 };
 
 use super::agent_voice::AgentVoiceSettings;
+use super::human_floor::HumanFloor;
 use super::{stt, tts};
 
 /// Voice input mode: push-to-talk (PTT) or voice-activity detection (VAD).
@@ -78,9 +79,20 @@ pub struct HuddleState {
     /// Active STT pipeline — not serialized, not cloned.
     #[serde(skip)]
     pub stt_pipeline: Option<Arc<stt::SttPipeline>>,
+    /// Weak STT handle shared with the audio receive loop so remote human
+    /// speech can reach transcription even when the pipeline hot-starts after
+    /// the Huddle audio socket was connected. The state-owned strong handle
+    /// above remains the sole owner and teardown clears both atomically.
+    #[serde(skip)]
+    pub remote_stt_pipeline: Arc<Mutex<Option<Weak<stt::SttPipeline>>>>,
     /// Active TTS pipeline — not serialized, not cloned.
     #[serde(skip)]
     pub tts_pipeline: Option<Arc<tts::TtsPipeline>>,
+    /// Peer indices currently publishing locally synthesized TTS sockets. The
+    /// receive loop uses this live registry to suppress only this desktop's
+    /// echo, never another socket authenticated as the same bot.
+    #[serde(skip)]
+    pub local_tts_publishers: tts::LocalTtsPublishers,
     /// Whether this client created the huddle (vs. joined it).
     /// Used to enforce that only the creator can end/archive the huddle.
     pub is_creator: bool,
@@ -106,6 +118,10 @@ pub struct HuddleState {
     /// restarts — both STT and TTS reference the same flag for the entire huddle.
     #[serde(skip)]
     pub tts_cancel: Arc<AtomicBool>,
+    /// Shared human-floor state. Confirmed local or remote human speech hard
+    /// cancels TTS and blocks stale/new playback until every source releases.
+    #[serde(skip)]
+    pub human_floor: HumanFloor,
     /// Sentinel: true while a TTS pipeline is being constructed (outside the lock).
     /// Prevents TOCTOU races where two concurrent callers both pass the `is_some()`
     /// check and both spawn TTS worker threads — the loser's thread would leak.
@@ -137,6 +153,8 @@ pub struct HuddleState {
     pub ptt_active: Arc<AtomicBool>,
     /// True while the clickable microphone control is manually unmuted.
     /// In PTT mode, either this flag or `ptt_active` opens the STT gate.
+    /// Defaults to muted so push-to-talk actually gates the microphone
+    /// until the user explicitly opens it.
     #[serde(skip)]
     pub manual_mic_unmuted: Arc<AtomicBool>,
 }
@@ -180,13 +198,16 @@ impl Clone for HuddleState {
             agent_pubkeys: Arc::new(Mutex::new(agent_pubkeys_snapshot)),
             agent_voice_settings: self.agent_voice_settings.clone(),
             stt_pipeline: None, // Never clone the pipeline handle.
+            remote_stt_pipeline: Arc::new(Mutex::new(None)),
             tts_pipeline: None, // Never clone the pipeline handle.
+            local_tts_publishers: Arc::clone(&self.local_tts_publishers),
             is_creator: self.is_creator,
             tts_enabled: self.tts_enabled,
             transcription_enabled: self.transcription_enabled,
             transcription_user_controlled: self.transcription_user_controlled,
             tts_active: Arc::clone(&self.tts_active),
             tts_cancel: Arc::clone(&self.tts_cancel),
+            human_floor: self.human_floor.clone(),
             tts_starting: Arc::clone(&self.tts_starting),
             stt_starting: Arc::clone(&self.stt_starting),
             last_agent_refresh: self.last_agent_refresh,
@@ -201,6 +222,8 @@ impl Clone for HuddleState {
 
 impl Default for HuddleState {
     fn default() -> Self {
+        let tts_cancel = Arc::new(AtomicBool::new(false));
+        let human_floor = HumanFloor::new();
         Self {
             phase: HuddlePhase::Idle,
             parent_channel_id: None,
@@ -212,13 +235,16 @@ impl Default for HuddleState {
             agent_pubkeys: Arc::new(Mutex::new(Vec::new())),
             agent_voice_settings: BTreeMap::new(),
             stt_pipeline: None,
+            remote_stt_pipeline: Arc::new(Mutex::new(None)),
             tts_pipeline: None,
+            local_tts_publishers: tts::LocalTtsPublishers::default(),
             is_creator: false,
             tts_enabled: true,
             transcription_enabled: false,
             transcription_user_controlled: false,
             tts_active: Arc::new(AtomicBool::new(false)),
-            tts_cancel: Arc::new(AtomicBool::new(false)),
+            tts_cancel,
+            human_floor,
             tts_starting: Arc::new(AtomicBool::new(false)),
             stt_starting: Arc::new(AtomicBool::new(false)),
             last_agent_refresh: None,
@@ -226,12 +252,28 @@ impl Default for HuddleState {
             session_generation: Arc::new(AtomicU64::new(0)),
             voice_input_mode: VoiceInputMode::default(),
             ptt_active: Arc::new(AtomicBool::new(false)),
-            manual_mic_unmuted: Arc::new(AtomicBool::new(true)),
+            manual_mic_unmuted: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl HuddleState {
+    pub(crate) fn set_stt_pipeline(&mut self, pipeline: Arc<stt::SttPipeline>) {
+        *self
+            .remote_stt_pipeline
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(Arc::downgrade(&pipeline));
+        self.stt_pipeline = Some(pipeline);
+    }
+
+    pub(crate) fn take_stt_pipeline(&mut self) -> Option<Arc<stt::SttPipeline>> {
+        self.remote_stt_pipeline
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        self.stt_pipeline.take()
+    }
+
     /// Begin a new local huddle lifetime and return its identity.
     pub(crate) fn begin_huddle_lifetime(&mut self) -> u64 {
         self.huddle_generation = self.huddle_generation.wrapping_add(1);
@@ -339,10 +381,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_push_to_talk_with_an_open_microphone() {
+    fn defaults_to_push_to_talk_with_a_muted_microphone() {
         let state = HuddleState::default();
         assert_eq!(state.voice_input_mode, super::VoiceInputMode::PushToTalk);
-        assert!(state.manual_mic_unmuted.load(Ordering::Acquire));
+        assert!(!state.manual_mic_unmuted.load(Ordering::Acquire));
     }
 
     #[test]

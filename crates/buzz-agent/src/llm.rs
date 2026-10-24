@@ -1,16 +1,16 @@
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use reqwest::Client;
 use serde_json::{json, Map, Value};
-use tokio::sync::Mutex;
-use tokio::time::Instant;
 
 use crate::auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, TokenSource};
 use crate::config::{
-    is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_openai_route,
-    Config, OpenAiApi, Provider, ThinkingEffort,
+    is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_databricks_v2,
+    normalize_effort_for_provider, Config, OpenAiApi, Provider, ThinkingEffort,
+    MAX_TOOL_CALLS_PER_TURN,
 };
 use crate::types::{
     AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
@@ -25,58 +25,10 @@ const DATABRICKS_OAUTH_SCOPES: &[&str] = &["all-apis", "offline_access"];
 const MAX_LLM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LLM_ERROR_BODY_BYTES: usize = 4 * 1024;
 const STALL_NOTICE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300);
-const MESH_VIRTUAL_MODEL_ID: &str = "mesh";
-const MESH_AUTO_MODEL_ID: &str = "auto";
-const MESH_AUTO_CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(5);
-const MESH_AUTO_CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const MESH_AUTO_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
-const MESH_AUTO_ENABLE_OBSERVATIONS: u8 = 2;
-const MESH_MOA_UNAVAILABLE_MESSAGE: &str = "MoA requires ≥2 models available in the mesh";
 
 /// Parser for an OpenAI-family JSON response. Per-endpoint pair lives
 /// alongside its `_body` serializer.
 type OpenAiParse = fn(Value) -> Result<LlmResponse, AgentError>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MeshCatalogObservation {
-    Available,
-    Unavailable,
-    Unknown,
-}
-
-fn mesh_catalog_supports_collective(catalog: &Value) -> Option<bool> {
-    let models = catalog.get("data").and_then(Value::as_array)?;
-    let mut has_virtual_mesh = false;
-    let mut physical_models = BTreeSet::new();
-    for id in models
-        .iter()
-        .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
-        if id == MESH_VIRTUAL_MODEL_ID {
-            has_virtual_mesh = true;
-        } else if id != MESH_AUTO_MODEL_ID {
-            physical_models.insert(id.replace("@main", ""));
-        }
-    }
-    Some(has_virtual_mesh && physical_models.len() >= 2)
-}
-
-fn looks_like_unstructured_tool_call(text: &str) -> bool {
-    let text = text.trim_start().to_ascii_lowercase();
-    text.starts_with("<|tool_call")
-        || text.starts_with("<tool_call")
-        || text.starts_with("[tool_call]")
-}
-
-#[derive(Debug, Default)]
-struct MeshAutoState {
-    last_checked: Option<Instant>,
-    consecutive_available: u8,
-    collective_enabled: bool,
-    cooldown_until: Option<Instant>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DatabricksV2Route {
@@ -92,10 +44,6 @@ pub struct Llm {
     /// == Auto`. Subsequent OpenAI calls then go straight to Responses
     /// for the lifetime of the process.
     auto_upgraded: AtomicBool,
-    /// Hysteretic view of whether mesh-llm currently advertises its virtual
-    /// Mixture-of-Agents model. A TTL, confirmation count, and failure cooldown
-    /// let long-running agents adapt without bouncing as peers briefly flap.
-    mesh_auto_state: Mutex<MeshAutoState>,
     /// Bearer-token source for OpenAI-family requests. Static for OpenAI
     /// (the `OPENAI_COMPAT_API_KEY` env var) and Databricks-with-token
     /// (the `DATABRICKS_TOKEN` env var); a refreshable PKCE engine for
@@ -104,18 +52,34 @@ pub struct Llm {
     auth: Arc<dyn TokenSource>,
 }
 
+/// Connect-phase timeout applied to every outgoing LLM HTTP request.
+///
+/// A 10-second budget is generous for a TLS + HTTP/2 handshake to a
+/// well-provisioned gateway.  Repeated connect timeouts indicate a
+/// network/reachability problem, not a slow generation.
+const LLM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `User-Agent` sent on every LLM request. reqwest sends no User-Agent by
+/// default, so OpenAI-compatible providers that identify clients by product
+/// token saw buzz-agent as an anonymous caller. The version is the crate
+/// version, matching the `agentInfo` reported over ACP.
+const LLM_USER_AGENT: &str = concat!("buzz-agent/", env!("CARGO_PKG_VERSION"));
+
 impl Llm {
     pub fn new(cfg: &Config) -> Result<Self, AgentError> {
         let http = Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .read_timeout(cfg.llm_timeout)
+            .user_agent(LLM_USER_AGENT)
+            .connect_timeout(LLM_CONNECT_TIMEOUT)
+            // No client-level read_timeout: we apply a per-request total
+            // timeout via RequestBuilder::timeout() so that escalated budgets
+            // on slow models are not silently floored by a fixed client-level
+            // value. The connect_timeout above still bounds the handshake phase.
             .build()
             .map_err(|e| AgentError::Llm(format!("http: {e}")))?;
         let auth = build_token_source(cfg)?;
         Ok(Self {
             http,
             auto_upgraded: AtomicBool::new(false),
-            mesh_auto_state: Mutex::new(MeshAutoState::default()),
             auth,
         })
     }
@@ -129,11 +93,20 @@ impl Llm {
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
         let effort = cfg.thinking_effort;
+        let call_start = std::time::Instant::now();
         let result = match cfg.provider {
             Provider::Anthropic => self
                 .post_anthropic(
                     cfg,
-                    &anthropic_body(cfg, system_prompt, history, tools, effective_model, effort),
+                    &anthropic_body(
+                        cfg,
+                        system_prompt,
+                        history,
+                        tools,
+                        effective_model,
+                        effort,
+                        "anthropic",
+                    ),
                 )
                 .await
                 .and_then(parse_anthropic),
@@ -151,45 +124,39 @@ impl Llm {
                     .and_then(parse_openai_with_reasoning_details)
             }
             Provider::OpenAi | Provider::Databricks => {
-                self.openai_request(
-                    cfg,
-                    effective_model,
-                    !tools.is_empty(),
-                    |use_responses, request_model| {
-                        // Normalize effort for model-specific availability. Startup no longer rejects
-                        // `max` for pure OpenAI/Databricks; this per-model table is the single authority
-                        // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
-                        // models, and still applies corrections like none→minimal on the gpt-5 base.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, request_model));
-                        if use_responses {
-                            (
-                                responses_body(
-                                    cfg,
-                                    system_prompt,
-                                    history,
-                                    tools,
-                                    request_model,
-                                    e,
-                                ),
-                                parse_responses as OpenAiParse,
-                            )
-                        } else {
-                            (
-                                openai_body(cfg, system_prompt, history, tools, request_model, e),
-                                parse_openai as OpenAiParse,
-                            )
-                        }
-                    },
-                )
+                let provider_str = match cfg.provider {
+                    Provider::OpenAi => "openai",
+                    Provider::Databricks => "databricks",
+                    _ => unreachable!(),
+                };
+                self.openai_request(cfg, effective_model, |use_responses, request_model| {
+                    // Normalize effort via the manifest: resolve the actual provider/model
+                    // record and apply resolve_openai_effort over its supported_efforts.
+                    // Adopted exact-record corrections (e.g. databricks-gpt-5-4-mini →
+                    // [low,medium,high]) are enforced here; the openai fallback's effort set
+                    // carries the former "unknown model: max→xhigh, others pass" behavior.
+                    let e = effort
+                        .map(|ef| normalize_effort_for_provider(provider_str, request_model, ef));
+                    if use_responses {
+                        (
+                            responses_body(cfg, system_prompt, history, tools, request_model, e),
+                            parse_responses as OpenAiParse,
+                        )
+                    } else {
+                        (
+                            openai_body(cfg, system_prompt, history, tools, request_model, e),
+                            parse_openai as OpenAiParse,
+                        )
+                    }
+                })
                 .await
             }
             Provider::DatabricksV2 => {
                 self.databricks_v2_request(cfg, effective_model, |route| match route {
                     DatabricksV2Route::OpenAiResponses => {
-                        // OpenAI Responses path: normalize effort against the per-model table.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
+                        // OpenAI Responses path: normalize effort via manifest normalization_policy.
+                        let e = effort
+                            .map(|ef| normalize_effort_for_databricks_v2(ef, effective_model));
                         (
                             responses_body(cfg, system_prompt, history, tools, effective_model, e),
                             parse_responses as OpenAiParse,
@@ -199,23 +166,40 @@ impl Llm {
                         // Anthropic Messages path: normalize effort (none|minimal → omit).
                         let e = effort.and_then(normalize_effort_for_anthropic_route);
                         (
-                            anthropic_body(cfg, system_prompt, history, tools, effective_model, e),
+                            anthropic_body(
+                                cfg,
+                                system_prompt,
+                                history,
+                                tools,
+                                effective_model,
+                                e,
+                                "databricks_v2",
+                            ),
                             parse_anthropic as OpenAiParse,
                         )
                     }
                     DatabricksV2Route::MlflowChatCompletions => {
-                        // MLflow Chat path (OpenAI-shaped): normalize effort against the per-model table.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
-                        (
-                            openai_body(cfg, system_prompt, history, tools, effective_model, e),
-                            parse_openai as OpenAiParse,
-                        )
+                        let e = effort
+                            .map(|ef| normalize_effort_for_databricks_v2(ef, effective_model));
+                        let body =
+                            openai_body(cfg, system_prompt, history, tools, effective_model, e);
+                        (body, parse_openai as OpenAiParse)
                     }
                 })
                 .await
             }
         };
+        // Stamp the actually-requested model into the response so the usage
+        // accumulation path can derive pricingIdentity. For OpenAi/Databricks
+        // this is done per-response inside openai_request_for_model (where the
+        // resolved request_model is known after mesh/auto resolution). For the
+        // remaining providers the effective_model IS the request model.
+        let result = result.map(|mut r| {
+            if r.request_model.is_none() {
+                r.request_model = Some(effective_model.to_string());
+            }
+            r
+        });
         // Stamp the effective model into Llm errors so log lines carry
         // `llm: (model-name) 404 Not Found: …` instead of the bare status.
         // The `llm: ` prefix comes from `Display for AgentError::Llm`; the
@@ -225,7 +209,7 @@ impl Llm {
         // Every arm above returns its `Result` into this mapper rather than
         // using `?` — an early return would silently skip the stamp, which is
         // exactly what the Anthropic and OpenRouter arms used to do.
-        result.map_err(|e| match e {
+        let stamped = result.map_err(|e| match e {
             AgentError::Llm(s) => AgentError::Llm(format!("({effective_model}) {s}")),
             AgentError::LlmModelNotFound(s) => {
                 AgentError::LlmModelNotFound(format!("({effective_model}) {s}"))
@@ -238,7 +222,27 @@ impl Llm {
                 AgentError::LlmContextExceeded(format!("({effective_model}) {s}"))
             }
             other => other,
-        })
+        });
+        // Emit one INFO event per successful LLM call. This gives operators
+        // visibility into healthy-but-slow generation (which previously logged
+        // nothing at INFO) and provides a wall-clock record even when no error
+        // fires. Token counts use `?`-formatting to preserve the None-vs-zero
+        // distinction: `None` means the provider omitted usage entirely.
+        if let Ok(ref response) = stamped {
+            let duration_ms = call_start.elapsed().as_millis();
+            tracing::info!(
+                model = effective_model,
+                provider = ?cfg.provider,
+                thinking_effort = ?cfg.thinking_effort,
+                duration_ms,
+                input_tokens = ?response.input_tokens,
+                cached_input_tokens = ?response.cached_input_tokens,
+                output_tokens = ?response.output_tokens,
+                stop = ?response.stop,
+                "llm: call completed"
+            );
+        }
+        stamped
     }
 
     pub async fn summarize(
@@ -249,36 +253,34 @@ impl Llm {
         max_output_tokens: u32,
         effective_model: &str,
     ) -> Result<String, AgentError> {
-        match cfg.provider {
-            Provider::Anthropic => {
-                let body = json!({
-                    "model": effective_model,
-                    "max_tokens": max_output_tokens,
-                    "system": system_prompt,
-                    "messages": [{
-                        "role": "user",
-                        "content": [{ "type": "text", "text": user_prompt }],
-                    }],
-                });
-                Ok(parse_anthropic(self.post_anthropic(cfg, &body).await?)?.text)
-            }
-            Provider::OpenRouter => {
-                let body = openrouter_summary_body(
-                    effective_model,
-                    system_prompt,
-                    user_prompt,
-                    max_output_tokens,
-                );
-                let v = self.post_openrouter(cfg, &body).await?;
-                Ok(parse_openai(v)?.text)
-            }
-            Provider::OpenAi | Provider::Databricks => {
-                let r = self
-                    .openai_request(
-                        cfg,
+        let call_start = std::time::Instant::now();
+        let result = (async {
+            match cfg.provider {
+                Provider::Anthropic => {
+                    let body = json!({
+                        "model": effective_model,
+                        "max_tokens": max_output_tokens,
+                        "system": system_prompt,
+                        "messages": [{
+                            "role": "user",
+                            "content": [{ "type": "text", "text": user_prompt }],
+                        }],
+                    });
+                    Ok(parse_anthropic(self.post_anthropic(cfg, &body).await?)?.text)
+                }
+                Provider::OpenRouter => {
+                    let body = openrouter_summary_body(
                         effective_model,
-                        false,
-                        |use_responses, request_model| {
+                        system_prompt,
+                        user_prompt,
+                        max_output_tokens,
+                    );
+                    let v = self.post_openrouter(cfg, &body).await?;
+                    Ok(parse_openai(v)?.text)
+                }
+                Provider::OpenAi | Provider::Databricks => {
+                    let r = self
+                        .openai_request(cfg, effective_model, |use_responses, request_model| {
                             if use_responses {
                                 (
                                     json!({
@@ -303,57 +305,68 @@ impl Llm {
                                     parse_openai as OpenAiParse,
                                 )
                             }
-                        },
-                    )
-                    .await?;
-                Ok(r.text)
+                        })
+                        .await?;
+                    Ok(r.text)
+                }
+                Provider::DatabricksV2 => {
+                    let r = self
+                        .databricks_v2_request(cfg, effective_model, |route| match route {
+                            DatabricksV2Route::OpenAiResponses => (
+                                json!({
+                                    "model": effective_model,
+                                    "max_output_tokens": max_output_tokens,
+                                    "instructions": system_prompt,
+                                    "input": user_prompt,
+                                }),
+                                parse_responses as OpenAiParse,
+                            ),
+                            DatabricksV2Route::AnthropicMessages => (
+                                json!({
+                                    "model": effective_model,
+                                    "max_tokens": max_output_tokens,
+                                    "system": system_prompt,
+                                    "messages": [{
+                                        "role": "user",
+                                        "content": [{ "type": "text", "text": user_prompt }],
+                                    }],
+                                }),
+                                parse_anthropic as OpenAiParse,
+                            ),
+                            DatabricksV2Route::MlflowChatCompletions => {
+                                let body = json!({
+                                    "model": effective_model,
+                                    "stream": false,
+                                    "max_completion_tokens": max_output_tokens,
+                                    "messages": [
+                                        { "role": "system", "content": system_prompt },
+                                        { "role": "user", "content": user_prompt },
+                                    ],
+                                });
+                                (body, parse_openai as OpenAiParse)
+                            }
+                        })
+                        .await?;
+                    Ok(r.text)
+                }
             }
-            Provider::DatabricksV2 => {
-                let r = self
-                    .databricks_v2_request(cfg, effective_model, |route| match route {
-                        DatabricksV2Route::OpenAiResponses => (
-                            json!({
-                                "model": effective_model,
-                                "max_output_tokens": max_output_tokens,
-                                "instructions": system_prompt,
-                                "input": user_prompt,
-                            }),
-                            parse_responses as OpenAiParse,
-                        ),
-                        DatabricksV2Route::AnthropicMessages => (
-                            json!({
-                                "model": effective_model,
-                                "max_tokens": max_output_tokens,
-                                "system": system_prompt,
-                                "messages": [{
-                                    "role": "user",
-                                    "content": [{ "type": "text", "text": user_prompt }],
-                                }],
-                            }),
-                            parse_anthropic as OpenAiParse,
-                        ),
-                        DatabricksV2Route::MlflowChatCompletions => (
-                            json!({
-                                "model": effective_model,
-                                "stream": false,
-                                "max_completion_tokens": max_output_tokens,
-                                "messages": [
-                                    { "role": "system", "content": system_prompt },
-                                    { "role": "user", "content": user_prompt },
-                                ],
-                            }),
-                            parse_openai as OpenAiParse,
-                        ),
-                    })
-                    .await?;
-                Ok(r.text)
-            }
+        })
+        .await;
+        if result.is_ok() {
+            let duration_ms = call_start.elapsed().as_millis();
+            tracing::info!(
+                model = effective_model,
+                provider = ?cfg.provider,
+                duration_ms,
+                "llm: summarize completed"
+            );
         }
+        result
     }
 
     async fn post_anthropic(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
         let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
-        post(&self.http, &url, body, false, |r| {
+        post(&self.http, &url, body, cfg.llm_timeout, |r| {
             r.header("x-api-key", &cfg.api_key)
                 .header("anthropic-version", &cfg.anthropic_api_version)
         })
@@ -361,196 +374,21 @@ impl Llm {
         .map_err(PostError::into_agent)
     }
 
-    /// OpenAI dispatch with Buzz's relay-mesh `auto` policy layered over the
-    /// normal endpoint selection. When enabled, a live virtual `mesh` model is
-    /// preferred; if the mesh contracts between discovery and inference, retry
-    /// the same request once through the router's ordinary `auto` model.
+    /// OpenAI dispatch. The configured model is sent as given: callers that
+    /// route through a mesh (Buzz shared compute) resolve their own model name
+    /// before spawning the agent, so nothing here needs to know about meshes.
     async fn openai_request<F>(
         &self,
         cfg: &Config,
         effective_model: &str,
-        tools_supplied: bool,
         mut build: F,
     ) -> Result<LlmResponse, AgentError>
     where
         F: FnMut(bool, &str) -> (Value, OpenAiParse) + Send,
     {
-        let request_model = self.resolve_openai_model(cfg, effective_model).await;
-        let adaptive_mesh =
-            effective_model == MESH_AUTO_MODEL_ID && request_model == MESH_VIRTUAL_MODEL_ID;
-
-        let first = self
-            .openai_request_for_model(cfg, &request_model, &mut build)
-            .await;
-        match first {
-            Err(PostError::MeshFallback(detail)) if adaptive_mesh => {
-                self.cool_down_collective().await;
-                tracing::warn!(
-                    configured_model = effective_model,
-                    attempted_model = MESH_VIRTUAL_MODEL_ID,
-                    fallback_model = MESH_AUTO_MODEL_ID,
-                    provider_message = detail,
-                    "relay-mesh auto: collective request failed; retrying once with auto"
-                );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
-                    .await
-                    .map_err(PostError::into_agent)
-            }
-            Ok(response)
-                if adaptive_mesh
-                    && tools_supplied
-                    && response.tool_calls.is_empty()
-                    && looks_like_unstructured_tool_call(&response.text) =>
-            {
-                self.cool_down_collective().await;
-                tracing::warn!(
-                    configured_model = effective_model,
-                    attempted_model = MESH_VIRTUAL_MODEL_ID,
-                    fallback_model = MESH_AUTO_MODEL_ID,
-                    "relay-mesh auto: collective response emitted unstructured tool markup; retrying once with auto"
-                );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
-                    .await
-                    .map_err(PostError::into_agent)
-            }
-            Ok(response) => Ok(response),
-            Err(error) => Err(error.into_agent()),
-        }
-    }
-
-    async fn cool_down_collective(&self) {
-        let now = Instant::now();
-        let mut state = self.mesh_auto_state.lock().await;
-        state.last_checked = Some(now);
-        state.consecutive_available = 0;
-        state.collective_enabled = false;
-        state.cooldown_until = Some(now + MESH_AUTO_COOLDOWN);
-    }
-
-    /// Resolve the model for one OpenAI-family request. Explicit model choices
-    /// are never changed. Relay-mesh `auto` dynamically follows the short-lived
-    /// `/models` catalog so long-running agents can adopt or leave MoA without
-    /// being restarted.
-    async fn resolve_openai_model(&self, cfg: &Config, effective_model: &str) -> String {
-        if cfg.provider != Provider::OpenAi
-            || !cfg.prefer_mesh_for_auto
-            || effective_model != MESH_AUTO_MODEL_ID
-        {
-            return effective_model.to_string();
-        }
-
-        let mut state = self.mesh_auto_state.lock().await;
-        let now = Instant::now();
-        if let Some(cooldown_until) = state.cooldown_until {
-            if now < cooldown_until {
-                return MESH_AUTO_MODEL_ID.to_string();
-            }
-            state.cooldown_until = None;
-        }
-        if state
-            .last_checked
-            .is_some_and(|checked_at| checked_at.elapsed() < MESH_AUTO_CATALOG_TTL)
-        {
-            return if state.collective_enabled {
-                MESH_VIRTUAL_MODEL_ID.to_string()
-            } else {
-                MESH_AUTO_MODEL_ID.to_string()
-            };
-        }
-
-        let observation = self.observe_mesh_virtual_model(cfg).await;
-        let checked_at = Instant::now();
-        state.last_checked = Some(checked_at);
-        match observation {
-            MeshCatalogObservation::Available => {
-                state.consecutive_available = state.consecutive_available.saturating_add(1);
-                if state.consecutive_available >= MESH_AUTO_ENABLE_OBSERVATIONS {
-                    state.collective_enabled = true;
-                }
-            }
-            MeshCatalogObservation::Unavailable => {
-                if state.collective_enabled {
-                    state.cooldown_until = Some(checked_at + MESH_AUTO_COOLDOWN);
-                }
-                state.consecutive_available = 0;
-                state.collective_enabled = false;
-            }
-            // A failed catalog check is not evidence that a previously stable
-            // mesh disappeared. Preserve the last confirmed state; inference
-            // itself remains authoritative and has the narrow 503 fallback.
-            MeshCatalogObservation::Unknown => {}
-        }
-        let request_model = if state.collective_enabled {
-            MESH_VIRTUAL_MODEL_ID
-        } else {
-            MESH_AUTO_MODEL_ID
-        };
-        tracing::debug!(
-            configured_model = effective_model,
-            request_model,
-            "relay-mesh auto: resolved request model from live catalog"
-        );
-        request_model.to_string()
-    }
-
-    async fn observe_mesh_virtual_model(&self, cfg: &Config) -> MeshCatalogObservation {
-        let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
-        let bearer = match self.auth.bearer().await {
-            Ok(bearer) => bearer,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "relay-mesh auto: catalog auth unavailable; preserving last confirmed route"
-                );
-                return MeshCatalogObservation::Unknown;
-            }
-        };
-        let response = match self
-            .http
-            .get(&url)
-            .bearer_auth(bearer)
-            .timeout(MESH_AUTO_CATALOG_TIMEOUT)
-            .send()
+        self.openai_request_for_model(cfg, effective_model, &mut build)
             .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "relay-mesh auto: catalog probe failed; preserving last confirmed route"
-                );
-                return MeshCatalogObservation::Unknown;
-            }
-        };
-        if !response.status().is_success() {
-            tracing::debug!(
-                status = %response.status(),
-                "relay-mesh auto: catalog probe was not successful; preserving last confirmed route"
-            );
-            return MeshCatalogObservation::Unknown;
-        }
-        match response.json::<Value>().await {
-            Ok(catalog) => {
-                let Some(available) = mesh_catalog_supports_collective(&catalog) else {
-                    tracing::debug!(
-                        "relay-mesh auto: catalog response has no data array; preserving last confirmed route"
-                    );
-                    return MeshCatalogObservation::Unknown;
-                };
-                if available {
-                    MeshCatalogObservation::Available
-                } else {
-                    MeshCatalogObservation::Unavailable
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "relay-mesh auto: invalid catalog response; preserving last confirmed route"
-                );
-                MeshCatalogObservation::Unknown
-            }
-        }
+            .map_err(PostError::into_agent)
     }
 
     /// Dispatch one OpenAI request for an already-resolved model. Endpoint
@@ -575,6 +413,10 @@ impl Llm {
                 self.post_openai(cfg, "/responses", &body, request_model)
                     .await?,
             )
+            .map(|mut r| {
+                r.request_model = Some(request_model.to_string());
+                r
+            })
             .map_err(PostError::from);
         }
         let (body, parse) = build(false, request_model);
@@ -582,7 +424,12 @@ impl Llm {
             .post_openai(cfg, "/chat/completions", &body, request_model)
             .await
         {
-            Ok(value) => parse(value).map_err(PostError::from),
+            Ok(value) => parse(value)
+                .map(|mut r| {
+                    r.request_model = Some(request_model.to_string());
+                    r
+                })
+                .map_err(PostError::from),
             Err(PostError::Agent(error))
                 if cfg.openai_api == OpenAiApi::Auto && self.try_upgrade(&error) =>
             {
@@ -591,6 +438,10 @@ impl Llm {
                     self.post_openai(cfg, "/responses", &body, request_model)
                         .await?,
                 )
+                .map(|mut r| {
+                    r.request_model = Some(request_model.to_string());
+                    r
+                })
                 .map_err(PostError::from)
             }
             Err(error) => Err(error),
@@ -606,7 +457,7 @@ impl Llm {
     where
         F: FnOnce(DatabricksV2Route) -> (Value, OpenAiParse) + Send,
     {
-        let route = databricks_v2_route_for_model(effective_model);
+        let route = databricks_v2_route(effective_model);
         let (body, parse) = build(route);
         parse(
             self.post_openai(cfg, databricks_v2_path(route), &body, effective_model)
@@ -654,13 +505,9 @@ impl Llm {
         let mut bearer = self.auth.bearer().await.map_err(PostError::from)?;
         let mut refreshed = false;
         loop {
-            match post(
-                &self.http,
-                &url,
-                body_ref,
-                effective_model == MESH_VIRTUAL_MODEL_ID,
-                |r| r.bearer_auth(&bearer),
-            )
+            match post(&self.http, &url, body_ref, cfg.llm_timeout, |r| {
+                r.bearer_auth(&bearer)
+            })
             .await
             {
                 Err(PostError::Agent(AgentError::LlmAuth(_))) if !refreshed => {
@@ -681,7 +528,7 @@ impl Llm {
         let mut bearer = self.auth.bearer().await?;
         let mut refreshed = false;
         loop {
-            match openrouter_post(&self.http, &url, body, &bearer).await {
+            match openrouter_post(&self.http, &url, body, &bearer, cfg.llm_timeout).await {
                 Err(AgentError::LlmAuth(_)) if !refreshed => {
                     refreshed = true;
                     let new_bearer = self.auth.refresh_now(&bearer).await?;
@@ -730,6 +577,7 @@ fn anthropic_body(
     tools: &[ToolDef],
     effective_model: &str,
     effort: Option<ThinkingEffort>,
+    provider: &str,
 ) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     let mut pending: Vec<Value> = Vec::new();
@@ -748,9 +596,21 @@ fn anthropic_body(
             HistoryItem::Assistant {
                 text,
                 tool_calls,
-                reasoning_details: _,
+                reasoning_details,
             } => {
                 flush(&mut messages, &mut pending);
+                // Native Anthropic blocks carry signed, potentially interleaved
+                // thinking. Replay the original order, not flattened text/calls.
+                if let Some(blocks) = reasoning_details
+                    .as_ref()
+                    .and_then(|v| v.get("anthropic_content"))
+                    .and_then(Value::as_array)
+                {
+                    if !blocks.is_empty() {
+                        messages.push(json!({ "role": "assistant", "content": blocks }));
+                    }
+                    continue;
+                }
                 let mut content: Vec<Value> = Vec::new();
                 if !text.is_empty() {
                     content.push(json!({ "type": "text", "text": text }));
@@ -801,8 +661,12 @@ fn anthropic_body(
     let mut body = json!({ "model": effective_model, "max_tokens": cfg.max_output_tokens,
         "system": system_value, "messages": messages });
     if let Some(e) = effort {
-        let (thinking, output_config) =
-            crate::config::anthropic_thinking_config(effective_model, e, cfg.max_output_tokens);
+        let (thinking, output_config) = crate::config::anthropic_thinking_config(
+            provider,
+            effective_model,
+            e,
+            cfg.max_output_tokens,
+        );
         if let Some(t) = thinking {
             body["thinking"] = t;
         }
@@ -844,6 +708,9 @@ fn stamp_rolling_cache_breakpoint(messages: &mut [Value]) {
             .get_mut("content")
             .and_then(Value::as_array_mut)
             .and_then(|c| c.last_mut())
+            // Thinking blocks must remain byte-for-byte unchanged, and cannot
+            // carry an explicit cache breakpoint.
+            .filter(|b| !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")))
             .and_then(Value::as_object_mut)
         {
             block.insert("cache_control".into(), json!({ "type": "ephemeral" }));
@@ -902,7 +769,9 @@ fn openai_body(
                 let mut msg = serde_json::Map::new();
                 msg.insert("role".into(), json!("assistant"));
                 msg.insert("content".into(), json!(text.as_str()));
-                if let Some(details) = reasoning_details {
+                // OpenRouter owns the array shape; native Anthropic state must
+                // not leak into Chat requests after a session model switch.
+                if let Some(details) = reasoning_details.as_ref().filter(|v| v.is_array()) {
                     msg.insert("reasoning_details".into(), details.clone());
                 }
                 if !tool_calls.is_empty() {
@@ -1077,7 +946,10 @@ fn responses_body(
         "input": input,
     });
     if let Some(e) = effort {
-        body["reasoning"] = json!({ "effort": e.openai_effort_str() });
+        body["reasoning"] = json!({
+            "effort": e.openai_effort_str(),
+            "summary": cfg.thinking_summary.as_str(),
+        });
     }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
@@ -1120,56 +992,18 @@ fn is_responses_required_error(body: &str) -> bool {
         || b.contains("use the responses api")
 }
 
-/// OpenAI-family code names that appear as their own segment in a Databricks v2
-/// endpoint name (the GPT-5 launch aliases). The `gpt` family itself is matched
-/// separately by segment prefix so `gpt`, `gpt5`, and the `gpt` of a split
-/// `gpt-5` all qualify.
-const DATABRICKS_V2_OPENAI_CODE_NAMES: &[&str] = &["sol", "luna", "terra"];
-
-/// Anthropic (Claude) family and release code names that appear as their own
-/// segment in a Databricks v2 endpoint name — the `claude` prefix, the family
-/// names (`opus`, `sonnet`, `haiku`), and the release code names (`mythos`,
-/// `fable`). Getting a Claude model onto the Anthropic Messages route is what
-/// lets it carry a `cache_control` breakpoint; an endpoint that matches none of
-/// these falls through to the MLflow (OpenAI-wire) path, where Anthropic prompt
-/// caching is structurally impossible and the discount is silently lost.
-const DATABRICKS_V2_CLAUDE_NAMES: &[&str] =
-    &["claude", "opus", "sonnet", "haiku", "mythos", "fable"];
-
-/// Split a Databricks v2 endpoint name into its lowercase alphanumeric segments,
-/// breaking on any non-alphanumeric delimiter (`-`, `_`, `.`, `/`, …). E.g.
-/// `Databricks-Claude-Opus-5` -> `["databricks", "claude", "opus", "5"]`.
-fn model_name_segments(model: &str) -> Vec<String> {
-    model
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
-}
-
-fn databricks_v2_route_for_model(model: &str) -> DatabricksV2Route {
-    // The v2 catalog exposes no family field, so the wire format is inferred
-    // from the endpoint name. Discovery deliberately keeps arbitrary custom
-    // aliases, so we match whole name *segments* rather than raw substrings: a
-    // substring test would misroute unrelated names — `consolidated-llama`
-    // (`sol`), `terraform-coder` (`terra`), `corpus-reranker`/`octopus-model`
-    // (`opus`) — onto a wire whose request shape their backend can't parse,
-    // turning a caching optimization into a hard request/parse failure. Segment
-    // matching still accepts real prefixed names like `goose-opus-5`.
-    let segments = model_name_segments(model);
-    let has_named_segment =
-        |names: &[&str]| segments.iter().any(|seg| names.contains(&seg.as_str()));
-    // `gpt` family: any segment beginning with `gpt` — covers `gpt`, `gpt5`, and
-    // the `gpt` segment of a split `gpt-5`, without matching mid-word.
-    let is_gpt_family = segments.iter().any(|seg| seg.starts_with("gpt"));
-    // OpenAI is checked before Claude so a name carrying both markers resolves
-    // to the OpenAI wire (preserving the prior `gpt-5`-first precedence).
-    if is_gpt_family || has_named_segment(DATABRICKS_V2_OPENAI_CODE_NAMES) {
-        DatabricksV2Route::OpenAiResponses
-    } else if has_named_segment(DATABRICKS_V2_CLAUDE_NAMES) {
-        DatabricksV2Route::AnthropicMessages
-    } else {
-        DatabricksV2Route::MlflowChatCompletions
+/// Resolve the Databricks v2 AI Gateway wire route for `model`.
+///
+/// The capability resolver owns Unity Catalog FQN classification so the Rust
+/// request path and desktop effort picker cannot disagree.
+fn databricks_v2_route(model: &str) -> DatabricksV2Route {
+    use crate::model_capabilities::DatabricksV2Route as Manifest;
+    match crate::model_capabilities::resolve("databricks_v2", model).databricks_v2_wire_route {
+        Manifest::OpenaiResponses => DatabricksV2Route::OpenAiResponses,
+        Manifest::AnthropicMessages => DatabricksV2Route::AnthropicMessages,
+        Manifest::MlflowChat | Manifest::NotApplicable | Manifest::RouteUnknown => {
+            DatabricksV2Route::MlflowChatCompletions
+        }
     }
 }
 
@@ -1182,6 +1016,11 @@ fn databricks_v2_path(route: DatabricksV2Route) -> &'static str {
 }
 
 fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
+    let max_tokens = v.get("status").and_then(Value::as_str) == Some("incomplete")
+        && v.get("incomplete_details")
+            .and_then(|d| d.get("reason"))
+            .and_then(Value::as_str)
+            == Some("max_output_tokens");
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
@@ -1212,7 +1051,7 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
                     }
                 }
             }
-            Some("function_call") => {
+            Some("function_call") if !max_tokens => {
                 saw_function_call = true;
                 let raw = item
                     .get("arguments")
@@ -1232,6 +1071,9 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
                     Default::default(),
                 )?);
             }
+            // Incomplete Responses output can carry a partial function call.
+            // It is intentionally discarded by the in-turn recovery path.
+            Some("function_call") => {}
             Some("reasoning") => {
                 // Reasoning summary items from the Responses API. Each item has a
                 // `summary` array of `{"type": "summary_text", "text": "..."}` objects.
@@ -1275,27 +1117,33 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         Some("completed") => ProviderStop::EndTurn,
         _ => ProviderStop::Other,
     };
-    let input_tokens = sum_usage(&v, &["input_tokens"]);
-    let output_tokens = sum_usage(&v, &["output_tokens"]);
+    let input_tokens = sum_usage(&v, &["input_tokens"]).and_then(SumUsageResult::into_exact);
+    let output_tokens = sum_usage(&v, &["output_tokens"]).and_then(SumUsageResult::into_exact);
     // The Responses API nests the cache split under `input_tokens_details`.
     let cached_input_tokens = usage_first(
         &v,
         &["cache_read_input_tokens"],
         &[("input_tokens_details", "cached_tokens")],
     );
+    // Responses API does not expose cache-write tokens today; stays None.
+    let cache_write_tokens: Option<u64> = None;
     // Responses API reports a genuine provider total. Read it directly —
     // never derived, so it stays None when the provider omits it.
-    let total_tokens = sum_usage(&v, &["total_tokens"]);
+    let total_tokens = sum_usage(&v, &["total_tokens"]).and_then(SumUsageResult::into_exact);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        input_tokens_overflowed: false, // input_tokens is a single field; cannot overflow
         cached_input_tokens,
+        cache_write_tokens,
         output_tokens,
         total_tokens,
         reasoning,
         reasoning_details: None,
+        // Stamped by the dispatch layer (openai_request_for_model) after parse.
+        request_model: None,
     })
 }
 
@@ -1303,9 +1151,32 @@ fn map_stop(s: Option<&str>) -> ProviderStop {
     match s {
         Some("end_turn" | "stop") => ProviderStop::EndTurn,
         Some("tool_use" | "tool_calls") => ProviderStop::ToolUse,
-        Some("max_tokens" | "length") => ProviderStop::MaxTokens,
+        Some("max_tokens" | "length" | "model_context_window_exceeded") => ProviderStop::MaxTokens,
         Some("refusal" | "content_filter") => ProviderStop::Refusal,
         _ => ProviderStop::Other,
+    }
+}
+
+/// Result of a multi-field token sum — distinguishes a successful total from an
+/// arithmetic overflow so callers can propagate the overflow signal rather than
+/// silently clamping to `u64::MAX`.
+#[derive(Debug, PartialEq)]
+enum SumUsageResult {
+    /// At least one field was present and the total did not overflow.
+    Exact(u64),
+    /// At least one field was present but the cumulative sum overflowed `u64`.
+    Overflow,
+}
+
+impl SumUsageResult {
+    /// Returns `Some(n)` when exact, `None` when overflow or when the caller
+    /// needs to signal an explicit absence.  Single-field callers whose sums
+    /// cannot overflow use this to convert back to `Option<u64>`.
+    fn into_exact(self) -> Option<u64> {
+        match self {
+            SumUsageResult::Exact(n) => Some(n),
+            SumUsageResult::Overflow => None,
+        }
     }
 }
 
@@ -1314,23 +1185,42 @@ fn map_stop(s: Option<&str>) -> ProviderStop {
 /// present is added; a field that is missing contributes 0. This keeps the
 /// result an inclusive total (so cached tokens are never silently dropped)
 /// while still distinguishing "no usage reported" from "usage was zero".
-fn sum_usage(v: &Value, fields: &[&str]) -> Option<u64> {
+///
+/// Returns [`SumUsageResult::Overflow`] if the cumulative total exceeds `u64::MAX`.
+/// Single-field callers whose sums cannot overflow may call `.into_exact()` to
+/// convert back to `Option<u64>` without loss.
+fn sum_usage(v: &Value, fields: &[&str]) -> Option<SumUsageResult> {
     let usage = v.get("usage")?;
     let mut total: u64 = 0;
     let mut saw_any = false;
+    let mut overflowed = false;
     for f in fields {
         if let Some(n) = usage.get(*f).and_then(Value::as_u64) {
-            total = total.saturating_add(n);
+            match total.checked_add(n) {
+                Some(t) => total = t,
+                None => overflowed = true,
+            }
             saw_any = true;
         }
     }
-    saw_any.then_some(total)
+    if !saw_any {
+        return None;
+    }
+    if overflowed {
+        Some(SumUsageResult::Overflow)
+    } else {
+        Some(SumUsageResult::Exact(total))
+    }
 }
 
 /// Input-token total for Anthropic / Databricks (Anthropic-style) responses.
 /// `input_tokens` alone EXCLUDES cached tokens, so we sum it with the two
 /// cache fields to get the inclusive total the context budget must gate on.
-fn anthropic_input_tokens(v: &Value) -> Option<u64> {
+///
+/// Returns [`SumUsageResult::Overflow`] when the sum of the three fields
+/// exceeds `u64::MAX` — the caller must propagate the overflow signal rather
+/// than clamping.
+fn anthropic_input_tokens(v: &Value) -> Option<SumUsageResult> {
     sum_usage(
         v,
         &[
@@ -1360,7 +1250,7 @@ fn anthropic_input_tokens(v: &Value) -> Option<u64> {
 /// The two never collide here: the router sends `claude*` models to the
 /// Anthropic route, so `parse_openai` only ever sees inclusive `prompt_tokens`.
 fn openai_chat_input_tokens(v: &Value) -> Option<u64> {
-    sum_usage(v, &["prompt_tokens"])
+    sum_usage(v, &["prompt_tokens"]).and_then(SumUsageResult::into_exact)
 }
 
 /// First present value among `usage.<field>` and `usage.<nested>.<leaf>` pairs.
@@ -1504,34 +1394,69 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
                         reasoning.push_str(t);
                     }
                 }
-                // Anthropic's replay shape is fully modelled, so nothing to keep.
-                Some("tool_use") => tool_calls.push(make_tool_call(
-                    str_field(b, "id"),
-                    str_field(b, "name"),
-                    b.get("input").cloned().unwrap_or(Value::Null),
-                    Default::default(),
-                )?),
+                // A max-token response may end in the middle of a tool input.
+                // The agent discards all calls from truncated responses, so do
+                // not reject the whole response trying to parse an input that
+                // can never be executed.
+                Some("tool_use") if stop != ProviderStop::MaxTokens => {
+                    tool_calls.push(make_tool_call(
+                        str_field(b, "id"),
+                        str_field(b, "name"),
+                        b.get("input").cloned().unwrap_or(Value::Null),
+                        Default::default(),
+                    )?)
+                }
+                Some("tool_use") => {}
                 _ => {}
             }
         }
     }
-    let input_tokens = anthropic_input_tokens(&v);
-    let output_tokens = sum_usage(&v, &["output_tokens"]);
+    // The run loop caps other providers' calls by truncating them. Native
+    // content must be replayed intact, so reject oversized turns before any
+    // tools execute rather than silently altering signed/interleaved state.
+    if tool_calls.len() > MAX_TOOL_CALLS_PER_TURN {
+        return Err(AgentError::Llm(format!(
+            "Anthropic response exceeds {MAX_TOOL_CALLS_PER_TURN} tool calls; cannot truncate native content"
+        )));
+    }
+    // anthropic_input_tokens() returns Option<SumUsageResult> because it sums
+    // three fields that can collectively overflow u64. Propagate the overflow
+    // signal via `input_tokens_overflowed` so the run loop can poison the
+    // turn accumulator rather than treating u64::MAX as an exact reading.
+    let (input_tokens, input_tokens_overflowed) = match anthropic_input_tokens(&v) {
+        Some(SumUsageResult::Exact(n)) => (Some(n), false),
+        Some(SumUsageResult::Overflow) => (None, true),
+        None => (None, false),
+    };
+    let output_tokens = sum_usage(&v, &["output_tokens"]).and_then(SumUsageResult::into_exact);
     // Anthropic reports the cache split flat on `usage`. Note this is already
     // part of `input_tokens` above, which sums it in deliberately.
     let cached_input_tokens = usage_first(&v, &["cache_read_input_tokens"], &[]);
+    // Anthropic reports cache-creation tokens as `cache_creation_input_tokens`;
+    // also a subset of `input_tokens` (already folded in above).
+    let cache_write_tokens = usage_first(&v, &["cache_creation_input_tokens"], &[]);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        input_tokens_overflowed,
         cached_input_tokens,
+        cache_write_tokens,
         output_tokens,
         // Anthropic reports only category counts; NIP-AM forbids deriving a
         // total from them. Always None for this provider.
         total_tokens: None,
         reasoning,
-        reasoning_details: None,
+        // Truncated content is not a valid signed assistant turn; the run loop
+        // keeps only its text and never executes its tool calls.
+        reasoning_details: v
+            .get("content")
+            .filter(|v| v.is_array())
+            .filter(|_| stop != ProviderStop::MaxTokens)
+            .map(|blocks| json!({ "anthropic_content": blocks })),
+        // Stamped by the dispatch layer (complete) after parse.
+        request_model: None,
     })
 }
 
@@ -1598,49 +1523,60 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
         }
     };
     let mut tool_calls = Vec::new();
-    if let Some(arr) = msg.get("tool_calls").and_then(Value::as_array) {
-        for tc in arr {
-            let f = tc
-                .get("function")
-                .ok_or_else(|| AgentError::Llm("tool_call missing function".into()))?;
-            let raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
-            let args: Value = serde_json::from_str(raw)
-                .map_err(|e| AgentError::Llm(format!("tool_call.arguments not valid JSON: {e}")))?;
-            // Everything on the wire object we do not model, kept for replay.
-            let extra = tc
-                .as_object()
-                .map(|o| {
-                    o.iter()
-                        .filter(|(k, _)| !matches!(k.as_str(), "id" | "type" | "function"))
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            tool_calls.push(make_tool_call(
-                str_field(tc, "id"),
-                str_field(f, "name"),
-                args,
-                extra,
-            )?);
+    if stop != ProviderStop::MaxTokens {
+        if let Some(arr) = msg.get("tool_calls").and_then(Value::as_array) {
+            for tc in arr {
+                let f = tc
+                    .get("function")
+                    .ok_or_else(|| AgentError::Llm("tool_call missing function".into()))?;
+                let raw = f.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                let args: Value = serde_json::from_str(raw).map_err(|e| {
+                    AgentError::Llm(format!("tool_call.arguments not valid JSON: {e}"))
+                })?;
+                // Everything on the wire object we do not model, kept for replay.
+                let extra = tc
+                    .as_object()
+                    .map(|o| {
+                        o.iter()
+                            .filter(|(k, _)| !matches!(k.as_str(), "id" | "type" | "function"))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                tool_calls.push(make_tool_call(
+                    str_field(tc, "id"),
+                    str_field(f, "name"),
+                    args,
+                    extra,
+                )?);
+            }
         }
     }
     dedupe_provider_ids(&mut tool_calls);
     let input_tokens = openai_chat_input_tokens(&v);
-    let output_tokens = sum_usage(&v, &["completion_tokens"]);
+    let output_tokens = sum_usage(&v, &["completion_tokens"]).and_then(SumUsageResult::into_exact);
     let cached_input_tokens = openai_chat_cached_tokens(&v);
+    // OpenAI Chat Completions reports cache-write tokens under
+    // `prompt_tokens_details.cache_write_tokens`. A subset of `prompt_tokens`.
+    let cache_write_tokens =
+        usage_first(&v, &[], &[("prompt_tokens_details", "cache_write_tokens")]);
     // OpenAI Chat Completions reports a genuine provider total. Read it
     // directly — never derived, so it stays None when the provider omits it.
-    let total_tokens = sum_usage(&v, &["total_tokens"]);
+    let total_tokens = sum_usage(&v, &["total_tokens"]).and_then(SumUsageResult::into_exact);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        input_tokens_overflowed: false, // prompt_tokens is a single field; cannot overflow
         cached_input_tokens,
+        cache_write_tokens,
         output_tokens,
         total_tokens,
         reasoning,
         reasoning_details: None,
+        // Stamped by the dispatch layer (openai_request_for_model) after parse.
+        request_model: None,
     })
 }
 
@@ -1705,6 +1641,44 @@ const MAX_RETRIES: u32 = 3;
 const BASE_BACKOFF_MS: u64 = 500;
 const MAX_BACKOFF_MS: u64 = 8_000;
 
+/// Maximum per-request timeout after escalation.
+///
+/// Each attempt that ends with a timeout doubles the budget for the next
+/// attempt: base, 2×base, 4×base, … The escalation is bounded here so a
+/// slow model cannot keep a worker alive indefinitely. The cap is also
+/// applied when `base` already exceeds it (e.g. an operator-set 1500 s stays
+/// 1500 s instead of being truncated to 1200 s — we never shrink the budget).
+const ESCALATION_TIMEOUT_CAP: std::time::Duration = std::time::Duration::from_secs(1200);
+
+/// Compute the per-attempt timeout after `timeout_failures` prior attempts
+/// timed out.
+///
+/// The budget doubles for every timeout failure: `base × 2^timeout_failures`.
+/// Non-timeout retryable failures (429, 5xx, connect resets) are not counted
+/// here — they are not evidence of a slow model. The budget is capped at
+/// `max(ESCALATION_TIMEOUT_CAP, base)` so a base already above the cap is
+/// preserved as-is.
+///
+/// Examples at base = 240 s: 0 failures → 240 s; 1 → 480 s; 2 → 960 s; 3 → 1200 s.
+///
+/// **Worst-case turn ceiling** (all 3 attempts time out, `MAX_RETRIES = 3`):
+///
+/// ```text
+/// total ≤ base + min(2×base, cap) + min(4×base, cap)
+/// ```
+///
+/// Concrete anchors operators can use to size their outer turn timeout:
+/// - 240 s base (default): 240 + 480 + 960 = **1680 s** (~28 min)
+/// - 900 s base: 900 + 1200 + 1200 = **3300 s** (~55 min)
+fn escalated_timeout(base: std::time::Duration, timeout_failures: u32) -> std::time::Duration {
+    // `checked_shl` returns None when the shift would overflow u32; saturate to
+    // u32::MAX so the cap below clamps it rather than panicking or wrapping.
+    let multiplier = 1u32.checked_shl(timeout_failures).unwrap_or(u32::MAX);
+    let scaled = base.saturating_mul(multiplier);
+    let cap = ESCALATION_TIMEOUT_CAP.max(base);
+    scaled.min(cap)
+}
+
 async fn backoff_with_jitter(attempt: u32) {
     let base = BASE_BACKOFF_MS
         .saturating_mul(1u64 << attempt)
@@ -1731,9 +1705,123 @@ fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
     e.is_timeout() || e.is_connect() || e.is_request()
 }
 
+/// Which phase of an HTTP exchange produced a timeout error.
+///
+/// Used by `timeout_message` to choose the right factual description.
+#[derive(Clone, Copy)]
+enum TimeoutPhase {
+    /// Timeout before any response bytes — transport/send phase.
+    Transport,
+    /// Timeout after headers were received, while reading body chunks.
+    BodyRead,
+}
+
+/// Pure function: build the human-readable timeout message for an LLM call.
+///
+/// Takes the two reqwest flags and the per-request total timeout rather than a
+/// `&reqwest::Error` so the flag-precedence logic can be tested without any
+/// network involvement.
+///
+/// `per_request_timeout` is the `RequestBuilder::timeout()` value applied to
+/// the attempt that fired; this is computed by `escalated_timeout` and may be
+/// larger than `cfg.llm_timeout` when earlier attempts already timed out.
+/// Connect timeouts use `LLM_CONNECT_TIMEOUT`.
+///
+/// This message appears in the terminal error produced by `classify_transport_error`
+/// (transport-phase timeout, always terminal) and `classify_body_read_error`
+/// (body-read timeout, terminal only on the final attempt — earlier attempts
+/// are retried with an escalated budget before reaching this message).
+fn timeout_message(
+    is_connect: bool,
+    per_request_timeout: std::time::Duration,
+    phase: TimeoutPhase,
+) -> String {
+    if is_connect {
+        // Connect-phase timeout: the TCP/TLS handshake didn't complete.
+        // reqwest sets both is_timeout() and is_connect() for this case.
+        format!("connect timeout: no connection established within {LLM_CONNECT_TIMEOUT:?}")
+    } else {
+        match phase {
+            TimeoutPhase::Transport => format!(
+                "read timeout: no response bytes received within {per_request_timeout:?} \
+                 (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
+            ),
+            // Total-request timeout fired during body streaming: the response
+            // started but did not complete within the window.
+            TimeoutPhase::BodyRead => format!(
+                "request timed out: response did not complete within {per_request_timeout:?} \
+                 (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
+            ),
+        }
+    }
+}
+
+/// Produce a human-readable description of a transport-layer reqwest error.
+///
+/// reqwest's `Display` for a timeout fire is the opaque
+/// `"error sending request for url (...)"` — the same text as every other
+/// pre-response failure — because the HTTP layer lumps them together.
+/// We replace that string with a factual message that names which kind of
+/// timeout fired, making it immediately obvious in logs whether the client
+/// never connected or whether no response bytes arrived within the window.
+///
+/// `per_request_timeout` is the `RequestBuilder::timeout()` value applied to
+/// the attempt that fired; it is the `escalated_timeout` for that attempt and
+/// may be larger than `cfg.llm_timeout` on retried attempts.
+fn classify_transport_error(
+    e: &reqwest::Error,
+    per_request_timeout: std::time::Duration,
+) -> String {
+    if e.is_timeout() {
+        timeout_message(e.is_connect(), per_request_timeout, TimeoutPhase::Transport)
+    } else {
+        format!("transport: {e}")
+    }
+}
+
+/// Produce a human-readable description of an error that occurred while
+/// reading response body chunks (`resp.chunk()`).
+///
+/// A timeout here means the total per-request budget expired during body
+/// streaming — headers (and possibly some body bytes) arrived but the response
+/// did not complete within the window. Non-final-attempt body timeouts are
+/// retried with an escalated budget before this function is called, so the
+/// message is only produced on the final attempt. Any other body-decode failure
+/// preserves the `"body read: ..."` prefix expected by callers and existing
+/// tests.
+///
+/// `per_request_timeout` is the `RequestBuilder::timeout()` value applied to
+/// the attempt that fired; it is the `escalated_timeout` for that attempt and
+/// may be larger than `cfg.llm_timeout` on retried attempts.
+fn classify_body_read_error(
+    e: &reqwest::Error,
+    per_request_timeout: std::time::Duration,
+) -> String {
+    if e.is_timeout() {
+        timeout_message(e.is_connect(), per_request_timeout, TimeoutPhase::BodyRead)
+    } else {
+        format!("body read: {e}")
+    }
+}
+
+/// Provider bodies that mean "this model cannot accept image input", the
+/// signal the agent loop uses to strip rejected images from history and
+/// continue the turn (see `replace_unsupported_images`).
+///
+/// Deliberately tight, same doctrine as [`is_context_length_error`]: each
+/// phrase is a verbatim capability rejection observed live. Misclassifying a
+/// generic 400 as recoverable would mutate history for an error that removing
+/// images cannot fix.
 fn is_unsupported_image_input_error(body: &str) -> bool {
-    body.to_ascii_lowercase()
-        .contains("no endpoints found that support image input")
+    let b = body.to_ascii_lowercase();
+    // OpenRouter 404: no provider endpoint accepts images for this model.
+    b.contains("no endpoints found that support image input")
+        // OpenAI-compatible 400 from text-only single-model deployments,
+        // e.g. Crusoe serverless GLM: `"crusoeai/GLM-5.2-NVFP4 is not a
+        // multimodal model"`. Without this arm the 400 is terminal, the image
+        // stays in history, and every subsequent request in the session fails
+        // identically — the turn wedges until the harness/user gives up.
+        || b.contains("is not a multimodal model")
 }
 
 /// Build the terminal `AgentError::Llm` for a `post()` exit that has given up
@@ -1758,23 +1846,16 @@ fn terminal_llm_error(elapsed: std::time::Duration, attempts: u32, detail: &str)
     ))
 }
 
-/// Internal HTTP failure that preserves a mesh-specific MoA failure as a
-/// typed signal. This covers both pre-inference eligibility rejection and a
-/// structured `moa_failure` from workers/reducers. It is consumed inside
-/// `openai_request`: an adaptive `auto` call falls back once, while an explicit
-/// `mesh` call is surfaced as the ordinary LLM error callers already
-/// understand.
+/// Internal HTTP failure wrapper for the OpenAI-family `post` helper.
 #[derive(Debug)]
 enum PostError {
     Agent(AgentError),
-    MeshFallback(String),
 }
 
 impl PostError {
     fn into_agent(self) -> AgentError {
         match self {
             Self::Agent(error) => error,
-            Self::MeshFallback(detail) => AgentError::Llm(detail),
         }
     }
 }
@@ -1785,37 +1866,11 @@ impl From<AgentError> for PostError {
     }
 }
 
-fn is_mesh_moa_unavailable_body(body: &str) -> bool {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some(MESH_MOA_UNAVAILABLE_MESSAGE)
-}
-
-fn is_mesh_moa_failure_body(body: &str) -> bool {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/type")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some("moa_failure")
-}
-
 async fn post<F>(
     http: &Client,
     url: &str,
     body: &Value,
-    detect_mesh_fallback: bool,
+    base_timeout: std::time::Duration,
     apply: F,
 ) -> Result<Value, PostError>
 where
@@ -1824,22 +1879,33 @@ where
     let body_bytes = serde_json::to_vec(body)
         .map_err(|e| PostError::Agent(AgentError::Llm(format!("serialize: {e}"))))?;
     let call_start = std::time::Instant::now();
-    for attempt in 0..MAX_RETRIES {
+    // Count prior attempts that ended with a timeout so we can double the
+    // budget on the next attempt. Non-timeout retryable failures (429, 5xx,
+    // connect resets) are not evidence of a slow model and do NOT escalate.
+    let mut timeout_failures: u32 = 0;
+    'attempt: for attempt in 0..MAX_RETRIES {
+        let per_request_timeout = escalated_timeout(base_timeout, timeout_failures);
         let resp = match apply(
             http.post(url)
                 .header("content-type", "application/json")
-                .body(body_bytes.clone()),
+                .body(body_bytes.clone())
+                .timeout(per_request_timeout),
         )
         .send()
         .await
         {
             Ok(r) => r,
             Err(e) => {
+                if e.is_timeout() {
+                    timeout_failures += 1;
+                }
                 if attempt + 1 < MAX_RETRIES && is_retryable_transport_error(&e) {
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts = MAX_RETRIES,
                         error = %e,
+                        is_timeout = e.is_timeout(),
+                        timeout_failures,
                         "llm: transport error, retrying"
                     );
                     backoff_with_jitter(attempt).await;
@@ -1848,7 +1914,7 @@ where
                 return Err(PostError::Agent(terminal_llm_error(
                     call_start.elapsed(),
                     attempt + 1,
-                    &format!("transport: {e}"),
+                    &classify_transport_error(&e, per_request_timeout),
                 )));
             }
         };
@@ -1867,13 +1933,6 @@ where
         }
         if status.is_server_error() || status == 429 || status.as_u16() == 499 {
             let body = read_error_body(resp).await;
-            let mesh_fallback = detect_mesh_fallback
-                && (status == reqwest::StatusCode::SERVICE_UNAVAILABLE
-                    && is_mesh_moa_unavailable_body(&body)
-                    || status.is_server_error() && is_mesh_moa_failure_body(&body));
-            if mesh_fallback {
-                return Err(PostError::MeshFallback(format!("{status}: {body}")));
-            }
             if attempt + 1 < MAX_RETRIES {
                 tracing::warn!(
                     attempt = attempt + 1,
@@ -1916,6 +1975,13 @@ where
                     "{status}: {body}"
                 ))));
             }
+            // Image-capability rejection is equally recoverable and equally
+            // deterministic: a text-only deployment 400s the same request
+            // forever. Typed here (not just on the 404 arm) because
+            // OpenAI-compatible providers report it as a 400.
+            if status == 400 && is_unsupported_image_input_error(&body) {
+                return Err(PostError::Agent(AgentError::UnsupportedImageInput(body)));
+            }
             return Err(PostError::Agent(AgentError::Llm(format!(
                 "{status}: {body}"
             ))));
@@ -1933,6 +1999,7 @@ where
             match stream.chunk().await {
                 Ok(Some(chunk)) => {
                     if buf.len() + chunk.len() > MAX_LLM_RESPONSE_BYTES {
+                        // Size overflow: not a timeout, not retryable.
                         return Err(PostError::Agent(AgentError::Llm(format!(
                             "response exceeded {MAX_LLM_RESPONSE_BYTES} bytes"
                         ))));
@@ -1941,21 +2008,75 @@ where
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    // A timeout during body streaming means the total
+                    // per-request budget expired mid-body (headers arrived but
+                    // the response stalled). Retry with an escalated budget,
+                    // same as a transport-phase timeout — the server may be
+                    // slow to flush, not permanently broken.
+                    if e.is_timeout() && attempt + 1 < MAX_RETRIES {
+                        timeout_failures += 1;
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = MAX_RETRIES,
+                            is_timeout = true,
+                            timeout_failures,
+                            error = %e,
+                            "llm: body-read timeout, retrying with escalated budget"
+                        );
+                        backoff_with_jitter(attempt).await;
+                        continue 'attempt;
+                    }
                     return Err(PostError::Agent(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
-                        &format!("body read: {e}"),
+                        &classify_body_read_error(&e, per_request_timeout),
                     )));
                 }
             }
         }
-        return serde_json::from_slice(&buf)
-            .map_err(|e| PostError::Agent(AgentError::Llm(format!("json: {e}"))));
+        // A 2xx body that fails to parse (e.g. a provider flushing a
+        // truncated JSON document and closing the stream cleanly) is a
+        // transient upstream fault, not a request problem: retry it like a
+        // 5xx. Safe to re-send — a malformed body produced no parsed
+        // response, so no tool call was ever extracted from it, and the
+        // retried request is the identical completion POST captured in
+        // `body_bytes` at function entry.
+        match serde_json::from_slice(&buf) {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                if attempt + 1 < MAX_RETRIES {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRIES,
+                        error = %e,
+                        "llm: malformed response body, retrying"
+                    );
+                    backoff_with_jitter(attempt).await;
+                    continue;
+                }
+                return Err(PostError::Agent(terminal_llm_error(
+                    call_start.elapsed(),
+                    attempt + 1,
+                    &format!("json: {e}"),
+                )));
+            }
+        }
     }
-    unreachable!("loop always returns on its final iteration (attempt + 1 == MAX_RETRIES)");
+    // Unreachable in practice: every iteration either returns or continues.
+    // A fallthrough here would mean MAX_RETRIES was 0, which is rejected at
+    // config validation. Return a terminal error rather than panic so the
+    // invariant is not load-bearing.
+    Err(PostError::Agent(terminal_llm_error(
+        call_start.elapsed(),
+        MAX_RETRIES,
+        "exhausted retries",
+    )))
 }
 
-pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
+pub(crate) fn databricks_pkce_config(
+    host: &str,
+    cache_dir_override: Option<PathBuf>,
+) -> PkceOAuthConfig {
     PkceOAuthConfig {
         discovery_url: format!(
             "{}/oidc/.well-known/oauth-authorization-server",
@@ -1967,7 +2088,7 @@ pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
             .map(|scope| (*scope).into())
             .collect(),
         cache_namespace: "databricks".into(),
-        cache_dir_override: None,
+        cache_dir_override,
     }
 }
 
@@ -1992,27 +2113,62 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
             }
             Ok(PkceOAuthTokenSource::new(databricks_pkce_config(
                 &cfg.base_url,
+                None,
             ))?)
+        }
+    }
+}
+
+/// Completion-token cap that [`Llm::summarize`] actually requests from
+/// `provider`, given the caller's visible-text budget. OpenRouter grants
+/// reasoning a separate, equal budget on top of the text budget (see
+/// [`openrouter_summary_body`]), so its top-level cap is double the caller's
+/// budget; every other provider requests the caller's budget unchanged.
+/// Callers that reserve output headroom in an input budget
+/// (`handoff_prompt_budget_bytes`) must reserve THIS value, not the text
+/// budget — otherwise input plus the actual completion allowance can exceed
+/// the configured context window.
+pub(crate) fn summary_completion_cap(provider: Provider, max_output_tokens: u32) -> u32 {
+    match provider {
+        Provider::OpenRouter => max_output_tokens.saturating_mul(2),
+        Provider::Anthropic | Provider::OpenAi | Provider::Databricks | Provider::DatabricksV2 => {
+            max_output_tokens
         }
     }
 }
 
 /// Build the request body for `Llm::summarize` on `Provider::OpenRouter`.
 /// Extracted so tests can assert on the actual wire shape instead of a
-/// hand-rolled literal — summaries never carry `reasoning` (see
-/// `apply_openrouter_mutations`, which the summary path never calls).
-/// It spells the token limit `max_tokens` directly for the same reason: the
-/// mutation that renames it is never applied here.
+/// hand-rolled literal — summaries never carry config-driven reasoning
+/// *effort* (see `apply_openrouter_mutations`, which the summary path never
+/// calls). It spells the token limit `max_tokens` directly for the same
+/// reason: the mutation that renames it is never applied here.
 fn openrouter_summary_body(
     effective_model: &str,
     system_prompt: &str,
     user_prompt: &str,
     max_output_tokens: u32,
 ) -> Value {
+    // Reasoning models spend output tokens thinking before emitting any
+    // visible text, and that spend counts against `max_tokens`. Left
+    // unseparated, a model can burn the entire cap mid-reasoning and return an
+    // empty `content` — observed with deepseek-v4-flash, where 13 consecutive
+    // handoff attempts length-stopped inside the reasoning channel and every
+    // one degraded to lossy history truncation. Give reasoning its own
+    // equal-sized budget on top of the text budget so `max_output_tokens`
+    // remains what the caller means: visible summary text. `exclude` keeps the
+    // reasoning out of the response body; `summarize()` only reads `content`.
+    // Non-reasoning endpoints ignore the `reasoning` object (see
+    // `apply_openrouter_mutations` on why it is never paired with
+    // `provider.require_parameters`).
     json!({
         "model": effective_model,
         "stream": false,
-        "max_tokens": max_output_tokens,
+        "max_tokens": summary_completion_cap(Provider::OpenRouter, max_output_tokens),
+        "reasoning": {
+            "max_tokens": max_output_tokens,
+            "exclude": true,
+        },
         "messages": [
             { "role": "system", "content": system_prompt },
             { "role": "user", "content": user_prompt },
@@ -2042,18 +2198,31 @@ enum OpenRouterErrorClass {
 
 /// Ceiling applied to the server-supplied `Retry-After` header before we
 /// sleep on it. OpenRouter can advertise waits up to an hour, but
-/// `openrouter_post`'s per-attempt sleep happens *outside*
-/// `Client::timeout` (`cfg.llm_timeout`, default 240s) — an unclamped hint
-/// could keep a single turn alive for up to two full-duration sleeps across
-/// `MAX_RETRIES`. Clamping (never rejecting) keeps us honoring the server's
-/// backoff signal while bounding worst-case turn latency to a value smaller
-/// than the connect/response timeout.
+/// `openrouter_post`'s per-attempt sleep happens *outside* the per-request
+/// `.timeout()` budget — an unclamped hint could keep a single turn alive for
+/// up to two full-duration sleeps across `MAX_RETRIES`. Clamping (never
+/// rejecting) keeps us honoring the server's backoff signal while bounding
+/// worst-case turn latency to a value smaller than the per-request timeout.
 const RETRY_AFTER_CAP_SECS: u64 = 60;
+
+/// Compute the retry delay from a raw `Retry-After` header value.
+///
+/// Returns `Some(duration)` when the header is present, non-zero, and
+/// parseable as a decimal number of seconds; the value is capped at
+/// `RETRY_AFTER_CAP_SECS`. Returns `None` when the header is absent,
+/// unparseable, or zero — callers should fall back to `backoff_with_jitter`.
+///
+/// This is the single place the cap logic lives; `parse_retry_after_header`
+/// delegates here so the cap can be unit tested without an HTTP header map.
+fn retry_delay_for_429(header_value: Option<&str>) -> Option<std::time::Duration> {
+    let val = header_value?;
+    let secs: u64 = val.trim().parse().ok()?;
+    (secs > 0).then(|| std::time::Duration::from_secs(secs.min(RETRY_AFTER_CAP_SECS)))
+}
 
 fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
     let val = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    let secs: u64 = val.trim().parse().ok()?;
-    (secs > 0).then(|| std::time::Duration::from_secs(secs.min(RETRY_AFTER_CAP_SECS)))
+    retry_delay_for_429(Some(val))
 }
 
 fn classify_openrouter_error(
@@ -2098,11 +2267,16 @@ async fn openrouter_post(
     url: &str,
     body: &Value,
     bearer: &str,
+    base_timeout: std::time::Duration,
 ) -> Result<Value, AgentError> {
     let body_bytes =
         serde_json::to_vec(body).map_err(|e| AgentError::Llm(format!("serialize: {e}")))?;
     let call_start = std::time::Instant::now();
-    for attempt in 0..MAX_RETRIES {
+    // Count prior timeout failures for per-attempt budget escalation; see
+    // `escalated_timeout` for the doubling strategy.
+    let mut timeout_failures: u32 = 0;
+    'attempt: for attempt in 0..MAX_RETRIES {
+        let per_request_timeout = escalated_timeout(base_timeout, timeout_failures);
         let resp = match http
             .post(url)
             .header("content-type", "application/json")
@@ -2110,16 +2284,22 @@ async fn openrouter_post(
             .header("X-OpenRouter-Title", "Buzz")
             .bearer_auth(bearer)
             .body(body_bytes.clone())
+            .timeout(per_request_timeout)
             .send()
             .await
         {
             Ok(r) => r,
             Err(e) => {
+                if e.is_timeout() {
+                    timeout_failures += 1;
+                }
                 if attempt + 1 < MAX_RETRIES && is_retryable_transport_error(&e) {
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts = MAX_RETRIES,
                         error = %e,
+                        is_timeout = e.is_timeout(),
+                        timeout_failures,
                         "llm: openrouter transport error, retrying"
                     );
                     backoff_with_jitter(attempt).await;
@@ -2128,7 +2308,7 @@ async fn openrouter_post(
                 return Err(terminal_llm_error(
                     call_start.elapsed(),
                     attempt + 1,
-                    &format!("transport: {e}"),
+                    &classify_transport_error(&e, per_request_timeout),
                 ));
             }
         };
@@ -2237,6 +2417,12 @@ async fn openrouter_post(
             if status == 400 && is_context_length_error(&body) {
                 return Err(AgentError::LlmContextExceeded(format!("{status}: {body}")));
             }
+            // Same 400-shaped image rejection as the shared `post()` terminal:
+            // OpenRouter normally reports this as a 404 (handled above), but a
+            // BYOK/passthrough upstream can surface the provider's own 400.
+            if status == 400 && is_unsupported_image_input_error(&body) {
+                return Err(AgentError::UnsupportedImageInput(body));
+            }
             return Err(AgentError::Llm(format!("{status}: {body}")));
         }
         if let Some(len) = resp.content_length() {
@@ -2260,15 +2446,55 @@ async fn openrouter_post(
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    // Body-read timeout: retry with escalated budget, same as
+                    // transport-phase timeouts — see the corresponding arm in
+                    // `post()` for the full rationale.
+                    if e.is_timeout() && attempt + 1 < MAX_RETRIES {
+                        timeout_failures += 1;
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = MAX_RETRIES,
+                            is_timeout = true,
+                            timeout_failures,
+                            error = %e,
+                            "llm: openrouter body-read timeout, retrying with escalated budget"
+                        );
+                        backoff_with_jitter(attempt).await;
+                        continue 'attempt;
+                    }
                     return Err(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
-                        &format!("body read: {e}"),
-                    ))
+                        &classify_body_read_error(&e, per_request_timeout),
+                    ));
                 }
             }
         }
-        return serde_json::from_slice(&buf).map_err(|e| AgentError::Llm(format!("json: {e}")));
+        // Same malformed-body retry as the shared `post()` terminal: a
+        // truncated 2xx JSON body is transient upstream trouble, and
+        // re-sending is provably tool-safe — nothing was parsed, so no tool
+        // call could have been extracted, and the retry re-uses the
+        // identical `body_bytes` completion request.
+        match serde_json::from_slice(&buf) {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                if attempt + 1 < MAX_RETRIES {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRIES,
+                        error = %e,
+                        "llm: openrouter malformed response body, retrying"
+                    );
+                    backoff_with_jitter(attempt).await;
+                    continue;
+                }
+                return Err(terminal_llm_error(
+                    call_start.elapsed(),
+                    attempt + 1,
+                    &format!("json: {e}"),
+                ));
+            }
+        }
     }
     Err(terminal_llm_error(
         call_start.elapsed(),
@@ -2383,8 +2609,9 @@ fn apply_anthropic_cache_control(body: &mut serde_json::Map<String, Value>) {
 
 #[cfg(test)]
 mod tests {
+    include!("llm_fqn_tests.rs");
     use super::*;
-    use crate::config::{Config, HookServers, OpenAiApi, Provider};
+    use crate::config::{Config, HookServers, OpenAiApi, Provider, ThinkingSummary};
     use crate::types::{HistoryItem, ToolCall, ToolResult, ToolResultContent};
     use std::collections::VecDeque;
     use std::time::Duration;
@@ -2397,6 +2624,7 @@ mod tests {
             system_prompt: "system".into(),
             max_rounds: 10,
             max_output_tokens: 1024,
+            max_token_recoveries: 3,
             llm_timeout: Duration::from_secs(10),
             tool_timeout: Duration::from_secs(10),
             mcp_init_timeout: Duration::from_secs(10),
@@ -2410,18 +2638,21 @@ mod tests {
             max_context_tokens: 200_000,
             max_handoffs: 1,
             max_parallel_tools: 1,
+            max_pending_permissions: 32,
+            permission_timeout: Duration::from_secs(330),
             hook_timeout: Duration::from_secs(1),
             stop_max_rejections: 0,
             require_reply: false,
             hook_servers: HookServers::None,
+            databricks_model_filter: None,
             api_key: "key".into(),
             model: "model".into(),
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
-            prefer_mesh_for_auto: false,
             hints_enabled: true,
             thinking_effort: None,
+            thinking_summary: ThinkingSummary::Auto,
             prompt_caching: true,
         }
     }
@@ -2430,6 +2661,7 @@ mod tests {
     struct CapturedHttpRequest {
         method: String,
         path: String,
+        user_agent: Option<String>,
         body: Option<Value>,
     }
 
@@ -2453,24 +2685,6 @@ mod tests {
                         "type": "server_error",
                         "code": "service_unavailable",
                     }
-                }),
-            }
-        }
-
-        fn moa_failure(status: u16, code: &str, message: &str) -> Self {
-            Self {
-                status,
-                body: json!({
-                    "choices": [{
-                        "finish_reason": "error",
-                        "message": { "content": message, "role": "assistant" },
-                    }],
-                    "error": {
-                        "message": message,
-                        "type": "moa_failure",
-                        "code": code,
-                    },
-                    "model": "mesh",
                 }),
             }
         }
@@ -2522,6 +2736,11 @@ mod tests {
                         Ok(read) => bytes.extend_from_slice(&chunk[..read]),
                     }
                 }
+                let user_agent = header_text.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("user-agent")
+                        .then(|| value.trim().to_string())
+                });
                 let mut request_line = header_text.lines().next().unwrap_or_default().split(' ');
                 let method = request_line.next().unwrap_or_default().to_string();
                 let path = request_line.next().unwrap_or_default().to_string();
@@ -2530,10 +2749,12 @@ mod tests {
                 } else {
                     serde_json::from_slice(&bytes[header_end..header_end + content_length]).ok()
                 };
-                captured_for_server
-                    .lock()
-                    .await
-                    .push(CapturedHttpRequest { method, path, body });
+                captured_for_server.lock().await.push(CapturedHttpRequest {
+                    method,
+                    path,
+                    user_agent,
+                    body,
+                });
 
                 let response = responses.lock().await.pop_front().unwrap_or_else(|| {
                     StubHttpResponse::error(500, "stub response sequence exhausted")
@@ -2562,16 +2783,6 @@ mod tests {
         (base_url, captured)
     }
 
-    fn model_catalog(ids: &[&str]) -> Value {
-        json!({
-            "object": "list",
-            "data": ids
-                .iter()
-                .map(|id| json!({ "id": id, "object": "model" }))
-                .collect::<Vec<_>>(),
-        })
-    }
-
     fn chat_response(text: &str) -> Value {
         json!({
             "choices": [{
@@ -2596,43 +2807,6 @@ mod tests {
         .await
     }
 
-    async fn complete_model_with_tool(
-        llm: &Llm,
-        cfg: &Config,
-        model: &str,
-    ) -> Result<LlmResponse, AgentError> {
-        llm.complete(
-            cfg,
-            "system",
-            &[HistoryItem::User("add two numbers".into())],
-            &[ToolDef {
-                name: "add_numbers".into(),
-                description: "Add two numbers".into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "a": {"type": "number"},
-                        "b": {"type": "number"}
-                    },
-                    "required": ["a", "b"]
-                }),
-            }],
-            model,
-        )
-        .await
-    }
-
-    async fn expire_mesh_catalog_check(llm: &Llm) {
-        llm.mesh_auto_state.lock().await.last_checked =
-            Some(Instant::now() - MESH_AUTO_CATALOG_TTL);
-    }
-
-    async fn expire_mesh_auto_cooldown(llm: &Llm) {
-        let mut state = llm.mesh_auto_state.lock().await;
-        state.last_checked = Some(Instant::now() - MESH_AUTO_CATALOG_TTL);
-        state.cooldown_until = Some(Instant::now() - std::time::Duration::from_secs(1));
-    }
-
     fn posted_models(requests: &[CapturedHttpRequest]) -> Vec<&str> {
         requests
             .iter()
@@ -2641,381 +2815,106 @@ mod tests {
             .collect()
     }
 
+    /// Every LLM request identifies the client to the provider via the
+    /// first User-Agent product token.
     #[tokio::test]
-    async fn mesh_auto_requires_two_stable_catalog_observations() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("direct")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("collective")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "direct"
-        );
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "collective"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["auto", "mesh"]);
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_does_not_enable_while_second_model_flaps() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("one")),
-            StubHttpResponse::ok(model_catalog(&["model-a"])),
-            StubHttpResponse::ok(chat_response("two")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("three")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("four")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        for _ in 0..4 {
-            complete_model(&llm, &config, "auto").await.unwrap();
-            expire_mesh_catalog_check(&llm).await;
-        }
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "auto", "auto", "mesh"]
-        );
-    }
-
-    #[test]
-    fn collective_catalog_requires_two_distinct_physical_models() {
-        assert_eq!(mesh_catalog_supports_collective(&json!({})), None);
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&[])),
-            Some(false)
-        );
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&["model-a", "mesh"])),
-            Some(false)
-        );
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&[
-                "org/model@main:Q4",
-                "org/model:Q4",
-                "mesh"
-            ])),
-            Some(false),
-            "two spellings of one model are not collective capacity"
-        );
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&["model-a", "model-b", "mesh"])),
-            Some(true)
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_tracks_models_appearing_disappearing_and_reappearing() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&[])),
-            StubHttpResponse::ok(chat_response("zero")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "mesh"])),
-            StubHttpResponse::ok(chat_response("one")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("two-first-observation")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("two-stable")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "mesh"])),
-            StubHttpResponse::ok(chat_response("contracted")),
-            StubHttpResponse::ok(model_catalog(&[])),
-            StubHttpResponse::ok(chat_response("empty-again")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("rejoin-first-observation")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("rejoined-stable")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        for call in 0..8 {
-            if call == 5 {
-                expire_mesh_auto_cooldown(&llm).await;
-            } else if call > 0 {
-                expire_mesh_catalog_check(&llm).await;
-            }
-            complete_model(&llm, &config, "auto").await.unwrap();
-        }
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "auto", "auto", "mesh", "auto", "auto", "auto", "mesh"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            8
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_falls_back_once_and_cools_down_when_mesh_contracts() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("warmup")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::error(503, MESH_MOA_UNAVAILABLE_MESSAGE),
-            StubHttpResponse::ok(chat_response("fallback")),
-            StubHttpResponse::ok(chat_response("cooldown")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "fallback"
-        );
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "cooldown"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "mesh", "auto", "auto"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2,
-            "cooldown request must not re-probe the catalog"
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_falls_back_once_when_moa_reducer_fails() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("warmup")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::moa_failure(
-                502,
-                "all_reducers_failed",
-                "Reducer failed: unsupported chat template",
-            ),
-            StubHttpResponse::ok(chat_response("fallback")),
-            StubHttpResponse::ok(chat_response("cooldown")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "fallback"
-        );
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "cooldown"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "mesh", "auto", "auto"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2,
-            "mesh-specific failure must enter cooldown without re-probing"
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_retries_unstructured_tool_markup_through_auto() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("warmup")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response(
-                "<|tool_call>call:add_numbers{a:17,b:25}<tool_call|>",
-            )),
-            StubHttpResponse::ok(chat_response("safe fallback")),
-            StubHttpResponse::ok(chat_response("cooldown")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model_with_tool(&llm, &config, "auto")
-                .await
-                .unwrap()
-                .text,
-            "safe fallback"
-        );
-        assert_eq!(
-            complete_model_with_tool(&llm, &config, "auto")
-                .await
-                .unwrap()
-                .text,
-            "cooldown"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "mesh", "auto", "auto"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2,
-            "pseudo tool markup must enter cooldown without another catalog probe"
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_catalog_failure_fails_open_to_auto() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::error(500, "catalog unavailable"),
-            StubHttpResponse::ok(chat_response("direct")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["auto"]);
-    }
-
-    #[tokio::test]
-    async fn generic_openai_auto_does_not_probe_or_select_mesh() {
+    async fn llm_requests_carry_buzz_agent_user_agent() {
         let (base_url, captured) =
-            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("provider auto"))]).await;
+            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("ok"))]).await;
         let mut config = cfg(Provider::OpenAi);
         config.base_url = base_url;
-        config.prefer_mesh_for_auto = false;
         let llm = Llm::new(&config).unwrap();
 
-        complete_model(&llm, &config, "auto").await.unwrap();
+        complete_model(&llm, &config, "gpt-test").await.unwrap();
         let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["auto"]);
-        assert!(requests.iter().all(|request| request.path != "/v1/models"));
+        let expected = format!("buzz-agent/{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].user_agent.as_deref(), Some(expected.as_str()));
     }
 
+    /// An explicit model is sent verbatim and never rewritten to something
+    /// else. A server error is retried under the *same* model (the ordinary
+    /// transport retry) and then surfaced -- there is no second model to fall
+    /// back to now that MeshLLM resolves `mesh` server-side.
     #[tokio::test]
     async fn explicit_models_are_never_rewritten_or_fallback_retried() {
-        let (base_url, captured) = spawn_sequence_stub(vec![StubHttpResponse::error(
-            503,
-            MESH_MOA_UNAVAILABLE_MESSAGE,
-        )])
+        let (base_url, captured) = spawn_sequence_stub(
+            (0..MAX_RETRIES)
+                .map(|_| StubHttpResponse::error(503, "upstream unavailable"))
+                .collect(),
+        )
         .await;
         let mut config = cfg(Provider::OpenAi);
         config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
         let llm = Llm::new(&config).unwrap();
 
         let error = complete_model(&llm, &config, "mesh").await.unwrap_err();
-        assert!(error.to_string().contains(MESH_MOA_UNAVAILABLE_MESSAGE));
+        assert!(error.to_string().contains("upstream unavailable"));
         let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["mesh"]);
+        assert!(
+            requests
+                .iter()
+                .filter(|request| request.method == "POST")
+                .all(|request| request.body.as_ref().and_then(|b| b.get("model"))
+                    == Some(&json!("mesh"))),
+            "every attempt must keep the explicit model: {:?}",
+            posted_models(&requests)
+        );
         assert!(requests.iter().all(|request| request.path != "/v1/models"));
+    }
+
+    /// Whatever model the config names is what goes on the wire -- including
+    /// `auto`, which is a real provider model name for plain OpenAI hosts. A
+    /// caller routing through a mesh resolves its own name before spawning the
+    /// agent, so there is nothing to rewrite here and no catalog to probe.
+    #[tokio::test]
+    async fn the_configured_model_is_sent_verbatim() {
+        for model in ["auto", "mesh", "unsloth/Qwen3-8B-GGUF:Q4_K_M"] {
+            let (base_url, captured) =
+                spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("ok"))]).await;
+            let mut config = cfg(Provider::OpenAi);
+            config.base_url = base_url;
+            let llm = Llm::new(&config).unwrap();
+
+            let response = complete_model(&llm, &config, model).await.unwrap();
+            assert_eq!(response.text, "ok");
+            let requests = captured.lock().await;
+            assert_eq!(posted_models(&requests), vec![model]);
+            assert!(
+                requests.iter().all(|request| request.path != "/v1/models"),
+                "no catalog probe belongs on this path"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn explicit_real_model_bypasses_mesh_auto_policy() {
-        let (base_url, captured) =
-            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("explicit"))]).await;
-        let mut config = cfg(Provider::OpenAi);
+    async fn databricks_v2_claude_model_service_fqn_summary_uses_anthropic_messages() {
+        let model = "catalog.schema.claude-gpt-5";
+        let response = json!({
+            "content": [{"type": "text", "text": "summary"}],
+            "stop_reason": "end_turn"
+        });
+        let (base_url, captured) = spawn_sequence_stub(vec![StubHttpResponse::ok(response)]).await;
+        let mut config = cfg(Provider::DatabricksV2);
         config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
         let llm = Llm::new(&config).unwrap();
 
-        let response = complete_model(&llm, &config, "model-a").await.unwrap();
-        assert_eq!(response.text, "explicit");
+        let summary = llm
+            .summarize(&config, "system", "history", 128, model)
+            .await
+            .unwrap();
+        assert_eq!(summary, "summary");
+
         let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["model-a"]);
-        assert!(requests.iter().all(|request| request.path != "/v1/models"));
-    }
-
-    #[test]
-    fn mesh_unavailable_classifier_requires_exact_openai_error_message() {
-        assert!(is_mesh_moa_unavailable_body(
-            &StubHttpResponse::error(503, MESH_MOA_UNAVAILABLE_MESSAGE)
-                .body
-                .to_string()
-        ));
-        assert!(!is_mesh_moa_unavailable_body(
-            &StubHttpResponse::error(503, "some other outage")
-                .body
-                .to_string()
-        ));
-    }
-
-    #[test]
-    fn mesh_failure_classifier_requires_structured_moa_failure_type() {
-        assert!(is_mesh_moa_failure_body(
-            &StubHttpResponse::moa_failure(
-                502,
-                "all_reducers_failed",
-                "Reducer failed: unsupported chat template",
-            )
-            .body
-            .to_string()
-        ));
-        assert!(!is_mesh_moa_failure_body(
-            &StubHttpResponse::error(502, "some other bad gateway")
-                .body
-                .to_string()
-        ));
+        let request = requests
+            .iter()
+            .find(|request| request.method == "POST")
+            .expect("summary must issue one POST");
+        assert_eq!(request.path, "/v1/ai-gateway/anthropic/v1/messages");
+        let body = request.body.as_ref().expect("summary body");
+        assert_eq!(body["model"], model);
+        assert!(body["messages"].is_array());
+        assert_eq!(body["max_tokens"], 128);
     }
 
     fn image_history() -> Vec<HistoryItem> {
@@ -3054,6 +2953,7 @@ mod tests {
             &[],
             "model",
             None,
+            "anthropic",
         );
         let content = &body["messages"][2]["content"][0]["content"];
         assert_eq!(content[0]["type"], "text");
@@ -3263,10 +3163,62 @@ mod tests {
         let v = serde_json::json!({
             "status": "incomplete",
             "incomplete_details": {"reason": "max_output_tokens"},
-            "output": [],
+            "output": [{
+                "type": "function_call",
+                "call_id": "partial",
+                "name": "dev__shell",
+                "arguments": "{\"command\":\"unterminated",
+            }],
         });
         let r = parse_responses(v).unwrap();
         assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert!(r.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn truncated_openai_tool_arguments_are_discarded_not_rejected() {
+        let v = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "content": "partial text",
+                    "tool_calls": [{
+                        "id": "partial",
+                        "type": "function",
+                        "function": {
+                            "name": "dev__shell",
+                            "arguments": "{\"command\":\"unterminated",
+                        },
+                    }],
+                },
+            }],
+        });
+        let r = parse_openai(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert_eq!(r.text, "partial text");
+        assert!(r.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn anthropic_context_window_exhaustion_is_truncation() {
+        let v = serde_json::json!({
+            "stop_reason": "model_context_window_exceeded",
+            "content": [{"type": "text", "text": "partial text"}],
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert_eq!(r.text, "partial text");
+    }
+
+    #[test]
+    fn truncated_anthropic_tool_use_is_discarded_not_rejected() {
+        let v = serde_json::json!({
+            "stop_reason": "max_tokens",
+            "content": [{"type": "tool_use", "id": "", "name": "", "input": null}],
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert!(r.tool_calls.is_empty());
     }
 
     #[test]
@@ -3286,8 +3238,13 @@ mod tests {
     }
 
     #[test]
-    fn databricks_v2_routes_by_model_family() {
+    fn databricks_v2_dispatch_routes_from_manifest() {
         use DatabricksV2Route::{AnthropicMessages, MlflowChatCompletions, OpenAiResponses};
+        // Exercises the production dispatch seam (`databricks_v2_route` +
+        // `databricks_v2_path`), not the interpreter — these are the exact
+        // functions `databricks_v2_request` calls to pick a wire. Expected
+        // values are the manifest-ratified answers (corpus class F et al.), so
+        // this is the wire-visible contract, not a restatement of the resolver.
         for (model, route, path) in [
             // OpenAI-shaped: the gpt family plus the GPT-5 code names.
             (
@@ -3295,9 +3252,6 @@ mod tests {
                 OpenAiResponses,
                 "/ai-gateway/openai/v1/responses",
             ),
-            ("gpt-4o", OpenAiResponses, "/ai-gateway/openai/v1/responses"),
-            // The intentional dashless `gpt5` spelling still routes to OpenAI.
-            ("gpt5", OpenAiResponses, "/ai-gateway/openai/v1/responses"),
             (
                 "databricks-gpt-5-6-luna",
                 OpenAiResponses,
@@ -3308,49 +3262,34 @@ mod tests {
                 OpenAiResponses,
                 "/ai-gateway/openai/v1/responses",
             ),
-            (
-                "databricks-terra",
-                OpenAiResponses,
-                "/ai-gateway/openai/v1/responses",
-            ),
-            // Anthropic-shaped: the claude prefix, the family names, and the
-            // release code names — each must reach the cache-capable route even
-            // when the endpoint name omits the literal "claude".
+            // Anthropic-shaped: curated `databricks-claude-*` names keep the
+            // cache-capable Messages wire via the manifest prefix rule.
             (
                 "databricks-claude-opus-4-7",
                 AnthropicMessages,
                 "/ai-gateway/anthropic/v1/messages",
             ),
             (
-                "goose-opus-5",
-                AnthropicMessages,
-                "/ai-gateway/anthropic/v1/messages",
-            ),
-            (
-                "databricks-sonnet-5",
-                AnthropicMessages,
-                "/ai-gateway/anthropic/v1/messages",
-            ),
-            (
-                "databricks-haiku-4-5",
-                AnthropicMessages,
-                "/ai-gateway/anthropic/v1/messages",
-            ),
-            (
-                "databricks-mythos-5",
-                AnthropicMessages,
-                "/ai-gateway/anthropic/v1/messages",
-            ),
-            (
-                "databricks-fable-5",
-                AnthropicMessages,
-                "/ai-gateway/anthropic/v1/messages",
-            ),
-            // Case-insensitive.
-            (
                 "Databricks-Claude-Opus-5",
                 AnthropicMessages,
                 "/ai-gateway/anthropic/v1/messages",
+            ),
+            // WIRE-VISIBLE CHANGE (corpus class F): an *uncurated* Claude
+            // code-name endpoint no longer routes to Anthropic Messages. The
+            // legacy segment classifier sent `goose-opus-5` to the cache-capable
+            // wire off the bare `opus` segment; the manifest treats only
+            // curated `databricks-claude-*` / exact records as Anthropic, so
+            // bare code names fall to the MLflow chat route (losing Anthropic
+            // prompt caching on those names). See the mutation guard below.
+            (
+                "goose-opus-5",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            (
+                "opus-5",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
             ),
             // Unrecognised names still fall through to the MLflow chat route.
             (
@@ -3358,16 +3297,8 @@ mod tests {
                 MlflowChatCompletions,
                 "/ai-gateway/mlflow/v1/chat/completions",
             ),
-            (
-                "databricks-gemini-3-pro",
-                MlflowChatCompletions,
-                "/ai-gateway/mlflow/v1/chat/completions",
-            ),
             // Collision guard: short code names must match only as whole
             // segments, never as substrings of an unrelated custom alias.
-            // Each of these embeds a marker (`sol`, `terra`, `opus`) mid-word
-            // and must stay on the MLflow fallback, not adopt a wire its
-            // backend can't parse.
             (
                 "consolidated-llama",
                 MlflowChatCompletions,
@@ -3389,10 +3320,121 @@ mod tests {
                 "/ai-gateway/mlflow/v1/chat/completions",
             ),
         ] {
-            let got = databricks_v2_route_for_model(model);
+            let got = databricks_v2_route(model);
             assert_eq!(got, route, "model={model}");
             assert_eq!(databricks_v2_path(got), path, "model={model}");
         }
+    }
+
+    #[test]
+    fn databricks_v2_model_service_fqn_shape_is_strict_and_precedes_manifest() {
+        use crate::model_capabilities::{resolve, DatabricksV2Route as Manifest};
+
+        for (model, expected) in [
+            (
+                "catalog.schema.service",
+                DatabricksV2Route::MlflowChatCompletions,
+            ),
+            (
+                "catalog.schema.claude-gpt-5",
+                DatabricksV2Route::AnthropicMessages,
+            ),
+            (
+                "data_tools.goose.kimi-k3",
+                DatabricksV2Route::MlflowChatCompletions,
+            ),
+        ] {
+            assert!(
+                crate::model_capabilities::is_databricks_model_service_fqn(model),
+                "expected FQN shape: {model}"
+            );
+            assert_eq!(
+                databricks_v2_route(model),
+                expected,
+                "only a Claude service component may select Anthropic Messages: {model}"
+            );
+        }
+
+        let manifest_route =
+            |model: &str| match resolve("databricks_v2", model).databricks_v2_wire_route {
+                Manifest::OpenaiResponses => DatabricksV2Route::OpenAiResponses,
+                Manifest::AnthropicMessages => DatabricksV2Route::AnthropicMessages,
+                Manifest::MlflowChat | Manifest::NotApplicable | Manifest::RouteUnknown => {
+                    DatabricksV2Route::MlflowChatCompletions
+                }
+            };
+        for model in [
+            "catalog.schema",
+            "catalog..service",
+            ".schema.service",
+            "catalog.schema.",
+            "catalog.schema.service.extra",
+            "catalog/schema/service",
+            "catalog.schema service",
+        ] {
+            assert!(
+                !crate::model_capabilities::is_databricks_model_service_fqn(model),
+                "unexpected FQN shape: {model}"
+            );
+            assert_eq!(
+                databricks_v2_route(model),
+                manifest_route(model),
+                "malformed/partial IDs must retain manifest routing: {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn databricks_v2_dispatch_is_pure_manifest_projection() {
+        // Mutation-bypass guard: the dispatch seam must be a pure projection of
+        // the manifest's resolved `databricks_v2_wire_route`, with no routing
+        // decision of its own. For every known DBv2 model (plus the legacy
+        // collision-guard and code-name cases), the seam's wire choice must
+        // equal the enum mapping of `resolve(...).databricks_v2_wire_route`.
+        //
+        // Reintroducing the deleted segment classifier — or any `if
+        // model.contains("opus")`-style shortcut that bypasses the manifest —
+        // disagrees with the manifest on `goose-opus-5` (segment → Anthropic,
+        // manifest → MLflow) and fails this test.
+        use crate::model_capabilities::{resolve, DatabricksV2Route as Manifest};
+        let expected = |model: &str| match resolve("databricks_v2", model).databricks_v2_wire_route
+        {
+            Manifest::OpenaiResponses => DatabricksV2Route::OpenAiResponses,
+            Manifest::AnthropicMessages => DatabricksV2Route::AnthropicMessages,
+            Manifest::MlflowChat | Manifest::NotApplicable | Manifest::RouteUnknown => {
+                DatabricksV2Route::MlflowChatCompletions
+            }
+        };
+        let mut models: Vec<String> =
+            crate::model_capabilities::databricks_v2_known_models().to_vec();
+        // Uncurated / adversarial names the known-model list does not carry, so
+        // the guard covers the exact inputs the legacy classifier misrouted.
+        for extra in [
+            "goose-opus-5",
+            "opus-5",
+            "goose-claude-fable-5",
+            "consolidated-llama",
+            "terraform-coder",
+            "corpus-reranker",
+            "octopus-model",
+            "gpt-opus-5",
+        ] {
+            models.push(extra.to_string());
+        }
+        for model in &models {
+            assert_eq!(
+                databricks_v2_route(model),
+                expected(model),
+                "dispatch seam diverged from manifest authority for model={model}"
+            );
+        }
+        // The class-F case, stated as a hard fact so the guard's intent is
+        // legible: the manifest routes `goose-opus-5` to the MLflow wire, and
+        // the seam agrees — the legacy Anthropic answer is gone.
+        assert_eq!(
+            databricks_v2_route("goose-opus-5"),
+            DatabricksV2Route::MlflowChatCompletions
+        );
     }
 
     #[test]
@@ -3536,6 +3578,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         // Static prefix: system promoted to a structured block carrying the marker.
         assert_eq!(body["system"][0]["type"], "text");
@@ -3566,6 +3609,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1);
@@ -3586,6 +3630,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         // system stays a bare string; no marker anywhere.
         assert_eq!(body["system"], "sys");
@@ -3604,6 +3649,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         assert_eq!(body["system"], "");
         assert_eq!(
@@ -3623,6 +3669,7 @@ mod tests {
             &[],
             "model",
             None,
+            "anthropic",
         );
         assert!(
             body.get("thinking").is_none(),
@@ -3643,6 +3690,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "enabled");
         // budget_tokens = min(32768, 4096-1024) = 3072
@@ -3662,6 +3710,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert!(
             body.get("thinking").is_none(),
@@ -3681,6 +3730,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         let t = body
             .get("thinking")
@@ -3700,6 +3750,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["budget_tokens"], 32_768);
     }
@@ -3717,6 +3768,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::Low),
+            "anthropic",
         );
         // Low budget (1024) fits exactly at the boundary — emitted without capping.
         assert_eq!(body["thinking"]["budget_tokens"], 1024);
@@ -3735,6 +3787,7 @@ mod tests {
             &[],
             "claude-opus-4-7",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(
             body["thinking"]["type"], "adaptive",
@@ -3756,6 +3809,7 @@ mod tests {
             &[],
             "claude-opus-4-5",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 31_744); // min(32768, 32768-1024)
@@ -3775,6 +3829,7 @@ mod tests {
             &[],
             "gpt-4o",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert!(body.get("thinking").is_none(), "thinking must be absent");
         assert!(
@@ -3839,6 +3894,75 @@ mod tests {
             Some(ThinkingEffort::Low),
         );
         assert_eq!(body["reasoning"]["effort"], "low");
+        // summary defaults to "auto" when effort is set.
+        assert_eq!(body["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn responses_body_summary_present_iff_effort_set() {
+        // effort set → reasoning object present with both effort and summary.
+        let body_with_effort = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::Medium),
+        );
+        assert!(
+            body_with_effort.get("reasoning").is_some(),
+            "reasoning must be present when effort is set"
+        );
+        assert_eq!(body_with_effort["reasoning"]["effort"], "medium");
+        assert_eq!(body_with_effort["reasoning"]["summary"], "auto");
+
+        // effort None → reasoning object entirely absent.
+        let body_no_effort = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            None,
+        );
+        assert!(
+            body_no_effort.get("reasoning").is_none(),
+            "reasoning must be absent when effort is None"
+        );
+    }
+
+    #[test]
+    fn responses_body_emits_configured_summary_mode() {
+        let mut cfg = cfg_responses();
+        cfg.thinking_summary = ThinkingSummary::Detailed;
+        let body = responses_body(
+            &cfg,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::High),
+        );
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(
+            body["reasoning"]["summary"], "detailed",
+            "configured summary mode must be forwarded to reasoning object"
+        );
+    }
+
+    #[test]
+    fn responses_body_concise_summary_mode() {
+        let mut cfg = cfg_responses();
+        cfg.thinking_summary = ThinkingSummary::Concise;
+        let body = responses_body(
+            &cfg,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::Low),
+        );
+        assert_eq!(body["reasoning"]["summary"], "concise");
     }
 
     #[test]
@@ -3850,6 +3974,7 @@ mod tests {
             &[],
             "override-model",
             None,
+            "anthropic",
         );
         assert_eq!(body["model"], "override-model");
     }
@@ -3879,6 +4004,7 @@ mod tests {
             &[],
             "claude-opus-4-8",
             Some(ThinkingEffort::XHigh),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "xhigh");
@@ -3896,6 +4022,7 @@ mod tests {
             &[],
             "claude-opus-4-8",
             Some(ThinkingEffort::Max),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "max");
@@ -3959,17 +4086,17 @@ mod tests {
 
     // ---- DatabricksV2 route-aware effort normalization (body-level assertions) ----
     //
-    // The DBv2 `complete()` dispatch applies `normalize_effort_for_openai_route` /
+    // The DBv2 `complete()` dispatch applies `normalize_effort_for_databricks_v2` /
     // `normalize_effort_for_anthropic_route` before calling body builders. These tests
     // verify the body shape that results from the already-normalized effort values — i.e.,
     // they confirm the body builders correctly serialize the values the dispatch passes them.
 
     #[test]
     fn dbv2_openai_route_max_effort_clamped_to_xhigh_in_responses_body() {
-        // DBv2 GPT-5.5 route: max → clamped to xhigh by normalize_effort_for_openai_route
+        // DBv2 GPT-5.5 route: max → clamped to xhigh by normalize_effort_for_databricks_v2
         // before reaching responses_body. gpt-5.5 supports xhigh so the final value is xhigh.
         let clamped =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::Max, "gpt-5.5");
         let body = responses_body(
             &cfg_responses(),
             "system",
@@ -3987,7 +4114,7 @@ mod tests {
     #[test]
     fn dbv2_openai_route_max_effort_passes_through_for_gpt5_6() {
         let normalized =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.6-sol");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::Max, "gpt-5.6-sol");
         let body = responses_body(
             &cfg_responses(),
             "system",
@@ -4004,10 +4131,10 @@ mod tests {
 
     #[test]
     fn dbv2_mlflow_route_max_effort_clamped_to_xhigh_in_openai_body() {
-        // DBv2 MLflow route (unknown model): max → clamped to xhigh by normalize_effort_for_openai_route.
+        // DBv2 MLflow route (unknown model): max → clamped to xhigh by normalize_effort_for_databricks_v2.
         // Unknown models pass through after the max→xhigh clamp.
         let clamped =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "llama-4");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::Max, "llama-4");
         let body = openai_body(
             &cfg(Provider::OpenAi),
             "system",
@@ -4027,14 +4154,14 @@ mod tests {
         // Verify that supported values pass through for the respective model families.
         // gpt-5.5 supports none (but not minimal); gpt-5 base supports minimal (but not none).
         let none_normalized =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::None, "gpt-5.5");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::None, "gpt-5.5");
         assert_eq!(
             none_normalized,
             ThinkingEffort::None,
             "OpenAI normalizer must not touch none for gpt-5.5"
         );
         let minimal_normalized =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Minimal, "gpt-5");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::Minimal, "gpt-5");
         assert_eq!(
             minimal_normalized,
             ThinkingEffort::Minimal,
@@ -4071,6 +4198,7 @@ mod tests {
             &[],
             "claude-opus-4-8",
             normalized, // None → omit thinking fields
+            "anthropic",
         );
         assert!(
             body.get("thinking").is_none(),
@@ -4095,6 +4223,7 @@ mod tests {
 
         // Before switch: claude-opus-4-8 with effort=max → adaptive shape, effort="max"
         let (thinking_before, oc_before) = crate::config::anthropic_thinking_config(
+            "anthropic",
             "claude-opus-4-8",
             ThinkingEffort::Max,
             32_768,
@@ -4105,7 +4234,7 @@ mod tests {
         // After switch to GPT-5.5 route: normalize max → xhigh for responses_body
         // (gpt-5.5 supports xhigh, so the clamp result is xhigh, not further reduced)
         let clamped =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::Max, "gpt-5.5");
         assert_eq!(clamped, ThinkingEffort::XHigh);
         let body_after = responses_body(
             &cfg_responses(),
@@ -4179,9 +4308,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let out = post(&client, &url, &serde_json::json!({}), false, |b| b)
-            .await
-            .expect("post should succeed after retry");
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed after retry");
         assert_eq!(out, serde_json::json!({ "ok": true }));
         assert!(
             accepts.load(Ordering::SeqCst) >= 2,
@@ -4243,9 +4378,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let out = post(&client, &url, &serde_json::json!({}), false, |b| b)
-            .await
-            .expect("post should succeed after 499 retry");
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed after 499 retry");
         assert_eq!(out, serde_json::json!({ "ok": true }));
         assert!(
             accepts.load(Ordering::SeqCst) >= 2,
@@ -4294,9 +4435,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = post(&client, &url, &serde_json::json!({}), false, |b| b)
-            .await
-            .unwrap_err();
+        let err = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .unwrap_err();
         match &err {
             PostError::Agent(AgentError::Llm(msg)) => {
                 assert!(
@@ -4314,6 +4461,398 @@ mod tests {
             accepts.load(Ordering::SeqCst),
             MAX_RETRIES,
             "server must see exactly MAX_RETRIES attempts — 499 must be retried"
+        );
+    }
+
+    /// Regression (write-compressor, tb21-twins-1): a provider returning
+    /// HTTP 200 with a *truncated* JSON body (cleanly closed, correct
+    /// framing, unparseable content) previously surfaced as a terminal
+    /// `AgentError::Llm("json: EOF while parsing a value ...")` on the very
+    /// first attempt, killing the agent turn. A malformed body is transient
+    /// upstream trouble and must be retried like a 5xx. Re-sending is
+    /// tool-safe: nothing was parsed, so no tool call was extracted from the
+    /// bad body, and the retry replays the identical completion request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_retries_malformed_json_body_and_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                if n == 0 {
+                    // First attempt: 200 OK with a truncated JSON document.
+                    // Content-Length matches the bytes actually sent, so the
+                    // body read completes cleanly — the fault is purely that
+                    // the JSON is cut off mid-value.
+                    let body = "{\"choices\":[{\"mess";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                    continue;
+                }
+                // Subsequent attempts: complete valid JSON.
+                let body = "{\"ok\":true}";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed after retrying the malformed body");
+        assert_eq!(out, serde_json::json!({ "ok": true }));
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "server must see exactly 2 attempts (malformed body retried once)"
+        );
+    }
+
+    /// A persistently malformed 200 body exhausts MAX_RETRIES and surfaces
+    /// the terminal error with the `json:` detail plus cumulative
+    /// duration/attempt count — never an early first-attempt death.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_exhausts_retries_on_persistent_malformed_json() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                accepts_srv.fetch_add(1, Ordering::SeqCst);
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                let body = "{\"choices\":[{\"mess";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .unwrap_err();
+        match &err {
+            PostError::Agent(AgentError::Llm(msg)) => {
+                assert!(
+                    msg.contains("json:"),
+                    "expected the json parse detail, got: {msg}"
+                );
+                assert!(
+                    msg.contains("cumulative") && msg.contains("3 attempts"),
+                    "expected cumulative duration + exact attempt count, got: {msg}"
+                );
+            }
+            other => panic!("expected PostError::Agent(AgentError::Llm), got: {other:?}"),
+        }
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            MAX_RETRIES,
+            "server must see exactly MAX_RETRIES attempts — malformed bodies must be retried"
+        );
+    }
+
+    /// Same regression coverage for `openrouter_post`, which carries its own
+    /// retry loop: a truncated 200 body on the first attempt is retried and
+    /// the call succeeds on the second.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_retries_malformed_json_body_and_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                if n == 0 {
+                    let body = "{\"choices\":[{\"mess";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                    continue;
+                }
+                let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = openrouter_post(&client, &url, &json!({}), "key", Duration::from_secs(5))
+            .await
+            .expect("openrouter_post should succeed after retrying the malformed body");
+        assert!(out.is_object(), "expected a JSON object: {out:?}");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "server must see exactly 2 attempts (malformed body retried once)"
+        );
+    }
+
+    /// A body-read timeout on the first attempt triggers a retry under an
+    /// escalated budget, and the call succeeds on the second attempt.
+    ///
+    /// The stub sends HTTP 200 headers for the first request, writes a partial
+    /// body, then stalls long enough to exhaust the base timeout (1 s).  On the
+    /// second request it sends a complete response immediately.  The test asserts
+    /// that `post()` returns success and that the server saw exactly 2 requests.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_body_read_timeout_retries_with_escalated_budget() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+
+                // Drain the incoming request headers on every attempt.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+
+                if n == 0 {
+                    // First attempt: declare a 64-byte body, send only 4 bytes,
+                    // then stall for 3 s — long enough to outlast the 1 s
+                    // base timeout and trigger a body-read timeout.
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\n\
+                              Content-Type: application/json\r\n\
+                              Content-Length: 64\r\n\
+                              \r\n\
+                              {\"s",
+                        )
+                        .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    // Connection closes here; the client has already timed out.
+                    continue;
+                }
+
+                // Second attempt: complete a valid JSON response immediately.
+                let body = r#"{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        // No client-level timeout — per-request timeout is applied inside post().
+        let client = Client::builder().build().unwrap();
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({"model": "x"}),
+            // Small base timeout so the body stall triggers quickly.
+            Duration::from_secs(1),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed on the second attempt after body-read timeout");
+        assert!(out.is_object(), "expected a JSON object response: {out:?}");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "server must see exactly 2 requests (body-read timeout retry)"
+        );
+    }
+
+    /// `openrouter_post`: a body-read timeout on the first attempt retries under
+    /// an escalated budget and succeeds on the second attempt.
+    ///
+    /// Same shape as `post_body_read_timeout_retries_with_escalated_budget` —
+    /// the stub stalls mid-body on the first request, then returns a complete
+    /// response immediately on the second.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_body_read_timeout_retries_with_escalated_budget() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+
+                if n == 0 {
+                    // First attempt: declare 64-byte body, send 4 bytes, stall.
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\n\
+                              Content-Type: application/json\r\n\
+                              Content-Length: 64\r\n\
+                              \r\n\
+                              {\"c",
+                        )
+                        .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+
+                // Second attempt: complete valid OpenRouter JSON response.
+                let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder().build().unwrap();
+        let out = openrouter_post(&client, &url, &json!({}), "key", Duration::from_secs(1))
+            .await
+            .expect("openrouter_post should succeed on the second attempt after body-read timeout");
+        assert!(out.is_object(), "expected a JSON object: {out:?}");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "server must see exactly 2 requests (body-read timeout retry)"
         );
     }
 
@@ -4450,6 +4989,363 @@ mod tests {
             warnings, 1,
             "exactly one stall warning with duration+attempts fields at threshold"
         );
+    }
+
+    // ---- escalated_timeout (pure-function tests) ----------------------------
+
+    /// No prior timeouts → budget is base unchanged.
+    #[test]
+    fn escalated_timeout_zero_failures_returns_base() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 0),
+            base,
+            "0 timeout failures must return base unchanged"
+        );
+    }
+
+    /// One prior timeout → budget doubles.
+    #[test]
+    fn escalated_timeout_one_failure_doubles() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 1),
+            Duration::from_secs(480),
+            "1 timeout failure must double the base to 480s"
+        );
+    }
+
+    /// Two prior timeouts → budget quadruples.
+    #[test]
+    fn escalated_timeout_two_failures_quadruples() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 2),
+            Duration::from_secs(960),
+            "2 timeout failures must quadruple the base to 960s"
+        );
+    }
+
+    /// At three prior timeouts (base 240 s, 240×8 = 1920 s) the cap kicks in
+    /// and the result is clamped to ESCALATION_TIMEOUT_CAP (1200 s).
+    #[test]
+    fn escalated_timeout_three_failures_capped_at_1200s() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 3),
+            Duration::from_secs(1200),
+            "3 timeout failures with 240s base must be capped at 1200s"
+        );
+    }
+
+    /// When base already exceeds the cap, the cap is raised to base (we never
+    /// shrink the operator-configured budget).
+    #[test]
+    fn escalated_timeout_base_above_cap_is_never_shrunk() {
+        let base = Duration::from_secs(1500);
+        // All scaled values (1×, 2×, 4×, …) are ≥ base, and the effective cap
+        // is max(ESCALATION_TIMEOUT_CAP, base) = 1500s, so they're all clamped
+        // to 1500s.
+        assert_eq!(
+            escalated_timeout(base, 0),
+            Duration::from_secs(1500),
+            "base 1500s at 0 failures must stay 1500s"
+        );
+        assert_eq!(
+            escalated_timeout(base, 1),
+            Duration::from_secs(1500),
+            "base 1500s at 1 failure must be capped at 1500s (not truncated to 1200s)"
+        );
+    }
+
+    // ---- timeout_message (pure-function tests, no network) ------------------
+
+    /// Connect timeout (is_connect=true) wins regardless of phase and shows
+    /// the LLM_CONNECT_TIMEOUT value — never the read-timeout text.
+    #[test]
+    fn timeout_message_connect_true_shows_connect_timeout() {
+        let llm = std::time::Duration::from_secs(240);
+        for phase in [TimeoutPhase::Transport, TimeoutPhase::BodyRead] {
+            let msg = timeout_message(true, llm, phase);
+            assert!(
+                msg.starts_with("connect timeout:"),
+                "is_connect=true must start with 'connect timeout:': {msg}"
+            );
+            // The configured connect timeout (10s) must appear verbatim.
+            assert!(
+                msg.contains("10s"),
+                "connect timeout must include the 10s configured value: {msg}"
+            );
+            assert!(
+                !msg.contains("read timeout"),
+                "connect timeout must not mention 'read timeout': {msg}"
+            );
+            assert!(
+                !msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+                "connect timeout must not reference the read-timeout config knob: {msg}"
+            );
+        }
+    }
+
+    /// Transport read-timeout (is_connect=false, Transport phase) shows the
+    /// configured llm_timeout value and the config-knob hint.
+    #[test]
+    fn timeout_message_transport_phase_shows_read_timeout_and_duration() {
+        let llm = std::time::Duration::from_secs(240);
+        let msg = timeout_message(false, llm, TimeoutPhase::Transport);
+        assert!(
+            msg.starts_with("read timeout:"),
+            "transport read-timeout must start with 'read timeout:': {msg}"
+        );
+        assert!(
+            msg.contains("240s"),
+            "transport read-timeout must include the 240s configured value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "transport read-timeout must reference the config knob: {msg}"
+        );
+        assert!(
+            !msg.contains("connect timeout"),
+            "transport read-timeout must not say 'connect timeout': {msg}"
+        );
+    }
+
+    /// Body-read timeout (BodyRead phase) says "response did not complete" and
+    /// shows the per-request timeout value and the config-knob hint.
+    ///
+    /// With per-request total timeouts, a body-stall fires the same total-budget
+    /// timer as a transport stall — the message reflects that the entire request
+    /// (not just a read-idle window) expired.
+    #[test]
+    fn timeout_message_body_read_phase_says_did_not_complete_and_duration() {
+        let per_request = std::time::Duration::from_secs(300);
+        let msg = timeout_message(false, per_request, TimeoutPhase::BodyRead);
+        assert!(
+            msg.starts_with("request timed out:"),
+            "body-read timeout must start with 'request timed out:': {msg}"
+        );
+        assert!(
+            msg.contains("did not complete"),
+            "body-read timeout must say 'did not complete': {msg}"
+        );
+        assert!(
+            msg.contains("300s"),
+            "body-read timeout must include the 300s per-request value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "body-read timeout must reference the config knob: {msg}"
+        );
+        assert!(
+            !msg.contains("read timeout"),
+            "body-read timeout must not say 'read timeout': {msg}"
+        );
+    }
+
+    /// A non-default duration threads through correctly — verifies the value
+    /// is not hard-coded anywhere in the pure function.
+    #[test]
+    fn timeout_message_duration_is_not_hardcoded() {
+        let msg = timeout_message(
+            false,
+            std::time::Duration::from_secs(600),
+            TimeoutPhase::Transport,
+        );
+        assert!(
+            msg.contains("600s"),
+            "transport read-timeout must reflect the supplied 600s value: {msg}"
+        );
+        assert!(
+            !msg.contains("240s"),
+            "must not hard-code 240s when 600s was supplied: {msg}"
+        );
+    }
+
+    // ---- classify_transport_error / classify_body_read_error (reqwest integration) --
+
+    /// A real loopback read-timeout must produce a message rooted at "read
+    /// timeout:" that contains the configured value — and must NOT use reqwest's
+    /// opaque "error sending request" string.
+    ///
+    /// This is the one test that requires real network I/O (loopback only) to
+    /// verify that reqwest actually sets is_timeout() for the scenario in which
+    /// Buzz agents stall (server connected but emitting no bytes).
+    #[tokio::test]
+    async fn classify_transport_error_read_timeout_is_loopback_verified() {
+        use tokio::net::TcpListener;
+
+        let llm_timeout = std::time::Duration::from_millis(50);
+        // Bind and never accept — TCP connect succeeds, no bytes follow.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _listener = listener; // keep alive so connect succeeds
+
+        let client = reqwest::Client::builder()
+            .read_timeout(llm_timeout)
+            .build()
+            .unwrap();
+
+        let err = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("must time out");
+
+        // Preconditions: verify reqwest's classification before asserting our output.
+        assert!(
+            err.is_timeout(),
+            "precondition: reqwest must report is_timeout"
+        );
+        assert!(
+            !err.is_connect(),
+            "precondition: read timeout must not set is_connect"
+        );
+
+        let msg = classify_transport_error(&err, llm_timeout);
+        assert!(
+            msg.starts_with("read timeout:"),
+            "read timeout must start with 'read timeout:': {msg}"
+        );
+        assert!(
+            msg.contains("50ms"),
+            "read timeout must include the configured 50ms value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "read timeout must name the config knob: {msg}"
+        );
+        assert!(
+            !msg.contains("error sending request"),
+            "read timeout must not use the opaque reqwest string: {msg}"
+        );
+    }
+
+    /// Non-timeout transport errors preserve the original reqwest error text.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classify_transport_error_non_timeout_preserves_reqwest_text() {
+        use tokio::net::TcpListener;
+
+        // Accept-then-close: keep the listener alive so the endpoint stays
+        // owned throughout, spawn a task that accepts exactly one connection
+        // and immediately drops the socket.  Produces a deterministic
+        // non-timeout reqwest error (request-class, not is_timeout()) while
+        // the test holds exclusive ownership of the address — no released-port
+        // race possible.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((sock, _)) = listener.accept().await {
+                drop(sock); // close immediately, no response written
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+
+        let err = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("must fail: server closes connection before response");
+
+        assert!(
+            !err.is_timeout(),
+            "precondition: connection-closed is not a timeout: {err}"
+        );
+
+        assert_eq!(
+            classify_transport_error(&err, std::time::Duration::from_secs(240)),
+            format!("transport: {err}")
+        );
+    }
+
+    /// A body-read timeout fires after headers arrive but before the body is
+    /// complete.  A loopback server sends an HTTP 200 with a declared content-
+    /// length larger than the payload it actually delivers; the client reads
+    /// one chunk, then stalls until the per-request total timeout fires.
+    ///
+    /// Asserts the exact wording, configured duration, and config-knob hint.
+    /// Also covers the non-timeout fallback via classify_body_read_error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classify_body_read_error_timeout_says_did_not_complete() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let per_request_timeout = std::time::Duration::from_millis(100);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server: accept once, send headers + one body chunk, then hang.
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Consume the request.
+                let mut buf = [0u8; 512];
+                let _ = sock.read(&mut buf).await;
+                // Declare 1 KiB body, send 4 bytes, then do nothing.
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\n\
+                          Content-Type: application/json\r\n\
+                          Content-Length: 1024\r\n\
+                          \r\n\
+                          test",
+                    )
+                    .await;
+                // Hold the connection open so the client times out rather than
+                // seeing EOF.
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        });
+
+        // Use a client-level read_timeout to produce a body-stall error; in
+        // production we use per-request .timeout(), but the error classification
+        // is the same — reqwest sets is_timeout() in both cases.
+        let client = reqwest::Client::builder()
+            .read_timeout(per_request_timeout)
+            .build()
+            .unwrap();
+
+        let resp = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("headers must arrive before timeout");
+
+        // Consume the response body — this is where the timeout fires.
+        let err = resp.bytes().await.expect_err("body read must time out");
+
+        assert!(
+            err.is_timeout(),
+            "precondition: reqwest must report is_timeout for body stall"
+        );
+
+        // ---- classify_body_read_error: timeout path ----
+        let msg = classify_body_read_error(&err, per_request_timeout);
+        assert!(
+            msg.starts_with("request timed out:"),
+            "body-read timeout must start with 'request timed out:': {msg}"
+        );
+        assert!(
+            msg.contains("did not complete"),
+            "body-read timeout must say 'did not complete': {msg}"
+        );
+        assert!(
+            msg.contains("100ms"),
+            "body-read timeout must include the per-request 100ms value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "body-read timeout must reference the config knob: {msg}"
+        );
+
+        // ---- classify_body_read_error: non-timeout fallback (pure, no I/O) ----
+        // We can't produce a real non-timeout body error without real I/O, but
+        // the pure-function path is identical to classify_transport_error's
+        // non-timeout fallback and is covered by the pure tests above.
     }
 
     // ---- usage / input-token extraction -------------------------------------
@@ -4849,6 +5745,98 @@ mod tests {
         assert_eq!(sum_usage(&v, &["input_tokens", "prompt_tokens"]), None);
     }
 
+    #[test]
+    fn sum_usage_exact_single_field() {
+        let v = serde_json::json!({"usage": {"input_tokens": 42}});
+        assert_eq!(
+            sum_usage(&v, &["input_tokens"]),
+            Some(SumUsageResult::Exact(42))
+        );
+    }
+
+    #[test]
+    fn sum_usage_exact_two_fields() {
+        let v = serde_json::json!({"usage": {"input_tokens": 100, "cache_read_input_tokens": 50}});
+        assert_eq!(
+            sum_usage(&v, &["input_tokens", "cache_read_input_tokens"]),
+            Some(SumUsageResult::Exact(150))
+        );
+    }
+
+    #[test]
+    fn sum_usage_overflow_two_fields_signals_overflow() {
+        // Reproducer from Thufir's finding: input_tokens = u64::MAX, cache_read = 1.
+        // Must return Overflow, not Exact(u64::MAX).
+        let v = serde_json::json!({
+            "usage": {
+                "input_tokens": u64::MAX,
+                "cache_read_input_tokens": 1_u64,
+                "cache_creation_input_tokens": 0_u64
+            }
+        });
+        assert_eq!(
+            sum_usage(
+                &v,
+                &[
+                    "input_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens"
+                ]
+            ),
+            Some(SumUsageResult::Overflow)
+        );
+    }
+
+    #[test]
+    fn parse_anthropic_input_overflow_sets_flag_and_clears_value() {
+        // The inclusive sum overflows; input_tokens must be None and the flag set.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": u64::MAX,
+                "cache_read_input_tokens": 1_u64,
+                "cache_creation_input_tokens": 0_u64,
+                "output_tokens": 7
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, None, "overflowed value must be discarded");
+        assert!(r.input_tokens_overflowed, "overflow flag must be set");
+        // output_tokens unaffected by input overflow
+        assert_eq!(r.output_tokens, Some(7));
+    }
+
+    #[test]
+    fn parse_anthropic_normal_sum_does_not_set_flag() {
+        // Normal (non-overflow) path: flag stays false.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 100_u64,
+                "cache_read_input_tokens": 900_u64,
+                "cache_creation_input_tokens": 50_u64,
+                "output_tokens": 7
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, Some(1050));
+        assert!(!r.input_tokens_overflowed);
+    }
+
+    #[test]
+    fn parse_anthropic_absent_usage_does_not_set_flag() {
+        // Absent usage: flag stays false, input_tokens stays None.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}]
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, None);
+        assert!(!r.input_tokens_overflowed);
+    }
+
     /// A token source whose `bearer()` always hands back the same stale
     /// token and whose `refresh_now()` mints a distinct fresh one, counting
     /// each refresh. Lets a test assert exactly how many forced refreshes a
@@ -4935,7 +5923,6 @@ mod tests {
                 .build()
                 .unwrap(),
             auto_upgraded: std::sync::atomic::AtomicBool::new(false),
-            mesh_auto_state: Mutex::new(MeshAutoState::default()),
             auth,
         }
     }
@@ -5330,8 +6317,14 @@ mod tests {
         assert!(body.get("max_completion_tokens").is_none());
     }
 
+    /// The summary body reserves `max_output_tokens` for visible text by
+    /// granting reasoning a separate, equal budget on top and excluding it
+    /// from the response. Without the separation, a reasoning model can spend
+    /// the entire cap thinking and length-stop with empty `content`, which
+    /// `summarize()` reports as an empty summary and the handoff degrades to
+    /// lossy truncation.
     #[test]
-    fn openrouter_summary_carries_neither_reasoning_nor_provider() {
+    fn openrouter_summary_budgets_reasoning_separately_and_carries_no_provider() {
         let body = openrouter_summary_body(
             "anthropic/claude-opus-4-7",
             "summarize",
@@ -5341,14 +6334,25 @@ mod tests {
         assert_eq!(body["model"], "anthropic/claude-opus-4-7");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "text to summarize");
-        assert_eq!(body["max_tokens"], 1024);
+        assert_eq!(
+            body["max_tokens"], 2048,
+            "total cap must cover the text budget plus the reasoning budget"
+        );
+        assert_eq!(
+            body["reasoning"]["max_tokens"], 1024,
+            "reasoning gets its own budget so it cannot starve the summary text"
+        );
+        assert_eq!(
+            body["reasoning"]["exclude"], true,
+            "reasoning must not be included in the response; summarize() reads only content"
+        );
+        assert!(
+            body["reasoning"].get("effort").is_none(),
+            "budget-based cap only; effort stays unset for the summary call"
+        );
         assert!(
             body.get("max_completion_tokens").is_none(),
             "summary body must use OpenRouter's token-limit spelling"
-        );
-        assert!(
-            body.get("reasoning").is_none(),
-            "summary body must not carry reasoning"
         );
         assert!(
             body.get("provider").is_none(),
@@ -6009,6 +7013,7 @@ mod tests {
             &[],
             "claude-opus-4-7",
             None,
+            "anthropic",
         );
         let messages = body["messages"].as_array().unwrap();
         let assistant = messages
@@ -6437,9 +7442,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("403") && s.contains("model flagged by moderation")),
             "403 must surface as AgentError::Llm with status+body, not LlmAuth: got {err:?}"
@@ -6464,9 +7475,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("credits exhausted")),
             "got {err:?}"
@@ -6494,9 +7511,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("no OpenRouter endpoint supports")),
             "parameter-routing 404 must not be reported as a missing model: got {err:?}"
@@ -6522,11 +7545,84 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("support image input")),
+            "image rejection must reach the history-recovery path: got {err:?}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a deterministic capability rejection must not be retried"
+        );
+    }
+
+    /// OpenAI-compatible text-only deployments report the image rejection as a
+    /// 400, not OpenRouter's 404 — Crusoe serverless GLM answers
+    /// `"crusoeai/GLM-5.2-NVFP4 is not a multimodal model"` to every request
+    /// whose history contains an image. Before the 400 arm existed, this fell
+    /// through to terminal `AgentError::Llm`: the image stayed in history and
+    /// every later call in the session failed identically (measured live:
+    /// 8 wedged benchmark trials, 40 min of doomed retries each). Asserted
+    /// through `complete()` so the arm's return path into the convergence
+    /// mapper is covered, same doctrine as the context-400 tests above.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_400_unsupported_image_is_typed_through_complete() {
+        let (base_url, captured) = spawn_sequence_stub(vec![StubHttpResponse {
+            status: 400,
+            body: json!({"error":{"message":"crusoeai/GLM-5.2-NVFP4 is not a multimodal model","type":"invalid_request_error"}}),
+        }])
+        .await;
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = base_url;
+        let llm = Llm::new(&c).unwrap();
+        let err = complete_model(&llm, &c, "gpt-probe-model")
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("support image input")),
+            matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("not a multimodal model")),
+            "a text-only deployment's 400 must reach the history-recovery path: got {err:?}"
+        );
+        assert_eq!(
+            captured.lock().await.len(),
+            1,
+            "a deterministic capability rejection must not be retried"
+        );
+    }
+
+    /// Same 400-shaped rejection at the OpenRouter terminal, which has its own
+    /// status ladder: a BYOK/passthrough upstream can surface the provider's
+    /// own 400 body instead of OpenRouter's 404 routing error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_400_unsupported_image_is_typed_and_not_retried() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            400,
+            r#"{"error":{"message":"crusoeai/GLM-5.2-NVFP4 is not a multimodal model"}}"#,
+        )])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("not a multimodal model")),
             "image rejection must reach the history-recovery path: got {err:?}"
         );
         assert_eq!(
@@ -6552,9 +7648,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::LlmModelNotFound(s) if s.contains("404") && s.contains("vendor/nonexistent-model")),
             "a model-level 404 must stay LlmModelNotFound: got {err:?}"
@@ -6577,9 +7679,15 @@ mod tests {
             .build()
             .unwrap();
         let before = std::time::Instant::now();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("second attempt succeeds");
+        let out = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("second attempt succeeds");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert!(
             before.elapsed() >= Duration::from_secs(1),
@@ -6588,33 +7696,65 @@ mod tests {
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
-    /// A `Retry-After` far beyond `RETRY_AFTER_CAP_SECS` must not stall the
-    /// retry loop for anywhere near its advertised duration — proving the
-    /// cap is enforced end-to-end in `openrouter_post`'s actual sleep, not
-    /// merely in the isolated `parse_retry_after_header` unit tests above.
-    /// Runs on a paused clock so a real 999999s wait would hang the test
-    /// instead of silently passing.
-    #[tokio::test(start_paused = true)]
-    async fn openrouter_post_429_retry_sleep_capped_despite_huge_retry_after() {
-        let (url, _captured, attempts) = spawn_openrouter_stub(vec![
-            CannedResponse::new(429, r#"{"error":{"message":"rate limited"}}"#)
-                .with_header("Retry-After", "999999"),
-            CannedResponse::new(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#),
-        ])
-        .await;
-        let http = Client::builder().build().unwrap();
-        let before = tokio::time::Instant::now();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("second attempt succeeds");
-        assert_eq!(out["choices"][0]["message"]["content"], "ok");
-        assert!(
-            before.elapsed() <= Duration::from_secs(RETRY_AFTER_CAP_SECS + 5),
-            "retry sleep must be clamped to RETRY_AFTER_CAP_SECS ({RETRY_AFTER_CAP_SECS}s), \
-             not the header's 999999s: elapsed {:?}",
-            before.elapsed()
+    // ---- retry_delay_for_429 (pure-function tests, no network) ---------------
+
+    /// A huge server-advertised Retry-After is capped at RETRY_AFTER_CAP_SECS.
+    /// This test proves the cap is actually wired into the loop's only delay
+    /// computation (not just a dead constant), because `openrouter_post`'s 429
+    /// arm calls `parse_retry_after_header` which delegates to this function.
+    #[test]
+    fn retry_delay_for_429_huge_value_is_capped() {
+        let d = retry_delay_for_429(Some("999999")).unwrap();
+        assert_eq!(
+            d,
+            Duration::from_secs(RETRY_AFTER_CAP_SECS),
+            "999999s must be capped to {RETRY_AFTER_CAP_SECS}s"
         );
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A small value below the cap is returned as-is.
+    #[test]
+    fn retry_delay_for_429_small_value_honored() {
+        let d = retry_delay_for_429(Some("3")).unwrap();
+        assert_eq!(d, Duration::from_secs(3), "3s must be honored verbatim");
+    }
+
+    /// A value equal to the cap is returned unchanged (boundary).
+    #[test]
+    fn retry_delay_for_429_exact_cap_is_not_truncated() {
+        let d = retry_delay_for_429(Some(&RETRY_AFTER_CAP_SECS.to_string())).unwrap();
+        assert_eq!(
+            d,
+            Duration::from_secs(RETRY_AFTER_CAP_SECS),
+            "exact cap must not be truncated"
+        );
+    }
+
+    /// Missing header returns None → caller falls back to backoff.
+    #[test]
+    fn retry_delay_for_429_missing_header_is_none() {
+        assert!(
+            retry_delay_for_429(None).is_none(),
+            "absent header must return None"
+        );
+    }
+
+    /// Garbage / non-numeric header returns None.
+    #[test]
+    fn retry_delay_for_429_garbage_header_is_none() {
+        assert!(
+            retry_delay_for_429(Some("not-a-number")).is_none(),
+            "unparseable header must return None"
+        );
+    }
+
+    /// Zero is treated as absent (no-op: don't sleep 0 seconds).
+    #[test]
+    fn retry_delay_for_429_zero_is_none() {
+        assert!(
+            retry_delay_for_429(Some("0")).is_none(),
+            "zero Retry-After must return None (no-op sleep)"
+        );
     }
 
     /// An untyped 503 (no `error.metadata.error_type`) exhausts all
@@ -6628,9 +7768,15 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("no OpenRouter endpoint supports")),
             "got {err:?}"
@@ -6655,9 +7801,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("200 succeeds");
+        openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("200 succeeds");
         let headers = captured.lock().await;
         let header_str = headers
             .first()
@@ -6686,9 +7838,15 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("retry after 499 should succeed");
+        let out = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("retry after 499 should succeed");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert_eq!(
             attempts.load(std::sync::atomic::Ordering::SeqCst),
@@ -6711,9 +7869,15 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("retry succeeds");
+        let out = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("retry succeeds");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
@@ -6762,9 +7926,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("body read")),
             "truncated body must surface as AgentError::Llm with 'body read': got {err:?}"

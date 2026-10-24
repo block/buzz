@@ -9,6 +9,7 @@
 .tags*
 **/.vagrant/
 **/DerivedData/
+BuzzPushKit/Package.resolved
 Icon?
 **/Pods/
 **/.symlinks/

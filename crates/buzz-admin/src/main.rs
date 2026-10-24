@@ -12,23 +12,35 @@
 //! and rides Redis to live clients. Do not wire a delta call that passes
 //! in-process tests and silently no-ops in the deployed `compose exec` path.
 //!
-//! ## Same-second domination guard
+//! ## Where the list is written
 //!
-//! The `custom_created_at = max(now, newest_existing_13534 + 1s)` bump defeats
-//! same-second domination for serial invocations; it does NOT serialize
-//! concurrent CLI processes — two near-simultaneous adds can read the same
-//! newest timestamp and collide on the bumped second. run.sh serialization is
-//! the guard against parallel adds (e.g. `xargs -P`).
+//! `buzz-db` writes the kind:13534 list in the same transaction as the
+//! membership change, under the per-community list lock, with a `created_at`
+//! past every earlier list's. Concurrent CLI processes therefore serialize in
+//! the database; the CLI only pushes the committed list to Redis.
 
+mod communities;
+mod deletions;
+mod nip_fi;
+mod user_deletions;
+
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
-use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
 use buzz_core::tenant::{relay_url_authority, TenantContext};
-use buzz_db::{Db, DbConfig};
+use buzz_db::{
+    partition::{PartitionAuditOutcome, PartitionAuditReport},
+    Db, DbConfig,
+};
+use buzz_media::{BucketSnapshot, MediaConfig, MediaStorage, S3AddressingStyle, SweepError};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
 use nostr::{EventBuilder, Keys, Kind, Tag, ToBech32};
+use serde::Serialize;
+use sqlx::Row;
 use tracing::warn;
 
 #[derive(Parser)]
@@ -78,23 +90,68 @@ enum Command {
         #[arg(long)]
         role: Option<String>,
     },
+    /// Rewrite the community's kind:13534 membership list from the stored
+    /// members and push it to live clients.
+    ///
+    /// Membership changes write the list themselves; this repairs a list that
+    /// is missing or stale (membership turned on after running without it, a
+    /// manual `relay_members` edit, a restore).
+    RepublishMembers,
     /// List all relay members.
     ListMembers,
     /// Generate a new Nostr keypair (for bootstrapping).
     GenerateKey,
     /// Run pending database migrations.
     Migrate,
+    /// Compute one complete S3 storage snapshot and persist it for relay readers.
+    StorageSnapshot {
+        /// Abort before folding a page that would exceed this object count.
+        #[arg(long, default_value_t = 10_000_000)]
+        max_objects: u64,
+    },
+    /// Run the partition catalog audit using a read-only database session.
+    PartitionAudit {
+        /// Future months to include in the coverage check.
+        #[arg(long, default_value_t = buzz_db::partition::PARTITION_MANAGER_MONTHS_AHEAD)]
+        months_ahead: u32,
+    },
     /// Inspect deployment-wide Buzz product feedback.
     ProductFeedback {
         #[command(subcommand)]
         command: ProductFeedbackCommand,
     },
-    /// Emit kind:39000/39002 events for channels missing them.
+    /// Reversible whole-community lifecycle controls.
+    Communities {
+        #[command(subcommand)]
+        command: communities::CommunitiesCommand,
+    },
+    /// NIP-FI community issuer bindings.
+    NipFi {
+        #[command(subcommand)]
+        command: nip_fi::NipFiCommand,
+    },
+    /// Durable CLI-only whole-community deletion control plane.
+    Deletions {
+        #[command(subcommand)]
+        command: deletions::DeletionsCommand,
+    },
+    /// Submit and inspect synthetic user-deletion requests.
+    UserDeletions {
+        #[command(subcommand)]
+        command: user_deletions::UserDeletionsCommand,
+    },
+    /// Emit missing kind:39000/39001/39002 channel discovery events, or
+    /// republish only a targeted channel's kind:39002 roster.
     ///
-    /// Channels created via direct SQL (seed scripts, pre-migration data) won't
-    /// have Nostr discovery events. This command creates them so pure-nostr
-    /// clients can see those channels. Idempotent — safe to run multiple times.
-    ReconcileChannels,
+    /// Without `--channel`, only channels missing discovery metadata are
+    /// reconciled. With `--channel`, only that channel's member snapshot is
+    /// replaced; canonical metadata and admin events remain untouched. Events
+    /// are always signed with the relay identity from the secret provider.
+    ReconcileChannels {
+        /// Optional channel UUID to force-republish.
+        #[arg(long)]
+        channel: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -160,20 +217,259 @@ async fn run(cli: Cli) -> Result<i32> {
             println!("Database migrations complete.");
             Ok(0)
         }
+        Command::StorageSnapshot { max_objects } => cmd_storage_snapshot(max_objects).await,
+        Command::PartitionAudit { months_ahead } => cmd_partition_audit(months_ahead).await,
         Command::AddMember { pubkey, role } => {
             cmd_add_member(pubkey, role, &secret_service, &secret_account).await
         }
         Command::RemoveMember { pubkey, role } => {
             cmd_remove_member(pubkey, role, &secret_service, &secret_account).await
         }
+        Command::RepublishMembers => cmd_republish_members(&secret_service, &secret_account).await,
         Command::ListMembers => cmd_list_members().await,
         Command::ProductFeedback {
             command: ProductFeedbackCommand::List { limit },
         } => cmd_list_product_feedback(limit).await,
-        Command::ReconcileChannels => {
-            reconcile_channels(&secret_service, &secret_account).await?;
+        Command::Communities { command } => communities::run(command).await,
+        Command::Deletions { command } => deletions::run(command).await,
+        Command::UserDeletions { command } => user_deletions::run(command).await,
+        Command::NipFi { command } => nip_fi::run(command).await,
+        Command::ReconcileChannels { channel } => {
+            reconcile_channels(channel, &secret_service, &secret_account).await?;
             Ok(0)
         }
+    }
+}
+
+/// One session: the worker detaches its lock-owning connection, and the
+/// cold-start pool opens no idle replacements while it scans S3.
+fn storage_snapshot_db_config(base: DbConfig) -> DbConfig {
+    DbConfig {
+        max_connections: 1,
+        ..base
+    }
+}
+
+async fn cmd_storage_snapshot(max_objects: u64) -> Result<i32> {
+    let max_objects_db = i64::try_from(max_objects)
+        .map_err(|_| anyhow::anyhow!("--max-objects must be at most {}", i64::MAX))?;
+    if max_objects == 0 {
+        return Err(anyhow::anyhow!("--max-objects must be greater than zero"));
+    }
+
+    let db = Db::connect_cold_start(
+        storage_snapshot_db_config(db_config_from_env()),
+        "storage_snapshot",
+    )
+    .await?;
+    let mut leader = db.try_lock_storage_accounting().await?.ok_or_else(|| {
+        anyhow::anyhow!("another storage-snapshot worker already holds the lease")
+    })?;
+    let storage = Arc::new(MediaStorage::new(&storage_config_from_env()?)?);
+    let code_sha =
+        std::env::var("BUZZ_STORAGE_SNAPSHOT_CODE_SHA").unwrap_or_else(|_| "unknown".to_string());
+    if code_sha.is_empty() || code_sha.len() > 128 {
+        return Err(anyhow::anyhow!(
+            "BUZZ_STORAGE_SNAPSHOT_CODE_SHA must contain 1 to 128 bytes"
+        ));
+    }
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "storage_snapshot_started",
+            "max_objects": max_objects,
+            "code_sha": code_sha,
+        })
+    );
+    let run_started = Instant::now();
+    let listed_objects = Arc::new(AtomicU64::new(0));
+    let fold = buzz_media::fold_bucket_listing(max_objects, move |token| {
+        let storage = Arc::clone(&storage);
+        let listed_objects = Arc::clone(&listed_objects);
+        async move {
+            let page = storage.list_page(token, 1000).await?;
+            let page_objects = u64::try_from(page.objects.len()).unwrap_or(u64::MAX);
+            let before = listed_objects.fetch_add(page_objects, Ordering::Relaxed);
+            let after = before.saturating_add(page_objects);
+            if before / 100_000 != after / 100_000 {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "storage_snapshot_progress",
+                        "listed_objects": after,
+                        "max_objects": max_objects,
+                    })
+                );
+            }
+            Ok(page)
+        }
+    });
+    let snapshot_code_sha = code_sha.clone();
+    let persisted = persist_completed_fold(fold, move |encoded, duration_ms| async move {
+        leader
+            .save_snapshot(&encoded, duration_ms, max_objects_db, &snapshot_code_sha)
+            .await?;
+        Ok(())
+    })
+    .await;
+    let (snapshot, duration_ms) = match persisted {
+        Ok(completed) => completed,
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "storage_snapshot_failed",
+                    "duration_ms": i64::try_from(run_started.elapsed().as_millis()).unwrap_or(i64::MAX),
+                    "max_objects": max_objects,
+                    "code_sha": code_sha,
+                    "error": error.to_string(),
+                })
+            );
+            return Err(error);
+        }
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "storage_snapshot_completed",
+            "duration_ms": duration_ms,
+            "listed_objects": snapshot.physical_objects,
+            "listed_bytes": snapshot.physical_bytes,
+            "logical_objects": snapshot.logical_objects,
+            "logical_bytes": snapshot.logical_bytes,
+            "max_objects": max_objects,
+            "code_sha": code_sha,
+        })
+    );
+    Ok(0)
+}
+
+async fn persist_completed_fold<FoldFuture, Persist, PersistFuture>(
+    fold: FoldFuture,
+    persist: Persist,
+) -> Result<(BucketSnapshot, i64)>
+where
+    FoldFuture: Future<Output = std::result::Result<BucketSnapshot, SweepError>>,
+    Persist: FnOnce(serde_json::Value, i64) -> PersistFuture,
+    PersistFuture: Future<Output = Result<()>>,
+{
+    let started = Instant::now();
+    let snapshot = fold.await?;
+    let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    let encoded = serde_json::to_value(&snapshot)?;
+    persist(encoded, duration_ms).await?;
+    Ok((snapshot, duration_ms))
+}
+
+fn storage_config_from_env() -> Result<MediaConfig> {
+    let required = |name: &str| {
+        std::env::var(name).map_err(|_| anyhow::anyhow!("{name} must be set for storage-snapshot"))
+    };
+    let addressing_style = std::env::var("BUZZ_S3_ADDRESSING_STYLE")
+        .unwrap_or_else(|_| "path".to_string())
+        .parse::<S3AddressingStyle>()
+        .map_err(anyhow::Error::msg)?;
+    Ok(MediaConfig {
+        s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT").unwrap_or_default(),
+        s3_access_key: std::env::var("BUZZ_S3_ACCESS_KEY").unwrap_or_default(),
+        s3_secret_key: std::env::var("BUZZ_S3_SECRET_KEY").unwrap_or_default(),
+        s3_bucket: required("BUZZ_S3_BUCKET")?,
+        s3_region: std::env::var("BUZZ_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+        s3_addressing_style: addressing_style,
+        max_image_bytes: 1,
+        max_gif_bytes: 1,
+        max_video_bytes: 1,
+        max_file_bytes: 1,
+        public_base_url: "http://storage-snapshot.invalid/media".to_string(),
+        upload_records_enabled: false,
+        upload_ip_header: None,
+        upload_port_header: None,
+    })
+}
+
+#[derive(Serialize)]
+struct PartitionAuditIdentity {
+    database: String,
+    user: String,
+    schema: String,
+    default_transaction_read_only: bool,
+    transaction_read_only: bool,
+}
+
+#[derive(Serialize)]
+struct PartitionAuditOutput {
+    schema_version: u32,
+    mode: &'static str,
+    source_sha: &'static str,
+    build_id: &'static str,
+    build_url: &'static str,
+    outcome: PartitionAuditOutcome,
+    months_ahead: u32,
+    identity: PartitionAuditIdentity,
+    report: PartitionAuditReport,
+}
+
+async fn cmd_partition_audit(months_ahead: u32) -> Result<i32> {
+    let db_url = std::env::var("DATABASE_URL")
+        .map_err(|_| anyhow::anyhow!("DATABASE_URL is required for partition-audit"))?;
+    let config = DbConfig {
+        database_url: db_url,
+        max_connections: 1,
+        min_connections: 1,
+        statement_timeout_ms: 30_000,
+        default_transaction_read_only: true,
+        ..DbConfig::default()
+    };
+    let pool = Db::connect_writer_pool(&config).await?;
+    let row = sqlx::query(
+        "SELECT current_database() AS database, current_user AS user, \
+                current_schema() AS schema, \
+                current_setting('default_transaction_read_only') = 'on' \
+                    AS default_transaction_read_only, \
+                current_setting('transaction_read_only') = 'on' AS transaction_read_only",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let identity = PartitionAuditIdentity {
+        database: row.try_get("database")?,
+        user: row.try_get("user")?,
+        schema: row.try_get("schema")?,
+        default_transaction_read_only: row.try_get("default_transaction_read_only")?,
+        transaction_read_only: row.try_get("transaction_read_only")?,
+    };
+    if !identity.default_transaction_read_only || !identity.transaction_read_only {
+        anyhow::bail!("partition-audit connection is not read-only");
+    }
+
+    let report = Db::from_pool(pool)
+        .audit_partitions_report(months_ahead)
+        .await;
+    let outcome = report.outcome();
+    let code = partition_audit_exit_code(outcome);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&PartitionAuditOutput {
+            schema_version: 1,
+            mode: "read_only",
+            source_sha: option_env!("BUZZ_SOURCE_SHA").unwrap_or("unknown"),
+            build_id: option_env!("BUZZ_BUILD_ID").unwrap_or("local"),
+            build_url: option_env!("BUZZ_BUILD_URL").unwrap_or("unknown"),
+            outcome,
+            months_ahead,
+            identity,
+            report,
+        })?
+    );
+    Ok(code)
+}
+
+/// Exit nonzero only when the audit is incomplete or a table cannot serve.
+fn partition_audit_exit_code(outcome: PartitionAuditOutcome) -> i32 {
+    match outcome {
+        PartitionAuditOutcome::Error => 5,
+        PartitionAuditOutcome::Unsafe => 2,
+        PartitionAuditOutcome::Degraded | PartitionAuditOutcome::Ok => 0,
     }
 }
 
@@ -200,21 +496,22 @@ async fn cmd_add_member(
         connect_member_services(secret_service, secret_account).await?;
 
     let tenant = resolve_admin_tenant(&db).await?;
-    match db
-        .add_relay_member(tenant.community(), &pubkey_hex, &role, None)
+    let write = match db
+        .add_relay_member(tenant.community(), &pubkey_hex, &role, None, &relay_keypair)
         .await
     {
-        Ok(true) => println!("added {pubkey_hex} as {role}"),
-        Ok(false) => println!("already a member: {pubkey_hex} (no change)"),
+        Ok(write) => write,
         Err(e) => {
             eprintln!("error: DB write failed: {e}");
             return Ok(5);
         }
+    };
+    if write.outcome {
+        println!("added {pubkey_hex} as {role}");
+    } else {
+        println!("already a member: {pubkey_hex} (no change)");
     }
-
-    if let Err(e) = publish_membership_list_with_bump(&db, &pubsub, &relay_keypair, &tenant).await {
-        eprintln!("warning: member added to DB but list publish failed: {e}");
-    }
+    fan_out_membership_list(&pubsub, &tenant, write.snapshot).await;
 
     Ok(0)
 }
@@ -246,27 +543,30 @@ async fn cmd_remove_member(
     let tenant = resolve_admin_tenant(&db).await?;
     use buzz_db::relay_members::RemoveResult;
     let result = if let Some(ref role) = role_filter {
-        db.remove_relay_member_if_role(tenant.community(), &pubkey_hex, role)
+        db.remove_relay_member_if_role(tenant.community(), &pubkey_hex, role, &relay_keypair)
             .await
     } else {
-        db.remove_relay_member(tenant.community(), &pubkey_hex)
+        db.remove_relay_member(tenant.community(), &pubkey_hex, &relay_keypair)
             .await
     };
 
-    match result {
-        Ok(RemoveResult::Removed) => println!("removed {pubkey_hex}"),
-        Ok(RemoveResult::NotFound) => {
+    match result.map(|write| (write.outcome, write.snapshot)) {
+        Ok((RemoveResult::Removed, snapshot)) => {
+            println!("removed {pubkey_hex}");
+            fan_out_membership_list(&pubsub, &tenant, snapshot).await;
+        }
+        Ok((RemoveResult::NotFound, _)) => {
             eprintln!("error: member not found: {pubkey_hex}");
             return Ok(2);
         }
-        Ok(RemoveResult::IsOwner) => {
+        Ok((RemoveResult::IsOwner, _)) => {
             eprintln!(
                 "error: cannot remove relay owner: {pubkey_hex}\n\
                  To change the owner, update RELAY_OWNER_PUBKEY and restart."
             );
             return Ok(3);
         }
-        Ok(RemoveResult::RoleMismatch) => {
+        Ok((RemoveResult::RoleMismatch, _)) => {
             let role_str = role_filter.as_deref().unwrap_or("(unknown)");
             eprintln!("error: role mismatch — {pubkey_hex} is not currently '{role_str}'");
             return Ok(4);
@@ -277,10 +577,27 @@ async fn cmd_remove_member(
         }
     }
 
-    if let Err(e) = publish_membership_list_with_bump(&db, &pubsub, &relay_keypair, &tenant).await {
-        eprintln!("warning: member removed from DB but list publish failed: {e}");
-    }
+    Ok(0)
+}
 
+async fn cmd_republish_members(secret_service: &str, secret_account: &str) -> Result<i32> {
+    let (db, pubsub, relay_keypair) =
+        connect_member_services(secret_service, secret_account).await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    let write = match db
+        .rewrite_nip43_membership_list(tenant.community(), &relay_keypair)
+        .await
+    {
+        Ok(write) => write,
+        Err(e) => {
+            eprintln!("error: DB write failed: {e}");
+            return Ok(5);
+        }
+    };
+    if let Some(stored) = &write.snapshot {
+        println!("republished membership list {}", stored.event.id.to_hex());
+    }
+    fan_out_membership_list(&pubsub, &tenant, write.snapshot).await;
     Ok(0)
 }
 
@@ -340,81 +657,25 @@ fn parse_pubkey_hex(input: &str) -> std::result::Result<String, String> {
         .map_err(|e| format!("invalid pubkey '{input}': {e}"))
 }
 
-/// Publish kind:13534 with `custom_created_at = max(now, newest_existing + 1s)`.
-///
-/// Guarantees the new event is not dominated by a same-second prior invocation,
-/// so `replace_addressable_event` always inserts and dispatches to Redis.
-///
-/// See module-level doc for the TOCTOU caveat on concurrent CLI processes.
-async fn publish_membership_list_with_bump(
-    db: &Db,
+/// Push the kind:13534 list a membership change committed to Redis, so live
+/// clients receive the updated roster. The list is already stored, so a
+/// failed push only delays live updates.
+async fn fan_out_membership_list(
     pubsub: &Arc<PubSubManager>,
-    relay_keypair: &Keys,
     tenant: &TenantContext,
-) -> Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let relay_pubkey = relay_keypair.public_key();
-    let relay_pubkey_bytes = relay_pubkey.to_bytes();
-
-    // Query the newest existing kind:13534 for this relay's pubkey (channel_id=None).
-    let newest_ts = db
-        .get_latest_global_replaceable(
-            tenant.community(),
-            KIND_NIP43_MEMBERSHIP_LIST as i32,
-            &relay_pubkey_bytes,
-        )
-        .await?
-        .map(|e| e.event.created_at.as_secs());
-
-    // custom_created_at = max(now, existing + 1s) — defeats same-second domination.
-    let ts = match newest_ts {
-        Some(existing) => (existing + 1).max(now),
-        None => now,
+    snapshot: Option<buzz_core::StoredEvent>,
+) {
+    let Some(stored) = snapshot else {
+        return;
     };
-
-    let members = db.list_relay_members(tenant.community()).await?;
-
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
-    // NIP-70 protected-event marker — prevents re-broadcasting by third parties.
-    tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
-    for member in &members {
-        tags.push(
-            Tag::parse(["member", &member.pubkey, &member.role])
-                .map_err(|e| anyhow::anyhow!("failed to build member tag: {e}"))?,
-        );
+    // Community-global scope (EventTopic::Global) matches the relay's own
+    // membership-list delivery; the tenant fixes the community.
+    if let Err(e) = pubsub
+        .publish_event(tenant, EventTopic::Global, &stored.event)
+        .await
+    {
+        warn!("Redis publish of kind:13534 failed: {e}");
     }
-
-    let event = EventBuilder::new(Kind::Custom(KIND_NIP43_MEMBERSHIP_LIST as u16), "")
-        .tags(tags)
-        .custom_created_at(nostr::Timestamp::from(ts))
-        .sign_with_keys(relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:13534: {e}"))?;
-
-    let (stored, was_inserted) = db
-        .replace_addressable_event(tenant.community(), &event, None)
-        .await?;
-    if was_inserted {
-        // Publish to Redis so live clients receive the updated roster.
-        // Community-global scope (EventTopic::Global) matches the relay's own
-        // membership-list publish path; the tenant fixes the community.
-        if let Err(e) = pubsub
-            .publish_event(tenant, EventTopic::Global, &stored.event)
-            .await
-        {
-            warn!("Redis publish of kind:13534 failed: {e}");
-        }
-    }
-
-    tracing::info!(
-        member_count = members.len(),
-        ts,
-        "NIP-43 membership list published by buzz-admin"
-    );
-    Ok(())
 }
 
 /// Connect to DB, Redis pub/sub, and load the relay keypair.
@@ -446,14 +707,16 @@ async fn connect_member_services(
 }
 
 async fn connect_db() -> Result<Db> {
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
-    let db = Db::new(&DbConfig {
+    Ok(Db::new(&db_config_from_env()).await?)
+}
+
+fn db_config_from_env() -> DbConfig {
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| DbConfig::default().database_url);
+    DbConfig {
         database_url: db_url,
         ..DbConfig::default()
-    })
-    .await?;
-    Ok(db)
+    }
+    .with_session_timeouts_from_env()
 }
 
 /// Resolve the deployment's tenant from the configured `RELAY_URL` host.
@@ -498,7 +761,12 @@ fn load_relay_keys(secret_service: &str, secret_account: &str) -> Result<Keys> {
     Keys::parse(encoded.trim()).map_err(|_| anyhow::anyhow!("relay signing identity is invalid"))
 }
 
-async fn reconcile_channels(secret_service: &str, secret_account: &str) -> Result<()> {
+async fn reconcile_channels(
+    channel_arg: Option<String>,
+    secret_service: &str,
+    secret_account: &str,
+) -> Result<()> {
+    use buzz_core::channel::group_state_identity_tags;
     use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
     use buzz_db::event::EventQuery;
 
@@ -507,7 +775,21 @@ async fn reconcile_channels(secret_service: &str, secret_account: &str) -> Resul
     let relay_keys = load_relay_keys(secret_service, secret_account)?;
 
     let tenant = resolve_admin_tenant(&db).await?;
-    let channels = db.list_channels(tenant.community(), None).await?;
+    let target_channel = channel_arg
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid --channel UUID: {e}"))?;
+    let channels = if let Some(target) = target_channel {
+        vec![db
+            .get_channel(tenant.community(), target)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("channel {target} not found in community {}", tenant.host())
+            })?]
+    } else {
+        db.list_channels(tenant.community(), None).await?
+    };
     if channels.is_empty() {
         println!("No channels in database.");
         return Ok(());
@@ -530,62 +812,65 @@ async fn reconcile_channels(secret_service: &str, secret_account: &str) -> Resul
             .await
             .unwrap_or_default();
 
-        if !existing.is_empty() {
+        if !existing.is_empty() && target_channel.is_none() {
             skipped += 1;
             continue;
         }
 
         let members = db.get_members(tenant.community(), channel.id).await?;
 
-        // kind:39000 — channel metadata
-        {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            tags.push(Tag::parse(["name", &channel.name])?);
-            if let Some(ref desc) = channel.description {
-                if !desc.is_empty() {
-                    tags.push(Tag::parse(["about", desc])?);
-                }
-            }
-            if channel.visibility == "private" {
-                tags.push(Tag::parse(["private"])?);
-            } else {
-                tags.push(Tag::parse(["public"])?);
-            }
-            if channel.channel_type == "dm" {
-                tags.push(Tag::parse(["hidden"])?);
-            }
-            tags.push(Tag::parse(["closed"])?);
-            tags.push(Tag::parse(["t", &channel.channel_type])?);
-
-            let event = EventBuilder::new(Kind::Custom(39000), "")
-                .tags(tags)
-                .sign_with_keys(&relay_keys)
-                .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                .await?;
-        }
-
-        // kind:39001 — admins
-        {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            for m in members
-                .iter()
-                .filter(|m| m.role == "owner" || m.role == "admin")
+        // A targeted repair is deliberately roster-only. kind:39000 metadata
+        // is richer than this legacy backfill builder, and kind:39001 is not
+        // part of the stale-roster incident; replacing either can destroy
+        // canonical state. Full backfill still creates all three event kinds
+        // for channels with no discovery metadata.
+        if target_channel.is_none() {
+            // kind:39000 — channel metadata
             {
-                let pk = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pk, &m.role])?);
+                let tags = buzz_db::channel::group_metadata_tags(channel, &members)
+                    .into_iter()
+                    .map(Tag::parse)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let event = EventBuilder::new(Kind::Custom(39000), "")
+                    .tags(tags)
+                    .sign_with_keys(&relay_keys)
+                    .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
+                db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
+                    .await?;
             }
-            let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
-                .tags(tags)
-                .sign_with_keys(&relay_keys)
-                .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
-            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
-                .await?;
+
+            // kind:39001 — admins
+            {
+                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
+                tags.extend(group_state_identity_tags(
+                    &channel.channel_type,
+                    &channel.labels,
+                    &channel.created_by,
+                )?);
+                for m in members
+                    .iter()
+                    .filter(|m| m.role == "owner" || m.role == "admin")
+                {
+                    let pk = hex::encode(&m.pubkey);
+                    tags.push(Tag::parse(["p", &pk, &m.role])?);
+                }
+                let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
+                    .tags(tags)
+                    .sign_with_keys(&relay_keys)
+                    .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
+                db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
+                    .await?;
+            }
         }
 
         // kind:39002 — members
         {
             let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
+            tags.extend(group_state_identity_tags(
+                &channel.channel_type,
+                &channel.labels,
+                &channel.created_by,
+            )?);
             for m in &members {
                 let pk = hex::encode(&m.pubkey);
                 tags.push(Tag::parse(["p", &pk, "", &m.role])?);
@@ -606,4 +891,216 @@ async fn reconcile_channels(secret_service: &str, secret_account: &str) -> Resul
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod storage_snapshot_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn storage_snapshot_holds_a_single_database_session() {
+        let config = storage_snapshot_db_config(DbConfig {
+            max_connections: 20,
+            lock_timeout_ms: 123,
+            ..DbConfig::default()
+        });
+        assert_eq!(config.max_connections, 1);
+        assert_eq!(config.lock_timeout_ms, 123);
+    }
+
+    #[tokio::test]
+    async fn failed_fold_never_invokes_snapshot_persistence() {
+        let persist_calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&persist_calls);
+        let result = persist_completed_fold(
+            async { Err::<BucketSnapshot, _>(SweepError::MalformedPage) },
+            move |_, _| async move {
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(persist_calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_partition_audit_month_horizon() {
+        let cli = Cli::try_parse_from(["buzz-admin", "partition-audit", "--months-ahead", "6"])
+            .expect("parse partition-audit command");
+        assert!(matches!(
+            cli.command,
+            Command::PartitionAudit { months_ahead: 6 }
+        ));
+    }
+
+    const OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn communities_command_parses_archive() {
+        let cli = Cli::try_parse_from([
+            "buzz-admin",
+            "communities",
+            "archive",
+            "--host",
+            "example.communities.buzz.xyz",
+            "--owner-pubkey",
+            OWNER,
+            "--operator-id",
+            "codex",
+            "--reason",
+            "requested deletion",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Communities {
+                command:
+                    communities::CommunitiesCommand::Archive {
+                        host,
+                        owner_pubkey,
+                        operator_id,
+                        reason,
+                    },
+            } => {
+                assert_eq!(host, "example.communities.buzz.xyz");
+                assert_eq!(owner_pubkey, OWNER);
+                assert_eq!(operator_id, "codex");
+                assert_eq!(reason, "requested deletion");
+            }
+            _ => panic!("expected communities archive command"),
+        }
+    }
+
+    #[test]
+    fn communities_command_parses_unarchive() {
+        let cli = Cli::try_parse_from([
+            "buzz-admin",
+            "communities",
+            "unarchive",
+            "--host",
+            "example.communities.buzz.xyz",
+            "--owner-pubkey",
+            OWNER,
+            "--operator-id",
+            "codex",
+            "--reason",
+            "rollback",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Communities {
+                command:
+                    communities::CommunitiesCommand::Unarchive {
+                        host,
+                        owner_pubkey,
+                        operator_id,
+                        reason,
+                    },
+            } => {
+                assert_eq!(host, "example.communities.buzz.xyz");
+                assert_eq!(owner_pubkey, OWNER);
+                assert_eq!(operator_id, "codex");
+                assert_eq!(reason, "rollback");
+            }
+            _ => panic!("expected communities unarchive command"),
+        }
+    }
+
+    #[test]
+    fn communities_commands_require_all_safety_and_audit_arguments() {
+        let missing_argument_cases = [
+            vec![
+                "buzz-admin",
+                "communities",
+                "archive",
+                "--owner-pubkey",
+                OWNER,
+                "--operator-id",
+                "codex",
+                "--reason",
+                "requested deletion",
+            ],
+            vec![
+                "buzz-admin",
+                "communities",
+                "archive",
+                "--host",
+                "example.communities.buzz.xyz",
+                "--operator-id",
+                "codex",
+                "--reason",
+                "requested deletion",
+            ],
+            vec![
+                "buzz-admin",
+                "communities",
+                "unarchive",
+                "--host",
+                "example.communities.buzz.xyz",
+                "--owner-pubkey",
+                OWNER,
+                "--reason",
+                "rollback",
+            ],
+            vec![
+                "buzz-admin",
+                "communities",
+                "unarchive",
+                "--host",
+                "example.communities.buzz.xyz",
+                "--owner-pubkey",
+                OWNER,
+                "--operator-id",
+                "codex",
+            ],
+        ];
+
+        for args in missing_argument_cases {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn communities_commands_do_not_expose_deletion_approval_arguments() {
+        let command = Cli::try_parse_from([
+            "buzz-admin",
+            "communities",
+            "archive",
+            "--host",
+            "example.communities.buzz.xyz",
+            "--owner-pubkey",
+            OWNER,
+            "--operator-id",
+            "codex",
+            "--reason",
+            "requested deletion",
+            "--approved-by",
+            "second-operator",
+        ]);
+
+        assert!(command.is_err());
+    }
+
+    #[test]
+    fn partition_audit_outcomes_keep_their_json_names_and_exit_codes() {
+        for (outcome, name, code) in [
+            (PartitionAuditOutcome::Ok, "ok", 0),
+            (PartitionAuditOutcome::Degraded, "degraded", 0),
+            (PartitionAuditOutcome::Unsafe, "unsafe", 2),
+            (PartitionAuditOutcome::Error, "error", 5),
+        ] {
+            assert_eq!(serde_json::to_value(outcome).unwrap(), name);
+            assert_eq!(partition_audit_exit_code(outcome), code, "{name}");
+        }
+    }
 }

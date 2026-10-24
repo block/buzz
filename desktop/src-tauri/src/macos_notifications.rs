@@ -8,6 +8,7 @@
 
 use std::{
     collections::VecDeque,
+    path::Path,
     ptr::NonNull,
     sync::{mpsc, Mutex, OnceLock},
     time::Duration,
@@ -24,7 +25,7 @@ use objc2_foundation::{NSBundle, NSDictionary, NSError, NSObject, NSObjectProtoc
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
     UNNotificationDefaultActionIdentifier, UNNotificationPresentationOptions,
-    UNNotificationRequest, UNNotificationResponse, UNNotificationSettings,
+    UNNotificationRequest, UNNotificationResponse, UNNotificationSetting, UNNotificationSettings,
     UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 use tauri::{AppHandle, Emitter};
@@ -128,7 +129,7 @@ pub(crate) fn init(app: &AppHandle) -> tauri::Result<()> {
         // objc2 cannot turn that exception into a Rust error, so do not call
         // into the framework at all in this environment.
         eprintln!(
-            "buzz-desktop: macOS notifications disabled because the process has no bundle identifier"
+            "buzz-desktop: macOS notifications disabled because the process is not running from an app bundle"
         );
         return Ok(());
     }
@@ -143,6 +144,18 @@ pub(crate) fn init(app: &AppHandle) -> tauri::Result<()> {
     // process-lifetime state, matching the application-lifetime delegate Apple
     // documents and avoiding mutable global or per-notification registrations.
     std::mem::forget(delegate);
+
+    // Older releases registered alerts/sounds but omitted Badge. Repair only
+    // that unregistered interaction, never an explicit user opt-out. This runs
+    // once per bundled process without blocking startup or prompting new users.
+    tauri::async_runtime::spawn_blocking(|| {
+        let result =
+            register_missing_badge(notification_settings_sync, request_notification_access_sync);
+        if let Err(error) = result {
+            // Leave the native setting unchanged; a later launch can retry.
+            eprintln!("buzz-desktop: failed to register macOS badge authorization: {error}");
+        }
+    });
     Ok(())
 }
 
@@ -157,15 +170,15 @@ fn ensure_bundled_application() -> Result<(), String> {
     }
 }
 
-fn notification_permission_state_sync() -> Result<NotificationPermissionState, String> {
+fn notification_settings_sync() -> Result<(UNAuthorizationStatus, UNNotificationSetting), String> {
     ensure_bundled_application()?;
 
     let (sender, receiver) = mpsc::sync_channel(1);
     let handler = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
         // SAFETY: Apple guarantees a live UNNotificationSettings object for
         // the duration of this completion handler.
-        let status = unsafe { settings.as_ref() }.authorizationStatus();
-        let _ = sender.send(permission_state(status));
+        let settings = unsafe { settings.as_ref() };
+        let _ = sender.send((settings.authorizationStatus(), settings.badgeSetting()));
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .getNotificationSettingsWithCompletionHandler(&handler);
@@ -175,11 +188,33 @@ fn notification_permission_state_sync() -> Result<NotificationPermissionState, S
         .map_err(|_| "macOS notification settings request timed out".to_string())
 }
 
+fn notification_permission_state_sync() -> Result<NotificationPermissionState, String> {
+    notification_settings_sync().map(|(status, _)| permission_state(status))
+}
+
+fn register_missing_badge(
+    settings: impl FnOnce() -> Result<(UNAuthorizationStatus, UNNotificationSetting), String>,
+    request: impl FnOnce() -> Result<NotificationPermissionState, String>,
+) -> Result<(), String> {
+    let (permission, badge) = settings()?;
+    if permission == UNAuthorizationStatus::Authorized
+        && badge == UNNotificationSetting::NotSupported
+    {
+        request()?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn notification_permission_state() -> Result<NotificationPermissionState, String> {
     tokio::task::spawn_blocking(notification_permission_state_sync)
         .await
         .map_err(|error| format!("macOS notification settings task failed: {error}"))?
+}
+
+fn notification_authorization_options() -> UNAuthorizationOptions {
+    // Register every interaction Buzz uses, including its Dock badge.
+    UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound | UNAuthorizationOptions::Badge
 }
 
 fn request_notification_access_sync() -> Result<NotificationPermissionState, String> {
@@ -195,7 +230,7 @@ fn request_notification_access_sync() -> Result<NotificationPermissionState, Str
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            notification_authorization_options(),
             &handler,
         );
 
@@ -293,7 +328,30 @@ pub(crate) fn take_pending_activations() -> Result<Vec<serde_json::Value>, Strin
 }
 
 fn is_bundled_application() -> bool {
-    NSBundle::mainBundle().bundleIdentifier().is_some()
+    let bundle = NSBundle::mainBundle();
+    bundle.bundleIdentifier().is_some()
+        && bundle.executablePath().is_some_and(|executable_path| {
+            is_application_bundle_layout(
+                Path::new(&bundle.bundlePath().to_string()),
+                Path::new(&executable_path.to_string()),
+            )
+        })
+}
+
+fn is_application_bundle_layout(bundle_path: &Path, executable_path: &Path) -> bool {
+    let Some(macos_path) = executable_path.parent() else {
+        return false;
+    };
+    let Some(contents_path) = macos_path.parent() else {
+        return false;
+    };
+
+    bundle_path
+        .extension()
+        .is_some_and(|extension| extension == "app")
+        && macos_path.file_name() == Some("MacOS".as_ref())
+        && contents_path.file_name() == Some("Contents".as_ref())
+        && contents_path.parent() == Some(bundle_path)
 }
 
 fn target_from_response(response: &UNNotificationResponse) -> Option<serde_json::Value> {
@@ -311,10 +369,96 @@ fn parse_target(serialized: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_bundled_application, parse_target, permission_state, queue_activation,
+        is_application_bundle_layout, is_bundled_application, notification_authorization_options,
+        parse_target, permission_state, queue_activation, register_missing_badge,
         take_pending_activations, NotificationPermissionState, MAX_PENDING_ACTIVATIONS,
     };
-    use objc2_user_notifications::UNAuthorizationStatus;
+    use objc2_user_notifications::{
+        UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationSetting,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn registers_only_unrequested_badges_for_already_authorized_installs() {
+        for permission in [
+            UNAuthorizationStatus::NotDetermined,
+            UNAuthorizationStatus::Denied,
+            UNAuthorizationStatus::Authorized,
+            UNAuthorizationStatus::Provisional,
+            UNAuthorizationStatus::Ephemeral,
+        ] {
+            for badge in [
+                UNNotificationSetting::NotSupported,
+                UNNotificationSetting::Disabled,
+                UNNotificationSetting::Enabled,
+            ] {
+                let mut requests = 0;
+                register_missing_badge(
+                    || Ok((permission, badge)),
+                    || {
+                        requests += 1;
+                        Ok(NotificationPermissionState::Granted)
+                    },
+                )
+                .expect("registration succeeds");
+                assert_eq!(
+                    requests,
+                    usize::from(
+                        permission == UNAuthorizationStatus::Authorized
+                            && badge == UNNotificationSetting::NotSupported
+                    ),
+                    "permission={permission:?}, badge={badge:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn badge_registration_propagates_settings_and_request_failures() {
+        let error = register_missing_badge(
+            || Err("settings unavailable".into()),
+            || panic!("must not request when settings failed"),
+        )
+        .expect_err("settings failure");
+        assert_eq!(error, "settings unavailable");
+        let error = register_missing_badge(
+            || {
+                Ok((
+                    UNAuthorizationStatus::Authorized,
+                    UNNotificationSetting::NotSupported,
+                ))
+            },
+            || Err("request failed".into()),
+        )
+        .expect_err("request failure");
+        assert_eq!(error, "request failed");
+    }
+
+    #[test]
+    fn bundled_startup_wires_native_badge_registration() {
+        // Complement behavioral tests with a wiring guard: removing the startup
+        // task must not leave the isolated operation tests green.
+        let source = include_str!("macos_notifications.rs");
+        let init = source
+            .split("pub(crate) fn init(")
+            .nth(1)
+            .expect("init")
+            .split("fn ensure_bundled_application")
+            .next()
+            .expect("init body");
+        assert!(init.contains("tauri::async_runtime::spawn_blocking"));
+        assert!(init.contains("register_missing_badge("));
+        assert!(init.contains("notification_settings_sync,"));
+        assert!(init.contains("request_notification_access_sync"));
+    }
+
+    #[test]
+    fn requests_all_interactions_used_by_buzz() {
+        let options = notification_authorization_options();
+        assert!(options.contains(UNAuthorizationOptions::Alert));
+        assert!(options.contains(UNAuthorizationOptions::Sound));
+        assert!(options.contains(UNAuthorizationOptions::Badge));
+    }
 
     #[test]
     fn activation_queue_is_bounded_and_drained() {
@@ -334,6 +478,26 @@ mod tests {
     #[test]
     fn cargo_test_process_is_not_treated_as_bundled() {
         assert!(!is_bundled_application());
+    }
+
+    #[test]
+    fn requires_the_executable_to_use_the_app_bundle_layout() {
+        assert!(is_application_bundle_layout(
+            Path::new("/Applications/Buzz.app"),
+            Path::new("/Applications/Buzz.app/Contents/MacOS/buzz-desktop"),
+        ));
+        assert!(!is_application_bundle_layout(
+            Path::new("/tmp/Fake.app"),
+            Path::new("/tmp/Fake.app/buzz-desktop"),
+        ));
+        assert!(!is_application_bundle_layout(
+            Path::new("/Users/developer/buzz/desktop/src-tauri/target/debug"),
+            Path::new("/Users/developer/buzz/desktop/src-tauri/target/debug/buzz-desktop"),
+        ));
+        assert!(!is_application_bundle_layout(
+            Path::new("/Applications/Buzz.app"),
+            Path::new("/Applications/Other.app/Contents/MacOS/buzz-desktop"),
+        ));
     }
 
     #[test]

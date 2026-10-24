@@ -426,13 +426,14 @@ impl Drop for EmitGuard {
 
 /// Map an `IngestError` variant onto the closed `SanitizedReason`
 /// alphabet (spec line 778, `Inv_SanitizedErrors`). The alphabet is
-/// asserted 1:1 with the relay's error variants — if a fourth variant
+/// asserted 1:1 with the relay's error variants — if a fifth variant
 /// is ever added to `IngestError` this match goes non-exhaustive and
 /// CI catches it.
 pub fn sanitized_reason_for(err: &crate::handlers::ingest::IngestError) -> SanitizedReason {
     use crate::handlers::ingest::IngestError as E;
     match err {
         E::Rejected(_) => SanitizedReason::Invalid,
+        E::CanvasConflict(_) => SanitizedReason::Invalid,
         E::AuthFailed(_) => SanitizedReason::Restricted,
         E::Internal(_) => SanitizedReason::ServerError,
     }

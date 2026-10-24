@@ -15,6 +15,7 @@ import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
+  startsNewMessageGroup,
 } from "@/features/messages/lib/messageGrouping";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
@@ -105,17 +106,10 @@ function membershipChangesCanGroup(
   first: MembershipChangePayload,
   second: MembershipChangePayload,
 ): boolean {
-  if (first.mode === "self-arrival") {
-    return (
-      second.mode === "self-arrival" ||
-      (second.mode === "departure" && first.target === second.target)
-    );
+  if (second.mode === "departure") {
+    return first.mode === "self-arrival" && first.target === second.target;
   }
-  return (
-    first.mode === "addition" &&
-    second.mode === "addition" &&
-    first.actor === second.actor
-  );
+  return first.mode !== "departure";
 }
 
 /**
@@ -125,10 +119,14 @@ function membershipChangesCanGroup(
  * its contents, but not its identity or the virtual list's existing key suffix.
  *
  * Compatible membership activities stay together while they are contiguous.
- * Self-joins and additions from one administrator each form their own summary;
- * a self-join immediately followed by that member leaving becomes a single
- * lifecycle summary. Each adjacent event must fall within the one-hour activity
- * window, so uninterrupted activity can extend beyond an hour overall.
+ * Arrival cohorts are actor-neutral even when self-joins and additions mix, but
+ * one or more equivalent self-joins followed by that member leaving remain a
+ * single lifecycle summary — every contiguous self-arrival of the departing
+ * member is absorbed, since the relay re-emits `member_joined` on each
+ * PUT_USER. `buildGroupedMembershipPayload` must describe every group this
+ * emits; `membershipGroupPayload.test.mjs` pins that with a matrix invariant.
+ * Each adjacent event must fall within the one-hour activity window, so
+ * uninterrupted activity can extend beyond an hour overall.
  */
 function buildMembershipGroups(
   entries: readonly MainTimelineEntry[],
@@ -250,6 +248,7 @@ export function buildTimelineItems(
     // that same standalone state until the send acknowledgement arrives.
     const isContinuation =
       !message.pending &&
+      !startsNewMessageGroup(message) &&
       previousGroupEntry !== null &&
       !previousGroupEntry.message.pending &&
       hasSameMessageAuthor(previousGroupEntry.message, message) &&

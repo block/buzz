@@ -5,12 +5,15 @@ const Object _sentinel = Object();
 /// Shown when a private-channel add is refused, so a missing Invite action
 /// reads as a rule rather than a bug.
 const privateChannelAddDeniedMessage =
-    'Only channel owners and admins can add people to a private channel.';
+    'Only channel members can add people to a private channel.';
 
 @immutable
 class Channel {
   final String id;
   final String name;
+
+  /// NIP-CL labels from metadata; presentation hints, never access grants.
+  final List<String> labels;
   final String channelType; // "stream", "forum", "dm"
   final String visibility; // "open", "private"
   final String description;
@@ -31,6 +34,7 @@ class Channel {
     required this.id,
     required this.name,
     required this.channelType,
+    this.labels = const [],
     required this.visibility,
     required this.description,
     required this.createdBy,
@@ -51,6 +55,7 @@ class Channel {
     id: json['id'] as String,
     name: json['name'] as String,
     channelType: json['channel_type'] as String,
+    labels: (json['labels'] as List<dynamic>? ?? const []).cast<String>(),
     visibility: json['visibility'] as String,
     description: (json['description'] as String?) ?? '',
     topic: json['topic'] as String?,
@@ -78,19 +83,35 @@ class Channel {
 
   bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
 
+  /// Solo presentation is carried by NIP-CL metadata, not project filing.
+  bool get isSolo => isStream && isPrivate && labels.contains('buzz.solo');
+
+  /// Keep old mobile-created chats visible while older clients migrate.
+  bool isPersonalChat(String? viewer, Iterable<String> legacyChannels) => isSolo
+      ? viewer != null && createdBy == viewer
+      : legacyChannels.contains(id);
+
   bool get isStream => channelType == 'stream';
   bool get isForum => channelType == 'forum';
+
+  /// Streams, forums and DMs can @mention people outside them. An outside
+  /// person who is not added becomes a reference, which does not notify them.
+  /// Streams and forums ask on send. Nobody can be added to a DM, so a DM
+  /// does not ask.
+  bool get mentionsOutsidePeople => isStream || isForum || isDm;
   bool get isDm => channelType == 'dm';
   bool get isPrivate => visibility == 'private';
+  bool get canJoin => visibility == 'open' && !isArchived && !isMember && !isDm;
 
   /// Whether [selfRole] may add *another* identity here, mirroring the relay's
   /// kind:9000 authority (`validate_admin_event` + `add_member`): DMs never,
-  /// open channels always, private channels owners/admins only. An unknown
-  /// visibility fails closed — the relay is the authority.
+  /// open channels always, private channels for any active member. Elevated
+  /// grants remain reserved for owners/admins. Unknown visibility fails closed.
   bool canAddMembers(String? selfRole) {
     if (isDm) return false;
     if (visibility == 'open') return true;
-    return selfRole == 'owner' || selfRole == 'admin';
+    if (visibility == 'private') return selfRole != null;
+    return false;
   }
 
   bool get isArchived => archivedAt != null;
@@ -123,6 +144,7 @@ class Channel {
     id: id,
     name: details.name,
     channelType: details.channelType,
+    labels: details.labels,
     visibility: details.visibility,
     description: details.description,
     topic: details.topic,
@@ -140,16 +162,19 @@ class Channel {
   );
 
   Channel copyWith({
+    String? name,
+    String? description,
     Object? lastMessageAt = _sentinel,
     Object? archivedAt = _sentinel,
     int? memberCount,
     bool? isMember,
   }) => Channel(
     id: id,
-    name: name,
+    name: name ?? this.name,
     channelType: channelType,
+    labels: labels,
     visibility: visibility,
-    description: description,
+    description: description ?? this.description,
     topic: topic,
     purpose: purpose,
     createdBy: createdBy,
@@ -173,6 +198,9 @@ class Channel {
 class ChannelDetails {
   final String id;
   final String name;
+
+  /// NIP-CL labels from metadata; presentation hints, never access grants.
+  final List<String> labels;
   final String channelType;
   final String visibility;
   final String description;
@@ -189,6 +217,7 @@ class ChannelDetails {
     required this.id,
     required this.name,
     required this.channelType,
+    this.labels = const [],
     required this.visibility,
     required this.description,
     required this.createdBy,
@@ -205,6 +234,7 @@ class ChannelDetails {
     id: json['id'] as String,
     name: json['name'] as String,
     channelType: json['channel_type'] as String,
+    labels: (json['labels'] as List<dynamic>? ?? const []).cast<String>(),
     visibility: json['visibility'] as String,
     description: (json['description'] as String?) ?? '',
     topic: json['topic'] as String?,
@@ -225,6 +255,7 @@ class ChannelDetails {
     id: channel.id,
     name: channel.name,
     channelType: channel.channelType,
+    labels: channel.labels,
     visibility: channel.visibility,
     description: channel.description,
     topic: channel.topic,

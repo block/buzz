@@ -118,4 +118,43 @@ test.describe("thread pane on ultrawide monitors", () => {
       path: "test-results/threadpane-ultrawide-after.png",
     });
   });
+
+  test("clamps the requested width to the channel surface", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1720, height: 900 });
+    await installMockBridge(page);
+    await openThread(page);
+
+    const pane = page.getByTestId("message-thread-panel");
+    const handle = page.getByTestId("right-auxiliary-pane-resize-handle");
+    const handleBox = await handle.boundingBox();
+    if (!handleBox) throw new Error("resize handle not laid out");
+
+    const startX = handleBox.x + handleBox.width / 2;
+    const startY = handleBox.y + handleBox.height / 2;
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    for (let x = startX; x >= 500; x -= 60) {
+      await page.mouse.move(x, startY);
+    }
+    await page.mouse.up();
+
+    const renderedWidth = await pane.evaluate((element) =>
+      Math.round(element.getBoundingClientRect().width),
+    );
+    const storedWidth = await page.evaluate(() =>
+      Number(window.sessionStorage.getItem("buzz.desktop.thread-panel-width")),
+    );
+    const mainWidth = await page
+      .getByTestId("channel-drop-zone")
+      .evaluate((element) => Math.round(element.getBoundingClientRect().width));
+
+    await page.screenshot({
+      path: "test-results/threadpane-expanded-after-fix.png",
+    });
+
+    expect(renderedWidth).toBe(storedWidth);
+    expect(mainWidth).toBeGreaterThanOrEqual(300);
+  });
 });

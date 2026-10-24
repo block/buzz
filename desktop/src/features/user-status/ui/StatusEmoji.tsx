@@ -21,11 +21,21 @@ type StatusEmojiProps = {
   value: string | undefined;
   /** Sizes the resolved custom image to match the surrounding text. */
   className?: string;
+  /** Hides the glyph from assistive technology when its parent provides a fuller label. */
+  decorative?: boolean;
+  /** Controls the browser-native tooltip without changing the accessible name. */
+  showTitle?: boolean;
 };
 
 const SHORTCODE_RE = /^:([^:\s]+):$/;
+export const DEFAULT_USER_STATUS_EMOJI = "💬";
 
-export function StatusEmoji({ value, className }: StatusEmojiProps) {
+export function StatusEmoji({
+  value,
+  className,
+  decorative = false,
+  showTitle = true,
+}: StatusEmojiProps) {
   const customEmoji = useCustomEmoji();
 
   if (!value) return null;
@@ -40,8 +50,9 @@ export function StatusEmoji({ value, className }: StatusEmojiProps) {
     if (found) {
       return (
         <img
-          alt={value}
-          title={displayName}
+          alt={decorative ? "" : value}
+          aria-hidden={decorative || undefined}
+          title={decorative || !showTitle ? undefined : displayName}
           src={rewriteRelayUrl(found.url)}
           className={cn("inline-block object-contain align-middle", className)}
           draggable={false}
@@ -55,11 +66,12 @@ export function StatusEmoji({ value, className }: StatusEmojiProps) {
   // (e.g. `mr-1`) every display site applies to the image branch above.
   return (
     <span
+      aria-hidden={decorative || undefined}
       className={cn(
         "inline-flex items-center justify-center leading-normal align-middle",
         className,
       )}
-      title={displayName}
+      title={decorative || !showTitle ? undefined : displayName}
     >
       {value}
     </span>

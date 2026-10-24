@@ -13,20 +13,26 @@ async function waitForMockLiveSubscription(
   channelName: string,
 ) {
   await expect
-    .poll(async () => {
-      return page.evaluate(
-        ({ ch }) =>
-          (
-            window as Window & {
-              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                channelName: string;
-              }) => boolean;
-            }
-          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName: ch }) ??
-          false,
-        { ch: channelName },
-      );
-    })
+    .poll(
+      async () => {
+        return page.evaluate(
+          ({ ch }) =>
+            (
+              window as Window & {
+                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                  channelName: string;
+                  kind: number;
+                }) => boolean;
+              }
+            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+              channelName: ch,
+              kind: 9,
+            }) ?? false,
+          { ch: channelName },
+        );
+      },
+      { timeout: 15_000 },
+    )
     .toBe(true);
 }
 
@@ -778,6 +784,13 @@ test.describe("thread unread indicator", () => {
       mentionPubkeys: [SELF_PUBKEY],
       createdAt: unreadTimestamp(),
     });
+    // A thread reply keeps the channel bold and retains the thread-activity dot;
+    // the room itself does not show a numeric badge.
+    await expect(page.getByTestId("channel-all-replies")).toHaveCSS(
+      "font-weight",
+      "700",
+    );
+    await expect(page.getByTestId("channel-unread-all-replies")).toHaveCount(0);
     await expect(
       page.getByTestId("channel-unread-dot-all-replies"),
     ).toBeVisible();
@@ -787,9 +800,13 @@ test.describe("thread unread indicator", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("all-replies");
 
     // The crux: leave the channel. Its unopened thread reply should still keep
-    // a channel sidebar dot until the thread itself is read.
+    // a channel sidebar unread indicator until the thread itself is read.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(page.getByTestId("channel-all-replies")).toHaveCSS(
+      "font-weight",
+      "700",
+    );
     await expect(
       page.getByTestId("channel-unread-dot-all-replies"),
     ).toBeVisible();

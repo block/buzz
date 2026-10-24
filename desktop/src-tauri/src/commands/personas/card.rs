@@ -23,14 +23,10 @@
 //!   uses (global config < persona < agent record) and never leaves Rust.
 //!   It is never logged.
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
-
 use super::super::export_util::save_bytes_with_dialog;
 use super::snapshot::{
-    memory_entries_from_listing, parse_memory_level, resolve_from_lists,
-    validate_snapshot_encode_size,
+    materialize_snapshot_description, memory_entries_from_listing, parse_memory_level,
+    resolve_from_lists, validate_snapshot_encode_size,
 };
 use crate::{
     app_state::AppState,
@@ -47,6 +43,9 @@ use crate::{
         save_global_agent_config, validate_global_config,
     },
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, State};
 
 /// The Buzz card frame template — Tyler's gold-honeycomb base. Generation
 /// input only: it never participates in the snapshot manifest, PNG chunk,
@@ -553,7 +552,8 @@ pub async fn mint_agent_card(
         let definitions = load_agent_definitions(&app)?;
         let (record, is_definition) =
             resolve_from_lists(&id, &instances, &definitions).map(|(r, d)| (r.clone(), d))?;
-
+        let mut record = record;
+        materialize_snapshot_description(&mut record, is_definition, &definitions);
         let global = load_global_agent_config(&app).unwrap_or_default();
         let personas = load_personas(&app).unwrap_or_default();
         let persona_env = record
@@ -668,9 +668,9 @@ pub async fn mint_agent_card(
             .ok_or_else(|| "Agent avatar data URL could not be decoded.".to_string())?,
         Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
             // Relay-hosted avatars (kind:0 pictures under the relay's /media/)
-            // may require Blossom get-auth (`require_media_get_auth`). Mint the
-            // header ONLY for same-origin URLs so the token never leaves the
-            // relay (same contract as `media_download.rs`).
+            // require Blossom get-auth. Mint the header ONLY for same-origin URLs
+            // so the token never leaves the relay (same contract as
+            // `media_download.rs`).
             let relay_base = crate::relay::relay_api_base_url_with_override(&state);
             let auth = is_same_origin(url, &relay_base)
                 .then(|| crate::commands::media::mint_media_get_auth(&state, &relay_base))

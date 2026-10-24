@@ -1,8 +1,11 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/features/channels/channel_window.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
+
+import '../../helpers/thread_ids.dart';
 
 NostrEvent _textMsg({
   required String id,
@@ -243,7 +246,7 @@ void main() {
         actorPubkey: 'pk1',
         targetPubkey: 'pk2',
       );
-      expect(event.describe(resolve), 'Bob was added by Alice');
+      expect(event.describe(resolve), 'Alice added Bob to the channel');
     });
 
     test('member_left', () {
@@ -386,11 +389,15 @@ void main() {
           EventKind.huddleEnded,
         ]),
       );
+      expect(
+        EventKind.channelTimelineContentKinds,
+        containsAll([EventKind.huddleStarted, EventKind.huddleEnded]),
+      );
     });
 
     test('passes through text messages', () {
       final events = [
-        _textMsg(id: 'a', content: 'hello'),
+        _textMsg(id: threadIdA, content: 'hello'),
         _textMsg(id: 'b', content: 'world', createdAt: 1100),
       ];
 
@@ -404,7 +411,7 @@ void main() {
 
     test('filters deleted messages', () {
       final events = [
-        _textMsg(id: 'a', content: 'keep'),
+        _textMsg(id: threadIdA, content: 'keep'),
         _textMsg(id: 'b', content: 'delete', createdAt: 1100),
         _deletion(id: 'd1', targets: ['b']),
       ];
@@ -419,7 +426,7 @@ void main() {
       // and treat 9005 as a deletion marker, otherwise agent-deleted messages
       // stay rendered until manual refresh.
       final events = [
-        _textMsg(id: 'a', content: 'keep'),
+        _textMsg(id: threadIdA, content: 'keep'),
         _textMsg(id: 'b', content: 'delete', createdAt: 1100),
         _nip29Deletion(id: 'd1', targets: ['b']),
       ];
@@ -431,8 +438,8 @@ void main() {
 
     test('applies edits', () {
       final events = [
-        _textMsg(id: 'a', content: 'original'),
-        _edit(id: 'e1', targetId: 'a', content: 'edited'),
+        _textMsg(id: threadIdA, content: 'original'),
+        _edit(id: 'e1', targetId: threadIdA, content: 'edited'),
       ];
 
       final result = formatTimeline(events);
@@ -444,7 +451,7 @@ void main() {
     test('applies edit tags for custom emoji rendering', () {
       final events = [
         _textMsg(
-          id: 'a',
+          id: threadIdA,
           content: 'original :old:',
           extraTags: [
             ['emoji', 'old', 'https://relay.example/old.png'],
@@ -452,7 +459,7 @@ void main() {
         ),
         _edit(
           id: 'e1',
-          targetId: 'a',
+          targetId: threadIdA,
           content: 'edited :new:',
           extraTags: [
             ['emoji', 'new', 'https://relay.example/new.png'],
@@ -488,7 +495,7 @@ void main() {
       final messages = formatTimeline([
         _textMsg(id: 'm1'),
         _reaction(
-          id: 'r1',
+          id: threadIdR1,
           targetId: 'm1',
           content: ':shipit:',
           extraTags: [
@@ -505,9 +512,9 @@ void main() {
 
     test('latest edit wins', () {
       final events = [
-        _textMsg(id: 'a', content: 'v1'),
-        _edit(id: 'e1', targetId: 'a', content: 'v2', createdAt: 2000),
-        _edit(id: 'e2', targetId: 'a', content: 'v3', createdAt: 3000),
+        _textMsg(id: threadIdA, content: 'v1'),
+        _edit(id: 'e1', targetId: threadIdA, content: 'v2', createdAt: 2000),
+        _edit(id: 'e2', targetId: threadIdA, content: 'v3', createdAt: 3000),
       ];
 
       final result = formatTimeline(events);
@@ -516,8 +523,8 @@ void main() {
 
     test('deleted edit is ignored', () {
       final events = [
-        _textMsg(id: 'a', content: 'original'),
-        _edit(id: 'e1', targetId: 'a', content: 'edited'),
+        _textMsg(id: threadIdA, content: 'original'),
+        _edit(id: 'e1', targetId: threadIdA, content: 'edited'),
         _deletion(id: 'd1', targets: ['e1']),
       ];
 
@@ -528,9 +535,9 @@ void main() {
 
     test('edit of deleted message is ignored', () {
       final events = [
-        _textMsg(id: 'a', content: 'original'),
-        _edit(id: 'e1', targetId: 'a', content: 'edited'),
-        _deletion(id: 'd1', targets: ['a']),
+        _textMsg(id: threadIdA, content: 'original'),
+        _edit(id: 'e1', targetId: threadIdA, content: 'edited'),
+        _deletion(id: 'd1', targets: [threadIdA]),
       ];
 
       final result = formatTimeline(events);
@@ -552,6 +559,23 @@ void main() {
       expect(result[0].systemEvent!.type, SystemEventType.channelCreated);
     });
 
+    test('huddle room IDs normalize canonical uppercase UUIDs', () {
+      final event = NostrEvent(
+        id: 'upper',
+        pubkey: 'alice',
+        createdAt: 1000,
+        kind: EventKind.huddleStarted,
+        tags: const [],
+        content:
+            '{"ephemeral_channel_id":"8D764100-FD8F-44CF-9C98-6D8FBD739B8C"}',
+        sig: '',
+      );
+      expect(
+        SystemEvent.fromHuddleEvent(event)!.ephemeralChannelId,
+        '8d764100-fd8f-44cf-9c98-6d8fbd739b8c',
+      );
+    });
+
     test('huddle start and end events render as system rows', () {
       final result = formatTimeline([
         _huddleEvent(id: 'h1', kind: EventKind.huddleStarted),
@@ -561,8 +585,16 @@ void main() {
       expect(result, hasLength(2));
       expect(result[0].isSystem, isTrue);
       expect(result[0].systemEvent!.type, SystemEventType.huddleStarted);
+      expect(
+        result[0].systemEvent!.ephemeralChannelId,
+        '8d764100-fd8f-44cf-9c98-6d8fbd739b8c',
+      );
       expect(result[1].isSystem, isTrue);
       expect(result[1].systemEvent!.type, SystemEventType.huddleEnded);
+      expect(
+        result[1].systemEvent!.ephemeralChannelId,
+        '8d764100-fd8f-44cf-9c98-6d8fbd739b8c',
+      );
     });
 
     test('huddle participant events are lifecycle metadata only', () {
@@ -592,7 +624,7 @@ void main() {
             'actor': 123,
           },
         ),
-        _textMsg(id: 'a', content: 'hello', createdAt: 1100),
+        _textMsg(id: threadIdA, content: 'hello', createdAt: 1100),
       ];
 
       final result = formatTimeline(events);
@@ -602,8 +634,8 @@ void main() {
 
     test('reactions and typing indicators are filtered out', () {
       final events = [
-        _textMsg(id: 'a', content: 'hello'),
-        _reaction(id: 'r1', targetId: 'a'),
+        _textMsg(id: threadIdA, content: 'hello'),
+        _reaction(id: threadIdR1, targetId: threadIdA),
         NostrEvent(
           id: 'typing1',
           pubkey: 'bob',
@@ -624,7 +656,7 @@ void main() {
 
     test('preserves chronological order', () {
       final events = [
-        _textMsg(id: 'a', content: 'first', createdAt: 1000),
+        _textMsg(id: threadIdA, content: 'first', createdAt: 1000),
         _systemMsg(
           id: 's1',
           payload: {'type': 'member_joined', 'actor': 'pk1', 'target': 'pk1'},
@@ -683,7 +715,7 @@ void main() {
 
   group('NostrEvent.threadReference', () {
     test('returns nulls for top-level message (no e-tags)', () {
-      final event = _textMsg(id: 'a');
+      final event = _textMsg(id: threadIdA);
       final ref = event.threadReference;
       expect(ref.parentId, isNull);
       expect(ref.rootId, isNull);
@@ -691,7 +723,7 @@ void main() {
 
     test('returns nulls for e-tags without root/reply markers', () {
       final event = _textMsg(
-        id: 'a',
+        id: threadIdA,
         extraTags: [
           ['e', 'target'],
         ],
@@ -705,45 +737,45 @@ void main() {
       final event = _textMsg(
         id: 'reply1',
         extraTags: [
-          ['e', 'root1', '', 'reply'],
+          ['e', threadIdRoot1, '', 'reply'],
         ],
       );
       final ref = event.threadReference;
-      expect(ref.parentId, 'root1');
-      expect(ref.rootId, 'root1');
+      expect(ref.parentId, threadIdRoot1);
+      expect(ref.rootId, threadIdRoot1);
     });
 
     test('parses nested reply (root + reply markers)', () {
       final event = _textMsg(
         id: 'reply2',
         extraTags: [
-          ['e', 'root1', '', 'root'],
-          ['e', 'parent1', '', 'reply'],
+          ['e', threadIdRoot1, '', 'root'],
+          ['e', threadIdParent1, '', 'reply'],
         ],
       );
       final ref = event.threadReference;
-      expect(ref.parentId, 'parent1');
-      expect(ref.rootId, 'root1');
+      expect(ref.parentId, threadIdParent1);
+      expect(ref.rootId, threadIdRoot1);
     });
 
     test('last reply tag wins when multiple exist', () {
       final event = _textMsg(
         id: 'reply3',
         extraTags: [
-          ['e', 'root1', '', 'root'],
-          ['e', 'old_parent', '', 'reply'],
-          ['e', 'new_parent', '', 'reply'],
+          ['e', threadIdRoot1, '', 'root'],
+          ['e', threadIdOldUnderscoreParent, '', 'reply'],
+          ['e', threadIdNewUnderscoreParent, '', 'reply'],
         ],
       );
       final ref = event.threadReference;
-      expect(ref.parentId, 'new_parent');
-      expect(ref.rootId, 'root1');
+      expect(ref.parentId, threadIdNewUnderscoreParent);
+      expect(ref.rootId, threadIdRoot1);
     });
   });
 
   group('formatTimeline threading', () {
     test('root messages have null parentId and rootId', () {
-      final events = [_textMsg(id: 'a')];
+      final events = [_textMsg(id: threadIdA)];
       final result = formatTimeline(events);
       expect(result[0].parentId, isNull);
       expect(result[0].rootId, isNull);
@@ -751,49 +783,72 @@ void main() {
 
     test('reply messages carry parentId and rootId', () {
       final events = [
-        _textMsg(id: 'root1'),
-        _replyMsg(id: 'r1', parentId: 'root1', createdAt: 2000),
+        _textMsg(id: threadIdRoot1),
+        _replyMsg(id: threadIdR1, parentId: threadIdRoot1, createdAt: 2000),
       ];
       final result = formatTimeline(events);
-      final reply = result.firstWhere((m) => m.id == 'r1');
-      expect(reply.parentId, 'root1');
-      expect(reply.rootId, 'root1');
+      final reply = result.firstWhere((m) => m.id == threadIdR1);
+      expect(reply.parentId, threadIdRoot1);
+      expect(reply.rootId, threadIdRoot1);
     });
 
     test('nested reply has distinct parentId and rootId', () {
       final events = [
-        _textMsg(id: 'root1'),
-        _replyMsg(id: 'r1', parentId: 'root1', createdAt: 2000),
-        _replyMsg(id: 'r2', parentId: 'r1', rootId: 'root1', createdAt: 3000),
+        _textMsg(id: threadIdRoot1),
+        _replyMsg(id: threadIdR1, parentId: threadIdRoot1, createdAt: 2000),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdR1,
+          rootId: threadIdRoot1,
+          createdAt: 3000,
+        ),
       ];
       final result = formatTimeline(events);
       final nested = result.firstWhere((m) => m.id == 'r2');
-      expect(nested.parentId, 'r1');
-      expect(nested.rootId, 'root1');
+      expect(nested.parentId, threadIdR1);
+      expect(nested.rootId, threadIdRoot1);
     });
   });
 
   group('buildMainTimelineEntries', () {
+    test(
+      'Me keeps agent replies inline without duplicate thread summaries',
+      () {
+        final messages = formatTimeline([
+          _textMsg(id: 'root', createdAt: 1000),
+          _replyMsg(id: 'answer', parentId: 'root', createdAt: 2000),
+          _textMsg(id: 'followup', createdAt: 3000),
+        ]);
+        final entries = buildMainTimelineEntries(messages, flat: true);
+        expect(entries.map((e) => e.message.id), [
+          'root',
+          'answer',
+          'followup',
+        ]);
+        expect(entries.every((e) => e.summary == null), isTrue);
+      },
+    );
+
     test('returns only root messages', () {
       final messages = formatTimeline([
-        _textMsg(id: 'a', createdAt: 1000),
-        _replyMsg(id: 'r1', parentId: 'a', createdAt: 2000),
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(id: threadIdR1, parentId: threadIdA, createdAt: 2000),
         _textMsg(id: 'b', createdAt: 3000),
       ]);
 
       final entries = buildMainTimelineEntries(messages);
       expect(entries, hasLength(2));
-      expect(entries[0].message.id, 'a');
+      expect(entries[0].message.id, threadIdA);
       expect(entries[1].message.id, 'b');
     });
 
     test('includes broadcast replies in the main timeline', () {
       final messages = formatTimeline([
-        _textMsg(id: 'a', createdAt: 1000),
-        _replyMsg(id: 'hidden', parentId: 'a', createdAt: 2000),
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(id: 'hidden', parentId: threadIdA, createdAt: 2000),
         _replyMsg(
           id: 'broadcast',
-          parentId: 'a',
+          parentId: threadIdA,
           createdAt: 3000,
           extraTags: const [
             ['broadcast', '1'],
@@ -802,50 +857,96 @@ void main() {
       ]);
 
       final entries = buildMainTimelineEntries(messages);
-      expect(entries.map((entry) => entry.message.id), ['a', 'broadcast']);
+      expect(entries.map((entry) => entry.message.id), [
+        threadIdA,
+        'broadcast',
+      ]);
     });
 
     test('root without replies has null summary', () {
-      final messages = formatTimeline([_textMsg(id: 'a')]);
+      final messages = formatTimeline([_textMsg(id: threadIdA)]);
       final entries = buildMainTimelineEntries(messages);
       expect(entries[0].summary, isNull);
     });
 
     test('root with replies has summary with correct count', () {
       final messages = formatTimeline([
-        _textMsg(id: 'a', createdAt: 1000),
-        _replyMsg(id: 'r1', parentId: 'a', pubkey: 'bob', createdAt: 2000),
-        _replyMsg(id: 'r2', parentId: 'a', pubkey: 'carol', createdAt: 3000),
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+        ),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdA,
+          pubkey: 'carol',
+          createdAt: 3000,
+        ),
       ]);
 
       final entries = buildMainTimelineEntries(messages);
       expect(entries, hasLength(1));
       expect(entries[0].summary, isNotNull);
       expect(entries[0].summary!.replyCount, 2);
-      expect(entries[0].summary!.threadHeadId, 'a');
+      expect(entries[0].summary!.threadHeadId, threadIdA);
       expect(entries[0].summary!.lastReplyAt, 3000);
     });
 
-    test('summary counts only direct children, not nested replies', () {
+    test('summary counts every loaded descendant, not only direct children', () {
       final messages = formatTimeline([
-        _textMsg(id: 'a', createdAt: 1000),
-        _replyMsg(id: 'r1', parentId: 'a', createdAt: 2000),
-        _replyMsg(id: 'r2', parentId: 'r1', rootId: 'a', createdAt: 3000),
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(id: threadIdR1, parentId: threadIdA, createdAt: 2000),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdR1,
+          rootId: threadIdA,
+          createdAt: 3000,
+        ),
       ]);
 
       final entries = buildMainTimelineEntries(messages);
-      // Only r1 is a direct child of a; r2 is a child of r1.
-      expect(entries[0].summary!.replyCount, 1);
+      // The root badge stands for the whole thread, so the reply to r1 counts
+      // towards threadIdA as well. This matches the relay's `descendant_count` and
+      // the desktop's `buildDescendantStatsByMessageId`.
+      expect(entries[0].summary!.replyCount, 2);
+      expect(entries[0].summary!.lastReplyAt, 3000);
     });
 
     test('summary has up to 3 unique participant pubkeys', () {
       final messages = formatTimeline([
-        _textMsg(id: 'a', createdAt: 1000),
-        _replyMsg(id: 'r1', parentId: 'a', pubkey: 'bob', createdAt: 2000),
-        _replyMsg(id: 'r2', parentId: 'a', pubkey: 'carol', createdAt: 3000),
-        _replyMsg(id: 'r3', parentId: 'a', pubkey: 'bob', createdAt: 4000),
-        _replyMsg(id: 'r4', parentId: 'a', pubkey: 'dave', createdAt: 5000),
-        _replyMsg(id: 'r5', parentId: 'a', pubkey: 'eve', createdAt: 6000),
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+        ),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdA,
+          pubkey: 'carol',
+          createdAt: 3000,
+        ),
+        _replyMsg(
+          id: 'r3',
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 4000,
+        ),
+        _replyMsg(
+          id: 'r4',
+          parentId: threadIdA,
+          pubkey: 'dave',
+          createdAt: 5000,
+        ),
+        _replyMsg(
+          id: 'r5',
+          parentId: threadIdA,
+          pubkey: 'eve',
+          createdAt: 6000,
+        ),
       ]);
 
       final entries = buildMainTimelineEntries(messages);
@@ -864,7 +965,7 @@ void main() {
           payload: {'type': 'channel_created', 'actor': 'pk1'},
           createdAt: 500,
         ),
-        _textMsg(id: 'a', createdAt: 1000),
+        _textMsg(id: threadIdA, createdAt: 1000),
       ];
       final messages = formatTimeline(events);
       final entries = buildMainTimelineEntries(messages);
@@ -877,6 +978,372 @@ void main() {
     });
   });
 
+  group('buildMainTimelineEntries relay summary merge', () {
+    ChannelWindowThreadSummary relaySummary({
+      required int replyCount,
+      int? descendantCount,
+      int? lastReplyAt,
+      List<String> participantPubkeys = const ['zoe'],
+    }) => ChannelWindowThreadSummary(
+      replyCount: replyCount,
+      descendantCount: descendantCount ?? replyCount,
+      lastReplyAt: lastReplyAt,
+      participantPubkeys: participantPubkeys,
+    );
+
+    test('relay recount covers replies this client never loaded', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+      ]);
+
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(replyCount: 4, lastReplyAt: 9000),
+        },
+      );
+
+      expect(entries.single.summary!.replyCount, 4);
+      expect(entries.single.summary!.lastReplyAt, 9000);
+      expect(entries.single.summary!.participantPubkeys, ['zoe']);
+    });
+
+    test('a reply newer than the recount is added to the badge', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+        ),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdA,
+          pubkey: 'carol',
+          createdAt: 3000,
+        ),
+      ]);
+
+      // The relay counted only r1 before r2 landed.
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(replyCount: 1, lastReplyAt: 2000),
+        },
+      );
+
+      expect(entries.single.summary!.replyCount, 2);
+      expect(entries.single.summary!.lastReplyAt, 3000);
+    });
+
+    test('a reply in the same second as the recount still counts', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+        ),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdA,
+          pubkey: 'carol',
+          createdAt: 2000,
+        ),
+      ]);
+
+      // Relay timestamps have second precision, so an equal timestamp is no
+      // proof the recount already included the second reply.
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(replyCount: 1, lastReplyAt: 2000),
+        },
+      );
+
+      expect(entries.single.summary!.replyCount, 2);
+    });
+
+    test('a lost recount still leaves a badge from the local reply', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+        ),
+      ]);
+
+      final entries = buildMainTimelineEntries(messages);
+
+      expect(entries.single.summary!.replyCount, 1);
+      expect(entries.single.summary!.participantPubkeys, ['bob']);
+    });
+
+    test('the relay recount wins when it is ahead of the loaded replies', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+        ),
+      ]);
+
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(replyCount: 7, lastReplyAt: 8000),
+        },
+      );
+
+      expect(entries.single.summary!.replyCount, 7);
+      expect(entries.single.summary!.lastReplyAt, 8000);
+    });
+
+    test('a zero recount does not erase a locally seen reply', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+        ),
+      ]);
+
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(replyCount: 0, lastReplyAt: null),
+        },
+      );
+
+      expect(entries.single.summary!.replyCount, 1);
+      expect(entries.single.summary!.lastReplyAt, 2000);
+    });
+
+    test('a locally seen nested reply raises its root badge', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+        ),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdR1,
+          rootId: threadIdA,
+          pubkey: 'carol',
+          createdAt: 3000,
+        ),
+      ]);
+
+      // The recount for threadIdA predates r2, so only the locally seen nested reply
+      // can bring the root badge, time, and facepile up to date.
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(
+            replyCount: 1,
+            lastReplyAt: 2000,
+            participantPubkeys: const ['bob'],
+          ),
+        },
+      );
+
+      final root = entries.firstWhere((entry) => entry.message.id == threadIdA);
+      expect(root.summary!.replyCount, 2);
+      expect(root.summary!.lastReplyAt, 3000);
+      expect(root.summary!.participantPubkeys, ['bob', 'carol']);
+    });
+
+    test('the relay half counts descendants, not direct replies', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+      ]);
+
+      // The relay reports both numbers. A thread of nested replies has a
+      // `reply_count` far below its `descendant_count`, and the badge stands
+      // for the whole thread.
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(
+            replyCount: 1,
+            descendantCount: 5,
+            lastReplyAt: 9000,
+          ),
+        },
+      );
+
+      expect(entries.single.summary!.replyCount, 5);
+    });
+
+    test('relay direct replies are a lower bound for a broadcast row', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA),
+        _replyMsg(
+          id: 'broadcast',
+          parentId: threadIdA,
+          extraTags: const [
+            ['broadcast', '1'],
+          ],
+        ),
+      ]);
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          'broadcast': relaySummary(replyCount: 1, descendantCount: 0),
+        },
+      );
+      final summary = entries.last.summary!;
+      expect(summary.replyCount, 1);
+      expect(summary.isLowerBound, isTrue);
+    });
+
+    test('a nested reply badges the reply it answers', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+          extraTags: const [
+            ['broadcast', '1'],
+          ],
+        ),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdR1,
+          rootId: threadIdA,
+          pubkey: 'carol',
+          createdAt: 3000,
+        ),
+      ]);
+
+      // The relay keys recounts by the outermost root, so r1 never gets one and
+      // its badge has to come from the locally seen nested reply.
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(replyCount: 1, lastReplyAt: 2000),
+        },
+      );
+
+      final byId = {for (final entry in entries) entry.message.id: entry};
+      expect(byId[threadIdA]!.summary!.replyCount, 2);
+      expect(byId[threadIdR1]!.summary!.replyCount, 1);
+      expect(byId[threadIdR1]!.summary!.participantPubkeys, ['carol']);
+      expect(byId[threadIdR1]!.summary!.lastReplyAt, 3000);
+    });
+
+    test('merged participants keep relay identities first, capped at 3', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+        ),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdA,
+          pubkey: 'carol',
+          createdAt: 3000,
+        ),
+      ]);
+
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(
+            replyCount: 1,
+            lastReplyAt: 2000,
+            participantPubkeys: const ['zoe', 'yara'],
+          ),
+        },
+      );
+
+      expect(entries.single.summary!.participantPubkeys, [
+        'zoe',
+        'yara',
+        'carol',
+      ]);
+    });
+
+    test('a deleted reply does not hold the badge above the recount', () {
+      // The relay counts down on delete and re-emits the recount, so taking the
+      // larger count must not resurrect a deleted reply. `formatTimeline` drops
+      // it from the local half first, which is what keeps `max` honest here.
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'bob',
+          createdAt: 2000,
+        ),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdA,
+          pubkey: 'carol',
+          createdAt: 3000,
+        ),
+        _deletion(id: 'd1', targets: ['r2']),
+      ]);
+
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(replyCount: 1, lastReplyAt: 2000),
+        },
+      );
+
+      expect(entries.single.summary!.replyCount, 1);
+      expect(entries.single.summary!.lastReplyAt, 2000);
+    });
+
+    test('a participant in both halves is not listed twice', () {
+      final messages = formatTimeline([
+        _textMsg(id: threadIdA, createdAt: 1000),
+        _replyMsg(
+          id: threadIdR1,
+          parentId: threadIdA,
+          pubkey: 'BOB',
+          createdAt: 2000,
+        ),
+        _replyMsg(
+          id: 'r2',
+          parentId: threadIdA,
+          pubkey: 'carol',
+          createdAt: 3000,
+        ),
+      ]);
+
+      final entries = buildMainTimelineEntries(
+        messages,
+        relaySummaries: {
+          threadIdA: relaySummary(
+            replyCount: 2,
+            lastReplyAt: 3000,
+            participantPubkeys: const ['carol', 'bob'],
+          ),
+        },
+      );
+
+      expect(entries.single.summary!.participantPubkeys, ['carol', 'bob']);
+    });
+  });
+
   group('groupMembershipTimelineEntries', () {
     List<MainTimelineEntry> entries(List<NostrEvent> events) =>
         buildMainTimelineEntries(formatTimeline(events));
@@ -885,7 +1352,7 @@ void main() {
       final grouped = groupMembershipTimelineEntries(
         entries([
           _systemMsg(
-            id: 'a',
+            id: threadIdA,
             payload: {
               'type': 'member_joined',
               'actor': 'alice',
@@ -915,14 +1382,18 @@ void main() {
       );
 
       expect(grouped, hasLength(1));
-      expect(grouped.single.map((entry) => entry.message.id), ['a', 'b', 'c']);
+      expect(grouped.single.map((entry) => entry.message.id), [
+        threadIdA,
+        'b',
+        'c',
+      ]);
     });
 
     test('groups self-joins from different people', () {
       final grouped = groupMembershipTimelineEntries(
         entries([
           _systemMsg(
-            id: 'a',
+            id: threadIdA,
             payload: {
               'type': 'member_joined',
               'actor': 'alice',
@@ -945,7 +1416,7 @@ void main() {
       final grouped = groupMembershipTimelineEntries(
         entries([
           _systemMsg(
-            id: 'a',
+            id: threadIdA,
             payload: {
               'type': 'member_joined',
               'actor': 'alice',
@@ -984,7 +1455,7 @@ void main() {
       final grouped = groupMembershipTimelineEntries(
         entries([
           _systemMsg(
-            id: 'a',
+            id: threadIdA,
             payload: {
               'type': 'member_joined',
               'actor': 'alice',

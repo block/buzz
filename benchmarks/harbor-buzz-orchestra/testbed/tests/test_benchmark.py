@@ -1,11 +1,13 @@
 """just benchmark must default to leaderboard-eligible settings."""
 
+import asyncio
 import importlib.util
 import json
 import sys
 from pathlib import Path
 
 import pytest
+from harbor.models.job.config import DatasetConfig
 
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "benchmark.py"
 _spec = importlib.util.spec_from_file_location("benchmark", _SCRIPT)
@@ -22,9 +24,10 @@ def state_dir(tmp_path, monkeypatch):
 
 def test_defaults_are_leaderboard_eligible():
     args = benchmark.parse_args([])
-    assert args.attempts == 5
+    assert args.attempts is None
     assert args.dataset is None and args.path is None  # dataset default applied later
-    argv = benchmark.leaderboard_argv(args, Path("prov.json"), Path("linux-bin"))
+    (run,) = benchmark.plan_benchmark_runs(args)
+    argv = benchmark.leaderboard_argv(run, Path("prov.json"), Path("linux-bin"))
     assert argv[argv.index("--dataset") + 1] == "terminal-bench/terminal-bench-2-1"
     assert argv[argv.index("--attempts") + 1] == "5"
     assert argv[argv.index("--manifest") + 1].endswith("tb-cobol-sonnet-haiku.yaml")
@@ -51,13 +54,186 @@ def test_selectors_pass_through():
             "--dry-run",
         ]
     )
-    argv = benchmark.leaderboard_argv(args, Path("p.json"), Path("b"))
+    (run,) = benchmark.plan_benchmark_runs(args)
+    argv = benchmark.leaderboard_argv(run, Path("p.json"), Path("b"))
     assert argv[argv.index("--path") + 1] == "/tmp/task"
     assert argv[argv.index("--include-task") + 1] == "cobol*"
     assert argv[argv.index("--exclude-task") + 1] == "flaky*"
     assert argv[argv.index("--attempts") + 1] == "1"
     assert "--dry-run" in argv
     assert "--dataset" not in argv
+
+
+def test_buzz_task_metadata_defines_the_expected_layers():
+    tasks = benchmark.buzz_tasks_for_path(benchmark.BUZZ_DATASET_ROOT)
+    assert tasks is not None
+    by_layer = {
+        layer: {task.path.name for task in tasks if task.layer == layer}
+        for layer in benchmark.EVALUATION_LAYERS
+    }
+    assert by_layer == {
+        "regression": {
+            "reply-to-thread",
+            "user-mention",
+            "read-named-path-outside-workspace",
+            "multiline-message",
+            "memory-retrieval",
+            "narrative-agent-names",
+        },
+        "workflow": {
+            "ambiguous-user-mention",
+            "cross-thread-requests",
+            "create-channel-invite-users",
+            "interleaved-agent-reports",
+        },
+    }
+
+
+@pytest.mark.parametrize("layer", [None, "other"])
+def test_buzz_task_metadata_rejects_missing_or_unknown_layers(
+    tmp_path, monkeypatch, layer
+):
+    dataset = tmp_path / "buzz-dataset"
+    task = dataset / "example"
+    task.mkdir(parents=True)
+    metadata = "" if layer is None else f'evaluation_layer = "{layer}"\n'
+    (task / "task.toml").write_text(
+        'schema_version = "1.3"\n\n'
+        '[task]\nname = "buzz-native/example"\n\n'
+        f'[metadata]\n{metadata}difficulty = "easy"\n'
+    )
+    monkeypatch.setattr(benchmark, "BUZZ_DATASET_ROOT", dataset)
+
+    with pytest.raises(SystemExit, match="evaluation_layer|metadata"):
+        benchmark.buzz_tasks_for_path(dataset)
+
+
+@pytest.mark.parametrize(("layer", "attempts"), [("regression", 1), ("workflow", 3)])
+def test_layer_selects_metadata_and_uses_its_default_attempts(layer, attempts):
+    args = benchmark.parse_args(
+        ["--path", str(benchmark.BUZZ_DATASET_ROOT), "--layer", layer]
+    )
+    (run,) = benchmark.plan_benchmark_runs(args)
+
+    assert run.attempts == attempts
+    selected = benchmark.buzz_tasks_for_path(benchmark.BUZZ_DATASET_ROOT)
+    assert selected is not None
+    assert set(run.include_task) == {
+        task.path.name for task in selected if task.layer == layer
+    }
+
+
+@pytest.mark.parametrize("layer", benchmark.EVALUATION_LAYERS)
+def test_layer_selectors_resolve_through_harbor_local_dataset_filter(layer):
+    args = benchmark.parse_args(
+        ["--path", str(benchmark.BUZZ_DATASET_ROOT), "--layer", layer]
+    )
+    (run,) = benchmark.plan_benchmark_runs(args)
+
+    configs = asyncio.run(
+        DatasetConfig(
+            path=benchmark.BUZZ_DATASET_ROOT,
+            task_names=run.include_task,
+        ).get_task_configs(disable_verification=True)
+    )
+
+    assert {config.path.name for config in configs} == set(run.include_task)
+
+
+def test_omitted_layer_splits_buzz_dataset_into_two_jobs():
+    args = benchmark.parse_args(["--path", str(benchmark.BUZZ_DATASET_ROOT)])
+    runs = benchmark.plan_benchmark_runs(args, stamp="20260825T120000Z")
+
+    assert [run.attempts for run in runs] == [1, 3]
+    assert [run.job_name.rsplit("-", 1)[-1] for run in runs] == [
+        "regression",
+        "workflow",
+    ]
+    assert set(runs[0].include_task).isdisjoint(runs[1].include_task)
+
+
+def test_single_buzz_task_infers_its_layer_default():
+    task_path = benchmark.BUZZ_DATASET_ROOT / "cross-thread-requests"
+    args = benchmark.parse_args(["--path", str(task_path)])
+    (run,) = benchmark.plan_benchmark_runs(args)
+
+    assert run.attempts == 3
+    assert run.include_task == ["cross-thread-requests"]
+
+
+def test_explicit_attempts_override_keeps_one_mixed_buzz_job():
+    args = benchmark.parse_args(
+        ["--path", str(benchmark.BUZZ_DATASET_ROOT), "--attempts", "7"]
+    )
+    (run,) = benchmark.plan_benchmark_runs(args)
+
+    assert run.attempts == 7
+    assert len(run.include_task) == 10
+
+    layered = benchmark.parse_args(
+        [
+            "--path",
+            str(benchmark.BUZZ_DATASET_ROOT),
+            "--layer",
+            "workflow",
+            "-k",
+            "2",
+        ]
+    )
+    (layered_run,) = benchmark.plan_benchmark_runs(layered)
+    assert layered_run.attempts == 2
+    assert len(layered_run.include_task) == 4
+
+
+def test_invalid_layer_is_rejected():
+    with pytest.raises(SystemExit):
+        benchmark.parse_args(["--layer", "conformance"])
+
+    args = benchmark.parse_args(
+        ["--dataset", "terminal-bench/x", "--layer", "workflow"]
+    )
+    with pytest.raises(SystemExit, match="only valid"):
+        benchmark.plan_benchmark_runs(args)
+
+
+def test_layer_dry_run_constructs_exact_task_selectors_and_attempts():
+    args = benchmark.parse_args(
+        [
+            "--path",
+            str(benchmark.BUZZ_DATASET_ROOT),
+            "--layer",
+            "workflow",
+            "--dry-run",
+            "--job-name",
+            "workflow-smoke",
+        ]
+    )
+    (run,) = benchmark.plan_benchmark_runs(args)
+    argv = benchmark.leaderboard_argv(run, Path("prov.json"), Path("linux-bin"))
+    lower_args = benchmark.run_leaderboard.parse_args(argv)
+    binaries = {"buzz": Path("host-bin/buzz")}
+    agent_binaries = {
+        name: Path("linux-bin") / name
+        for name in benchmark.run_leaderboard.AGENT_BINARIES
+        + (benchmark.run_leaderboard.FORWARDER_BINARY,)
+    }
+    command = benchmark.run_leaderboard.build_command(
+        lower_args, binaries, agent_binaries
+    )
+
+    assert command[command.index("-k") + 1] == "3"
+    selected = [
+        command[index + 1]
+        for index, part in enumerate(command)
+        if part == "--include-task-name"
+    ]
+    assert set(selected) == set(run.include_task)
+    assert set(selected) == {
+        "ambiguous-user-mention",
+        "cross-thread-requests",
+        "create-channel-invite-users",
+        "interleaved-agent-reports",
+    }
 
 
 def test_state_is_generated_once_and_reused(state_dir):

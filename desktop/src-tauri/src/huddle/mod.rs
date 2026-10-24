@@ -23,12 +23,17 @@
 //!    takes `stt_pipeline`/`tts_pipeline` out of the lock, then calls `shutdown()`
 //!    and drops them outside the lock (thread joins can block ~200ms).
 
+mod agent_tts_publisher;
 mod agent_tts_routing;
 pub mod agent_voice;
 pub mod agents;
 pub mod audio_output;
 mod commands;
+mod human_floor;
 pub mod jitter;
+#[cfg(test)]
+mod latency_bench;
+mod local_barge_in;
 pub mod models;
 pub mod pipeline;
 pub mod playout;
@@ -40,6 +45,8 @@ pub mod state;
 pub mod stt;
 pub mod transcription;
 pub mod tts;
+#[path = "tts_playback.rs"]
+mod tts_playback;
 pub mod tts_settings;
 mod tts_voice_import;
 mod tts_voice_registry;
@@ -69,7 +76,8 @@ pub(super) fn drain_until_shutdown<T>(
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use commands::{
-    interrupt_huddle_speech, remove_agent_from_huddle, set_huddle_manual_mic_unmuted,
+    add_agent_to_huddle, interrupt_huddle_speech, remove_agent_from_huddle,
+    set_huddle_manual_mic_unmuted,
 };
 pub use state::{HuddleJoinInfo, HuddlePhase, HuddleState, VoiceInputMode};
 pub use transcription::{set_huddle_transcription_enabled, start_stt_pipeline};
@@ -78,7 +86,7 @@ pub use window::{close_huddle_companion, open_huddle_window};
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
-use std::sync::atomic::Ordering;
+use std::sync::{atomic::Ordering, Arc};
 use tauri::State;
 use uuid::Uuid;
 
@@ -91,7 +99,7 @@ use agent_tts_routing::{
 pub use pipeline::check_pipeline_hotstart;
 use pipeline::{
     await_inflight_tts_start, maybe_start_stt_pipeline, maybe_start_tts_pipeline,
-    post_connect_setup, start_auto_enabled_transcription, PostConnectOutcome,
+    post_connect_setup, PostConnectOutcome,
 };
 use relay_api::{
     count_human_members, fetch_channel_members, parse_channel_uuid, validate_pubkey_hex,
@@ -486,7 +494,7 @@ fn teardown_huddle(state: &AppState) -> Result<(), String> {
         // Increment generation first — this immediately invalidates any
         // in-flight transcription task, even before pipelines shut down.
         hs.session_generation.fetch_add(1, Ordering::Release);
-        let stt = hs.stt_pipeline.take();
+        let stt = hs.take_stt_pipeline();
         let tts = hs.tts_pipeline.take();
         let cancel = hs.audio_ws_cancel.take();
         // Cancel the relay token BEFORE dropping the sender. If we drop
@@ -870,7 +878,7 @@ pub async fn speak_agent_message(
         })?;
     }
 
-    let sender = {
+    let pipeline = {
         let hs = state.huddle()?;
         let agent_is_present = hs
             .agent_pubkeys
@@ -884,20 +892,27 @@ pub async fn speak_agent_message(
             );
             return Ok(());
         }
-        hs.tts_pipeline
-            .as_ref()
-            .map(|pipeline| pipeline.text_sender())
-            .map(|sender| {
-                let speaker_generation = sender.speaker_generation(&speaker_pubkey);
-                (sender, speaker_generation)
-            })
+        hs.tts_pipeline.as_ref().map(Arc::clone)
     };
-    let Some((sender, speaker_generation)) = sender else {
+    let Some(pipeline) = pipeline else {
         eprintln!(
             "buzz-desktop: tts stage=invoke status=failed reason=unavailable route_id={route_id}"
         );
         return Err("Agent text to speech is enabled but its audio pipeline is unavailable".into());
     };
+    match agent_tts_publisher::ensure(&app, &state, &pipeline, &speaker_pubkey).await {
+        Ok(true) => eprintln!(
+            "buzz-desktop: tts broadcast status=ready route_id={route_id}"
+        ),
+        Ok(false) => eprintln!(
+            "buzz-desktop: tts broadcast status=unavailable reason=agent_identity_not_local route_id={route_id}"
+        ),
+        Err(error) => eprintln!(
+            "buzz-desktop: tts broadcast status=unavailable reason=publisher_setup_failed route_id={route_id} error={error}"
+        ),
+    }
+    let sender = pipeline.text_sender();
+    let speaker_generation = sender.speaker_generation(&speaker_pubkey);
     enqueue_agent_tts_text(route_id, text, move |route_id, text| {
         sender
             .send(
@@ -914,86 +929,4 @@ pub async fn speak_agent_message(
     .inspect_err(|_| {
         eprintln!("buzz-desktop: tts stage=queue status=failed reason=closed route_id={route_id}")
     })
-}
-
-/// Add an agent to the active huddle.
-///
-/// Steps:
-/// 1. Validates the huddle is in the Connected or Active phase.
-/// 2. Adds the agent to both the ephemeral and parent channels (kind:9000).
-/// 3. Only appends the agent pubkey to `agent_pubkeys` if the ephemeral add
-///    succeeded — failed adds (policy rejection) are NOT p-tagged.
-///
-/// Returns a structured `AgentAddResult` so the frontend can surface
-/// parent-channel errors without treating them as hard failures.
-///
-/// The running ACP process for this agent auto-subscribes when it receives
-/// the kind:9000 membership notification — no separate process spawn needed.
-#[tauri::command]
-pub async fn add_agent_to_huddle(
-    agent_pubkey: String,
-    state: State<'_, AppState>,
-) -> Result<agents::AgentAddResult, String> {
-    validate_pubkey_hex(&agent_pubkey)?;
-
-    let (eph_id, parent_id, huddle_generation) = {
-        let hs = state.huddle()?;
-        if !matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active) {
-            return Err("no active huddle".to_string());
-        }
-
-        // Enforce agent cap on incremental adds too.
-        let current_agent_count = hs
-            .agent_pubkeys
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len();
-        if current_agent_count >= MAX_HUDDLE_AGENTS {
-            return Err(format!(
-                "agent limit reached: {} (max {})",
-                current_agent_count, MAX_HUDDLE_AGENTS
-            ));
-        }
-
-        let eph = hs
-            .ephemeral_channel_id
-            .clone()
-            .ok_or("no ephemeral channel")?;
-        let parent = hs.parent_channel_id.clone().ok_or("no parent channel")?;
-        (eph, parent, hs.huddle_generation)
-    };
-
-    let eph_uuid = Uuid::parse_str(&eph_id).map_err(|e| e.to_string())?;
-    let parent_uuid = Uuid::parse_str(&parent_id).map_err(|e| e.to_string())?;
-
-    // Returns Err only if the ephemeral add fails — parent failure is in the result.
-    let result = agents::add_agent_to_huddle(eph_uuid, parent_uuid, &agent_pubkey, &state).await?;
-
-    // Ephemeral add succeeded — register it only if this is still the huddle
-    // that initiated the relay operation.
-    let transcription_auto_enabled = {
-        let mut hs = state.huddle()?;
-        if !hs.is_current_huddle(&eph_id, huddle_generation) {
-            return Ok(result);
-        }
-        let mut pubkeys = hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner());
-        if !pubkeys.contains(&agent_pubkey) {
-            pubkeys.push(agent_pubkey.clone());
-        }
-        drop(pubkeys);
-        if !hs.participants.contains(&agent_pubkey) {
-            hs.participants.push(agent_pubkey.clone());
-        }
-        hs.maybe_auto_enable_transcription_for_agents()
-    };
-
-    // No guidelines re-post needed — the agent sees the original kind:48106
-    // guidelines via EOSE replay when it subscribes to the ephemeral channel.
-    if transcription_auto_enabled {
-        start_auto_enabled_transcription(&state, &eph_id).await;
-    } else {
-        state.emit_huddle_state_changed();
-    }
-
-    Ok(result)
 }

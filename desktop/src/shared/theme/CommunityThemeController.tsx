@@ -8,6 +8,7 @@ import {
   clearCommunityThemeOutbox,
   communityThemeApplyExpectation,
   communityThemePersistenceAction,
+  communityThemeScopeFallback,
   hasMigratedCommunityTheme,
   markCommunityThemeMigrated,
   readCommunityThemeOutbox,
@@ -19,6 +20,7 @@ import {
 } from "./communityThemePreference";
 import {
   CommunityThemeSyncManager,
+  communityThemeHydrationRemote,
   isNewerCommunityThemeCoordinate,
   shouldSeedCommunityTheme,
   type RemoteCommunityTheme,
@@ -74,12 +76,21 @@ export function CommunityThemeController() {
     // Preserve the user's existing global appearance the first time this
     // feature sees their current community. Later missing/malformed target
     // records use the stable default so the previous community never leaks.
-    const fallback = hasMigratedCommunityTheme(pubkey)
-      ? DEFAULT_COMMUNITY_THEME
-      : initialPreferenceRef.current;
+    const fallback = communityThemeScopeFallback(
+      hasMigratedCommunityTheme(pubkey),
+      initialPreferenceRef.current,
+    );
     const scopedPreference = dirty ?? local ?? fallback;
     scopedPreferenceRef.current = scopedPreference;
     applyPreference(scopedPreference);
+    // Initialization is programmatic even when the provider already exposes
+    // this exact value. Mark it after applyPreference so its no-op optimization
+    // cannot make the persistence effect mistake the fallback for a user edit.
+    expectedAppliedRef.current = communityThemeApplyExpectation(
+      scopedPreference,
+      currentPreferenceRef.current,
+      true,
+    );
   }, [pubkey, relayUrl, applyPreference]);
 
   useEffect(() => {
@@ -127,31 +138,33 @@ export function CommunityThemeController() {
       );
     };
 
-    void manager.fetchRemote().then((result) => {
-      if (scopeRef.current !== scope) return;
-      if (result.status === "valid") {
-        applyRemote(result.remote);
-        markCommunityThemeMigrated(pubkey);
-      } else if (shouldSeedCommunityTheme(result)) {
-        const local =
-          readCommunityThemeOutbox(pubkey, relayUrl) ??
-          readCommunityThemePreference(pubkey, relayUrl) ??
-          scopedPreferenceRef.current ??
-          DEFAULT_COMMUNITY_THEME;
-        writeCommunityThemePreference(pubkey, relayUrl, local);
-        writeCommunityThemeOutbox(pubkey, relayUrl, local);
-        markCommunityThemeMigrated(pubkey);
-        manager.publish(local);
-      }
-      // Invalid/future or unavailable records use the already-applied local
-      // fallback without publishing over relay state we cannot safely read.
-    });
-
     let unsubscribe: (() => Promise<void>) | null = null;
-    void manager.subscribe(applyRemote).then((dispose) => {
-      if (scopeRef.current !== scope) void dispose();
-      else unsubscribe = dispose;
-    });
+    void manager
+      .subscribeAndFetch(applyRemote)
+      .then(({ result, unsubscribe: dispose }) => {
+        if (scopeRef.current !== scope) {
+          void dispose();
+          return;
+        }
+        unsubscribe = dispose;
+        const remote = communityThemeHydrationRemote(result);
+        if (remote) {
+          applyRemote(remote);
+          markCommunityThemeMigrated(pubkey);
+        } else if (shouldSeedCommunityTheme(result)) {
+          const local =
+            readCommunityThemeOutbox(pubkey, relayUrl) ??
+            readCommunityThemePreference(pubkey, relayUrl) ??
+            scopedPreferenceRef.current ??
+            DEFAULT_COMMUNITY_THEME;
+          writeCommunityThemePreference(pubkey, relayUrl, local);
+          writeCommunityThemeOutbox(pubkey, relayUrl, local);
+          markCommunityThemeMigrated(pubkey);
+          manager.publish(local);
+        }
+        // Invalid or unavailable hydration keeps the already-applied fallback
+        // without publishing over relay state we could not establish safely.
+      });
     const unsubscribeReconnect = relayClient.subscribeToReconnects(() => {
       void manager.fetchRemote().then((result) => {
         if (result.status === "valid") {

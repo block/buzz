@@ -78,7 +78,9 @@ pub async fn cmd_get_users(
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
         }
-        crate::OutputFormat::Json => serde_json::to_string(&profiles).unwrap_or_default(),
+        crate::OutputFormat::Json | crate::OutputFormat::Agent => {
+            serde_json::to_string(&profiles).unwrap_or_default()
+        }
     };
     println!("{output}");
     Ok(())
@@ -350,7 +352,9 @@ async fn search_by_name(
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
         }
-        crate::OutputFormat::Json => serde_json::to_string(&profiles).unwrap_or_default(),
+        crate::OutputFormat::Json | crate::OutputFormat::Agent => {
+            serde_json::to_string(&profiles).unwrap_or_default()
+        }
     };
     println!("{output}");
     Ok(())
@@ -485,7 +489,7 @@ pub async fn cmd_get_presence(client: &BuzzClient, pubkeys_csv: &str) -> Result<
     Ok(())
 }
 
-fn presence_subject(event: &serde_json::Value) -> &str {
+pub(crate) fn presence_subject(event: &serde_json::Value) -> &str {
     event
         .get("tags")
         .and_then(|tags| tags.as_array())

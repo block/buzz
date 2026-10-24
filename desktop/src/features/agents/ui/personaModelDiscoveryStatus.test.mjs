@@ -60,13 +60,77 @@ test("Buzz shared compute names a missing relay member roster", () => {
   assert.doesNotMatch(status?.message ?? "", /relay connection/);
 });
 
-test("model discovery status stays quiet for missing Databricks defaults", () => {
+for (const error of [
+  "config: DATABRICKS_HOST required",
+  "buzz-acp models failed (exit 1): config: DATABRICKS_MODEL required",
+]) {
+  test(`missing Databricks host is named, not swallowed: ${error}`, () => {
+    const status = formatModelDiscoveryErrorStatus(
+      new Error(error),
+      "databricks_v2",
+    );
+
+    assert.equal(status.tone, "warning");
+    assert.match(status.message, /DATABRICKS_HOST/);
+    assert.match(status.message, /Advanced/);
+  });
+}
+
+test("missing provider asks the user to choose one", () => {
   const status = formatModelDiscoveryErrorStatus(
-    new Error("config: DATABRICKS_HOST required"),
-    "databricks",
+    new Error("config: BUZZ_AGENT_PROVIDER is required"),
+    "",
   );
 
-  assert.equal(status, null);
+  assert.equal(status.tone, "muted");
+  assert.match(status.message, /Choose a provider/);
+});
+
+test("Databricks sign-in-required is a muted note pointing at the picker and CLI", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(
+      "Databricks sign-in is required; save this agent, then open its model picker to sign in, or run `buzz-agent auth databricks`",
+    ),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "muted");
+  assert.match(status?.message ?? "", /model picker/);
+  assert.match(status?.message ?? "", /buzz-agent auth databricks/);
+});
+
+test("Databricks sign-in failure warns and points at the explicit retry", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Databricks sign-in failed: oauth callback: access_denied"),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /didn't complete/);
+  assert.match(status?.message ?? "", /model picker/);
+});
+
+test("Databricks sign-in timeout warns and points at the explicit retry", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(
+      "Databricks sign-in timed out; open the model picker to retry, or run `buzz-agent auth databricks`",
+    ),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /didn't complete/);
+  assert.match(status?.message ?? "", /buzz-agent auth databricks/);
+});
+
+test("other Databricks discovery failures fall through to the generic notice", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Databricks model discovery failed: relay offline"),
+    "databricks_v2",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Using built-in model options/);
 });
 
 test("auth-required errors name the agent and ask for sign-in", () => {

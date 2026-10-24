@@ -27,10 +27,8 @@ class _ChannelTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final contentColor = isMuted
-        ? navigationSecondaryForeground(context)
-        : navigationPrimaryForeground(
-            context,
-          ).withValues(alpha: isUnread ? 1 : 0.8);
+        ? navigationMetadataForeground(context)
+        : channelNavigationForeground(context);
 
     return InkWell(
       borderRadius: BorderRadius.circular(Radii.md),
@@ -45,34 +43,58 @@ class _ChannelTile extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            SizedBox(
-              width: _kChannelLeadingWidth,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: channel.isDm
-                    ? _DmAvatar(channel: channel, currentPubkey: currentPubkey)
-                    : Icon(
-                        channelIcon(channel),
-                        key: ValueKey('channel-icon-${channel.id}'),
-                        size: _kChannelIconSize,
-                        color: contentColor,
-                      ),
+            if (channel.isDm) ...[
+              SizedBox(
+                width: _kChannelLeadingWidth,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: _DmAvatar(
+                    channel: channel,
+                    currentPubkey: currentPubkey,
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(width: _kChannelLabelGap),
+              const SizedBox(width: _kChannelLabelGap),
+            ] else ...[
+              SizedBox(
+                width: _kChannelLeadingWidth,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Icon(
+                    channel.visibility == 'private'
+                        ? BuzzIcons.lock
+                        : BuzzIcons.hash,
+                    key: ValueKey('channel-icon-${channel.id}'),
+                    size: _kChannelIconSize,
+                    color: contentColor,
+                  ),
+                ),
+              ),
+              const SizedBox(width: _kChannelLabelGap),
+            ],
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    resolveDmChannelDisplayLabel(
-                      channel,
-                      currentPubkey: currentPubkey,
+                    ref.watch(
+                      identityNameSourcesProvider.select(
+                        (names) => resolveDmChannelDisplayLabel(
+                          channel,
+                          currentPubkey: currentPubkey,
+                          names: names,
+                        ),
+                      ),
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: contentListTitleTextStyle.copyWith(
-                      color: contentColor,
+                      color: isMuted
+                          ? contentColor
+                          : channelNavigationForeground(
+                              context,
+                              unread: isUnread,
+                            ),
                       fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
                     ),
                   ),
@@ -85,10 +107,15 @@ class _ChannelTile extends ConsumerWidget {
             ],
             if (isMuted) ...[
               const SizedBox(width: Grid.xxs),
-              Icon(
-                LucideIcons.bellOff,
-                size: 12,
-                color: context.colors.onSurface.withValues(alpha: 0.4),
+              SizedBox(
+                width: _kChannelIconSize,
+                child: Center(
+                  child: Icon(
+                    BuzzIcons.bellOff,
+                    size: 12,
+                    color: navigationMetadataForeground(context),
+                  ),
+                ),
               ),
             ],
             if (!channel.isMember && !channel.isDm)
@@ -137,8 +164,6 @@ class _DmAvatar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final profiles = ref.watch(userCacheProvider);
-    final presenceMap = ref.watch(presenceCacheProvider);
     final normalizedCurrent = currentPubkey?.toLowerCase();
     final otherPubkeys = [
       for (final pk in channel.participantPubkeys)
@@ -171,7 +196,16 @@ class _DmAvatar extends ConsumerWidget {
     }
 
     final otherPubkey = visiblePubkeys.isNotEmpty ? visiblePubkeys.first : null;
-    final profile = otherPubkey != null ? profiles[otherPubkey] : null;
+    final profile = ref.watch(
+      userCacheProvider.select(
+        (profiles) => otherPubkey == null ? null : profiles[otherPubkey],
+      ),
+    );
+    final presence = ref.watch(
+      presenceCacheProvider.select(
+        (presenceMap) => otherPubkey == null ? null : presenceMap[otherPubkey],
+      ),
+    );
 
     // Trigger fetches if not cached yet.
     if (otherPubkey != null) {
@@ -182,15 +216,14 @@ class _DmAvatar extends ConsumerWidget {
     }
 
     final avatarUrl = profile?.avatarUrl;
+    // Keyed to the hex public key when the counterpart is unnamed and the
+    // profile isn't cached — the compact-npub participant label would
+    // otherwise render `N` for every unnamed DM counterpart. Selection skips
+    // the current user like the row label does, so the initial always
+    // identifies the same counterpart the label names.
     final initial =
         profile?.initial ??
-        (channel.participants.isNotEmpty
-            ? channel.participants.first[0].toUpperCase()
-            : '?');
-    final presence = otherPubkey != null
-        ? (presenceMap[otherPubkey] ?? 'offline')
-        : 'offline';
-
+        dmAvatarInitial(channel, currentPubkey: currentPubkey);
     return SizedBox(
       width: _kDmAvatarSize,
       height: _kDmAvatarSize,
@@ -200,7 +233,7 @@ class _DmAvatar extends ConsumerWidget {
           AvatarImage(
             imageUrl: avatarUrl,
             radius: _kDmAvatarSize / 2,
-            backgroundColor: context.colors.primaryContainer,
+            backgroundColor: context.controlSurface,
             fallback: Text(
               initial,
               style: context.textTheme.labelSmall?.copyWith(
@@ -209,29 +242,31 @@ class _DmAvatar extends ConsumerWidget {
                 fontWeight: FontWeight.w600,
               ),
             ),
+            isAgent: profile?.isAgent == true,
           ),
-          Positioned(
-            right: -1,
-            bottom: -1,
-            child: Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                color: _presenceColor(context, presence),
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: context.theme.scaffoldBackgroundColor,
-                  width: 1.5,
+          if (presence != null)
+            Positioned(
+              right: -1,
+              bottom: -1,
+              child: Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: _presenceColor(context, presence),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: context.theme.scaffoldBackgroundColor,
+                    width: 1.5,
+                  ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
   }
 
-  Color _presenceColor(BuildContext context, String presence) {
+  Color _presenceColor(BuildContext context, String? presence) {
     return switch (presence) {
       'online' => context.appColors.success,
       'away' => context.appColors.warning,

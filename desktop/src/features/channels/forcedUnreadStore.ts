@@ -74,7 +74,15 @@ export function removeForcedUnreadSource(
 }
 
 const STORAGE_PREFIX = "buzz-forced-unread.v1";
+export const MAX_FORCED_UNREAD_ENTRIES = 500;
 const storageKey = (pubkey: string) => `${STORAGE_PREFIX}:${pubkey}`;
+
+export function boundForcedUnreadMap(map: ForcedUnreadMap): ForcedUnreadMap {
+  const entries = Object.entries(map);
+  return entries.length <= MAX_FORCED_UNREAD_ENTRIES
+    ? map
+    : Object.fromEntries(entries.slice(-MAX_FORCED_UNREAD_ENTRIES));
+}
 
 export const forcedUnreadStore = {
   read(pubkey: string): ForcedUnreadMap {
@@ -113,14 +121,17 @@ export const forcedUnreadStore = {
           }
         }
       }
-      return result;
+      return boundForcedUnreadMap(result);
     } catch {
       return {};
     }
   },
   write(pubkey: string, map: ForcedUnreadMap): void {
     try {
-      window.localStorage.setItem(storageKey(pubkey), JSON.stringify(map));
+      window.localStorage.setItem(
+        storageKey(pubkey),
+        JSON.stringify(boundForcedUnreadMap(map)),
+      );
     } catch {
       // Ignore storage errors (private browsing, quota exceeded).
     }
@@ -148,7 +159,9 @@ export function useForcedUnreadActions(
         source,
       );
       if (next === current) return;
+      delete forcedUnreadRef.current[channelId];
       forcedUnreadRef.current[channelId] = next;
+      forcedUnreadRef.current = boundForcedUnreadMap(forcedUnreadRef.current);
       persist();
     },
     [forcedUnreadRef, getOwnTimestamp, persist],

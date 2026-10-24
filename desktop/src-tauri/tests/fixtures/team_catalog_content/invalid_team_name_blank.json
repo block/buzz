@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "name": "   ",
+  "members": [
+    {
+      "member_key": "reviewer",
+      "display_name": "Relay Reviewer",
+      "system_prompt": "Review."
+    }
+  ]
+}

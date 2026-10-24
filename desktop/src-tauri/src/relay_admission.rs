@@ -17,6 +17,10 @@
 //! are driven by user-initiated file transfers rather than bridge event flow,
 //! and they have independent retry logic.
 //!
+//! The native WS client also arms this gate for the explicit
+//! `shared admission unavailable` signal. Quota/concurrency CLOSEDs stay on
+//! WebSocket; they do not consume the HTTP bridge's separate ApiCalls budget.
+//!
 //! **Community scope:** the gate is reset on every `apply_workspace` call,
 //! mirroring the TS gate's `resetRateLimitGate()` on community switch in
 //! `useCommunityInit.ts`. A 429 from community A cannot stall community B.
@@ -36,11 +40,14 @@ const DEFAULT_RATE_LIMIT_SECONDS: u64 = 10;
 /// Prevents an untrusted relay from pinning traffic for an unreasonable window
 /// or overflowing `Instant` arithmetic.
 /// Exposed `pub` so `relay.rs` can clamp the hint before embedding it in the
-/// returned error string — ensuring every consumer (Rust gate and TS gate via
-/// `applyTauriRateLimitIfNeeded`) sees the same capped value.
+/// returned error string, matching the window the native HTTP gate honours.
 pub const MAX_HINT_SECONDS: u64 = 300;
 
 static GATE_EXPIRY: Mutex<Option<Instant>> = Mutex::new(None);
+
+// The gate is process-wide, so every test that can arm it must serialize.
+#[cfg(test)]
+pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Arm (or extend) the admission gate from a relay 429.
 ///
@@ -101,18 +108,16 @@ pub fn reset_rate_limit_gate() {
 }
 
 #[cfg(test)]
-#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 
     // The gate is a process-wide static shared by every test in this binary,
-    // so all gate tests serialize on one async lock to keep armed expiries
+    // so all tests that arm it serialize on one async lock to keep expiries
     // from bleeding between parallel test threads.
-    pub(crate) static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test(start_paused = true)]
     async fn wait_returns_immediately_when_gate_is_inactive() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
         let start = Instant::now();
         wait_for_rate_limit().await;
@@ -125,7 +130,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn hintless_429_arms_the_ten_second_default() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
         activate_rate_limit(None);
         let start = Instant::now();
@@ -136,7 +141,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn shorter_hint_never_shrinks_an_active_window() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
         activate_rate_limit(Some(8));
         activate_rate_limit(Some(1));
@@ -152,7 +157,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn concurrent_429_extends_the_window_for_parked_waiters() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
         activate_rate_limit(Some(2));
         let start = Instant::now();
@@ -175,7 +180,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn hint_zero_uses_default() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
         activate_rate_limit(Some(0));
         let start = Instant::now();
@@ -190,7 +195,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn hint_at_max_is_honoured() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
         activate_rate_limit(Some(MAX_HINT_SECONDS));
         let start = Instant::now();
@@ -205,7 +210,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn oversize_hint_is_clamped_to_max() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
         // An oversize hint (including u64::MAX) must clamp rather than panic.
         activate_rate_limit(Some(u64::MAX));
@@ -223,7 +228,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn workspace_change_clears_armed_gate() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
         activate_rate_limit(Some(60));
         // Switch workspace — gate for community A must not stall community B.
@@ -239,7 +244,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn community_a_gate_does_not_block_community_b() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
         // Community A gets a 429 with a 30s window.
         activate_rate_limit(Some(30));
@@ -265,7 +270,7 @@ mod tests {
     async fn gate_armed_by_one_path_withholds_another_path() {
         use std::io::{Read, Write};
 
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
 
         // The loopback server answers every request with 200 [].
@@ -327,7 +332,7 @@ mod tests {
     /// is the same bound as if the workspace had not changed.
     #[tokio::test(start_paused = true)]
     async fn parked_waiter_does_not_wake_early_after_workspace_reset() {
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
 
         // Arm a 5s gate for community A.
@@ -376,7 +381,7 @@ mod tests {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
         use serde::Deserialize;
 
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
 
         // Arm the gate for 1s (real time — NIP-98 uses SystemTime, not Tokio clock).
@@ -436,7 +441,7 @@ mod tests {
     async fn http_429_withholds_next_relay_command_until_expiry_then_resumes() {
         use std::io::{Read, Write};
 
-        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = TEST_SERIAL.lock().await;
         reset_rate_limit_gate();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

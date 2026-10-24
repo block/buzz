@@ -1,6 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/features/channels/channel.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 /// Tests for [channelDetailsFromEvent].
@@ -11,6 +14,52 @@ import 'package:buzz/shared/relay/relay.dart';
 /// also exposed on `ChannelDetails` MUST be propagated here — otherwise
 /// `mergeDetails` silently clears that state on the merged Channel.
 void main() {
+  test(
+    'Solo metadata survives details merges and classifies only own private streams',
+    () {
+      for (final type in ['stream', 'forum', 'dm']) {
+        for (final private in [true, false]) {
+          final details = channelDetailsFromEvent(
+            NostrEvent(
+              id: 'metadata',
+              pubkey: 'relay',
+              createdAt: 1,
+              kind: 39000,
+              tags: [
+                ['d', 'chat'],
+                ['t', type],
+                ['t', 'buzz.solo'],
+                ['P', 'owner'],
+                [private ? 'private' : 'public'],
+              ],
+              content: '',
+              sig: '',
+            ),
+          );
+          final channel = Channel(
+            id: 'chat',
+            name: '',
+            channelType: 'stream',
+            visibility: 'private',
+            description: '',
+            createdBy: 'relay',
+            createdAt: DateTime(2026),
+            memberCount: 1,
+          ).mergeDetails(details).copyWith(isMember: true);
+          expect(channel.labels, ['buzz.solo']);
+          expect(channel.createdBy, 'owner');
+          expect(channel.isSolo, type == 'stream' && private);
+          expect(
+            channel.isPersonalChat('owner', const []),
+            type == 'stream' && private,
+          );
+          expect(channel.isPersonalChat('other', const []), isFalse);
+          expect(ChannelDetails.fromChannel(channel).labels, ['buzz.solo']);
+        }
+      }
+    },
+  );
+
   test('extracts unique relay members from current and legacy tags', () {
     final pubkeys = relayMemberPubkeysFromEvents([
       NostrEvent(
@@ -77,6 +126,69 @@ void main() {
     expect(users.map((user) => user.label), ['Alice', 'Bob']);
     expect(users.first.pubkey, 'alice');
     expect(users.first.avatarUrl, 'https://example.com/alice.png');
+  });
+
+  group('identity labels', () {
+    // Valid fixture keys whose npub encodings were verified against the
+    // NIP-19 codec independently of the code under test.
+    const alicePubkey =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    const bobPubkey =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+
+    test('member labels honor "You", authored names, and npub fallback', () {
+      final unnamed = ChannelMember(
+        pubkey: alicePubkey,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(0),
+      );
+      final named = ChannelMember(
+        pubkey: alicePubkey,
+        role: 'member',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(0),
+        displayName: '  Alice  ',
+      );
+
+      // Unnamed members fall back to the compact npub …
+      expect(unnamed.labelFor(null), 'npub15yw…ccpw');
+      // … but only the member's own identity is "You" — never the caller's key.
+      expect(unnamed.labelFor(alicePubkey), 'You');
+      expect(unnamed.labelFor(alicePubkey.toUpperCase()), 'You');
+      expect(unnamed.labelFor(bobPubkey), 'npub15yw…ccpw');
+      // An authored display name wins over every fallback.
+      expect(named.labelFor(bobPubkey), 'Alice');
+    });
+
+    test(
+      'directory labels keep names, one-line npub fallbacks, and initials',
+      () {
+        final unnamed = DirectoryUser(pubkey: alicePubkey);
+        final alsoUnnamed = DirectoryUser(pubkey: bobPubkey);
+        final named = DirectoryUser(
+          pubkey: alicePubkey,
+          displayName: 'Alice',
+          nip05Handle: 'alice@example.com',
+        );
+
+        // Unnamed: the primary label is already the compact key, so a
+        // second key-shaped line would only duplicate it.
+        expect(unnamed.label, 'npub15yw…ccpw');
+        expect(unnamed.secondaryLabel, '');
+        // Initials stay hex-derived — a compact npub would render `N` for all.
+        expect(unnamed.initial, 'A');
+        expect(alsoUnnamed.initial, 'B');
+        // Named: the authored name leads, the handle keys the second line.
+        expect(named.label, 'Alice');
+        expect(named.secondaryLabel, 'alice@example.com');
+        expect(named.initial, 'A');
+      },
+    );
+
+    test('add-members failures identify the member by compact npub', () {
+      const failure = AddMembersException({alicePubkey: 'not a member'});
+
+      expect(failure.message, 'npub15yw…ccpw: not a member');
+    });
   });
 
   test('propagates archived state from kind:39000 archived tag', () {
@@ -155,6 +267,28 @@ void main() {
   });
 
   group('buildCreateChannelTags', () {
+    test(
+      'Solo creation carries its discovery label without client creator claims',
+      () {
+        final tags = buildCreateChannelTags(
+          channelId: _channelId,
+          name: 'Solo',
+          channelType: 'stream',
+          visibility: 'private',
+          labels: const ['buzz.solo'],
+        );
+        expect(tags, contains(equals(['t', 'buzz.solo'])));
+        expect(tags.where((tag) => tag.first == 'P'), isEmpty);
+        final ordinary = buildCreateChannelTags(
+          channelId: _channelId,
+          name: 'Private channel',
+          channelType: 'stream',
+          visibility: 'private',
+        );
+        expect(ordinary.where((tag) => tag.first == 't'), isEmpty);
+      },
+    );
+
     test('builds an ongoing channel without a ttl tag', () {
       final tags = buildCreateChannelTags(
         channelId: 'c8c629ae-d35c-44fa-bc39-f6c1816756cc',
@@ -201,6 +335,28 @@ void main() {
   });
 
   group('build channel lifecycle tags', () {
+    test('channel edits match desktop kind 9002 tags', () {
+      expect(
+        buildUpdateChannelTags(
+          channelId: 'channel-id',
+          name: '  ###general  ',
+          description: ' Team updates ',
+        ),
+        [
+          ['h', 'channel-id'],
+          ['name', 'general'],
+          ['about', 'Team updates'],
+        ],
+      );
+    });
+
+    test('channel edits reject a hash-only name', () {
+      expect(
+        () => buildUpdateChannelTags(channelId: 'channel-id', name: ' ### '),
+        throwsArgumentError,
+      );
+    });
+
     test('archive matches kind 9002 tags', () {
       expect(buildSetChannelArchivedTags('channel-id', archived: true), [
         ['h', 'channel-id'],
@@ -219,6 +375,330 @@ void main() {
       expect(buildDeleteChannelTags('channel-id'), [
         ['h', 'channel-id'],
       ]);
+    });
+  });
+
+  test(
+    'create and join stop before submitting after a community switch',
+    () async {
+      final keys = nostr.Keys.generate();
+      final session = _RecordingPublishRelaySession();
+      final actionsProvider = Provider<ChannelActions>((ref) {
+        return ChannelActions(
+          ref: ref,
+          session: session,
+          signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+          currentPubkey: keys.public,
+          isCommunityValid: () => false,
+        );
+      });
+      final container = ProviderContainer(retry: (_, _) => null);
+      addTearDown(container.dispose);
+
+      final actions = container.read(actionsProvider);
+      await expectLater(
+        actions.createChannel(
+          channelId: _channelId,
+          name: 'general',
+          channelType: 'stream',
+          visibility: 'open',
+        ),
+        throwsA(isA<StateError>()),
+      );
+      await expectLater(
+        actions.joinChannel(_channelId),
+        throwsA(isA<StateError>()),
+      );
+
+      expect(session.publishedEvents, isEmpty);
+    },
+  );
+
+  group('Huddle channel lifecycle', () {
+    test(
+      'starts from accepted signed events without refreshing all channels',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _RecordingPublishRelaySession();
+        final actionsProvider = Provider<ChannelActions>((ref) {
+          return ChannelActions(
+            ref: ref,
+            session: session,
+            signedEventRelay: SignedEventRelay(
+              session: session,
+              nsec: keys.nsec,
+            ),
+            currentPubkey: keys.public,
+          );
+        });
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            myPubkeyProvider.overrideWithValue(keys.public),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final actions = container.read(actionsProvider);
+        final backingChannelId = await actions.createHuddleBackingChannel();
+        final started = await actions.announceHuddleStarted(
+          parentChannelId: _channelId,
+          ephemeralChannelId: backingChannelId,
+        );
+
+        expect(session.historyQueryCount, 0);
+        expect(session.publishedEvents, hasLength(2));
+        final create = session.publishedEvents.first;
+        expect(create.kind, 9007);
+        expect(create.tags, contains(equals(['h', backingChannelId])));
+        expect(create.tags, contains(equals(['visibility', 'private'])));
+        expect(create.tags, contains(equals(['channel_type', 'stream'])));
+        expect(create.tags, contains(equals(['ttl', '3600'])));
+
+        final start = session.publishedEvents.last;
+        expect(start.kind, EventKind.huddleStarted);
+        expect(start.tags, [
+          ['h', _channelId],
+        ]);
+        expect(start.content, '{"ephemeral_channel_id":"$backingChannelId"}');
+        expect(started.id, start.id);
+      },
+    );
+
+    test(
+      'publishes ephemeral Huddle reactions on the backing channel',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _RecordingPublishRelaySession();
+        final actionsProvider = Provider<ChannelActions>((ref) {
+          return ChannelActions(
+            ref: ref,
+            session: session,
+            signedEventRelay: SignedEventRelay(
+              session: session,
+              nsec: keys.nsec,
+            ),
+            currentPubkey: keys.public,
+          );
+        });
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            myPubkeyProvider.overrideWithValue(keys.public),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(actionsProvider)
+            .sendHuddleReaction(
+              channelId: _channelId,
+              emoji: ' 🎉 ',
+              senderName: 'Self',
+            );
+
+        expect(session.publishedEvents, hasLength(1));
+        final reaction = session.publishedEvents.single;
+        expect(reaction.kind, EventKind.huddleReaction);
+        expect(reaction.content, '🎉');
+        expect(reaction.tags, [
+          ['h', _channelId],
+          ['reaction', '🎉'],
+          ['sender_name', 'Self'],
+        ]);
+      },
+    );
+
+    test('last-human count ignores a stale cached roster', () async {
+      final session = _ConnectionAwareRelaySession();
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          channelMembersProvider(_channelId).overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: _memberPubkey,
+                role: 'admin',
+                joinedAt: DateTime(2025),
+              ),
+              ChannelMember(
+                pubkey:
+                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      session.connect();
+      expect(
+        await container.read(channelMembersProvider(_channelId).future),
+        hasLength(2),
+      );
+
+      final humanCount = await container.read(huddleHumanCountProvider)(
+        _channelId,
+      );
+
+      expect(humanCount, 1);
+      expect(session.historyQueryCount, 1);
+    });
+  });
+
+  test(
+    'stale channel actions cannot publish after a community switch',
+    () async {
+      final session = RelaySessionNotifier();
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final staleActions = container.read(channelActionsProvider);
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://other-community.example', nsec: null);
+
+      final operations = <Future<void> Function()>[
+        () =>
+            staleActions.updateChannel(channelId: _channelId, name: 'renamed'),
+        () => staleActions.archiveChannel(_channelId),
+        () => staleActions.unarchiveChannel(_channelId),
+        () => staleActions.deleteChannel(_channelId),
+        () => staleActions.setCanvas(channelId: _channelId, content: 'canvas'),
+        () => staleActions.changeMemberRole(
+          channelId: _channelId,
+          pubkey: _memberPubkey,
+          role: 'admin',
+        ),
+        () => staleActions.removeMember(
+          channelId: _channelId,
+          pubkey: _memberPubkey,
+        ),
+        () => staleActions.leaveChannel(_channelId),
+      ];
+
+      for (final operation in operations) {
+        await expectLater(operation(), throwsA(isA<StateError>()));
+      }
+    },
+  );
+
+  group('channelMembersProvider', () {
+    test('waits for the relay connection before fetching members', () async {
+      final session = _ConnectionAwareRelaySession();
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      final subscription = container.listen(
+        channelMembersProvider(_channelId),
+        (_, _) {},
+      );
+      addTearDown(subscription.close);
+
+      expect(
+        await container.read(channelMembersProvider(_channelId).future),
+        isEmpty,
+      );
+      expect(session.historyQueryCount, 0);
+
+      session.connect();
+      await container.pump();
+      final members = await container.read(
+        channelMembersProvider(_channelId).future,
+      );
+
+      expect(session.historyQueryCount, 1);
+      expect(members, hasLength(1));
+      expect(members.single.pubkey, _memberPubkey);
+      expect(members.single.role, 'admin');
+    });
+
+    test(
+      'keeps the provider member snapshot available during reconnect',
+      () async {
+        final session = _ConnectionAwareRelaySession();
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+        final subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        addTearDown(subscription.close);
+
+        session.connect();
+        await container.pump();
+        final connectedMembers = await container.read(
+          channelMembersProvider(_channelId).future,
+        );
+        expect(connectedMembers, hasLength(1));
+        expect(session.historyQueryCount, 1);
+
+        session.setStatus(SessionStatus.reconnecting);
+        await container.pump();
+
+        final reconnectingMembers = container
+            .read(channelMembersProvider(_channelId))
+            .asData
+            ?.value;
+        expect(reconnectingMembers, connectedMembers);
+        expect(session.historyQueryCount, 1);
+      },
+    );
+
+    test('keeps the member snapshot available during reconnect', () {
+      final cachedMembers = [
+        ChannelMember(
+          pubkey: _memberPubkey,
+          role: 'member',
+          joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+        ),
+      ];
+      final refreshedMember = ChannelMember(
+        pubkey: _memberPubkey,
+        role: 'admin',
+        joinedAt: DateTime.fromMillisecondsSinceEpoch(2000),
+      );
+
+      expect(
+        channelMembersForAutocomplete(
+          membersAsync: const AsyncData([]),
+          sessionStatus: SessionStatus.connected,
+          cachedMembers: cachedMembers,
+        ),
+        isEmpty,
+      );
+      expect(
+        channelMembersForAutocomplete(
+          membersAsync: const AsyncData([]),
+          sessionStatus: SessionStatus.reconnecting,
+          cachedMembers: cachedMembers,
+        ),
+        same(cachedMembers),
+      );
+      expect(
+        channelMembersForAutocomplete(
+          membersAsync: AsyncData([refreshedMember]),
+          sessionStatus: SessionStatus.connected,
+          cachedMembers: cachedMembers,
+        ),
+        [refreshedMember],
+      );
     });
   });
 
@@ -312,6 +792,27 @@ void main() {
       expect(session.searchQueryCount, 2);
     });
 
+    test('search results keep the relay ranking', () async {
+      // The relay ranks the exact name first; alphabetizing would move
+      // "Abe Wes" above "Wes".
+      final session = _DirectoryFakeRelaySession(
+        profileEvents: [profile('wes', 'Wes'), profile('abe', 'Abe Wes')],
+      );
+      final container = buildContainer(session);
+      addTearDown(container.dispose);
+
+      final results = await container.read(
+        relayDirectorySearchProvider('wes').future,
+      );
+      expect(results.map((user) => user.label), ['Wes', 'Abe Wes']);
+      final found = await container
+          .read(channelActionsProvider)
+          .searchUsers('wes');
+      expect(found.map((user) => user.label), ['Wes', 'Abe Wes']);
+      final browsed = await container.read(relayDirectoryUsersProvider.future);
+      expect(browsed.map((user) => user.label), ['Abe Wes', 'Wes']);
+    });
+
     test('cached search families are released once unlistened', () async {
       final session = _DirectoryFakeRelaySession(
         profileEvents: [profile('alice', 'Alice')],
@@ -335,6 +836,92 @@ void main() {
   });
 }
 
+const _channelId = '11111111-1111-4111-8111-111111111111';
+const _memberPubkey =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+class _RecordingPublishRelaySession extends RelaySessionNotifier {
+  final publishedEvents = <NostrEvent>[];
+  int historyQueryCount = 0;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    publishedEvents.add(event);
+    return event;
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    historyQueryCount++;
+    return const [];
+  }
+}
+
+class _FixedRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() =>
+      RelayConfig(baseUrl: 'https://first-community.example', nsec: null);
+
+  @override
+  void update({required String baseUrl, String? nsec}) {
+    state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
+  }
+}
+
+class _ConnectionAwareRelaySession extends RelaySessionNotifier {
+  int historyQueryCount = 0;
+
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.disconnected);
+
+  void connect() {
+    state = const SessionState(status: SessionStatus.connected);
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    historyQueryCount++;
+    return [
+      NostrEvent(
+        id: 'members',
+        pubkey: 'owner',
+        createdAt: 1,
+        kind: 39002,
+        tags: const [
+          ['d', _channelId],
+          ['p', _memberPubkey, 'wss://relay.example', 'admin'],
+        ],
+        content: '',
+        sig: 'sig',
+      ),
+    ];
+  }
+
+  void setStatus(SessionStatus status) {
+    state = SessionState(status: status);
+  }
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async => () {};
+}
+
 /// Fake [RelaySessionNotifier] that serves canned kind:0 profile events from
 /// [queryRelay] and counts directory vs. search queries.
 class _DirectoryFakeRelaySession extends RelaySessionNotifier {
@@ -353,10 +940,19 @@ class _DirectoryFakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (filters.any((filter) => filter.search != null)) {
-      searchQueryCount++;
-    } else {
-      directoryQueryCount++;
+      throw StateError('name search must use searchProfiles');
     }
+    directoryQueryCount++;
+    return profileEvents;
+  }
+
+  @override
+  Future<List<NostrEvent>> searchProfiles(
+    String query, {
+    int limit = 50,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    searchQueryCount++;
     return profileEvents;
   }
 
