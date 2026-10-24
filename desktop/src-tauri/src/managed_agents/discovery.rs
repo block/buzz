@@ -364,16 +364,27 @@ fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
 }
 
 fn command_search_dirs() -> Vec<PathBuf> {
+    command_search_dirs_for(
+        cfg!(debug_assertions),
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf)),
+    )
+}
+
+fn command_search_dirs_for(debug_build: bool, executable_dir: Option<PathBuf>) -> Vec<PathBuf> {
     let mut dirs = profile_target_dirs(&workspace_root_dir()).to_vec();
     if let Ok(current_dir) = std::env::current_dir() {
         dirs.extend(profile_target_dirs(&current_dir));
     }
 
-    dirs.extend(
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf)),
-    );
+    // A packaged app must run the sidecars shipped with that app, even when
+    // its build checkout still exists. Development keeps fresh workspace tools first.
+    if debug_build {
+        dirs.extend(executable_dir);
+    } else if let Some(dir) = executable_dir {
+        dirs.insert(0, dir);
+    }
     dirs.into_iter().fold(Vec::new(), |mut unique, dir| {
         if !unique.contains(&dir) {
             unique.push(dir);
@@ -1258,3 +1269,6 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod packaged_sidecar_tests;
