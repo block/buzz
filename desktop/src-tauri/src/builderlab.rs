@@ -235,9 +235,10 @@ impl BuilderlabSession {
             .lock()
             .ok()
             .and_then(|stored| {
-                stored
-                    .as_ref()
-                    .map(|stored| stored.employee.is_some() && stored.refusal.is_some())
+                stored.as_ref().map(|stored| {
+                    stored.employee.is_some()
+                        && (stored.refusal.is_some() || stored.assertion.is_none())
+                })
             })
             .unwrap_or(false)
     }
@@ -447,11 +448,40 @@ fn login_url(return_to: &str) -> Result<Url, String> {
     Ok(login_url)
 }
 
+enum SessionCheckError {
+    Rejected(String),
+    Unavailable(String),
+}
+
+impl From<String> for SessionCheckError {
+    fn from(message: String) -> Self {
+        Self::Unavailable(message)
+    }
+}
+
+impl SessionCheckError {
+    fn message(self) -> String {
+        match self {
+            Self::Rejected(message) | Self::Unavailable(message) => message,
+        }
+    }
+}
+
 pub(crate) async fn authenticated_user(
     client: &reqwest::Client,
     credential: &str,
     api_base: &str,
 ) -> Result<AuthMeResponse, String> {
+    check_authenticated_user(client, credential, api_base)
+        .await
+        .map_err(SessionCheckError::message)
+}
+
+async fn check_authenticated_user(
+    client: &reqwest::Client,
+    credential: &str,
+    api_base: &str,
+) -> Result<AuthMeResponse, SessionCheckError> {
     let builder = client
         .get(api_url_for_base(api_base, "/v1/auth/me")?)
         .header(BB_SESSION_CREDENTIAL_HEADER, session_header(credential)?)
@@ -461,22 +491,27 @@ pub(crate) async fn authenticated_user(
     } else {
         builder
             .build()
-            .map_err(|_| "Could not prepare Builderlab session check")?
+            .map_err(|_| "Could not prepare Builderlab session check".to_owned())?
     };
     let response = client
         .execute(request)
         .await
         .map_err(|error| format!("Builderlab session check failed: {error}"))?;
     if !response.status().is_success() {
-        return Err(format!(
+        let message = format!(
             "Builderlab session check failed with HTTP {}",
             response.status()
-        ));
+        );
+        return Err(match response.status() {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                SessionCheckError::Rejected(message)
+            }
+            _ => SessionCheckError::Unavailable(message),
+        });
     }
-    response
-        .json()
-        .await
-        .map_err(|error| format!("invalid Builderlab session response: {error}"))
+    response.json().await.map_err(|error| {
+        SessionCheckError::Unavailable(format!("invalid Builderlab session response: {error}"))
+    })
 }
 
 #[tauri::command]
@@ -612,20 +647,31 @@ pub(crate) async fn get_builderlab_auth(
     app_state: tauri::State<'_, crate::app_state::AppState>,
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<Option<BuilderlabAuthInfo>, String> {
-    let stored = session.request_context(&app_state)?;
+    check_stored_auth(&app_state, &session).await
+}
+
+async fn check_stored_auth(
+    app_state: &crate::app_state::AppState,
+    session: &BuilderlabSession,
+) -> Result<Option<BuilderlabAuthInfo>, String> {
+    let stored = session.request_context(app_state)?;
     let Some((credential, api_base)) = stored else {
         return Ok(None);
     };
-    match authenticated_user(&app_state.media_fetch_client, &credential, api_base).await {
+    match check_authenticated_user(&app_state.media_fetch_client, &credential, api_base).await {
         Ok(me) => Ok(Some(BuilderlabAuthInfo {
             expires_at: me.expires_at,
             email: me.email,
             name: me.name,
         })),
         Err(error) => {
-            session.clear_if_credential(&credential)?;
-            notify_session_changed(&app_state);
-            Err(error)
+            // Losing reachability does not revoke a credential. Keep it for a later
+            // retry; only an authoritative authentication refusal ends the session.
+            if matches!(&error, SessionCheckError::Rejected(_)) {
+                session.clear_if_credential(&credential)?;
+                notify_session_changed(app_state);
+            }
+            Err(error.message())
         }
     }
 }
@@ -886,6 +932,83 @@ pub(crate) async fn transfer_builderlab_community(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stored_session_survives_transient_checks_but_not_authentication_refusal() {
+        for status in [
+            StatusCode::OK, // Malformed successful responses are not revocation evidence.
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base =
+                Box::leak(format!("http://{}", listener.local_addr().unwrap()).into_boxed_str());
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    Router::new().route(
+                        "/v1/auth/me",
+                        get(move || async move { (status, "invalid JSON") }),
+                    ),
+                )
+                .await
+                .unwrap();
+            });
+            let state = crate::app_state::build_app_state();
+            let session = BuilderlabSession::default();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            session
+                .replace(StoredSession {
+                    credential: "session-fixture".to_owned(),
+                    api_base: base,
+                    employee: None,
+                    assertion: None,
+                    refusal: None,
+                    cancel: cancel.clone(),
+                })
+                .unwrap();
+            assert!(check_stored_auth(&state, &session).await.is_err());
+            let rejected = matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN);
+            assert_eq!(
+                session.request_context(&state).unwrap().is_none(),
+                rejected,
+                "{status}"
+            );
+            assert_eq!(cancel.is_cancelled(), rejected, "{status}");
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn unreachable_session_endpoint_preserves_the_stored_credential() {
+        // Close a reserved port without starting an HTTP server, so this request
+        // cannot reuse a live pooled connection from a preceding response.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = Box::leak(format!("http://{}", listener.local_addr().unwrap()).into_boxed_str());
+        drop(listener);
+        let state = crate::app_state::build_app_state();
+        let session = BuilderlabSession::default();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        session
+            .replace(StoredSession {
+                credential: "session-fixture".to_owned(),
+                api_base: base,
+                employee: None,
+                assertion: None,
+                refusal: None,
+                cancel: cancel.clone(),
+            })
+            .unwrap();
+        assert!(check_stored_auth(&state, &session).await.is_err());
+        assert_eq!(
+            session.request_context(&state).unwrap().unwrap().0,
+            "session-fixture"
+        );
+        assert!(!cancel.is_cancelled());
+    }
 
     #[test]
     fn employee_session_retains_origin_and_rejects_canceled_or_replaced_identity() {

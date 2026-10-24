@@ -544,3 +544,29 @@ fn queued_employee_request_refreshes_only_the_expired_nip98_proof() {
     }
     assert_eq!(request.body().unwrap().as_bytes().unwrap(), body);
 }
+
+#[tokio::test]
+async fn transient_assertion_refresh_failure_can_retry_without_another_login() {
+    let fixture = Fixture::new(false, false).await;
+    fixture.evidence().await.unwrap();
+    assert!(!fixture.session.employee_can_retry(&fixture.state));
+    fixture.session.invalidate_employee_assertion().unwrap();
+    *fixture.stub.status.lock().unwrap() = StatusCode::SERVICE_UNAVAILABLE;
+    assert!(fixture.evidence().await.is_err());
+    assert!(fixture.session.employee_expiry(&fixture.state).is_none());
+    assert!(fixture.session.employee_can_retry(&fixture.state));
+    assert!(fixture
+        .session
+        .request_context(&fixture.state)
+        .unwrap()
+        .is_some());
+    *fixture.stub.status.lock().unwrap() = StatusCode::OK;
+    let keys = fixture.state.signing_keys().unwrap();
+    fixture
+        .session
+        .evidence_with_refresh(&fixture.state, &keys, &fixture.relay, true)
+        .await
+        .unwrap();
+    assert!(fixture.session.employee_expiry(&fixture.state).is_some());
+    assert!(!fixture.session.employee_can_retry(&fixture.state));
+}
