@@ -15,11 +15,39 @@ use url::Url;
 const BUILDERLAB_API_BASE_URL: &str = "https://app.builderlab.xyz/api/goose";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const BB_SESSION_CREDENTIAL_HEADER: &str = "X-BB-Session-Credential";
+fn session_header(credential: &str) -> Result<reqwest::header::HeaderValue, String> {
+    let mut value = reqwest::header::HeaderValue::from_str(credential)
+        .map_err(|_| "Invalid identity session")?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+/// A committed key/community change must close sockets using the previous employee session.
+pub(crate) fn invalidate_changed_employee_context(state: &crate::app_state::AppState) {
+    use tauri::Manager;
+    let handle = state
+        .app_handle
+        .lock()
+        .ok()
+        .and_then(|handle| handle.clone());
+    if let Some(handle) = handle {
+        if let Some(session) = handle.try_state::<BuilderlabSession>() {
+            let _ = session.request_context(state);
+            notify_session_changed(state);
+        }
+    }
+}
+pub(crate) fn notify_session_changed(state: &crate::app_state::AppState) {
+    use tauri::Emitter;
+    if let Some(handle) = state.app_handle.lock().ok().and_then(|value| value.clone()) {
+        let _ = handle.emit("builderlab-session-changed", ());
+    }
+}
+
 // Builderlab enforces an Origin check on the identity bind endpoints. Browsers
 // attach this automatically; the desktop reqwest client must set it explicitly
 // or challenge/verify fail with `invalid_origin`. It also seeds the challenge
 // body's `origin` field so both agree.
-const BUILDERLAB_ORIGIN: &str = "https://app.builderlab.xyz";
 const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
@@ -140,7 +168,7 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
 </html>"#;
 
 #[derive(Default)]
-pub(crate) struct BuilderlabSession(Mutex<Option<StoredSession>>);
+pub(crate) struct BuilderlabSession(Mutex<Option<StoredSession>>, tokio::sync::Mutex<()>);
 
 #[derive(Default)]
 pub(crate) struct BuilderlabLogin(Mutex<Option<PendingLogin>>);
@@ -152,6 +180,197 @@ struct PendingLogin {
 
 struct StoredSession {
     credential: String,
+    api_base: &'static str,
+    employee: Option<EmployeeBinding>,
+    assertion: Option<CachedAssertion>,
+    refusal: Option<String>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+pub(crate) struct EmployeeBinding {
+    pub(crate) pubkey: String,
+    pub(crate) expires_at: i64,
+    pub(crate) relay: String,
+}
+struct CachedAssertion {
+    value: String,
+    expires_at: i64,
+}
+
+mod employee_relay;
+mod employee_response;
+pub(crate) use employee_relay::{
+    employee_evidence, requires_employee, send_employee_media_request, send_employee_request,
+    EmployeeEvidence,
+};
+pub(crate) use employee_response::{
+    employee_response_end, guard_employee_response, ProtectedAssertion,
+};
+
+impl BuilderlabSession {
+    pub(crate) fn employee_expiry(&self, state: &crate::app_state::AppState) -> Option<i64> {
+        self.request_context(state).ok().flatten()?;
+        let stored = self.0.lock().ok()?;
+        let stored = stored.as_ref()?;
+        // A received CLI credential alone is not a connected Buzz identity.
+        stored.assertion.as_ref()?;
+        stored.employee.as_ref().map(|employee| employee.expires_at)
+    }
+    pub(crate) fn invalidate_employee_assertion(&self) -> Result<(), String> {
+        if let Some(stored) = self
+            .0
+            .lock()
+            .map_err(|_| "Square session unavailable")?
+            .as_mut()
+        {
+            stored.assertion = None;
+        }
+        Ok(())
+    }
+    pub(crate) fn employee_can_retry(&self, state: &crate::app_state::AppState) -> bool {
+        if self.request_context(state).ok().flatten().is_none() {
+            return false;
+        }
+        self.0
+            .lock()
+            .ok()
+            .and_then(|stored| {
+                stored.as_ref().map(|stored| {
+                    stored.employee.is_some()
+                        && (stored.refusal.is_some() || stored.assertion.is_none())
+                })
+            })
+            .unwrap_or(false)
+    }
+    fn refuse_employee_access(&self, credential: &str, reason: String) -> Result<(), String> {
+        let mut stored = self.0.lock().map_err(|_| "Square session unavailable")?;
+        if let Some(stored) = stored
+            .as_mut()
+            .filter(|stored| stored.credential == credential)
+        {
+            stored.cancel.cancel();
+            stored.assertion = None;
+            stored.refusal = Some(reason);
+        }
+        Ok(())
+    }
+    pub(crate) fn clear_failed_employee_login(
+        &self,
+        credential: &str,
+        canceled: bool,
+    ) -> Result<(), String> {
+        let mut stored = self.0.lock().map_err(|_| "Square session unavailable")?;
+        if stored.as_ref().is_some_and(|value| {
+            value.credential == credential && (canceled || value.refusal.is_none())
+        }) {
+            if let Some(previous) = stored.take() {
+                previous.cancel.cancel();
+            }
+        }
+        Ok(())
+    }
+    fn replace(&self, next: StoredSession) -> Result<(), String> {
+        let mut current = self.0.lock().map_err(|error| error.to_string())?;
+        if let Some(previous) = current.replace(next) {
+            previous.cancel.cancel();
+        }
+        Ok(())
+    }
+    fn clear(&self) -> Result<(), String> {
+        if let Some(previous) = self.0.lock().map_err(|error| error.to_string())?.take() {
+            previous.cancel.cancel();
+        }
+        Ok(())
+    }
+    pub(crate) fn clear_if_credential(&self, credential: &str) -> Result<(), String> {
+        let mut stored = self.0.lock().map_err(|_| "Square session unavailable")?;
+        if stored
+            .as_ref()
+            .is_some_and(|value| value.credential == credential)
+        {
+            if let Some(previous) = stored.take() {
+                previous.cancel.cancel();
+            }
+        }
+        Ok(())
+    }
+
+    fn request_context(
+        &self,
+        app_state: &crate::app_state::AppState,
+    ) -> Result<Option<(String, &'static str)>, String> {
+        let mut stored = self.0.lock().map_err(|error| error.to_string())?;
+        if let Some(session) = stored.as_ref() {
+            if let Some(expected) = &session.employee {
+                if app_state.signing_keys()?.public_key().to_hex() != expected.pubkey
+                    || chrono::Utc::now().timestamp() >= expected.expires_at
+                    || crate::relay::relay_ws_url_with_override(app_state) != expected.relay
+                {
+                    session.cancel.cancel();
+                    *stored = None;
+                    return Err("Buzz identity changed. Sign in with Square again.".to_owned());
+                }
+            }
+        }
+        Ok(stored
+            .as_ref()
+            .map(|session| (session.credential.clone(), session.api_base)))
+    }
+
+    fn api_origin(&self, app_state: &crate::app_state::AppState) -> Result<String, String> {
+        let (_, base) = self.request_context(app_state)?.ok_or("Sign in first")?;
+        Url::parse(base)
+            .map(|url| url.origin().ascii_serialization())
+            .map_err(|_| "Invalid identity origin".to_owned())
+    }
+
+    pub(crate) fn finish_employee_login(
+        &self,
+        login: &BuilderlabLogin,
+        id: uuid::Uuid,
+        credential: String,
+        api_base: &'static str,
+        employee: EmployeeBinding,
+    ) -> Result<(), String> {
+        let pending = login.0.lock().map_err(|error| error.to_string())?;
+        if pending.as_ref().is_none_or(|pending| pending.id != id) {
+            return Err("Square sign-in canceled".to_owned());
+        }
+        self.replace(StoredSession {
+            credential,
+            api_base,
+            employee: Some(employee),
+            assertion: None,
+            refusal: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        })?;
+        // The login remains cancellable through first assertion/key enrollment.
+        Ok(())
+    }
+}
+
+impl BuilderlabLogin {
+    pub(crate) fn complete_employee_login(&self, id: uuid::Uuid) -> Result<(), String> {
+        let mut pending = self.0.lock().map_err(|_| "Square sign-in unavailable")?;
+        if pending.as_ref().is_none_or(|value| value.id != id) {
+            return Err("Square sign-in canceled".to_owned());
+        }
+        *pending = None;
+        Ok(())
+    }
+
+    pub(crate) fn begin_employee_login(
+        &self,
+    ) -> Result<(uuid::Uuid, oneshot::Receiver<()>), String> {
+        let id = uuid::Uuid::new_v4();
+        let (cancel, receiver) = oneshot::channel();
+        let mut pending = self.0.lock().map_err(|error| error.to_string())?;
+        if let Some(previous) = pending.take() {
+            let _ = previous.cancel.send(());
+        }
+        *pending = Some(PendingLogin { id, cancel });
+        Ok((id, receiver))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,16 +382,17 @@ struct LoginExchangeResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BuilderlabAuthInfo {
-    expires_at: String,
-    email: Option<String>,
-    name: Option<String>,
+    pub(crate) expires_at: String,
+    pub(crate) email: Option<String>,
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AuthMeResponse {
+pub(crate) struct AuthMeResponse {
+    pub(crate) subject: Option<String>,
     email: Option<String>,
     name: Option<String>,
-    expires_at: String,
+    pub(crate) expires_at: String,
 }
 
 struct CallbackState {
@@ -210,7 +430,11 @@ async fn login_callback(
 }
 
 fn api_url(path: &str) -> Result<Url, String> {
-    Url::parse(&format!("{BUILDERLAB_API_BASE_URL}{path}"))
+    api_url_for_base(BUILDERLAB_API_BASE_URL, path)
+}
+
+pub(crate) fn api_url_for_base(base: &str, path: &str) -> Result<Url, String> {
+    Url::parse(&format!("{base}{path}"))
         .map_err(|error| format!("invalid Builderlab API URL: {error}"))
 }
 
@@ -224,27 +448,70 @@ fn login_url(return_to: &str) -> Result<Url, String> {
     Ok(login_url)
 }
 
-async fn authenticated_user(
+enum SessionCheckError {
+    Rejected(String),
+    Unavailable(String),
+}
+
+impl From<String> for SessionCheckError {
+    fn from(message: String) -> Self {
+        Self::Unavailable(message)
+    }
+}
+
+impl SessionCheckError {
+    fn message(self) -> String {
+        match self {
+            Self::Rejected(message) | Self::Unavailable(message) => message,
+        }
+    }
+}
+
+pub(crate) async fn authenticated_user(
     client: &reqwest::Client,
     credential: &str,
+    api_base: &str,
 ) -> Result<AuthMeResponse, String> {
+    check_authenticated_user(client, credential, api_base)
+        .await
+        .map_err(SessionCheckError::message)
+}
+
+async fn check_authenticated_user(
+    client: &reqwest::Client,
+    credential: &str,
+    api_base: &str,
+) -> Result<AuthMeResponse, SessionCheckError> {
+    let builder = client
+        .get(api_url_for_base(api_base, "/v1/auth/me")?)
+        .header(BB_SESSION_CREDENTIAL_HEADER, session_header(credential)?)
+        .timeout(Duration::from_secs(30));
+    let request = if api_base == crate::employee_login::API_BASE {
+        crate::employee_api::request(builder)?
+    } else {
+        builder
+            .build()
+            .map_err(|_| "Could not prepare Builderlab session check".to_owned())?
+    };
     let response = client
-        .get(api_url("/v1/auth/me")?)
-        .header(BB_SESSION_CREDENTIAL_HEADER, credential)
-        .timeout(Duration::from_secs(30))
-        .send()
+        .execute(request)
         .await
         .map_err(|error| format!("Builderlab session check failed: {error}"))?;
     if !response.status().is_success() {
-        return Err(format!(
+        let message = format!(
             "Builderlab session check failed with HTTP {}",
             response.status()
-        ));
+        );
+        return Err(match response.status() {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                SessionCheckError::Rejected(message)
+            }
+            _ => SessionCheckError::Unavailable(message),
+        });
     }
-    response
-        .json()
-        .await
-        .map_err(|error| format!("invalid Builderlab session response: {error}"))
+    response.json().await.map_err(|error| {
+        SessionCheckError::Unavailable(format!("invalid Builderlab session response: {error}"))
+    })
 }
 
 #[tauri::command]
@@ -339,7 +606,12 @@ pub(crate) async fn start_builderlab_login(
         return Err("Builderlab code exchange returned an empty credential".to_owned());
     }
 
-    let me = authenticated_user(&app_state.http_client, &exchanged.session_credential).await?;
+    let me = authenticated_user(
+        &app_state.media_fetch_client,
+        &exchanged.session_credential,
+        BUILDERLAB_API_BASE_URL,
+    )
+    .await?;
     if exchanged.expires_at != me.expires_at {
         return Err("Builderlab session expiry did not match code exchange".to_owned());
     }
@@ -356,11 +628,17 @@ pub(crate) async fn start_builderlab_login(
         {
             return Err("Builderlab authentication canceled".to_owned());
         }
+        session.replace(StoredSession {
+            credential: exchanged.session_credential,
+            api_base: BUILDERLAB_API_BASE_URL,
+            employee: None,
+            assertion: None,
+            refusal: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        })?;
         *pending = None;
     }
-    *session.0.lock().map_err(|error| error.to_string())? = Some(StoredSession {
-        credential: exchanged.session_credential,
-    });
+    notify_session_changed(&app_state);
     Ok(info)
 }
 
@@ -369,27 +647,31 @@ pub(crate) async fn get_builderlab_auth(
     app_state: tauri::State<'_, crate::app_state::AppState>,
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<Option<BuilderlabAuthInfo>, String> {
-    let stored = session
-        .0
-        .lock()
-        .map_err(|error| error.to_string())?
-        .as_ref()
-        .map(|stored| stored.credential.clone());
-    let Some(credential) = stored else {
+    check_stored_auth(&app_state, &session).await
+}
+
+async fn check_stored_auth(
+    app_state: &crate::app_state::AppState,
+    session: &BuilderlabSession,
+) -> Result<Option<BuilderlabAuthInfo>, String> {
+    let stored = session.request_context(app_state)?;
+    let Some((credential, api_base)) = stored else {
         return Ok(None);
     };
-    match authenticated_user(&app_state.http_client, &credential).await {
+    match check_authenticated_user(&app_state.media_fetch_client, &credential, api_base).await {
         Ok(me) => Ok(Some(BuilderlabAuthInfo {
             expires_at: me.expires_at,
             email: me.email,
             name: me.name,
         })),
         Err(error) => {
-            *session
-                .0
-                .lock()
-                .map_err(|lock_error| lock_error.to_string())? = None;
-            Err(error)
+            // Losing reachability does not revoke a credential. Keep it for a later
+            // retry; only an authoritative authentication refusal ends the session.
+            if matches!(&error, SessionCheckError::Rejected(_)) {
+                session.clear_if_credential(&credential)?;
+                notify_session_changed(app_state);
+            }
+            Err(error.message())
         }
     }
 }
@@ -407,8 +689,14 @@ pub(crate) fn cancel_builderlab_login(
 #[tauri::command]
 pub(crate) fn clear_builderlab_auth(
     session: tauri::State<'_, BuilderlabSession>,
+    login: tauri::State<'_, BuilderlabLogin>,
+    app_state: tauri::State<'_, crate::app_state::AppState>,
 ) -> Result<(), String> {
-    *session.0.lock().map_err(|error| error.to_string())? = None;
+    if let Some(pending) = login.0.lock().map_err(|error| error.to_string())?.take() {
+        let _ = pending.cancel.send(());
+    }
+    session.clear()?;
+    notify_session_changed(&app_state);
     Ok(())
 }
 
@@ -422,23 +710,24 @@ struct NostrIdentityChallenge {
 }
 
 async fn authenticated_json(
-    client: &reqwest::Client,
+    app_state: &crate::app_state::AppState,
     session: &BuilderlabSession,
     method: reqwest::Method,
     path: &str,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let credential = session
-        .0
-        .lock()
-        .map_err(|error| error.to_string())?
-        .as_ref()
-        .map(|stored| stored.credential.clone())
-        .ok_or_else(|| "Sign in to Builderlab first".to_owned())?;
-    let response = client
-        .request(method, api_url(path)?)
-        .header(BB_SESSION_CREDENTIAL_HEADER, credential)
-        .header(reqwest::header::ORIGIN, BUILDERLAB_ORIGIN)
+    let (credential, api_base) = session
+        .request_context(app_state)?
+        .ok_or_else(|| "Sign in first".to_owned())?;
+    let origin = Url::parse(api_base)
+        .map_err(|_| "Invalid identity origin")?
+        .origin()
+        .ascii_serialization();
+    let response = app_state
+        .media_fetch_client
+        .request(method, api_url_for_base(api_base, path)?)
+        .header(BB_SESSION_CREDENTIAL_HEADER, session_header(&credential)?)
+        .header(reqwest::header::ORIGIN, &origin)
         .json(&body)
         .timeout(Duration::from_secs(60))
         .send()
@@ -469,7 +758,7 @@ pub(crate) async fn get_builderlab_nostr_identity(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/current",
@@ -484,11 +773,11 @@ pub(crate) async fn bind_builderlab_nostr_identity(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     let challenge_value = authenticated_json(
-        &app_state.http_client,
+        &app_state,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/challenge",
-        serde_json::json!({ "origin": BUILDERLAB_ORIGIN }),
+        serde_json::json!({ "origin": session.api_origin(&app_state)? }),
     )
     .await?;
     // A structured error here (e.g. missing_mapping) arrives as an object with an
@@ -510,7 +799,7 @@ pub(crate) async fn bind_builderlab_nostr_identity(
         &challenge.expires_at,
     )?;
     authenticated_json(
-        &app_state.http_client,
+        &app_state,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/verify",
@@ -529,7 +818,7 @@ pub(crate) async fn delete_builderlab_nostr_identity(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/nostr-identities/delete",
@@ -544,7 +833,7 @@ pub(crate) async fn list_builderlab_communities(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/list",
@@ -560,7 +849,7 @@ pub(crate) async fn check_builderlab_community_name(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/availability",
@@ -576,7 +865,7 @@ pub(crate) async fn create_builderlab_community(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities",
@@ -592,7 +881,7 @@ pub(crate) async fn archive_builderlab_community(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/archive",
@@ -608,7 +897,7 @@ pub(crate) async fn unarchive_builderlab_community(
     session: tauri::State<'_, BuilderlabSession>,
 ) -> Result<serde_json::Value, String> {
     authenticated_json(
-        &app_state.http_client,
+        &app_state,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/unarchive",
@@ -628,7 +917,7 @@ pub(crate) async fn transfer_builderlab_community(
     // archive/unarchive endpoints which take `community_id`; mirror the web
     // client's payload exactly.
     authenticated_json(
-        &app_state.http_client,
+        &app_state,
         &session,
         reqwest::Method::POST,
         "/v1/buzz/communities/transfer",
@@ -644,6 +933,165 @@ pub(crate) async fn transfer_builderlab_community(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn stored_session_survives_transient_checks_but_not_authentication_refusal() {
+        for status in [
+            StatusCode::OK, // Malformed successful responses are not revocation evidence.
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base =
+                Box::leak(format!("http://{}", listener.local_addr().unwrap()).into_boxed_str());
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    Router::new().route(
+                        "/v1/auth/me",
+                        get(move || async move { (status, "invalid JSON") }),
+                    ),
+                )
+                .await
+                .unwrap();
+            });
+            let state = crate::app_state::build_app_state();
+            let session = BuilderlabSession::default();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            session
+                .replace(StoredSession {
+                    credential: "session-fixture".to_owned(),
+                    api_base: base,
+                    employee: None,
+                    assertion: None,
+                    refusal: None,
+                    cancel: cancel.clone(),
+                })
+                .unwrap();
+            assert!(check_stored_auth(&state, &session).await.is_err());
+            let rejected = matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN);
+            assert_eq!(
+                session.request_context(&state).unwrap().is_none(),
+                rejected,
+                "{status}"
+            );
+            assert_eq!(cancel.is_cancelled(), rejected, "{status}");
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn unreachable_session_endpoint_preserves_the_stored_credential() {
+        // Close a reserved port without starting an HTTP server, so this request
+        // cannot reuse a live pooled connection from a preceding response.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = Box::leak(format!("http://{}", listener.local_addr().unwrap()).into_boxed_str());
+        drop(listener);
+        let state = crate::app_state::build_app_state();
+        let session = BuilderlabSession::default();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        session
+            .replace(StoredSession {
+                credential: "session-fixture".to_owned(),
+                api_base: base,
+                employee: None,
+                assertion: None,
+                refusal: None,
+                cancel: cancel.clone(),
+            })
+            .unwrap();
+        assert!(check_stored_auth(&state, &session).await.is_err());
+        assert_eq!(
+            session.request_context(&state).unwrap().unwrap().0,
+            "session-fixture"
+        );
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn employee_session_retains_origin_and_rejects_canceled_or_replaced_identity() {
+        let state = crate::app_state::build_app_state();
+        let keys = state.signing_keys().unwrap();
+        let session = BuilderlabSession::default();
+        let login = BuilderlabLogin::default();
+        let (old, mut canceled) = login.begin_employee_login().unwrap();
+        let (current, _) = login.begin_employee_login().unwrap();
+        assert!(canceled.try_recv().is_ok());
+        assert!(session
+            .finish_employee_login(
+                &login,
+                old,
+                "old".to_owned(),
+                "https://square.builderlabstaging.xyz/api/goose",
+                EmployeeBinding {
+                    pubkey: keys.public_key().to_hex(),
+                    expires_at: chrono::Utc::now().timestamp() + 240,
+                    relay: crate::relay::relay_ws_url_with_override(&state),
+                },
+            )
+            .is_err());
+        session
+            .finish_employee_login(
+                &login,
+                current,
+                "current".to_owned(),
+                "https://square.builderlabstaging.xyz/api/goose",
+                EmployeeBinding {
+                    pubkey: keys.public_key().to_hex(),
+                    expires_at: chrono::Utc::now().timestamp() + 240,
+                    relay: crate::relay::relay_ws_url_with_override(&state),
+                },
+            )
+            .unwrap();
+        let (credential, base) = session.request_context(&state).unwrap().unwrap();
+        assert_eq!(credential, "current");
+        assert_eq!(base, "https://square.builderlabstaging.xyz/api/goose");
+        *state.keys.lock().unwrap() = nostr::Keys::generate();
+        assert!(session.request_context(&state).is_err());
+        assert!(session.request_context(&state).unwrap().is_none());
+    }
+    #[test]
+    fn employee_provisional_login_remains_cancelable_and_cannot_clear_a_replacement() {
+        let state = crate::app_state::build_app_state();
+        let session = BuilderlabSession::default();
+        let login = BuilderlabLogin::default();
+        let (id, mut cancellation) = login.begin_employee_login().unwrap();
+        session
+            .finish_employee_login(
+                &login,
+                id,
+                "provisional".to_owned(),
+                BUILDERLAB_API_BASE_URL,
+                EmployeeBinding {
+                    pubkey: state.signing_keys().unwrap().public_key().to_hex(),
+                    expires_at: chrono::Utc::now().timestamp() + 240,
+                    relay: crate::relay::relay_ws_url_with_override(&state),
+                },
+            )
+            .unwrap();
+        // A later login/cancel still owns and invalidates this in-flight admission.
+        let (new_id, _) = login.begin_employee_login().unwrap();
+        assert!(cancellation.try_recv().is_ok());
+        assert!(login.complete_employee_login(id).is_err());
+        session
+            .replace(StoredSession {
+                credential: "replacement".to_owned(),
+                api_base: BUILDERLAB_API_BASE_URL,
+                employee: None,
+                assertion: None,
+                refusal: None,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            })
+            .unwrap();
+        session.clear_if_credential("provisional").unwrap();
+        assert_eq!(
+            session.request_context(&state).unwrap().unwrap().0,
+            "replacement"
+        );
+        login.complete_employee_login(new_id).unwrap();
+    }
     #[test]
     fn auth_complete_page_uses_buzz_brand() {
         for expected in [

@@ -56,6 +56,7 @@ import {
   shouldWaitForScheduledReconnect,
 } from "@/shared/api/relayReconnectPolicy";
 import { RelayReconnectWaiters } from "@/shared/api/relayReconnectWaiters";
+import { notifyRelayReconnectListeners } from "./relayReconnectListeners";
 import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
 import {
   AUTH_TIMEOUT_MS,
@@ -438,6 +439,18 @@ export class RelayClient {
     );
   }
 
+  /** Replace this community's socket while preserving live subscription owners. */
+  async reconnect() {
+    this.resetConnection(new Error("Relay connection refreshed."), {
+      reconnect: false,
+    });
+    this.connectPromise = null;
+    this.terminal = false;
+    this.authOkTracker.reset();
+    this.keepAliveRequested = true;
+    this.notifyReconnectListeners = this.hasConnectedOnce;
+    await this.connectBypassingBackoff();
+  }
   async preconnect() {
     // Explicit re-engagement (reconnect card / community switch): clears the
     // terminal latch and AUTH rejection streak, and bypasses backoff once.
@@ -1102,23 +1115,10 @@ export class RelayClient {
   }
 
   private emitReconnectIfNeeded() {
-    const shouldNotifyReconnectListeners =
-      this.hasConnectedOnce && this.notifyReconnectListeners;
-
+    const notify = this.hasConnectedOnce && this.notifyReconnectListeners;
     this.hasConnectedOnce = true;
     this.notifyReconnectListeners = false;
-
-    if (!shouldNotifyReconnectListeners) {
-      return;
-    }
-
-    for (const listener of this.reconnectListeners) {
-      try {
-        listener();
-      } catch (error) {
-        console.error("Failed to handle relay reconnect", error);
-      }
-    }
+    notifyRelayReconnectListeners(notify, this.reconnectListeners);
   }
 
   private resetConnection(

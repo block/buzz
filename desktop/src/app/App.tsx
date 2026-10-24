@@ -24,6 +24,9 @@ import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { useCloseWindowShortcut } from "@/app/useCloseWindowShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
+import { SquareEmployeeSessionGate } from "@/features/settings/ui/SquareEmployeeSessionGate";
+import { useSquareEmployeeSession } from "@/features/settings/ui/useSquareEmployeeSession";
+import { Button } from "@/shared/ui/button";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
 import {
@@ -363,11 +366,13 @@ function CommunityApp({
   continueOnboarding,
   currentPubkey,
   onBackToMachineConfig,
+  onRecoverIdentity,
   sharedIdentity,
 }: {
   continueOnboarding: boolean;
   currentPubkey: string | null;
   onBackToMachineConfig: () => void;
+  onRecoverIdentity: () => void;
   sharedIdentity: boolean;
 }) {
   const {
@@ -434,6 +439,13 @@ function CommunityApp({
     sharedIdentity,
     isFindingCommunityAfterLeave,
     communities,
+  );
+
+  const communityApplied =
+    community.isReady && community.appliedKey === communityKey;
+  const employeeSession = useSquareEmployeeSession(
+    communityApplied,
+    communityKey,
   );
 
   const transitionCommunity = useCallback(
@@ -547,12 +559,18 @@ function CommunityApp({
     community.isReady &&
     community.appliedKey === communityKey;
   useEffect(() => {
-    if (transaction?.stage !== "connecting" || !targetIsReady) return;
+    if (
+      transaction?.stage !== "connecting" ||
+      !targetIsReady ||
+      !employeeSession.ready
+    )
+      return;
     const transactionId = transaction.id;
     const relayUrl = transaction.relayUrl;
     if (profileCheckTransactionRef.current === transactionId) return;
     profileCheckTransactionRef.current = transactionId;
 
+    let canceled = false;
     // resolveProfileCheckAction resolves exactly once (Promise.race + timer
     // cleared on settle), so no settled flag is needed here.
     void resolveProfileCheckAction(getProfile, 10_000).then((result) => {
@@ -560,7 +578,11 @@ function CommunityApp({
       // transaction must still be the same one that launched this request
       // AND still be in connecting. Covers cancel+replacement (B's ID !== A's)
       // and cancel-without-replacement (transactionRef.current is null).
-      if (!isTransactionStillConnecting(transactionRef.current, transactionId))
+      if (
+        canceled ||
+        !employeeSession.isCurrent() ||
+        !isTransactionStillConnecting(transactionRef.current, transactionId)
+      )
         return;
 
       if (result.action === "skip") {
@@ -573,9 +595,16 @@ function CommunityApp({
         );
       }
     });
+    return () => {
+      canceled = true;
+      if (profileCheckTransactionRef.current === transactionId)
+        profileCheckTransactionRef.current = null;
+    };
   }, [
     communityOnboarding,
     targetIsReady,
+    employeeSession.ready,
+    employeeSession.isCurrent,
     transaction?.stage,
     transaction?.id,
     transaction?.relayUrl,
@@ -611,18 +640,11 @@ function CommunityApp({
     } else if ("error" in community && community.error) {
       // Surface apply failures so the user can retry or change community.
       appContent = (
-        <>
-          <CommunityApplyErrorScreen
-            error={community.error}
-            onChangeCommunity={() => setIsCommunityChangeOpen(true)}
-            onRetry={reconnectCommunity}
-          />
-          {isCommunityChangeOpen ? (
-            <CommunityChangeOverlay
-              onClose={() => setIsCommunityChangeOpen(false)}
-            />
-          ) : null}
-        </>
+        <CommunityApplyErrorScreen
+          error={community.error}
+          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+          onRetry={reconnectCommunity}
+        />
       );
     }
   }
@@ -630,8 +652,6 @@ function CommunityApp({
   // rendering anything that connects to the relay. The appliedKey check avoids
   // a one-render race where React sees the new active community while the
   // Tauri backend is still configured for the previous one.
-  const communityApplied =
-    community.isReady && community.appliedKey === communityKey;
   useLayoutEffect(() => {
     if (communityApplied) {
       completeCommunityViewTransition();
@@ -677,19 +697,66 @@ function CommunityApp({
 
   return (
     <>
-      {appContent}
-      {transaction ? (
-        <div
-          className={isEnteringCurtain ? "fixed inset-0 z-50" : undefined}
-          data-testid={
-            isEnteringCurtain ? "onboarding-entering-curtain" : undefined
-          }
-        >
-          <CommunityOnboardingFlow
-            onCancel={handleCommunityOnboardingCancel}
-            onConnect={handleCommunityOnboardingConnect}
-          />
-        </div>
+      <SquareEmployeeSessionGate
+        active={communityApplied}
+        scope={communityKey}
+        session={employeeSession}
+        recovery={
+          <nav aria-label="Community recovery" className="flex flex-col gap-2">
+            {communities
+              .filter((saved) => saved.id !== activeCommunity?.id)
+              .map((saved) => (
+                <Button
+                  key={saved.id}
+                  variant="outline"
+                  onClick={() => {
+                    void transitionCommunity(saved.id);
+                  }}
+                >
+                  Switch to {saved.name}
+                </Button>
+              ))}
+            <Button
+              variant="outline"
+              onClick={() => setIsCommunityChangeOpen(true)}
+            >
+              Edit community connection
+            </Button>
+            <Button variant="outline" onClick={onRecoverIdentity}>
+              Recover Buzz identity
+            </Button>
+            {transaction ? (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  void handleCommunityOnboardingCancel();
+                }}
+              >
+                Cancel joining community
+              </Button>
+            ) : null}
+          </nav>
+        }
+      >
+        {appContent}
+        {transaction ? (
+          <div
+            className={isEnteringCurtain ? "fixed inset-0 z-50" : undefined}
+            data-testid={
+              isEnteringCurtain ? "onboarding-entering-curtain" : undefined
+            }
+          >
+            <CommunityOnboardingFlow
+              onCancel={handleCommunityOnboardingCancel}
+              onConnect={handleCommunityOnboardingConnect}
+            />
+          </div>
+        ) : null}
+      </SquareEmployeeSessionGate>
+      {isCommunityChangeOpen ? (
+        <CommunityChangeOverlay
+          onClose={() => setIsCommunityChangeOpen(false)}
+        />
       ) : null}
     </>
   );
@@ -711,6 +778,12 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   const reopenMachineConfig = useCallback(() => {
     setContinueOnboarding(false);
     setMachineInitialPage("config");
+    machine.reopen();
+  }, [machine.reopen]);
+
+  const recoverIdentity = useCallback(() => {
+    setContinueOnboarding(false);
+    setMachineInitialPage("key-import");
     machine.reopen();
   }, [machine.reopen]);
 
@@ -762,6 +835,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
         continueOnboarding={continueOnboarding}
         currentPubkey={machine.currentPubkey}
         onBackToMachineConfig={reopenMachineConfig}
+        onRecoverIdentity={recoverIdentity}
         sharedIdentity={sharedIdentity}
       />
     );

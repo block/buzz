@@ -8,6 +8,8 @@ mod channel_head_cache;
 mod commands;
 mod deep_link;
 mod egress_guard;
+mod employee_api;
+mod employee_login;
 mod event_sync;
 mod events;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -335,6 +337,9 @@ pub fn run() {
             if let Ok(mut guard) = state.app_handle.lock() {
                 *guard = Some(app_handle.clone());
             }
+            app_handle
+                .state::<native_relay_client::NativeRelayClient>()
+                .set_app_handle(app_handle.clone())?;
 
             let (tts_settings, tts_settings_load_error) =
                 huddle::tts_settings::load_for_app(&app_handle);
@@ -544,6 +549,10 @@ pub fn run() {
             take_pending_entity_deep_link,
             acknowledge_pending_entity_deep_link,
             start_builderlab_login,
+            employee_login::employee_sign_in_available,
+            employee_login::start_employee_login,
+            employee_login::employee_session_status,
+            employee_login::refresh_employee_relay_access,
             cancel_builderlab_login,
             get_builderlab_auth,
             clear_builderlab_auth,

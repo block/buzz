@@ -73,21 +73,57 @@ async fn connect_authenticated_audio_socket(
     relay_url: &str,
     keys: &nostr::Keys,
     auth_tag_json: Option<&str>,
+    employee: Option<&crate::builderlab::EmployeeEvidence>,
 ) -> Result<(WsSink, WsReceiver, u8, Vec<(u8, String, u8)>), String> {
     use nostr::JsonUtil;
 
     let ws_url = format!("{relay_url}/huddle/{channel_id}/audio");
-    let joined = buzz_audio_client::connection::connect(
-        &ws_url,
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = ws_url
+        .into_client_request()
+        .map_err(|_| "Invalid Huddle URL")?;
+    if let Some(employee) = employee {
+        request
+            .headers_mut()
+            .insert("Nostr-Federated-Identity", employee.header.clone());
+    }
+    let connecting = buzz_audio_client::connection::connect(
+        request,
         parent_channel_id,
         None,
         |challenge| async move {
+            if let Some(employee) = employee {
+                let token = employee
+                    .header
+                    .to_str()
+                    .map_err(|_| "Invalid employee evidence")?
+                    .trim_start_matches("Bearer ");
+                if employee.cancel.is_cancelled()
+                    || employee.expires_at <= chrono::Utc::now().timestamp()
+                    || challenge.contains(token)
+                {
+                    return Err("Employee Huddle authorization changed".to_owned());
+                }
+            }
             let event = build_audio_auth_event(keys, relay_url, &challenge, auth_tag_json)?;
             serde_json::from_str(&event.as_json())
                 .map_err(|e| format!("failed to serialize auth event: {e}"))
         },
-    )
-    .await?;
+    );
+    let joined = if let Some(employee) = employee {
+        tokio::select! {
+            biased;
+            _ = employee.cancel.cancelled() => return Err("Square sign-in changed".to_owned()),
+            result = connecting => result.map_err(|_| "Employee Huddle connection refused".to_owned())?,
+        }
+    } else {
+        connecting.await?
+    };
+    if employee.is_some_and(|value| {
+        value.cancel.is_cancelled() || value.expires_at <= chrono::Utc::now().timestamp()
+    }) {
+        return Err("Employee Huddle authorization changed".to_owned());
+    }
     let (tx, rx) = joined.socket.split();
     let peers = joined
         .peers
@@ -107,7 +143,7 @@ pub(crate) async fn connect_audio_relay(
     state: &AppState,
 ) -> Result<(CancellationToken, tokio::sync::mpsc::Sender<Vec<u8>>), String> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
-    let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+    let keys = state.signing_keys()?;
 
     // TTS interrupt flags — recv task cancels TTS when remote humans speak.
     let (
@@ -131,12 +167,41 @@ pub(crate) async fn connect_audio_relay(
 
     let app_handle = state.app_handle.lock().ok().and_then(|g| g.clone());
 
-    let (ws_tx, ws_rx, _peer_index, initial_peers) =
-        connect_authenticated_audio_socket(channel_id, parent_channel_id, &relay_url, &keys, None)
-            .await?;
+    let employee = crate::builderlab::employee_evidence(state, &keys, &relay_url).await?;
+    let (ws_tx, ws_rx, _peer_index, initial_peers) = connect_authenticated_audio_socket(
+        channel_id,
+        parent_channel_id,
+        &relay_url,
+        &keys,
+        None,
+        employee.as_ref(),
+    )
+    .await?;
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
+    if let Some(employee) = employee {
+        let cancel = cancel.clone();
+        let app_handle = app_handle.clone();
+        tokio::spawn(async move {
+            let lifetime = std::time::Duration::from_secs(
+                employee
+                    .expires_at
+                    .saturating_sub(chrono::Utc::now().timestamp())
+                    .max(0) as u64,
+            );
+            tokio::select! {
+                _ = employee.cancel.cancelled() => {},
+                _ = tokio::time::sleep(lifetime) => {},
+                _ = cancel.cancelled() => return,
+            }
+            cancel.cancel();
+            if let Some(handle) = app_handle {
+                use tauri::Emitter;
+                let _ = handle.emit("huddle-audio-disconnected", ());
+            }
+        });
+    }
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(50);
     let output_device_name = state
         .huddle_audio
@@ -251,6 +316,7 @@ pub(crate) async fn connect_tts_audio_publisher(
         &relay_url,
         keys,
         auth_tag_json,
+        None,
     )
     .await?;
 
@@ -517,6 +583,108 @@ pub(crate) async fn count_human_members(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn employee_huddle_upgrade_uses_native_assertion_and_same_own_key_proof() {
+        use nostr::JsonUtil;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("ws://{}", listener.local_addr().unwrap());
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            #[allow(clippy::result_large_err)]
+            let check = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                         response| {
+                assert_eq!(
+                    request.headers()["Nostr-Federated-Identity"],
+                    "Bearer private.huddle.assertion"
+                );
+                assert!(request.uri().query().is_none());
+                Ok(response)
+            };
+            let mut ws = tokio_tungstenite::accept_hdr_async(stream, check)
+                .await
+                .unwrap();
+            ws.send(WsMsg::Text(
+                serde_json::json!({"type":"challenge","challenge":"public-nonce"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            let proof: serde_json::Value =
+                serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            assert!(!proof.to_string().contains("private.huddle.assertion"));
+            let event = nostr::Event::from_json(proof["event"].to_string()).unwrap();
+            event.verify().unwrap();
+            assert_eq!(event.pubkey, pubkey);
+            ws.send(WsMsg::Text(
+                serde_json::json!({"type":"joined","peer_index":0,"peers":[]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        });
+        let employee = crate::builderlab::EmployeeEvidence {
+            header: "Bearer private.huddle.assertion".parse().unwrap(),
+            cancel: CancellationToken::new(),
+            expires_at: chrono::Utc::now().timestamp() + 60,
+        };
+        let result = connect_authenticated_audio_socket(
+            "channel",
+            None,
+            &relay,
+            &keys,
+            None,
+            Some(&employee),
+        )
+        .await;
+        assert!(result.is_ok());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canceled_employee_huddle_does_not_sign_a_delayed_challenge() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("ws://{}", listener.local_addr().unwrap());
+        let keys = nostr::Keys::generate();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            entered.send(()).unwrap();
+            // Cancellation must drop the socket while the relay hasn't offered a challenge.
+            while let Some(message) = ws.next().await {
+                assert!(
+                    !matches!(message, Ok(WsMsg::Text(_))),
+                    "obsolete employee signed AUTH"
+                );
+            }
+        });
+        let employee = crate::builderlab::EmployeeEvidence {
+            header: "Bearer private.huddle.assertion".parse().unwrap(),
+            cancel: CancellationToken::new(),
+            expires_at: chrono::Utc::now().timestamp() + 60,
+        };
+        let connecting = connect_authenticated_audio_socket(
+            "channel",
+            None,
+            &relay,
+            &keys,
+            None,
+            Some(&employee),
+        );
+        tokio::pin!(connecting);
+        tokio::select! { _ = ready => {}, _ = &mut connecting => panic!("must await challenge") }
+        employee.cancel.cancel();
+        assert!(connecting.await.unwrap_err().contains("changed"));
+        tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn tts_upsampling_doubles_rate_with_linear_midpoints() {
