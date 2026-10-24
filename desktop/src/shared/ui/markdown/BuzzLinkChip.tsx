@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
@@ -46,14 +48,18 @@ function useBuzzLinkContextMenu({
         dataAttributes={["data-buzz-link-context-menu"]}
         items={[
           {
-            label: "Open link",
+            get label() {
+              return uiT("Open link");
+            },
             onSelect: () => {
               closeMenu();
               onOpenLink();
             },
           },
           {
-            label: "Copy link",
+            get label() {
+              return uiT("Copy link");
+            },
             onSelect: () => {
               closeMenu();
               copyTextToClipboard(href, "Link copied to clipboard");
@@ -121,6 +127,8 @@ export function BuzzLinkChip({
   onOpenLink: () => void;
   wrapping?: boolean;
 }) {
+  useUiLanguage();
+
   const { contextMenu, onContextMenuCapture } = useBuzzLinkContextMenu({
     href,
     interactive,
@@ -194,6 +202,8 @@ export function BuzzInlineLink({
   interactive: boolean;
   onOpenLink: () => void;
 }) {
+  useUiLanguage();
+
   const contextMenuHref =
     href ?? (typeof props.title === "string" ? props.title : undefined);
   const { contextMenu, onContextMenuCapture } = useBuzzLinkContextMenu({

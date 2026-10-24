@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { EllipsisVertical, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 
@@ -29,8 +31,18 @@ const LINK_PREVIEW_STYLE_OPTIONS: {
   value: LinkPreviewStyle;
   label: string;
 }[] = [
-  { value: "rich", label: "Rich" },
-  { value: "compact", label: "Compact" },
+  {
+    value: "rich",
+    get label() {
+      return uiT("Rich");
+    },
+  },
+  {
+    value: "compact",
+    get label() {
+      return uiT("Compact");
+    },
+  },
 ];
 
 export function LinkPreviewControls({
@@ -40,6 +52,8 @@ export function LinkPreviewControls({
   onRemove?: () => void;
   placement?: "left" | "right";
 }) {
+  useUiLanguage();
+
   const style = useLinkPreviewStyle();
   const { onOpenSettings } = useAppShell();
 
@@ -53,16 +67,23 @@ export function LinkPreviewControls({
 
     setLinkPreviewStyle(nextStyle);
     toast.success(
-      `Link previews set to ${nextStyle === "rich" ? "Rich" : "Compact"}.`,
+      uiT("Link previews set to {0}.", {
+        p0: nextStyle === "rich" ? "Rich" : "Compact",
+      }),
       {
         action: onOpenSettings
           ? {
-              label: "Appearance",
+              get label() {
+                return uiT("Appearance");
+              },
               onClick: () => onOpenSettings("appearance"),
             }
           : undefined,
-        description:
-          "You can always modify this and other settings in Appearance.",
+        get description() {
+          return uiT(
+            "You can always modify this and other settings in Appearance.",
+          );
+        },
       },
     );
   };
@@ -77,10 +98,10 @@ export function LinkPreviewControls({
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button
-            aria-label="Link display settings"
+            aria-label={uiT("Link display settings")}
             className={CONTROL_BUTTON_CLASS}
             size="icon-xs"
-            title="Link display settings"
+            title={uiT("Link display settings")}
             type="button"
             variant="ghost"
           >
@@ -89,7 +110,7 @@ export function LinkPreviewControls({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" side="right">
           <DropdownMenuSub>
-            <DropdownMenuSubTrigger>Display</DropdownMenuSubTrigger>
+            <DropdownMenuSubTrigger>{uiT("Display")}</DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
               <DropdownMenuRadioGroup
                 onValueChange={handleStyleChange}
@@ -114,7 +135,7 @@ export function LinkPreviewControls({
                 onClick={onRemove}
               >
                 <EyeOff aria-hidden="true" />
-                Remove preview
+                {uiT("Remove preview")}
               </DropdownMenuItem>
             </>
           ) : null}

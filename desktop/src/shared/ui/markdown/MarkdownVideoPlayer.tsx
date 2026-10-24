@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import * as React from "react";
 
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
@@ -31,6 +33,8 @@ export function MarkdownVideoPlayer({
   resolvedSrc: string;
   src?: string;
 }) {
+  const __buzzLanguage = useUiLanguage();
+
   const videoReviewContext = React.useContext(VideoReviewMarkdownContext);
   // Download eligibility is independent of rendering as a video: only a
   // relay-hosted `/media/` URL can pass the native `download_file` SSRF gate,
@@ -47,16 +51,20 @@ export function MarkdownVideoPlayer({
   // Fall back to `thumb` for compatibility with older events.
   const posterUrl = entry?.image ?? entry?.thumb;
   const resolvedPoster = posterUrl ? rewriteRelayUrl(posterUrl) : undefined;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const resolvedReviewContext = React.useMemo(
     () =>
       videoReviewContext
         ? {
             ...videoReviewContext,
             title:
-              videoReviewContext.title ?? entry?.filename ?? alt ?? "Video",
+              videoReviewContext.title ??
+              entry?.filename ??
+              alt ??
+              uiT("Video"),
           }
         : undefined,
-    [alt, entry?.filename, videoReviewContext],
+    [alt, entry?.filename, videoReviewContext, __buzzLanguage],
   );
 
   return (

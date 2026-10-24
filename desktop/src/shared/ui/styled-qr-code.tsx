@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import {
   useId,
   useMemo,
@@ -92,10 +94,12 @@ export function StyledQrCode({
   centerImageSrc,
   foregroundColor = "#000000",
   size = 240,
-  title = "QR code",
+  title = uiT("QR code"),
   value,
   ...svgProps
 }: StyledQrCodeProps) {
+  useUiLanguage();
+
   const clipId = `styled-qr-logo-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const matrix = useMemo(
     () => create(value, { errorCorrectionLevel: "M" }).modules,

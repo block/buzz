@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 type BurstPoint = {
@@ -558,6 +560,8 @@ export function EmojiBurstProvider({
 }: {
   children: React.ReactNode;
 }) {
+  useUiLanguage();
+
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const contextRef = React.useRef<CanvasRenderingContext2D | null>(null);
   const particlesRef = React.useRef<Particle[]>([]);

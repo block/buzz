@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useId } from "react";
 
 /**
@@ -22,6 +24,8 @@ import { useId } from "react";
  * to the static silhouette via the CSS media query.
  */
 export function FlappingBee({ className }: { className?: string }) {
+  useUiLanguage();
+
   const maskId = `flapping-bee-cutouts-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
 
   // Wing geometry from the 466x309 mark: circles r=91.7 at (91.7, 154.5) and

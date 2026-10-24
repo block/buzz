@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as React from "react";
 
@@ -20,6 +22,8 @@ function isWindowDragHandleEvent(event: MouseEvent | PointerEvent) {
 }
 
 export function StartupWindowDragRegion() {
+  useUiLanguage();
+
   React.useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
       if (event.button !== 0 || event.detail > 1) {

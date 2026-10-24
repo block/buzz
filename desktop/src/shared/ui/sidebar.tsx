@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
@@ -154,6 +156,8 @@ const SidebarProvider = React.forwardRef<
     },
     ref,
   ) => {
+    useUiLanguage();
+
     const isMobile = useIsMobile();
     const [openMobile, setOpenMobile] = React.useState(false);
     const [isResizing, setIsResizing] = React.useState(false);
@@ -295,6 +299,8 @@ const Sidebar = React.forwardRef<
     },
     ref,
   ) => {
+    useUiLanguage();
+
     const { isMobile, isResizing, state, openMobile, setOpenMobile } =
       useSidebar();
 
@@ -328,8 +334,10 @@ const Sidebar = React.forwardRef<
             side={side}
           >
             <SheetHeader className="sr-only">
-              <SheetTitle>Sidebar</SheetTitle>
-              <SheetDescription>Displays the mobile sidebar.</SheetDescription>
+              <SheetTitle>{uiT("Sidebar")}</SheetTitle>
+              <SheetDescription>
+                {uiT("Displays the mobile sidebar.")}
+              </SheetDescription>
             </SheetHeader>
             <div className="flex h-full w-full flex-col">{children}</div>
           </SheetContent>
@@ -396,6 +404,8 @@ const SidebarTrigger = React.forwardRef<
   React.ElementRef<typeof Button>,
   React.ComponentProps<typeof Button>
 >(({ className, onClick, ...props }, ref) => {
+  useUiLanguage();
+
   const { open, toggleSidebar } = useSidebar();
 
   return (
@@ -412,7 +422,7 @@ const SidebarTrigger = React.forwardRef<
       {...props}
     >
       <DrawerPanelIcon side={open ? "left" : "right"} />
-      <span className="sr-only">Toggle Sidebar</span>
+      <span className="sr-only">{uiT("Toggle Sidebar")}</span>
     </Button>
   );
 });
@@ -433,6 +443,8 @@ const SidebarRail = React.forwardRef<
     },
     ref,
   ) => {
+    useUiLanguage();
+
     const {
       setIsResizing,
       setSidebarWidth,
@@ -474,7 +486,7 @@ const SidebarRail = React.forwardRef<
       <button
         ref={ref}
         data-sidebar="rail"
-        aria-label="Resize sidebar"
+        aria-label={uiT("Resize sidebar")}
         tabIndex={-1}
         disabled={isRailDisabled || state !== "expanded"}
         onPointerCancel={(event) => {
@@ -547,7 +559,7 @@ const SidebarRail = React.forwardRef<
           onPointerUp?.(event);
           finishResize(event);
         }}
-        title="Drag to resize sidebar"
+        title={uiT("Drag to resize sidebar")}
         className={cn(
           "absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 sm:flex",
           "cursor-col-resize",
@@ -800,6 +812,8 @@ const SidebarMenuButton = React.forwardRef<
     },
     ref,
   ) => {
+    useUiLanguage();
+
     const Comp = asChild ? Slot : "button";
     const { isMobile, state } = useSidebar();
 
@@ -896,6 +910,8 @@ const SidebarMenuSkeleton = React.forwardRef<
     showIcon?: boolean;
   }
 >(({ className, showIcon = false, ...props }, ref) => {
+  useUiLanguage();
+
   // Random width between 50 to 90%.
   const width = React.useMemo(() => {
     return `${Math.floor(Math.random() * 40) + 50}%`;

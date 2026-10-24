@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 type AgentSessionContextValue = {
@@ -17,6 +19,8 @@ export function AgentSessionProvider({
   children: React.ReactNode;
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
 }) {
+  useUiLanguage();
+
   const value = React.useMemo(
     () => ({ onOpenAgentSession }),
     [onOpenAgentSession],

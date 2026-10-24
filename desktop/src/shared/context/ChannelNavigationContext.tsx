@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { Channel } from "@/shared/api/types";
@@ -22,6 +24,8 @@ export function ChannelNavigationProvider({
   channels: Channel[];
   children: React.ReactNode;
 }) {
+  useUiLanguage();
+
   const value = React.useMemo(
     () => ({
       channels,

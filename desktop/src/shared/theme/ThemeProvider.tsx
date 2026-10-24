@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   type ReactNode,
   createContext,
@@ -549,6 +551,8 @@ export function ThemeProvider({
   children,
   defaultTheme = "buzz",
 }: ThemeProviderProps) {
+  useUiLanguage();
+
   const glassBackgroundSupported = isTauri() && isMacPlatform();
 
   // Apply cached vars synchronously before first render

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { invokeTauri } from "@/shared/api/tauri";
@@ -48,20 +50,26 @@ export function useVideoContextMenu(
     const entries: MediaContextMenuItem[] = [];
     if (downloadUrl) {
       entries.push({
-        label: "Download video",
+        get label() {
+          return uiT("Download video");
+        },
         onSelect: () => {
           close();
           invokeTauri("download_file", {
             url: downloadUrl,
             filename: resolveVideoDownloadFilename(filename),
           }).catch((err: unknown) => {
-            toast.error(err instanceof Error ? err.message : "Download failed");
+            toast.error(
+              err instanceof Error ? err.message : uiT("Download failed"),
+            );
           });
         },
       });
     }
     entries.push({
-      label: "Copy link",
+      get label() {
+        return uiT("Copy link");
+      },
       onSelect: () => {
         close();
         copyTextToClipboard(downloadUrl ?? src, "Link copied to clipboard");

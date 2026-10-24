@@ -1,4 +1,6 @@
-"use client";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+("use client");
 
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
@@ -22,6 +24,8 @@ const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
 >(({ className, ...props }, ref) => {
+  useUiLanguage();
+
   const { isDark } = useTheme();
 
   return (
@@ -126,7 +130,7 @@ const DialogContent = React.forwardRef<
               )}
             >
               <X className="h-4 w-4" />
-              <span className="sr-only">Close</span>
+              <span className="sr-only">{uiT("Close")}</span>
             </DialogPrimitive.Close>
           ) : null}
         </DialogPrimitive.Content>
