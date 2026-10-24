@@ -1095,6 +1095,29 @@ pub async fn emit_membership_notification(
         warn!(%channel_id, "membership notice skipped: channel not found");
         return Ok(());
     };
+    emit_typed_membership_notification(
+        tenant,
+        state,
+        channel_id,
+        &channel_type,
+        target_pubkey,
+        actor_pubkey,
+        notification_kind,
+    )
+    .await
+}
+
+/// [`emit_membership_notification`] for a caller that already read the
+/// channel's type, such as a kind:9000 notifying several people.
+async fn emit_typed_membership_notification(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    channel_type: &str,
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+    notification_kind: u32,
+) -> anyhow::Result<()> {
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
     let channel_id_str = channel_id.to_string();
@@ -1121,7 +1144,7 @@ pub async fn emit_membership_notification(
     })
     .to_string();
 
-    let type_tag = Tag::parse([buzz_core::filter::NOTICE_CHANNEL_TYPE_TAG, &channel_type])
+    let type_tag = Tag::parse([buzz_core::filter::NOTICE_CHANNEL_TYPE_TAG, channel_type])
         .map_err(|e| anyhow::anyhow!("failed to build channel type tag: {e}"))?;
     let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
         .tags([p_tag, h_tag, type_tag])
@@ -1603,42 +1626,58 @@ pub(crate) async fn validate_put_user(
         .and_then(|m| m.role.parse().ok());
     let join_role = buzz_db::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
 
-    let mut checked = Vec::with_capacity(targets.len());
-    for target in targets {
-        // Authorization policy — visibility gate, elevated-grant gate,
-        // active-member role-change gate, and last-owner demotion — lives in
-        // `channel_authz`, which is pure and table-tested. The database reads
-        // it depends on stay here.
-        let refusal = match channel_authz::decide_put_user(
-            &channel.visibility,
-            join_role,
-            actor_role,
-            target.role,
-            &members,
-            &target.pubkey,
-            &actor_bytes,
-        ) {
-            Err(denied) => Some(denied.to_string()),
-            // Self-add: always allowed regardless of policy.
-            Ok(PutUserDecision::Allow) => None,
-            // Third-party add: check channel_add_policy on the target.
-            Ok(PutUserDecision::CheckAddPolicy) => match state
-                .db
-                .get_agent_channel_policy(tenant.community(), &target.pubkey)
-                .await?
-            {
-                Some((policy, owner)) => channel_authz::decide_channel_add_policy(
-                    &policy,
-                    owner.as_deref(),
-                    &actor_bytes,
-                )
-                .err()
-                .map(|denied| denied.to_string()),
-                None => None,
-            },
-        };
-        checked.push((target, refusal));
-    }
+    // Authorization policy — visibility gate, elevated-grant gate,
+    // active-member role-change gate, and last-owner demotion — lives in
+    // `channel_authz`, which is pure and table-tested. The database reads it
+    // depends on stay here, and are made once for the whole event.
+    let decisions: Vec<_> = targets
+        .iter()
+        .map(|target| {
+            channel_authz::decide_put_user(
+                &channel.visibility,
+                join_role,
+                actor_role,
+                target.role,
+                &members,
+                &target.pubkey,
+                &actor_bytes,
+            )
+        })
+        .collect();
+    // A third-party add also checks the target's channel_add_policy.
+    let policy_keys: Vec<Vec<u8>> = targets
+        .iter()
+        .zip(&decisions)
+        .filter(|(_, decision)| matches!(decision, Ok(PutUserDecision::CheckAddPolicy)))
+        .map(|(target, _)| target.pubkey.clone())
+        .collect();
+    let policies = state
+        .db
+        .get_agent_channel_policies(tenant.community(), &policy_keys)
+        .await?;
+    let checked: Vec<_> = targets
+        .into_iter()
+        .zip(decisions)
+        .map(|(target, decision)| {
+            let refusal = match decision {
+                Err(denied) => Some(denied.to_string()),
+                // Self-add: always allowed regardless of policy.
+                Ok(PutUserDecision::Allow) => None,
+                Ok(PutUserDecision::CheckAddPolicy) => {
+                    policies.get(&target.pubkey).and_then(|(policy, owner)| {
+                        channel_authz::decide_channel_add_policy(
+                            policy,
+                            owner.as_deref(),
+                            &actor_bytes,
+                        )
+                        .err()
+                        .map(|denied| denied.to_string())
+                    })
+                }
+            };
+            (target, refusal)
+        })
+        .collect();
 
     if checked.iter().all(|(_, refusal)| refusal.is_some()) {
         // One person keeps the single-add error text.
@@ -1722,22 +1761,59 @@ pub(crate) async fn apply_put_user(
     let actor_bytes = event.pubkey.to_bytes().to_vec();
     let actor_hex = hex::encode(&actor_bytes);
     let mut report = PutUserReport::default();
+    let mut allowed = Vec::with_capacity(plan.targets.len());
     for (target, refusal) in plan.targets {
-        if let Some(reason) = refusal {
-            report.reject(&target.pubkey, reason);
-            continue;
+        match refusal {
+            Some(reason) => report.reject(&target.pubkey, reason),
+            None => allowed.push(target),
         }
-        let put = match state
+    }
+    let puts: Vec<_> = allowed
+        .iter()
+        .map(|target| buzz_db::channel_members::MemberPut {
+            pubkey: &target.pubkey,
+            requested: target.role,
+        })
+        .collect();
+    let results = match state
+        .db
+        .put_members(tenant.community(), channel_id, &puts, Some(&actor_bytes))
+        .await
+    {
+        Ok(results) => results,
+        // Nothing was written.
+        Err(e) => {
+            error!(channel = %channel_id, error = %e, "NIP-29 PUT_USER write failed");
+            for target in &allowed {
+                report.reject(&target.pubkey, "error: membership write failed".into());
+            }
+            Vec::new()
+        }
+    };
+    // Every person's notification is tagged with the channel's type: read it
+    // once. No channel row means no type to tag, so no notifications.
+    let channel_type = if results.iter().any(Result::is_ok) {
+        match state
             .db
-            .put_member_with_prior_role(
-                tenant.community(),
-                channel_id,
-                &target.pubkey,
-                target.role,
-                Some(&actor_bytes),
-            )
+            .channel_type_of(tenant.community(), channel_id)
             .await
         {
+            Ok(None) => {
+                warn!(%channel_id, "membership notice skipped: channel not found");
+                None
+            }
+            Ok(channel_type) => channel_type,
+            Err(e) => {
+                warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    for (target, result) in allowed.iter().zip(results) {
+        let put = match result {
             Ok(put) => put,
             Err(buzz_db::DbError::AccessDenied(reason)) => {
                 report.reject(&target.pubkey, reason);
@@ -1779,17 +1855,20 @@ pub(crate) async fn apply_put_user(
             }
         }
 
-        if let Err(e) = emit_membership_notification(
-            tenant,
-            state,
-            channel_id,
-            &target.pubkey,
-            &actor_bytes,
-            KIND_MEMBER_ADDED_NOTIFICATION,
-        )
-        .await
-        {
-            warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+        if let Some(channel_type) = &channel_type {
+            if let Err(e) = emit_typed_membership_notification(
+                tenant,
+                state,
+                channel_id,
+                channel_type,
+                &target.pubkey,
+                &actor_bytes,
+                KIND_MEMBER_ADDED_NOTIFICATION,
+            )
+            .await
+            {
+                warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+            }
         }
     }
 

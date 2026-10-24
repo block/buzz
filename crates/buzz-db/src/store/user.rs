@@ -415,6 +415,42 @@ pub async fn get_agent_channel_policy(
     .transpose()
 }
 
+/// A user's `channel_add_policy`, and their `agent_owner_pubkey` if any.
+pub type AgentChannelPolicy = (String, Option<Vec<u8>>);
+
+/// [`get_agent_channel_policy`] for several pubkeys in one query. A pubkey
+/// missing from the map is not in the users table.
+pub async fn get_agent_channel_policies(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkeys: &[Vec<u8>],
+) -> Result<std::collections::HashMap<Vec<u8>, AgentChannelPolicy>> {
+    if pubkeys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let rows = sqlx::query(
+        r#"SELECT pubkey, channel_add_policy::text AS channel_add_policy, agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = ANY($2)"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkeys)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    rows.into_iter()
+        .map(|r| -> Result<(Vec<u8>, AgentChannelPolicy)> {
+            let pubkey: Vec<u8> = r.try_get("pubkey")?;
+            let policy: String = r.try_get("channel_add_policy")?;
+            let owner: Option<Vec<u8>> = r.try_get("agent_owner_pubkey").unwrap_or(None);
+            Ok((pubkey, (policy, owner)))
+        })
+        .collect()
+}
+
 /// List the agents whose `agent_owner_pubkey` is `owner_pubkey` in one community.
 pub async fn list_agents_for_owner(
     pool: &PgPool,
@@ -632,6 +668,16 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Option<(String, Option<Vec<u8>>)>> {
         crate::user::get_agent_channel_policy(&self.pool, community_id, pubkey).await
+    }
+
+    /// [`Db::get_agent_channel_policy`] for several pubkeys in one query.
+    #[datastore_span(name = "get_agent_channel_policies", system = "postgresql")]
+    pub async fn get_agent_channel_policies(
+        &self,
+        community_id: CommunityId,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<std::collections::HashMap<Vec<u8>, AgentChannelPolicy>> {
+        crate::user::get_agent_channel_policies(&self.pool, community_id, pubkeys).await
     }
 
     /// List the agents owned by `owner_pubkey` in one community.
