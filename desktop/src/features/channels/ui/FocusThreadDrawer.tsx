@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
@@ -187,11 +189,13 @@ export function FocusThreadDrawer({
   channelName,
   children,
   escapeEnabled = true,
-  label = "Thread",
+  label = uiT("Thread"),
   hasActiveEdit = false,
   onClose,
   restoreFocusTarget,
 }: FocusThreadDrawerProps) {
+  useUiLanguage();
+
   const prefersReducedMotion = useReducedMotion();
   const travelPx = prefersReducedMotion ? 0 : THREAD_FOCUS_DRAWER_TRAVEL_PX;
   const drawerRef = React.useRef<HTMLDivElement>(null);
@@ -256,7 +260,7 @@ export function FocusThreadDrawer({
     >
       <motion.button
         animate={{ opacity: 1 }}
-        aria-label={`Back to #${channelName}`}
+        aria-label={uiT("Back to #{0}", { p0: channelName })}
         className={cn(
           "absolute inset-0 cursor-pointer transition-colors duration-150",
           FOCUS_SCRIM_CLASS,

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { Bot } from "lucide-react";
 
@@ -132,7 +134,7 @@ export function NewMessageResultRow({
                     className="h-3 w-3"
                     data-testid="new-dm-agent-icon"
                   />
-                  agent
+                  {uiT("agent")}
                 </span>
                 <AgentManagementMarker
                   pubkey={user.pubkey}
@@ -141,7 +143,7 @@ export function NewMessageResultRow({
               </div>
               {ownerLabel ? (
                 <span className="block truncate text-xs text-muted-foreground">
-                  managed by {ownerLabel}
+                  {uiT("managed by {0}", { p0: ownerLabel })}
                 </span>
               ) : null}
             </div>

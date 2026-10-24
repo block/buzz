@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Check, Users } from "lucide-react";
 import type * as React from "react";
 
@@ -72,9 +74,9 @@ export function AddChannelBotTeamsSection({
   return (
     <div className="space-y-3">
       <div>
-        <div className="text-sm font-medium">Teams</div>
+        <div className="text-sm font-medium">{uiT("Teams")}</div>
         <p className="text-xs text-muted-foreground">
-          Select a team to toggle all its agents at once.
+          {uiT("Select a team to toggle all its agents at once.")}
         </p>
       </div>
 
@@ -132,8 +134,8 @@ export function AddChannelBotTeamsSection({
                         >
                           <Check className="h-4 w-4" />
                           {allInChannel
-                            ? "All in channel"
-                            : `${inChannelCount} in channel`}
+                            ? uiT("All in channel")
+                            : uiT("{0} in channel", { p0: inChannelCount })}
                         </span>
                       ) : null}
                     </SelectionChipButton>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -17,6 +19,8 @@ export function HomeMembersSidebarOverlay({
   currentPubkey?: string;
   onClose: () => void;
 }) {
+  useUiLanguage();
+
   const { activeCommunity } = useCommunities();
 
   if (!channel) return null;

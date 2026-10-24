@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { Channel } from "@/shared/api/types";
 
 const relativeTimeFormatter = new Intl.RelativeTimeFormat("en-US", {
@@ -148,7 +150,7 @@ export function getEphemeralChannelDisplay(
           : formatCompactTtl(channel.ttlSeconds),
       tooltipLabel:
         channel.ttlSeconds === null
-          ? "Ephemeral channel. Cleans up automatically after inactivity."
+          ? uiT("Ephemeral channel. Cleans up automatically after inactivity.")
           : `Ephemeral channel. Cleans up after ${formatVerboseTtl(
               channel.ttlSeconds,
             )} of inactivity.`,
@@ -162,7 +164,7 @@ export function getEphemeralChannelDisplay(
     detailLabel: compactRemaining,
     tooltipLabel:
       compactRemaining === "Cleanup due"
-        ? "Ephemeral channel. Cleanup is due now."
+        ? uiT("Ephemeral channel. Cleanup is due now.")
         : absoluteDeadlineLabel
           ? `Ephemeral channel. Cleans up ${verboseRemaining}. Scheduled for ${absoluteDeadlineLabel}.`
           : `Ephemeral channel. Cleans up ${verboseRemaining}.`,

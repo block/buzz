@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
@@ -81,6 +83,8 @@ function getPromptEnterTotalSeconds(characterCount: number) {
 }
 
 export function SearchPromptPlaceholder() {
+  useUiLanguage();
+
   const shouldReduceMotion = useReducedMotion();
   const [wordIndex, setWordIndex] = React.useState(0);
   const activeWord = SEARCH_PROMPT_WORDS[wordIndex];
@@ -142,7 +146,7 @@ export function SearchPromptPlaceholder() {
         className="text-muted-foreground"
         data-testid="search-placeholder"
       >
-        Search for {activeWord}
+        {uiT("Search for {0}", { p0: activeWord })}
       </span>
     );
   }
@@ -155,7 +159,7 @@ export function SearchPromptPlaceholder() {
       data-search-prompt-options={SEARCH_PROMPT_WORDS.join(",")}
       data-testid="search-placeholder"
     >
-      <span>Search for&nbsp;</span>
+      <span>{uiT("Search for")}</span>
       <span
         className="relative inline-block overflow-visible whitespace-nowrap align-baseline leading-[inherit] motion-safe:transition-[width] motion-safe:ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
         data-width-animation-duration-ms={Math.round(
@@ -166,7 +170,7 @@ export function SearchPromptPlaceholder() {
           ...(wordWidth === null ? {} : { width: wordWidth }),
         }}
       >
-        <span className="sr-only">everything</span>
+        <span className="sr-only">{uiT("everything")}</span>
         <span
           aria-hidden="true"
           className="pointer-events-none invisible inline-block whitespace-nowrap leading-[inherit]"

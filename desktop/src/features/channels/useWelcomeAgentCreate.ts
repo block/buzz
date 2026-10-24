@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
@@ -54,7 +56,9 @@ export function useWelcomeAgentCreate({
   const createInChat = React.useCallback(async () => {
     if (!activeChannel || !welcomeGuideAgent) {
       setError(
-        "The welcome guide is unavailable. Create the agent manually instead.",
+        uiT(
+          "The welcome guide is unavailable. Create the agent manually instead.",
+        ),
       );
       return;
     }
@@ -71,7 +75,7 @@ export function useWelcomeAgentCreate({
       setError(
         cause instanceof Error
           ? cause.message
-          : "Could not start the conversation.",
+          : uiT("Could not start the conversation."),
       );
     }
   }, [activeChannel, sendMessageMutation, welcomeGuideAgent]);

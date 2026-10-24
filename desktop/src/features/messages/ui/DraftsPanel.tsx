@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { FileText, Lock, Pencil, Send, Trash2 } from "lucide-react";
 import * as React from "react";
 
@@ -312,17 +314,19 @@ export function SendConfirmDialog({
     >
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Send message</AlertDialogTitle>
+          <AlertDialogTitle>{uiT("Send message")}</AlertDialogTitle>
           <AlertDialogDescription>
-            Are you sure you want to send this message to {destination}?
+            {uiT("Are you sure you want to send this message to {0}?", {
+              p0: destination,
+            })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <Button onClick={onCancel} size="sm" type="button" variant="outline">
-            Cancel
+            {uiT("Cancel")}
           </Button>
           <Button onClick={onConfirm} size="sm" type="button">
-            Send
+            {uiT("Send")}
           </Button>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -373,7 +377,7 @@ function DraftRow({
       data-testid={`home-draft-item-${entry.key}`}
     >
       <button
-        aria-label={`View draft in ${channelLabel}`}
+        aria-label={uiT("View draft in {0}", { p0: channelLabel })}
         className="block w-full min-w-0 px-3 py-3 text-left disabled:cursor-default"
         onClick={onSelect}
         type="button"
@@ -398,7 +402,7 @@ function DraftRow({
                 className="shrink-0 rounded px-1 py-0.5 text-2xs font-medium text-destructive/70 ring-1 ring-destructive/30"
                 data-testid={`home-draft-orphaned-label-${entry.key}`}
               >
-                thread deleted
+                {uiT("thread deleted")}
               </span>
             ) : null}
           </div>
@@ -420,10 +424,10 @@ function DraftRow({
               disabled={!canOpen}
               label={
                 canOpen
-                  ? "Open draft"
+                  ? uiT("Open draft")
                   : isOrphaned
-                    ? "Thread deleted"
-                    : "No channel link"
+                    ? uiT("Thread deleted")
+                    : uiT("No channel link")
               }
               onClick={() => onOpen(entry)}
             >
@@ -433,10 +437,10 @@ function DraftRow({
               disabled={!canSend}
               label={
                 canSend
-                  ? "Send message"
+                  ? uiT("Send message")
                   : isOrphaned
-                    ? "Thread deleted"
-                    : "No channel link"
+                    ? uiT("Thread deleted")
+                    : uiT("No channel link")
               }
               onClick={() => onSend(entry)}
             >
@@ -445,7 +449,7 @@ function DraftRow({
           </>
         )}
         <DraftRowActionButton
-          label="Delete draft"
+          label={uiT("Delete draft")}
           onClick={() => onDelete(entry.key)}
         >
           <Trash2 className="h-4 w-4" />
@@ -588,6 +592,8 @@ export function DraftsPanel({
   onSelectDraft,
   selectedDraftKey,
 }: DraftsPanelProps) {
+  useUiLanguage();
+
   const { goChannel } = useAppNavigation();
 
   // Send confirmation dialog state.
@@ -636,7 +642,7 @@ export function DraftsPanel({
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
         <FileText className="h-8 w-8 text-muted-foreground/50" />
-        <p className="text-sm text-muted-foreground">No drafts</p>
+        <p className="text-sm text-muted-foreground">{uiT("No drafts")}</p>
       </div>
     );
   }
@@ -648,7 +654,7 @@ export function DraftsPanel({
         data-testid="home-inbox-drafts-list"
       >
         <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Drafts
+          {uiT("Drafts")}
         </h3>
         {items.map(({ entry, rootStatus, source }) => (
           <DraftRow

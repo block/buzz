@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Check, type LucideIcon } from "lucide-react";
 
 import {
@@ -180,7 +182,9 @@ export function FeedSection({
               >
                 {canOpenChannel ? (
                   <button
-                    aria-label={`Open ${item.channelName || "channel"}`}
+                    aria-label={uiT("Open {0}", {
+                      p0: item.channelName || "channel",
+                    })}
                     className="absolute inset-0"
                     data-testid={`home-feed-open-${item.id}`}
                     onClick={() => {
@@ -246,7 +250,7 @@ export function FeedSection({
 
                 {showDoneAction ? (
                   <Button
-                    aria-label={isDone ? "Undo done" : "Mark done"}
+                    aria-label={isDone ? uiT("Undo done") : uiT("Mark done")}
                     onClick={() => {
                       if (isDone) {
                         onUndoDone(item.id);

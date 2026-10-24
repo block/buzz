@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Activity, Bot } from "lucide-react";
 
 import type { UserNote } from "@/shared/api/socialTypes";
@@ -37,7 +39,7 @@ export function RecentNotesSection({
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-muted-foreground" />
           <h3 className="text-sm font-semibold text-foreground">
-            Recent Notes
+            {uiT("Recent Notes")}
           </h3>
         </div>
         <button
@@ -45,7 +47,7 @@ export function RecentNotesSection({
           onClick={onOpenPulse}
           type="button"
         >
-          View all in Pulse
+          {uiT("View all in Pulse")}
         </button>
       </div>
 
@@ -78,7 +80,7 @@ export function RecentNotesSection({
                   </span>
                   {isAgent ? (
                     <span className="inline-flex h-3.5 items-center rounded bg-muted px-1 text-2xs font-medium text-muted-foreground">
-                      bot
+                      {uiT("bot")}
                     </span>
                   ) : null}
                   <span className="shrink-0 text-2xs text-muted-foreground">

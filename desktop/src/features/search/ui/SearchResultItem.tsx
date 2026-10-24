@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 import {
   ArrowRight,
@@ -145,7 +147,7 @@ export function ChannelResultBody({ channel }: { channel: Channel }) {
         <p className="text-sm font-semibold tracking-tight">{channel.name}</p>
         <Badge variant="secondary">{channel.channelType}</Badge>
         <p className="ml-auto whitespace-nowrap text-xs text-muted-foreground">
-          Channel
+          {uiT("Channel")}
         </p>
       </div>
       {channel.description ? (

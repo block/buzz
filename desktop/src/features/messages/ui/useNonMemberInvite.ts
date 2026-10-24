@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { PRIVATE_CHANNEL_ADD_DENIED_MESSAGE } from "@/features/channels/lib/channelMemberAdmission";
 import type { MentionRevalidationOptions } from "@/features/messages/lib/agentMentionRevalidation";
@@ -152,7 +154,7 @@ export function useNonMemberInvite({
           setError(
             error instanceof Error
               ? error.message
-              : "Could not invite members.",
+              : uiT("Could not invite members."),
           );
       })
       .finally(() => {

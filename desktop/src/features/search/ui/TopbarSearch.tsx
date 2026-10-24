@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Search } from "lucide-react";
 import * as React from "react";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
@@ -390,6 +392,8 @@ export function TopbarSearch({
   suggestionChannels,
   variant = "bar",
 }: TopbarSearchProps) {
+  const __buzzLanguage = useUiLanguage();
+
   const [isOpen, setIsOpen] = React.useState(false);
   const [scopeChannelId, setScopeChannelId] = React.useState<string | null>(
     null,
@@ -439,6 +443,7 @@ export function TopbarSearch({
     () => getSuggestedSearchResults(suggestionChannels ?? channels),
     [channels, suggestionChannels],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const suggestionActionResults = React.useMemo(() => {
     const actions: SearchResult[] = [];
 
@@ -447,7 +452,9 @@ export function TopbarSearch({
         kind: "action",
         action: {
           id: "browse-channels",
-          title: "Browse channels",
+          get title() {
+            return uiT("Browse channels");
+          },
         },
       });
     }
@@ -457,7 +464,9 @@ export function TopbarSearch({
         kind: "action",
         action: {
           id: "create-channel",
-          title: "Create a new channel",
+          get title() {
+            return uiT("Create a new channel");
+          },
         },
       });
     }
@@ -467,16 +476,19 @@ export function TopbarSearch({
         kind: "action",
         action: {
           id: "create-agent",
-          title: "Create a new agent",
+          get title() {
+            return uiT("Create a new agent");
+          },
         },
       });
     }
 
     return actions;
-  }, [onBrowseChannels, onCreateAgent, onCreateChannel]);
+  }, [onBrowseChannels, onCreateAgent, onCreateChannel, __buzzLanguage]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const suggestionResults = React.useMemo(
     () => [...suggestedResults, ...suggestionActionResults],
-    [suggestedResults, suggestionActionResults],
+    [suggestedResults, suggestionActionResults, __buzzLanguage],
   );
   const minimumQueryLength = getMinimumSearchQueryLength(scopeChannelId);
   const isShowingSuggestions =
@@ -831,12 +843,12 @@ export function TopbarSearch({
             currentChannelSearchAction ? "pb-5" : "py-5",
           )}
         >
-          <p>No recent activity yet.</p>
+          <p>{uiT("No recent activity yet.")}</p>
         </div>
       </div>
     ) : (
       <div
-        aria-label="Recent activity"
+        aria-label={uiT("Recent activity")}
         className="max-h-96 overflow-y-auto"
         role="listbox"
       >
@@ -850,7 +862,7 @@ export function TopbarSearch({
                 {suggestedResults.length > 0 ? (
                   <div>
                     <div className={SEARCH_SECTION_TITLE_CLASS}>
-                      Recent activity
+                      {uiT("Recent activity")}
                     </div>
                     {suggestedResults.map((result) =>
                       renderSearchResultRow(result, resultIndex++),
@@ -859,7 +871,9 @@ export function TopbarSearch({
                 ) : null}
                 {suggestionActionResults.length > 0 ? (
                   <div>
-                    <div className={SEARCH_SECTION_TITLE_CLASS}>Actions</div>
+                    <div className={SEARCH_SECTION_TITLE_CLASS}>
+                      {uiT("Actions")}
+                    </div>
                     {suggestionActionResults.map((result) =>
                       renderSearchResultRow(result, resultIndex++),
                     )}
@@ -898,15 +912,11 @@ export function TopbarSearch({
           currentChannelSearchAction ? "pb-5" : "py-5",
         )}
       >
-        No {scopeChannel ? "messages" : "matches"} for{" "}
-        <span className="font-semibold">{trimmedQuery}</span>
-        {scopeLabel ? (
-          <>
-            {" "}
-            in <span className="font-semibold">{scopeLabel}</span>
-          </>
-        ) : null}
-        .
+        {uiMessage(scopeLabel ? "No {0} for {1} in {2}." : "No {0} for {1}.", {
+          p0: scopeChannel ? uiT("messages") : uiT("matches"),
+          p1: <span className="font-semibold">{trimmedQuery}</span>,
+          p2: <span className="font-semibold">{scopeLabel}</span>,
+        })}
       </p>
     </div>
   ) : (
@@ -925,7 +935,7 @@ export function TopbarSearch({
     <div className={cn("relative", className)}>
       <Dialog open={isOpen} onOpenChange={handleSearchOpenChange}>
         <button
-          aria-label="Search everything"
+          aria-label={uiT("Search everything")}
           className={
             isIconVariant
               ? "group/search flex size-6 items-center justify-center rounded p-1 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-border/35 hover:text-sidebar-foreground focus-visible:bg-sidebar-border/35 focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring"
@@ -934,7 +944,7 @@ export function TopbarSearch({
           data-testid="open-search"
           onClick={() => openSearchDialog(null)}
           ref={triggerRef}
-          title="Search everything"
+          title={uiT("Search everything")}
           type="button"
         >
           <Search
@@ -954,7 +964,7 @@ export function TopbarSearch({
                     : "text-sidebar-foreground/55",
                 )}
               >
-                {query || "Search everything"}
+                {query || uiT("Search everything")}
               </span>
               <kbd className="shrink-0 text-2xs text-sidebar-foreground/45">
                 &#x2318;K
@@ -977,7 +987,9 @@ export function TopbarSearch({
           showCloseButton={false}
         >
           <DialogTitle className="sr-only">
-            {scopeLabel ? `Search in ${scopeLabel}` : "Search everything"}
+            {scopeLabel
+              ? uiT("Search in {0}", { p0: scopeLabel })
+              : uiT("Search everything")}
           </DialogTitle>
           <SearchDialogInputRow
             inputRef={dialogInputRef}

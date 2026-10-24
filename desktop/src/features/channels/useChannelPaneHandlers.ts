@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -124,7 +126,7 @@ export function useChannelPaneHandlers({
 
   const requireThreadEditResolution = React.useCallback(() => {
     if (!editTargetIsThreadReplyRef.current) return true;
-    toast.info("Finish or cancel your edit before leaving the thread.");
+    toast.info(uiT("Finish or cancel your edit before leaving the thread."));
     return false;
   }, []);
 

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -56,7 +58,7 @@ export function SystemMessageAvatar({
         profiles,
         preferResolvedSelfLabel: true,
       })
-    : "Someone";
+    : uiT("Someone");
   const singlePubkey = actorPubkey ?? targetPubkey;
 
   if (!hasActorAndTarget) {
@@ -174,7 +176,10 @@ export function MembershipAvatarStack({
   if (visiblePubkeys.length === 0) return null;
   return (
     <div
-      aria-label={`${visiblePubkeys.length} channel member${visiblePubkeys.length === 1 ? "" : "s"}`}
+      aria-label={uiT("{0} channel member{1}", {
+        p0: visiblePubkeys.length,
+        p1: visiblePubkeys.length === 1 ? "" : "s",
+      })}
       className="relative z-10 flex shrink-0 items-center justify-center"
       data-testid="system-message-avatar-stack"
       role="img"

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import {
   Clock3,
@@ -100,6 +102,8 @@ export function AgentSessionThreadPanel({
   widthPx,
   transparentChrome = false,
 }: AgentSessionThreadPanelProps) {
+  useUiLanguage();
+
   const isLive = agent.status === "running" || agent.status === "deployed";
   const isOverlay = useIsThreadPanelOverlay();
   const sessionChannelId = channelId ?? channel?.id ?? null;
@@ -141,7 +145,9 @@ export function AgentSessionThreadPanel({
   const lastUpdatedTitle =
     latestActivityAt === null
       ? undefined
-      : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
+      : uiT("Last updated {0}", {
+          p0: new Date(latestActivityAt).toLocaleString(),
+        });
 
   const { fetchOlderArchived, hasOlderArchived } =
     useLoadArchivedObserverEvents(
@@ -232,8 +238,8 @@ export function AgentSessionThreadPanel({
   const scopeLabel = sessionChannelId
     ? scopeChannelName
       ? `#${scopeChannelName}`
-      : "1 channel"
-    : "All channels";
+      : uiT("1 channel")
+    : uiT("All channels");
   const agentProfile = profiles?.[normalizePubkey(agent.pubkey)] ?? null;
   const agentLabel = resolveUserLabel({
     pubkey: agent.pubkey,
@@ -241,7 +247,7 @@ export function AgentSessionThreadPanel({
     profiles,
     preferResolvedSelfLabel: true,
   });
-  const viewLabel = showRawFeed ? "Raw ACP activity" : "Activity";
+  const viewLabel = showRawFeed ? uiT("Raw ACP activity") : uiT("Activity");
   const headerScopeLabel = `${viewLabel} · ${scopeLabel}`;
   const animateActivity = useTranscriptAnimationEnabled();
   const showTimestamps = useTranscriptTimestampsEnabled();
@@ -272,20 +278,24 @@ export function AgentSessionThreadPanel({
       });
       if (outcome === "ambiguous_target") {
         toast.error(
-          "This channel has multiple agent sessions. Stopping a specific thread isn't available here yet.",
+          uiT(
+            "This channel has multiple agent sessions. Stopping a specific thread isn't available here yet.",
+          ),
         );
         return;
       }
       if (outcome === "no_active_turn") {
-        toast.info("No active turn to stop.");
+        toast.info(uiT("No active turn to stop."));
         return;
       }
       if (outcome === "unconfirmed") {
-        toast.info("Stop requested, but the agent hasn't confirmed it.");
+        toast.info(uiT("Stop requested, but the agent hasn't confirmed it."));
         return;
       }
       toast.success(
-        `Stop signal sent to ${agent.name}. It may take a moment to respond.`,
+        uiT("Stop signal sent to {0}. It may take a moment to respond.", {
+          p0: agent.name,
+        }),
       );
     } catch (error) {
       toast.error(
@@ -302,11 +312,11 @@ export function AgentSessionThreadPanel({
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label="Open activity settings"
+              aria-label={uiT("Open activity settings")}
               className="relative"
               data-testid="agent-session-settings-menu-trigger"
               size="icon"
-              title="Activity settings"
+              title={uiT("Activity settings")}
               type="button"
               variant="ghost"
             >
@@ -334,19 +344,19 @@ export function AgentSessionThreadPanel({
               }}
               title={
                 showRawFeed
-                  ? "Hide raw JSON-RPC payloads."
+                  ? uiT("Hide raw JSON-RPC payloads.")
                   : channel
-                    ? "Show raw JSON-RPC payloads for this channel."
-                    : "Show raw JSON-RPC payloads for this agent."
+                    ? uiT("Show raw JSON-RPC payloads for this channel.")
+                    : uiT("Show raw JSON-RPC payloads for this agent.")
               }
             >
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2 text-sm font-medium">
                   <TerminalSquare className="h-4 w-4 text-muted-foreground" />
-                  Raw
+                  {uiT("Raw")}
                 </span>
                 <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Show raw JSON-RPC activity.
+                  {uiT("Show raw JSON-RPC activity.")}
                 </span>
               </span>
               <Switch
@@ -366,16 +376,16 @@ export function AgentSessionThreadPanel({
               }}
               title={
                 showRawFeed
-                  ? "Raw activity rows don't animate in."
+                  ? uiT("Raw activity rows don't animate in.")
                   : animateActivity
-                    ? "Stop animating new activity rows."
-                    : "Animate new activity rows as they arrive."
+                    ? uiT("Stop animating new activity rows.")
+                    : uiT("Animate new activity rows as they arrive.")
               }
             >
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2 text-sm font-medium">
                   <Sparkles className="h-4 w-4 text-muted-foreground" />
-                  Show Animations
+                  {uiT("Show Animations")}
                 </span>
               </span>
               <Switch
@@ -394,14 +404,14 @@ export function AgentSessionThreadPanel({
               }}
               title={
                 showTimestamps
-                  ? "Hide per-row activity timestamps."
-                  : "Show a timestamp under each activity row."
+                  ? uiT("Hide per-row activity timestamps.")
+                  : uiT("Show a timestamp under each activity row.")
               }
             >
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2 text-sm font-medium">
                   <Clock3 className="h-4 w-4 text-muted-foreground" />
-                  Show Timestamps
+                  {uiT("Show Timestamps")}
                 </span>
               </span>
               <Switch
@@ -421,26 +431,34 @@ export function AgentSessionThreadPanel({
               }}
               title={
                 canStopCurrentTurn
-                  ? "Interrupt the current ACP turn without stopping the agent process."
+                  ? uiT(
+                      "Interrupt the current ACP turn without stopping the agent process.",
+                    )
                   : !sessionChannelId
-                    ? "Open activity for a channel to stop its current turn."
+                    ? uiT(
+                        "Open activity for a channel to stop its current turn.",
+                      )
                     : isWorking
-                      ? "Only locally managed agents can be interrupted from this community."
-                      : "Available while the agent is working."
+                      ? uiT(
+                          "Only locally managed agents can be interrupted from this community.",
+                        )
+                      : uiT("Available while the agent is working.")
               }
             >
               <Octagon className="mt-0.5 h-4 w-4 text-muted-foreground" />
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-medium">
-                  Stop current turn
+                  {uiT("Stop current turn")}
                 </span>
                 {!canStopCurrentTurn ? (
                   <span className="mt-0.5 block text-xs text-muted-foreground">
                     {!sessionChannelId
-                      ? "Open activity for a channel to stop its current turn."
+                      ? uiT(
+                          "Open activity for a channel to stop its current turn.",
+                        )
                       : isWorking
-                        ? "Only available for locally managed agents."
-                        : "Available while the agent is working."}
+                        ? uiT("Only available for locally managed agents.")
+                        : uiT("Available while the agent is working.")}
                   </span>
                 ) : null}
               </span>
@@ -455,7 +473,7 @@ export function AgentSessionThreadPanel({
     <>
       <AuxiliaryPanelHeaderGroup
         align="start"
-        backButtonAriaLabel="Back from activity"
+        backButtonAriaLabel={uiT("Back from activity")}
         backButtonTestId="agent-session-back"
         onBack={onBack}
       >
@@ -530,8 +548,12 @@ export function AgentSessionThreadPanel({
             className="border-0 bg-transparent px-0 py-2 shadow-none"
             emptyDescription={
               sessionChannelId
-                ? `Mention ${agent.name} in the channel to see its work here.`
-                : `Mention ${agent.name} in any channel to see its work here.`
+                ? uiT("Mention {0} in the channel to see its work here.", {
+                    p0: agent.name,
+                  })
+                : uiT("Mention {0} in any channel to see its work here.", {
+                    p0: agent.name,
+                  })
             }
             profiles={profiles}
             rawLayout="exclusive"

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { PRIVATE_CHANNEL_ADD_DENIED_MESSAGE } from "@/features/channels/lib/channelMemberAdmission";
@@ -158,7 +160,7 @@ export function useForumMentionPreparation(
         setError(
           failure instanceof Error
             ? failure.message
-            : "Could not invite members.",
+            : uiT("Could not invite members."),
         );
     } finally {
       if (invitingRef.current === draft) {

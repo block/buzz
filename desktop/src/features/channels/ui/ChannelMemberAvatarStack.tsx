@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useUsersBatchQuery } from "@/features/profile/hooks";
@@ -15,6 +17,8 @@ export function ChannelMemberAvatarStack({
   currentPubkey?: string;
   members: ChannelMember[];
 }) {
+  useUiLanguage();
+
   const visibleMembers = members.slice(0, MAX_VISIBLE_AVATARS);
   const visiblePubkeys = React.useMemo(
     () => members.slice(0, MAX_VISIBLE_AVATARS).map((member) => member.pubkey),
@@ -66,7 +70,7 @@ export function ChannelMemberAvatarStack({
           className="-ml-2 flex h-8 w-8 items-center justify-center rounded-full border-2 border-background bg-muted text-2xs font-semibold text-muted-foreground"
           data-testid="channel-management-member-avatar-overflow"
           style={{ zIndex: stackItemCount }}
-          title={`${overflowCount} more members`}
+          title={uiT("{0} more members", { p0: overflowCount })}
         >
           +{overflowCount}
         </span>

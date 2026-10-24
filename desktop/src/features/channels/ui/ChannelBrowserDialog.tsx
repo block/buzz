@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import {
   ArrowLeft,
@@ -56,9 +58,24 @@ type BrowserTab = "all" | "joined" | "archived";
 type ChannelSort = ChannelSortMode | "members";
 
 const CHANNEL_SORT_OPTIONS: { label: string; value: ChannelSort }[] = [
-  { label: "Alphabetical", value: "alpha" },
-  { label: "Recent", value: "recent" },
-  { label: "Most members", value: "members" },
+  {
+    get label() {
+      return uiT("Alphabetical");
+    },
+    value: "alpha",
+  },
+  {
+    get label() {
+      return uiT("Recent");
+    },
+    value: "recent",
+  },
+  {
+    get label() {
+      return uiT("Most members");
+    },
+    value: "members",
+  },
 ];
 
 function BrowseState({
@@ -109,6 +126,8 @@ export function ChannelBrowserDialog({
   onCreateChannel,
   isCreatingChannel = false,
 }: ChannelBrowserDialogProps) {
+  useUiLanguage();
+
   const [query, setQuery] = React.useState("");
   const [activeTab, setActiveTab] = React.useState<BrowserTab>("all");
   const [sort, setSort] = React.useState<ChannelSort>("alpha");
@@ -142,15 +161,15 @@ export function ChannelBrowserDialog({
   const isForumMode = channelTypeFilter === "forum";
   const canCreate = Boolean(onCreateChannel);
   const createKind = isForumMode ? "forum" : "stream";
-  const browseTitle = isForumMode ? "Add a forum" : "Browse channels";
+  const browseTitle = isForumMode ? uiT("Add a forum") : uiT("Browse channels");
   const searchPlaceholder = canCreate
     ? isForumMode
-      ? "Search or create a forum"
-      : "Search or create a channel"
+      ? uiT("Search or create a forum")
+      : uiT("Search or create a channel")
     : isForumMode
-      ? "Search forums by name or description"
-      : "Search channels by name or description";
-  const entityLabel = isForumMode ? "forum" : "channel";
+      ? uiT("Search forums by name or description")
+      : uiT("Search channels by name or description");
+  const entityLabel = isForumMode ? uiT("forum") : uiT("channel");
 
   const noopCreate = React.useCallback(async () => {}, []);
   const createForm = useCreateChannelForm({
@@ -238,9 +257,9 @@ export function ChannelBrowserDialog({
 
   const selectedSortLabel =
     CHANNEL_SORT_OPTIONS.find((option) => option.value === sort)?.label ??
-    "Alphabetical";
+    uiT("Alphabetical");
 
-  const allTabLabel = isForumMode ? "All forums" : "All channels";
+  const allTabLabel = isForumMode ? uiT("All forums") : uiT("All channels");
 
   // Whether an exact name match already exists — if so we don't offer to
   // create a duplicate, mirroring how you'd never make two "#general"s.
@@ -394,22 +413,32 @@ export function ChannelBrowserDialog({
       : undefined;
   const emptyTitle =
     deferredQuery.length > 0
-      ? `No ${entityLabel}s match your search`
+      ? uiT("No {0}s match your search", { p0: entityLabel })
       : activeTab === "archived"
-        ? `No archived ${entityLabel}s`
+        ? uiT("No archived {0}s", { p0: entityLabel })
         : activeTab === "joined"
-          ? `No joined ${entityLabel}s`
-          : `No ${entityLabel}s to browse`;
+          ? uiT("No joined {0}s", { p0: entityLabel })
+          : uiT("No {0}s to browse", { p0: entityLabel });
   const emptyDescription =
     deferredQuery.length > 0
       ? canCreate
-        ? `No ${entityLabel} by that name yet — create it to get started.`
-        : "Try a different name or keyword."
+        ? uiT("No {0} by that name yet — create it to get started.", {
+            p0: entityLabel,
+          })
+        : uiT("Try a different name or keyword.")
       : activeTab === "archived"
-        ? `Archived ${entityLabel}s you have joined will appear here.`
+        ? uiT("Archived {0}s you have joined will appear here.", {
+            p0: entityLabel,
+          })
         : activeTab === "joined"
-          ? `${entityLabel[0].toUpperCase()}${entityLabel.slice(1)}s you join will appear here.`
-          : `All open ${entityLabel}s are available in the sidebar. Create a new ${entityLabel} to get started.`;
+          ? uiT("{0}{1}s you join will appear here.", {
+              p0: entityLabel[0].toUpperCase(),
+              p1: entityLabel.slice(1),
+            })
+          : uiT(
+              "All open {0}s are available in the sidebar. Create a new {1} to get started.",
+              { p0: entityLabel, p1: entityLabel },
+            );
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -441,7 +470,7 @@ export function ChannelBrowserDialog({
                 <DialogTitle>{browseTitle}</DialogTitle>
                 <DialogClose className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus:ring-1 focus:ring-ring">
                   <X className="h-4 w-4" />
-                  <span className="sr-only">Close</span>
+                  <span className="sr-only">{uiT("Close")}</span>
                 </DialogClose>
               </div>
               <div className={MODAL_SEARCH_SHELL_CLASS}>
@@ -517,7 +546,10 @@ export function ChannelBrowserDialog({
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button
-                      aria-label={`Sort ${entityLabel}s: ${selectedSortLabel}`}
+                      aria-label={uiT("Sort {0}s: {1}", {
+                        p0: entityLabel,
+                        p1: selectedSortLabel,
+                      })}
                       data-testid="channel-browser-sort"
                       size="icon-xs"
                       type="button"
@@ -527,7 +559,7 @@ export function ChannelBrowserDialog({
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
-                    <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+                    <DropdownMenuLabel>{uiT("Sort by")}</DropdownMenuLabel>
                     <DropdownMenuRadioGroup
                       onValueChange={(value) => {
                         setSort(value as ChannelSort);
@@ -589,7 +621,7 @@ export function ChannelBrowserDialog({
                       }}
                       value="joined"
                     >
-                      Joined
+                      {uiT("Joined")}
                     </TabsTrigger>
                     <TabsTrigger
                       className="rounded-none border-b-2 border-transparent bg-transparent px-0 py-2 text-sm font-medium shadow-none transition-colors duration-150 ease-out data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
@@ -598,7 +630,7 @@ export function ChannelBrowserDialog({
                       }}
                       value="archived"
                     >
-                      Archived
+                      {uiT("Archived")}
                     </TabsTrigger>
                   </TabsList>
                 </Tabs>
@@ -683,13 +715,13 @@ function CreateChannelRow({
       {hasQuery ? (
         <span className="min-w-0 text-sm">
           <span className="font-medium text-foreground">
-            Create {entityLabel}{" "}
+            {uiT("Create {0}", { p0: entityLabel })}
           </span>
           <span className="font-semibold text-foreground">“{query}”</span>
         </span>
       ) : (
         <span className="min-w-0 text-sm font-medium text-foreground">
-          Create a new {entityLabel}
+          {uiT("Create a new {0}", { p0: entityLabel })}
         </span>
       )}
     </button>
@@ -713,7 +745,7 @@ function ChannelCreateView({
         <div className="flex items-center justify-between gap-4">
           <div className="flex min-w-0 items-center gap-2">
             <button
-              aria-label="Back to search"
+              aria-label={uiT("Back to search")}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus:ring-1 focus:ring-ring"
               data-testid="channel-browser-create-back"
               onClick={onBack}
@@ -722,17 +754,17 @@ function ChannelCreateView({
               <ArrowLeft className="h-4 w-4" />
             </button>
             <DialogTitle className="truncate">
-              {`New ${entityLabel}`}
+              {uiT("New {0}", { p0: entityLabel })}
             </DialogTitle>
           </div>
           <button
-            aria-label="Close"
+            aria-label={uiT("Close")}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus:ring-1 focus:ring-ring"
             onClick={onClose}
             type="button"
           >
             <X className="h-4 w-4" />
-            <span className="sr-only">Close</span>
+            <span className="sr-only">{uiT("Close")}</span>
           </button>
         </div>
       </DialogHeader>
@@ -798,7 +830,7 @@ function ChannelCard({
             </p>
             {channel.archivedAt ? (
               <Badge className="ml-1 shrink-0" variant="warning">
-                archived
+                {uiT("archived")}
               </Badge>
             ) : null}
           </div>
@@ -830,7 +862,7 @@ function ChannelCard({
           type="button"
           variant="default"
         >
-          {isJoining ? "Joining..." : "Join"}
+          {isJoining ? uiT("Joining...") : uiT("Join")}
         </Button>
       ) : null}
     </div>
