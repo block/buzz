@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { ArrowLeft, ChevronRight, Link2, Plus } from "lucide-react";
 
@@ -32,6 +34,8 @@ export function AddCommunityDialog({
   open,
   onOpenChange,
 }: AddCommunityDialogProps) {
+  useUiLanguage();
+
   const communityOnboarding = useCommunityOnboarding();
   const [mode, setMode] = React.useState<AddCommunityMode>("choose");
   const [joinError, setJoinError] = React.useState<string | null>(null);
@@ -69,7 +73,9 @@ export function AddCommunityDialog({
       });
       if (!started) {
         setJoinError(
-          "Finish connecting the community already in progress, then try again.",
+          uiT(
+            "Finish connecting the community already in progress, then try again.",
+          ),
         );
         return;
       }
@@ -80,17 +86,17 @@ export function AddCommunityDialog({
 
   const title =
     mode === "create"
-      ? "Create a new community"
+      ? uiT("Create a new community")
       : mode === "join"
-        ? "Join an existing community"
-        : "Add community";
+        ? uiT("Join an existing community")
+        : uiT("Add community");
 
   const description =
     mode === "create"
-      ? "Opens Builderlab in your browser."
+      ? uiT("Opens Builderlab in your browser.")
       : mode === "join"
-        ? "Use the community URL or invite link you received."
-        : "Create a new community or join one you already have.";
+        ? uiT("Use the community URL or invite link you received.")
+        : uiT("Create a new community or join one you already have.");
 
   return (
     <Dialog
@@ -108,7 +114,7 @@ export function AddCommunityDialog({
           <div className="flex min-w-0 items-center gap-2">
             {mode !== "choose" ? (
               <button
-                aria-label="Back to add community options"
+                aria-label={uiT("Back to add community options")}
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                 data-testid="add-community-back"
                 onClick={() => {
@@ -143,10 +149,10 @@ export function AddCommunityDialog({
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-medium text-foreground">
-                    Create a new community
+                    {uiT("Create a new community")}
                   </span>
                   <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
-                    Claim a Buzz address for your team.
+                    {uiT("Claim a Buzz address for your team.")}
                   </span>
                 </span>
                 <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60" />
@@ -163,10 +169,10 @@ export function AddCommunityDialog({
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-medium text-foreground">
-                    Join an existing community
+                    {uiT("Join an existing community")}
                   </span>
                   <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
-                    Use a community URL or invite link.
+                    {uiT("Use a community URL or invite link.")}
                   </span>
                 </span>
                 <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60" />

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useQueryClient } from "@tanstack/react-query";
 import { Headphones, MessageSquareText } from "lucide-react";
 import * as React from "react";
@@ -118,6 +120,8 @@ export function HuddleAttachment({
   className,
   message,
 }: HuddleAttachmentProps) {
+  useUiLanguage();
+
   const ephemeralChannelId = React.useMemo(
     () => parseEphemeralChannelId(message.body),
     [message.body],
@@ -243,9 +247,9 @@ export function HuddleAttachment({
           <Headphones />
         </AttachmentMedia>
         <AttachmentContent>
-          <AttachmentTitle>Huddle unavailable</AttachmentTitle>
+          <AttachmentTitle>{uiT("Huddle unavailable")}</AttachmentTitle>
           <AttachmentDescription>
-            This huddle card is missing session details.
+            {uiT("This huddle card is missing session details.")}
           </AttachmentDescription>
         </AttachmentContent>
       </Attachment>
@@ -268,9 +272,9 @@ export function HuddleAttachment({
       </AttachmentMedia>
       <AttachmentContent>
         <AttachmentTitle>
-          Huddle
+          {uiT("Huddle")}
           <span aria-hidden="true"> · </span>
-          {displayEnded ? "Ended" : "In progress"}
+          {displayEnded ? uiT("Ended") : uiT("In progress")}
         </AttachmentTitle>
         <AttachmentDescription>
           {participantLabel(participantCount)}
@@ -286,11 +290,11 @@ export function HuddleAttachment({
             variant="secondary"
           >
             <Headphones className="h-4 w-4" />
-            {isJoining || isStarting ? "Joining" : "Join"}
+            {isJoining || isStarting ? uiT("Joining") : uiT("Join")}
           </AttachmentAction>
         ) : isCurrentHuddle || displayEnded ? (
           <AttachmentAction
-            aria-label="View huddle"
+            aria-label={uiT("View huddle")}
             onClick={() => {
               if (isCurrentHuddle) {
                 showHuddleInMainApp(ephemeralChannelId);
@@ -303,7 +307,7 @@ export function HuddleAttachment({
             variant="ghost"
           >
             <MessageSquareText className="h-4 w-4" />
-            View
+            {uiT("View")}
           </AttachmentAction>
         ) : null}
       </AttachmentActions>

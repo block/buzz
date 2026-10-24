@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Check, Copy } from "lucide-react";
 
@@ -35,6 +37,8 @@ export function WelcomeSetup({
   initialTransitionMode = "initial",
   onBack,
 }: WelcomeSetupProps) {
+  useUiLanguage();
+
   const [page, setPage] = React.useState<WelcomeSetupPage>(initialPage);
   const [transitionMode, setTransitionMode] =
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
@@ -135,11 +139,12 @@ export function WelcomeSetup({
             >
               <div className="w-full max-w-[760px]">
                 <h1 className="text-title font-normal">
-                  Join or create a community
+                  {uiT("Join or create a community")}
                 </h1>
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
-                  Join with an invite, create your own community, or reconnect
-                  one you already have.
+                  {uiT(
+                    "Join with an invite, create your own community, or reconnect one you already have.",
+                  )}
                 </p>
               </div>
               <div className="flex w-full flex-1 translate-y-16 flex-col items-center justify-center gap-20 py-8">
@@ -153,7 +158,7 @@ export function WelcomeSetup({
                     onClick={() => showPage("join")}
                     type="button"
                   >
-                    Join a community
+                    {uiT("Join a community")}
                   </button>
                 </Card>
                 <Card
@@ -166,7 +171,7 @@ export function WelcomeSetup({
                     onClick={beginHostedCommunity}
                     type="button"
                   >
-                    Create a community
+                    {uiT("Create a community")}
                   </button>
                 </Card>
                 <Card
@@ -179,7 +184,7 @@ export function WelcomeSetup({
                     onClick={() => showPage("existing")}
                     type="button"
                   >
-                    I already have a community
+                    {uiT("I already have a community")}
                   </button>
                 </Card>
               </div>
@@ -193,10 +198,12 @@ export function WelcomeSetup({
             >
               <div className="w-full max-w-[760px]">
                 <h1 className="text-title font-normal">
-                  Reconnect to your community
+                  {uiT("Reconnect to your community")}
                 </h1>
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
-                  Tell us your role so we can find the fastest way back in.
+                  {uiT(
+                    "Tell us your role so we can find the fastest way back in.",
+                  )}
                 </p>
               </div>
               <div className="flex w-full flex-1 translate-y-16 flex-col items-center justify-center gap-20 py-8">
@@ -210,7 +217,7 @@ export function WelcomeSetup({
                     onClick={beginHostedCommunity}
                     type="button"
                   >
-                    I own the community
+                    {uiT("I own the community")}
                   </button>
                 </Card>
                 <Card
@@ -223,7 +230,7 @@ export function WelcomeSetup({
                     onClick={() => showPage("member")}
                     type="button"
                   >
-                    I’m a member or admin
+                    {uiT("I’m a member or admin")}
                   </button>
                 </Card>
               </div>
@@ -245,13 +252,17 @@ export function WelcomeSetup({
               <div className="w-full max-w-[620px]">
                 <h1 className="text-title font-normal">
                   {page === "member"
-                    ? "Reconnect to your community"
-                    : "Join a community"}
+                    ? uiT("Reconnect to your community")
+                    : uiT("Join a community")}
                 </h1>
                 <p className="mt-3 text-sm leading-6 text-foreground/80">
                   {page === "member"
-                    ? "Enter the community URL or an invite link. Your role will be restored when you connect."
-                    : "Enter the invite link or community URL you received."}
+                    ? uiT(
+                        "Enter the community URL or an invite link. Your role will be restored when you connect.",
+                      )
+                    : uiT(
+                        "Enter the invite link or community URL you received.",
+                      )}
                 </p>
               </div>
               <div className="flex w-full flex-1 flex-col items-center justify-center gap-16">
@@ -263,18 +274,18 @@ export function WelcomeSetup({
                   }
                   onConnect={startConnection}
                   onRedeem={redeemInvite}
-                  placeholder="Invite link or community URL"
+                  placeholder={uiT("Invite link or community URL")}
                   variant="onboarding-spotlight"
                 />
                 {page === "join" ? (
                   <div className="w-full max-w-[560px] text-left">
                     <p className="text-sm font-medium text-foreground">
-                      Joining a private community?
+                      {uiT("Joining a private community?")}
                     </p>
                     <p className="mt-2 text-sm leading-6 text-foreground/75">
-                      Some communities need the owner to add you before you can
-                      join. Copy your public ID and send it to the community
-                      owner.
+                      {uiT(
+                        "Some communities need the owner to add you before you can join. Copy your public ID and send it to the community owner.",
+                      )}
                     </p>
                     <div className="mt-4 flex items-center gap-3 rounded-xl border border-foreground/10 bg-background/35 px-4 py-3">
                       <code
@@ -284,7 +295,7 @@ export function WelcomeSetup({
                         {npub || "Loading…"}
                       </code>
                       <Button
-                        aria-label="Copy public ID"
+                        aria-label={uiT("Copy public ID")}
                         className="h-9 shrink-0 rounded-full px-3"
                         disabled={!npub}
                         onClick={() => {
@@ -302,7 +313,7 @@ export function WelcomeSetup({
                         ) : (
                           <Copy className="h-4 w-4" aria-hidden="true" />
                         )}
-                        <span>{copiedNpub ? "Copied" : "Copy"}</span>
+                        <span>{copiedNpub ? uiT("Copied") : uiT("Copy")}</span>
                       </Button>
                     </div>
                     {npubError ? (

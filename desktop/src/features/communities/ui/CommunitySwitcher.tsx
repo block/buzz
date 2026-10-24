@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   Check,
   ChevronDown,
@@ -122,6 +124,8 @@ export function CommunitySwitcher({
   onLeaveCommunity,
   onRemoveCommunityFromDevice,
 }: CommunitySwitcherProps) {
+  useUiLanguage();
+
   const [editingCommunity, setEditingCommunity] =
     React.useState<Community | null>(null);
   const [dropdownOpen, setDropdownOpen] = React.useState(false);
@@ -189,8 +193,11 @@ export function CommunitySwitcher({
       setDropdownOpen(false);
       if (result?.status === "already-absent") {
         toast("Community removed", {
-          description:
-            "You were no longer a member, so Buzz removed the community from this device.",
+          get description() {
+            return uiT(
+              "You were no longer a member, so Buzz removed the community from this device.",
+            );
+          },
         });
       }
     } catch (error) {
@@ -199,7 +206,10 @@ export function CommunitySwitcher({
           ? error.message
           : "Couldn't leave the community. Try again.";
       setLeaveError(
-        `${message} If the community no longer exists, use Remove from this device.`,
+        uiT(
+          "{0} If the community no longer exists, use Remove from this device.",
+          { p0: message },
+        ),
       );
       setDropdownOpen(true);
     } finally {
@@ -217,7 +227,7 @@ export function CommunitySwitcher({
       toast.error(
         error instanceof Error
           ? error.message
-          : "Couldn't remove the community from this device. Try again.",
+          : uiT("Couldn't remove the community from this device. Try again."),
       );
     }
   }, [onRemoveCommunityFromDevice, removingCommunity]);
@@ -261,7 +271,7 @@ export function CommunitySwitcher({
             : "min-w-0 flex-1 truncate font-medium"
         }
       >
-        {activeCommunity?.name ?? "No community"}
+        {activeCommunity?.name ?? uiT("No community")}
       </span>
       {variant === "profile-menu" ? (
         <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -287,7 +297,7 @@ export function CommunitySwitcher({
             aria-label={
               degraded
                 ? `${activeCommunity?.name ?? "Community"} — ${connectionLabel}`
-                : "Community actions"
+                : uiT("Community actions")
             }
             className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-popover-foreground outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none data-[state=open]:bg-muted/50 data-[state=open]:text-popover-foreground"
             data-testid="community-switcher"
@@ -309,7 +319,7 @@ export function CommunitySwitcher({
           sideOffset={0}
         >
           <div
-            aria-label="Community actions"
+            aria-label={uiT("Community actions")}
             data-testid="profile-community-actions"
             role="menu"
           >
@@ -325,7 +335,7 @@ export function CommunitySwitcher({
                   type="button"
                 >
                   <Link2 className="h-4 w-4" />
-                  <span>Copy community URL</span>
+                  <span>{uiT("Copy community URL")}</span>
                 </button>
                 {canInvite && onInvite ? (
                   <button
@@ -338,7 +348,7 @@ export function CommunitySwitcher({
                     type="button"
                   >
                     <Ticket className="h-4 w-4" />
-                    <span>Invite to community</span>
+                    <span>{uiT("Invite to community")}</span>
                   </button>
                 ) : null}
                 <button
@@ -351,7 +361,7 @@ export function CommunitySwitcher({
                   type="button"
                 >
                   <Settings2 className="h-4 w-4" />
-                  <span>Community settings</span>
+                  <span>{uiT("Community settings")}</span>
                 </button>
                 <button
                   className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-destructive outline-hidden transition-colors hover:bg-destructive/10 focus:bg-destructive/10 focus:outline-none focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
@@ -361,7 +371,9 @@ export function CommunitySwitcher({
                   type="button"
                 >
                   <LogOut className="h-4 w-4" />
-                  <span>{isLeaving ? "Leaving…" : "Leave community"}</span>
+                  <span>
+                    {isLeaving ? uiT("Leaving…") : uiT("Leave community")}
+                  </span>
                 </button>
                 <button
                   className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-destructive outline-hidden transition-colors hover:bg-destructive/10 focus:bg-destructive/10 focus:outline-none focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
@@ -374,7 +386,7 @@ export function CommunitySwitcher({
                   type="button"
                 >
                   <Trash2 className="h-4 w-4" />
-                  <span>Remove from this device</span>
+                  <span>{uiT("Remove from this device")}</span>
                 </button>
                 {leaveError ? (
                   <p
@@ -397,7 +409,7 @@ export function CommunitySwitcher({
               type="button"
             >
               <Plus className="h-4 w-4" />
-              <span>Add a community</span>
+              <span>{uiT("Add a community")}</span>
             </button>
           </div>
         </PopoverContent>
@@ -416,7 +428,7 @@ export function CommunitySwitcher({
             aria-label={
               degraded
                 ? `${activeCommunity?.name ?? "Community"} — ${connectionLabel}`
-                : "Switch community"
+                : uiT("Switch community")
             }
             className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md py-0.5 text-left text-xs text-sidebar-foreground/50 outline-hidden transition-colors hover:text-sidebar-foreground focus:outline-none focus-visible:outline-none data-[state=open]:text-sidebar-foreground"
             data-testid="community-switcher"
@@ -461,7 +473,7 @@ export function CommunitySwitcher({
             </span>
             <span className="min-w-0 flex-1 truncate">{community.name}</span>
             <button
-              aria-label={`Edit ${community.name}`}
+              aria-label={uiT("Edit {0}", { p0: community.name })}
               className="flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 hover:bg-accent group-hover:opacity-100 group-focus:opacity-100"
               onClick={(e) => {
                 e.stopPropagation();
@@ -478,7 +490,7 @@ export function CommunitySwitcher({
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onAddCommunity}>
           <Plus className="h-4 w-4" />
-          <span>Add a community</span>
+          <span>{uiT("Add a community")}</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -514,15 +526,20 @@ export function CommunitySwitcher({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove from this device</AlertDialogTitle>
+            <AlertDialogTitle>
+              {uiT("Remove from this device")}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              {`Remove "${removingCommunity?.name ?? ""}" from this device? Buzz won't contact the relay, so your membership isn't revoked. You can add the community again later.`}
+              {uiT(
+                "Remove \"{0}\" from this device? Buzz won't contact the relay, so your membership isn't revoked. You can add the community again later.",
+                { p0: removingCommunity?.name ?? "" },
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>{uiT("Cancel")}</AlertDialogCancel>
             <AlertDialogAction onClick={() => void handleRemoveFromDevice()}>
-              Remove
+              {uiT("Remove")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

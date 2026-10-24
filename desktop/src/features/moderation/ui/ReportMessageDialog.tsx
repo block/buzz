@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Flag } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -18,13 +20,48 @@ import { Textarea } from "@/shared/ui/textarea";
 /** NIP-56 report categories, in the order shown to the reporter. `other` is
  *  last so it reads as the fallback rather than a first-class choice. */
 const REPORT_CATEGORIES: { value: ReportType; label: string }[] = [
-  { value: "spam", label: "Spam" },
-  { value: "profanity", label: "Profanity or hate speech" },
-  { value: "nudity", label: "Nudity or sexual content" },
-  { value: "impersonation", label: "Impersonation" },
-  { value: "malware", label: "Malware or scam" },
-  { value: "illegal", label: "Illegal content" },
-  { value: "other", label: "Other" },
+  {
+    value: "spam",
+    get label() {
+      return uiT("Spam");
+    },
+  },
+  {
+    value: "profanity",
+    get label() {
+      return uiT("Profanity or hate speech");
+    },
+  },
+  {
+    value: "nudity",
+    get label() {
+      return uiT("Nudity or sexual content");
+    },
+  },
+  {
+    value: "impersonation",
+    get label() {
+      return uiT("Impersonation");
+    },
+  },
+  {
+    value: "malware",
+    get label() {
+      return uiT("Malware or scam");
+    },
+  },
+  {
+    value: "illegal",
+    get label() {
+      return uiT("Illegal content");
+    },
+  },
+  {
+    value: "other",
+    get label() {
+      return uiT("Other");
+    },
+  },
 ];
 
 /**
@@ -57,6 +94,8 @@ export function ReportMessageDialog({
   /** Reported message event id (the `e` tag target). */
   eventId: string;
 }) {
+  useUiLanguage();
+
   const submitReport = useSubmitReportMutation();
   const [category, setCategory] = React.useState<ReportType | null>(null);
   const [note, setNote] = React.useState("");
@@ -81,7 +120,7 @@ export function ReportMessageDialog({
       },
       {
         onSuccess: () => {
-          toast.success("Report submitted to community moderators");
+          toast.success(uiT("Report submitted to community moderators"));
           onOpenChange(false);
         },
         onError: (error) => toast.error(reportErrorMessage(error)),
@@ -95,11 +134,12 @@ export function ReportMessageDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Flag className="h-4 w-4" />
-            Report message
+            {uiT("Report message")}
           </DialogTitle>
           <DialogDescription>
-            Reports go to this community's moderators for review. The author is
-            not notified of who reported them.
+            {uiT(
+              "Reports go to this community's moderators for review. The author is not notified of who reported them.",
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -122,11 +162,11 @@ export function ReportMessageDialog({
             htmlFor="report-note"
             className="text-sm font-medium text-muted-foreground"
           >
-            Additional context (optional)
+            {uiT("Additional context (optional)")}
           </label>
           <Textarea
             id="report-note"
-            placeholder="Add anything that helps moderators..."
+            placeholder={uiT("Add anything that helps moderators...")}
             value={note}
             onChange={(e) => setNote(e.target.value)}
             rows={3}
@@ -140,14 +180,14 @@ export function ReportMessageDialog({
             onClick={() => onOpenChange(false)}
             disabled={submitReport.isPending}
           >
-            Cancel
+            {uiT("Cancel")}
           </Button>
           <Button
             variant="default"
             onClick={submit}
             disabled={!category || submitReport.isPending}
           >
-            Submit report
+            {uiT("Submit report")}
           </Button>
         </DialogFooter>
       </DialogContent>

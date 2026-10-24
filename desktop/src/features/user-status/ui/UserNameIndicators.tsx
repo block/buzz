@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useIsUserInHuddle } from "@/features/huddle/HuddlePresenceContext";
@@ -23,6 +25,8 @@ export function UserNameIndicators({
   pubkey: string | undefined;
   size?: "chat" | "dm";
 }) {
+  useUiLanguage();
+
   const normalizedPubkey = normalizePubkey(pubkey ?? "");
   const sharedStatus = useUserStatusLookupContext();
   const registerStatus = sharedStatus?.register;
@@ -55,7 +59,7 @@ export function UserNameIndicators({
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <span
-              aria-label="🎧 In a huddle"
+              aria-label={uiT("🎧 In a huddle")}
               className={cn(
                 "inline-flex cursor-default items-center justify-center leading-none",
                 indicatorTextClass,
@@ -66,7 +70,7 @@ export function UserNameIndicators({
               🎧
             </span>
           </TooltipTrigger>
-          <TooltipContent>In a huddle</TooltipContent>
+          <TooltipContent>{uiT("In a huddle")}</TooltipContent>
         </Tooltip>
       ) : null}
       {status ? (
@@ -88,7 +92,7 @@ export function UserNameIndicators({
               />
             </span>
           </TooltipTrigger>
-          <TooltipContent>{status.text || "Status set"}</TooltipContent>
+          <TooltipContent>{status.text || uiT("Status set")}</TooltipContent>
         </Tooltip>
       ) : null}
     </span>

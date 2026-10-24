@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -85,6 +87,8 @@ function writeDraft(key: string, value: string): void {
  * exposing implementation protocols or raw mesh controls.
  */
 export function MeshComputeSettingsCard() {
+  useUiLanguage();
+
   const shouldReduceMotion = useReducedMotion();
   const { status, error, refresh } = useMeshNodeStatus();
   const [installedModels, setInstalledModels] = React.useState<
@@ -227,13 +231,15 @@ export function MeshComputeSettingsCard() {
   return (
     <section className="min-w-0" data-testid="settings-mesh-share-compute">
       <SettingsSectionHeader
-        title="Share compute"
-        description="Share this machine with members of this relay so they can run agents here."
+        title={uiT("Share compute")}
+        description={uiT(
+          "Share this machine with members of this relay so they can run agents here.",
+        )}
       />
 
       {error ? (
         <p className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Couldn't check shared compute: {error}
+          {uiT("Couldn't check shared compute: {0}", { p0: error })}
         </p>
       ) : null}
       {actionError ? (
@@ -245,7 +251,7 @@ export function MeshComputeSettingsCard() {
         <DownloadProgressBar progress={downloadProgress} />
       ) : null}
 
-      <SettingsOptionGroup title="Sharing">
+      <SettingsOptionGroup title={uiT("Sharing")}>
         <div className="space-y-5 px-4 py-3">
           <div className="flex min-w-0 items-start justify-between gap-6">
             <div className="min-w-0">
@@ -253,7 +259,7 @@ export function MeshComputeSettingsCard() {
                 className="text-sm font-medium"
                 htmlFor="mesh-share-compute-toggle"
               >
-                Share this machine
+                {uiT("Share this machine")}
               </label>
               {!isSharing ? (
                 <StatusLine
@@ -303,7 +309,7 @@ export function MeshComputeSettingsCard() {
               onClick={() => setAdvancedOpen((current) => !current)}
               type="button"
             >
-              <span>Advanced</span>
+              <span>{uiT("Advanced")}</span>
               <ChevronDown
                 className={cn(
                   "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
@@ -314,7 +320,7 @@ export function MeshComputeSettingsCard() {
             {advancedOpen ? (
               <div className="mt-3 space-y-1.5">
                 <label className="text-sm font-medium" htmlFor="mesh-vram">
-                  Max VRAM (GB)
+                  {uiT("Max VRAM (GB)")}
                 </label>
                 <AgentConfigTextInput
                   data-testid="mesh-share-compute-vram"
@@ -326,13 +332,13 @@ export function MeshComputeSettingsCard() {
                     setMaxVramGb(next);
                     writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
                   }}
-                  placeholder="No limit"
+                  placeholder={uiT("No limit")}
                   usePersonaInputStyle
                   value={maxVramGb}
                 />
                 {status?.consoleUrl ? (
                   <p className="text-sm font-normal text-muted-foreground">
-                    Debug console:{" "}
+                    {uiT("Debug console:")}{" "}
                     <a
                       className="underline"
                       href={status.consoleUrl}
@@ -366,7 +372,7 @@ export function MeshComputeSettingsCard() {
                   className="space-y-1"
                   data-testid="mesh-share-compute-sharing-status"
                 >
-                  <h3 className="text-sm font-medium">Status</h3>
+                  <h3 className="text-sm font-medium">{uiT("Status")}</h3>
                   <div className="space-y-1 rounded-lg bg-muted/30 px-3 py-2">
                     <StatusLine
                       isConsuming={isConsuming}
@@ -428,7 +434,9 @@ function DownloadProgressBar({
     >
       <div className="flex items-baseline justify-between gap-2 text-sm">
         <span className="min-w-0 truncate font-medium">
-          {progress.status === "preparing" ? "Preparing" : "Downloading"}{" "}
+          {progress.status === "preparing"
+            ? uiT("Preparing")
+            : uiT("Downloading")}{" "}
           {progress.label}
         </span>
         <span className="shrink-0 text-muted-foreground">
@@ -490,6 +498,9 @@ function MeshModelPicker({
   onCustomModelEditingChange: (editing: boolean) => void;
   onModelChange: (model: string) => void;
 }) {
+  const __buzzLanguage = useUiLanguage();
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const options = React.useMemo<AgentDropdownOption[]>(() => {
     const seen = new Set<string>();
     const catalogOptions = (catalog?.entries ?? []).map((entry) => {
@@ -510,7 +521,7 @@ function MeshModelPicker({
                 {installed.name ?? installed.id}
               </span>
               <span className="shrink-0 text-2xs text-muted-foreground">
-                Installed
+                {uiT("Installed")}
               </span>
             </div>
           ),
@@ -521,9 +532,14 @@ function MeshModelPicker({
     return [
       ...catalogOptions,
       ...localOptions,
-      { label: "Custom model…", value: CUSTOM_MODEL_DROPDOWN_VALUE },
+      {
+        get label() {
+          return uiT("Custom model…");
+        },
+        value: CUSTOM_MODEL_DROPDOWN_VALUE,
+      },
     ];
-  }, [catalog?.entries, installedModels]);
+  }, [catalog?.entries, installedModels, __buzzLanguage]);
   const knownModel = options.some((option) => option.value === model.trim());
   const showCustomModelInput =
     isCustomModelEditing || (model.trim().length > 0 && !knownModel);
@@ -543,7 +559,7 @@ function MeshModelPicker({
   return (
     <div className="space-y-1.5" data-testid="mesh-share-compute-catalog">
       <label className="text-sm font-medium" htmlFor="mesh-share-compute-model">
-        Model
+        {uiT("Model")}
       </label>
       <AgentDropdownSelect
         className={MESH_SELECT_TRIGGER_CLASS}
@@ -551,7 +567,7 @@ function MeshModelPicker({
         id="mesh-share-compute-model"
         onValueChange={handleModelChange}
         options={options}
-        placeholder="Select a model"
+        placeholder={uiT("Select a model")}
         placeholderClassName="text-muted-foreground/55"
         searchable
         testId="mesh-share-compute-model"
@@ -559,7 +575,7 @@ function MeshModelPicker({
       />
       {showCustomModelInput ? (
         <AgentConfigTextInput
-          aria-label="Custom model reference"
+          aria-label={uiT("Custom model reference")}
           autoCorrect="off"
           disabled={disabled}
           onChange={(event) => {
@@ -569,7 +585,7 @@ function MeshModelPicker({
             onCustomModelEditingChange(true);
             onModelChange(event.target.value);
           }}
-          placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
+          placeholder={uiT("Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main")}
           usePersonaInputStyle
           value={model}
         />
@@ -578,10 +594,11 @@ function MeshModelPicker({
         className="text-sm font-normal text-muted-foreground/70"
         data-settings-subcopy
       >
-        {catalog
-          ? `Recommended for this machine${catalog.gpuName ? ` (${catalog.gpuName}, ${catalog.vramDisplay} AI memory)` : ""}.`
-          : "Choose a model or enter a model reference or local file."}{" "}
-        Buzz downloads remote models when sharing starts.
+        {uiT("{0} Buzz downloads remote models when sharing starts.", {
+          p0: catalog
+            ? `Recommended for this machine${catalog.gpuName ? ` (${catalog.gpuName}, ${catalog.vramDisplay} AI memory)` : ""}.`
+            : "Choose a model or enter a model reference or local file.",
+        })}
       </p>
     </div>
   );
@@ -597,17 +614,17 @@ function MeshModelOptionLabel({ entry }: { entry: MeshCatalogEntry }) {
       </span>
       {entry.recommended ? (
         <span className="shrink-0 rounded bg-primary/15 px-1.5 text-2xs font-medium text-primary">
-          Recommended
+          {uiT("Recommended")}
         </span>
       ) : null}
       {entry.installed ? (
         <span className="shrink-0 text-2xs text-muted-foreground">
-          Installed
+          {uiT("Installed")}
         </span>
       ) : null}
       {!entry.curated ? (
         <span className="shrink-0 text-2xs text-muted-foreground">
-          Advanced
+          {uiT("Advanced")}
         </span>
       ) : null}
     </div>
@@ -628,10 +645,10 @@ function StatusLine({
   status: MeshNodeStatus | null;
 }) {
   if (pendingAction === "start") {
-    return <p className="text-sm text-muted-foreground">Starting…</p>;
+    return <p className="text-sm text-muted-foreground">{uiT("Starting…")}</p>;
   }
   if (pendingAction === "stop") {
-    return <p className="text-sm text-muted-foreground">Stopping…</p>;
+    return <p className="text-sm text-muted-foreground">{uiT("Stopping…")}</p>;
   }
   // A client-mode runtime owns the single slot: this machine is consuming a
   // peer's compute, not sharing. The switch stays off, but remains available
@@ -639,13 +656,16 @@ function StatusLine({
   if (isConsuming) {
     return (
       <p className="text-sm text-muted-foreground">
-        This machine is currently using another member's shared compute. Turn on
-        sharing to switch to the selected local model; Buzz may briefly restart.
+        {uiT(
+          "This machine is currently using another member's shared compute. Turn on sharing to switch to the selected local model; Buzz may briefly restart.",
+        )}
       </p>
     );
   }
   if (!status) {
-    return <p className="text-sm text-muted-foreground">Checking status…</p>;
+    return (
+      <p className="text-sm text-muted-foreground">{uiT("Checking status…")}</p>
+    );
   }
   const { state, health, modelId, modelName } = status;
   const modelLabel = displayModel ?? modelName ?? modelId ?? "";
@@ -664,27 +684,31 @@ function StatusLine({
     if (health.status === "failed") {
       return (
         <p className="text-sm text-destructive">
-          Couldn't load: {health.reason}
+          {uiT("Couldn't load: {0}", { p0: health.reason })}
         </p>
       );
     }
     if (health.status === "degraded") {
       return (
         <p className="text-sm text-amber-600 dark:text-amber-400">
-          Active{modelLabel ? ` — ${modelLabel}` : ""}. {health.reason}
+          {uiT("Active{0}. {1}", {
+            p0: modelLabel ? ` — ${modelLabel}` : "",
+            p1: health.reason,
+          })}
         </p>
       );
     }
     return (
       <p className="text-sm text-muted-foreground">
-        {omitSharingVerb ? "" : "Sharing"}
-        {modelLabel ? `${omitSharingVerb ? "" : " "}${modelLabel}` : ""} with
-        relay members.
+        {uiT("{0}{1} with relay members.", {
+          p0: omitSharingVerb ? "" : "Sharing",
+          p1: modelLabel ? `${omitSharingVerb ? "" : " "}${modelLabel}` : "",
+        })}
       </p>
     );
   }
   if (state === "stopping") {
-    return <p className="text-sm text-muted-foreground">Stopping…</p>;
+    return <p className="text-sm text-muted-foreground">{uiT("Stopping…")}</p>;
   }
   if (state === "failed") {
     const reason =

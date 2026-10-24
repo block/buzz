@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 /**
  * Direct actions — ban, time out, or delete without a report — in one
  * community.
@@ -205,6 +207,8 @@ export function DirectActionsProvider({
   generation: number;
   children: ReactNode;
 }) {
+  useUiLanguage();
+
   const [draft, setDraft] = useState<Draft | null>(null);
   const [frozen, setFrozen] = useState<Frozen | null>(null);
   const [pending, setPending] = useState(false);
@@ -264,7 +268,7 @@ export function DirectActionsProvider({
         if (result.state === "pending") {
           setPending(true);
         } else {
-          toast.success(`${ACTION_LABELS[intent.action]}: done`);
+          toast.success(uiT("{0}: done", { p0: ACTION_LABELS[intent.action] }));
           setFrozen(null);
           setDraft(emptyDraft(intent.communityHost));
         }
@@ -284,7 +288,11 @@ export function DirectActionsProvider({
         setError(message);
         if (shownHost.current !== intent.communityHost) {
           toast.error(
-            `${ACTION_LABELS[intent.action]} in ${intent.communityHost} failed: ${message}`,
+            uiT("{0} in {1} failed: {2}", {
+              p0: ACTION_LABELS[intent.action],
+              p1: intent.communityHost,
+              p2: message,
+            }),
           );
         }
       }
@@ -365,7 +373,8 @@ function EventPreview({ event }: { event: AdminEventPreviewDto }) {
       <p className="whitespace-pre-wrap break-words">{event.content}</p>
       {event.deletedAt && (
         <p className="text-muted-foreground">
-          Already deleted {formatTimestamp(event.deletedAt)}.
+          {uiT("Already deleted ")}
+          {formatTimestamp(event.deletedAt)}.
         </p>
       )}
     </div>
@@ -373,6 +382,8 @@ function EventPreview({ event }: { event: AdminEventPreviewDto }) {
 }
 
 export function ActionsSection({ community }: { community: CommunityRef }) {
+  useUiLanguage();
+
   const communityHost = community.host;
   const c = useDirectActions();
   const { frozen } = c;
@@ -414,7 +425,7 @@ export function ActionsSection({ community }: { community: CommunityRef }) {
     return (
       <div className="space-y-2 text-xs" data-testid="direct-elsewhere">
         <p>
-          Finish or discard the pending action in{" "}
+          {uiT("Finish or discard the pending action in")}{" "}
           <code>{frozen.intent.communityHost}</code>.
         </p>
         <ConfirmStep readOnly />
@@ -524,7 +535,7 @@ export function ActionsSection({ community }: { community: CommunityRef }) {
           size="sm"
           type="button"
         >
-          Review
+          {uiT("Review")}
         </Button>
       )}
     </div>
@@ -533,6 +544,8 @@ export function ActionsSection({ community }: { community: CommunityRef }) {
 
 /** The frozen intent, leading with its community. */
 function ConfirmStep({ readOnly = false }: { readOnly?: boolean }) {
+  useUiLanguage();
+
   const c = useDirectActions();
   if (!c.frozen) return null;
   const { intent, community, name, member, preview } = c.frozen;
@@ -542,7 +555,8 @@ function ConfirmStep({ readOnly = false }: { readOnly?: boolean }) {
       data-testid="direct-confirm"
     >
       <p className="flex flex-wrap items-center gap-1.5">
-        In <CommunityBadge {...community} />
+        {uiT("In ")}
+        <CommunityBadge {...community} />
         <NotConnectedWarning host={intent.communityHost} />
       </p>
       <p>
@@ -559,7 +573,10 @@ function ConfirmStep({ readOnly = false }: { readOnly?: boolean }) {
             </code>
           </span>
         )}
-        {intent.expirationSecs ? ` for ${intent.expirationSecs}s` : ""}?
+        {intent.expirationSecs
+          ? uiT(" for {0}s", { p0: intent.expirationSecs })
+          : ""}
+        ?
       </p>
       {intent.action !== "delete" && (
         <PubKey
@@ -571,11 +588,12 @@ function ConfirmStep({ readOnly = false }: { readOnly?: boolean }) {
       {member && <MemberState member={member} />}
       {preview && <EventPreview event={preview} />}
       <p data-testid="direct-confirm-reason">
-        Reason: {intent.reason ?? "(none)"}
+        {uiT("Reason: ")}
+        {intent.reason ?? uiT("(none)")}
       </p>
       {c.pending && (
         <p className="text-muted-foreground" data-testid="direct-pending">
-          Accepted; the relay is still applying it. Retry to check.
+          {uiT("Accepted; the relay is still applying it. Retry to check.")}
         </p>
       )}
       <div className="flex gap-1.5">
@@ -588,7 +606,7 @@ function ConfirmStep({ readOnly = false }: { readOnly?: boolean }) {
             type="button"
             variant="destructive"
           >
-            {c.error || c.pending ? "Retry" : "Confirm"}
+            {c.error || c.pending ? uiT("Retry") : uiT("Confirm")}
           </Button>
         )}
         <Button
@@ -599,7 +617,7 @@ function ConfirmStep({ readOnly = false }: { readOnly?: boolean }) {
           type="button"
           variant="ghost"
         >
-          Discard
+          {uiT("Discard")}
         </Button>
       </div>
     </div>
@@ -657,6 +675,8 @@ export function AdminMemberPicker({
   member: UserSearchResult | null;
   onChange: (member: UserSearchResult | null) => void;
 }) {
+  useUiLanguage();
+
   const [query, setQuery] = useState("");
   const deferred = useDeferredValue(query.trim());
   const search = useAdminMemberSearch(communityHost, deferred);
@@ -680,7 +700,7 @@ export function AdminMemberPicker({
           type="button"
           variant="link"
         >
-          Change
+          {uiT("Change")}
         </Button>
       </div>
     );
@@ -692,7 +712,7 @@ export function AdminMemberPicker({
         data-testid="direct-member-input"
         disabled={disabled}
         onChange={(e) => setQuery(e.target.value)}
-        placeholder="Search by name, or paste an npub or hex key"
+        placeholder={uiT("Search by name, or paste an npub or hex key")}
         value={query}
       />
       {secret && (
@@ -700,7 +720,7 @@ export function AdminMemberPicker({
           className="text-xs text-destructive"
           data-testid="direct-member-secret"
         >
-          That's a secret key. Never paste it here.
+          {uiT("That's a secret key. Never paste it here.")}
         </p>
       )}
       {search.error && !secret && (
@@ -740,6 +760,8 @@ export function MembersSection({
   /** Called after prefilling the Actions draft, to show that section. */
   onAct: () => void;
 }) {
+  useUiLanguage();
+
   const c = useDirectActions();
   const [member, setMember] = useState<UserSearchResult | null>(null);
   return (
@@ -765,7 +787,7 @@ export function MembersSection({
               type="button"
               variant="outline"
             >
-              {action === "ban" ? "Ban" : "Time out"}
+              {action === "ban" ? uiT("Ban") : uiT("Time out")}
             </Button>
           ))}
         </span>

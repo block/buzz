@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -24,6 +26,8 @@ const PULSE_PANEL_SEARCH_KEYS = [
 ] as const;
 
 export function PulseScreen() {
+  useUiLanguage();
+
   const identityQuery = useIdentityQuery();
   const { applyPatch, values } = useHistorySearchState(PULSE_PANEL_SEARCH_KEYS);
   const profilePanelPubkey = values.profile;

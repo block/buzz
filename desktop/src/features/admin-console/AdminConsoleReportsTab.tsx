@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 /**
  * Reports tab — deployment-wide moderation reports for the admin console.
  *
@@ -220,6 +222,8 @@ function EnforcementStateBlock({
   reportId: string;
   onActionComplete: () => void;
 }) {
+  useUiLanguage();
+
   const [isWorking, setIsWorking] = useState(false);
 
   const actionStatus = activeAction.status;
@@ -242,13 +246,13 @@ function EnforcementStateBlock({
       await cancelAdminReport(origin, reportId, {
         actionId: activeAction.id,
       });
-      toast.success("Enforcement cancelled — report reopened");
+      toast.success(uiT("Enforcement cancelled — report reopened"));
       onActionComplete();
     } catch (e) {
       // A 409 means the action is no longer cancellable (already cancelled,
       // superseded, or past the mutation point). Reload detail rather than
       // retry — the toast is informational, the reload shows current state.
-      toast.error(`Cancel rejected: ${adminErrorMessage(e)}`);
+      toast.error(uiT("Cancel rejected: {0}", { p0: adminErrorMessage(e) }));
       onActionComplete();
     } finally {
       setIsWorking(false);
@@ -288,7 +292,7 @@ function EnforcementStateBlock({
           {isWorking ? (
             <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
           ) : (
-            "Cancel & reopen"
+            uiT("Cancel & reopen")
           )}
         </Button>
       )}
@@ -373,6 +377,8 @@ function ResolveReportForm({
   origin: string;
   onResolved: () => void;
 }) {
+  useUiLanguage();
+
   const [selectedAction, setSelectedAction] =
     useState<AdminReportAction | null>(null);
   const [reason, setReason] = useState("");
@@ -420,7 +426,9 @@ function ResolveReportForm({
       });
       // Derive toast from the authoritative relay response, not mutable form
       // state — relay idempotency executes the first command even on retry.
-      toast.success(`Report resolved: ${resolutionLabel(resolution)}`);
+      toast.success(
+        uiT("Report resolved: {0}", { p0: resolutionLabel(resolution) }),
+      );
       onResolved();
     } catch (e) {
       // Preserve the frozen payload whenever the outcome is ambiguous (409,
@@ -446,7 +454,7 @@ function ResolveReportForm({
       data-testid="resolve-report-form"
     >
       <p className="text-xs font-medium text-muted-foreground">
-        Resolve report
+        {uiT("Resolve report")}
       </p>
       <div className="flex flex-wrap gap-1.5">
         {allowedActions.map((action) => (
@@ -476,7 +484,7 @@ function ResolveReportForm({
             className="text-xs text-muted-foreground shrink-0"
             htmlFor="timeout-duration-input"
           >
-            Duration (seconds)
+            {uiT("Duration (seconds)")}
           </label>
           <input
             className="flex-1 rounded-md border border-border/60 bg-background px-2 py-1 text-xs font-mono"
@@ -485,7 +493,7 @@ function ResolveReportForm({
             id="timeout-duration-input"
             min="1"
             onChange={(e) => setExpirationSecs(e.target.value)}
-            placeholder="e.g. 3600"
+            placeholder={uiT("e.g. 3600")}
             type="number"
             value={expirationSecs}
           />
@@ -498,7 +506,7 @@ function ResolveReportForm({
           data-testid="resolve-reason-input"
           disabled={isLocked || isSubmitting}
           onChange={(e) => setReason(e.target.value)}
-          placeholder="Reason (optional)"
+          placeholder={uiT("Reason (optional)")}
           type="text"
           value={reason}
         />
@@ -517,7 +525,7 @@ function ResolveReportForm({
           className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"
           data-testid="resolve-community"
         >
-          In{" "}
+          {uiT("In")}{" "}
           <CommunityBadge host={report.communityHost} id={report.communityId} />
           {report.communityHost && (
             <NotConnectedWarning host={report.communityHost} />
@@ -541,7 +549,10 @@ function ResolveReportForm({
           {isSubmitting ? (
             <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
           ) : (
-            `Confirm: ${actionLabel(frozenRef.current?.action ?? selectedAction)} in ${report.communityHost}`
+            uiT("Confirm: {0} in {1}", {
+              p0: actionLabel(frozenRef.current?.action ?? selectedAction),
+              p1: report.communityHost,
+            })
           )}
         </Button>
       )}
@@ -573,6 +584,8 @@ function ReopenReportForm({
   origin: string;
   onReopened: () => void;
 }) {
+  useUiLanguage();
+
   const [reason, setReason] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   // Stable requestId per attempt; reused on retry after a lost response.
@@ -593,7 +606,7 @@ function ReopenReportForm({
         requestId: requestIdRef.current,
         reason: reason.trim() || undefined,
       });
-      toast.success("Report reopened");
+      toast.success(uiT("Report reopened"));
       onReopened();
     } catch (e) {
       // Preserve the requestId on an ambiguous outcome (409, 5xx, lost
@@ -616,13 +629,14 @@ function ReopenReportForm({
     >
       <div className="space-y-1">
         <p className="text-xs font-medium text-muted-foreground">
-          Reopen report
+          {uiT("Reopen report")}
         </p>
         <p className="text-xs text-muted-foreground">
-          Moves this report back to the open queue for re-triage.{" "}
-          {wasEnforced
-            ? "The enforcement action already taken is not reversed — reopening does not un-ban, un-timeout, or restore a deleted message."
-            : "Reopening does not reverse any enforcement action."}
+          {uiT("Moves this report back to the open queue for re-triage. {0}", {
+            p0: wasEnforced
+              ? "The enforcement action already taken is not reversed — reopening does not un-ban, un-timeout, or restore a deleted message."
+              : "Reopening does not reverse any enforcement action.",
+          })}
         </p>
       </div>
 
@@ -630,7 +644,7 @@ function ReopenReportForm({
         className="w-full rounded-md border border-border/60 bg-background px-2 py-1 text-xs"
         data-testid="reopen-reason-input"
         onChange={(e) => setReason(e.target.value)}
-        placeholder="Reason (optional)"
+        placeholder={uiT("Reason (optional)")}
         type="text"
         value={reason}
       />
@@ -646,7 +660,7 @@ function ReopenReportForm({
         {isSubmitting ? (
           <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
         ) : (
-          "Reopen report"
+          uiT("Reopen report")
         )}
       </Button>
     </div>
@@ -669,6 +683,8 @@ export function ReportsTab({
   pubkey: string;
   generation: number;
 }) {
+  useUiLanguage();
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // List refresh fence: bumped whenever a mutation completes in the detail
   // view, so returning to the list shows fresh status without a tab switch.
@@ -727,7 +743,11 @@ export function ReportsTab({
 
   const reports = listState.data;
   if (!Array.isArray(reports) || reports.length === 0) {
-    return <p className="text-sm text-muted-foreground">No reports found.</p>;
+    return (
+      <p className="text-sm text-muted-foreground">
+        {uiT("No reports found.")}
+      </p>
+    );
   }
 
   return (
@@ -802,16 +822,18 @@ function ReportFields({ data }: { data: AdminReportDetailDto }) {
         {data.reportType && <Badge variant="outline">{data.reportType}</Badge>}
       </div>
       <DetailRow label="ID" value={data.id} mono />
-      <DetailRow label="Community" value={data.communityId} mono />
+      <DetailRow label={uiT("Community")} value={data.communityId} mono />
       <div className="flex items-center gap-2 text-xs">
-        <span className="text-muted-foreground">Host</span>
+        <span className="text-muted-foreground">{uiT("Host")}</span>
         <CommunityBadge host={data.communityHost} id={data.communityId} />
       </div>
-      <DetailRow label="Event ID" value={data.reportEventId} mono />
+      <DetailRow label={uiT("Event ID")} value={data.reportEventId} mono />
       {/* Reporter uses PubKey widget for valid keys; falls back to mono text. */}
       {isHex64(data.reporterPubkey) ? (
         <div className="flex gap-2 text-xs">
-          <span className="w-28 shrink-0 text-muted-foreground">Reporter</span>
+          <span className="w-28 shrink-0 text-muted-foreground">
+            {uiT("Reporter")}
+          </span>
           <PubKey
             className="min-w-0"
             interactive
@@ -821,14 +843,16 @@ function ReportFields({ data }: { data: AdminReportDetailDto }) {
           />
         </div>
       ) : (
-        <DetailRow label="Reporter" value={data.reporterPubkey} mono />
+        <DetailRow label={uiT("Reporter")} value={data.reporterPubkey} mono />
       )}
-      <DetailRow label="Target kind" value={data.targetKind} />
+      <DetailRow label={uiT("Target kind")} value={data.targetKind} />
       {/* Pubkey targets get the PubKey widget; event IDs are not keys, so they
           render as raw hex with a copy control. */}
       {isHex64(data.target) && data.targetKind?.toLowerCase() === "pubkey" ? (
         <div className="flex gap-2 text-xs">
-          <span className="w-28 shrink-0 text-muted-foreground">Target</span>
+          <span className="w-28 shrink-0 text-muted-foreground">
+            {uiT("Target")}
+          </span>
           <PubKey
             className="min-w-0"
             interactive
@@ -839,7 +863,9 @@ function ReportFields({ data }: { data: AdminReportDetailDto }) {
         </div>
       ) : data.targetKind?.toLowerCase() === "event" ? (
         <div className="flex items-center gap-2 text-xs">
-          <span className="w-28 shrink-0 text-muted-foreground">Target</span>
+          <span className="w-28 shrink-0 text-muted-foreground">
+            {uiT("Target")}
+          </span>
           <span
             className="min-w-0 break-all font-mono"
             data-testid="report-target-event-id"
@@ -847,7 +873,7 @@ function ReportFields({ data }: { data: AdminReportDetailDto }) {
             {data.target}
           </span>
           <button
-            aria-label="Copy event ID"
+            aria-label={uiT("Copy event ID")}
             className="shrink-0 text-muted-foreground hover:text-foreground"
             data-testid="report-target-event-copy"
             onClick={() => copyTextToClipboard(data.target)}
@@ -857,26 +883,39 @@ function ReportFields({ data }: { data: AdminReportDetailDto }) {
           </button>
         </div>
       ) : (
-        <DetailRow label="Target" value={data.target} mono />
+        <DetailRow label={uiT("Target")} value={data.target} mono />
       )}
-      <DetailRow label="Channel" value={data.channelId ?? null} mono />
-      <DetailRow label="Note" value={data.note ?? null} />
-      <DetailRow label="Resolved by" value={data.resolvedBy ?? null} mono />
-      <DetailRow label="Resolved at" value={formatTimestamp(data.resolvedAt)} />
-      <DetailRow label="Action ID" value={data.actionId ?? null} mono />
-      <DetailRow label="Created" value={formatTimestamp(data.createdAt)} />
+      <DetailRow label={uiT("Channel")} value={data.channelId ?? null} mono />
+      <DetailRow label={uiT("Note")} value={data.note ?? null} />
+      <DetailRow
+        label={uiT("Resolved by")}
+        value={data.resolvedBy ?? null}
+        mono
+      />
+      <DetailRow
+        label={uiT("Resolved at")}
+        value={formatTimestamp(data.resolvedAt)}
+      />
+      <DetailRow label={uiT("Action ID")} value={data.actionId ?? null} mono />
+      <DetailRow
+        label={uiT("Created")}
+        value={formatTimestamp(data.createdAt)}
+      />
       {data.message != null && (
         <div className="mt-3 space-y-1.5 rounded-md border border-border/40 px-3 py-2.5">
           <p className="mb-1 text-xs font-semibold text-muted-foreground">
-            Reported message
-            {data.message.deletedAt != null && (
-              <span className="ml-1.5 text-destructive">(deleted)</span>
-            )}
+            {uiMessage("Reported message {0}", {
+              p0: data.message.deletedAt != null && (
+                <span className="ml-1.5 text-destructive">
+                  {uiT("(deleted)")}
+                </span>
+              ),
+            })}
           </p>
           {isHex64(data.message.authorPubkey) ? (
             <div className="flex gap-2 text-xs">
               <span className="w-28 shrink-0 text-muted-foreground">
-                Author
+                {uiT("Author")}
               </span>
               <PubKey
                 className="min-w-0"
@@ -887,11 +926,15 @@ function ReportFields({ data }: { data: AdminReportDetailDto }) {
               />
             </div>
           ) : (
-            <DetailRow label="Author" value={data.message.authorPubkey} mono />
+            <DetailRow
+              label={uiT("Author")}
+              value={data.message.authorPubkey}
+              mono
+            />
           )}
-          <DetailRow label="Content" value={data.message.content} />
+          <DetailRow label={uiT("Content")} value={data.message.content} />
           <DetailRow
-            label="Msg created"
+            label={uiT("Msg created")}
             value={formatTimestamp(data.message.createdAt)}
           />
         </div>
@@ -918,6 +961,8 @@ function ReportDetail({
   /** Called after any mutation completes so the parent list can refetch. */
   onMutated: () => void;
 }) {
+  useUiLanguage();
+
   // Resolution generation: bump to reload detail after an action completes.
   const [resolveGen, setResolveGen] = useState(0);
 
@@ -950,7 +995,7 @@ function ReportDetail({
         type="button"
       >
         <ChevronLeft className="h-3.5 w-3.5" />
-        Back to reports
+        {uiT("Back to reports")}
       </button>
       {detailState.status === "loading" && <LoadingSpinner />}
       {detailState.status === "error" && (

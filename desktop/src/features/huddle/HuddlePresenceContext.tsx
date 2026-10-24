@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
@@ -27,6 +29,8 @@ export function HuddlePresenceProvider({
 }: {
   children: React.ReactNode;
 }) {
+  useUiLanguage();
+
   const relaySelfQuery = useRelaySelfQuery();
   const channelsQuery = useChannelsQuery();
   const relaySelfPubkey = relaySelfQuery.data;

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useRemindersQuery } from "@/features/reminders/hooks";
@@ -26,6 +28,8 @@ export function RemindMeLaterProvider({
   pubkey?: string;
   children: React.ReactNode;
 }) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const [target, setTarget] = React.useState<ReminderTarget | null>(null);
 

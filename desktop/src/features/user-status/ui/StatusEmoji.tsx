@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { cn } from "@/shared/lib/cn";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
@@ -36,6 +38,8 @@ export function StatusEmoji({
   decorative = false,
   showTitle = true,
 }: StatusEmojiProps) {
+  useUiLanguage();
+
   const customEmoji = useCustomEmoji();
 
   if (!value) return null;

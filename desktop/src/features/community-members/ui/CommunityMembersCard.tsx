@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { MoreHorizontal, Plus, Shield, ShieldCheck, User } from "lucide-react";
 import { toast } from "sonner";
@@ -105,12 +107,16 @@ function MemberRow({
             </span>
             <RoleBadge role={member.role} />
             {isSelf ? (
-              <span className="text-xs text-muted-foreground">(you)</span>
+              <span className="text-xs text-muted-foreground">
+                {uiT("(you)")}
+              </span>
             ) : null}
           </div>
           <p className="flex items-center gap-2 text-xs text-muted-foreground">
             <PubKey className="text-xs" pubkey={member.pubkey} />
-            <span>Joined {formatRelativeDate(member.createdAt)}</span>
+            <span>
+              {uiT("Joined {0}", { p0: formatRelativeDate(member.createdAt) })}
+            </span>
           </p>
         </div>
       </div>
@@ -124,7 +130,7 @@ function MemberRow({
               variant="ghost"
             >
               <MoreHorizontal className="h-4 w-4" />
-              <span className="sr-only">Actions</span>
+              <span className="sr-only">{uiT("Actions")}</span>
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
@@ -134,14 +140,14 @@ function MemberRow({
                   <DropdownMenuItem
                     onClick={() => onChangeRole(member.pubkey, "admin")}
                   >
-                    Make Admin
+                    {uiT("Make Admin")}
                   </DropdownMenuItem>
                 ) : null}
                 {member.role === "admin" ? (
                   <DropdownMenuItem
                     onClick={() => onChangeRole(member.pubkey, "member")}
                   >
-                    Make Member
+                    {uiT("Make Member")}
                   </DropdownMenuItem>
                 ) : null}
               </>
@@ -152,7 +158,7 @@ function MemberRow({
                 className="text-destructive focus:text-destructive"
                 onClick={() => onRemove(member)}
               >
-                Remove
+                {uiT("Remove")}
               </DropdownMenuItem>
             ) : null}
           </DropdownMenuContent>
@@ -169,6 +175,8 @@ export function CommunityMembersCard({
 }: {
   currentPubkey?: string;
 }) {
+  useUiLanguage();
+
   const membersQuery = useRelayMembersQuery();
   const myMembershipQuery = useMyRelayMembershipQuery();
   const changeRoleMutation = useChangeRelayMemberRoleMutation();
@@ -201,11 +209,13 @@ export function CommunityMembersCard({
       { pubkey, newRole },
       {
         onSuccess: () => {
-          toast.success(`Role changed to ${newRole}`);
+          toast.success(uiT("Role changed to {0}", { p0: newRole }));
         },
         onError: (error) => {
           toast.error(
-            error instanceof Error ? error.message : "Failed to change role",
+            error instanceof Error
+              ? error.message
+              : uiT("Failed to change role"),
           );
         },
       },
@@ -219,11 +229,11 @@ export function CommunityMembersCard({
           <div className="flex items-center gap-2">
             <Shield className="h-4 w-4 text-muted-foreground" />
             <h2 className="text-sm font-semibold tracking-tight">
-              Community Members
+              {uiT("Community Members")}
             </h2>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            Manage who has access to this relay.
+            {uiT("Manage who has access to this relay.")}
           </p>
         </div>
 
@@ -234,7 +244,7 @@ export function CommunityMembersCard({
             size="sm"
           >
             <Plus className="h-4 w-4" />
-            Add Member
+            {uiT("Add Member")}
           </Button>
         ) : null}
       </div>
@@ -246,7 +256,9 @@ export function CommunityMembersCard({
       ) : null}
 
       {membersQuery.isLoading ? (
-        <p className="mt-4 text-sm text-muted-foreground">Loading members...</p>
+        <p className="mt-4 text-sm text-muted-foreground">
+          {uiT("Loading members...")}
+        </p>
       ) : members.length > 0 ? (
         <div className="mt-4 space-y-2">
           {members.map((member) => (
@@ -264,7 +276,9 @@ export function CommunityMembersCard({
           ))}
         </div>
       ) : membersQuery.isSuccess ? (
-        <p className="mt-4 text-sm text-muted-foreground">No members yet.</p>
+        <p className="mt-4 text-sm text-muted-foreground">
+          {uiT("No members yet.")}
+        </p>
       ) : null}
 
       <AddMemberDialog

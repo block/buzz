@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Ban, CircleSlash, Clock, ShieldCheck, UserMinus } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -24,9 +26,24 @@ import {
 } from "@/shared/ui/dropdown-menu";
 
 const TIMEOUT_PRESETS: { label: string; seconds: number }[] = [
-  { label: "1 hour", seconds: 60 * 60 },
-  { label: "24 hours", seconds: 24 * 60 * 60 },
-  { label: "7 days", seconds: 7 * 24 * 60 * 60 },
+  {
+    get label() {
+      return uiT("1 hour");
+    },
+    seconds: 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("24 hours");
+    },
+    seconds: 24 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("7 days");
+    },
+    seconds: 7 * 24 * 60 * 60,
+  },
 ];
 
 /**
@@ -46,6 +63,8 @@ export function MessageModerationMenuItems({
   channelId?: string | null;
   message: TimelineMessage;
 }) {
+  useUiLanguage();
+
   const relayMembershipQuery = useMyRelayMembershipQuery();
   const relayRole = relayMembershipQuery.data?.role;
   const canModerate = relayRole === "owner" || relayRole === "admin";
@@ -94,7 +113,9 @@ export function MessageModerationMenuItems({
         toast.success(success);
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Moderation action failed",
+          error instanceof Error
+            ? error.message
+            : uiT("Moderation action failed"),
         );
       }
     },
@@ -118,7 +139,7 @@ export function MessageModerationMenuItems({
           }
         >
           <ShieldCheck className="h-4 w-4" />
-          Lift timeout
+          {uiT("Lift timeout")}
         </DropdownMenuItem>
       ) : (
         <DropdownMenuSub>
@@ -127,7 +148,7 @@ export function MessageModerationMenuItems({
             disabled={isPending}
           >
             <Clock className="h-4 w-4" />
-            Time out author
+            {uiT("Time out author")}
           </DropdownMenuSubTrigger>
           <DropdownMenuSubContent>
             {TIMEOUT_PRESETS.map((preset) => (
@@ -167,7 +188,7 @@ export function MessageModerationMenuItems({
           }
         >
           <UserMinus className="h-4 w-4" />
-          Kick from channel
+          {uiT("Kick from channel")}
         </DropdownMenuItem>
       ) : null}
 
@@ -183,7 +204,7 @@ export function MessageModerationMenuItems({
           }
         >
           <CircleSlash className="h-4 w-4" />
-          Lift ban
+          {uiT("Lift ban")}
         </DropdownMenuItem>
       ) : (
         <DropdownMenuItem
@@ -198,7 +219,7 @@ export function MessageModerationMenuItems({
           }
         >
           <Ban className="h-4 w-4" />
-          Ban author from community
+          {uiT("Ban author from community")}
         </DropdownMenuItem>
       )}
     </>

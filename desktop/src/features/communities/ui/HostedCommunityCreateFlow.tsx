@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { AlertCircle, ExternalLink, LoaderCircle } from "lucide-react";
 
@@ -39,6 +41,8 @@ type HostedCommunityCreateFlowProps = {
 export function HostedCommunityCreateFlow({
   onComplete,
 }: HostedCommunityCreateFlowProps) {
+  useUiLanguage();
+
   const onboarding = useCommunityOnboarding();
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
   const [auth, setAuth] = React.useState<BuilderlabAuth | null>(null);
@@ -303,7 +307,7 @@ export function HostedCommunityCreateFlow({
     return (
       <div className="flex min-h-40 items-center justify-center" role="status">
         <LoaderCircle className="h-5 w-5 animate-spin text-muted-foreground" />
-        <span className="sr-only">Checking sign-in</span>
+        <span className="sr-only">{uiT("Checking sign-in")}</span>
       </div>
     );
   }
@@ -312,8 +316,9 @@ export function HostedCommunityCreateFlow({
     return (
       <div className="space-y-5">
         <p className="text-sm leading-6 text-muted-foreground">
-          Sign in with Builderlab to create and host a community. Buzz will open
-          your browser, then bring you back here.
+          {uiT(
+            "Sign in with Builderlab to create and host a community. Buzz will open your browser, then bring you back here.",
+          )}
         </p>
         {errorBox}
         <div className="flex justify-end pt-1">
@@ -321,7 +326,7 @@ export function HostedCommunityCreateFlow({
             {action === "Signing in…" ? (
               <LoaderCircle className="h-4 w-4 animate-spin" />
             ) : null}
-            {action ?? "Continue to Builderlab"}
+            {action ?? uiT("Continue to Builderlab")}
             {action ? null : <ExternalLink className="h-4 w-4" />}
           </Button>
         </div>
@@ -333,8 +338,9 @@ export function HostedCommunityCreateFlow({
     return (
       <div className="space-y-5">
         <p className="text-sm leading-6 text-muted-foreground">
-          Connect this device’s Buzz identity to your Builderlab account. Your
-          private key stays on this device.
+          {uiT(
+            "Connect this device’s Buzz identity to your Builderlab account. Your private key stays on this device.",
+          )}
         </p>
         {errorBox}
         <div className="flex justify-end gap-2 pt-1">
@@ -344,7 +350,7 @@ export function HostedCommunityCreateFlow({
             type="button"
             variant="outline"
           >
-            Use a different account
+            {uiT("Use a different account")}
           </Button>
           <Button
             disabled={Boolean(action)}
@@ -352,7 +358,7 @@ export function HostedCommunityCreateFlow({
             type="button"
           >
             {action ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
-            {action ?? "Connect and continue"}
+            {action ?? uiT("Connect and continue")}
           </Button>
         </div>
       </div>
@@ -363,15 +369,18 @@ export function HostedCommunityCreateFlow({
     return (
       <div className="space-y-5">
         <p className="text-sm leading-6 text-muted-foreground">
-          This Builderlab account uses a different Buzz identity. Switch it to
-          this device, or sign in with another account.
+          {uiT(
+            "This Builderlab account uses a different Buzz identity. Switch it to this device, or sign in with another account.",
+          )}
         </p>
         <div className="rounded-xl bg-muted/40 px-4 py-3 font-mono text-xs text-muted-foreground">
           <p className="break-all">
-            Account: {boundNpub ?? UNAVAILABLE_KEY_LABEL}
+            {uiT("Account: {0}", { p0: boundNpub ?? UNAVAILABLE_KEY_LABEL })}
           </p>
           <p className="mt-1 break-all">
-            This device: {localNpub ?? UNAVAILABLE_KEY_LABEL}
+            {uiT("This device: {0}", {
+              p0: localNpub ?? UNAVAILABLE_KEY_LABEL,
+            })}
           </p>
         </div>
         {errorBox}
@@ -382,7 +391,7 @@ export function HostedCommunityCreateFlow({
             type="button"
             variant="outline"
           >
-            Use a different account
+            {uiT("Use a different account")}
           </Button>
           <Button
             disabled={Boolean(action)}
@@ -390,7 +399,7 @@ export function HostedCommunityCreateFlow({
             type="button"
           >
             {action ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
-            {action ?? "Use this device"}
+            {action ?? uiT("Use this device")}
           </Button>
         </div>
       </div>
@@ -416,7 +425,7 @@ export function HostedCommunityCreateFlow({
           className="text-sm font-medium text-foreground"
           htmlFor="hosted-community-create-name"
         >
-          Community address
+          {uiT("Community address")}
         </label>
         <div
           className={cn(
@@ -475,7 +484,7 @@ export function HostedCommunityCreateFlow({
           type="submit"
         >
           {action ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
-          {action ?? "Create community"}
+          {action ?? uiT("Create community")}
         </Button>
       </div>
     </form>
