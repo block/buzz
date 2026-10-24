@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
@@ -22,17 +24,25 @@ export function WhereToRunSection({
   isPending: boolean;
   onDraftChange: (next: WhereToRunDraft) => void;
 }) {
+  const __buzzLanguage = useUiLanguage();
+
   const backendProviders = useBackendProvidersQuery().data ?? [];
   const [probeError, setProbeError] = React.useState<string | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const runOnOptions = React.useMemo(
     () => [
-      { label: "This computer", value: "local" },
+      {
+        get label() {
+          return uiT("This computer");
+        },
+        value: "local",
+      },
       ...backendProviders.map((provider) => ({
         label: provider.id,
         value: provider.id,
       })),
     ],
-    [backendProviders],
+    [backendProviders, __buzzLanguage],
   );
   const isProviderMode = draft.runOn !== "local";
   const selectedBackendProvider = React.useMemo(
@@ -89,7 +99,7 @@ export function WhereToRunSection({
     <div className="space-y-4">
       <div className="space-y-1.5">
         <label className="text-sm font-medium" htmlFor="agent-run-on">
-          Run on
+          {uiT("Run on")}
         </label>
         <PersonaDropdownField
           disabled={isPending}
@@ -101,7 +111,7 @@ export function WhereToRunSection({
             })
           }
           options={runOnOptions}
-          placeholder="Choose where to run"
+          placeholder={uiT("Choose where to run")}
           value={draft.runOn}
         />
       </div>
@@ -111,17 +121,21 @@ export function WhereToRunSection({
           <div className="flex gap-3 rounded-2xl border border-warning/30 bg-warning-bg px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <p className="text-sm text-warning">
-              This provider at{" "}
-              <span className="font-mono font-medium">
-                {selectedBackendProvider.binaryPath}
-              </span>{" "}
-              will receive your agent&apos;s private key. Only use providers
-              from trusted sources.
+              {uiMessage(
+                "This provider at {0} will receive your agent's private key. Only use providers from trusted sources.",
+                {
+                  p0: (
+                    <span className="font-mono font-medium">
+                      {selectedBackendProvider.binaryPath}
+                    </span>
+                  ),
+                },
+              )}
             </p>
           </div>
           {probeError ? (
             <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-              Could not probe provider: {probeError}
+              {uiT("Could not probe provider: {0}", { p0: probeError })}
             </p>
           ) : null}
           {draft.probedProvider?.config_schema ? (

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
   TeamSnapshotImportMemberResult,
   TeamSnapshotImportResult,
@@ -53,11 +55,18 @@ export function deriveImportToast(
     }
     return {
       type: "error",
-      message: `${result.team.name} imported, but ${parts.join(" and ")}.`,
+      message: uiT("{0} imported, but {1}.", {
+        p0: result.team.name,
+        p1: parts.join(" and "),
+      }),
     };
   }
   return {
     type: "notice",
-    message: `Imported ${result.team.name} with ${memberCount} member${memberCount === 1 ? "" : "s"}.`,
+    message: uiT("Imported {0} with {1} member{2}.", {
+      p0: result.team.name,
+      p1: memberCount,
+      p2: memberCount === 1 ? "" : "s",
+    }),
   };
 }

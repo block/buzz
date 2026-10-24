@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   CopyPlus,
   EllipsisVertical,
@@ -60,8 +62,10 @@ export function TeamsSection({
     <section className="relative space-y-4" data-testid="agents-library-teams">
       <div className={TEAM_CARD_COLUMN_CLASS}>
         <SectionHeader
-          title="Agent teams"
-          description="Group agents that you can add to a channel together."
+          title={uiT("Agent teams")}
+          description={uiT(
+            "Group agents that you can add to a channel together.",
+          )}
         />
       </div>
 
@@ -104,7 +108,7 @@ export function TeamsSection({
                   <DropdownMenu modal={false}>
                     <DropdownMenuTrigger asChild>
                       <button
-                        aria-label={`${team.name} team actions`}
+                        aria-label={uiT("{0} team actions", { p0: team.name })}
                         className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                         type="button"
                       >
@@ -120,7 +124,7 @@ export function TeamsSection({
                         onClick={() => onAddToChannel(team)}
                       >
                         <Rocket className="h-4 w-4" />
-                        Deploy to channel
+                        {uiT("Deploy to channel")}
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
@@ -128,21 +132,21 @@ export function TeamsSection({
                         onClick={() => onEdit(team)}
                       >
                         <Pencil className="h-4 w-4" />
-                        Edit
+                        {uiT("Edit")}
                       </DropdownMenuItem>
                       <DropdownMenuItem
                         disabled={isPending || hasMissingPersonas}
                         onClick={() => onDuplicate(team)}
                       >
                         <CopyPlus className="h-4 w-4" />
-                        Duplicate
+                        {uiT("Duplicate")}
                       </DropdownMenuItem>
                       <DropdownMenuItem
                         disabled={isPending || hasMissingPersonas}
                         onClick={() => onShare(team)}
                       >
                         <Share2 className="h-4 w-4" />
-                        Share
+                        {uiT("Share")}
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
@@ -151,7 +155,7 @@ export function TeamsSection({
                         onClick={() => onDelete(team)}
                       >
                         <Trash2 className="h-4 w-4" />
-                        Delete
+                        {uiT("Delete")}
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -169,10 +173,14 @@ export function TeamsSection({
               >
                 {hasMissingPersonas ? (
                   <p className="border-t border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                    {missingPersonaCount} agent
-                    {missingPersonaCount === 1 ? "" : "s"} in this team{" "}
-                    {missingPersonaCount === 1 ? "is" : "are"} no longer in your
-                    agents. Edit the team to fix it before deploying or sharing.
+                    {uiT(
+                      "{0} agent {1} in this team {2} no longer in your agents. Edit the team to fix it before deploying or sharing.",
+                      {
+                        p0: missingPersonaCount,
+                        p1: missingPersonaCount === 1 ? "" : "s",
+                        p2: missingPersonaCount === 1 ? "is" : "are",
+                      },
+                    )}
                   </p>
                 ) : null}
               </TeamIdentityCard>
@@ -206,14 +214,17 @@ function NewTeamCard({
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <CreateIdentityCard ariaLabel="New team" dataTestId="new-team-card" />
+        <CreateIdentityCard
+          ariaLabel={uiT("New team")}
+          dataTestId="new-team-card"
+        />
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
         <DropdownMenuItem disabled={isPending} onClick={onCreate}>
-          Create team
+          {uiT("Create team")}
         </DropdownMenuItem>
         <DropdownMenuItem
           data-testid="team-catalog-open"
@@ -223,7 +234,7 @@ function NewTeamCard({
           {teamCatalogCopy.chooseFromCatalog}
         </DropdownMenuItem>
         <DropdownMenuItem disabled={isPending} onClick={onImport}>
-          Import
+          {uiT("Import")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

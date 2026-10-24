@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode, Ref } from "react";
 import {
@@ -63,6 +65,8 @@ export function ProfilePrimaryActions({
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
   wavePending?: boolean;
 }) {
+  useUiLanguage();
+
   const showFollowAction = useFeatureEnabled("pulse");
   const followToggleMutation = isFollowing ? unfollowMutation : followMutation;
 
@@ -70,7 +74,10 @@ export function ProfilePrimaryActions({
     followToggleMutation.mutate(pubkey, {
       onError: (error) =>
         toast.error(
-          `${isFollowing ? "Unfollow" : "Follow"} failed: ${error.message}`,
+          uiT("{0} failed: {1}", {
+            p0: isFollowing ? "Unfollow" : "Follow",
+            p1: error.message,
+          }),
         ),
     });
   };
@@ -108,7 +115,7 @@ export function ProfilePrimaryActions({
         <ProfileActionTile
           disabled={agentActionDisabled}
           icon={RefreshCw}
-          label="Restart agent"
+          label={uiT("Restart agent")}
           onClick={onAgentRestart}
           testId="user-profile-agent-restart"
         />
@@ -118,7 +125,7 @@ export function ProfilePrimaryActions({
           disabled={messagePending}
           icon={MessageSquare}
           isLoading={messagePending}
-          label="Message"
+          label={uiT("Message")}
           onClick={onMessage}
           testId="user-profile-message"
         />
@@ -128,7 +135,7 @@ export function ProfilePrimaryActions({
           disabled={huddlePending}
           icon={Headphones}
           isLoading={huddlePending}
-          label="Huddle"
+          label={uiT("Huddle")}
           onClick={onHuddle}
           testId="user-profile-huddle"
         />
@@ -138,7 +145,7 @@ export function ProfilePrimaryActions({
           disabled={wavePending}
           icon={Hand}
           isLoading={wavePending}
-          label="Wave"
+          label={uiT("Wave")}
           onClick={onWave}
           testId="user-profile-wave"
         />
@@ -148,7 +155,7 @@ export function ProfilePrimaryActions({
           active={isFollowing}
           disabled={followToggleMutation.isPending}
           icon={isFollowing ? UserMinus : UserPlus}
-          label={isFollowing ? "Unfollow" : "Follow"}
+          label={isFollowing ? uiT("Unfollow") : uiT("Follow")}
           onClick={handleFollowClick}
         />
       ) : null}
@@ -179,7 +186,7 @@ export function ProfilePersonaPrimaryActions({
         active
         disabled={disabled}
         icon={Play}
-        label="Start agent"
+        label={uiT("Start agent")}
         onClick={onStartAgent}
         testId="user-profile-start-agent"
       />

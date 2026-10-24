@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -22,6 +24,8 @@ export function TranscriptTimestamp({
   messageLink?: TranscriptTimestampMessageLink | null;
   timestamp: string;
 }) {
+  useUiLanguage();
+
   const formatted = formatTranscriptTime(timestamp);
   const { goChannel } = useAppNavigation();
   const href = messageLink ? buildMessageLink(messageLink) : null;

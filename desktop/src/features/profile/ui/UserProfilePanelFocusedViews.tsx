@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { ArrowUpRight, CircleAlert, UserPlus } from "lucide-react";
 
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
@@ -64,7 +66,7 @@ export function ChannelsFocusedView({
             disabled={isActionPending}
             grouped
             icon={UserPlus}
-            label="Add to channel"
+            label={uiT("Add to channel")}
             onClick={onAddToChannel}
             testId="user-profile-agent-add-channel"
             trailing={isActionPending ? "Working…" : undefined}
@@ -72,7 +74,7 @@ export function ChannelsFocusedView({
         ) : null}
         {isLoading ? (
           <p className="px-4 py-3 text-sm leading-6 text-muted-foreground">
-            Loading channels…
+            {uiT("Loading channels…")}
           </p>
         ) : channels.length === 0 ? (
           <div
@@ -85,13 +87,15 @@ export function ChannelsFocusedView({
             <UserPlus className="mx-auto h-4 w-4 text-muted-foreground" />
             <p className="mt-3 text-sm font-medium">
               {canAddToChannel
-                ? "Add this agent to a channel"
-                : "Channels appear here"}
+                ? uiT("Add this agent to a channel")
+                : uiT("Channels appear here")}
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
               {canAddToChannel
-                ? "Choose a channel above so it can join the conversation."
-                : "Visible memberships appear as this agent joins channels."}
+                ? uiT("Choose a channel above so it can join the conversation.")
+                : uiT(
+                    "Visible memberships appear as this agent joins channels.",
+                  )}
             </p>
           </div>
         ) : (
@@ -102,7 +106,7 @@ export function ChannelsFocusedView({
             {channels.map((channel) => (
               <li key={channel.id}>
                 <button
-                  aria-label={`Open #${channel.name}`}
+                  aria-label={uiT("Open #{0}", { p0: channel.name })}
                   className="group flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
                   data-testid={`user-profile-channel-link-${channel.name}`}
                   onClick={() => onOpenChannel(channel.id)}
@@ -136,7 +140,7 @@ export function AgentInfoFocusedView({
 
   return (
     <div className="pt-4">
-      <ProfileFieldGroup fields={metadataFields} title="Info" />
+      <ProfileFieldGroup fields={metadataFields} title={uiT("Info")} />
     </div>
   );
 }
@@ -176,7 +180,7 @@ export function DiagnosticsFocusedView({
         >
           <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
           <div className="min-w-0">
-            <AlertTitle>Last error</AlertTitle>
+            <AlertTitle>{uiT("Last error")}</AlertTitle>
             <AlertDescription className="wrap-break-word">
               {lastErrorField.displayValue}
             </AlertDescription>

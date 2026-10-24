@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import React from "react";
 import { ChevronDown } from "lucide-react";
 
@@ -31,6 +33,8 @@ export function PromptSectionAccordion({
 }: {
   section: PromptSection;
 }) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const body = section.body.trim();
 
@@ -63,7 +67,9 @@ export function PromptSectionAccordion({
               {body.length > 0 ? (
                 body
               ) : (
-                <span className="italic text-foreground/50">No metadata.</span>
+                <span className="italic text-foreground/50">
+                  {uiT("No metadata.")}
+                </span>
               )}
             </div>
           </div>

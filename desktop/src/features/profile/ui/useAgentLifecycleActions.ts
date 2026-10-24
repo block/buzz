@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -65,7 +67,7 @@ export function useAgentLifecycleActions({
       );
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Agent action failed.",
+        error instanceof Error ? error.message : uiT("Agent action failed."),
       );
     }
   }, [
@@ -93,11 +95,11 @@ export function useAgentLifecycleActions({
         stopManagedAgent,
         onStopped: () => clearActiveTurnsForAgentOnStop(managedAgent.pubkey),
       });
-      toast.success(`Restarted ${managedAgent.name}.`);
+      toast.success(uiT("Restarted {0}.", { p0: managedAgent.name }));
     } catch (error) {
       if (isRelayRemovedError(error)) return;
       toast.error(
-        error instanceof Error ? error.message : "Agent restart failed.",
+        error instanceof Error ? error.message : uiT("Agent restart failed."),
       );
     }
   }, [

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
 
 export type AgentCommunityAvailability =
@@ -28,10 +30,10 @@ export function agentCommunityStatusDetail(
   runtime: ManagedAgentRuntimeStatus,
 ): string | null {
   if (!runtime.localSetup)
-    return "Set up this agent on this device to start it.";
-  if (runtime.lifecycle === "stopped") return "Stopped by you";
+    return uiT("Set up this agent on this device to start it.");
+  if (runtime.lifecycle === "stopped") return uiT("Stopped by you");
   if (runtime.lifecycle === "failed")
-    return runtime.error ?? "Could not connect";
+    return runtime.error ?? uiT("Could not connect");
   return null;
 }
 
@@ -57,9 +59,15 @@ export const MANAGED_AGENT_PAIR_ACTION_LABELS: Record<
   ManagedAgentPairAction,
   string
 > = {
-  start: "Start Agent",
-  stop: "Stop Agent",
-  restart: "Restart Agent",
+  get start() {
+    return uiT("Start Agent");
+  },
+  get stop() {
+    return uiT("Stop Agent");
+  },
+  get restart() {
+    return uiT("Restart Agent");
+  },
 };
 
 /**

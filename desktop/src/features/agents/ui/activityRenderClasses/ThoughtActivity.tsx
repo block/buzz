@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Markdown } from "@/shared/ui/markdown";
 import {
   ActivityRow,
@@ -29,7 +31,7 @@ export function ThoughtActivity(props: ActivityRenderClassItemProps) {
       <ActivityRow testId="transcript-thought-item" title={title}>
         {label}
         <span className="text-xs text-muted-foreground/70">
-          No readable reasoning tokens
+          {uiT("No readable reasoning tokens")}
         </span>
       </ActivityRow>
     );

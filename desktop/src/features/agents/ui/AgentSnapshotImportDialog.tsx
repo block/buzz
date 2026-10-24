@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { AlertCircle, Lock, Upload } from "lucide-react";
 
@@ -47,6 +49,8 @@ export function AgentSnapshotImportDialog({
   onConfirm,
   onOpenChange,
 }: AgentSnapshotImportDialogProps) {
+  useUiLanguage();
+
   // Default: clear the source allowlist (safe default per spec).
   const [keepAllowlist, setKeepAllowlist] = React.useState(false);
 
@@ -63,10 +67,10 @@ export function AgentSnapshotImportDialog({
   const hasMemory = preview.memoryEntryCount > 0;
   const memoryLevelLabel =
     preview.memoryLevel === "core"
-      ? "core"
+      ? uiT("core")
       : preview.memoryLevel === "everything"
-        ? "all"
-        : "none";
+        ? uiT("all")
+        : uiT("none");
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -79,7 +83,9 @@ export function AgentSnapshotImportDialog({
         <DialogHeader className="space-y-0">
           <div className="flex items-center justify-between gap-4">
             <DialogTitle>
-              {phase === "result" ? "Agent imported" : "Import agent snapshot"}
+              {phase === "result"
+                ? uiT("Agent imported")
+                : uiT("Import agent snapshot")}
             </DialogTitle>
             <div className="flex items-center gap-2">
               {phase === "preview" ? (
@@ -93,7 +99,7 @@ export function AgentSnapshotImportDialog({
                     variant="default"
                   >
                     <Upload className="h-4 w-4" />
-                    Import
+                    {uiT("Import")}
                   </Button>
                   <DialogClose asChild>
                     <Button
@@ -102,14 +108,14 @@ export function AgentSnapshotImportDialog({
                       type="button"
                       variant="ghost"
                     >
-                      Cancel
+                      {uiT("Cancel")}
                     </Button>
                   </DialogClose>
                 </>
               ) : (
                 <DialogClose asChild>
                   <Button size="sm" type="button" variant="ghost">
-                    Close
+                    {uiT("Close")}
                   </Button>
                 </DialogClose>
               )}
@@ -129,7 +135,7 @@ export function AgentSnapshotImportDialog({
           />
         ) : phase === "confirming" ? (
           <div className="py-4 text-center text-sm text-muted-foreground">
-            Creating agent…
+            {uiT("Creating agent…")}
           </div>
         ) : result !== null ? (
           <ResultBody result={result} confirmError={confirmError} />
@@ -170,9 +176,11 @@ export function PreviewBody({
         >
           <Lock className="mt-0.5 h-4 w-4 shrink-0" />
           <p>
-            This card is <strong>locked</strong> — its agent is encrypted to the
-            original owner and agent keys. Your keys unlocked it; the full
-            decrypted payload is shown below.
+            {uiT("This card is ")}
+            <strong>{uiT("locked")}</strong>{" "}
+            {uiT(
+              " — its agent is encrypted to the original owner and agent keys. Your keys unlocked it; the full decrypted payload is shown below.",
+            )}
           </p>
         </div>
       ) : null}
@@ -189,9 +197,11 @@ export function PreviewBody({
         data-testid="agent-snapshot-import-behavior"
       >
         <div>
-          <p className="text-sm font-medium">Agent instructions</p>
+          <p className="text-sm font-medium">{uiT("Agent instructions")}</p>
           <p className="text-xs text-muted-foreground">
-            Review the instructions this agent will follow after import.
+            {uiT(
+              "Review the instructions this agent will follow after import.",
+            )}
           </p>
         </div>
         <pre
@@ -203,8 +213,9 @@ export function PreviewBody({
       </section>
 
       <p className="text-sm text-muted-foreground">
-        A new agent will be created with a fresh keypair. The imported agent is
-        independent of the source — identity never travels.
+        {uiT(
+          "A new agent will be created with a fresh keypair. The imported agent is independent of the source — identity never travels.",
+        )}
       </p>
 
       {/* Memory section */}
@@ -215,18 +226,22 @@ export function PreviewBody({
         >
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <p>
-            This snapshot includes{" "}
+            {uiT("This snapshot includes")}{" "}
             <strong>
-              {preview.memoryEntryCount} {memoryLevelLabel} memory entr
-              {preview.memoryEntryCount === 1 ? "y" : "ies"}
+              {uiT("{0} {1} memory entr {2}", {
+                p0: preview.memoryEntryCount,
+                p1: uiT(memoryLevelLabel),
+                p2: preview.memoryEntryCount === 1 ? "y" : "ies",
+              })}
             </strong>
-            . Memory is stored as plaintext in the file and will be restored
-            under the new agent's identity.
+            {uiT(
+              ". Memory is stored as plaintext in the file and will be restored under the new agent's identity.",
+            )}
           </p>
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">
-          No memory included — config only.
+          {uiT("No memory included — config only.")}
         </p>
       )}
 
@@ -237,12 +252,15 @@ export function PreviewBody({
           data-testid="agent-snapshot-import-allowlist-section"
         >
           <p className="text-sm font-medium">
-            Respond-to allowlist ({preview.sourceAllowlistCount} entr
-            {preview.sourceAllowlistCount === 1 ? "y" : "ies"})
+            {uiT("Respond-to allowlist ({0} entr {1})", {
+              p0: preview.sourceAllowlistCount,
+              p1: preview.sourceAllowlistCount === 1 ? "y" : "ies",
+            })}
           </p>
           <p className="text-xs text-muted-foreground">
-            This snapshot includes source-environment pubkeys. Review every key
-            before choosing Keep; Clear is safer when you do not recognize them.
+            {uiT(
+              "This snapshot includes source-environment pubkeys. Review every key before choosing Keep; Clear is safer when you do not recognize them.",
+            )}
           </p>
           <ul
             className="max-h-28 space-y-1 overflow-y-auto rounded bg-muted/60 p-2 font-mono text-xs"
@@ -264,7 +282,8 @@ export function PreviewBody({
                 type="radio"
               />
               <span className="text-sm">
-                <strong>Clear</strong> — start with an empty allowlist (safer)
+                <strong>{uiT("Clear")}</strong>{" "}
+                {uiT(" — start with an empty allowlist (safer)")}
               </span>
             </label>
             <label className="flex cursor-pointer items-center gap-2">
@@ -276,7 +295,8 @@ export function PreviewBody({
                 type="radio"
               />
               <span className="text-sm">
-                <strong>Keep</strong> — copy source allowlist to the new agent
+                <strong>{uiT("Keep")}</strong>{" "}
+                {uiT(" — copy source allowlist to the new agent")}
               </span>
             </label>
           </div>
@@ -288,11 +308,12 @@ export function PreviewBody({
         data-testid="agent-snapshot-import-manifest"
       >
         <summary className="cursor-pointer text-sm font-medium">
-          Full embedded manifest
+          {uiT("Full embedded manifest")}
         </summary>
         <p className="mt-2 text-xs text-muted-foreground">
-          This is the complete portable payload decoded from the file. Secrets,
-          credentials, and source identity are not part of the snapshot format.
+          {uiT(
+            "This is the complete portable payload decoded from the file. Secrets, credentials, and source identity are not part of the snapshot format.",
+          )}
         </p>
         <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/60 p-3 text-xs">
           {preview.manifestJson}
@@ -317,8 +338,8 @@ export function ResultBody({
   return (
     <div className="space-y-3 py-1">
       <p className="text-sm">
-        <span className="font-medium">{result.displayName}</span> was created
-        successfully.
+        <span className="font-medium">{result.displayName}</span>{" "}
+        {uiT(" was created successfully.")}
       </p>
 
       {result.memoryTotal > 0 ? (
@@ -330,10 +351,14 @@ export function ResultBody({
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="flex flex-col gap-1">
               <p>
-                Memory partially restored: {result.memoryWritten} of{" "}
-                {result.memoryTotal} entr
-                {result.memoryTotal === 1 ? "y" : "ies"} written. The agent
-                exists but some memory entries failed to publish.
+                {uiT(
+                  "Memory partially restored: {0} of {1} entr {2} written. The agent exists but some memory entries failed to publish.",
+                  {
+                    p0: result.memoryWritten,
+                    p1: result.memoryTotal,
+                    p2: result.memoryTotal === 1 ? "y" : "ies",
+                  },
+                )}
               </p>
               {result.memoryErrors.length > 0 ? (
                 <ul
@@ -354,15 +379,17 @@ export function ResultBody({
             className="text-xs text-muted-foreground"
             data-testid="agent-snapshot-import-memory-success"
           >
-            {result.memoryTotal} memory entr
-            {result.memoryTotal === 1 ? "y" : "ies"} restored.
+            {uiT("{0} memory entr {1} restored.", {
+              p0: result.memoryTotal,
+              p1: result.memoryTotal === 1 ? "y" : "ies",
+            })}
           </p>
         )
       ) : null}
 
       {result.profileSyncError ? (
         <p className="text-xs text-amber-600 dark:text-amber-400">
-          Profile sync: {result.profileSyncError}
+          {uiT("Profile sync: {0}", { p0: result.profileSyncError })}
         </p>
       ) : null}
 

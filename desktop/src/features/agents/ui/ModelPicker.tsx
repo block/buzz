@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 
@@ -38,6 +40,8 @@ export function ModelPicker({
   agent: ManagedAgent;
   onModelChanged?: () => void;
 }) {
+  useUiLanguage();
+
   const [modelsData, setModelsData] =
     React.useState<AgentModelsResponse | null>(null);
   const [loading, setLoading] = React.useState(false);
@@ -106,10 +110,10 @@ export function ModelPicker({
   const displayLabel = agent.model
     ? rowLabel(agent.model)
     : modelsData?.agentDefaultModel
-      ? `${rowLabel(modelsData.agentDefaultModel)} (default)`
+      ? uiT("{0} (default)", { p0: rowLabel(modelsData.agentDefaultModel) })
       : hasRequestedModels && loading
-        ? "Loading..."
-        : "Auto";
+        ? uiT("Loading...")
+        : uiT("Auto");
 
   // Provenance label shown only for post-spawn agents where the model origin
   // is known from the config surface and the source is not a user-explicit
@@ -180,17 +184,19 @@ export function ModelPicker({
         const outcome = await sendLiveSwitch(modelId);
         if (outcome === "ambiguous") {
           toast.error(
-            "Couldn't switch all sessions — a channel has multiple agent sessions. Stop and restart the agent with the new model.",
+            uiT(
+              "Couldn't switch all sessions — a channel has multiple agent sessions. Stop and restart the agent with the new model.",
+            ),
           );
           return;
         }
         if (outcome === "unsupported") {
-          toast.error("That model isn't available for this agent.");
+          toast.error(uiT("That model isn't available for this agent."));
           return;
         }
         if (outcome === "failed") {
           toast.error(
-            "Couldn't switch models — the agent kept its current model.",
+            uiT("Couldn't switch models — the agent kept its current model."),
           );
           return;
         }
@@ -199,7 +205,9 @@ export function ModelPicker({
           // no active turn remained by the time the harness received it. Nothing
           // was applied and nothing rides a later session — tell the truth.
           toast.error(
-            "Couldn't switch models — the agent wasn't running a turn to switch.",
+            uiT(
+              "Couldn't switch models — the agent wasn't running a turn to switch.",
+            ),
           );
           return;
         }
@@ -208,12 +216,14 @@ export function ModelPicker({
           // session (the agent is mid-turn) and didn't confirm before the
           // fallback timeout. Tell the truth instead of claiming success.
           toast.info(
-            "Model switch pending — applies when the current turn finishes.",
+            uiT(
+              "Model switch pending — applies when the current turn finishes.",
+            ),
           );
           onModelChanged?.();
           return;
         }
-        toast.success("Model switched for this session.");
+        toast.success(uiT("Model switched for this session."));
         onModelChanged?.();
         return;
       }
@@ -263,11 +273,13 @@ export function ModelPicker({
           {loading ? (
             <div className="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground">
               <Spinner className="h-4 w-4 border-2" />
-              Loading models...
+              {uiT("Loading models...")}
             </div>
           ) : error ? (
             <div className="space-y-2 px-3 py-2 text-sm">
-              <p className="text-destructive">Failed to load models.</p>
+              <p className="text-destructive">
+                {uiT("Failed to load models.")}
+              </p>
               <button
                 className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
                 onClick={() => {
@@ -276,12 +288,12 @@ export function ModelPicker({
                 }}
                 type="button"
               >
-                Retry
+                {uiT("Retry")}
               </button>
             </div>
           ) : !modelsData ? (
             <div className="px-3 py-2 text-sm text-muted-foreground">
-              Open to load available models.
+              {uiT("Open to load available models.")}
             </div>
           ) : !modelsData.supportsSwitching ? (
             <div className="px-3 py-2 text-sm text-muted-foreground">
@@ -291,11 +303,11 @@ export function ModelPicker({
                     {resolveModelLabel(agent.model, null, agent.provider)}
                   </p>
                   <p className="mt-0.5 text-xs">
-                    This runtime does not support switching models.
+                    {uiT("This runtime does not support switching models.")}
                   </p>
                 </>
               ) : (
-                "This agent uses the runtime's default model."
+                uiT("This agent uses the runtime's default model.")
               )}
             </div>
           ) : (
@@ -313,7 +325,7 @@ export function ModelPicker({
         </DropdownMenuContent>
       </DropdownMenu>
       {needsRestart ? (
-        <span className="text-2xs text-warning">restart to apply</span>
+        <span className="text-2xs text-warning">{uiT("restart to apply")}</span>
       ) : null}
     </span>
   );

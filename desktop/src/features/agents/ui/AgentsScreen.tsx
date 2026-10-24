@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -39,6 +41,8 @@ const AGENTS_PROFILE_SEARCH_KEYS = [
 ] as const;
 
 export function AgentsScreen() {
+  useUiLanguage();
+
   const identityQuery = useIdentityQuery();
   const personasQuery = usePersonasQuery();
   const { applyPatch, values } = useHistorySearchState(

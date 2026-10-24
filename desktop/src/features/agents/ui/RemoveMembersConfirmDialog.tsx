@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -33,11 +35,13 @@ export function RemoveMembersConfirmDialog({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            Remove {count} member{plural ? "s" : ""}?
+            {uiT("Remove {0} member{1}?", { p0: count, p1: plural ? "s" : "" })}
           </AlertDialogTitle>
           <AlertDialogDescription>
-            {memberNames.join(", ")} will be removed from this team. Do you also
-            want to remove the {plural ? "agents" : "agent"} completely?
+            {uiT(
+              "{0} will be removed from this team. Do you also want to remove the {1} completely?",
+              { p0: memberNames.join(", "), p1: plural ? "agents" : "agent" },
+            )}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -47,7 +51,7 @@ export function RemoveMembersConfirmDialog({
             type="button"
             variant="outline"
           >
-            Cancel
+            {uiT("Cancel")}
           </Button>
           <Button
             disabled={isPending}
@@ -56,7 +60,7 @@ export function RemoveMembersConfirmDialog({
             type="button"
             variant="outline"
           >
-            Keep {plural ? "agents" : "agent"}
+            {uiT("Keep {0}", { p0: plural ? "agents" : "agent" })}
           </Button>
           <Button
             disabled={isPending}
@@ -65,7 +69,7 @@ export function RemoveMembersConfirmDialog({
             type="button"
             variant="destructive"
           >
-            Remove {plural ? "agents" : "agent"}
+            {uiT("Remove {0}", { p0: plural ? "agents" : "agent" })}
           </Button>
         </AlertDialogFooter>
       </AlertDialogContent>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { ChevronRight, MessageSquare } from "lucide-react";
 
 import { Markdown } from "@/shared/ui/markdown";
@@ -119,7 +121,7 @@ export function AgentInstructionRow({
       <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1 text-left">
         <div className="text-xs font-medium text-foreground">
-          Agent instructions
+          {uiT("Agent instructions")}
         </div>
         {trimmedInstruction ? (
           canOpenInstructions ? (
@@ -146,7 +148,7 @@ export function AgentInstructionRow({
             className="mt-0.5 text-sm leading-6 text-muted-foreground"
             data-testid="user-profile-agent-instruction-empty"
           >
-            No instruction set.
+            {uiT("No instruction set.")}
           </p>
         )}
       </div>
@@ -193,7 +195,7 @@ export function AgentInstructionsFocusedView({
           />
         ) : (
           <p className="text-sm leading-6 text-muted-foreground">
-            No instruction set.
+            {uiT("No instruction set.")}
           </p>
         )}
       </div>

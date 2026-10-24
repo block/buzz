@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { cn } from "@/shared/lib/cn";
 
 export function AgentDefinitionMetadata({
@@ -15,19 +17,32 @@ export function AgentDefinitionMetadata({
 }) {
   const items = [
     {
-      label: "Type",
+      get label() {
+        return uiT("Type");
+      },
       value: isBuiltIn ? "Built-in agent" : "Custom agent",
     },
     {
-      label: "Preferred model",
+      get label() {
+        return uiT("Preferred model");
+      },
       value: model ?? "Use app default",
     },
     {
-      label: "Preferred runtime",
+      get label() {
+        return uiT("Preferred runtime");
+      },
       value: runtime ?? "Use app default",
     },
     ...(provider !== undefined
-      ? [{ label: "Preferred provider", value: provider ?? "Use app default" }]
+      ? [
+          {
+            get label() {
+              return uiT("Preferred provider");
+            },
+            value: provider ?? "Use app default",
+          },
+        ]
       : []),
   ];
 
