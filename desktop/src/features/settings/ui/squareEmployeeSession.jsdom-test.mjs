@@ -373,3 +373,92 @@ test("refused relay access retains an explicit retry without claiming the employ
   );
   assert.ok(!calls.some(([command]) => command === "start_employee_login"));
 });
+
+test("expired access renews through fresh browser sign-in and keeps wrong-account recovery available", async () => {
+  let status = {
+    required: true,
+    authenticated: false,
+    canRenew: true,
+    expiresAt: null,
+  };
+  handlers.set("employee_sign_in_available", async () => true);
+  handlers.set("employee_session_status", async () => status);
+  handlers.set("start_employee_login", async () => {
+    throw new Error("Renew with the same Square account and community.");
+  });
+  let reconnected = 0;
+  relayClient.reconnect = async () => {
+    reconnected += 1;
+  };
+  await mount(React.createElement(SquareEmployeeSignInCard));
+  assert.match(
+    container.textContent,
+    /Continue in your browser with the same Square account/,
+  );
+  await click("Renew Square session");
+  assert.match(container.textContent, /Renew with the same Square account/);
+  assert.equal(reconnected, 0);
+  assert.ok(
+    [...container.querySelectorAll("button")].some(
+      (button) => button.textContent === "Sign out of Square",
+    ),
+  );
+  handlers.set("start_employee_login", async () => {
+    status = {
+      required: true,
+      authenticated: true,
+      canRenew: true,
+      expiresAt: Date.now() / 1000 + 240,
+    };
+    return { expires_at: "fresh server expiry" };
+  });
+  await click("Renew Square session");
+  assert.equal(reconnected, 1);
+  assert.match(
+    container.textContent,
+    /Square session and your Buzz key are connected/,
+  );
+  assert.equal(
+    calls.filter(([name]) => name === "refresh_employee_relay_access").length,
+    0,
+    "renewal must not substitute assertion refresh for a new BB session",
+  );
+});
+
+test("returning after idle checks expiry before showing protected chat", async () => {
+  const now = Date.now();
+  let status = {
+    required: true,
+    authenticated: true,
+    canRenew: true,
+    expiresAt: now / 1000 + 240,
+  };
+  handlers.set("employee_sign_in_available", async () => true);
+  handlers.set("employee_session_status", async () => status);
+  await mount(gate("employee"));
+  assert.match(container.textContent, /Community chat/);
+  const originalNow = Date.now;
+  const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+  try {
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+    Date.now = () => now + 300_000;
+    status = {
+      required: true,
+      authenticated: false,
+      canRenew: true,
+      expiresAt: null,
+    };
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    await settle();
+    assert.doesNotMatch(container.textContent, /Community chat/);
+    assert.match(container.textContent, /Renew Square session/);
+  } finally {
+    Date.now = originalNow;
+    if (hiddenDescriptor)
+      Object.defineProperty(document, "hidden", hiddenDescriptor);
+    else delete document.hidden;
+  }
+});

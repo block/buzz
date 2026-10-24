@@ -87,6 +87,7 @@ impl Fixture {
                 credential: "private-session-fixture".to_owned(),
                 api_base: base,
                 employee: Some(EmployeeBinding {
+                    account: crate::builderlab::EmployeeAccount::test_account(),
                     pubkey: keys.public_key().to_hex(),
                     expires_at: chrono::Utc::now().timestamp() + 240,
                     relay: relay.clone(),
@@ -345,10 +346,9 @@ async fn employee_manual_refresh_waits_for_old_issuance_then_requires_a_fresh_re
     tokio::pin!(old);
     tokio::select! { _ = fixture.stub.entered.notified() => {}, _ = &mut old => panic!("must wait") }
     let keys = fixture.state.signing_keys().unwrap();
-    let refresh =
-        fixture
-            .session
-            .evidence_with_refresh(&fixture.state, &keys, &fixture.relay, true);
+    let refresh = fixture
+        .session
+        .refresh_employee_access(&fixture.state, &keys, &fixture.relay);
     tokio::pin!(refresh);
     fixture.stub.release.notify_one();
     old.await.unwrap();
@@ -356,6 +356,11 @@ async fn employee_manual_refresh_waits_for_old_issuance_then_requires_a_fresh_re
     assert_eq!(fixture.stub.captured.lock().unwrap().len(), 2);
     fixture.stub.release.notify_one();
     refresh.await.unwrap();
+    assert!(fixture
+        .session
+        .employee_renewal_binding(&fixture.state)
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]

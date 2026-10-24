@@ -183,6 +183,7 @@ pub(crate) async fn start_employee_login(
         .workspace_apply_generation
         .load(std::sync::atomic::Ordering::Acquire);
     let pubkey = app_state.signing_keys()?.public_key().to_hex();
+    let _ = session.employee_renewal_binding(&app_state)?;
     let verifier = random_parameter()?;
     let state = random_parameter()?;
     let nonce = random_parameter()?;
@@ -246,16 +247,24 @@ pub(crate) async fn start_employee_login(
     let expires_at = DateTime::parse_from_rfc3339(&receipt.expires_at)
         .map_err(|_| "Invalid Square session expiry")?
         .timestamp();
-    session.finish_employee_login(
+    let candidate = BuilderlabSession::default();
+    let binding = crate::builderlab::EmployeeBinding {
+        account: crate::builderlab::EmployeeAccount {
+            subject: receipt.subject_id.clone(),
+            org: receipt.org.clone(),
+            workspace: receipt.workspace_identifier.clone(),
+        },
+        pubkey: pubkey.clone(),
+        expires_at,
+        relay: relay.clone(),
+    };
+    session.validate_employee_renewal(&binding)?;
+    candidate.finish_employee_login(
         &login,
         login_id,
         receipt.session_credential.clone(),
         API_BASE,
-        crate::builderlab::EmployeeBinding {
-            pubkey,
-            expires_at,
-            relay: relay.clone(),
-        },
+        binding,
     )?;
     drop(_identity_guard);
     let keys = app_state.signing_keys()?;
@@ -263,19 +272,43 @@ pub(crate) async fn start_employee_login(
     let (result, canceled) = tokio::select! {
         biased;
         _ = &mut cancel => (Err("Square sign-in canceled".to_owned()), true),
-        result = crate::builderlab::employee_evidence(&app_state, &keys, &relay) => (result.map(|_| ()), false),
+        result = candidate.evidence_with_refresh(&app_state, &keys, &relay, false) => (result.map(|_| ()), false),
     };
     if let Err(error) = result {
-        session.clear_failed_employee_login(&receipt.session_credential, canceled)?;
+        candidate.clear_failed_employee_login(&receipt.session_credential, canceled)?;
+        {
+            let _identity_guard = app_state
+                .identity_mutation
+                .lock()
+                .map_err(|_| "Buzz identity changed")?;
+            if app_state.signing_keys()?.public_key().to_hex() == pubkey
+                && app_state
+                    .workspace_apply_generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == workspace_generation
+                && crate::relay::relay_ws_url_with_override(&app_state) == relay
+            {
+                session.retain_initial_refusal(&login, login_id, &candidate)?;
+            }
+        }
         let _ = login.complete_employee_login(login_id);
         crate::builderlab::notify_session_changed(&app_state);
         return Err(error);
     }
-    if let Err(error) = login.complete_employee_login(login_id) {
-        session.clear_if_credential(&receipt.session_credential)?;
-        crate::builderlab::notify_session_changed(&app_state);
-        return Err(error);
+    let _identity_guard = app_state
+        .identity_mutation
+        .lock()
+        .map_err(|_| "Buzz identity changed")?;
+    if app_state.signing_keys()?.public_key().to_hex() != pubkey
+        || app_state
+            .workspace_apply_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+            != workspace_generation
+        || crate::relay::relay_ws_url_with_override(&app_state) != relay
+    {
+        return Err("Community or Buzz identity changed. Sign in again.".to_owned());
     }
+    session.commit_verified_employee_login(&login, login_id, &candidate)?;
     crate::builderlab::notify_session_changed(&app_state);
     Ok(BuilderlabAuthInfo {
         expires_at: me.expires_at,
@@ -415,6 +448,7 @@ pub(crate) struct EmployeeSessionStatus {
     required: bool,
     authenticated: bool,
     can_retry: bool,
+    can_renew: bool,
     expires_at: Option<i64>,
 }
 
@@ -429,6 +463,7 @@ pub(crate) fn employee_session_status(
             required: false,
             authenticated: false,
             can_retry: false,
+            can_renew: false,
             expires_at: None,
         });
     }
@@ -437,6 +472,7 @@ pub(crate) fn employee_session_status(
         required: true,
         authenticated: expires_at.is_some(),
         can_retry: session.employee_can_retry(&app_state),
+        can_renew: session.employee_renewal_binding(&app_state)?.is_some(),
         expires_at,
     })
 }
@@ -453,7 +489,7 @@ pub(crate) async fn refresh_employee_relay_access(
         return Err("Select the configured Square community".to_owned());
     }
     session
-        .evidence_with_refresh(&app_state, &keys, &relay, true)
+        .refresh_employee_access(&app_state, &keys, &relay)
         .await?;
     crate::builderlab::notify_session_changed(&app_state);
     Ok(())

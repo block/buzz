@@ -59,3 +59,29 @@ cannot complete the native transaction. Browser flags, approved service routes,
 workspace grants and any explicit staging routing selector must already be
 configured. Credentials and native callback codes must stay in the normal flow.
 The namespace option does not renew or extend the short-lived Square session.
+
+### Renewing employee access
+
+**Renew Square session** opens the same Square browser handoff and obtains a new
+short-lived server session. It is available in Square team member settings while
+connected and on the recovery screen after expiry. Continue with the same Square
+account and merchant. Buzz checks the prior subject, organization, workspace,
+relay, and device key before replacing the active session. A failed or canceled
+renewal leaves an existing session usable until its original expiry. To choose a
+different account, explicitly sign out of Square first.
+
+Expiry still discards the native credential, cancels protected relay access, and
+hides protected content. Only the public continuity binding remains in memory;
+it cannot authorize requests and is cleared by sign-out or a community/identity
+change. After restarting the app, use normal Square sign-in. Renewal is
+browser-assisted: it does not extend session lifetimes, reuse an expired
+credential, or provide silent renewal after long idle periods. Silent renewal
+requires a separately supported upstream authority contract.
+
+To validate, renew while a session is active and verify that the same employee
+can continue chatting. Cancel or reject a renewal and verify that the original
+session still works until expiry. Then leave the app idle past expiry, return,
+and confirm protected chat is hidden and renewal is available. Complete renewal
+with the same account; the existing community, device key, and saved draft should
+remain. A different account must be rejected without replacing the original
+session. These checks require a human acceptance run before marking the PR ready.

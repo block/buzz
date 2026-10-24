@@ -168,7 +168,11 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
 </html>"#;
 
 #[derive(Default)]
-pub(crate) struct BuilderlabSession(Mutex<Option<StoredSession>>, tokio::sync::Mutex<()>);
+pub(crate) struct BuilderlabSession(
+    Mutex<Option<StoredSession>>,
+    tokio::sync::Mutex<()>,
+    Mutex<Option<EmployeeBinding>>,
+);
 
 #[derive(Default)]
 pub(crate) struct BuilderlabLogin(Mutex<Option<PendingLogin>>);
@@ -187,7 +191,9 @@ struct StoredSession {
     cancel: tokio_util::sync::CancellationToken,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct EmployeeBinding {
+    pub(crate) account: EmployeeAccount,
     pub(crate) pubkey: String,
     pub(crate) expires_at: i64,
     pub(crate) relay: String,
@@ -197,6 +203,8 @@ struct CachedAssertion {
     expires_at: i64,
 }
 
+mod employee_renewal;
+pub(crate) use employee_renewal::EmployeeAccount;
 mod employee_relay;
 mod employee_response;
 pub(crate) use employee_relay::{
@@ -271,13 +279,18 @@ impl BuilderlabSession {
     }
     fn replace(&self, next: StoredSession) -> Result<(), String> {
         let mut current = self.0.lock().map_err(|error| error.to_string())?;
+        if next.employee.is_none() {
+            self.clear_employee_renewal()?;
+        }
         if let Some(previous) = current.replace(next) {
             previous.cancel.cancel();
         }
         Ok(())
     }
     fn clear(&self) -> Result<(), String> {
-        if let Some(previous) = self.0.lock().map_err(|error| error.to_string())?.take() {
+        let mut current = self.0.lock().map_err(|error| error.to_string())?;
+        self.clear_employee_renewal()?;
+        if let Some(previous) = current.take() {
             previous.cancel.cancel();
         }
         Ok(())
@@ -300,15 +313,22 @@ impl BuilderlabSession {
         app_state: &crate::app_state::AppState,
     ) -> Result<Option<(String, &'static str)>, String> {
         let mut stored = self.0.lock().map_err(|error| error.to_string())?;
+        // Context changes must also discard continuity pins after credential expiry.
+        let _ = self.employee_renewal_binding(app_state)?;
         if let Some(session) = stored.as_ref() {
             if let Some(expected) = &session.employee {
                 if app_state.signing_keys()?.public_key().to_hex() != expected.pubkey
                     || chrono::Utc::now().timestamp() >= expected.expires_at
                     || crate::relay::relay_ws_url_with_override(app_state) != expected.relay
                 {
+                    if app_state.signing_keys()?.public_key().to_hex() != expected.pubkey
+                        || crate::relay::relay_ws_url_with_override(app_state) != expected.relay
+                    {
+                        self.clear_employee_renewal()?;
+                    }
                     session.cancel.cancel();
                     *stored = None;
-                    return Err("Buzz identity changed. Sign in with Square again.".to_owned());
+                    return Err("Square access ended. Sign in with Square again.".to_owned());
                 }
             }
         }
@@ -336,6 +356,7 @@ impl BuilderlabSession {
         if pending.as_ref().is_none_or(|pending| pending.id != id) {
             return Err("Square sign-in canceled".to_owned());
         }
+        self.validate_employee_renewal(&employee)?;
         self.replace(StoredSession {
             credential,
             api_base,
@@ -1026,6 +1047,7 @@ mod tests {
                 "old".to_owned(),
                 "https://square.builderlabstaging.xyz/api/goose",
                 EmployeeBinding {
+                    account: EmployeeAccount::test_account(),
                     pubkey: keys.public_key().to_hex(),
                     expires_at: chrono::Utc::now().timestamp() + 240,
                     relay: crate::relay::relay_ws_url_with_override(&state),
@@ -1039,6 +1061,7 @@ mod tests {
                 "current".to_owned(),
                 "https://square.builderlabstaging.xyz/api/goose",
                 EmployeeBinding {
+                    account: EmployeeAccount::test_account(),
                     pubkey: keys.public_key().to_hex(),
                     expires_at: chrono::Utc::now().timestamp() + 240,
                     relay: crate::relay::relay_ws_url_with_override(&state),
@@ -1065,6 +1088,7 @@ mod tests {
                 "provisional".to_owned(),
                 BUILDERLAB_API_BASE_URL,
                 EmployeeBinding {
+                    account: EmployeeAccount::test_account(),
                     pubkey: state.signing_keys().unwrap().public_key().to_hex(),
                     expires_at: chrono::Utc::now().timestamp() + 240,
                     relay: crate::relay::relay_ws_url_with_override(&state),

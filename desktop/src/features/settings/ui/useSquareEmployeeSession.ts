@@ -6,6 +6,7 @@ export type SquareEmployeeSessionStatus = {
   required: boolean;
   authenticated: boolean;
   canRetry?: boolean;
+  canRenew?: boolean;
   expiresAt: number | null;
 };
 
@@ -93,6 +94,25 @@ export function useSquareEmployeeSession(active: boolean, scope: string) {
     const timer = window.setTimeout(refresh, remaining);
     return () => window.clearTimeout(timer);
   }, [current, refresh]);
+  useEffect(() => {
+    if (!active) return;
+    const resume = () => {
+      const status = current?.status;
+      if (
+        !document.hidden &&
+        status?.required &&
+        status.expiresAt !== null &&
+        status.expiresAt * 1000 <= Date.now()
+      )
+        refresh();
+    };
+    window.addEventListener("focus", resume);
+    document.addEventListener("visibilitychange", resume);
+    return () => {
+      window.removeEventListener("focus", resume);
+      document.removeEventListener("visibilitychange", resume);
+    };
+  }, [active, current?.status, refresh]);
   const revision = current?.revision ?? 0;
   const status = current?.status ?? null;
   const isCurrent = useCallback(

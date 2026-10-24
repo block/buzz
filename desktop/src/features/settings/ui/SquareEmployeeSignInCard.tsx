@@ -17,6 +17,7 @@ export function SquareEmployeeSignInCard({
     "square-employee-settings",
   );
   const signedIn = session.status?.authenticated === true && session.ready;
+  const canRenew = session.status?.canRenew === true;
   const canReconnect = signedIn || session.status?.canRetry === true;
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
@@ -112,6 +113,12 @@ export function SquareEmployeeSignInCard({
           is still pending, retry the connection in a moment.
         </p>
       ) : null}
+      {canRenew ? (
+        <p role="status">
+          {signedIn ? "Renew before access expires to keep working. " : null}
+          Continue in your browser with the same Square account and community.
+        </p>
+      ) : null}
       {error ? <p role="alert">{error}</p> : null}
       {session.error ? (
         <>
@@ -127,7 +134,7 @@ export function SquareEmployeeSignInCard({
           void signIn();
         }}
       >
-        Sign in with Square
+        {canRenew ? "Renew Square session" : "Sign in with Square"}
       </Button>
       {pending ? (
         <Button
@@ -140,25 +147,25 @@ export function SquareEmployeeSignInCard({
         </Button>
       ) : null}
       {canReconnect ? (
-        <>
-          <Button
-            variant="outline"
-            disabled={pending}
-            onClick={() => {
-              void reconnect();
-            }}
-          >
-            Retry community connection
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => {
-              void signOut();
-            }}
-          >
-            Sign out of Square
-          </Button>
-        </>
+        <Button
+          variant="outline"
+          disabled={pending}
+          onClick={() => {
+            void reconnect();
+          }}
+        >
+          Retry community connection
+        </Button>
+      ) : null}
+      {canReconnect || canRenew ? (
+        <Button
+          variant="outline"
+          onClick={() => {
+            void signOut();
+          }}
+        >
+          Sign out of Square
+        </Button>
       ) : null}
     </section>
   );
