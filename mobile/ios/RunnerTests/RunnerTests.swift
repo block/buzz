@@ -586,6 +586,21 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testStandaloneRailObservesBookPosture() throws {
+    guard #available(iOS 27.1, *) else { return }
+    for standalone in [false, true] {
+      let parent = UIViewController()
+      let bar = IosNavigationBarFactory(
+        messenger: NavigationTestMessenger(), parent: parent
+      ).create(withFrame: CGRect(x: 0, y: 0, width: 48, height: 48),
+               viewIdentifier: 999989,
+               arguments: ["standaloneControl": standalone])
+      XCTAssertEqual(
+        bar.view().interactions.contains { $0 is UIHingeInteraction }, standalone)
+    }
+  }
+
+  @MainActor
   func testNavigationIgnoresNonFiniteScrollOffsets() throws {
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)
@@ -696,72 +711,82 @@ class RunnerTests: XCTestCase {
     guard !UIAccessibility.isReduceMotionEnabled else {
       throw XCTSkip("The system has disabled transition animation")
     }
-    let parent = UIViewController()
-    let window = UIWindow(frame: UIScreen.main.bounds)
-    window.windowScene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-    window.rootViewController = parent
-    window.makeKeyAndVisible()
-    defer { window.isHidden = true }
-    let messenger = NavigationTestMessenger()
-    let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
-      withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 180),
-      viewIdentifier: 999992, arguments: ["title": "Home", "largeTitle": true])
-    parent.view.addSubview(bar.view())
-    parent.view.layoutIfNeeded()
-    try await Task.sleep(nanoseconds: 200_000_000)
-    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
-    let metrics = try XCTUnwrap(messenger.metrics)
-    let expanded = try XCTUnwrap(metrics["expandedHeight"] as? Double)
-    let compact = try XCTUnwrap(metrics["compactHeight"] as? Double)
-    let boundary = expanded - compact
+    for leadingTitle in [false, true] {
+      let parent = UIViewController()
+      let window = UIWindow(frame: UIScreen.main.bounds)
+      window.windowScene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+      window.rootViewController = parent
+      window.makeKeyAndVisible()
+      defer { window.isHidden = true }
+      let messenger = NavigationTestMessenger()
+      let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
+        withFrame: CGRect(x: 0, y: 0, width: window.bounds.width, height: 180),
+        viewIdentifier: 999992, arguments: ["title": "Home", "largeTitle": true, "alignCollapsedTitleToLeading": leadingTitle])
+      parent.view.addSubview(bar.view())
+      parent.view.layoutIfNeeded()
+      try await Task.sleep(nanoseconds: 200_000_000)
+      let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+      let metrics = try XCTUnwrap(messenger.metrics)
+      let expanded = try XCTUnwrap(metrics["expandedHeight"] as? Double)
+      let compact = try XCTUnwrap(metrics["compactHeight"] as? Double)
+      let boundary = expanded - compact
 
-    func labels(in view: UIView) -> [UILabel] {
-      let own = (view as? UILabel).map { [$0] } ?? []
-      return own + view.subviews.flatMap { labels(in: $0) }
+      func labels(in view: UIView) -> [UILabel] {
+        let own = (view as? UILabel).map { [$0] } ?? []
+        return own + view.subviews.flatMap { labels(in: $0) }
+      }
+      func visibleOpacity(of view: UIView) -> Float {
+        guard !view.isHidden else { return 0 }
+        let opacity = view.layer.presentation()?.opacity ?? Float(view.alpha)
+        let maskOpacity = view.layer.mask.map { $0.presentation()?.opacity ?? $0.opacity } ?? 1
+        return opacity * maskOpacity * (view.superview.map { visibleOpacity(of: $0) } ?? 1)
+      }
+      let title = try XCTUnwrap(labels(in: navigation.view)
+        .filter { $0.text == "Home" }.max { $0.font.pointSize < $1.font.pointSize })
+      let centeredTitle = try XCTUnwrap(labels(in: bar.view()).filter { $0.text == "Home" && $0 !== title }.min { $0.font.pointSize < $1.font.pointSize })
+      let initialTitleX = title.convert(title.bounds, to: bar.view()).minX
+      if leadingTitle {
+        XCTAssertGreaterThanOrEqual(title.convert(title.bounds, to: bar.view()).minY, 44,
+                                    "Expanded pane titles must clear the reserved header row")
+      }
+      let initialTitleY = title.convert(title.bounds, to: parent.view).minY
+      XCTAssertEqual(title.textColor.cgColor.alpha, 1, accuracy: 0.01)
+      messenger.scroll(to: boundary * 0.7)
+      XCTAssertGreaterThan(title.textColor.cgColor.alpha, 0.1)
+      XCTAssertLessThan(title.textColor.cgColor.alpha, 0.6, "The actual large text must fade before it collapses")
+      // Flutter also resizes the platform view every scroll frame. Exercise that
+      // layout, which could invalidate a snapshot-only header transition.
+      bar.view().frame.size.height -= boundary * 0.7
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      XCTAssertLessThan(title.textColor.cgColor.alpha, 0.6)
+      messenger.scroll(to: boundary)
+      try await Task.sleep(nanoseconds: 60_000_000)
+      XCTAssertFalse(try XCTUnwrap(centeredTitle.layer.mask).bounds.isEmpty)
+      XCTAssertGreaterThan(visibleOpacity(of: centeredTitle), 0.01)
+      XCTAssertLessThan(visibleOpacity(of: centeredTitle), 0.99)
+      XCTAssertEqual(title.textColor.cgColor.alpha, 0, accuracy: 0.01)
+      if leadingTitle {
+        XCTAssertEqual(centeredTitle.convert(centeredTitle.bounds, to: bar.view()).minX, initialTitleX, accuracy: 0.5)
+      }
+      messenger.scroll(to: boundary * 0.7)
+      try await Task.sleep(nanoseconds: 240_000_000)
+      XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
+      XCTAssertGreaterThan(title.textColor.cgColor.alpha, 0.1)
+      messenger.scroll(to: boundary)
+      try await Task.sleep(nanoseconds: 240_000_000)
+      XCTAssertEqual(visibleOpacity(of: centeredTitle), 1, accuracy: 0.01)
+      XCTAssertEqual(navigation.navigationBar.frame.height, compact, accuracy: 0.5)
+      messenger.scroll(to: 0)
+      bar.view().frame.size.height += boundary * 0.7
+      bar.view().setNeedsLayout()
+      bar.view().layoutIfNeeded()
+      try await Task.sleep(nanoseconds: 240_000_000)
+      XCTAssertEqual(title.textColor.cgColor.alpha, 1, accuracy: 0.01)
+      XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
+      XCTAssertEqual(navigation.navigationBar.frame.height, expanded, accuracy: 0.5)
+      XCTAssertEqual(title.convert(title.bounds, to: parent.view).minY, initialTitleY, accuracy: 0.5)
     }
-    func visibleOpacity(of view: UIView) -> Float {
-      guard !view.isHidden else { return 0 }
-      let opacity = view.layer.presentation()?.opacity ?? Float(view.alpha)
-      let maskOpacity = view.layer.mask.map { $0.presentation()?.opacity ?? $0.opacity } ?? 1
-      return opacity * maskOpacity * (view.superview.map { visibleOpacity(of: $0) } ?? 1)
-    }
-    let title = try XCTUnwrap(labels(in: navigation.view)
-      .filter { $0.text == "Home" }.max { $0.font.pointSize < $1.font.pointSize })
-    let centeredTitle = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView?.subviews.compactMap { $0 as? UILabel }.first)
-    let initialTitleY = title.convert(title.bounds, to: parent.view).minY
-    XCTAssertEqual(title.textColor.cgColor.alpha, 1, accuracy: 0.01)
-    messenger.scroll(to: boundary * 0.7)
-    XCTAssertGreaterThan(title.textColor.cgColor.alpha, 0.1)
-    XCTAssertLessThan(title.textColor.cgColor.alpha, 0.6, "The actual large text must fade before it collapses")
-    // Flutter also resizes the platform view every scroll frame. Exercise that
-    // layout, which could invalidate a snapshot-only header transition.
-    bar.view().frame.size.height -= boundary * 0.7
-    bar.view().setNeedsLayout()
-    bar.view().layoutIfNeeded()
-    XCTAssertLessThan(title.textColor.cgColor.alpha, 0.6)
-    messenger.scroll(to: boundary)
-    try await Task.sleep(nanoseconds: 60_000_000)
-    XCTAssertFalse(try XCTUnwrap(centeredTitle.layer.mask).bounds.isEmpty)
-    XCTAssertGreaterThan(visibleOpacity(of: centeredTitle), 0.01)
-    XCTAssertLessThan(visibleOpacity(of: centeredTitle), 0.99)
-    XCTAssertEqual(title.textColor.cgColor.alpha, 0, accuracy: 0.01)
-    messenger.scroll(to: boundary * 0.7)
-    try await Task.sleep(nanoseconds: 240_000_000)
-    XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
-    XCTAssertGreaterThan(title.textColor.cgColor.alpha, 0.1)
-    messenger.scroll(to: boundary)
-    try await Task.sleep(nanoseconds: 240_000_000)
-    XCTAssertEqual(visibleOpacity(of: centeredTitle), 1, accuracy: 0.01)
-    XCTAssertEqual(navigation.navigationBar.frame.height, compact, accuracy: 0.5)
-    messenger.scroll(to: 0)
-    bar.view().frame.size.height += boundary * 0.7
-    bar.view().setNeedsLayout()
-    bar.view().layoutIfNeeded()
-    try await Task.sleep(nanoseconds: 240_000_000)
-    XCTAssertEqual(title.textColor.cgColor.alpha, 1, accuracy: 0.01)
-    XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
-    XCTAssertEqual(navigation.navigationBar.frame.height, expanded, accuracy: 0.5)
-    XCTAssertEqual(title.convert(title.bounds, to: parent.view).minY, initialTitleY, accuracy: 0.5)
   }
 
   @MainActor
@@ -796,7 +821,7 @@ class RunnerTests: XCTestCase {
       XCTAssertEqual(edge.topEdgeEffect.style, .soft)
       XCTAssertEqual(edge.contentOffset, .zero)
       XCTAssertFalse(edge.isUserInteractionEnabled)
-      XCTAssertTrue(material.isHidden)
+      XCTAssertFalse(material.isHidden, "Large titles retain their backdrop while fading")
       XCTAssertFalse(bar.view().clipsToBounds)
     }
     let expandedHeight = navigation.navigationBar.frame.height

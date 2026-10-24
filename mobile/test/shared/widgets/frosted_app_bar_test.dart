@@ -1,3 +1,6 @@
+import 'package:flutter/services.dart';
+import 'package:duo_kit/duo_kit.dart';
+import 'package:buzz/shared/widgets/duo_toolbar.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scroll_under_scope.dart';
@@ -10,6 +13,221 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets('Duo keeps list actions in header and profile on aligned rail', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final active = ValueNotifier(true);
+    final hasStrip = ValueNotifier(true);
+    addTearDown(active.dispose);
+    addTearDown(hasStrip.dispose);
+    var presses = 0;
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          builder: (context, child) => IosNavigationMetricsHost(
+            child: MediaQuery(
+              // The detail pane can be narrower than its window.
+              data: MediaQuery.of(context).copyWith(size: const Size(400, 600)),
+              child: child!,
+            ),
+          ),
+          theme: AppTheme.light(),
+          home: ListenableBuilder(
+            listenable: Listenable.merge([active, hasStrip]),
+            builder: (context, _) => DuoToolbarScope(
+              active: active.value,
+              strip: hasStrip.value
+                  ? const FoldStrip(
+                      side: FoldStripSide.right,
+                      rect: Rect.fromLTWH(700, 0, 100, 600),
+                      topClearance: 170,
+                      bottomClearance: 0,
+                      isClearanceEstimated: true,
+                    )
+                  : null,
+              child: Stack(
+                children: [
+                  FrostedAppBar(
+                    nativeLeading: IosNavigationAction(
+                      label: 'Community',
+                      keepInHeaderOnDuo: true,
+                      onPressed: () => presses++,
+                    ),
+                    nativeActions: [
+                      IosNavigationAction(
+                        label: 'Search',
+                        keepInHeaderOnDuo: true,
+                        onPressed: () => presses++,
+                      ),
+                      IosNavigationAction(
+                        label: 'Inbox',
+                        keepInHeaderOnDuo: true,
+                        onPressed: () => presses++,
+                      ),
+                      IosNavigationAction(
+                        label: 'Profile',
+                        onPressed: () => presses++,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    for (final (index, label) in ['Profile'].indexed) {
+      final control = find.byKey(ValueKey('duo-toolbar-$label'));
+      expect(tester.getTopLeft(control), Offset(694, 110 + index * 60));
+      expect(tester.getSize(control).height, 60);
+      final view = tester.widget<UiKitView>(
+        find.descendant(of: control, matching: find.byType(UiKitView)),
+      );
+      expect(view.creationParams, containsPair('standaloneControl', true));
+      await _nativeAction(tester, control, 910 + index, 'leading');
+    }
+    expect(presses, 1);
+    final header = tester
+        .widgetList<IosNavigationBar>(find.byType(IosNavigationBar))
+        .singleWhere((bar) => !bar.standaloneControl);
+    expect(header.horizontalControls, isTrue);
+    expect(header.alwaysFrosted, isTrue);
+    expect(
+      find.byKey(const ValueKey('duo-navigation-backdrop')),
+      findsOneWidget,
+    );
+    expect(tester.getSize(find.byWidget(header)).height, 68);
+    expect(frostedAppBarHeight(tester.element(find.byWidget(header))), 68);
+    expect(header.centerTitleInPane, isTrue);
+    expect(header.leading!.label, 'Community');
+    expect(header.actions.map((action) => action.label), ['Search', 'Inbox']);
+    final toolbarContext = tester.element(find.byType(FrostedAppBar));
+    final view = View.of(toolbarContext);
+    final windowSize = view.physicalSize / view.devicePixelRatio;
+    IosNavigationMetrics.updateRail(toolbarContext, {
+      'centerX': 740,
+      'windowWidth': windowSize.width,
+      'windowHeight': windowSize.height,
+    });
+    await tester.pump();
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('duo-toolbar-Profile'))).dx,
+      684,
+    );
+    // A measurement from another pose must not move the current controls.
+    IosNavigationMetrics.updateRail(toolbarContext, {
+      'centerX': 500,
+      'windowWidth': windowSize.height,
+      'windowHeight': windowSize.width,
+    });
+    await tester.pump();
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('duo-toolbar-Profile'))).dx,
+      694,
+    );
+    active.value = false;
+    await tester.pump();
+    expect(find.byKey(const ValueKey('duo-toolbar-Profile')), findsNothing);
+    active.value = true;
+    hasStrip.value = false;
+    await tester.pump();
+    expect(find.byType(IosNavigationBar), findsOneWidget);
+    final restored = tester.widget<IosNavigationBar>(
+      find.byType(IosNavigationBar),
+    );
+    expect(restored.centerTitleInPane, isFalse);
+    expect(find.byKey(const ValueKey('duo-navigation-backdrop')), findsNothing);
+    expect(restored.leading!.label, 'Community');
+    expect(restored.actions.map((action) => action.label), [
+      'Search',
+      'Inbox',
+      'Profile',
+    ]);
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('Duo Back follows pushed routes and action menus remain usable', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final navigator = GlobalKey<NavigatorState>();
+    var chosen = false;
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          navigatorKey: navigator,
+          theme: AppTheme.light(),
+          builder: (context, child) => DuoToolbarScope(
+            strip: const FoldStrip(
+              side: FoldStripSide.right,
+              rect: Rect.fromLTWH(700, 0, 100, 600),
+              topClearance: 170,
+              bottomClearance: 0,
+              isClearanceEstimated: true,
+            ),
+            active: true,
+            child: child!,
+          ),
+          home: const Stack(children: [FrostedAppBar(nativeTitle: 'Home')]),
+        ),
+      ),
+    );
+    navigator.currentState!.push(
+      MaterialPageRoute<void>(
+        builder: (_) => Stack(
+          children: [
+            FrostedAppBar(
+              nativeTitle: 'Conversation',
+              nativeActions: [
+                IosNavigationAction(
+                  label: 'Options',
+                  children: [
+                    IosNavigationAction(
+                      label: 'Choose assistant',
+                      onPressed: () => chosen = true,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('duo-toolbar-Back'))).dy,
+      110,
+    );
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('duo-toolbar-Options'))).dy,
+      170,
+    );
+    await _nativeAction(
+      tester,
+      find.byKey(const ValueKey('duo-toolbar-Options')),
+      920,
+      'leading.0',
+    );
+    expect(chosen, isTrue);
+    await _nativeAction(
+      tester,
+      find.byKey(const ValueKey('duo-toolbar-Back')),
+      921,
+      'leading',
+    );
+    await tester.pumpAndSettle();
+    expect(navigator.currentState!.canPop(), isFalse);
+    expect(find.byKey(const ValueKey('duo-toolbar-Back')), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('iOS conversations request a backdrop before scrolling', (
     tester,
   ) async {
@@ -346,4 +564,29 @@ void main() {
     expect(find.byType(UiKitView), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
+}
+
+Future<void> _nativeAction(
+  WidgetTester tester,
+  Finder control,
+  int id,
+  String action,
+) async {
+  final channel = MethodChannel('buzz/ios_navigation_bar/$id');
+  tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+    channel,
+    (_) async => null,
+  );
+  tester
+      .widget<UiKitView>(
+        find.descendant(of: control, matching: find.byType(UiKitView)),
+      )
+      .onPlatformViewCreated!(id);
+  await tester.pump();
+  await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+    channel.name,
+    const StandardMethodCodec().encodeMethodCall(MethodCall('action', action)),
+    (_) {},
+  );
+  await tester.pump();
 }

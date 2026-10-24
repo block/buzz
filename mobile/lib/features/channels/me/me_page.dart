@@ -1,3 +1,4 @@
+import '../../home/adaptive_conversation_pane.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -107,6 +108,18 @@ class MePage extends HookConsumerWidget {
         : () => perform(() async {
             final result = await _showNewMeChat(context, ref);
             if (result == null || !context.mounted) return;
+            final pane = ConversationPaneScope.maybeOf(context);
+            if (pane != null) {
+              pane.open(
+                result.$1.id,
+                (_) => ChannelDetailPage(
+                  channel: result.$1,
+                  personalChat: true,
+                  initialAssistant: result.$2,
+                ),
+              );
+              return;
+            }
             await Navigator.of(context).push(
               MaterialPageRoute<void>(
                 builder: (_) => ChannelDetailPage(
@@ -206,16 +219,44 @@ class MePage extends HookConsumerWidget {
                       a.lastMessageAt ?? a.createdAt,
                     ),
                   );
-            Widget row(Channel channel) => _MeChatRow(
-              name: channel.name,
-              isUnread: unreadIds.contains(channel.id),
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) =>
-                      ChannelDetailPage(channel: channel, personalChat: true),
+            Widget row(Channel channel) {
+              final pane = ConversationPaneScope.maybeOf(context);
+              final selected = pane?.selectedId == channel.id;
+              return DecoratedBox(
+                decoration: BoxDecoration(
+                  color: selected ? context.colors.primaryContainer : null,
+                  borderRadius: BorderRadius.circular(Radii.md),
                 ),
-              ),
-            );
+                child: Semantics(
+                  selected: selected,
+                  child: _MeChatRow(
+                    name: channel.name,
+                    isUnread: unreadIds.contains(channel.id),
+                    onTap: () {
+                      if (pane != null) {
+                        pane.open(
+                          channel.id,
+                          (_) => ChannelDetailPage(
+                            channel: channel,
+                            personalChat: true,
+                          ),
+                        );
+                      } else {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => ChannelDetailPage(
+                              channel: channel,
+                              personalChat: true,
+                            ),
+                          ),
+                        );
+                      }
+                    },
+                  ),
+                ),
+              );
+            }
+
             return BeeRefreshIndicator(
               edgeOffset: topSectionHeight,
               onRefresh: () async {

@@ -1,7 +1,9 @@
+import 'package:buzz/features/home/adaptive_conversation_pane.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/ios_navigation_metrics.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
@@ -31,7 +33,7 @@ void main() {
           data: MediaQuery.of(
             context,
           ).copyWith(disableAnimations: disableAnimations),
-          child: child!,
+          child: IosNavigationMetricsHost(child: child!),
         ),
         home: HomePage(
           mePageBuilder: (_, action) {
@@ -47,6 +49,130 @@ void main() {
       ),
     );
   }
+
+  testWidgets('Duo tabs move into the strip and retain Solo across poses', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(466, 678);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    tester.view.padding = const FakeViewPadding(right: 76);
+    addTearDown(tester.view.reset);
+    ValueNotifier<VoidCallback?>? action;
+    var newChats = 0;
+    await tester.pumpWidget(
+      await buildHome(
+        disableAnimations: true,
+        onNewChatAction: (value) => action = value,
+      ),
+    );
+    await tester.pumpAndSettle();
+    final home = find.byIcon(BuzzIcons.house500);
+    final solo = find.byIcon(BuzzIcons.messageSquare);
+    expect(tester.getCenter(home).dx, greaterThan(390));
+    expect(tester.getCenter(home).dx, tester.getCenter(solo).dx);
+    expect(tester.getCenter(home).dy, lessThan(tester.getCenter(solo).dy));
+    final plus = find.byTooltip('Create or start conversation');
+    expect(tester.getSize(plus), const Size.square(48));
+    expect(tester.getSize(find.byTooltip('Home')), const Size.square(48));
+    expect(tester.getSize(find.byTooltip('Solo')), const Size.square(48));
+    expect(tester.getCenter(plus).dx, tester.getCenter(solo).dx);
+    expect(tester.getBottomLeft(plus).dy, lessThan(tester.getTopLeft(home).dy));
+    IosNavigationMetrics.updateRail(tester.element(find.byType(HomePage)), {
+      'centerX': 418,
+      'windowWidth': 466,
+      'windowHeight': 678,
+    });
+    await tester.pumpAndSettle();
+    expect(tester.getCenter(home).dx, 412);
+    expect(tester.getCenter(solo).dx, 412);
+    expect(tester.getCenter(plus).dx, 412);
+    await tester.tap(plus);
+    await tester.pumpAndSettle();
+    expect(find.text('Create channel').hitTestable(), findsOneWidget);
+    await tester.tap(solo);
+    await tester.pumpAndSettle();
+    expect(find.text('Personal workspace'), findsOneWidget);
+    action!.value = () => newChats++;
+    await tester.pump();
+    await tester.tap(find.byTooltip('New chat'));
+    await tester.pumpAndSettle();
+    expect(newChats, 1);
+    final conversations = ConversationPaneScope.maybeOf(
+      tester.element(find.text('Personal workspace')),
+    )!;
+    conversations.open(
+      'sample',
+      (_) => const FrostedScaffold(
+        appBar: FrostedAppBar(title: Text('Sample conversation')),
+        body: Text('Conversation content'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Home').hitTestable(), findsNothing);
+    expect(find.byTooltip('Solo').hitTestable(), findsNothing);
+    expect(find.byTooltip('New chat').hitTestable(), findsNothing);
+    tester.view.physicalSize = const Size(951, 669);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Home').hitTestable(), findsOneWidget);
+    expect(find.byTooltip('New chat').hitTestable(), findsOneWidget);
+    expect(tester.getRect(find.byTooltip('New chat')).right, lessThan(292));
+    for (final division in [
+      <double>[470, 0, 12, 669],
+      null,
+    ]) {
+      IosNavigationMetrics.updateRail(tester.element(find.byType(HomePage)), {
+        'centerX': 920,
+        'windowWidth': 951,
+        'windowHeight': 669,
+        'bookDivision': division,
+      });
+      await tester.pumpAndSettle();
+      final button = tester.getRect(find.byTooltip('New chat'));
+      expect(button.right, lessThan(division == null ? 292 : 470));
+      if (division != null) expect(button.left, greaterThan(350));
+      expect(find.text('Conversation content'), findsOneWidget);
+      expect(conversations.selectedId, 'sample');
+    }
+
+    tester.view.physicalSize = const Size(466, 678);
+    await tester.pumpAndSettle();
+    expect(find.text('Conversation content'), findsOneWidget);
+    expect(find.byTooltip('Home').hitTestable(), findsNothing);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Personal workspace'), findsOneWidget);
+    expect(find.byTooltip('Home').hitTestable(), findsOneWidget);
+    expect(find.byTooltip('New chat').hitTestable(), findsOneWidget);
+
+    tester.view.physicalSize = const Size(951, 669);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Home'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.pumpAndSettle();
+    final menu = find.byKey(const ValueKey('quick-actions-ios-glass'));
+    expect(tester.getRect(menu).right, lessThan(292));
+    expect(tester.getRect(menu).left, greaterThanOrEqualTo(0));
+    expect(find.text('Create channel').hitTestable(), findsOneWidget);
+    await tester.tap(find.byTooltip('Solo'));
+    await tester.pumpAndSettle();
+    tester.view.physicalSize = const Size(669, 951);
+    tester.view.viewPadding = const FakeViewPadding(top: 24, bottom: 34);
+    tester.view.padding = const FakeViewPadding(top: 24, bottom: 34);
+    await tester.pumpAndSettle();
+    expect(find.text('Personal workspace'), findsOneWidget);
+    final unselectedHome = find.byIcon(BuzzIcons.house300);
+    expect(tester.getCenter(unselectedHome).dy, tester.getCenter(solo).dy);
+    expect(
+      tester.getCenter(unselectedHome).dx,
+      lessThan(tester.getCenter(solo).dx),
+    );
+    expect(tester.takeException(), isNull);
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets('iOS glass retains icons, tab taps and unread semantics', (
     tester,

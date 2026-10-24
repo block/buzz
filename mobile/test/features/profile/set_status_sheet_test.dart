@@ -3,6 +3,7 @@ import 'package:buzz/features/profile/user_status.dart';
 import 'package:buzz/features/profile/user_status_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +12,79 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets(
+    'iOS status uses native form, retains failed draft, saves and clears',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const channel = MethodChannel('buzz/profile_text_editor');
+      final calls = <Map<dynamic, dynamic>>[];
+      final notifier = _RecordingUserStatusNotifier()..failNext = true;
+      final expiration = DateTime.now().add(const Duration(days: 3));
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            expect(call.method, 'presentStatus');
+            calls.add(call.arguments as Map<dynamic, dynamic>);
+            if (calls.length == 3) return {'clear': true};
+            if (calls.length == 4) return null;
+            return {
+              'text': 'Focused',
+              'emoji': ':buzz:',
+              'duration': 0,
+              'expiresAt': expiration.millisecondsSinceEpoch / 1000,
+              'clear': false,
+            };
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            customEmojiListProvider.overrideWithValue(const []),
+            userStatusProvider.overrideWith(() => notifier),
+          ],
+          child: Builder(
+            builder: (context) => FilledButton(
+              onPressed: () => showSetStatusSheet(
+                context,
+                currentStatus: const UserStatus(
+                  text: 'Old',
+                  emoji: '🎯',
+                  updatedAt: 1,
+                ),
+              ),
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(calls, hasLength(2));
+      expect(calls.first['text'], 'Old');
+      expect(calls[1]['text'], 'Focused');
+      expect(calls[1]['emoji'], ':buzz:');
+      expect(calls[1]['saveError'], true);
+      expect(notifier.savedText, 'Focused');
+      expect(
+        notifier.savedExpiresAt?.millisecondsSinceEpoch,
+        expiration.millisecondsSinceEpoch,
+      );
+      expect(find.byType(BottomSheet), findsNothing);
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(notifier.savedText, '');
+      expect(notifier.savedEmoji, '');
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(calls, hasLength(4));
+      expect(notifier.savedText, '');
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   testWidgets('keeps its resting top edge when the keyboard appears', (
     tester,
   ) async {
@@ -198,6 +272,17 @@ void main() {
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const channel = MethodChannel('buzz/profile_text_editor');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          channel,
+          (_) async => throw MissingPluginException(),
+        );
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
+
     final statusNotifier = _RecordingUserStatusNotifier();
     await tester.pumpWidget(
       WidgetHelpers.testable(
@@ -234,6 +319,7 @@ void main() {
 }
 
 class _RecordingUserStatusNotifier extends UserStatusNotifier {
+  bool failNext = false;
   String? savedText;
   String? savedEmoji;
   DateTime? savedExpiresAt;
@@ -247,6 +333,10 @@ class _RecordingUserStatusNotifier extends UserStatusNotifier {
     String emoji, {
     DateTime? expiresAt,
   }) async {
+    if (failNext) {
+      failNext = false;
+      throw StateError('publish failed');
+    }
     savedText = text;
     savedEmoji = emoji;
     savedExpiresAt = expiresAt;

@@ -1,3 +1,4 @@
+import '../home/adaptive_conversation_pane.dart';
 import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/widgets/compose_morph_icon.dart';
@@ -240,6 +241,17 @@ class ChannelsPage extends HookConsumerWidget {
         .toList();
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
+      final pane = ConversationPaneScope.maybeOf(context);
+      if (pane != null) {
+        pane.open(
+          channel.id,
+          (_) => ChannelDetailPage(
+            channel: channel,
+            placement: ChannelRoutePlacement.ordinary,
+          ),
+        );
+        return;
+      }
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ChannelDetailPage(
@@ -460,6 +472,7 @@ class ChannelsPage extends HookConsumerWidget {
         nativeLargeTitle: false,
         nativeLeading: IosNavigationAction(
           label: 'Community settings',
+          keepInHeaderOnDuo: true,
           onAvatarBoundsChanged: (bounds) {
             final header = headerKey.currentContext?.findRenderObject();
             if (header is RenderBox) {
@@ -482,6 +495,7 @@ class ChannelsPage extends HookConsumerWidget {
           if (onSearch != null)
             IosNavigationAction(
               label: 'Search',
+              keepInHeaderOnDuo: true,
               symbol: 'magnifyingglass',
               sharesBackground: true,
               icon: BuzzIcons.search300,
@@ -490,6 +504,7 @@ class ChannelsPage extends HookConsumerWidget {
           if (onInbox != null)
             IosNavigationAction(
               label: 'Inbox',
+              keepInHeaderOnDuo: true,
               symbol: 'tray',
               sharesBackground: true,
               icon: BuzzIcons.inbox300,

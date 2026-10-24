@@ -113,6 +113,8 @@ void main() {
           );
           expect(find.text('Push notifications'), findsNothing);
           if (enabled) {
+            await tester.tap(find.text('Notifications'));
+            await tester.pumpAndSettle();
             final toggle = tester.widget<Switch>(find.byType(Switch));
             expect(toggle.value, isTrue);
             expect(toggle.onChanged, isNotNull);

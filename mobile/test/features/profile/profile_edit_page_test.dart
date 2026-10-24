@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:buzz/features/profile/profile_edit_page.dart';
+import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
@@ -21,6 +22,7 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_native_segmented_control.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/playing_avatar_image.dart';
 import 'package:buzz/shared/widgets/progressive_animated_avatar.dart';
@@ -234,10 +236,27 @@ void main() {
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    const emoji = EmojiEntry(
+      id: 'smile',
+      name: 'Smile',
+      keywords: [],
+      native: '😊',
+      categoryId: 'people',
+    );
+    const dataset = EmojiDataset(
+      categories: [
+        EmojiCategory(id: 'people', emoji: [emoji]),
+      ],
+      all: [emoji],
+      nativeToShortcode: {'😊': ':smile:'},
+    );
 
     await tester.pumpWidget(
       WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        overrides: [
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+          emojiDatasetOrEmptyProvider.overrideWithValue(dataset),
+        ],
         child: const ProfileEditPage(),
       ),
     );
@@ -246,6 +265,121 @@ void main() {
     await tester.pump();
 
     expect(find.byType(IosNativeSegmentedControl), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(678, 466);
+    tester.view.padding = const FakeViewPadding(right: 84);
+    tester.view.viewPadding = const FakeViewPadding(right: 84);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+          emojiDatasetOrEmptyProvider.overrideWithValue(dataset),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox(),
+          identityRecoveryPageBuilder: (_) => const SizedBox(),
+          profileEditPageBuilder: (_) =>
+              const ProfileEditPage(startInPhotoEditor: true),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final photoRow = find.byKey(const ValueKey('edit-profile-photo'));
+    await tester.ensureVisible(photoRow);
+    await tester.tap(photoRow);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    final entrance = find.byKey(
+      const ValueKey('avatar-editor-entrance-transform'),
+    );
+    final enteringOffset = tester
+        .widget<Transform>(entrance)
+        .transform
+        .getTranslation()
+        .y;
+    expect(enteringOffset, lessThan(0));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(
+      tester.widget<Transform>(entrance).transform.getTranslation().y,
+      greaterThan(enteringOffset),
+    );
+    expect(
+      tester.getRect(find.byType(IosNativeSegmentedControl)).right,
+      lessThan(594),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.getRect(find.byType(IosNativeSegmentedControl)).right,
+      lessThan(594),
+    );
+    tester.view.physicalSize = const Size(466, 678);
+    tester.view.padding = const FakeViewPadding(right: 76);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    await tester.pumpAndSettle();
+    expect(
+      tester.getRect(find.byType(IosNativeSegmentedControl)).right,
+      lessThan(390),
+    );
+    final modeControl = tester.widget<IosNativeSegmentedControl>(
+      find.byType(IosNativeSegmentedControl),
+    );
+    modeControl.onChanged!(1);
+    await tester.pumpAndSettle();
+    tester.view.physicalSize = const Size(932, 656);
+    tester.view.padding = const FakeViewPadding(right: 84);
+    tester.view.viewPadding = const FakeViewPadding(right: 84);
+    await tester.pumpAndSettle();
+    final unfoldedControl = tester.getRect(
+      find.byType(IosNativeSegmentedControl),
+    );
+    expect(unfoldedControl.left, greaterThan(280));
+    expect(unfoldedControl.right, lessThan(848));
+    expect(
+      tester
+          .widget<IosNativeSegmentedControl>(
+            find.byType(IosNativeSegmentedControl),
+          )
+          .selectedIndex,
+      1,
+    );
+    expect(find.text('Profile'), findsOneWidget);
+    tester.view.physicalSize = const Size(466, 678);
+    tester.view.padding = const FakeViewPadding(right: 76);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<IosNativeSegmentedControl>(
+            find.byType(IosNativeSegmentedControl),
+          )
+          .selectedIndex,
+      1,
+    );
+    final back = find.byKey(const ValueKey('duo-toolbar-Back to profile'));
+    final bar = tester.widget<IosNavigationBar>(
+      find.descendant(of: back, matching: find.byType(IosNavigationBar)),
+    );
+    bar.leading!.onPressed!();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(
+      tester.widget<Transform>(entrance).transform.getTranslation().y,
+      lessThan(0),
+    );
+    expect(find.byType(IosNativeSegmentedControl), findsOneWidget);
+    await tester.pumpAndSettle();
+    expect(photoRow, findsOneWidget);
+    tester.platformDispatcher.accessibilityFeaturesTestValue =
+        const FakeAccessibilityFeatures(disableAnimations: true);
+    addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+    await tester.pump();
+    await tester.ensureVisible(photoRow);
+    await tester.tap(photoRow);
+    await tester.pumpAndSettle();
+    expect(tester.widget<Transform>(entrance).transform.getTranslation().y, 0);
+    await tester.pumpWidget(const SizedBox());
     debugDefaultTargetPlatformOverride = null;
   });
 

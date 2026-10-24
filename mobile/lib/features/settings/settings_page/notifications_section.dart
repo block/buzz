@@ -1,27 +1,29 @@
 part of '../settings_page.dart';
 
+bool _notificationsVisible(WidgetRef ref) {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return false;
+  final community = ref.watch(activeCommunityProvider).value;
+  if (community == null) return false;
+  final capability = ref.watch(currentRelayPushDescriptorProvider);
+  return (!capability.isLoading &&
+          !capability.hasError &&
+          capability.value != null) ||
+      community.pushNotificationsEnabled ||
+      community.pushSubscriptionState.pendingTombstoneGeneration != null;
+}
+
 class _NotificationsSection extends ConsumerWidget {
   const _NotificationsSection();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
-      return const SizedBox.shrink();
-    }
-    final community = ref.watch(activeCommunityProvider).value;
-    if (community == null) return const SizedBox.shrink();
+    if (!_notificationsVisible(ref)) return const SizedBox.shrink();
+    final community = ref.watch(activeCommunityProvider).value!;
     final capability = ref.watch(currentRelayPushDescriptorProvider);
     final hasCapability =
         !capability.isLoading &&
         !capability.hasError &&
         capability.value != null;
-    final optOutPending =
-        community.pushSubscriptionState.pendingTombstoneGeneration != null;
-    if (!hasCapability &&
-        !community.pushNotificationsEnabled &&
-        !optOutPending) {
-      return const SizedBox.shrink();
-    }
     final canToggle = hasCapability || community.pushNotificationsEnabled;
 
     void setEnabled(bool enabled) {
