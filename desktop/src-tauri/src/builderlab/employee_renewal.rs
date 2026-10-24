@@ -103,7 +103,6 @@ impl BuilderlabSession {
             .employee
             .as_ref()
             .ok_or("Square employee session required")?;
-        self.validate_employee_renewal(binding)?;
         let now = chrono::Utc::now().timestamp();
         if binding.expires_at <= now
             || next.refusal.is_some()
@@ -114,9 +113,23 @@ impl BuilderlabSession {
         {
             return Err("Fresh Square relay authorization is required".to_owned());
         }
-        let credential = next.credential.clone();
-        self.replace(staged.take().ok_or("Square session changed")?)?;
-        self.remember_employee_binding(&credential)?;
+        // A retry may establish the first continuity pin while this candidate is
+        // obtaining admission. Validate, replace, and publish the pin atomically
+        // using the same active-session -> pin lock order as retry and sign-out.
+        let mut current = self.0.lock().map_err(|_| "Square session unavailable")?;
+        let mut pin = self.2.lock().map_err(|_| "Square session unavailable")?;
+        if pin.as_ref().is_some_and(|prior| {
+            prior.account != binding.account
+                || prior.pubkey != binding.pubkey
+                || prior.relay != binding.relay
+        }) {
+            return Err("Renew with the same Square account and community. To change accounts, sign out of Square first.".to_owned());
+        }
+        let binding = binding.clone();
+        if let Some(previous) = current.replace(staged.take().ok_or("Square session changed")?) {
+            previous.cancel.cancel();
+        }
+        *pin = Some(binding);
         *pending = None;
         Ok(())
     }
@@ -400,6 +413,27 @@ mod tests {
         assert!(session.employee_can_retry(&state));
         assert!(session.employee_expiry(&state).is_none());
         assert!(session.employee_renewal_binding(&state).unwrap().is_none());
+        // A different-account browser handoff can begin while initial access is
+        // still refused. The final commit must honor a pin established by retry
+        // after that handoff's initial validation.
+        let other = BuilderlabSession::default();
+        let (other_id, _) = login.begin_employee_login().unwrap();
+        let mut other_binding = binding.clone();
+        other_binding.account.subject = "other employee".to_owned();
+        session.validate_employee_renewal(&other_binding).unwrap();
+        other
+            .finish_employee_login(
+                &login,
+                other_id,
+                "other candidate".to_owned(),
+                super::super::BUILDERLAB_API_BASE_URL,
+                other_binding,
+            )
+            .unwrap();
+        other.0.lock().unwrap().as_mut().unwrap().assertion = Some(CachedAssertion {
+            value: "other assertion".to_owned(),
+            expires_at: binding.expires_at,
+        });
         {
             let mut stored = session.0.lock().unwrap();
             let stored = stored.as_mut().unwrap();
@@ -411,6 +445,15 @@ mod tests {
             });
         }
         session.remember_current_employee_binding(&state).unwrap();
+        assert!(session
+            .commit_verified_employee_login(&login, other_id, &other)
+            .is_err());
+        assert!(other.0.lock().unwrap().is_some());
+        assert_eq!(
+            session.request_context(&state).unwrap().unwrap().0,
+            "accepted"
+        );
+        assert!(session.2.lock().unwrap().as_ref().unwrap().account == binding.account);
         let (candidate, id) = denied();
         assert!(!session
             .retain_initial_refusal(&login, id, &candidate)
