@@ -313,8 +313,15 @@ pub struct Config {
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
     /// Maximum concurrent media uploads handled by one relay process.
+    ///
+    /// Default: 16 (`BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS`). Stays above the
+    /// per-pubkey limit so one 10-file drop still fits.
     pub media_max_concurrent_uploads: usize,
     /// Maximum concurrent media uploads accepted from one pubkey.
+    ///
+    /// Default: 10 (`BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS_PER_PUBKEY`). The
+    /// desktop composer starts every selected file at once. Clamped to
+    /// `media_max_concurrent_uploads`.
     pub media_max_concurrent_uploads_per_pubkey: u32,
     /// Maximum media upload starts accepted from one pubkey per minute.
     pub media_uploads_per_minute: u32,
@@ -1018,13 +1025,13 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|&v| v > 0)
-                .unwrap_or(8);
+                .unwrap_or(16);
         let media_max_concurrent_uploads_per_pubkey: u32 =
             std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS_PER_PUBKEY")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|&v| v > 0)
-                .unwrap_or(2)
+                .unwrap_or(10)
                 .min(u32::try_from(media_max_concurrent_uploads).unwrap_or(u32::MAX));
         let media_uploads_per_minute: u32 = std::env::var("BUZZ_MEDIA_UPLOADS_PER_MINUTE")
             .ok()
@@ -1715,6 +1722,18 @@ mod tests {
         assert!(
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
+        );
+        assert_eq!(
+            config.media_max_concurrent_uploads, 16,
+            "the process cap must leave room for a 10-file drop"
+        );
+        assert_eq!(
+            config.media_max_concurrent_uploads_per_pubkey, 10,
+            "one person must be able to upload 10 files at the same time"
+        );
+        assert!(
+            config.media_uploads_per_minute >= config.media_max_concurrent_uploads_per_pubkey,
+            "the per-minute cap must not reject a single 10-file drop"
         );
     }
 
