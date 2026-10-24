@@ -63,6 +63,7 @@ jobs:
               - 'deny.toml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
+              - '.github/actions/setup-test-secrets/**'
               - 'docker-compose.yml'
               - 'docker-compose.ci.yml'
               - 'scripts/run-tests.sh'
@@ -158,9 +159,9 @@ jobs:
           # Fail if dead API token patterns reappear in desktop, mobile, docs, or config.
           # Relay crates are excluded — they still use token auth internally.
           PATTERNS='TokenScope|MintTokenResponse|hasApiToken|spr_tok_'
-          PATHS='desktop/src/ desktop/tests/ mobile/test/ mobile/lib/ .env.example'
-          EXCLUDES='--exclude-dir=node_modules --exclude-dir=.dart_tool'
-          if grep -rn $EXCLUDES -E "$PATTERNS" $PATHS 2>/dev/null; then
+          PATHS=(desktop/src/ desktop/tests/ mobile/test/ mobile/lib/ .env.example)
+          EXCLUDES=(--exclude-dir=node_modules --exclude-dir=.dart_tool)
+          if grep -rn "${EXCLUDES[@]}" -E "$PATTERNS" "${PATHS[@]}" 2>/dev/null; then
             echo "::error::Dead API token references found in client code. See above."
             exit 1
           fi

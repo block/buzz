@@ -6,6 +6,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "support/provider.rs"]
+mod provider;
+
 #[test]
 fn harness_native_git_and_startup_shutdown_cleanup() {
     check_native_git_and_startup_shutdown_cleanup(false);
@@ -26,13 +29,16 @@ fn check_native_git_and_startup_shutdown_cleanup(task: bool) {
 set -eu
 cd "$PROBE_DIR"
 test -z "${NOSTR_PRIVATE_KEY:-}"
+test -z "${BUZZ_PRIVATE_KEY:-}"
+! git config nostr.keyfile
 test "$(git config test.inherited)" = preserved
 test "$(git config user.name)" = 'Git Probe'
 test "$(git config --get-urlmatch credential.helper https://relay.invalid/git/test/repo)" = nostr
 ! git config --get-urlmatch credential.helper https://unrelated.invalid/git/test/repo
 ! git config --get-urlmatch credential.helper https://relay.invalid/other/repo
 ! git config --get-urlmatch credential.helper https://relay.invalid/git-other/repo
-git config nostr.keyfile > keyfile
+git config nostr.secretService > coordinates
+git config nostr.secretAccount >> coordinates
 command -v git-sign-nostr > signer
 command -v git-credential-nostr > credential
 git init -q repo
@@ -49,6 +55,7 @@ exec sleep 60
 "#).unwrap();
     std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
     let keys = nostr::Keys::generate();
+    let identity_entry = provider::ProviderIdentity::for_keys(&keys);
     let log = std::fs::File::create(workspace.join("harness.log")).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_buzz-acp"));
     if task {
@@ -71,9 +78,8 @@ exec sleep 60
     let mut child = command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .args(identity_entry.args())
         .args([
-            "--private-key",
-            &keys.secret_key().to_secret_hex(),
             "--relay-url",
             "wss://relay.invalid",
             "--agent-command",
@@ -88,6 +94,7 @@ exec sleep 60
         .env("GIT_COMMITTER_NAME", "Inherited Human")
         .env("GIT_COMMITTER_EMAIL", "human@example.invalid")
         .env("NOSTR_PRIVATE_KEY", "must-not-reach-adapter")
+        .env("BUZZ_PRIVATE_KEY", "must-not-reach-adapter")
         .env("GIT_CONFIG_COUNT", "3")
         .env("GIT_CONFIG_KEY_0", "test.inherited")
         .env("GIT_CONFIG_VALUE_0", "preserved")
@@ -168,7 +175,11 @@ exec sleep 60
         .tags
         .iter()
         .any(|tag| tag.as_slice() == ["u", "https://relay.invalid/git/test/repo"]));
-    for file in ["keyfile", "signer", "credential"] {
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("coordinates")).unwrap(),
+        format!("{}\n{}\n", identity_entry.service, identity_entry.account)
+    );
+    for file in ["signer", "credential"] {
         let path = std::fs::read_to_string(workspace.join(file)).unwrap();
         assert!(
             !std::path::Path::new(path.trim()).exists(),
@@ -178,18 +189,19 @@ exec sleep 60
 }
 
 #[test]
-fn keyfile_removed_after_adapter_failure() {
-    check_keyfile_removed_after_adapter_failure(false);
+fn helper_dir_removed_after_adapter_failure() {
+    check_helper_dir_removed_after_adapter_failure(false);
 }
 
 #[test]
-fn task_keyfile_removed_after_adapter_failure() {
-    check_keyfile_removed_after_adapter_failure(true);
+fn task_helper_dir_removed_after_adapter_failure() {
+    check_helper_dir_removed_after_adapter_failure(true);
 }
 
-fn check_keyfile_removed_after_adapter_failure(task: bool) {
+fn check_helper_dir_removed_after_adapter_failure(task: bool) {
     let temp = tempfile::tempdir().unwrap();
     let keys = nostr::Keys::generate();
+    let identity_entry = provider::ProviderIdentity::for_keys(&keys);
     let input = tempfile::NamedTempFile::new().unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_buzz-acp"));
     if task {
@@ -205,9 +217,8 @@ fn check_keyfile_removed_after_adapter_failure(task: bool) {
         command.arg("run").arg("--task").arg(input.path());
     }
     let output = command
+        .args(identity_entry.args())
         .args([
-            "--private-key",
-            &keys.secret_key().to_secret_hex(),
             "--relay-url",
             "ws://localhost:1",
             "--agent-command",

@@ -47,7 +47,7 @@ use config::{
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
-use nostr::{PublicKey, ToBech32};
+use nostr::PublicKey;
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
     PromptResult, PromptSource, SessionState, TimeoutKind,
@@ -61,7 +61,7 @@ use uuid::Uuid;
 
 /// Check if argv[1] matches a subcommand name, before any clap parsing.
 ///
-/// This avoids clap rejecting harness flags (like `--private-key`) that aren't
+/// This avoids clap rejecting harness flags (like `--secret-service`) that aren't
 /// declared on the subcommand's `Parser`. The `models` path has its own
 /// dedicated parser; the default path uses the existing `CliArgs`.
 ///
@@ -6461,7 +6461,12 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             .unwrap_or("mcp")
             .to_string(),
         command: config.mcp_command.clone(),
-        args: vec![],
+        args: vec![
+            "--secret-service".into(),
+            config.secret_service.clone(),
+            "--secret-account".into(),
+            config.secret_account.clone(),
+        ],
         env: {
             let mut env = vec![
                 EnvVar {
@@ -6471,17 +6476,6 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                 EnvVar {
                     name: "BUZZ_RELAY_URL".into(),
                     value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
                 },
             ];
             // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
@@ -10105,6 +10099,8 @@ mod build_mcp_servers_tests {
     pub(super) fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            secret_service: "buzz-test".into(),
+            secret_account: "identity".into(),
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
@@ -10195,6 +10191,8 @@ mod build_mcp_servers_tests {
         }
         git::GitEnvironment::install(
             &config.keys,
+            &config.secret_service,
+            &config.secret_account,
             &config.relay_url,
             &std::env::current_exe().unwrap(),
         )
@@ -10283,8 +10281,21 @@ mod build_mcp_servers_tests {
                 "user mode must not set {absent}: {entries:?}"
             );
         }
+        // User mode keeps relay auth, which resolves the identity from the
+        // provider coordinates rather than from key material.
+        for coordinate in [
+            ("nostr.secretService", "buzz-test"),
+            ("nostr.secretAccount", "identity"),
+        ] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|(key, value)| (key.as_str(), value.as_str()) == coordinate),
+                "{coordinate:?} missing: {entries:?}"
+            );
+        }
         assert!(
-            entries.iter().any(|(key, _)| key == "nostr.keyfile"),
+            !entries.iter().any(|(key, _)| key == "nostr.keyfile"),
             "{entries:?}"
         );
         assert_eq!(value_of("BUZZ_GIT_IDENTITY").as_deref(), Some("user"));
@@ -10336,25 +10347,61 @@ mod build_mcp_servers_tests {
             assert_eq!(entries.len(), 1, "{name} must appear exactly once");
             assert_eq!(entries[0].value, *value);
         }
-        assert!(!env.iter().any(|entry| entry.name == "NOSTR_PRIVATE_KEY"));
-        let keyfile = git
-            .env
-            .windows(2)
-            .find(|pair| pair[0].1 == "nostr.keyfile")
-            .unwrap()[1]
-            .1
-            .clone();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(&keyfile).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
+        for secret_name in git::IDENTITY_SECRET_ENV {
+            assert!(!env.iter().any(|entry| entry.name == secret_name));
+            assert!(!git.env.iter().any(|(name, _)| name == secret_name));
         }
-        assert!(std::path::Path::new(&keyfile).exists());
-        drop(git);
-        assert!(!std::path::Path::new(&keyfile).exists());
+        let config_value = |key: &str| {
+            git.env
+                .windows(2)
+                .find(|pair| pair[0].1 == key)
+                .map(|pair| pair[1].1.clone())
+        };
+        assert_eq!(
+            config_value("nostr.secretService").as_deref(),
+            Some("buzz-test")
+        );
+        assert_eq!(
+            config_value("nostr.secretAccount").as_deref(),
+            Some("identity")
+        );
+        assert_eq!(config_value("nostr.keyfile"), None);
+        // No representation of the private key may cross the process boundary.
+        let secret_hex = config.keys.secret_key().to_secret_hex();
+        let nsec = nostr::ToBech32::to_bech32(config.keys.secret_key()).unwrap();
+        for value in env
+            .iter()
+            .map(|entry| &entry.value)
+            .chain(server_args(&servers))
+        {
+            assert!(!value.contains(&secret_hex) && !value.contains(&nsec));
+        }
+    }
+
+    fn server_args(servers: &[McpServer]) -> impl Iterator<Item = &String> {
+        servers.iter().flat_map(|server| server.args.iter())
+    }
+
+    #[test]
+    fn for_config_strips_persona_private_key_variables() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut config = test_config();
+        config.persona_env_vars.extend([
+            ("BUZZ_PRIVATE_KEY".into(), "nsec1persona".into()),
+            ("NOSTR_PRIVATE_KEY".into(), "nsec1persona".into()),
+        ]);
+        let _git = git::GitEnvironment::for_config(&mut config).unwrap();
+        for secret_name in git::IDENTITY_SECRET_ENV {
+            assert!(!config
+                .persona_env_vars
+                .iter()
+                .any(|(name, _)| name == secret_name));
+        }
+        let servers = build_mcp_servers(&config);
+        assert!(!servers[0]
+            .env
+            .iter()
+            .any(|entry| git::IDENTITY_SECRET_ENV.contains(&entry.name.as_str())));
     }
 
     #[test]
@@ -10370,9 +10417,15 @@ mod build_mcp_servers_tests {
             names.contains(&"BUZZ_RELAY_URL"),
             "missing BUZZ_RELAY_URL; got {names:?}"
         );
-        assert!(
-            names.contains(&"BUZZ_PRIVATE_KEY"),
-            "missing BUZZ_PRIVATE_KEY; got {names:?}"
+        assert!(!names.contains(&"BUZZ_PRIVATE_KEY"));
+        assert_eq!(
+            server.args,
+            [
+                "--secret-service",
+                "buzz-test",
+                "--secret-account",
+                "identity"
+            ]
         );
     }
 
@@ -11239,6 +11292,8 @@ mod error_outcome_emission_tests {
     fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            secret_service: "buzz-test".into(),
+            secret_account: "identity".into(),
             relay_url: "ws://localhost:3000".into(),
             // `true` exits cleanly, so the async respawn fails fast and
             // harmlessly off the JoinSet — irrelevant to the synchronous

@@ -26,6 +26,8 @@ const READ_CHUNK: usize = 16 * 1024;
 pub struct SharedState {
     pub cwd: PathBuf,
     pub shim: Shim,
+    pub secret_service: String,
+    pub secret_account: String,
     pub session_dir: TempDir,
     pub bootstrap_instructions: String,
     /// The shell resolved at construction: `Ok((path, display_name))` when a shell
@@ -37,7 +39,12 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    pub fn new(cwd: PathBuf, shim: Shim) -> std::io::Result<Self> {
+    pub fn new(
+        cwd: PathBuf,
+        shim: Shim,
+        secret_service: String,
+        secret_account: String,
+    ) -> std::io::Result<Self> {
         let session_dir = tempfile::Builder::new()
             .prefix("buzz-dev-mcp-session-")
             .tempdir()?;
@@ -54,6 +61,8 @@ impl SharedState {
         Ok(Self {
             cwd,
             shim,
+            secret_service,
+            secret_account,
             session_dir,
             bootstrap_instructions,
             resolved_shell,
@@ -74,12 +83,11 @@ impl SharedState {
 
 fn build_bootstrap(cwd: &Path, shell_hint: &str) -> String {
     let stack = detect_stack(cwd);
-    let buzz_hint =
-        if std::env::var("BUZZ_RELAY_URL").is_ok() && std::env::var("BUZZ_PRIVATE_KEY").is_ok() {
-            "\nBuzz relay configured. Run `buzz --help` to see available commands.\n"
-        } else {
-            ""
-        };
+    let buzz_hint = if std::env::var("BUZZ_RELAY_URL").is_ok() {
+        "\nBuzz relay configured. Run `buzz --help` to see available commands.\n"
+    } else {
+        ""
+    };
     format!(
         "Working directory: {}\n\
          Detected stack: {}\n\
@@ -986,7 +994,13 @@ mod tests {
 
     fn make_state(cwd: &std::path::Path) -> SharedState {
         let shim = Shim::install().expect("shim install");
-        SharedState::new(cwd.to_path_buf(), shim).expect("state new")
+        SharedState::new(
+            cwd.to_path_buf(),
+            shim,
+            "buzz-test".into(),
+            "identity".into(),
+        )
+        .expect("state new")
     }
 
     /// Pull the JSON body out of a CallToolResult so tests can assert on fields.
@@ -1279,7 +1293,13 @@ mod windows_resolver_tests {
         env::set_var("BUZZ_SHELL", &fake_pwsh);
 
         let shim = crate::shim::Shim::install().expect("shim");
-        let state = SharedState::new(dir.path().to_path_buf(), shim).expect("state");
+        let state = SharedState::new(
+            dir.path().to_path_buf(),
+            shim,
+            "buzz-test".into(),
+            "identity".into(),
+        )
+        .expect("state");
 
         env::remove_var("BUZZ_SHELL");
 

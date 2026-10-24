@@ -166,15 +166,14 @@ async fn spawn_child() {
             let worker = std::env::current_dir().unwrap().join(name);
             let args = CliArgs::try_parse_from([
                 "buzz-acp",
-                "--private-key",
-                "0000000000000000000000000000000000000000000000000000000000000001",
                 "--agent-command",
                 worker.to_str().unwrap(),
                 "--agent-args",
                 "",
             ])
             .unwrap();
-            let config = Config::from_args(args).unwrap();
+            // Launch policy is independent of identity resolution.
+            let config = Config::from_args_with_keys(args, nostr::Keys::generate()).unwrap();
             // A second spawn uses the same host configuration after shutdown,
             // just as a replacement worker does. No prefix is consumed once.
             for _ in 0..2 {

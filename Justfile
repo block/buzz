@@ -396,6 +396,8 @@ test:
 test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
+    cargo test -p git-credential-nostr -p git-sign-nostr
+    ./scripts/test-reset-desktop-standalone-state.sh
     ./scripts/test-ensure-local-relay-key.sh
     # Shared Huddle transport, codec, and loopback authentication regressions.
     cargo test -p buzz-audio-client
@@ -1319,20 +1321,20 @@ _release-pr lane version:
 # ─── Agent Harness ────────────────────────────────────────────────────────────
 
 # Run a goose agent connected to a Buzz relay (foreground)
-goose relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
+goose relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" service="buzz-desktop" account="identity":
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
-    source ./scripts/_goose-env.sh "{{relay}}" "{{key}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
-    exec env "${env_args[@]}" ./target/release/buzz-acp
+    source ./scripts/_goose-env.sh "{{relay}}" "{{service}}" "{{account}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
+    exec env "${env_args[@]}" ./target/release/buzz-acp "${acp_args[@]}"
 
 # Run a goose agent in the background (screen session named 'goose-agent-N')
-goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
+goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" service="buzz-desktop" account="identity":
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
-    source ./scripts/_goose-env.sh "{{relay}}" "{{key}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
-    screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") ./target/release/buzz-acp"
+    source ./scripts/_goose-env.sh "{{relay}}" "{{service}}" "{{account}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
+    screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") ./target/release/buzz-acp $(printf '%q ' "${acp_args[@]}")"
     echo "Agent running in screen session 'goose-agent-{{agents}}'. Attach with: screen -r goose-agent-{{agents}}"
 
 # ─── Benchmarking ─────────────────────────────────────────────────────────────

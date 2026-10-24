@@ -120,6 +120,8 @@ jobs:
             libxdo-dev \
             patchelf \
             wget
+      - name: Set up isolated test secrets
+        uses: ./.github/actions/setup-test-secrets
       - name: Desktop Tauri ${{ matrix.lane }}
         run: ${{ matrix.run }}
         env:

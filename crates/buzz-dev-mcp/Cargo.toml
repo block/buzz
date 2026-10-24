@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 buzz-cli = { path = "../buzz-cli" }
 nostr = { workspace = true }
+zeroize = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
@@ -38,6 +39,7 @@ reqwest = { workspace = true }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 buzz-core = { workspace = true }
+daz-secrets = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
