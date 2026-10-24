@@ -32,11 +32,9 @@ fn claude_spawn_uses_the_probed_cli_executable() {
         std::env::remove_var("PATH");
     }
     crate::managed_agents::clear_resolve_cache();
-    assert!(
-        command.get_envs().any(|(key, value)| {
-            key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str())
-        })
-    );
+    assert!(command
+        .get_envs()
+        .any(|(key, value)| { key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str()) }));
 }
 
 #[test]
