@@ -91,6 +91,7 @@ fn make_prompt_context(
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
+        claude_remote_control: config.claude_remote_control,
         team_instructions: config.team_instructions.clone(),
         base_prompt: if config.no_base_prompt {
             None
