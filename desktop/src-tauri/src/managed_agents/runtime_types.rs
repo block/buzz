@@ -31,6 +31,45 @@ impl ManagedAgentRuntimeKey {
     }
 }
 
+/// Relay coordinates for a managed-agent child process.
+///
+/// Runtime identity deliberately canonicalizes equivalent relay spellings so
+/// one `(agent, relay)` pair cannot be started twice. The child connection URL
+/// is different: its host is part of the relay's community-selection boundary
+/// and must retain the spelling selected by the workspace (`localhost` must
+/// not silently become `127.0.0.1`). Keeping both values in one type prevents
+/// callers from accidentally using the canonical identity as a connection URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedAgentRelayTarget {
+    pub key: ManagedAgentRuntimeKey,
+    pub connection_url: String,
+}
+
+impl ManagedAgentRelayTarget {
+    pub fn new(pubkey: impl Into<String>, relay_url: &str) -> Result<Self, String> {
+        let connection_url = relay_url.trim().to_string();
+        let key = ManagedAgentRuntimeKey::new(pubkey, &connection_url)?;
+        Ok(Self {
+            key,
+            connection_url,
+        })
+    }
+}
+
+#[cfg(test)]
+mod relay_target_tests {
+    use super::ManagedAgentRelayTarget;
+
+    #[test]
+    fn loopback_identity_is_canonical_but_child_connection_preserves_host() {
+        let target = ManagedAgentRelayTarget::new("aa".repeat(32), "  ws://localhost:3000  ")
+            .expect("valid managed-agent relay target");
+
+        assert_eq!(target.key.relay_url, "ws://127.0.0.1:3000");
+        assert_eq!(target.connection_url, "ws://localhost:3000");
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedAgentRuntimeLifecycle {
