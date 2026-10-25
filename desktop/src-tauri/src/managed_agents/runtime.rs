@@ -494,7 +494,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
-    if relay_target.key.pubkey != record.pubkey {
+    if !relay_target.key.pubkey.eq_ignore_ascii_case(&record.pubkey) {
         return Err("managed-agent relay target belongs to a different agent".into());
     }
     let runtime_key = relay_target.key.clone();

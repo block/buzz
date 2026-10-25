@@ -62,9 +62,10 @@ mod relay_target_tests {
 
     #[test]
     fn loopback_identity_is_canonical_but_child_connection_preserves_host() {
-        let target = ManagedAgentRelayTarget::new("aa".repeat(32), "  ws://localhost:3000  ")
+        let target = ManagedAgentRelayTarget::new("AA".repeat(32), "  ws://localhost:3000  ")
             .expect("valid managed-agent relay target");
 
+        assert_eq!(target.key.pubkey, "aa".repeat(32));
         assert_eq!(target.key.relay_url, "ws://127.0.0.1:3000");
         assert_eq!(target.connection_url, "ws://localhost:3000");
     }
