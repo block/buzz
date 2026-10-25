@@ -198,6 +198,11 @@ a system channel stays an ordinary NIP-29 group.
 The relay decides this for each filter. A filter that names a channel does
 not add it to another filter in the same request.
 
+An **unlisted** open channel (Buzz's `unlisted` setting, see NOSTR.md) is
+named-only in the same way for readers who are not members, whatever its
+type. Its members read it like any other channel. The system-channel opt-in
+never adds it.
+
 Push notifications (NIP-PL) use the same rule. A lease filter wakes its
 author for an event in a system channel or a channel of a type added later
 only when the filter names that channel. A lease filter cannot have `#t` or
