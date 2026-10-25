@@ -3113,6 +3113,165 @@ async fn post_ws(url: &str, channel_id: &str, signer: &Keys, text: &str) -> (boo
     (ok.accepted, ok.message)
 }
 
+/// Submit a kind:9002 `unlisted` change and return the OK frame.
+async fn set_unlisted_ws(
+    url: &str,
+    channel_id: &str,
+    signer: &Keys,
+    value: &str,
+) -> (bool, String) {
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", channel_id]).unwrap(),
+            Tag::parse(["unlisted", value]).unwrap(),
+            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+        ])
+        .sign_with_keys(signer)
+        .unwrap();
+    let mut client = BuzzTestClient::connect(url, signer)
+        .await
+        .expect("connect unlisted actor");
+    let ok = client.send_event(event).await.expect("send kind:9002");
+    client.disconnect().await.ok();
+    (ok.accepted, ok.message)
+}
+
+/// The events one REQ returns for `keys`.
+async fn req_events(url: &str, keys: &Keys, filter: Filter) -> Vec<nostr::Event> {
+    let mut ws = BuzzTestClient::connect(url, keys).await.expect("connect");
+    let sid = sub_id("unlisted");
+    ws.subscribe(&sid, vec![filter]).await.expect("subscribe");
+    let events = ws
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+    ws.disconnect().await.ok();
+    events
+}
+
+/// The channel ids of the kind:39000 events `keys` sees without naming any
+/// channel, since `since`.
+async fn listed_channel_ids(url: &str, keys: &Keys, since: nostr::Timestamp) -> Vec<String> {
+    req_events(
+        url,
+        keys,
+        Filter::new().kind(Kind::Custom(39000)).since(since),
+    )
+    .await
+    .iter()
+    .filter_map(|e| {
+        e.tags
+            .iter()
+            .find(|t| t.kind().to_string() == "d")
+            .and_then(|t| t.content().map(str::to_owned))
+    })
+    .collect()
+}
+
+/// An unlisted open channel through the real relay: only owners/admins set
+/// it; non-members do not see it in kind:39000 discovery, history or search
+/// unless they name it, and then read it; anyone can join it by id and then
+/// lists it; listing it again shows it to everyone. A reader whose channel set
+/// was cached before a change sees the change at once.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_unlisted_channel_wire() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    // 39000 timestamps are whole seconds; start one second early.
+    let since = nostr::Timestamp::from(nostr::Timestamp::now().as_secs() - 1);
+    let listed = create_test_channel(&owner).await;
+    let channel_id = create_test_channel(&owner).await;
+    // A non-member whose accessible channels are cached while it is listed.
+    let stranger = Keys::generate();
+    assert!(listed_channel_ids(&url, &stranger, since)
+        .await
+        .contains(&channel_id));
+
+    // Only owners/admins may change the setting; only true/false are valid.
+    let (accepted, msg) = set_unlisted_ws(&url, &channel_id, &outsider, "true").await;
+    assert!(!accepted, "a non-member must not change unlisted");
+    assert!(msg.contains("not authorized"), "{msg}");
+    let (accepted, msg) = set_unlisted_ws(&url, &channel_id, &owner, "yes").await;
+    assert!(!accepted, "an unknown unlisted value must be refused");
+    assert!(msg.contains("invalid unlisted value"), "{msg}");
+    assert_eq!(
+        set_unlisted_ws(&url, &channel_id, &owner, "true").await,
+        (true, String::new())
+    );
+
+    // Named by `#d`, the metadata is readable and carries the flag.
+    let tags = group_metadata_tags(&url, &outsider, &channel_id).await;
+    assert!(tags.contains(&vec!["unlisted".to_string()]), "{tags:?}");
+    assert!(tags.contains(&vec!["public".to_string()]), "{tags:?}");
+    assert!(!tags.contains(&vec!["hidden".to_string()]), "{tags:?}");
+
+    // Discovery without `#d`: members list it, non-members do not, including
+    // one whose channel set was cached before the change.
+    assert!(!listed_channel_ids(&url, &stranger, since)
+        .await
+        .contains(&channel_id));
+    let seen = listed_channel_ids(&url, &outsider, since).await;
+    assert!(
+        seen.contains(&listed),
+        "a listed channel is listed: {seen:?}"
+    );
+    assert!(!seen.contains(&channel_id), "unlisted to a non-member");
+    assert!(listed_channel_ids(&url, &owner, since)
+        .await
+        .contains(&channel_id));
+
+    // History and search: a non-member reads it only by naming it.
+    let token = format!("unlisted{}", uuid::Uuid::new_v4().simple());
+    let (accepted, msg) = post_ws(&url, &channel_id, &owner, &format!("hello {token}")).await;
+    assert!(accepted, "owner post: {msg}");
+    let h = SingleLetterTag::lowercase(Alphabet::H);
+    let messages = Filter::new().kind(Kind::Custom(9)).since(since);
+    let search = Filter::new().kind(Kind::Custom(9)).search(&token);
+    for (filter, what) in [(&messages, "history"), (&search, "search")] {
+        let in_channel = |events: &[nostr::Event]| {
+            events.iter().any(|e| {
+                e.tags.iter().any(|t| {
+                    t.kind().to_string() == "h" && t.content() == Some(channel_id.as_str())
+                })
+            })
+        };
+        let unnamed = req_events(&url, &outsider, filter.clone()).await;
+        assert!(!in_channel(&unnamed), "{what}: unnamed, non-member");
+        let named = req_events(
+            &url,
+            &outsider,
+            filter.clone().custom_tags(h, [channel_id.as_str()]),
+        )
+        .await;
+        assert!(in_channel(&named), "{what}: named, non-member");
+        let member = req_events(&url, &owner, filter.clone()).await;
+        assert!(in_channel(&member), "{what}: unnamed, member");
+    }
+
+    // Anyone can join by id, and then lists it like any member.
+    let (accepted, msg) = join_ws(&url, &channel_id, &outsider).await;
+    assert!(accepted, "join an unlisted channel: {msg}");
+    assert!(listed_channel_ids(&url, &outsider, since)
+        .await
+        .contains(&channel_id));
+
+    // Listing it again shows it to everyone, at once.
+    assert!(!listed_channel_ids(&url, &stranger, since)
+        .await
+        .contains(&channel_id));
+    assert_eq!(
+        set_unlisted_ws(&url, &channel_id, &owner, "false").await,
+        (true, String::new())
+    );
+    let tags = group_metadata_tags(&url, &stranger, &channel_id).await;
+    assert!(!tags.contains(&vec!["unlisted".to_string()]), "{tags:?}");
+    assert!(listed_channel_ids(&url, &stranger, since)
+        .await
+        .contains(&channel_id));
+}
+
 /// Record `owner` as the NIP-OA owner of `agent`, by authenticating once.
 async fn record_agent_owner(url: &str, agent: &Keys, owner: &Keys) {
     let auth_tag = buzz_sdk::nip_oa::parse_auth_tag(

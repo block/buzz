@@ -1599,15 +1599,17 @@ fn validate_update_channel_fields(
     visibility: Option<&str>,
     ttl_change: Option<Option<i32>>,
     join_role: Option<buzz_sdk::ChannelJoinRole>,
+    unlisted: Option<bool>,
 ) -> Result<(), CliError> {
     if name.is_none()
         && description.is_none()
         && visibility.is_none()
         && ttl_change.is_none()
         && join_role.is_none()
+        && unlisted.is_none()
     {
         return Err(CliError::Usage(
-            "at least one field required (--name, --description, --visibility, --ttl, --no-ttl, --join-role)"
+            "at least one field required (--name, --description, --visibility, --ttl, --no-ttl, --join-role, --unlisted)"
                 .into(),
         ));
     }
@@ -1624,6 +1626,7 @@ pub async fn cmd_update_channel(
     ttl: Option<i64>,
     no_ttl: bool,
     join_role: Option<buzz_sdk::ChannelJoinRole>,
+    unlisted: Option<bool>,
 ) -> Result<(), CliError> {
     // Outer Option: None leaves TTL unchanged. Inner: Some(secs) sets it,
     // None (from --no-ttl) clears it, making the channel permanent.
@@ -1633,7 +1636,14 @@ pub async fn cmd_update_channel(
         (None, false) => None,
     };
 
-    validate_update_channel_fields(name, description, visibility, ttl_change, join_role)?;
+    validate_update_channel_fields(
+        name,
+        description,
+        visibility,
+        ttl_change,
+        join_role,
+        unlisted,
+    )?;
     let channel_uuid = parse_uuid(channel_id)?;
 
     let builder = buzz_sdk::build_update_channel(
@@ -1643,6 +1653,7 @@ pub async fn cmd_update_channel(
         visibility,
         ttl_change,
         join_role,
+        unlisted,
     )
     .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
 
@@ -1946,6 +1957,7 @@ pub async fn dispatch(
             ttl,
             no_ttl,
             join_role,
+            unlisted,
         } => {
             let visibility = visibility.as_ref().map(|v| v.to_string());
             cmd_update_channel(
@@ -1957,6 +1969,7 @@ pub async fn dispatch(
                 ttl,
                 no_ttl,
                 join_role.map(Into::into),
+                unlisted,
             )
             .await
         }
@@ -2146,7 +2159,7 @@ mod tests {
 
     #[test]
     fn update_channel_fields_rejects_empty_update() {
-        let result = validate_update_channel_fields(None, None, None, None, None);
+        let result = validate_update_channel_fields(None, None, None, None, None, None);
         assert!(matches!(result, Err(CliError::Usage(_))));
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("at least one field required"));
@@ -2155,7 +2168,7 @@ mod tests {
 
     #[test]
     fn update_channel_fields_accepts_visibility_only_update() {
-        let result = validate_update_channel_fields(None, None, Some("open"), None, None);
+        let result = validate_update_channel_fields(None, None, Some("open"), None, None, None);
         assert!(result.is_ok(), "visibility-only update should be accepted");
     }
 

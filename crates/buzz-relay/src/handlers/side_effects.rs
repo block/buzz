@@ -694,6 +694,7 @@ pub async fn validate_admin_event(
                 "ttl",
                 "t",
                 "join_role",
+                "unlisted",
             ];
             let has_recognized = event
                 .tags
@@ -701,22 +702,24 @@ pub async fn validate_admin_event(
                 .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted)"
                 ));
             }
 
-            // Validate archived values before storage.
+            // Validate archived and unlisted values before storage. Both are
+            // partial updates, so turning one off must be explicit.
             for t in event.tags.iter() {
-                if t.kind().to_string() == "archived" {
+                let name = t.kind().to_string();
+                if name == "archived" || name == "unlisted" {
                     match t.content() {
                         Some("true") | Some("false") => {}
                         Some(v) => {
                             return Err(anyhow::anyhow!(
-                                "invalid archived value: {v} (must be \"true\" or \"false\")"
+                                "invalid {name} value: {v} (must be \"true\" or \"false\")"
                             ));
                         }
                         None => {
-                            return Err(anyhow::anyhow!("archived tag must have a value"));
+                            return Err(anyhow::anyhow!("{name} tag must have a value"));
                         }
                     }
                 }
@@ -804,7 +807,8 @@ pub async fn validate_admin_event(
                 labels.map_err(|e| anyhow::anyhow!("{e}"))?;
             }
 
-            // name/about/archived/visibility/ttl/labels/join_role require owner/admin;
+            // name/about/archived/visibility/ttl/labels/join_role/unlisted
+            // require owner/admin;
             // topic/purpose allow any member who may post.
             let has_privileged_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
@@ -815,6 +819,7 @@ pub async fn validate_admin_event(
                     || k == "ttl"
                     || k == "t"
                     || k == "join_role"
+                    || k == "unlisted"
             });
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
@@ -836,7 +841,7 @@ pub async fn validate_admin_event(
                             return Ok(());
                         }
                         Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl/label/join_role changes"
+                            "actor not authorized for name/about/archived/visibility/ttl/label/join_role/unlisted changes"
                         ))
                     }
                 }
@@ -1760,6 +1765,15 @@ pub(crate) async fn persist_edit_metadata(
                 "false" => edit.archived = Some(false),
                 _ => {} // refused during authorization
             },
+            "unlisted" => {
+                // Validated during authorization; fail closed so a bad value
+                // can never reach the column.
+                edit.columns.unlisted = Some(match val {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(anyhow::anyhow!("invalid unlisted value: {val}")),
+                });
+            }
             _ => {}
         }
     }
@@ -1790,6 +1804,11 @@ pub(crate) async fn persist_edit_metadata(
             "type": "join_role_changed", "actor": actor_hex, "join_role": join_role
         }));
     }
+    if let Some(unlisted) = edit.columns.unlisted {
+        notices.push(serde_json::json!({
+            "type": "unlisted_changed", "actor": actor_hex, "unlisted": unlisted
+        }));
+    }
     if let Some(ttl_seconds) = edit.columns.ttl_seconds {
         notices.push(serde_json::json!({
             "type": "ttl_changed", "actor": actor_hex, "ttl_seconds": ttl_seconds
@@ -1810,6 +1829,7 @@ pub(crate) async fn persist_edit_metadata(
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let new_visibility = edit.columns.visibility.clone();
+    let unlisted_changed = edit.columns.unlisted.is_some();
     let unarchived = edit.archived == Some(false);
     let write = state
         .db
@@ -1827,6 +1847,11 @@ pub(crate) async fn persist_edit_metadata(
 
     // The changes are committed. What follows only updates live state, so a
     // failure is logged; the next read sees the committed channel.
+    if unlisted_changed && new_visibility.is_none() {
+        // Unlisting changes which channels a read that names none can see;
+        // nobody loses access, so no subscription is evicted.
+        state.invalidate_all_accessible_channels(tenant);
+    }
     if let Some(visibility) = new_visibility.as_deref() {
         // A visibility flip changes who can see the channel, so the
         // accessible-channels and visibility caches must be cleared

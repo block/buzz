@@ -1279,14 +1279,16 @@ pub async fn get_members_bulk(
 
 /// Get all channel IDs accessible to a pubkey.
 ///
-/// Includes channels where the pubkey is an active member AND all open channels.
-/// Open channels must be included in REQ filter resolution.
+/// Includes channels where the pubkey is an active member AND all listed open
+/// channels. Open channels must be included in REQ filter resolution.
 ///
 /// Only legacy channel types are in either half
 /// ([`buzz_core::channel::LEGACY_CHANNEL_TYPES`]): this is the implicit scope
 /// of queries that do not name a channel, so system channels and any type
-/// added later stay out. A query that names such a channel, or opts in to
-/// system channels, adds them from [`get_readable_named_only_channels`].
+/// added later stay out. Unlisted open channels stay out of the open half for
+/// the same reason; a member still has them through the member half. A query
+/// that names such a channel, or opts in to system channels, adds them from
+/// [`get_readable_named_only_channels`].
 pub async fn get_accessible_channel_ids(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1307,7 +1309,7 @@ pub async fn get_accessible_channel_ids(
         UNION
         SELECT id AS channel_id
         FROM channels
-        WHERE community_id = $1 AND visibility = 'open' AND deleted_at IS NULL
+        WHERE community_id = $1 AND visibility = 'open' AND NOT unlisted AND deleted_at IS NULL
           AND {open_types}
         "#,
         member_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
@@ -1328,14 +1330,18 @@ pub async fn get_accessible_channel_ids(
         .collect()
 }
 
-/// The channels of non-legacy types (system channels, and any type added
-/// later) that a pubkey can read: those where it is an active member, and
-/// every open one. Each comes with its type. Uncached, so a caller can trust
-/// it for a channel the request names.
+/// The channels that a pubkey can read but that [`get_accessible_channel_ids`]
+/// leaves out, each with its type:
+/// - channels of non-legacy types (system channels, and any type added later)
+///   where it is an active member, and every open one;
+/// - every unlisted open channel of a legacy type. A member of one also has
+///   it through [`get_accessible_channel_ids`]; listing it here as well is
+///   harmless, since a filter's scope is deduplicated.
 ///
-/// These are the channels that [`get_accessible_channel_ids`] leaves out. A
+/// Uncached, so a caller can trust it for a channel the request names. A
 /// read reaches one only by naming it, or, for system channels, by opting in
-/// to them.
+/// to them. An unlisted channel has a legacy type, so a system opt-in never
+/// adds it.
 pub async fn get_readable_named_only_channels(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1351,14 +1357,19 @@ pub async fn get_readable_named_only_channels(
         SELECT c.id AS channel_id, c.channel_type::text AS channel_type
         FROM channels c
         WHERE c.community_id = $1 AND c.deleted_at IS NULL
-          AND NOT {legacy_types}
           AND (
-            c.visibility = 'open'
-            OR EXISTS (
-              SELECT 1 FROM channel_members cm
-              WHERE cm.community_id = c.community_id AND cm.channel_id = c.id
-                AND cm.pubkey = $2 AND cm.removed_at IS NULL
+            (
+              NOT {legacy_types}
+              AND (
+                c.visibility = 'open'
+                OR EXISTS (
+                  SELECT 1 FROM channel_members cm
+                  WHERE cm.community_id = c.community_id AND cm.channel_id = c.id
+                    AND cm.pubkey = $2 AND cm.removed_at IS NULL
+                )
+              )
             )
+            OR ({legacy_types} AND c.visibility = 'open' AND c.unlisted)
           )
         "#,
         legacy_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
@@ -1546,7 +1557,7 @@ async fn get_channel_tx(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -1605,7 +1616,8 @@ pub struct AccessibleChannel {
 }
 
 /// Returns full channel records for all channels a user can access:
-/// open channels (visible to everyone) plus channels where the user is an active member.
+/// listed open channels (visible to everyone) plus channels where the user is
+/// an active member. An unlisted open channel is returned only to its members.
 ///
 /// Uses a LEFT JOIN on channel_members (PK: channel_id + pubkey) which produces at
 /// most one row per channel. Results are ordered stream -> forum -> dm, then by name.
@@ -1631,7 +1643,8 @@ pub async fn get_accessible_channels(
     let membership_clause = if member_only == Some(true) {
         "AND cm.channel_id IS NOT NULL"
     } else {
-        "AND (c.visibility = 'open' OR cm.channel_id IS NOT NULL)"
+        // Unlisted open channels are listed to their members only.
+        "AND ((c.visibility = 'open' AND NOT c.unlisted) OR cm.channel_id IS NOT NULL)"
     };
 
     let base = format!(
@@ -1642,7 +1655,7 @@ pub async fn get_accessible_channels(
                c.nip29_group_id, c.topic_required, c.max_members,
                c.topic, c.topic_set_by, c.topic_set_at,
                c.purpose, c.purpose_set_by, c.purpose_set_at,
-               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role,
+               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role, c.unlisted,
                (cm.channel_id IS NOT NULL) AS is_member
         FROM channels c
         LEFT JOIN channel_members cm
