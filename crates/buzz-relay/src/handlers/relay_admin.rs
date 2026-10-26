@@ -25,7 +25,8 @@ use buzz_core::tenant::TenantContext;
 use buzz_db::relay_members::RemoveResult;
 
 use crate::handlers::side_effects::{
-    fan_out_nip43_membership_list, publish_nip43_member_added, publish_nip43_member_removed,
+    auto_join_default_channels, fan_out_nip43_membership_list, publish_nip43_member_added,
+    publish_nip43_member_removed,
 };
 use crate::state::AppState;
 
@@ -362,6 +363,7 @@ async fn execute_relay_admin_command(
                 if let Err(e) = publish_nip43_member_added(tenant, state, &target_hex).await {
                     warn!(error = %e, "failed to publish NIP-43 member added event");
                 }
+                auto_join_default_channels(tenant, state, &target_hex).await;
             }
             fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
         }
@@ -986,6 +988,108 @@ mod postgres_tests {
 
         assert!(member_socket.cancellation_token().is_cancelled());
         assert!(!bystander_socket.cancellation_token().is_cancelled());
+    }
+
+    /// A kind:9030 add joins the new relay member to the community's
+    /// effective default channels, once: the flagged open channel gains them
+    /// as a member with one kind:44100; the unflagged channel does not. A
+    /// kind:9022 leave followed by a repeat kind:9030 (an idempotent no-op on
+    /// the roster) does not re-add them. Mutation: delete the
+    /// `auto_join_default_channels` call → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn adding_a_member_auto_joins_default_channels() {
+        use crate::handlers::group_state_postgres_tests::{
+            create_channel, edit_channel, http_auth,
+        };
+        use crate::handlers::ingest::ingest_event;
+
+        let host = format!("add-auto-join-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, target) = (Keys::generate(), Keys::generate());
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &owner.public_key().to_hex(),
+                "owner",
+                None,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("seed owner");
+        let flagged = create_channel(&state, &tenant, &owner, &[]).await;
+        let control = create_channel(&state, &tenant, &owner, &[]).await;
+        edit_channel(&state, &tenant, &owner, flagged, &[&["auto_join", "true"]])
+            .await
+            .expect("relay owner flags channel");
+
+        let roles = |keys: &Keys| {
+            let state = state.clone();
+            let community = tenant.community();
+            let pubkey = keys.public_key().to_bytes();
+            async move {
+                let mut roles = Vec::new();
+                for channel_id in [flagged, control] {
+                    roles.push(
+                        state
+                            .db
+                            .get_member_role(community, channel_id, &pubkey)
+                            .await
+                            .expect("member role"),
+                    );
+                }
+                roles
+            }
+        };
+        let added_notifications = || {
+            let state = state.clone();
+            let community = tenant.community();
+            let target_hex = target.public_key().to_hex();
+            async move {
+                state
+                    .db
+                    .count_events(&buzz_db::EventQuery {
+                        kinds: Some(vec![buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32]),
+                        p_tag_hex: Some(target_hex),
+                        global_only: true,
+                        ..buzz_db::EventQuery::for_community(community)
+                    })
+                    .await
+                    .expect("count 44100")
+            }
+        };
+        let add = || {
+            EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
+                .tags(vec![Tag::public_key(target.public_key())])
+                .sign_with_keys(&owner)
+                .expect("sign 9030")
+        };
+
+        handle_relay_admin_event(&tenant, &state, &add())
+            .await
+            .expect("owner adds member");
+        assert_eq!(roles(&target).await, [Some("member".to_string()), None]);
+        assert_eq!(added_notifications().await, 1);
+
+        let leave = EventBuilder::new(Kind::Custom(9022), "")
+            .tags([Tag::parse(["h", &flagged.to_string()]).expect("h tag")])
+            .sign_with_keys(&target)
+            .expect("sign 9022");
+        let left = ingest_event(&state, &tenant, leave, http_auth(&target))
+            .await
+            .expect("ingest 9022");
+        assert!(left.accepted, "{:?}", left.message);
+        handle_relay_admin_event(&tenant, &state, &add())
+            .await
+            .expect("repeat add is a roster no-op");
+        assert_eq!(
+            roles(&target).await,
+            [None, None],
+            "a repeat kind:9030 must not resurrect a kind:9022 leave"
+        );
+        assert_eq!(added_notifications().await, 1);
     }
 
     /// A pod-local root socket registered and bound to `keys`, as root AUTH

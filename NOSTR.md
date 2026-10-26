@@ -72,7 +72,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **NIP-10 threads** | ✅ | WS-submitted replies with `["e","<root>","","reply"]` tags create `thread_metadata` atomically. Visible in REST thread queries. Unknown parents rejected. |
 | **NIP-17 DMs (gift wrap)** | ✅ | kind:1059 accepted with ephemeral signing keys. Stored community-globally (`channel_id=None` inside the connected community). Delivered via `#p`-filtered subscriptions. Not indexed in search. |
 | **DM discovery** | ✅ | DM creation emits kind:39000 (with `hidden` tag) + kind:44100 membership notifications. NIP-29 clients discover DMs via standard group discovery flow. |
-| **Join request (kind:9021)** | ✅ | Open channels only. Adds the joiner with the channel's `join_role` (`member` by default), emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
+| **Join request (kind:9021)** | ✅ | Open channels only. Adds the joiner with the channel's `join_role` (`member` by default), emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. The same body joins new community members to [default channels](#default-channels). |
 | **Edits (kind:40003)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 | **Rich content (kind:40002)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 
@@ -215,6 +215,16 @@ one the relay joins every new community member into. The setting is
 
 Every change is announced by one kind:40099 `auto_join_changed` system
 message in the channel.
+
+When someone becomes a community member (an invite claim or a kind:9030 add)
+the relay joins them to every effective default channel as a self-join: the
+body of kind:9021, so the channel's `join_role` applies and the channel gets
+its `member_joined` kind:40099, kind:39002 and kind:44100. It does this once,
+at that moment, and never again on login or reconnect, so a later kind:9022
+leave stands. A channel that fails to join is logged and counted
+(`buzz_auto_join_failures_total`), not retried: the kind:39000 tag is the
+record a client reconciles against. `buzz-admin add-member` writes the
+roster row only and does not join default channels.
 
 ### Group Discovery
 

@@ -2679,15 +2679,25 @@ async fn handle_delete_group(
     Ok(())
 }
 
-async fn handle_join_request(
-    tenant: &TenantContext,
-    event: &Event,
-    state: &Arc<AppState>,
-) -> anyhow::Result<()> {
-    let channel_id =
-        extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
-    let actor_bytes = event.pubkey.to_bytes().to_vec();
+/// What [`join_channel_as_self`] did for the member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelfJoinOutcome {
+    /// The member was added and every join side effect was emitted.
+    Joined,
+    /// The member was already active in the channel; nothing changed.
+    AlreadyMember,
+}
 
+/// Join `pubkey` to an open, unarchived channel as a self-join: no inviter,
+/// the channel's `join_role`, and the kind:40099, 39000/39002 and 44100
+/// side effects of a kind:9021. Shared by the kind:9021 handler and the
+/// default-channel auto-join on new community memberships.
+pub(crate) async fn join_channel_as_self(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> anyhow::Result<SelfJoinOutcome> {
     // Only open channels allow self-join via kind:9021.
     let channel = state
         .db
@@ -2699,15 +2709,17 @@ async fn handle_join_request(
             "channel is private — request an invitation"
         ));
     }
+    if channel.archived_at.is_some() {
+        return Err(anyhow::anyhow!("channel is archived"));
+    }
 
     // Skip if already an active member — prevents duplicate join notifications.
     // Fail closed on DB errors rather than falling through to add_member.
     if state
-        .is_member_cached(tenant.community(), channel_id, &actor_bytes)
+        .is_member_cached(tenant.community(), channel_id, pubkey)
         .await?
     {
-        info!(channel = %channel_id, "kind:9021 join — already a member, skipping");
-        return Ok(());
+        return Ok(SelfJoinOutcome::AlreadyMember);
     }
 
     // A self-join gets the channel's `join_role`, read by `put_member` under
@@ -2715,11 +2727,11 @@ async fn handle_join_request(
     // channel, where a member must then make them a member.
     state
         .db
-        .put_member(tenant.community(), channel_id, &actor_bytes, None, None)
+        .put_member(tenant.community(), channel_id, pubkey, None, None)
         .await?;
-    state.invalidate_membership(tenant, channel_id, &actor_bytes);
+    state.invalidate_membership(tenant, channel_id, pubkey);
 
-    let actor_hex = hex::encode(&actor_bytes);
+    let actor_hex = hex::encode(pubkey);
     emit_system_message(
         tenant,
         state,
@@ -2741,8 +2753,8 @@ async fn handle_join_request(
         tenant,
         state,
         channel_id,
-        &actor_bytes,
-        &actor_bytes,
+        pubkey,
+        pubkey,
         buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION,
     )
     .await
@@ -2750,7 +2762,64 @@ async fn handle_join_request(
         warn!("membership notification for join failed: {e}");
     }
 
-    info!(channel = %channel_id, "kind:9021 join processed");
+    Ok(SelfJoinOutcome::Joined)
+}
+
+/// Join a new community member to every effective `auto_join` channel, as
+/// kind:9021 self-joins. Runs inline at the membership write sites (invite
+/// claim, kind:9030) and nowhere else, so a later kind:9022 leave stands.
+///
+/// Best effort: the relay membership has already committed, so a channel
+/// that fails is logged and counted, never retried, and never fails the
+/// caller. The `auto_join` tag on kind:39000 is the durable record a client
+/// reconciles against.
+pub(crate) async fn auto_join_default_channels(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey_hex: &str,
+) {
+    let Ok(pubkey) = hex::decode(pubkey_hex) else {
+        warn!(member = %pubkey_hex, "auto-join skipped: member pubkey is not hex");
+        return;
+    };
+    let channels = match state.db.list_auto_join_channels(tenant.community()).await {
+        Ok(channels) => channels,
+        Err(e) => {
+            warn!(member = %pubkey_hex, error = %e, "auto-join skipped: listing default channels failed");
+            metrics::counter!("buzz_auto_join_failures_total").increment(1);
+            return;
+        }
+    };
+    for channel in channels {
+        match join_channel_as_self(tenant, state, channel.id, &pubkey).await {
+            Ok(SelfJoinOutcome::Joined) => {
+                metrics::counter!("buzz_auto_join_channels_total").increment(1);
+                info!(channel = %channel.id, member = %pubkey_hex, "auto-joined default channel");
+            }
+            Ok(SelfJoinOutcome::AlreadyMember) => {}
+            Err(e) => {
+                metrics::counter!("buzz_auto_join_failures_total").increment(1);
+                warn!(channel = %channel.id, member = %pubkey_hex, error = %e, "auto-join of default channel failed");
+            }
+        }
+    }
+}
+
+async fn handle_join_request(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> anyhow::Result<()> {
+    let channel_id =
+        extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
+    match join_channel_as_self(tenant, state, channel_id, &event.pubkey.to_bytes()).await? {
+        SelfJoinOutcome::AlreadyMember => {
+            info!(channel = %channel_id, "kind:9021 join — already a member, skipping");
+        }
+        SelfJoinOutcome::Joined => {
+            info!(channel = %channel_id, "kind:9021 join processed");
+        }
+    }
     Ok(())
 }
 

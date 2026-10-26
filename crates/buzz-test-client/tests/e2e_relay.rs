@@ -302,6 +302,102 @@ async fn test_invite_mint_and_claim_admits_new_pubkey() {
     );
 }
 
+/// Claiming an invite joins the new member to the community's default
+/// channels: the relay owner flags one, the claimer receives its kind:44100
+/// and is on its kind:39002 roster, and a repeat claim is a no-op.
+#[tokio::test]
+#[ignore]
+async fn test_invite_claim_auto_joins_default_channel() {
+    let url = relay_url();
+    let relay_owner = Keys::generate();
+    let joiner = Keys::generate();
+    let joiner_hex = joiner.public_key().to_hex();
+    seed_relay_owner(&relay_owner).await;
+    let channel_id = create_test_channel(&relay_owner).await;
+    assert_eq!(
+        set_metadata_ws(&url, &channel_id, &relay_owner, "auto_join", "true").await,
+        (true, String::new())
+    );
+
+    let mut joiner_client = BuzzTestClient::connect(&url, &joiner)
+        .await
+        .expect("connect joiner");
+    let sid = sub_id("auto-join-notif");
+    let filter = Filter::new()
+        .kind(Kind::Custom(44100))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), joiner_hex.as_str())
+        .since(nostr::Timestamp::now() - 5u64);
+    joiner_client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe to membership notifications");
+    joiner_client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE for membership sub");
+
+    let mint_response = invite_post(&relay_owner, "/api/invites", "{}").await;
+    assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
+    let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
+    let code = mint_json
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .expect("mint response includes code");
+    let claim_body = serde_json::json!({ "code": code }).to_string();
+    let claim_response = invite_post(&joiner, "/api/invites/claim", &claim_body).await;
+    assert_eq!(claim_response.status(), reqwest::StatusCode::OK);
+    let claim_json: serde_json::Value = claim_response.json().await.expect("claim JSON");
+    assert_eq!(
+        claim_json.get("status").and_then(serde_json::Value::as_str),
+        Some("joined")
+    );
+
+    // Other tests may leave their own default channels flagged on this
+    // shared relay; wait for the notification about ours.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let msg = joiner_client
+            .recv_event(remaining)
+            .await
+            .expect("recv kind:44100 notification for the default channel");
+        if let RelayMessage::Event { event, .. } = msg {
+            let channel = event
+                .tags
+                .iter()
+                .find(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+                .and_then(|tag| tag.as_slice().get(1).cloned());
+            if channel.as_deref() == Some(channel_id.as_str()) {
+                break;
+            }
+        }
+    }
+    joiner_client.disconnect().await.ok();
+    assert_eq!(
+        member_role(&url, &relay_owner, &channel_id, &joiner_hex)
+            .await
+            .as_deref(),
+        Some("member"),
+        "the relay-signed kind:39002 roster lists the claimer"
+    );
+
+    let repeat_response = invite_post(&joiner, "/api/invites/claim", &claim_body).await;
+    assert_eq!(repeat_response.status(), reqwest::StatusCode::OK);
+    let repeat_json: serde_json::Value = repeat_response.json().await.expect("repeat claim JSON");
+    assert_eq!(
+        repeat_json
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("already_member")
+    );
+
+    // Leave the shared relay as found.
+    assert_eq!(
+        set_metadata_ws(&url, &channel_id, &relay_owner, "auto_join", "false").await,
+        (true, String::new())
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_invite_claim_rejects_invalid_code() {
