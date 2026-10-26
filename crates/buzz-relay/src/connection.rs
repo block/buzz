@@ -1364,6 +1364,13 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         }
     };
 
+    match &msg {
+        ClientMessage::Req { .. } => crate::metrics::record_ws_read("req"),
+        ClientMessage::Count { .. } => crate::metrics::record_ws_read("count"),
+        ClientMessage::ArtifactSync { .. } => crate::metrics::record_ws_read("sync"),
+        _ => {}
+    }
+
     if let Err(reason) = enforce_ws_admission(&msg, &conn, &state).await {
         crate::access::ReadLog::refused(&msg, &conn, reason);
         return;

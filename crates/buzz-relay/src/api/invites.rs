@@ -402,10 +402,11 @@ async fn mint_invite_inner(
         "http"
     };
 
-    let minted = crate::access::Detail::InviteMinted {
-        invite_id: invite.invite_id,
-        expires_at: invite.expires_at.timestamp(),
+    let minted = crate::access::Detail {
+        invite_id: Some(invite.invite_id),
+        expires_at: Some(invite.expires_at.timestamp()),
         max_uses: invite.max_uses,
+        ..Default::default()
     };
 
     // expires_at as unix seconds for the response contract.
@@ -440,8 +441,9 @@ pub async fn claim_invite(
     // The request's access line carries whether the claim joined.
     let claimed = claim_invite_authed(&state, tenant, pubkey, verified_owner, &body).await;
     if let Ok(Json(json)) = &claimed {
-        slot.detail(crate::access::Detail::InviteClaimed {
-            joined: json["status"] == "joined",
+        slot.detail(crate::access::Detail {
+            joined: Some(json["status"] == "joined"),
+            ..Default::default()
         });
     }
     claimed

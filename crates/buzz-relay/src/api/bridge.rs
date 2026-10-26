@@ -174,8 +174,8 @@ impl ProvenCaller {
     }
 
     /// Record what the request did.
-    pub(crate) fn complete(&self, detail: crate::access::BridgeDetail) {
-        self.slot.detail(crate::access::Detail::Bridge(detail));
+    pub(crate) fn complete(&self, detail: crate::access::Detail) {
+        self.slot.detail(detail);
     }
 
     /// The shared API rate limit, then the replay guard. A refusal is logged.
@@ -1330,41 +1330,41 @@ enum SubmitOutcome {
 
 impl SubmitOutcome {
     /// What the request's access line records about this outcome.
-    fn fields(&self) -> crate::access::BridgeDetail {
-        use crate::access::BridgeDetail;
+    fn fields(&self) -> crate::access::Detail {
+        use crate::access::Detail;
         match self {
             SubmitOutcome::Ok {
                 accepted,
                 kind,
                 event_id,
                 ..
-            } => BridgeDetail {
+            } => Detail {
                 accepted: Some(*accepted),
                 kind: Some(*kind),
                 event_id: Some(event_id.clone()),
-                ..BridgeDetail::default()
+                ..Detail::default()
             },
             SubmitOutcome::ParseFail {
                 category,
                 line,
                 column,
                 ..
-            } => BridgeDetail {
+            } => Detail {
                 accepted: Some(false),
                 category: Some(category),
                 line: Some(*line),
                 column: Some(*column),
-                ..BridgeDetail::default()
+                ..Detail::default()
             },
-            SubmitOutcome::Rejected { kind, reason, .. } => BridgeDetail {
+            SubmitOutcome::Rejected { kind, reason, .. } => Detail {
                 accepted: Some(false),
                 kind: Some(*kind),
                 reject_reason: Some(reason),
-                ..BridgeDetail::default()
+                ..Detail::default()
             },
-            SubmitOutcome::Err { .. } => BridgeDetail {
+            SubmitOutcome::Err { .. } => Detail {
                 accepted: Some(false),
-                ..BridgeDetail::default()
+                ..Detail::default()
             },
         }
     }
@@ -1639,7 +1639,7 @@ pub async fn query_events(
     // every outcome including a refused login.
     let result = query_events_authed(&state, &tenant, &headers, &body, &mut caller).await;
     if let Ok(Json(Value::Array(events))) = &result {
-        caller.complete(crate::access::BridgeDetail {
+        caller.complete(crate::access::Detail {
             result_count: Some(events.len() as u64),
             ..Default::default()
         });
@@ -2320,7 +2320,7 @@ pub async fn count_events(
     // every outcome including a refused login.
     let result = count_events_authed(&state, &tenant, &headers, &body, &mut caller).await;
     if let Ok(Json(value)) = &result {
-        caller.complete(crate::access::BridgeDetail {
+        caller.complete(crate::access::Detail {
             result_count: value.get("count").and_then(Value::as_u64),
             ..Default::default()
         });
@@ -3435,7 +3435,10 @@ pub(crate) mod postgres_tests {
         assert_eq!(line["level"], "WARN", "{line}");
         assert_eq!(line["filters"], 1, "{line}");
         assert_eq!(line["kinds"], "9", "{line}");
-        assert_eq!(line["channel_count"], 1, "{line}");
+        assert!(
+            line["channel_ids"].is_string() && line.get("channel_count").is_none(),
+            "{line}"
+        );
         assert_eq!(line["since"], 10, "{line}");
         assert_eq!(line["search"], true, "{line}");
     }
@@ -6063,22 +6066,6 @@ pub(crate) mod postgres_tests {
         line.clone()
     }
 
-    /// Positive control: an admitted `/query` logs one success, after the
-    /// membership and ban checks.
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "requires Postgres"]
-    async fn admitted_query_logs_one_success_line() {
-        let state = nip_fi_off_test_state().await.expect("local Postgres");
-        let host = with_community(&state).await;
-        let keys = Keys::generate();
-        let (status, lines) = signed_query_auth_lines(state, &host, &keys).await;
-        assert_eq!(status, axum::http::StatusCode::OK);
-        let line = assert_one_auth_line(&lines, "success", None);
-        assert_eq!(line["method"], "nip98");
-        assert_eq!(line["pubkey"], keys.public_key().to_hex());
-        assert_eq!(line["pubkey_verified"], true);
-    }
-
     /// The same signed `/query` sent twice: the second is refused by the
     /// replay check inside `ProvenCaller`, and that refusal is its one line.
     #[tokio::test(flavor = "current_thread")]
@@ -6144,7 +6131,7 @@ pub(crate) mod postgres_tests {
         );
     }
 
-    /// A served `/query` writes one access line: the login, the route's
+    /// A served `/query` that returns nothing writes one DEBUG access line: the login, the route's
     /// status and result count, and the filter summary, and no separate
     /// bridge line.
     #[tokio::test(flavor = "current_thread")]
@@ -6162,9 +6149,10 @@ pub(crate) mod postgres_tests {
         let lines = out.lines();
         assert_eq!(lines.len(), 1, "one line per request: {lines:?}");
         let line = &lines[0];
-        assert_eq!(line["level"], "INFO", "{line}");
+        assert_eq!(line["level"], "DEBUG", "{line}");
         assert_eq!(line["event"], "http", "{line}");
         assert_eq!(line["outcome"], "success", "{line}");
+        assert!(line.get("reason").is_none(), "{line}");
         assert_eq!(line["method"], "nip98", "{line}");
         assert_eq!(line["pubkey"], keys.public_key().to_hex(), "{line}");
         assert_eq!(line["pubkey_verified"], true, "{line}");
@@ -6227,7 +6215,9 @@ pub(crate) mod postgres_tests {
     }
 
     /// A served artifact `/query` and `/count` record which kinds, channel
-    /// and limit they read, like any other read.
+    /// and limit they read, like any other read. A client-defined tag the
+    /// plain filter parser rejects (`#1`) narrows the read but must not cancel
+    /// its summary, and its value is never logged.
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "requires Postgres"]
     async fn artifact_reads_log_their_filter_summary() {
@@ -6235,58 +6225,26 @@ pub(crate) mod postgres_tests {
         let host = with_community(&state).await;
         let keys = Keys::generate();
         let channel = uuid::Uuid::new_v4().to_string();
-        let body = serde_json::to_vec(&serde_json::json!([{
-            "artifact": "current",
-            "kinds": [45010],
-            "#h": [channel],
-            "limit": 1
-        }]))
-        .unwrap();
-        for route in ["/query", "/count"] {
-            let url = format!("https://{host}{route}");
-            let (status, lines, _) =
-                post_access_lines(Arc::clone(&state), &host, route, &url, &keys, &body).await;
-            assert_eq!(status, axum::http::StatusCode::OK, "{lines:?}");
-            assert_eq!(lines.len(), 1, "{lines:?}");
-            let line = &lines[0];
-            assert_eq!(line["route"], route, "{line}");
-            assert_eq!(line["kinds"], "45010", "{line}");
-            assert_eq!(line["channel_ids"], channel.as_str(), "{line}");
-            assert_eq!(line["limit"], 1, "{line}");
-            assert_eq!(line["filters"], 1, "{line}");
-        }
-    }
-
-    /// A client-defined tag the plain filter parser rejects (`#1`) narrows
-    /// an artifact read but must not cancel its summary, and its value is
-    /// never logged.
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "requires Postgres"]
-    async fn artifact_reads_with_custom_tags_keep_their_summary() {
-        let state = nip_fi_off_test_state().await.expect("local Postgres");
-        let host = with_community(&state).await;
-        let keys = Keys::generate();
-        let channel = uuid::Uuid::new_v4().to_string();
         let marker = "CUSTOMTAGMARKER4b2e";
-        let body = serde_json::to_vec(&serde_json::json!([{
-            "artifact": "current",
-            "kinds": [45010],
-            "#h": [channel],
-            "#1": [marker],
-            "limit": 1
-        }]))
-        .unwrap();
-        for route in ["/query", "/count"] {
-            let url = format!("https://{host}{route}");
-            let (status, lines, raw) =
-                post_access_lines(Arc::clone(&state), &host, route, &url, &keys, &body).await;
-            assert_eq!(status, axum::http::StatusCode::OK, "{raw}");
-            assert_eq!(lines.len(), 1, "{lines:?}");
-            let line = &lines[0];
-            assert_eq!(line["kinds"], "45010", "{line}");
-            assert_eq!(line["channel_ids"], channel.as_str(), "{line}");
-            assert_eq!(line["limit"], 1, "{line}");
-            assert!(!raw.contains(marker), "custom tag value logged: {raw}");
+        let plain = serde_json::json!({"artifact": "current", "kinds": [45010], "#h": [channel], "limit": 1});
+        let mut custom = plain.clone();
+        custom["#1"] = serde_json::json!([marker]);
+        for filter in [plain, custom] {
+            let body = serde_json::to_vec(&[filter]).unwrap();
+            for route in ["/query", "/count"] {
+                let url = format!("https://{host}{route}");
+                let (status, lines, raw) =
+                    post_access_lines(Arc::clone(&state), &host, route, &url, &keys, &body).await;
+                assert_eq!(status, axum::http::StatusCode::OK, "{raw}");
+                assert_eq!(lines.len(), 1, "{lines:?}");
+                let line = &lines[0];
+                assert_eq!(line["route"], route, "{line}");
+                assert_eq!(line["kinds"], "45010", "{line}");
+                assert_eq!(line["channel_ids"], channel.as_str(), "{line}");
+                assert_eq!(line["limit"], 1, "{line}");
+                assert_eq!(line["filters"], 1, "{line}");
+                assert!(!raw.contains(marker), "custom tag value logged: {raw}");
+            }
         }
     }
 

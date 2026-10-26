@@ -334,9 +334,10 @@ async fn feedback_attachment(
     let served = serve_feedback_attachment_checked(&state, &headers, id, &sha256).await;
     if let Ok((_, community_id)) = &served {
         slot.in_community(*community_id);
-        slot.detail(crate::access::Detail::Attachment {
-            feedback_id: id,
-            attachment_sha256: sha256,
+        slot.detail(crate::access::Detail {
+            feedback_id: Some(id),
+            attachment_sha256: Some(sha256),
+            ..Default::default()
         });
     }
     served.map(|(response, _)| response)

@@ -13,6 +13,10 @@
 //! except public documents and probes; a request that matched no route is
 //! logged only at status 400 or above, as `route="<unmatched>"`. `route` is the
 //! matched template, never the raw path.
+//! A successful bridge read that returned nothing (`result_count=0`) logs at
+//! DEBUG: polling clients make most of them. WebSocket `req` lines stay at
+//! INFO, because an empty subscription can still deliver live events. The
+//! request method is the enclosing span's `http.request.method`.
 //!
 //! With `BUZZ_CLIENT_IP_HEADER` set, `http`, `auth` and `close` lines also
 //! carry `client_ip`: the rightmost entry of that request header, only when it
@@ -30,24 +34,25 @@ use uuid::Uuid;
 /// The tracing target for every access line.
 pub(crate) const TARGET: &str = "buzz_relay::access";
 
-/// Most identifiers listed per field; the matching `*_count` field is exact.
+/// Most identifiers listed per field; a longer list adds its `*_count`.
 const LIST_CAP: usize = 10;
 
 macro_rules! emit {
     ($level:expr, $($fields:tt)+) => {
-        if $level == Level::WARN {
-            tracing::warn!(target: TARGET, $($fields)+)
-        } else {
-            tracing::info!(target: TARGET, $($fields)+)
+        match $level {
+            Level::WARN => tracing::warn!(target: TARGET, $($fields)+),
+            Level::INFO => tracing::info!(target: TARGET, $($fields)+),
+            _ => tracing::debug!(target: TARGET, $($fields)+),
         }
     };
 }
 
 /// What a REQ or COUNT asked for, merged across its filters. List fields hold
 /// the first [`LIST_CAP`] distinct values; their `*_count` fields sum the
-/// per-filter set sizes, so a value repeated in two filters counts twice. A
-/// list field is `*` when any filter leaves that dimension open, because that
-/// filter reads every value; `since`/`until`/`limit` likewise take the widest
+/// per-filter set sizes, so a value repeated in two filters counts twice, and
+/// are absent when the list already shows that many values. A list field is
+/// `*` when any filter leaves that dimension open, because that filter reads
+/// every value; `since`/`until`/`limit` likewise take the widest
 /// bound and are absent when any filter leaves them open. No field understates
 /// what the read covered. Only well-formed channel ids and pubkeys are listed,
 /// so client-chosen tag text never reaches the log.
@@ -55,13 +60,13 @@ macro_rules! emit {
 pub(crate) struct FilterSummary {
     filters: usize,
     kinds: Option<String>,
-    kind_count: usize,
+    kind_count: Option<usize>,
     channel_ids: Option<String>,
-    channel_count: usize,
+    channel_count: Option<usize>,
     authors: Option<String>,
-    author_count: usize,
+    author_count: Option<usize>,
     p_tags: Option<String>,
-    p_count: usize,
+    p_count: Option<usize>,
     ids: usize,
     since: Option<u64>,
     until: Option<u64>,
@@ -164,16 +169,18 @@ impl<T: PartialEq> Listed<T> {
         }
     }
 
-    /// The count, and the comma-joined list: [`OPEN`] when a filter leaves
-    /// the dimension open, `None` when nothing was listed.
-    fn finish(self, open: bool, show: impl Fn(&T) -> String) -> (usize, Option<String>) {
+    /// The count, unless the list shows exactly that many values, and the
+    /// comma-joined list: [`OPEN`] when a filter leaves the dimension open,
+    /// `None` when nothing was listed.
+    fn finish(self, open: bool, show: impl Fn(&T) -> String) -> (Option<usize>, Option<String>) {
+        let count = (open || self.seen != self.listed.len()).then_some(self.seen);
         let shown = if open {
             Some(OPEN.to_owned())
         } else {
             (!self.listed.is_empty())
                 .then(|| self.listed.iter().map(show).collect::<Vec<_>>().join(","))
         };
-        (self.seen, shown)
+        (count, shown)
     }
 }
 
@@ -1000,45 +1007,34 @@ struct AccessNote {
     pubkey_verified: bool,
     decision: Option<AuthResult>,
     summary: Option<FilterSummary>,
-    detail: Option<Detail>,
+    detail: Detail,
 }
 
-/// What a route did, beyond its auth decision. Each identifier lives only in
-/// the variant of the route that logs it; invite codes, tokens and Blossom
-/// hashes have no field.
-#[derive(Debug)]
-pub(crate) enum Detail {
-    /// An HTTP bridge read or write.
-    Bridge(BridgeDetail),
-    /// A minted invite: its id, expiry, and use limit (absent: unlimited).
-    InviteMinted {
-        invite_id: Uuid,
-        expires_at: i64,
-        max_uses: Option<i32>,
-    },
-    /// An invite claim: whether it added the member (`false`: already one).
-    InviteClaimed { joined: bool },
-    /// An admin feedback attachment read.
-    Attachment {
-        feedback_id: Uuid,
-        attachment_sha256: String,
-    },
-}
-
-/// What a bridge request read or wrote.
+/// What a route did, beyond its auth decision. Each route sets only its own
+/// fields; invite codes, tokens and Blossom hashes have no field.
 #[derive(Debug, Default)]
-pub(crate) struct BridgeDetail {
+pub(crate) struct Detail {
+    /// A bridge read: events returned, or the count a `/count` answered.
     pub(crate) result_count: Option<u64>,
+    /// A bridge write: whether it was stored, and the event's kind and id.
     pub(crate) accepted: Option<bool>,
     pub(crate) kind: Option<u32>,
-    /// The id of the event a write stored or rejected.
     pub(crate) event_id: Option<String>,
-    /// A body that failed to parse: its error category and position.
+    /// A bridge body that failed to parse: its error category and position.
     pub(crate) category: Option<&'static str>,
     pub(crate) line: Option<usize>,
     pub(crate) column: Option<usize>,
     /// An ingest rejection's fixed code, never its message.
     pub(crate) reject_reason: Option<&'static str>,
+    /// A minted invite: its id, expiry, and use limit (absent: unlimited).
+    pub(crate) invite_id: Option<Uuid>,
+    pub(crate) expires_at: Option<i64>,
+    pub(crate) max_uses: Option<i32>,
+    /// An invite claim: whether it added the member (`false`: already one).
+    pub(crate) joined: Option<bool>,
+    /// An admin feedback attachment read.
+    pub(crate) feedback_id: Option<Uuid>,
+    pub(crate) attachment_sha256: Option<String>,
 }
 
 /// The access note of one HTTP request. [`http_access_log`] puts it in the
@@ -1110,7 +1106,7 @@ impl AccessSlot {
     }
 
     pub(crate) fn detail(&self, detail: Detail) {
-        self.note().detail = Some(detail);
+        self.note().detail = detail;
     }
 
     /// Write this note's line as the layer would for `route` answered with
@@ -1120,7 +1116,6 @@ impl AccessSlot {
         drop(HttpLine {
             slot: self.clone(),
             route: Some(route.to_owned()),
-            http_method: axum::http::Method::POST,
             peer_addr: None,
             client_ip: None,
             started: std::time::Instant::now(),
@@ -1135,7 +1130,6 @@ impl AccessSlot {
         drop(HttpLine {
             slot: self.clone(),
             route: Some(route.to_owned()),
-            http_method: axum::http::Method::GET,
             peer_addr: None,
             client_ip: None,
             started: std::time::Instant::now(),
@@ -1175,7 +1169,6 @@ pub(crate) async fn http_access_log(
     let mut line = HttpLine {
         slot,
         route,
-        http_method: req.method().clone(),
         peer_addr: req
             .extensions()
             .get::<axum::extract::ConnectInfo<SocketAddr>>()
@@ -1201,7 +1194,6 @@ struct HttpLine {
     slot: AccessSlot,
     /// The matched template; `None` for a request that matched no route.
     route: Option<String>,
-    http_method: axum::http::Method,
     peer_addr: Option<SocketAddr>,
     client_ip: Option<IpAddr>,
     started: std::time::Instant,
@@ -1235,36 +1227,19 @@ impl Drop for HttpLine {
         } else {
             level
         };
+        // A served read that returned nothing is routine polling.
+        let level = if level == Level::INFO && note.detail.result_count == Some(0) {
+            Level::DEBUG
+        } else {
+            level
+        };
         let pubkey = note.pubkey.as_ref().map(PublicKey::to_hex);
         let s = note.summary.as_ref();
-        let bridge = match &note.detail {
-            Some(Detail::Bridge(b)) => Some(b),
-            _ => None,
-        };
-        let (invite_id, expires_at, max_uses) = match &note.detail {
-            Some(Detail::InviteMinted {
-                invite_id,
-                expires_at,
-                max_uses,
-            }) => (Some(invite_id), Some(*expires_at), *max_uses),
-            _ => (None, None, None),
-        };
-        let (feedback_id, attachment_sha256) = match &note.detail {
-            Some(Detail::Attachment {
-                feedback_id,
-                attachment_sha256,
-            }) => (Some(feedback_id), Some(attachment_sha256.as_str())),
-            _ => (None, None),
-        };
-        let joined = match &note.detail {
-            Some(Detail::InviteClaimed { joined }) => Some(*joined),
-            _ => None,
-        };
+        let d = &note.detail;
         emit!(
             level,
             event = HTTP_EVENT,
             route = self.route.as_deref().unwrap_or(UNMATCHED_ROUTE),
-            http_method = %self.http_method,
             peer_addr = self.peer_addr.map(tracing::field::display),
             client_ip = self.client_ip.map(tracing::field::display),
             method = note.method.map(AuthMethod::as_str),
@@ -1277,29 +1252,29 @@ impl Drop for HttpLine {
             status,
             time_to_response_ms =
                 u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            result_count = bridge.and_then(|b| b.result_count),
-            accepted = bridge.and_then(|b| b.accepted),
-            kind = bridge.and_then(|b| b.kind),
-            event_id = bridge.and_then(|b| b.event_id.as_deref()),
-            category = bridge.and_then(|b| b.category),
-            line = bridge.and_then(|b| b.line),
-            column = bridge.and_then(|b| b.column),
-            reject_reason = bridge.and_then(|b| b.reject_reason),
-            invite_id = invite_id.map(tracing::field::display),
-            expires_at,
-            max_uses,
-            joined,
-            feedback_id = feedback_id.map(tracing::field::display),
-            attachment_sha256,
+            result_count = d.result_count,
+            accepted = d.accepted,
+            kind = d.kind,
+            event_id = d.event_id.as_deref(),
+            category = d.category,
+            line = d.line,
+            column = d.column,
+            reject_reason = d.reject_reason,
+            invite_id = d.invite_id.map(tracing::field::display),
+            expires_at = d.expires_at,
+            max_uses = d.max_uses,
+            joined = d.joined,
+            feedback_id = d.feedback_id.map(tracing::field::display),
+            attachment_sha256 = d.attachment_sha256.as_deref(),
             filters = s.map(|s| s.filters),
             kinds = s.and_then(|s| s.kinds.as_deref()),
-            kind_count = s.map(|s| s.kind_count),
+            kind_count = s.and_then(|s| s.kind_count),
             channel_ids = s.and_then(|s| s.channel_ids.as_deref()),
-            channel_count = s.map(|s| s.channel_count),
+            channel_count = s.and_then(|s| s.channel_count),
             authors = s.and_then(|s| s.authors.as_deref()),
-            author_count = s.map(|s| s.author_count),
+            author_count = s.and_then(|s| s.author_count),
             p_tags = s.and_then(|s| s.p_tags.as_deref()),
-            p_count = s.map(|s| s.p_count),
+            p_count = s.and_then(|s| s.p_count),
             ids = s.map(|s| s.ids),
             since = s.and_then(|s| s.since),
             until = s.and_then(|s| s.until),
@@ -1465,6 +1440,34 @@ pub(crate) mod tests {
         assert_eq!(line["level"], "INFO", "{line}");
     }
 
+    /// Only a served bridge read that returned nothing drops to DEBUG.
+    #[test]
+    fn empty_served_http_reads_log_at_debug() {
+        let level = |result_count, result, status| {
+            let (_, out) = capture(|| {
+                let slot = AccessSlot::default();
+                slot.attempt(AuthMethod::Nip98, None, false);
+                slot.finish(result);
+                slot.detail(Detail {
+                    result_count,
+                    ..Default::default()
+                });
+                match status {
+                    Some(status) => slot.emit("/query", status),
+                    None => slot.abandon("/query"),
+                }
+            });
+            out.lines()[0]["level"].as_str().unwrap().to_owned()
+        };
+        let denied = AuthResult::Denied(AuthReason::NotRelayMember);
+        assert_eq!(level(Some(0), AuthResult::Success, Some(200)), "DEBUG");
+        assert_eq!(level(Some(3), AuthResult::Success, Some(200)), "INFO");
+        assert_eq!(level(None, AuthResult::Success, Some(200)), "INFO");
+        assert_eq!(level(Some(0), AuthResult::Success, Some(500)), "WARN");
+        assert_eq!(level(Some(0), AuthResult::Success, None), "WARN");
+        assert_eq!(level(Some(0), denied, Some(403)), "WARN");
+    }
+
     #[test]
     fn summary_merges_filters_to_the_widest_bounds() {
         let s = FilterSummary::new(&[
@@ -1472,7 +1475,8 @@ pub(crate) mod tests {
             filter(serde_json::json!({"kinds": [7, 5], "since": 50, "until": 300, "limit": 50})),
         ]);
         assert_eq!(s.filters, 2);
-        assert_eq!((s.kinds.as_deref(), s.kind_count), (Some("7,9,5"), 4));
+        // `7` is in both filters: the list hides one value, so the count shows.
+        assert_eq!((s.kinds.as_deref(), s.kind_count), (Some("7,9,5"), Some(4)));
         assert_eq!((s.since, s.until, s.limit), (Some(50), Some(300), Some(50)));
         assert!(!s.search);
     }
@@ -1486,44 +1490,32 @@ pub(crate) mod tests {
         assert_eq!((s.since, s.until, s.limit), (None, None, None));
     }
 
+    /// Lists stop at [`LIST_CAP`] distinct values, and then carry the exact
+    /// count; cross-filter duplicates count twice. A list that shows every
+    /// value has no count.
     #[test]
-    fn summary_caps_lists_and_counts_every_value() {
+    fn summary_caps_lists_and_counts_only_what_they_hide() {
         let channels: Vec<String> = (0..14).map(|_| Uuid::new_v4().to_string()).collect();
-        let ps: Vec<String> = (0..12).map(|_| pk()).collect();
-        let s = FilterSummary::new(&[filter(serde_json::json!({
-            "#h": channels, "#p": ps, "authors": [PK_A], "ids": [PK_A]
-        }))]);
-        assert_eq!(s.channel_count, 14);
-        assert_eq!(s.channel_ids.unwrap().split(',').count(), LIST_CAP);
-        assert_eq!(s.p_count, 12);
-        assert_eq!(s.p_tags.unwrap().split(',').count(), LIST_CAP);
-        assert_eq!(
-            (s.authors.as_deref(), s.author_count, s.ids),
-            (Some(PK_A), 1, 1)
-        );
-    }
-
-    #[test]
-    fn summary_of_long_lists_lists_ten_distinct_and_sums_counts() {
         let authors: Vec<String> = (0..5_000).map(|_| pk()).collect();
-        let shared = authors[0].clone();
-        let s = FilterSummary::new(&[
-            filter(serde_json::json!({"authors": authors})),
-            filter(serde_json::json!({"authors": [shared]})),
-        ]);
-        // Cross-filter duplicates count twice.
-        assert_eq!(s.author_count, 5_001);
-        let listed: Vec<&str> = s.authors.as_deref().unwrap().split(',').collect();
-        assert_eq!(listed.len(), LIST_CAP);
-        assert_eq!(listed.iter().collect::<BTreeSet<_>>().len(), LIST_CAP);
-    }
-
-    #[test]
-    fn summary_caps_kinds_like_the_identifier_lists() {
         let kinds: Vec<u16> = (0..=u16::MAX).collect();
-        let s = FilterSummary::new(&[filter(serde_json::json!({"kinds": kinds}))]);
-        assert_eq!(s.kinds.unwrap().split(',').count(), LIST_CAP);
-        assert_eq!(s.kind_count, 65_536);
+        let s = FilterSummary::new(&[
+            filter(serde_json::json!({
+                "#h": channels, "authors": authors, "kinds": kinds
+            })),
+            filter(serde_json::json!({"#h": [channels[0]], "authors": [authors[0]], "kinds": [1]})),
+        ]);
+        assert_eq!(s.channel_count, Some(15));
+        assert_eq!(s.author_count, Some(5_001));
+        assert_eq!(s.kind_count, Some(65_537));
+        for list in [&s.channel_ids, &s.authors, &s.kinds] {
+            let listed: BTreeSet<&str> = list.as_deref().unwrap().split(',').collect();
+            assert_eq!(listed.len(), LIST_CAP);
+        }
+        let s = FilterSummary::new(&[filter(serde_json::json!({"#p": [PK_A], "ids": [PK_A]}))]);
+        assert_eq!(
+            (s.p_tags.as_deref(), s.p_count, s.ids),
+            (Some(PK_A), None, 1)
+        );
     }
 
     #[test]
@@ -1540,7 +1532,7 @@ pub(crate) mod tests {
         assert_eq!(s.p_tags.as_deref(), Some("*"));
         assert_eq!(
             (s.kind_count, s.author_count, s.channel_count, s.p_count),
-            (1, 1, 1, 1)
+            (Some(1), Some(1), Some(1), Some(1))
         );
     }
 
@@ -1599,7 +1591,7 @@ pub(crate) mod tests {
             assert_eq!(line["level"], "WARN", "{line}");
             assert_eq!(line["filters"], 1, "{line}");
             assert_eq!(line["kinds"], "9", "{line}");
-            assert_eq!(line["channel_count"], 1, "{line}");
+            assert_eq!(line["channel_ids"], Uuid::nil().to_string(), "{line}");
             assert_eq!(line["since"], 10, "{line}");
             assert_eq!(line["search"], true, "{line}");
         }
@@ -1628,7 +1620,10 @@ pub(crate) mod tests {
             assert_eq!(line["level"], "WARN", "{line}");
             assert_eq!(line["filters"], 1, "{line}");
             assert_eq!(line["kinds"], "9", "{line}");
-            assert_eq!(line["channel_count"], 1, "{line}");
+            assert!(
+                line["channel_ids"].is_string() && line.get("channel_count").is_none(),
+                "{line}"
+            );
             assert_eq!(line["since"], 10, "{line}");
             assert_eq!(line["search"], true, "{line}");
         }
@@ -1676,8 +1671,8 @@ pub(crate) mod tests {
         let s = FilterSummary::new(&[filter(serde_json::json!({
             "#h": ["secret plans for tuesday"], "#p": ["not a pubkey"]
         }))]);
-        assert_eq!((s.channel_ids, s.channel_count), (None, 1));
-        assert_eq!((s.p_tags, s.p_count), (None, 1));
+        assert_eq!((s.channel_ids, s.channel_count), (None, Some(1)));
+        assert_eq!((s.p_tags, s.p_count), (None, Some(1)));
     }
 
     #[test]

@@ -601,8 +601,10 @@ impl ClassifyResponse for RelayResponseClassifier {
     }
 }
 
+/// ERROR level, so the span is on whenever an access line is: those lines
+/// take the request method from its `http.request.method`.
 fn make_http_span(request: &Request<Body>) -> tracing::Span {
-    tracing::info_span!(
+    tracing::error_span!(
         target: "buzz_relay",
         "http.request",
         otel.kind = "server",
