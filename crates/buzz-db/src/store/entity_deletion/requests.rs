@@ -15,7 +15,7 @@ pub struct EntityRequest {
     pub id: Uuid,
     /// Currently always `user`.
     pub entity_type: String,
-    /// Synthetic `demo:` label, not a resolved account identity.
+    /// Canonical hex public key or a synthetic `demo:` label.
     pub target: String,
     /// Intake, approval, execution (`running`/`retry_wait`), or `completed`.
     pub status: String,
@@ -27,7 +27,7 @@ pub struct EntityRequest {
     pub created_at: DateTime<Utc>,
     /// Time of the last change; identical resubmissions do not change it.
     pub updated_at: DateTime<Utc>,
-    /// Saved synthetic communities in processing order; absent on legacy intake.
+    /// Saved communities in processing order; absent on legacy intake.
     pub inventory_manifest: Option<serde_json::Value>,
     /// SHA-256 of the saved inventory.
     pub inventory_digest: Option<String>,

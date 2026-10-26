@@ -1,8 +1,5 @@
-//! Submit a user request and its dummy inventory in one transaction.
-use super::{
-    inventory::{demo_inventory, validate_submission},
-    UserDeletionStore,
-};
+//! Submit a user request and its discovered inventory in one transaction.
+use super::{inventory::validate_submission, UserDeletionStore};
 use crate::entity_deletion::EntityRequest;
 use crate::store::entity_deletion::requests::{inventory_digest, REQUEST_COLUMNS};
 use crate::{DbError, Result};
@@ -11,13 +8,21 @@ impl UserDeletionStore {
     ///
     /// A conflicting operator or reason returns an error without changing the
     /// existing request. Concurrent identical submissions converge on one row.
-    /// Legacy submitted rows acquire their demo inventory on matching resubmission.
+    /// Legacy submitted rows acquire their inventory on matching resubmission.
+    /// Hex and npub inputs normalize to the same target; saved inventories are not refreshed.
     pub async fn submit(
         &self,
         target: &str,
         requested_by: &str,
         reason: Option<&str>,
     ) -> Result<EntityRequest> {
+        let normalized;
+        let target = if target.starts_with("demo:") {
+            target
+        } else {
+            normalized = super::normalize_user_deletion_pubkey(target)?;
+            &normalized
+        };
         validate_submission(target, requested_by, reason)?;
         let mut tx = self.pool.begin().await?;
         sqlx::query(
@@ -43,7 +48,12 @@ impl UserDeletionStore {
             )));
         }
         if request.status == "submitted" {
-            let inventory = demo_inventory(target);
+            let subject = if target.starts_with("demo:") {
+                "demo"
+            } else {
+                target
+            };
+            let inventory = super::discovery::generate_inventory_on(&mut tx, subject).await?;
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "UPDATE entity_deletion_requests

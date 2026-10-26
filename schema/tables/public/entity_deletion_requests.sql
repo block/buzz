@@ -1,8 +1,8 @@
--- Operator-global intake for synthetic user-deletion requests.
+-- Operator-global intake for user-deletion requests.
 CREATE TABLE entity_deletion_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     entity_type TEXT NOT NULL DEFAULT 'user' CHECK (entity_type = 'user'),
-    target TEXT NOT NULL CHECK (target ~ '^demo:[a-z0-9][a-z0-9_-]{0,63}$'),
+    target TEXT NOT NULL CHECK (target ~ '^demo:[a-z0-9][a-z0-9_-]{0,63}$' OR target ~ '^[0-9a-f]{64}$'),
     status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted', 'inventoried', 'approved', 'running', 'retry_wait', 'completed')),
     requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) BETWEEN 1 AND 256),
     reason TEXT CHECK (octet_length(reason) <= 4096),

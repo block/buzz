@@ -1,4 +1,4 @@
-//! User target validation and synthetic inventory generation.
+//! User target validation and saved inventory validation.
 use crate::entity_deletion::EntityRequest;
 use crate::store::entity_deletion::requests::validate_operator;
 use crate::{DbError, Result};
@@ -14,16 +14,19 @@ pub(super) fn validate_submission(
     requested_by: &str,
     reason: Option<&str>,
 ) -> Result<()> {
-    let slug = target.strip_prefix("demo:").unwrap_or_default();
-    if slug.is_empty()
-        || slug.len() > 64
-        || !slug.as_bytes()[0].is_ascii_alphanumeric()
-        || !slug
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-    {
-        return Err(DbError::DeletionSafety(
-            "target must be demo:<1..64 lowercase letters, digits, underscores or hyphens>".into(),
+    let valid_target = if let Some(slug) = target.strip_prefix("demo:") {
+        !slug.is_empty()
+            && slug.len() <= 64
+            && slug.as_bytes()[0].is_ascii_alphanumeric()
+            && slug
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    } else {
+        super::normalize_user_deletion_pubkey(target).is_ok_and(|key| key == target)
+    };
+    if !valid_target {
+        return Err(invalid(
+            "target must be a demo:<slug> label or a normalized hex public key",
         ));
     }
     validate_operator(requested_by)?;
@@ -33,22 +36,18 @@ pub(super) fn validate_submission(
     Ok(())
 }
 
-pub(super) fn demo_inventory(target: &str) -> serde_json::Value {
+pub(super) fn demo_inventory() -> serde_json::Value {
     serde_json::json!({
-        "version": 1,
-        "target": target,
         "communities": [
             {
                 "community_id": "00000000-0000-0000-0000-00000000000b",
                 "label": "demo:community-b",
-                "relationship": "participant",
-                "action": "delete_subject_data"
+                "relationship": "participant"
             },
             {
                 "community_id": "00000000-0000-0000-0000-00000000000c",
                 "label": "demo:community-c",
-                "relationship": "former_participant",
-                "action": "delete_subject_data"
+                "relationship": "former_participant"
             }
         ]
     })
@@ -75,7 +74,9 @@ impl UserDeletionInventory {
             .inventory_manifest
             .as_ref()
             .ok_or_else(|| invalid("missing inventory"))?;
-        if value["version"] != 1 || value["target"] != request.target {
+        // Preserve old manifests and their exact saved handler inputs on resume.
+        let legacy = value.get("version").is_some() || value.get("target").is_some();
+        if legacy && (value["version"] != 1 || value["target"] != request.target) {
             return Err(invalid("unsupported inventory version or target"));
         }
         let rows = value["communities"]
@@ -92,7 +93,8 @@ impl UserDeletionInventory {
                 .and_then(|s| Uuid::parse_str(s).ok())
                 .ok_or_else(|| invalid("invalid inventory community id"))?;
             if !seen.insert(id)
-                || row["action"] != "delete_subject_data"
+                || (legacy && row["action"] != "delete_subject_data")
+                || (!legacy && row.get("action").is_some())
                 || !matches!(
                     row["relationship"].as_str(),
                     Some("participant" | "former_participant")
