@@ -11,6 +11,9 @@ const _communityCenteredAvatarSize = _communityGridAvatarSize * 1.5;
 // Readiness follows the data that determines the landing page's layout. Live
 // messages continue to sync normally after this first usable snapshot. The
 // header's own profile avatar hydrates independently and never gates landing.
+// Cached destinations use local layout/read preferences immediately. Remote
+// changes may reorder the list or update badges after reveal; offline landing
+// must not wait for those relay reads.
 final _communityContentReadyProvider = Provider.autoDispose<AsyncValue<bool>>((
   ref,
 ) {

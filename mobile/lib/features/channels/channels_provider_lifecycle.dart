@@ -177,10 +177,13 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     );
   }
 
-  Future<void> _refreshInBackground() async {
-    if (_backgroundRefreshInFlight ||
-        _lifecycleRef.read(relaySessionProvider).status !=
-            SessionStatus.connected) {
+  Future<void> _refreshInBackground({bool queueIfBusy = false}) async {
+    if (_lifecycleRef.read(relaySessionProvider).status !=
+        SessionStatus.connected) {
+      return;
+    }
+    if (_backgroundRefreshInFlight) {
+      if (queueIfBusy) _backgroundRefreshQueued = true;
       return;
     }
     final generation = _buildGeneration;
@@ -192,7 +195,13 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
         await _backstopRefresh();
       }
     } finally {
-      if (generation == _buildGeneration) _backgroundRefreshInFlight = false;
+      if (generation == _buildGeneration) {
+        _backgroundRefreshInFlight = false;
+        if (_backgroundRefreshQueued) {
+          _backgroundRefreshQueued = false;
+          unawaited(_refreshInBackground());
+        }
+      }
     }
   }
 

@@ -58,9 +58,9 @@ class ChannelListSnapshotStorage {
   /// The scope key. `wss://`/`ws://` origins fold to `https://`/`http://`
   /// like `RelayConfig.baseUrl`, so both onboarding paths share a snapshot.
   static String key(String pubkey, String relayUrl) {
-    final relay = RelayConfig(
-      baseUrl: normalizeCommunityRelayUrl(relayUrl),
-    ).baseUrl;
+    final relay = normalizeCommunityRelayUrl(
+      RelayConfig(baseUrl: normalizeCommunityRelayUrl(relayUrl)).baseUrl,
+    );
     return '$_keyPrefix:${pubkey.toLowerCase()}:${Uri.encodeComponent(relay)}';
   }
 
@@ -152,16 +152,15 @@ class ChannelListSnapshotStorage {
   /// remain on disk for retry at the next startup or community mutation.
   Future<void> removeOrphans(Set<String> retainedKeys) async {
     final keys = {..._prefs.getKeys(), ..._epochs.keys};
-    for (final key in keys) {
-      if (!key.startsWith('$_keyPrefix:') || retainedKeys.contains(key)) {
-        continue;
-      }
-      try {
-        await _removeKey(key);
-      } catch (error) {
-        debugPrint('[ChannelListSnapshotStorage] cleanup failed: $error');
-      }
-    }
+    // Start every deletion before yielding: later community additions must not
+    // have a new writer retired by an older cleanup's delayed next iteration.
+    await Future.wait([
+      for (final key in keys)
+        if (key.startsWith('$_keyPrefix:') && !retainedKeys.contains(key))
+          _removeKey(key).catchError((Object error) {
+            debugPrint('[ChannelListSnapshotStorage] cleanup failed: $error');
+          }),
+    ]);
   }
 
   Future<void> _removeKey(String key) async {

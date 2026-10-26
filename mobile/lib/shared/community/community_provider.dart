@@ -250,7 +250,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   Future<List<Community>> build() async {
     final storage = ref.read(communityStorageProvider);
     final communities = await storage.loadAll();
-    await _removeOrphanChannelListSnapshots(communities);
+    unawaited(_removeOrphanChannelListSnapshots(communities));
     await syncCommunitySnapshot(ref, communities);
     return communities;
   }
@@ -276,7 +276,10 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         pubkey: community.pubkey,
         nsec: community.nsec,
       );
-      await _removeChannelListSnapshot(existing);
+      if (_channelSnapshotPubkey(existing)?.toLowerCase() !=
+          _channelSnapshotPubkey(updated)?.toLowerCase()) {
+        await _removeChannelListSnapshot(existing);
+      }
       await storage.save(updated);
       final updatedList = [...current];
       updatedList[existingIndex] = updated;

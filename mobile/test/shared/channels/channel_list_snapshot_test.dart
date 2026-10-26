@@ -1,4 +1,5 @@
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/shared/relay/relay_provider.dart' show RelayConfig;
 import 'package:buzz/shared/channels/channel_list_snapshot.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -77,6 +78,27 @@ void main() {
     );
     expect(storage.read('other', _relay), isNull);
     expect(storage.read(_pubkey, 'https://other.example'), isNull);
+  });
+
+  test('escaped relay paths have idempotent writer and cleanup keys', () async {
+    for (final relay in [
+      'wss://relay.example/a%2Fb',
+      'wss://relay.example/a%2fb/',
+      'wss://RELAY.example:443/a%20b',
+    ]) {
+      final canonical = RelayConfig(baseUrl: relay).baseUrl;
+      expect(
+        ChannelListSnapshotStorage.key(_pubkey, relay),
+        ChannelListSnapshotStorage.key(_pubkey, canonical),
+      );
+      final token = storage.capture(_pubkey, canonical);
+      await storage.write(token, _snapshot());
+      await storage.removeOrphans({
+        ChannelListSnapshotStorage.key(_pubkey, relay),
+      });
+      expect(storage.read(_pubkey, canonical), isNotNull);
+      expect(await storage.write(token, _snapshot()), isTrue);
+    }
   });
 
   test(

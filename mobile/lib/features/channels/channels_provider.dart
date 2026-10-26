@@ -69,6 +69,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   bool _hasCachedSnapshot = false;
   bool _needsSnapshotRevalidation = false;
   bool _backgroundRefreshInFlight = false;
+  bool _backgroundRefreshQueued = false;
   int _buildGeneration = 0;
   void Function(List<Channel>, Set<String>)? _saveSnapshot;
   String? _memberSnapshotRelayBaseUrl;
@@ -144,6 +145,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Future<List<Channel>> build() async {
     final buildGeneration = ++_buildGeneration;
     _backgroundRefreshInFlight = false;
+    _backgroundRefreshQueued = false;
     _refreshCoordinator.retireInFlight();
     final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
     final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
@@ -182,7 +184,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         // A new authenticated connection can change relay admission policy.
         // Ordinary refreshes must not retry an unchanged terminal rejection.
         _terminallyClosedLiveChunks.clear();
-        unawaited(_refreshInBackground());
+        unawaited(_refreshInBackground(queueIfBusy: true));
       }
     });
 
@@ -218,8 +220,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
 
     if (sessionState.status != SessionStatus.connected) {
-      // Preserve cached channels only for a reconnect within the same scope.
-      if (_hasLoaded) return state.value ?? const [];
       await connected.future;
     }
     if (!ref.mounted || buildGeneration != _buildGeneration) {
@@ -509,7 +509,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         }
       }
     }
-    if (fetchLastMessage) _needsSnapshotRevalidation = false;
+    if (fetchLastMessage) _needsSnapshotRevalidation = latestEvents == null;
     saveSnapshot?.call(channels, _hiddenDmIds);
     return channels;
   }
@@ -945,22 +945,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Future<void> _backstopRefresh() async {
     try {
       final sessionState = ref.read(relaySessionProvider);
-      final prevChannels = state.value ?? const [];
-      final prevLastMessage = {
-        for (final c in prevChannels)
-          if (c.lastMessageAt != null) c.id: c.lastMessageAt,
-      };
       final channels = await _fetch(
         subscribeLive: sessionState.status == SessionStatus.connected,
         fetchLastMessage: false,
         fetchDirectory: false,
       );
-      for (var i = 0; i < channels.length; i++) {
-        final prev = prevLastMessage[channels[i].id];
-        if (channels[i].lastMessageAt == null && prev != null) {
-          channels[i] = channels[i].copyWith(lastMessageAt: prev);
-        }
-      }
       state = AsyncData(channels);
     } on _StaleChannelRefresh {
       return;
@@ -969,9 +958,34 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
-  /// Refreshes memberships and, when [fetchDirectory], the open directory.
-  /// Invite starter recovery opts in to converge on another identity's
-  /// starters instead of attempting duplicate creation from memberships.
+  /// Fetches current memberships for decisions that cannot use cached data.
+  ///
+  /// Unlike background refresh, failures (including disconnection or a retired
+  /// request) propagate. Cached UI state stays visible while the request runs.
+  Future<List<Channel>> fetchFresh({bool fetchDirectory = false}) async {
+    final generation = _buildGeneration;
+    try {
+      await future;
+    } catch (_) {
+      // A failed initial list must not prevent an explicit network retry.
+    }
+    if (!ref.mounted || generation != _buildGeneration) {
+      throw const _StaleChannelRefresh();
+    }
+    if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
+      throw StateError('Connect to the community before refreshing channels.');
+    }
+    final channels = await _fetch(
+      subscribeLive: true,
+      fetchDirectory: fetchDirectory,
+    );
+    state = AsyncData(channels);
+    return channels;
+  }
+
+  /// Best-effort refresh of memberships and, optionally, the open directory.
+  /// Keeps usable UI state on failure. Decisions requiring fresh membership
+  /// must use [fetchFresh] to receive the fetch error instead.
   Future<void> refresh({bool fetchDirectory = false}) async {
     final sessionState = ref.read(relaySessionProvider);
     // Don't attempt to fetch when the session isn't connected — fetchHistory
@@ -981,11 +995,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // when the session transitions to connected.
     if (sessionState.status != SessionStatus.connected) return;
     try {
-      final channels = await _fetch(
-        subscribeLive: true,
-        fetchDirectory: fetchDirectory,
-      );
-      state = AsyncData(channels);
+      await fetchFresh(fetchDirectory: fetchDirectory);
     } on _StaleChannelRefresh {
       return;
     } catch (error, stackTrace) {

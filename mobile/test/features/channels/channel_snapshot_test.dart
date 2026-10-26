@@ -13,6 +13,114 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('fresh read retries a failed initial list', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final session = _SnapshotSession(['alpha'])..fail = true;
+    final container = _container(prefs, session);
+    addTearDown(container.dispose);
+    await expectLater(
+      container.read(channelsProvider.future),
+      throwsStateError,
+    );
+    session.fail = false;
+    expect(
+      (await container.read(channelsProvider.notifier).fetchFresh()).single.id,
+      'alpha',
+    );
+    expect(container.read(channelsProvider).requireValue.single.id, 'alpha');
+  });
+
+  test(
+    'fresh membership reads propagate failures while retaining cached UI',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final session = _SnapshotSession(['alpha']);
+      final container = _container(prefs, session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _settle();
+      session.ids = ['alpha', 'me-chat'];
+      final notifier = container.read(channelsProvider.notifier);
+      final fresh = await notifier.fetchFresh();
+      expect(fresh.map((c) => c.id), ['alpha', 'me-chat']);
+      session.fail = true;
+      await expectLater(
+        notifier.fetchFresh(fetchDirectory: true),
+        throwsStateError,
+      );
+      expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
+        'alpha',
+        'me-chat',
+      ]);
+      session.disconnect();
+      await expectLater(notifier.fetchFresh(), throwsStateError);
+      expect(container.read(channelsProvider).hasError, isFalse);
+    },
+  );
+
+  test('history deadline keeps full snapshot revalidation pending', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final storage = ChannelListSnapshotStorage(prefs);
+    await storage.write(
+      storage.capture('me', 'https://a.example'),
+      ChannelListSnapshot(
+        channels: [_channel('alpha').toJson()],
+        hiddenDmIds: {},
+      ),
+    );
+    fakeAsync((clock) {
+      final session = _SnapshotSession(['alpha'])..latestTimeout = true;
+      final container = _container(prefs, session);
+      container.listen(channelsProvider, (_, _) {});
+      clock.flushMicrotasks();
+      expect(container.read(channelsProvider).requireValue.single.id, 'alpha');
+      expect(session.latestReads, 1);
+      session.latestTimeout = false;
+      clock.elapse(const Duration(minutes: 1));
+      clock.flushMicrotasks();
+      expect(session.latestReads, 2);
+      clock.elapse(const Duration(minutes: 1));
+      clock.flushMicrotasks();
+      expect(session.latestReads, 2);
+      container.dispose();
+      expect(clock.pendingTimers, isEmpty);
+    });
+  });
+
+  test(
+    'reconnect during background refresh queues one non-overlapping retry',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      fakeAsync((clock) {
+        final session = _SnapshotSession(['alpha']);
+        final container = _container(prefs, session);
+        container.listen(channelsProvider, (_, _) {});
+        clock.flushMicrotasks();
+        final latestReads = session.latestReads;
+        final gate = session.gate = Completer<void>();
+        clock.elapse(const Duration(minutes: 1));
+        clock.flushMicrotasks();
+        final parkedRequests = session.membershipRequests;
+        session.disconnect();
+        session.connect();
+        clock.flushMicrotasks();
+        expect(session.membershipRequests, parkedRequests);
+        session.gate = null;
+        gate.complete();
+        clock.flushMicrotasks();
+        expect(session.membershipRequests, parkedRequests + 1);
+        expect(session.latestReads, latestReads);
+        container.dispose();
+        clock.elapse(const Duration(minutes: 2));
+        expect(clock.pendingTimers, isEmpty);
+      });
+    },
+  );
+
   test('same-scope rebuild keeps live timestamps ahead of disk', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -301,6 +409,7 @@ class _SnapshotSession extends RelaySessionNotifier {
   List<String> ids;
   final bool connected;
   bool fail = false;
+  bool latestTimeout = false;
   Completer<void>? gate;
   int membershipRequests = 0;
   int latestReads = 0;
@@ -326,7 +435,12 @@ class _SnapshotSession extends RelaySessionNotifier {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    if (filters.any((filter) => filter.limit == 20)) latestReads++;
+    if (filters.any((filter) => filter.limit == 20)) {
+      latestReads++;
+      if (latestTimeout) {
+        throw RelayException(503, '{"error":"query timed out"}');
+      }
+    }
     if (filters.singleOrNull?.kinds.contains(39002) == true) {
       if (filters.single.until != null) return [];
       membershipRequests++;

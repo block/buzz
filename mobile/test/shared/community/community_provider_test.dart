@@ -484,6 +484,38 @@ void main() {
       },
     );
 
+    test('startup does not wait for orphan disk deletes', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = _SnapshotStore();
+      SharedPreferencesStorePlatform.instance = store;
+      final prefs = await SharedPreferences.getInstance();
+      final cache = ChannelListSnapshotStorage(prefs);
+      const snapshot = ChannelListSnapshot(channels: [], hiddenDmIds: {});
+      for (final id in ['orphan-a', 'orphan-b']) {
+        await cache.write(
+          cache.capture(id, 'https://orphan.example'),
+          snapshot,
+        );
+      }
+      final gate = store.removeGate = Completer<void>();
+      container = createContainer(
+        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+      );
+      expect(await container.read(communityListProvider.future), isEmpty);
+      // All old deletions are submitted before new scopes can start writers.
+      expect(store.removeAttempts, 2);
+      final token = cache.capture('orphan-b', 'https://orphan.example');
+      expect(await cache.write(token, snapshot), isTrue);
+      gate.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(await cache.write(token, snapshot), isTrue);
+      expect((await store.getAll()).values, [
+        prefs.getString(
+          ChannelListSnapshotStorage.key('orphan-b', 'https://orphan.example'),
+        ),
+      ]);
+    });
+
     test('startup and credential replacement discard orphan snapshots', () async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
@@ -511,6 +543,9 @@ void main() {
       expect(await cache.write(restoredToken, snapshot), isFalse);
 
       final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+      expect(cache.read(oldKeys.public, community.relayUrl), isNotNull);
+      expect(await cache.write(oldToken, snapshot), isTrue);
       await notifier.addCommunity(community.copyWith(nsec: newKeys.nsec));
       expect(cache.read(oldKeys.public, community.relayUrl), isNull);
       expect(await cache.write(oldToken, snapshot), isFalse);
@@ -884,11 +919,14 @@ class _SnapshotStore extends InMemorySharedPreferencesStore {
   _SnapshotStore() : super.empty();
   String? failure;
   int removeAttempts = 0;
+  Completer<void>? removeGate;
   @override
   Future<bool> remove(String key) async {
     removeAttempts++;
     if (failure == 'false') return false;
     if (failure == 'throw') throw StateError('disk failure');
-    return super.remove(key);
+    final removed = super.remove(key);
+    await removeGate?.future;
+    return removed;
   }
 }
