@@ -100,7 +100,7 @@ use agent_tts_routing::{
 pub use pipeline::check_pipeline_hotstart;
 use pipeline::{
     await_inflight_tts_start, maybe_start_stt_pipeline, maybe_start_tts_pipeline,
-    post_connect_setup, PostConnectOutcome,
+    post_connect_setup, start_huddle_media, PostConnectOutcome,
 };
 use relay_api::{parse_channel_uuid, validate_pubkey_hex, MAX_HUDDLE_AGENTS};
 use roster::fetch_huddle_roster;
@@ -331,7 +331,14 @@ pub async fn start_huddle(
 
             // 7. Hydrate members, download models, start pipelines (incl. audio relay).
             // Audio relay failure is fatal — no point in a huddle without audio.
-            match post_connect_setup(&state, &ephemeral_channel_id, huddle_generation).await {
+            match post_connect_setup(
+                &state,
+                &ephemeral_channel_id,
+                huddle_generation,
+                start_huddle_media,
+            )
+            .await
+            {
                 Ok(PostConnectOutcome::Ready) => {}
                 Ok(PostConnectOutcome::Stale) => {
                     close_huddle_window(&app, &ephemeral_channel_id);
@@ -454,7 +461,14 @@ pub async fn join_huddle(
 
     // Hydrate members, download models, start pipelines (incl. audio relay).
     // Audio relay failure is fatal — no point in a huddle without audio.
-    match post_connect_setup(&state, &ephemeral_channel_id, huddle_generation).await {
+    match post_connect_setup(
+        &state,
+        &ephemeral_channel_id,
+        huddle_generation,
+        start_huddle_media,
+    )
+    .await
+    {
         Ok(PostConnectOutcome::Ready) => {}
         Ok(PostConnectOutcome::Stale) => {
             return Err("huddle join was superseded".to_owned());

@@ -4,6 +4,7 @@
 //! the voice pipelines. Extracted from mod.rs to keep the command layer thin.
 
 use std::{
+    ops::AsyncFnOnce,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -37,6 +38,15 @@ pub(crate) enum PostConnectOutcome {
 /// the huddle is not active or pipelines are already running.
 #[tauri::command]
 pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), String> {
+    pipeline_hotstart(&state, start_ready_pipelines).await
+}
+
+/// Hot-start body. `start_pipelines` starts the voice pipelines whose models
+/// are ready; tests replace it to keep model files and audio out of the run.
+async fn pipeline_hotstart(
+    state: &AppState,
+    start_pipelines: impl AsyncFnOnce(&AppState, Option<&str>) -> Result<(), String>,
+) -> Result<(), String> {
     let (is_active, ephemeral_channel_id, huddle_generation) = {
         let hs = state.huddle()?;
         (
@@ -50,6 +60,40 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
         return Ok(());
     }
 
+    start_pipelines(state, ephemeral_channel_id.as_deref()).await?;
+
+    // Periodically refresh agent membership from the relay.
+    // This catches mid-huddle additions/removals by other participants, keeps
+    // STT p-tags authoritative, and auto-enables transcription when the first
+    // agent appears unless the user has already chosen a transcription state.
+    // Throttled independently from the more frequent hotstart poll.
+    //
+    // NOTE: The frontend ALSO polls agent membership independently via
+    // get_huddle_agent_pubkeys. This is intentional — the two polls have
+    // different failure semantics:
+    //   - Rust (here): preserves stale list on failure (STT p-tags should not
+    //     disappear on a transient network blip).
+    //   - React (HuddleContext.tsx): clears list on failure (TTS authorization
+    //     must fail-closed — never speak from a stale agent list).
+    //
+    // On a complete roster: replace (even with empty — agents may have been
+    // removed). On an incomplete roster (managed-agent records unreadable):
+    // add the role-proven agents and keep stored agents that are still
+    // members. On Err: preserve the existing list (transient failure shouldn't
+    // zero it).
+    if let Some(eph_id) = &ephemeral_channel_id {
+        refresh_huddle_roster(state, eph_id, huddle_generation).await?;
+    }
+
+    Ok(())
+}
+
+/// Start the STT and TTS pipelines whose models are ready, and clear handles
+/// of pipelines whose worker has exited.
+async fn start_ready_pipelines(
+    state: &AppState,
+    ephemeral_channel_id: Option<&str>,
+) -> Result<(), String> {
     // Detect dead pipelines: if the worker thread has exited (init failure or crash),
     // clear the pipeline handle so hot-start can retry on the next cycle.
     {
@@ -85,41 +129,17 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
 
     // Start TTS first so STT can observe its active-playback gate.
     if !has_tts && (tts_ready || models::is_tts_ready()) {
-        if let Err(e) = maybe_start_tts_pipeline(&state).await {
+        if let Err(e) = maybe_start_tts_pipeline(state).await {
             eprintln!("buzz-desktop: TTS hotstart failed: {e}");
         }
     }
     if transcription_enabled && !has_stt && (stt_ready || models::is_stt_ready()) {
-        if let Some(eph_id) = &ephemeral_channel_id {
-            if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
+        if let Some(eph_id) = ephemeral_channel_id {
+            if let Err(e) = maybe_start_stt_pipeline(state, eph_id).await {
                 eprintln!("buzz-desktop: STT hotstart failed: {e}");
             }
         }
     }
-
-    // Periodically refresh agent membership from the relay.
-    // This catches mid-huddle additions/removals by other participants, keeps
-    // STT p-tags authoritative, and auto-enables transcription when the first
-    // agent appears unless the user has already chosen a transcription state.
-    // Throttled independently from the more frequent hotstart poll.
-    //
-    // NOTE: The frontend ALSO polls agent membership independently via
-    // get_huddle_agent_pubkeys. This is intentional — the two polls have
-    // different failure semantics:
-    //   - Rust (here): preserves stale list on failure (STT p-tags should not
-    //     disappear on a transient network blip).
-    //   - React (HuddleContext.tsx): clears list on failure (TTS authorization
-    //     must fail-closed — never speak from a stale agent list).
-    //
-    // On a complete roster: replace (even with empty — agents may have been
-    // removed). On an incomplete roster (managed-agent records unreadable):
-    // add the role-proven agents and keep stored agents that are still
-    // members. On Err: preserve the existing list (transient failure shouldn't
-    // zero it).
-    if let Some(eph_id) = &ephemeral_channel_id {
-        refresh_huddle_roster(&state, eph_id, huddle_generation).await?;
-    }
-
     Ok(())
 }
 
@@ -226,10 +246,14 @@ async fn hydrate_huddle_roster(
     Ok(true)
 }
 
+/// Setup after the Huddle connects: read the roster, then run `start_media`.
+/// Callers pass [`start_huddle_media`]; tests replace it to keep model files
+/// and audio out of the run.
 pub(crate) async fn post_connect_setup(
     state: &AppState,
     ephemeral_channel_id: &str,
     huddle_generation: u64,
+    start_media: impl AsyncFnOnce(&AppState, &str, u64) -> Result<PostConnectOutcome, String>,
 ) -> Result<PostConnectOutcome, String> {
     {
         let hs = state.huddle()?;
@@ -242,6 +266,16 @@ pub(crate) async fn post_connect_setup(
         return Ok(PostConnectOutcome::Stale);
     }
 
+    start_media(state, ephemeral_channel_id, huddle_generation).await
+}
+
+/// Download voice models, connect the audio relay, and start the voice
+/// pipelines. Audio relay failure is an error.
+pub(crate) async fn start_huddle_media(
+    state: &AppState,
+    ephemeral_channel_id: &str,
+    huddle_generation: u64,
+) -> Result<PostConnectOutcome, String> {
     // Prepare voice models. Agent presence may have auto-enabled transcription;
     // explicit user choices remain authoritative.
     if let Some(mgr) = models::global_model_manager() {

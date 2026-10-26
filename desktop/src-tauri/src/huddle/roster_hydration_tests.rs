@@ -1,5 +1,6 @@
-//! Huddle roster hydration through the production relay reads, when the
-//! managed-agent records cannot be read.
+//! Huddle roster hydration through the post-connect and hot-start entrypoints,
+//! with the production relay reads, when the managed-agent records cannot be
+//! read. The voice-model and audio steps are replaced.
 use super::*;
 use axum::{extract::State as AxumState, http::StatusCode, routing::post, Json, Router};
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -95,9 +96,17 @@ async fn post_connect_keeps_bot_agents_when_records_are_unreadable() {
     let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
     let (_relay, state, generation, bot, _member) = huddle().await;
 
-    assert!(hydrate_huddle_roster(&state, CHANNEL, generation)
-        .await
-        .unwrap());
+    let mut media_started = false;
+    let outcome = post_connect_setup(&state, CHANNEL, generation, async |state, _, _| {
+        // Media setup reads the agents, so they must be stored first.
+        assert_eq!(agents(state), std::slice::from_ref(&bot));
+        media_started = true;
+        Ok(PostConnectOutcome::Ready)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(outcome, PostConnectOutcome::Ready));
+    assert!(media_started);
     assert_eq!(agents(&state), [bot]);
     assert_eq!(state.huddle().unwrap().participants.len(), 3);
 
@@ -111,11 +120,11 @@ async fn post_connect_keeps_bot_agents_when_records_are_unreadable() {
 async fn hotstart_refresh_keeps_known_agents_when_records_are_unreadable() {
     let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
     let departed = Keys::generate().public_key().to_hex();
-    let (_relay, state, generation, bot, member) = huddle().await;
+    let (_relay, state, _generation, bot, member) = huddle().await;
     // `member` was proven an agent by an earlier record read.
     *state.huddle().unwrap().agent_pubkeys.lock().unwrap() = vec![member.clone(), departed];
 
-    refresh_huddle_roster(&state, CHANNEL, generation)
+    pipeline_hotstart(&state, async |_, _| Ok(()))
         .await
         .unwrap();
     assert_eq!(agents(&state), [member, bot]);
