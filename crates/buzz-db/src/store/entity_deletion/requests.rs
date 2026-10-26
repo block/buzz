@@ -8,14 +8,14 @@ pub(crate) const REQUEST_COLUMNS: &str =
     "id, entity_type, target, status, requested_by, reason, created_at,
      updated_at, inventory_manifest, inventory_digest";
 
-/// A demonstration request; approval authorizes only the synthetic workflow.
+/// A persisted request whose identity and workflow are selected by intake.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct EntityRequest {
     /// Stable request identifier.
     pub id: Uuid,
-    /// Currently always `user`.
+    /// Workflow discriminator supplied by intake.
     pub entity_type: String,
-    /// Identity identifier; current intake saves a canonical public key or `demo:` label.
+    /// Opaque identity identifier supplied by intake.
     pub target: String,
     /// Intake, approval, execution (`running`/`retry_wait`), or `completed`.
     pub status: String,

@@ -50,7 +50,7 @@ pub enum Command {
         #[arg(long)]
         next_step: bool,
         /// Inject a retryable failure when this dummy stage is reached.
-        #[arg(long, value_parser = ["gate_user", "purge_db", "purge_agents"])]
+        #[arg(long, value_parser = workflow::parse_stage)]
         fail_stage: Option<String>,
         /// Delay each dummy action for inspection and shutdown testing (up to 60s).
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=60_000))]

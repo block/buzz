@@ -332,3 +332,56 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         .bind(community).bind(&key).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 1);
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn inventory_approval_and_resume_use_saved_account_identity_without_resolution() {
+    let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap();
+    let pool = PgPool::connect(&url).await.unwrap();
+    let saved = workflow_cli(
+        &url,
+        &[
+            "submit",
+            "--target",
+            "demo:resolved-account",
+            "--requested-by",
+            "operator-a",
+        ],
+        true,
+    )
+    .await;
+    let id = saved["id"].as_str().unwrap();
+    // Model the output of a future account resolver. This is not CLI support
+    // for resolving account IDs: the inventory is already saved and complete.
+    let account = "builderlab:account-123";
+    sqlx::query("UPDATE entity_deletion_requests SET target = $2 WHERE id = $1")
+        .bind(Uuid::parse_str(id).unwrap())
+        .bind(account)
+        .execute(&pool)
+        .await
+        .unwrap();
+    workflow_cli(
+        &url,
+        &[
+            "approve",
+            id,
+            "--approved-by",
+            "operator-b",
+            "--inventory-digest",
+            saved["inventory_digest"].as_str().unwrap(),
+        ],
+        true,
+    )
+    .await;
+    let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
+    let first_stage = stepped["stage_history"][0]["id"].clone();
+    let completed = workflow_cli(&url, &["run", id], true).await;
+    assert_eq!(completed["target"], account);
+    assert_eq!(completed["inventory_manifest"], saved["inventory_manifest"]);
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["stage_history"][0]["id"], first_stage);
+    for stage in completed["stage_history"].as_array().unwrap() {
+        assert_eq!(stage["metadata_json"]["inputs"]["target"], account);
+        assert_eq!(stage["status"], "completed");
+    }
+}

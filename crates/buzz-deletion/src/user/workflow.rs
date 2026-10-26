@@ -63,6 +63,13 @@ pub(super) fn rule(name: &str) -> Result<&'static Rule> {
         .ok_or_else(|| invalid("unknown workflow stage"))
 }
 
+// The CLI derives stage validation from this workflow, without a second list.
+pub(super) fn parse_stage(name: &str) -> std::result::Result<String, String> {
+    rule(name)
+        .map(|rule| rule.name.to_owned())
+        .map_err(|error| error.to_string())
+}
+
 pub(super) fn decision(stage: &EntityStage) -> Result<Decision> {
     let rule = rule(&stage.stage)?;
     let result = stage
@@ -209,5 +216,18 @@ impl Progress {
                 Ok(None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_options_follow_the_workflow_definition() {
+        for rule in RULES {
+            assert_eq!(parse_stage(rule.name).unwrap(), rule.name);
+        }
+        assert!(parse_stage("unregistered_stage").is_err());
     }
 }

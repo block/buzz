@@ -23,6 +23,40 @@ fn invalid_pubkey() -> DbError {
     DbError::DeletionSafety("expected a 64-character hex public key or an npub".into())
 }
 
+// Identity resolution belongs to intake, never approval or workflow recovery.
+pub(super) fn normalize_target(input: &str) -> Result<String> {
+    if let Some(slug) = input.strip_prefix("demo:") {
+        if slug.is_empty()
+            || slug.len() > 64
+            || !slug.as_bytes()[0].is_ascii_alphanumeric()
+            || !slug
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        {
+            return Err(DbError::DeletionSafety("invalid demo target label".into()));
+        }
+        return Ok(input.to_owned());
+    }
+    normalize_user_deletion_pubkey(input)
+}
+
+fn demo_inventory() -> serde_json::Value {
+    serde_json::json!({
+        "communities": [
+            {
+                "community_id": "00000000-0000-0000-0000-00000000000b",
+                "label": "demo:community-b",
+                "relationship": "participant"
+            },
+            {
+                "community_id": "00000000-0000-0000-0000-00000000000c",
+                "label": "demo:community-c",
+                "relationship": "former_participant"
+            }
+        ]
+    })
+}
+
 #[derive(sqlx::FromRow)]
 struct Membership {
     community_id: Uuid,
@@ -50,9 +84,12 @@ pub(super) async fn generate_inventory_on(
     pubkey: &str,
 ) -> Result<Value> {
     if pubkey == "demo" {
-        return Ok(super::inventory::demo_inventory());
+        return Ok(demo_inventory());
     }
-    let pubkey = normalize_user_deletion_pubkey(pubkey)?;
+    let pubkey = normalize_target(pubkey)?;
+    if pubkey.starts_with("demo:") {
+        return Ok(demo_inventory());
+    }
     sqlx::query("SET LOCAL statement_timeout = '30s'")
         .execute(&mut *conn)
         .await?;

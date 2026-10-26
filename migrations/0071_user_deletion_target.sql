@@ -2,8 +2,10 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
 -- Keep identity formats in the application, so public keys and account IDs
--- can share this target field. Existing demo requests remain valid.
+-- can share this target field. Workflow dispatch validates entity types.
+-- Existing demo requests remain valid.
 ALTER TABLE entity_deletion_requests
+    DROP CONSTRAINT entity_deletion_requests_entity_type_check,
     DROP CONSTRAINT entity_deletion_requests_target_check,
     ADD CONSTRAINT entity_deletion_requests_target_check
         CHECK (octet_length(target) BETWEEN 1 AND 256 AND target = btrim(target)) NOT VALID;

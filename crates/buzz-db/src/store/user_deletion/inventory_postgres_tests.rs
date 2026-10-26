@@ -97,6 +97,11 @@ async fn migration_schema_user_target_constraint_matches_desired_state() {
     assert_eq!(definitions.len(), 2);
     assert_eq!(definitions[0], definitions[1]);
     assert!(definitions[0].1);
+    let restricted_types: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_constraint WHERE conname = 'entity_deletion_requests_entity_type_check'",
+    ).fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(restricted_types, 0);
+
     tx.rollback().await.unwrap();
     let users = Db::from_pool(pool.clone()).user_deletion_store();
     users

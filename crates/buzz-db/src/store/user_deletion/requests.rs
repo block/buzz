@@ -1,7 +1,9 @@
 //! Submit a user request and its discovered inventory in one transaction.
-use super::{inventory::validate_submission, UserDeletionStore};
+use super::{discovery::normalize_target, UserDeletionStore};
 use crate::entity_deletion::EntityRequest;
-use crate::store::entity_deletion::requests::{inventory_digest, REQUEST_COLUMNS};
+use crate::store::entity_deletion::requests::{
+    inventory_digest, validate_operator, REQUEST_COLUMNS,
+};
 use crate::{DbError, Result};
 impl UserDeletionStore {
     /// Save a request or return an identical previous submission.
@@ -16,20 +18,17 @@ impl UserDeletionStore {
         requested_by: &str,
         reason: Option<&str>,
     ) -> Result<EntityRequest> {
-        let normalized;
-        let target = if target.starts_with("demo:") {
-            target
-        } else {
-            normalized = super::normalize_user_deletion_pubkey(target)?;
-            &normalized
-        };
-        validate_submission(target, requested_by, reason)?;
+        let target = normalize_target(target)?;
+        validate_operator(requested_by)?;
+        if reason.is_some_and(|r| r.len() > 4096) {
+            return Err(DbError::DeletionSafety("reason exceeds 4096 bytes".into()));
+        }
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO entity_deletion_requests (target, requested_by, reason)
              VALUES ($1, $2, $3) ON CONFLICT (entity_type, target) DO NOTHING",
         )
-        .bind(target)
+        .bind(&target)
         .bind(requested_by)
         .bind(reason)
         .execute(&mut *tx)
@@ -38,7 +37,7 @@ impl UserDeletionStore {
             "SELECT {REQUEST_COLUMNS}
              FROM entity_deletion_requests WHERE entity_type = 'user' AND target = $1 FOR UPDATE",
         )))
-        .bind(target)
+        .bind(&target)
         .fetch_one(&mut *tx)
         .await?;
         if request.requested_by != requested_by || request.reason.as_deref() != reason {
@@ -48,12 +47,7 @@ impl UserDeletionStore {
             )));
         }
         if request.status == "submitted" {
-            let subject = if target.starts_with("demo:") {
-                "demo"
-            } else {
-                target
-            };
-            let inventory = super::discovery::generate_inventory_on(&mut tx, subject).await?;
+            let inventory = super::discovery::generate_inventory_on(&mut tx, &target).await?;
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "UPDATE entity_deletion_requests

@@ -6,12 +6,15 @@ async fn stage_storage_accepts_caller_policy_and_rolls_back_invalid_decisions() 
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
-    let db = Db::from_pool(pool);
+    let db = Db::from_pool(pool.clone());
     let request = db
         .user_deletion_store()
         .submit("demo:generic-storage", "operator", None)
         .await
         .unwrap();
+    // Shared persistence can execute another caller's entity type and stage policy.
+    sqlx::query("UPDATE entity_deletion_requests SET entity_type = 'repository', target = 'repository-123' WHERE id = $1")
+        .bind(request.id).execute(&pool).await.unwrap();
     let store = db.entity_deletion_store();
     store
         .approve(
@@ -38,6 +41,7 @@ async fn stage_storage_accepts_caller_policy_and_rolls_back_invalid_decisions() 
     let NextStage::Stage(row) = store
         .transition_stage(&lease, None, |request, history| {
             assert!(history.is_empty());
+            assert_eq!(request.entity_type, "repository");
             assert_eq!(request.status, "approved");
             Ok(StageTransition::Initialize(NewEntityStage {
                 stage: "arbitrary_policy_stage".into(),

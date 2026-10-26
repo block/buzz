@@ -214,6 +214,8 @@ check to accept a nonempty identifier of up to 256 bytes with no surrounding
 spaces, then validate in a separate transaction. Identity formats belong in the
 application, so this column can also store account IDs when account resolution
 is implemented. Today the CLI resolves only demo and hex/npub inputs.
+Migration 0071 also removes the user-only entity-type check. Workflow-specific
+commands validate the entity type before executing a request.
 Both use a 5-second lock timeout and 30-second statement timeout. The desired-state
 schema has the same final constraint. No data backfill, trigger, function, or
 foreign key is added. Existing demo targets remain valid. If you applied an
@@ -241,3 +243,20 @@ completion for demo and npub, with hex resubmission; unchanged membership rows;
 SELECT-only discovery; channel-only participants; owner precedence; hidden and
 removed memberships; lifecycle inclusion; query errors; size cap; and migration
 constraint parity. Existing worker tests cover failure, retries and lease takeover.
+
+## Adding real stages without changing the executor
+
+The user workflow's stage rules live in `crates/buzz-deletion/src/user/workflow.rs`;
+handler dispatch lives in `user/handlers.rs`. Add a rule and its handler there,
+then connect the predecessor's decision to it. CLI stage-name validation reads
+that same rule list. Unknown stages fail explicitly. No stage-name constraint
+exists in SQL, and adding a stage does not require changing the worker loop.
+
+Input identity parsing and demo fixture selection live in the inventory generator
+in `buzz-db/src/store/user_deletion/discovery.rs`. Approval and recovery validate
+the saved inventory and workflow history, without reparsing the target identifier.
+The shared request store has no demo or public-key formatting rules. An account-ID
+resolver remains future work; accepting saved account-shaped identifiers does not
+implement that resolver. Dummy side effects remain confined to the user handlers.
+
+Permanent uniqueness on `(entity_type, target)` is unchanged by this cleanup.

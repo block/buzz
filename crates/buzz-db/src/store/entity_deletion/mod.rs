@@ -5,7 +5,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Writer-database access to synthetic deletion requests.
+/// Writer-database access to deletion workflow requests.
 #[derive(Clone)]
 pub struct EntityDeletionStore {
     pool: PgPool,

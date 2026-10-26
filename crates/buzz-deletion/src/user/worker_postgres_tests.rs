@@ -446,3 +446,46 @@ async fn execute_without_transition(store: &EntityDeletionStore, id: Uuid, optio
         .unwrap();
     store.release(&lease).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn user_command_rejects_other_entity_types_without_claiming_or_executing() {
+    let (store, id, pool) = fixture().await;
+    sqlx::query("UPDATE entity_deletion_requests SET entity_type = 'repository' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = serde_json::to_value(store.inspect(id).await.unwrap()).unwrap();
+    let error = run(&store, id, "worker", &options(), &CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("does not support entity type repository"));
+    assert_eq!(
+        serde_json::to_value(store.inspect(id).await.unwrap()).unwrap(),
+        before
+    );
+    let saved = store.get(id).await.unwrap();
+    assert!(Db::from_pool(pool.clone())
+        .user_deletion_store()
+        .approve(
+            id,
+            "another-approver",
+            saved.inventory_digest.as_deref().unwrap()
+        )
+        .await
+        .is_err());
+    // Completed requests must not bypass workflow dispatch validation either.
+    sqlx::query("UPDATE entity_deletion_requests SET status = 'completed' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        run(&store, id, "worker", &options(), &CancellationToken::new())
+            .await
+            .is_err()
+    );
+}
