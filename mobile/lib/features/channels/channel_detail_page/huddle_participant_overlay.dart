@@ -175,7 +175,13 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
       ),
       isSelf: isSelf,
     );
-    final isAgent = profile?.isAgent == true || fallbackLabel != null;
+    final isHuddleAgent = ref.watch(
+      huddleAgentPubkeysProvider(
+        ephemeralChannelId,
+      ).select((agents) => agents.contains(pubkey.toLowerCase())),
+    );
+    final isAgent =
+        isHuddleAgent || profile?.isAgent == true || fallbackLabel != null;
 
     return Semantics(
       label: active ? '$label, speaking' : label,
@@ -274,6 +280,9 @@ class _HuddleParticipantRoster extends ConsumerWidget {
     }
     final profiles = ref.watch(userCacheProvider);
     final fallbackLabels = ref.watch(agentDirectoryDisplayNamesProvider);
+    final agentPubkeys = ref.watch(
+      huddleAgentPubkeysProvider(ephemeralChannelId),
+    );
     final names = ref.watch(_huddleIdentityNamesProvider(ephemeralChannelId));
     final activeSpeakerPubkeys = ref.watch(
       huddleSessionProvider.select((session) => session.activeSpeakerPubkeys),
@@ -362,6 +371,9 @@ class _HuddleParticipantRoster extends ConsumerWidget {
                                       color: context.colors.onPrimaryContainer,
                                     ),
                                     isAgent:
+                                        agentPubkeys.contains(
+                                          pubkey.toLowerCase(),
+                                        ) ||
                                         profile?.isAgent == true ||
                                         fallbackLabels[pubkey] != null,
                                   ),

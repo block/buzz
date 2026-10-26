@@ -718,6 +718,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                     activeSpeakerPubkeys: session.activeSpeakerPubkeys,
                     speakerLevels: session.speakerLevels,
                     workingAgentPubkeys: workingAgentPubkeys,
+                    agentPubkeys: huddleBotPubkeys,
                     retryTooltip: retryTooltip,
                     retryIcon: retryIcon,
                     onRetry: onRetry,

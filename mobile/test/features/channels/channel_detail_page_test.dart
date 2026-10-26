@@ -7458,14 +7458,36 @@ void main() {
         await tester.tap(find.widgetWithText(FilledButton, 'Join'));
         await tester.pumpAndSettle();
 
+        AvatarImage avatarIn(Finder owner) => tester.widget<AvatarImage>(
+          find.descendant(of: owner, matching: find.byType(AvatarImage)),
+        );
+        final agentAvatar = find.byKey(
+          const ValueKey('huddle-participant-avatar-agent'),
+        );
+        expect(agentAvatar, findsOneWidget);
+        // The record makes it an agent, so it renders as one too.
+        expect(avatarIn(agentAvatar).isAgent, isTrue);
         expect(
-          find.byKey(const ValueKey('huddle-participant-avatar-agent')),
-          findsOneWidget,
+          avatarIn(
+            find.byKey(const ValueKey('huddle-participant-avatar-self')),
+          ).isAgent,
+          isFalse,
         );
         // A person who is not on audio is not in the roster after admission.
         expect(
           find.byKey(const ValueKey('huddle-participant-avatar-person')),
           findsNothing,
+        );
+
+        await tester.tap(agentAvatar);
+        await tester.pumpAndSettle();
+        expect(
+          avatarIn(
+            find.byKey(
+              const ValueKey('huddle-participant-spotlight-avatar-agent'),
+            ),
+          ).isAgent,
+          isTrue,
         );
       },
     );
@@ -8540,6 +8562,20 @@ void main() {
           ),
         );
         expect(membershipAgentRow, findsOneWidget);
+        // The `bot` role alone makes it an agent: no profile attestation or
+        // directory label is needed for the agent avatar.
+        AvatarImage rowAvatar(Finder row) => tester.widget<AvatarImage>(
+          find.descendant(of: row, matching: find.byType(AvatarImage)),
+        );
+        expect(rowAvatar(membershipAgentRow).isAgent, isTrue);
+        expect(
+          rowAvatar(
+            find.byKey(
+              const ValueKey('huddle-participant-roster-row-guest-23'),
+            ),
+          ).isAgent,
+          isFalse,
+        );
         await tester.tapAt(const Offset(8, 8));
         await tester.pumpAndSettle();
         expect(
