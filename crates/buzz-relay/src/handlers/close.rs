@@ -25,6 +25,20 @@ pub async fn handle_close(sub_id: String, conn: Arc<ConnectionState>, state: Arc
     debug!(conn_id = %conn.conn_id, sub_id = %sub_id, "Subscription closed");
 }
 
+/// Refuse a `REQ` or sync `REQ` with `CLOSED reason`. A `REQ` replaces
+/// whatever held its ID (NIP-01), and `CLOSED` tells the client the ID is
+/// closed, so the old holder is retired before the frame, under the lifecycle
+/// lock. Every refusal before a request's handler runs goes through here. If
+/// the frame cannot be queued, the connection is cancelled: the client would
+/// otherwise never learn that the old holder is gone.
+pub(crate) async fn refuse(sub_id: &str, reason: &str, conn: &ConnectionState, state: &AppState) {
+    let mut subs = conn.subscriptions.lock().await;
+    retire_locked(&mut subs, sub_id, conn, state).await;
+    if !conn.send(RelayMessage::closed(sub_id, reason)) {
+        conn.cancel.cancel();
+    }
+}
+
 /// Monotonic source of subscription owner tokens. Each REQ claims its sub ID
 /// with a fresh token, so a superseded request can tell it no longer owns it.
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);

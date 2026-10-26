@@ -1385,10 +1385,14 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    conn.send(request_rejection_message(
-                        RejectionTarget::Subscription(&sub_id),
+                    // Retires whatever held the ID before `CLOSED`.
+                    handlers::close::refuse(
+                        &sub_id,
                         "rate-limited: too many concurrent requests",
-                    ));
+                        &conn,
+                        &state,
+                    )
+                    .await;
                     return;
                 }
             };
@@ -1408,7 +1412,7 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 Ok(p) => p,
                 Err(_) => {
                     // Retires whatever held the ID before `CLOSED`.
-                    handlers::artifact_sync::refuse(
+                    handlers::close::refuse(
                         &sub_id,
                         "rate-limited: too many concurrent requests",
                         &conn,
@@ -2145,15 +2149,16 @@ pub(crate) mod tests {
         assert_eq!(frame[2], "rate-limited: too many concurrent requests");
     }
 
-    /// A sync REQ refused before its handler runs still replaces the old
-    /// holder of its ID (NIP-01): the `CLOSED` must not leave a live
-    /// subscription that keeps fanning out under a closed ID. Covers handler
-    /// saturation and WS admission, both through production dispatch.
-    /// Mutation: send either refusal without `retire_locked` → RED.
+    /// A sync or ordinary REQ refused before its handler runs still replaces
+    /// the old holder of its ID (NIP-01), whether that is a sync or a live
+    /// subscription: the `CLOSED` must not leave either one fanning out under
+    /// a closed ID. Covers handler saturation and WS admission, both through
+    /// production dispatch. Mutation: send any refusal without
+    /// `retire_locked` → RED.
     #[tokio::test]
-    async fn pre_handler_sync_refusal_retires_the_old_holder() {
+    async fn pre_handler_req_refusal_retires_the_old_holder() {
         use buzz_pubsub::EventTopic;
-        for (auth, saturate, reason) in [
+        let cases = [
             (
                 AuthState::Failed,
                 true,
@@ -2164,7 +2169,13 @@ pub(crate) mod tests {
                 false,
                 "rate-limited: shared admission unavailable",
             ),
-        ] {
+        ];
+        let shapes = [(true, true), (true, false), (false, true), (false, false)];
+        for ((sync, sync_holder), (auth, saturate, reason)) in shapes
+            .into_iter()
+            .flat_map(|shape| cases.clone().map(|case| (shape, case)))
+        {
+            let case = format!("{reason}, sync REQ: {sync}, sync holder: {sync_holder}");
             // Redis is unreachable here, so authenticated admission is
             // `Unavailable`; an unauthenticated connection skips admission.
             let state = crate::state::tests::test_state().await;
@@ -2180,6 +2191,9 @@ pub(crate) mod tests {
             )
             .await
             .expect("claim the old holder");
+            if sync_holder {
+                state.artifact_syncs.insert_idle(conn.conn_id, "s");
+            }
             let _held = if saturate {
                 let permits = state.handler_semaphore.available_permits();
                 Some(
@@ -2192,29 +2206,75 @@ pub(crate) mod tests {
                 None
             };
 
-            let raw = serde_json::json!(
-                ["REQ", "s", {"artifact": "current", "#h": [channel.to_string()]}]
-            )
-            .to_string();
+            let filter = if sync {
+                serde_json::json!({"artifact": "current", "#h": [channel.to_string()]})
+            } else {
+                serde_json::json!({"kinds": [1], "#h": [channel.to_string()]})
+            };
+            let raw = serde_json::json!(["REQ", "s", filter]).to_string();
             handle_text_message(raw, Arc::clone(&conn), Arc::clone(&state)).await;
 
-            assert!(conn.subscriptions.lock().await.is_empty(), "{reason}");
+            assert!(conn.subscriptions.lock().await.is_empty(), "{case}");
             assert!(
                 state.sub_registry.get_filters(conn.conn_id, "s").is_none(),
-                "{reason}"
+                "{case}"
             );
-            assert!(
-                !state.artifact_syncs.contains(conn.conn_id, "s"),
-                "{reason}"
-            );
+            assert!(!state.artifact_syncs.contains(conn.conn_id, "s"), "{case}");
             assert_eq!(
                 state.pubsub.topic_refcount(&conn.tenant, topic).await,
                 0,
-                "{reason}"
+                "{case}"
             );
             let frame = read_frame(&mut rx);
-            assert_eq!(frame, serde_json::json!(["CLOSED", "s", reason]));
-            assert!(rx.try_recv().is_err(), "{reason}: only CLOSED is sent");
+            assert_eq!(frame, serde_json::json!(["CLOSED", "s", reason]), "{case}");
+            assert!(rx.try_recv().is_err(), "{case}: only CLOSED is sent");
+        }
+    }
+
+    /// A pre-handler refusal whose `CLOSED` cannot be queued has already
+    /// retired the old holder, so it cancels the connection: the client
+    /// learns the ID is gone from the disconnect. The queue is full but
+    /// below the slow-client grace limit, which would not cancel by itself.
+    /// Covers a sync and an ordinary REQ through production dispatch.
+    /// Mutation: ignore the `send` result in `close::refuse` → RED.
+    #[tokio::test]
+    async fn pre_handler_refusal_with_a_full_queue_cancels_the_connection() {
+        for filter in [
+            serde_json::json!({"artifact": "current", "#h": [uuid::Uuid::new_v4().to_string()]}),
+            serde_json::json!({"kinds": [1]}),
+        ] {
+            let state = crate::state::tests::test_state().await;
+            let (conn, _rx) = test_conn_with_auth(AuthState::Failed);
+            handlers::req::claim_live_subscription(
+                "s",
+                &[nostr::Filter::new().kind(Kind::TextNote)],
+                None,
+                &conn,
+                &state,
+            )
+            .await
+            .expect("claim the old holder");
+            state.artifact_syncs.insert_idle(conn.conn_id, "s");
+            while conn
+                .send_tx
+                .try_send(WsMessage::Text("filler".into()))
+                .is_ok()
+            {}
+            let permits = state.handler_semaphore.available_permits();
+            let _held = Arc::clone(&state.handler_semaphore)
+                .acquire_many_owned(permits as u32)
+                .await
+                .expect("hold every handler permit");
+
+            let raw = serde_json::json!(["REQ", "s", filter]).to_string();
+            handle_text_message(raw, Arc::clone(&conn), Arc::clone(&state)).await;
+
+            assert!(conn.subscriptions.lock().await.is_empty(), "{filter}");
+            assert!(
+                !state.artifact_syncs.contains(conn.conn_id, "s"),
+                "{filter}"
+            );
+            assert!(conn.cancel.is_cancelled(), "{filter}");
         }
     }
 

@@ -141,9 +141,9 @@ async fn send_admission_result(
     };
     metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => label, "bucket" => bucket).increment(1);
     match msg {
-        // A refused sync retires whatever held its ID before `CLOSED`.
-        ClientMessage::ArtifactSync { sub_id, .. } => {
-            crate::handlers::artifact_sync::refuse(sub_id, &reason, conn, state).await;
+        // A refused REQ or sync retires whatever held its ID before `CLOSED`.
+        ClientMessage::Req { sub_id, .. } | ClientMessage::ArtifactSync { sub_id, .. } => {
+            crate::handlers::close::refuse(sub_id, &reason, conn, state).await;
         }
         _ => {
             conn.send(request_rejection_message(
