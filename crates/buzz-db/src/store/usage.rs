@@ -1752,12 +1752,13 @@ mod postgres_tests {
         .await
         .expect_err("a dark reader must stall the collection until its deadline");
 
-        // Still paused: only close-on-drop (or, failing it, the reader pool's
-        // release check) can free the slot now.
+        // Still paused: only close-on-drop can free the slot this fast. The
+        // reader pool's release check would free it too, but only after its
+        // 5s timeout, and its follow-up sqlx ping is not bounded at all.
         let started = Instant::now();
         while read_pool.size() != 0 {
             assert!(
-                started.elapsed() < Duration::from_secs(8),
+                started.elapsed() < Duration::from_secs(3),
                 "slot release must be bounded by close-on-drop, still held after {:?}",
                 started.elapsed()
             );
