@@ -550,16 +550,18 @@ async fn ordinary_req(f: &Fixture, conn: &Arc<ConnectionState>, filters: Vec<Val
 async fn refused_or_one_shot_replacement_retires_the_old_holder() {
     let f = fixture().await;
     let owner = Keys::generate();
-    let home = create_channel(&f.state, &f.tenant, &owner, &[]).await;
-    let mixed = vec![
-        json!({"search": "x", "#h": [home]}),
-        json!({"kinds": [45010], "#h": [home]}),
-    ];
-    let liveness = vec![json!({"kinds": [buzz_core::kind::KIND_HUDDLE_LIVENESS], "#h": [home]})];
+    let mixed: fn(Uuid) -> Vec<Value> = |home| {
+        vec![
+            json!({"search": "x", "#h": [home]}),
+            json!({"kinds": [45010], "#h": [home]}),
+        ]
+    };
+    let liveness: fn(Uuid) -> Vec<Value> =
+        |home| vec![json!({"kinds": [buzz_core::kind::KIND_HUDDLE_LIVENESS], "#h": [home]})];
     for (sync_holder, replacement, terminal) in [
         (
             true,
-            &mixed,
+            mixed,
             json!([
                 "CLOSED",
                 "s",
@@ -568,20 +570,21 @@ async fn refused_or_one_shot_replacement_retires_the_old_holder() {
         ),
         (
             false,
-            &mixed,
+            mixed,
             json!([
                 "CLOSED",
                 "s",
                 "error: mixed search and non-search filters not supported"
             ]),
         ),
-        (true, &liveness, json!(["EOSE", "s"])),
-        (false, &liveness, json!(["EOSE", "s"])),
+        (true, liveness, json!(["EOSE", "s"])),
+        (false, liveness, json!(["EOSE", "s"])),
     ] {
         let case = format!("sync holder: {sync_holder}, replacement: {terminal}");
+        let home = create_channel(&f.state, &f.tenant, &owner, &[]).await;
         let (conn, mut rx) = connect(&f, &owner);
-        if sync_holder {
-            start_sync(&f, &conn, sync_filter(&[home])).await.unwrap();
+        let sync = if sync_holder {
+            Some(start_sync(&f, &conn, sync_filter(&[home])))
         } else {
             ordinary_req(
                 &f,
@@ -589,11 +592,18 @@ async fn refused_or_one_shot_replacement_retires_the_old_holder() {
                 vec![json!({"kinds": [45010], "#h": [home], "limit": 0})],
             )
             .await;
-        }
+            None
+        };
         assert!(initial_set(&mut rx).await.is_empty(), "{case}");
 
-        ordinary_req(&f, &conn, replacement.clone()).await;
+        ordinary_req(&f, &conn, replacement(home)).await;
         assert_eq!(frame(&mut rx).await, terminal, "{case}");
+        if let Some(sync) = sync {
+            tokio::time::timeout(Duration::from_secs(5), sync)
+                .await
+                .expect("the replaced sync ends")
+                .unwrap();
+        }
         assert!(conn.subscriptions.lock().await.is_empty(), "{case}");
         assert!(
             !f.state.artifact_syncs.contains(conn.conn_id, "s"),
