@@ -469,7 +469,9 @@ async fn put_user_decides_each_person_after_the_ones_before() {
         Some("owner")
     );
     assert_eq!(
-        role_of(&state, &tenant, channel_id, &owner).await.as_deref(),
+        role_of(&state, &tenant, channel_id, &owner)
+            .await
+            .as_deref(),
         Some("member")
     );
 
@@ -496,7 +498,9 @@ async fn put_user_decides_each_person_after_the_ones_before() {
         })
     );
     assert_eq!(
-        role_of(&state, &tenant, channel_id, &owner).await.as_deref(),
+        role_of(&state, &tenant, channel_id, &owner)
+            .await
+            .as_deref(),
         Some("owner")
     );
 
@@ -533,7 +537,9 @@ async fn put_user_decides_each_person_after_the_ones_before() {
         })
     );
     assert_eq!(
-        role_of(&state, &tenant, channel_id, &owner).await.as_deref(),
+        role_of(&state, &tenant, channel_id, &owner)
+            .await
+            .as_deref(),
         Some("owner")
     );
 }
