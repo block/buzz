@@ -63,7 +63,8 @@ use std::fmt;
 
 use crate::nip_fi_core::ResolvedCommunity;
 use crate::nip_fi_core::{
-    asserted_key_matches, evaluate_attached_assertion, http_denial, AssertionRejection, Communities,
+    asserted_key_matches, assertion_denied, evaluate_attached_assertion, http_denial,
+    AssertionRejection, Communities,
 };
 use buzz_auth::CommunityBinding;
 
@@ -254,6 +255,12 @@ impl<X> NipFiAdmission<X> {
         self.assertion.as_ref()
     }
 
+    /// The owner named by a verified agent assertion (Enforce only). It
+    /// takes the place of a NIP-OA owner in the relay-membership step.
+    pub(crate) fn token_owner(&self) -> Option<PublicKey> {
+        self.assertion.as_ref().and_then(VerifiedAssertion::owner)
+    }
+
     /// Caller-supplied side-data from the NIP-98 extraction closure.
     #[allow(dead_code)]
     pub(crate) fn extra(&self) -> &X {
@@ -279,7 +286,9 @@ impl<X> NipFiAdmission<X> {
 ///    `(proven_pubkey, X)` on success, or a `Response` to emit on failure.
 ///    Off and Shadow return `Ok(NipFiAdmission { proven_pubkey, assertion:
 ///    None, extra: X })` here, identical to pre-NIP-FI (no assertion
-///    requirement); Shadow first records the verdict steps 4-7 would reach.
+///    requirement); Shadow first records the verdict steps 4-7 would reach,
+///    then, given `owner_state`, the token-owner refusal every admitted route
+///    applies after admission.
 ///    [FI-INV-15]
 /// 4. Enforce mode: extract `Nostr-Federated-Identity: Bearer <JWS>`.
 /// 5. Verify assertion (signature, issuer, expiry, claims).
@@ -327,6 +336,7 @@ pub(crate) async fn admit_nip_fi_http<'a, D, X, F>(
     verifier: Option<&dyn VerifyAssertion>,
     mode: NipFiMode,
     deny_map: &D,
+    owner_state: Option<&crate::state::AppState>,
 ) -> Result<NipFiAdmission<X>, Response<Body>>
 where
     D: HttpDenyMap,
@@ -346,7 +356,15 @@ where
         let proof = extract_nip98();
         if mode.observes_only() {
             let signed = proof.as_ref().ok().filter(|p| p.signed).map(|p| p.pubkey);
-            observe_shadow_verdict(headers, communities, verifier, deny_map, signed).await;
+            observe_shadow_verdict(
+                headers,
+                communities,
+                verifier,
+                deny_map,
+                signed,
+                owner_state,
+            )
+            .await;
         }
         let proof = proof?;
         return Ok(NipFiAdmission {
@@ -390,27 +408,60 @@ where
 }
 
 /// Record the verdict enforce would reach for a request whose NIP-98 step
-/// proved `signed` (`None`: missing, rejected or unsigned).
+/// proved `signed` (`None`: missing, rejected or unsigned). With
+/// `owner_state`, an agent assertion that passes admission is also judged by
+/// the token-owner rules every admitted route applies after it.
 async fn observe_shadow_verdict<D: HttpDenyMap>(
     headers: &HeaderMap,
     communities: Communities<'_>,
     verifier: Option<&dyn VerifyAssertion>,
     deny_map: &D,
     signed: Option<PublicKey>,
+    owner_state: Option<&crate::state::AppState>,
 ) {
     let community = resolve_for_admission(communities, headers).await;
-    let verdict = evaluate_enforce_steps(headers, community.as_deref(), verifier, deny_map, || {
-        signed.map(|key| Nip98Proof::new(key, ())).ok_or(())
-    })
-    .and_then(|_| match &community {
-        // Enforce's final re-check, after the handler's awaits.
-        Ok(community) => community
-            .deadline()
-            .check()
-            .map_err(|class| (Stage::Deadline, class)),
-        Err(_) => Ok(()),
-    });
-    crate::nip_fi_shadow::record("http", &community, verdict);
+    let mut verdict =
+        evaluate_enforce_steps(headers, community.as_deref(), verifier, deny_map, || {
+            signed.map(|key| Nip98Proof::new(key, ())).ok_or(())
+        })
+        .and_then(|(proof, assertion)| match &community {
+            // Enforce's final re-check, after the handler's awaits.
+            Ok(community) => community
+                .deadline()
+                .check()
+                .map(|()| (proof.pubkey, assertion.owner()))
+                .map_err(|class| (Stage::Deadline, class)),
+            Err(_) => Ok((proof.pubkey, assertion.owner())),
+        });
+    if let (Ok((agent, Some(owner))), Some(state)) = (verdict, owner_state) {
+        if let Some(class) = observe_owner(state, headers, agent, owner).await {
+            verdict = Err((Stage::Owner, class));
+        }
+    }
+    crate::nip_fi_shadow::record("http", &community, verdict.map(|_| ()));
+}
+
+/// The token-owner refusal for `agent` in the request's tenant. A Host that
+/// binds no tenant is refused by the route itself, so it has none; a failed
+/// tenant read leaves the owner unchecked, so it is unavailable.
+async fn observe_owner(
+    state: &crate::state::AppState,
+    headers: &HeaderMap,
+    agent: PublicKey,
+    owner: PublicKey,
+) -> Option<DenialClass> {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let tenant = match crate::tenant::bind_community(&state.db, host).await {
+        Ok(tenant) => tenant,
+        Err(crate::tenant::BindError::UnmappedHost) => return None,
+        Err(crate::tenant::BindError::Lookup(_)) => {
+            return Some(DenialClass::AuthorizationUnavailable)
+        }
+    };
+    crate::handlers::auth::token_owner_denial(state, tenant.community(), agent, owner).await
 }
 
 /// Shadow only: record the enforce verdict for a request whose NIP-98 proof
@@ -424,6 +475,7 @@ pub(crate) async fn observe_failed_proof(state: &crate::state::AppState, headers
             state.nip_fi_communities(),
             verifier,
             &NoDenyMapConfigured,
+            None,
             None,
         )
         .await;
@@ -489,9 +541,10 @@ where
         return Err((Stage::Pairing, DenialClass::AuthorizationDenied));
     }
 
-    // Step 7: deny-map check — (iss, pubkey) must not be in an active deny
-    // window.  Private-state denial.  [FI-INV-14] [NIP-FI.md:624-627]
-    if deny_map.is_denied(assertion.identity().issuer(), &proof.pubkey, Utc::now()) {
+    // Step 7: deny-map check — (iss, pubkey) and, for an agent assertion,
+    // (iss, owner) must not be in an active deny window.  Private-state
+    // denial.  [FI-INV-14] [NIP-FI.md:624-627]
+    if assertion_denied(deny_map, &assertion, Utc::now()) {
         return Err((Stage::DenySet, DenialClass::AuthorizationDenied));
     }
 
@@ -534,6 +587,7 @@ where
                 verifier,
                 mode,
                 deny_map,
+                Some(state),
             )
             .await
         }
@@ -545,6 +599,7 @@ where
                 verifier,
                 mode,
                 &NoDenyMapConfigured,
+                Some(state),
             )
             .await
         }
@@ -559,6 +614,31 @@ mod tests {
     // throughout this module — it IS the HTTP response returned from tests.
     #![allow(clippy::result_large_err)]
     use super::*;
+
+    /// [`admit_nip_fi_http`] with no state, so shadow skips its owner step.
+    async fn admit_stateless<'a, D, X, F>(
+        headers: &HeaderMap,
+        extract_nip98: F,
+        communities: impl Into<Communities<'a>>,
+        verifier: Option<&dyn VerifyAssertion>,
+        mode: NipFiMode,
+        deny_map: &D,
+    ) -> Result<NipFiAdmission<X>, Response<Body>>
+    where
+        D: HttpDenyMap,
+        F: FnOnce() -> Result<Nip98Proof<X>, Response<Body>>,
+    {
+        admit_nip_fi_http(
+            headers,
+            extract_nip98,
+            communities,
+            verifier,
+            mode,
+            deny_map,
+            None,
+        )
+        .await
+    }
     use crate::nip_fi_core::extract_bearer_token;
     use crate::nip_fi_core::test_support::{communities, host_headers};
     use crate::nip_fi_core::tests::ScriptedVerifier;
@@ -782,7 +862,7 @@ mod tests {
             HeaderValue::from_static("Bearer any.valid.looking.token"),
         );
         let admit = |proven: PublicKey, deny_map: &FixedDenyMap| {
-            admit_nip_fi_http(
+            admit_stateless(
                 &headers,
                 || Ok(Nip98Proof::new(proven, ())),
                 &communities(),
@@ -831,7 +911,7 @@ mod tests {
         let headers = host_headers(); // no assertion
         let expected_pubkey = any_pubkey();
         let ep = expected_pubkey;
-        let outcome = admit_nip_fi_http(
+        let outcome = admit_stateless(
             &headers,
             || Ok(Nip98Proof::new(ep, ())),
             &communities(),
@@ -856,7 +936,7 @@ mod tests {
         let headers = host_headers();
         let deny_resp = http_denial(DenialClass::MissingEvidence);
         let deny_status = deny_resp.status();
-        let outcome = admit_nip_fi_http::<_, (), _>(
+        let outcome = admit_stateless::<_, (), _>(
             &headers,
             || Err(deny_resp),
             &communities(),
@@ -890,7 +970,7 @@ mod tests {
         // Authorization header absent → NIP-98 closure fails → MissingEvidence (401).
         let headers = host_headers(); // no Authorization header
         let legacy_resp = http_denial(DenialClass::EvidenceRejected); // would be 403 if propagated
-        let outcome = admit_nip_fi_http::<_, (), _>(
+        let outcome = admit_stateless::<_, (), _>(
             &headers,
             || Err(legacy_resp),
             &communities(),
@@ -918,7 +998,7 @@ mod tests {
             HeaderValue::from_static("Nostr invalid_base64!!!"),
         );
         let legacy_resp = http_denial(DenialClass::MissingEvidence); // would be 401 if propagated
-        let outcome = admit_nip_fi_http::<_, (), _>(
+        let outcome = admit_stateless::<_, (), _>(
             &headers,
             || Err(legacy_resp),
             &communities(),
@@ -944,7 +1024,7 @@ mod tests {
         let headers = host_headers(); // no Authorization header
         let legacy_status = StatusCode::UNAUTHORIZED;
         let legacy_resp = http_denial(DenialClass::MissingEvidence);
-        let outcome = admit_nip_fi_http::<_, (), _>(
+        let outcome = admit_stateless::<_, (), _>(
             &headers,
             || Err(legacy_resp),
             &communities(),
@@ -984,7 +1064,7 @@ mod tests {
             .body(axum::body::Body::from(legacy_body.as_ref()))
             .unwrap();
         let headers = host_headers();
-        let outcome = admit_nip_fi_http::<_, (), _>(
+        let outcome = admit_stateless::<_, (), _>(
             &headers,
             || Err(legacy_resp),
             &communities(),
@@ -1068,7 +1148,7 @@ mod tests {
         for (case, headers, closure_ok) in cases {
             let closure_calls = Cell::new(0u32);
             let verifier = CountingVerifier(AtomicUsize::new(0));
-            let outcome = admit_nip_fi_http::<_, (), _>(
+            let outcome = admit_stateless::<_, (), _>(
                 headers,
                 || {
                     closure_calls.set(closure_calls.get() + 1);
@@ -1124,7 +1204,7 @@ mod tests {
     fn enforce_missing_assertion_is_401() {
         let headers = host_headers();
         let pubkey = any_pubkey();
-        let outcome = admit_nip_fi_http(
+        let outcome = admit_stateless(
             &headers,
             || Ok(Nip98Proof::new(pubkey, ())),
             &communities(),
@@ -1158,7 +1238,7 @@ mod tests {
             HeaderValue::from_static("Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"),
         );
         let pubkey = any_pubkey();
-        let outcome = admit_nip_fi_http(
+        let outcome = admit_stateless(
             &headers,
             || Ok(Nip98Proof::new(pubkey, ())),
             &communities(),
@@ -1220,7 +1300,7 @@ mod tests {
             HeaderValue::from_static("Bearer any.valid.looking.token"),
         );
 
-        let outcome = admit_nip_fi_http(
+        let outcome = admit_stateless(
             &headers,
             || Ok(Nip98Proof::new(pubkey_b, ())),
             &communities(),
@@ -1295,7 +1375,7 @@ mod tests {
             HeaderValue::from_static("Nostr second.token"),
         );
 
-        let outcome = admit_nip_fi_http::<_, (), _>(
+        let outcome = admit_stateless::<_, (), _>(
             &headers,
             || {
                 closure_ran_clone.store(true, Ordering::SeqCst);
@@ -1347,7 +1427,7 @@ mod tests {
         );
 
         // Closure succeeds → Off mode should admit.
-        let outcome = admit_nip_fi_http::<_, (), _>(
+        let outcome = admit_stateless::<_, (), _>(
             &headers,
             || {
                 closure_ran_clone.store(true, Ordering::SeqCst);
@@ -1396,7 +1476,7 @@ mod tests {
         proven: PublicKey,
         verifier: Option<&dyn VerifyAssertion>,
     ) -> Result<NipFiAdmission<()>, Response<Body>> {
-        admit_nip_fi_http(
+        admit_stateless(
             headers,
             || Ok(Nip98Proof::new(proven, ())),
             &communities(),
@@ -1502,6 +1582,170 @@ mod tests {
         );
     }
 
+    /// Verifier answering every call with one fixed assertion.
+    struct AgentVerifier(buzz_auth::VerifiedAssertion);
+
+    impl VerifyAssertion for AgentVerifier {
+        fn verify_assertion(
+            &self,
+            _token: &str,
+            _community: &buzz_auth::CommunityBinding,
+        ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// One shadow HTTP admission of `agent`, acting for `owner`, judged
+    /// against `state`; asserts shadow still admits.
+    async fn admit_owned_in_shadow(
+        state: &crate::state::AppState,
+        agent: PublicKey,
+        owner: PublicKey,
+    ) {
+        let verifier = AgentVerifier(crate::nip_fi_shadow_session::tests::owned_assertion(
+            agent, owner,
+        ));
+        let admission = admit_nip_fi_http::<_, (), _>(
+            &bearer_headers("Bearer a.b.c"),
+            || Ok(Nip98Proof::new(agent, ())),
+            &communities(),
+            Some(&verifier as &dyn VerifyAssertion),
+            NipFiMode::Shadow,
+            &AlwaysAdmitStubDenyMap,
+            Some(state),
+        )
+        .await;
+        assert!(admission.is_ok(), "shadow admits");
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        // Shadow judges an admitted agent assertion by its token owner, as
+        // `enforce_relay_membership` does after admission: a banned token owner
+        // or a stored owner other than the token owner records `owner/denied`,
+        // a clean owner `admit/admit`, and shadow admits each. A tenant read that
+        // fails before the owner is checked records `owner/unavailable`.
+        // Mutations: deleting the owner step in `observe_shadow_verdict` records
+        // `admit/admit` for every case; collapsing the read failure in
+        // `observe_owner` to `None` records `admit/admit` for `TenantReadFails`.
+        #[test]
+        #[ignore = "requires Postgres"]
+        fn shadow_records_token_owner_refusals() {
+            #[derive(Clone, Copy, Debug)]
+            enum Case {
+                CleanOwner,
+                BannedOwner,
+                OtherStoredOwner,
+                TenantReadFails,
+            }
+            for (case, expected) in [
+                (Case::CleanOwner, "admit/admit"),
+                (Case::BannedOwner, "owner/denied"),
+                (Case::OtherStoredOwner, "owner/denied"),
+                (Case::TenantReadFails, "owner/unavailable"),
+            ] {
+                let records = crate::nip_fi_shadow_session::tests::shadow_records(async {
+                    let state = crate::state::tests::test_state_with_database_pool(
+                        sqlx::PgPool::connect(&crate::test_support::database_url())
+                            .await
+                            .expect("connect test database"),
+                    )
+                    .await;
+                    let community = state
+                        .db
+                        .ensure_configured_community(crate::nip_fi_core::test_support::TEST_HOST)
+                        .await
+                        .expect("ensure community")
+                        .id;
+                    let (agent, owner) = (any_pubkey(), any_pubkey());
+                    match case {
+                        Case::BannedOwner => state
+                            .db
+                            .ban_community_member(
+                                community,
+                                &owner.to_bytes(),
+                                &owner.to_bytes(),
+                                None,
+                                None,
+                            )
+                            .await
+                            .expect("ban owner"),
+                        Case::OtherStoredOwner => {
+                            let prior = any_pubkey();
+                            for key in [agent, prior] {
+                                state
+                                    .db
+                                    .ensure_user(community, key.as_bytes())
+                                    .await
+                                    .expect("ensure user");
+                            }
+                            assert!(state
+                                .db
+                                .set_agent_owner(community, agent.as_bytes(), prior.as_bytes())
+                                .await
+                                .expect("seed stored owner"));
+                        }
+                        Case::TenantReadFails => state.db.pool().close().await,
+                        Case::CleanOwner => {}
+                    }
+                    admit_owned_in_shadow(&state, agent, owner).await;
+                });
+                assert_eq!(records, [expected], "{case:?}");
+            }
+        }
+    }
+
+    // Pins: step 7 reads the owner of an agent assertion. With the owner's
+    // deny entry live, enforce denies the agent with the deny-map row and
+    // shadow records the would-deny; without it, enforce admits and the
+    // admission carries the owner. Mutation: dropping the owner arm of
+    // `assertion_denied` admits the agent and records an admit.
+    #[test]
+    fn owner_deny_entry_denies_agent_assertion() {
+        use buzz_auth::{IssuerCapacity, NipFiDenyMap};
+        let (agent, owner) = (any_pubkey(), any_pubkey());
+        let verifier = AgentVerifier(crate::nip_fi_shadow_session::tests::owned_assertion(
+            agent, owner,
+        ));
+        let map = NipFiDenyMap::new(
+            8,
+            vec![IssuerCapacity {
+                issuer: "test-issuer".to_owned(),
+                capacity: 8,
+            }],
+        );
+        let headers = bearer_headers("Bearer a.b.c");
+        let admit = |mode, map: &NipFiDenyMap| {
+            admit_stateless(
+                &headers,
+                || Ok(Nip98Proof::new(agent, ())),
+                &communities(),
+                Some(&verifier as &dyn VerifyAssertion),
+                mode,
+                map,
+            )
+            .now_or_never()
+            .expect("env resolution never waits")
+        };
+
+        let admission = match admit(NipFiMode::Enforce, &map) {
+            Ok(admission) => admission,
+            Err(resp) => panic!("a clean owner admits its agent, got {}", resp.status()),
+        };
+        assert_eq!(admission.assertion().and_then(|a| a.owner()), Some(owner));
+
+        let now = Utc::now();
+        map.merge_cross_pod_deny("test-issuer", &owner, now + chrono::Duration::hours(1), now);
+        let (status, body) = denial_parts(admit(NipFiMode::Enforce, &map));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, b"authorization denied\n");
+        let records = crate::nip_fi_shadow_session::tests::shadow_records(async {
+            assert!(admit(NipFiMode::Shadow, &map).is_ok(), "shadow admits");
+        });
+        assert_eq!(records, ["deny_set/denied"]);
+    }
+
     // Pins: NIP-98 proof runs before assertion extraction. A failed NIP-98
     // proof with a missing assertion header is 401 from the NIP-98 step and
     // the verifier never runs. This is the reverse of NIP-FI.md §Admission
@@ -1512,7 +1756,7 @@ mod tests {
     #[test]
     fn characterize_http_nip98_precedes_assertion_evaluation() {
         let verifier = ScriptedVerifier::new(Ok(Some(any_pubkey())));
-        let outcome = admit_nip_fi_http::<_, (), _>(
+        let outcome = admit_stateless::<_, (), _>(
             &bearer_headers("Bearer a.b.c"),
             || Err(http_denial(DenialClass::MissingEvidence)),
             &communities(),
@@ -1543,7 +1787,7 @@ mod tests {
         for headers in [unmapped, absent] {
             let verifier = ScriptedVerifier::new(Ok(Some(any_pubkey())));
             let closure_ran = std::cell::Cell::new(false);
-            let outcome = admit_nip_fi_http::<_, (), _>(
+            let outcome = admit_stateless::<_, (), _>(
                 &headers,
                 || {
                     closure_ran.set(true);
@@ -1581,7 +1825,7 @@ mod tests {
         absent.remove(axum::http::header::HOST);
         let key = any_pubkey();
         for headers in [unmapped, absent] {
-            let admission = admit_nip_fi_http::<_, (), _>(
+            let admission = admit_stateless::<_, (), _>(
                 &headers,
                 || Ok(Nip98Proof::new(key, ())),
                 &communities(),
@@ -1614,7 +1858,7 @@ mod tests {
         headers.insert("x-pubkey", HeaderValue::from_str(&key.to_hex()).unwrap());
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let admission = metrics::with_local_recorder(&recorder, || {
-            admit_nip_fi_http(
+            admit_stateless(
                 &headers,
                 || {
                     crate::api::bridge::verify_bridge_auth_with_options(
@@ -1652,7 +1896,7 @@ mod tests {
     fn shadow_evaluates_assertion_without_changing_admission() {
         let key = any_pubkey();
         let verifier = ScriptedVerifier::new(Ok(Some(key)));
-        let admission = admit_nip_fi_http::<_, (), _>(
+        let admission = admit_stateless::<_, (), _>(
             &bearer_headers("Bearer a.b.c"),
             || Ok(Nip98Proof::new(key, ())),
             &communities(),
@@ -1666,7 +1910,7 @@ mod tests {
         assert!(admission.assertion.is_none());
         assert_eq!(verifier.calls(), 1);
 
-        let legacy = admit_nip_fi_http::<_, (), _>(
+        let legacy = admit_stateless::<_, (), _>(
             &bearer_headers("Bearer a.b.c"),
             || Err(Response::new(Body::from("legacy"))),
             &communities(),

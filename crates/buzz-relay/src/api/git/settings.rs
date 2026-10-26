@@ -196,6 +196,7 @@ async fn authenticate(
     )
     .await?;
     let pubkey = *admission.proven_pubkey();
+    let token_owner = admission.token_owner();
     let (event_id_bytes, signed_created_at) = admission.into_extra();
 
     bridge::enforce_http_admission(state, &tenant, &pubkey)
@@ -207,21 +208,35 @@ async fn authenticate(
     let tag = relay_members::extract_auth_tag_header(headers);
     relay_members::enforce_relay_membership(
         state,
-        tenant.community(),
+        &tenant,
         pubkey.as_bytes(),
         tag,
         signed_created_at,
+        token_owner,
     )
     .await
     .map_err(IntoResponse::into_response)?;
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_http_ban_recheck(tenant.community()).await;
     deny_banned_git_principal(
         &state.db,
         tenant.community(),
         &pubkey,
         tag,
         signed_created_at,
+        token_owner,
     )
-    .await?;
+    .await
+    .map_err(|legacy| match token_owner {
+        // A verified agent token gets only NIP-FI's fixed denial, as smart
+        // Git transport does, so the response never shows which step refused.
+        Some(_) => crate::nip_fi_core::http_denial(if legacy.status().is_server_error() {
+            buzz_auth::DenialClass::AuthorizationUnavailable
+        } else {
+            buzz_auth::DenialClass::AuthorizationDenied
+        }),
+        None => legacy,
+    })?;
     // Admission ignores kind= restrictions by design (NIP-AA). Repository
     // management must not turn a message-only credential into write authority.
     // This HTTP operation has no event kind: only kind-unrestricted credentials

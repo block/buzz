@@ -247,9 +247,9 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
           .read(_inviteRelayConnectedProvider(scope.relayHttpOrigin).future)
           .timeout(const Duration(seconds: 15));
       ensureScopeCurrent();
-      await ref.read(channelsProvider.notifier).refresh(fetchDirectory: true);
-      ensureScopeCurrent();
-      final channels = await ref.read(channelsProvider.future);
+      final channels = await ref
+          .read(channelsProvider.notifier)
+          .fetchFresh(fetchDirectory: true);
       ensureScopeCurrent();
       return channels;
     },

@@ -132,10 +132,10 @@ fn media_denial(error: MediaError, strictness: BlossomStrictness) -> MediaDenial
 /// Map a shared membership-step refusal to media's response shape: a failed
 /// lookup stays 503, a real refusal (non-member or banned) is a policy denial.
 fn membership_denial(
-    (status, _): (StatusCode, axum::Json<serde_json::Value>),
+    refusal: crate::api::relay_members::MembershipRefusal,
     strictness: BlossomStrictness,
 ) -> MediaDenial {
-    let error = if status.is_server_error() {
+    let error = if refusal.status().is_server_error() {
         MediaError::AuthorizationUnavailable
     } else {
         MediaError::RelayMembershipRequired
@@ -355,6 +355,7 @@ pub(crate) async fn upload_blob(
         Ok(a) => a,
         Err(resp) => return resp,
     };
+    let token_owner = admission.token_owner();
     let auth_event = admission.into_extra();
 
     // Post-admission: validate X-SHA-256 header and hash binding.
@@ -385,10 +386,11 @@ pub(crate) async fn upload_blob(
     let auth_tag = crate::api::relay_members::extract_auth_tag_header(&headers);
     if let Err(e) = crate::api::relay_members::enforce_relay_membership(
         &state,
-        ctx.tenant.community(),
+        &ctx.tenant,
         auth_event.pubkey.as_bytes(),
         auth_tag,
         Some(auth_event.created_at.as_secs()),
+        token_owner,
     )
     .await
     .map(|_| ())
@@ -691,16 +693,18 @@ async fn enforce_blossom_read_membership(
     state: &AppState,
     tenant: &TenantContext,
     auth_event: &nostr::Event,
+    token_owner: Option<nostr::PublicKey>,
     headers: &HeaderMap,
     strictness: BlossomStrictness,
 ) -> Result<(), MediaDenial> {
     let auth_tag = crate::api::relay_members::extract_auth_tag_header(headers);
     crate::api::relay_members::enforce_relay_membership(
         state,
-        tenant.community(),
+        tenant,
         auth_event.pubkey.as_bytes(),
         auth_tag,
         Some(auth_event.created_at.as_secs()),
+        token_owner,
     )
     .await
     .map(|_| ())
@@ -832,9 +836,18 @@ pub(crate) async fn get_blob(
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };
+    let token_owner = admission.token_owner();
     let auth_event = admission.into_extra();
     // Post-admission: membership gate.
-    enforce_blossom_read_membership(&state, &tenant, &auth_event, &req_headers, strictness).await?;
+    enforce_blossom_read_membership(
+        &state,
+        &tenant,
+        &auth_event,
+        token_owner,
+        &req_headers,
+        strictness,
+    )
+    .await?;
     serve_blob_for_tenant(&state, &tenant, &sha256_ext, &req_headers)
         .await
         .map_err(MediaDenial::from)
@@ -1129,8 +1142,17 @@ pub(crate) async fn head_blob(
         Ok(a) => a,
         Err(resp) => return Ok(resp),
     };
+    let token_owner = admission.token_owner();
     let auth_event = admission.into_extra();
-    enforce_blossom_read_membership(&state, &tenant, &auth_event, &headers, strictness).await?;
+    enforce_blossom_read_membership(
+        &state,
+        &tenant,
+        &auth_event,
+        token_owner,
+        &headers,
+        strictness,
+    )
+    .await?;
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.

@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+import 'package:buzz/shared/read_state/read_state_storage.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
@@ -6,6 +10,7 @@ import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'dart:async';
 
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:buzz/shared/channels/channel_list_snapshot.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
@@ -61,6 +66,7 @@ import '../../helpers/thread_ids.dart';
 part 'channels_page_test/presence_tests.dart';
 part 'channels_page_test/dm_recipient_layout_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
+part 'channels_page_test/read_seed_journey.dart';
 
 void main() {
   setUpAll(() async {
@@ -158,6 +164,8 @@ void main() {
   }
 
   _communityUnreadLandingTests(buildTestable);
+  _readSeedJourney(buildTestable);
+  _communityCachedLandingTests(buildTestable);
 
   final testChannels = [
     Channel(
@@ -2375,7 +2383,8 @@ void main() {
           );
           await tester.pump();
           final flyingAvatar = find.byKey(const Key('community-flying-avatar'));
-          expect(notifier.switchedIds, reduceMotion ? ['bravo'] : isEmpty);
+          // The switch starts with the centering motion, not after it.
+          expect(notifier.switchedIds, ['bravo']);
           if (nativeHeader) {
             expect(
               tester
@@ -2388,7 +2397,6 @@ void main() {
           final origin = tester.getCenter(flyingAvatar);
           await tester.pump(const Duration(milliseconds: 105));
           if (!reduceMotion) {
-            expect(notifier.switchedIds, isEmpty);
             final inFlight = tester.getCenter(flyingAvatar);
             const center = Offset(195, 422);
             expect(
@@ -3715,51 +3723,6 @@ void main() {
     });
   }
 
-  testWidgets('seeds first loaded channels as read', (tester) async {
-    final channels = [
-      Channel(
-        id: '1',
-        name: 'general',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'General discussion',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 10,
-        lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
-          20 * 1000,
-          isUtc: true,
-        ),
-        isMember: true,
-      ),
-    ];
-    final readState = _FakeReadStateNotifier(
-      const ReadStateState(
-        isReady: true,
-        pubkey: 'pk',
-        contexts: {},
-        version: 0,
-      ),
-    );
-
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
-          readStateProvider.overrideWith(() => readState),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(readState.seededContexts, {'1': 20});
-    expect(readState.markedContexts, isEmpty);
-    expect(
-      tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w400,
-    );
-  });
-
   testWidgets('waits for read-state readiness before initial seeding', (
     tester,
   ) async {
@@ -3992,6 +3955,13 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
       version: state.version + 1,
       forcedUnreadContexts: state.forcedUnreadContexts,
     );
+  }
+
+  @override
+  void seedContextsRead(Map<String, int> contexts) {
+    for (final entry in contexts.entries) {
+      seedContextRead(entry.key, entry.value);
+    }
   }
 
   @override

@@ -416,16 +416,16 @@ where
     }
 }
 
-/// Records the NIP-42-proven pubkey and its admitting NIP-FI issuer on an audio
+/// Records the NIP-42-proven pubkey and its admitting NIP-FI session on an audio
 /// control after successful auth so the issuer-scoped NIP-FI disconnect scan
 /// can reach audio sockets alongside relay peers.  Shared by the handler and
 /// tests that register audio sockets through the production seam.
 pub(crate) fn audio_post_auth_register(
     control: &CommunityConnectionControl,
     pubkey_bytes: Vec<u8>,
-    nip_fi_issuer: Option<String>,
+    nip_fi: Option<crate::nip_fi_core::NipFiSession>,
 ) {
-    control.set_proven_identity(pubkey_bytes, nip_fi_issuer);
+    control.set_proven_identity(pubkey_bytes, nip_fi);
 }
 
 /// Runs the audio session, then holds the read half for the client's Close
@@ -751,6 +751,9 @@ async fn run_active_audio_connection(
 
     if let Some(shadow) = control.nip_fi_shadow() {
         shadow.observe_pairing(pubkey);
+        shadow
+            .observe_owner(&state, tenant.community(), pubkey)
+            .await;
     }
     // NIP-FI key pairing [FI-INV-05]: unconditional, using the shared production
     // seam. When an assertion was presented at upgrade, the proven NIP-42 key
@@ -798,19 +801,13 @@ async fn run_active_audio_connection(
         pubkey_bytes.clone(),
         nip_fi_assertion
             .as_ref()
-            .map(|a| a.identity().issuer().to_owned()),
+            .map(crate::nip_fi_core::NipFiSession::from_assertion),
     );
     #[cfg(test)]
     crate::nip_fi_test_hooks::before_deny_set_check(tenant.community()).await;
     if let Some(assertion) = &nip_fi_assertion {
-        if let (Some(asserted_key), Some(deny_map)) =
-            (assertion.asserted_key(), state.nip_fi_deny_map.as_deref())
-        {
-            if deny_map.is_denied(
-                assertion.identity().issuer(),
-                &asserted_key,
-                chrono::Utc::now(),
-            ) {
+        if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
                 warn!(
                     channel_id = %channel_id,
                     pubkey = %pubkey_hex,
@@ -827,8 +824,44 @@ async fn run_active_audio_connection(
     #[cfg(test)]
     crate::nip_fi_test_hooks::after_deny_set_check_passed(tenant.community()).await;
 
-    // NIP-OA owner of a delegated agent: from relay membership on a closed
-    // relay, or straight from the self-proving auth tag on an open one.
+    // Owner of a delegated agent: the verified NIP-FI token owner, else the
+    // NIP-OA owner from relay membership on a closed relay, or straight from
+    // the self-proving auth tag on an open one.
+    let token_owner = nip_fi_assertion
+        .as_ref()
+        .and_then(|assertion| assertion.owner());
+    // A token owner is linked during membership, so refuse a banned principal
+    // or token owner before that write, as root AUTH does. The final check
+    // below rereads bans.
+    let early_ban = match token_owner {
+        Some(_) => {
+            crate::handlers::auth::community_ban_outcome(
+                &state,
+                tenant.community(),
+                pubkey,
+                auth_tag_json.as_deref(),
+                Some(signed_auth_created_at),
+                token_owner,
+                false,
+            )
+            .await
+        }
+        None => crate::handlers::auth::BanOutcome::Clear,
+    };
+    if let Some(denial) = crate::handlers::auth::ban_admission_denial(early_ban) {
+        shadow_attempt.refused();
+        warn!(channel_id = %channel_id, pubkey = %pubkey_hex, reason = denial.reason, "audio: denied at ban check");
+        exit_authorization_refusal(
+            &mut ws_send,
+            &control,
+            &mut terminal_ctrl_rx,
+            nip_fi_assertion.is_some(),
+            denial.class,
+            serde_json::json!({"type": "error", "message": denial.reason}),
+        )
+        .await;
+        return;
+    }
     let mut nip_oa_owner = None;
     let relay_refusal = match crate::api::relay_members::check_relay_membership(
         &state,
@@ -836,6 +869,7 @@ async fn run_active_audio_connection(
         pubkey.as_bytes(),
         auth_tag_json.as_deref(),
         Some(signed_auth_created_at),
+        token_owner,
     )
     .await
     {
@@ -846,11 +880,13 @@ async fn run_active_audio_connection(
         Ok(decision) => {
             nip_oa_owner = match decision {
                 crate::api::relay_members::MembershipDecision::ViaOwner(owner) => Some(owner),
-                _ => crate::api::relay_members::extract_nip_oa_owner(
-                    pubkey.as_bytes(),
-                    auth_tag_json.as_deref(),
-                    Some(signed_auth_created_at),
-                ),
+                _ => token_owner.or_else(|| {
+                    crate::api::relay_members::extract_nip_oa_owner(
+                        pubkey.as_bytes(),
+                        auth_tag_json.as_deref(),
+                        Some(signed_auth_created_at),
+                    )
+                }),
             };
             None
         }
@@ -921,7 +957,7 @@ async fn run_active_audio_connection(
     if let Some(owner) = nip_oa_owner {
         #[cfg(test)]
         crate::nip_fi_test_hooks::before_owner_permit(tenant.community()).await;
-        let linked = {
+        let link = {
             let _owner_permit = match audio_gate.acquire_effect().await {
                 Ok(permit) => permit,
                 Err(crate::nip_fi_gate::SessionExpired) => {
@@ -937,17 +973,17 @@ async fn run_active_audio_connection(
                     return;
                 }
             };
-            crate::api::relay_members::materialize_nip_oa_owner(&state, &tenant, &pubkey, &owner)
-                .await
+            crate::api::relay_members::link_agent_owner(&state, &tenant, &pubkey, &owner).await
         };
-        if !linked {
+        if let Some(denial) = crate::handlers::auth::owner_link_denial(link, token_owner.is_some())
+        {
             shadow_attempt.refused();
-            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, nip_oa_owner = %owner.to_hex(),
-                "audio: NIP-OA owner could not be materialized, denying");
+            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, owner = %owner.to_hex(), ?link,
+                "audio: agent owner could not be linked, denying");
             let deny_frame = authorization_exit_frame(
                 nip_fi_assertion.is_some(),
-                buzz_auth::DenialClass::AuthorizationUnavailable,
-                serde_json::json!({"type": "error", "message": crate::handlers::auth::OWNER_LINK_ERROR}),
+                denial.class,
+                serde_json::json!({"type": "error", "message": denial.reason}),
             );
             crate::connection::send_exit_frames_bounded(&mut ws_send, [deny_frame]).await;
             return;
@@ -980,6 +1016,7 @@ async fn run_active_audio_connection(
                 pubkey,
                 auth_tag_json.as_deref(),
                 Some(signed_auth_created_at),
+                token_owner,
             )
             .await
         }
@@ -4626,7 +4663,11 @@ mod tests {
         let control = CommunityConnectionControl::new(CancellationToken::new());
         let (terminal_tx, mut terminal_rx) = mpsc::channel::<WsMessage>(1);
         control.set_terminal_frame_sender(terminal_tx);
-        audio_post_auth_register(&control, key.clone(), Some("test-issuer".to_owned()));
+        audio_post_auth_register(
+            &control,
+            key.clone(),
+            Some(crate::nip_fi_core::NipFiSession::new("test-issuer", None)),
+        );
         let _guard = registry.register(uuid::Uuid::new_v4(), community, control.clone());
 
         let mut wire = Vec::new();
@@ -7153,16 +7194,34 @@ mod tests {
 
     #[tokio::test]
     async fn w_audio_deny_active_key_refused_at_post_registration_check() {
+        w_audio_deny_active_refused_body(None).await;
+    }
+
+    // An owner-only deny entry refuses the agent's audio AUTH at the same
+    // check. Mutation: dropping the owner arm of `assertion_denied` admits it.
+    #[tokio::test]
+    async fn w_audio_owner_deny_refuses_agent_at_post_registration_check() {
+        w_audio_deny_active_refused_body(Some(nostr::Keys::generate())).await;
+    }
+
+    async fn w_audio_deny_active_refused_body(owner: Option<nostr::Keys>) {
         use buzz_auth::VerifiedAssertion;
         use chrono::{Duration, Utc};
         use std::sync::Arc;
 
         let key = nostr::Keys::generate();
         let deadline = Utc::now() + Duration::hours(1);
-        // Assertion with "test-issuer"; the key IS in the deny map.
-        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        // Assertion with "test-issuer"; the key, or the agent's owner, IS in
+        // the deny map.
+        let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let target = owner
+            .as_ref()
+            .map_or(key.public_key(), nostr::Keys::public_key);
+        if owner.is_some() {
+            assertion = assertion.with_owner_for_test(target);
+        }
 
-        let state = audio_deny_state(Some(&key.public_key())).await;
+        let state = audio_deny_state(Some(&target)).await;
 
         let tenant = buzz_core::tenant::TenantContext::resolved(
             buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
@@ -7306,6 +7365,20 @@ mod tests {
 
     #[tokio::test]
     async fn w_audio_deny_straddle_entry_inserted_between_registration_and_check_is_caught() {
+        w_audio_deny_straddle_body(None).await;
+    }
+
+    // The owner's disconnect in the same window: the close scan finds the
+    // agent's audio socket by its recorded owner, and the check refuses it on
+    // the owner's entry. Mutation: dropping the owner in
+    // `NipFiSession::from_assertion`, or the owner arm of the audio
+    // registry's match, leaves the scan at 0.
+    #[tokio::test]
+    async fn w_audio_owner_straddle_closes_agent_and_refuses_admission() {
+        w_audio_deny_straddle_body(Some(nostr::Keys::generate())).await;
+    }
+
+    async fn w_audio_deny_straddle_body(owner: Option<nostr::Keys>) {
         // Arms `before_deny_set_check` — fires AFTER audio_post_auth_register and
         // BEFORE the is_denied call. Entry starts absent; inserted during the window.
         // The deny check finds it and closes the connection.
@@ -7315,7 +7388,14 @@ mod tests {
 
         let key = nostr::Keys::generate();
         let deadline = Utc::now() + Duration::hours(1);
-        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        // The deny and the close scan target the owner when there is one.
+        let target = owner
+            .as_ref()
+            .map_or(key.public_key(), nostr::Keys::public_key);
+        if owner.is_some() {
+            assertion = assertion.with_owner_for_test(target);
+        }
 
         // Build state with empty deny map (key not denied yet).
         let deny_map = Arc::new(buzz_auth::NipFiDenyMap::new(
@@ -7451,12 +7531,8 @@ mod tests {
 
         // Insert the deny entry — handler is between registration and check.
         let until = Utc::now() + Duration::seconds(3600);
-        let merge = deny_map_for_insert.merge_cross_pod_deny(
-            "test-issuer",
-            &key.public_key(),
-            until,
-            Utc::now(),
-        );
+        let merge =
+            deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now());
         assert!(
             matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
             "W_audio_deny_straddle: deny entry must be inserted during hook window"
@@ -7472,7 +7548,7 @@ mod tests {
         // Mutation evidence (Mut-C: move hook before audio_post_auth_register):
         //   disconnect_nip_fi returns 0 (not yet registered) → assertion panics.
         //   Causally falsifies the registration-before-check invariant.
-        let pubkey_bytes = key.public_key().to_bytes().to_vec();
+        let pubkey_bytes = target.to_bytes().to_vec();
         let closed = state
             .community_connections
             .disconnect_nip_fi("test-issuer", &pubkey_bytes);
@@ -7839,6 +7915,97 @@ mod tests {
                     session.expire();
                 });
                 assert!(records.is_empty(), "{refusal}: {records:?}");
+            }
+        }
+
+        // Audio judges an agent assertion by its token owner where enforce
+        // does: a banned token owner or a stored owner other than the token
+        // owner records `owner/denied`; a clean owner records nothing before
+        // the channel refusal that ends this join. Mutation: deleting audio's
+        // `observe_owner` call records nothing for every case.
+        #[test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        fn shadow_audio_auth_records_token_owner_refusals() {
+            use crate::nip_fi_shadow_session::tests::{
+                owned_assertion, shadow_records, shadow_state,
+            };
+            #[derive(Clone, Copy, Debug)]
+            enum Case {
+                Clean,
+                Banned,
+                OtherStored,
+            }
+            let cases: [(Case, &[&str]); 3] = [
+                (Case::Clean, &[]),
+                (Case::Banned, &["owner/denied"]),
+                (Case::OtherStored, &["owner/denied"]),
+            ];
+            for (case, expected) in cases {
+                let records = shadow_records(async move {
+                    let mut state = (*audio_test_state_real_db()
+                        .await
+                        .expect("postgres-ci provides a database"))
+                    .clone();
+                    state.nip_fi_deny_map = shadow_state(None).await.nip_fi_deny_map;
+                    state.nip_fi_shadow_sessions = std::sync::Arc::default();
+                    let state = std::sync::Arc::new(state);
+                    let id = uuid::Uuid::new_v4();
+                    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                        .bind(id)
+                        .bind(format!("audio-owner-{}.example", id.simple()))
+                        .execute(state.db.pool())
+                        .await
+                        .expect("insert community");
+                    let community = buzz_core::tenant::CommunityId::from_uuid(id);
+                    let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+                    let owner_bytes = owner.public_key().to_bytes();
+                    match case {
+                        Case::Banned => {
+                            state
+                                .db
+                                .ban_community_member(
+                                    community,
+                                    &owner_bytes,
+                                    &owner_bytes,
+                                    None,
+                                    None,
+                                )
+                                .await
+                                .expect("ban owner");
+                        }
+                        Case::OtherStored => {
+                            let prior = nostr::Keys::generate().public_key();
+                            for key in [agent.public_key(), prior] {
+                                state
+                                    .db
+                                    .ensure_user(community, key.as_bytes())
+                                    .await
+                                    .expect("ensure user");
+                            }
+                            assert!(state
+                                .db
+                                .set_agent_owner(
+                                    community,
+                                    agent.public_key().as_bytes(),
+                                    prior.as_bytes()
+                                )
+                                .await
+                                .expect("seed stored owner"));
+                        }
+                        Case::Clean => {}
+                    }
+                    let session = crate::nip_fi_shadow_session::ShadowSession::start(
+                        &state,
+                        "audio",
+                        crate::nip_fi_shadow::BOUND.into(),
+                        owned_assertion(agent.public_key(), owner.public_key()),
+                        chrono::Utc::now(),
+                    );
+                    shadow_audio_auth_in(state, &agent, std::sync::Arc::clone(&session), community)
+                        .await;
+                    session.expire();
+                });
+                assert_eq!(records, expected, "{case:?}");
             }
         }
 
@@ -14834,6 +15001,155 @@ mod tests {
             expect_policy_close(&mut agent_client).await;
             agent_server.abort();
             bystander_server.abort();
+        }
+
+        /// Audio AUTH of a NIP-FI agent on a closed relay, with no NIP-OA: a
+        /// member token owner admits a non-member agent and records the
+        /// stored owner; a non-member owner, a banned owner (even for an agent
+        /// that is itself a member) and a different stored owner are each
+        /// refused with `authorization denied`. A banned owner is refused
+        /// before its owner link is written.
+        /// Mutations: drop the token-owner arm of `check_membership`, treat
+        /// `OwnerLink::Conflict` as linked, or drop audio's early ban check
+        /// → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn audio_token_owner_decides_agent_admission() {
+            #[derive(Clone, Copy, Debug)]
+            enum Case {
+                MemberOwner,
+                NonMemberOwner,
+                BannedOwnerOfMemberAgent,
+                OtherStoredOwner,
+            }
+            let mut state = (*audio_test_state_real_db()
+                .await
+                .expect("postgres-ci provides a database"))
+            .clone();
+            let mut config = (*state.config).clone();
+            config.require_relay_membership = true;
+            state.config = std::sync::Arc::new(config);
+            let state = std::sync::Arc::new(state);
+            for case in [
+                Case::MemberOwner,
+                Case::NonMemberOwner,
+                Case::BannedOwnerOfMemberAgent,
+                Case::OtherStoredOwner,
+            ] {
+                let (tenant, channel_id, _member) = seed_audio_fixture(state.db.pool()).await;
+                let community = tenant.community();
+                let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+                add_channel_member(state.db.pool(), &tenant, channel_id, &agent).await;
+                if !matches!(case, Case::NonMemberOwner) {
+                    state
+                        .db
+                        .add_relay_member(
+                            community,
+                            &owner.public_key().to_hex(),
+                            "member",
+                            None,
+                            &nostr::Keys::generate(),
+                        )
+                        .await
+                        .map(|write| write.outcome)
+                        .expect("add owner");
+                }
+                match case {
+                    Case::BannedOwnerOfMemberAgent => {
+                        state
+                            .db
+                            .add_relay_member(
+                                community,
+                                &agent.public_key().to_hex(),
+                                "member",
+                                None,
+                                &nostr::Keys::generate(),
+                            )
+                            .await
+                            .map(|write| write.outcome)
+                            .expect("add agent");
+                        let owner_bytes = owner.public_key().to_bytes();
+                        state
+                            .db
+                            .ban_community_member(community, &owner_bytes, &owner_bytes, None, None)
+                            .await
+                            .expect("ban owner");
+                    }
+                    Case::OtherStoredOwner => {
+                        let prior = nostr::Keys::generate();
+                        for key in [&agent, &prior] {
+                            state
+                                .db
+                                .ensure_user_for_authorization(
+                                    community,
+                                    key.public_key().as_bytes(),
+                                )
+                                .await
+                                .expect("seed user");
+                        }
+                        assert!(state
+                            .db
+                            .set_agent_owner_for_authorization(
+                                community,
+                                agent.public_key().as_bytes(),
+                                prior.public_key().as_bytes(),
+                            )
+                            .await
+                            .expect("seed prior owner"));
+                    }
+                    Case::MemberOwner | Case::NonMemberOwner => {}
+                }
+                let assertion = buzz_auth::VerifiedAssertion::for_test(
+                    Some(agent.public_key()),
+                    vec![chrono::Utc::now() + chrono::Duration::hours(1)],
+                )
+                .with_owner_for_test(owner.public_key());
+
+                let (mut client, server) =
+                    start_audio_auth(&state, tenant, channel_id, &agent, None, Some(assertion))
+                        .await;
+                let first = next_audio_text(&mut client).await;
+                server.abort();
+                if matches!(case, Case::MemberOwner) {
+                    assert!(!first.contains("\"error\""), "{case:?}: {first}");
+                    assert!(state
+                        .db
+                        .is_agent_owner(
+                            community,
+                            agent.public_key().as_bytes(),
+                            owner.public_key().as_bytes(),
+                        )
+                        .await
+                        .expect("read stored owner"));
+                } else {
+                    // Every refusal of a NIP-FI session is the one
+                    // `authorization denied` frame.
+                    assert_eq!(
+                        first,
+                        serde_json::json!({
+                            "message": "restricted: authorization denied",
+                            "type": "restricted"
+                        })
+                        .to_string(),
+                        "{case:?}"
+                    );
+                }
+                if matches!(case, Case::BannedOwnerOfMemberAgent) {
+                    // The ban is refused before the owner link is written.
+                    assert!(
+                        !state
+                            .db
+                            .is_agent_owner(
+                                community,
+                                agent.public_key().as_bytes(),
+                                owner.public_key().as_bytes(),
+                            )
+                            .await
+                            .expect("read stored owner"),
+                        "a banned token owner must not be linked"
+                    );
+                }
+            }
         }
 
         /// Audio refuses an agent whose owner link cannot be recorded (the

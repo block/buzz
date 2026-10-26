@@ -93,6 +93,21 @@ void main() {
     );
   });
 
+  test('ignores mutes outside the push channel grammar', () {
+    // Starter channels use UUIDv5 IDs; muting one must not break push setup.
+    const starterChannel = 'fee88e92-da9f-5958-a910-48db3264ad38';
+
+    final subscriptions = buildDesiredBuzzPushSubscriptions(
+      myPubkey: me,
+      channelIds: [channelA],
+      mutedChannelIds: [starterChannel, 'not-a-channel'],
+    );
+
+    expect(subscriptions, hasLength(2));
+    expect(subscriptions.first.ignore, hasLength(1));
+    expect(subscriptions.last.filter.hTags, [channelA]);
+  });
+
   test('chunks channel subscriptions to relay limits deterministically', () {
     final channels = [
       for (var i = 0; i < 51; i++)

@@ -545,6 +545,99 @@ mod tests {
         }
     }
 
+    // The WebSocket upgrade binds `nostr_owner_pubkey` to the token type with
+    // the real verifier: an agent token with a valid owner is admitted and
+    // carries that owner into the session (where AUTH applies owner bans);
+    // an agent token without one, a human token carrying one (valid or null),
+    // an agent token under an `at+jwt` policy and an unknown type are
+    // refused `evidence rejected`. Every token carries valid `at+jwt` claims,
+    // so the `at+jwt` case is refused only for its type. Mutations: accept
+    // `nip-fi-agent+jwt` under `at+jwt`, skip the owner rule, or accept any
+    // `nip-fi*` type in `enforce_token_type` → RED.
+    #[test]
+    fn upgrade_binds_the_owner_claim_to_the_agent_token_type() {
+        use crate::nip_fi_core::test_support::{
+            assertion_verifier, at_jwt_class, communities_for, sign_assertion, TEST_ISSUER,
+        };
+        use buzz_auth::TokenClass::DedicatedNipFi;
+
+        let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let (agent_hex, owner_hex) = (agent.public_key().to_hex(), owner.public_key().to_hex());
+        let owner_claim = || Some(serde_json::Value::from(owner_hex.clone()));
+        let cases = [
+            (
+                "agent with owner",
+                DedicatedNipFi,
+                "nip-fi-agent+jwt",
+                owner_claim(),
+                true,
+            ),
+            (
+                "agent without owner",
+                DedicatedNipFi,
+                "nip-fi-agent+jwt",
+                None,
+                false,
+            ),
+            (
+                "human with owner",
+                DedicatedNipFi,
+                "nip-fi+jwt",
+                owner_claim(),
+                false,
+            ),
+            (
+                "human with null owner",
+                DedicatedNipFi,
+                "nip-fi+jwt",
+                Some(serde_json::Value::Null),
+                false,
+            ),
+            (
+                "agent under at+jwt",
+                at_jwt_class(),
+                "nip-fi-agent+jwt",
+                owner_claim(),
+                false,
+            ),
+            (
+                "unknown type",
+                DedicatedNipFi,
+                "nip-fi-agent",
+                owner_claim(),
+                false,
+            ),
+        ];
+        for (case, token_class, typ, claim, admitted) in cases {
+            let verifier = assertion_verifier(token_class);
+            let headers = headers_with(&format!(
+                "Bearer {}",
+                sign_assertion(typ, &agent_hex, claim)
+            ));
+            let outcome = check_nip_fi_at_upgrade(
+                ROOT,
+                &headers,
+                &communities_for(&[TEST_ISSUER]),
+                Some(&verifier),
+                NipFiMode::Enforce,
+            )
+            .now_or_never()
+            .expect("env resolution never waits");
+            if admitted {
+                let NipFiUpgradeOutcome::Admitted(assertion, _) = outcome else {
+                    panic!("{case}: expected admission");
+                };
+                assert_eq!(assertion.owner(), Some(owner.public_key()), "{case}");
+            } else {
+                assert_eq!(
+                    denied_parts(outcome),
+                    (StatusCode::FORBIDDEN, b"evidence rejected\n".to_vec()),
+                    "{case}"
+                );
+            }
+        }
+    }
+
     // Pins: upgrade maps verifier errors through `VerifierError::denial_class`
     // (503 for unavailable dependencies, 403 evidence rejected otherwise).
     // Mutation: mapping every verifier error to EvidenceRejected fails the

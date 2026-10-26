@@ -131,11 +131,28 @@ class ReadStateManager {
       currentUnixSeconds(),
       _maxFetchedCreatedAt + 1,
     );
-    _advanceContext(contextId, unixTimestamp, publishable: true);
+    if (_advanceContext(contextId, unixTimestamp, publishable: true)) {
+      _persistLocalState();
+      _onChanged();
+      _schedulePublish();
+    }
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
-    _advanceContext(contextId, unixTimestamp, publishable: false);
+    seedContextsRead({contextId: unixTimestamp});
+  }
+
+  /// Advance local-only seeds together, saving and notifying once per batch.
+  void seedContextsRead(Map<String, int> contexts) {
+    var changed = false;
+    for (final entry in contexts.entries) {
+      if (_advanceContext(entry.key, entry.value, publishable: false)) {
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    _persistLocalState();
+    _onChanged();
   }
 
   Future<void> flush() async {
@@ -180,35 +197,28 @@ class ReadStateManager {
     _unsubscribeLive = null;
   }
 
-  void _advanceContext(
+  bool _advanceContext(
     String contextId,
     int unixTimestamp, {
     required bool publishable,
   }) {
-    if (_disposed || unixTimestamp < 0) return;
+    if (_disposed || unixTimestamp < 0) return false;
 
     final current = _effectiveState[contextId] ?? 0;
     if (unixTimestamp <= current) {
       if (!publishable || _publishableContextIds.contains(contextId)) {
-        return;
+        return false;
       }
 
       _publishableContextIds.add(contextId);
-      _persistLocalState();
-      _onChanged();
-      _schedulePublish();
-      return;
+      return true;
     }
 
     _effectiveState[contextId] = unixTimestamp;
     if (publishable) {
       _publishableContextIds.add(contextId);
     }
-    _persistLocalState();
-    _onChanged();
-    if (publishable) {
-      _schedulePublish();
-    }
+    return true;
   }
 
   Future<void> _fetchAndMerge() async {

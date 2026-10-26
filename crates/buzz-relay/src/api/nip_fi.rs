@@ -1300,12 +1300,17 @@ mod route_integration_tests {
         let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
 
         let ctrl_b = CommunityConnectionControl::new(cancel_b.clone());
-        ctrl_b.set_proven_identity(k_b.to_bytes().to_vec(), Some(TEST_ISS.to_owned()));
+        ctrl_b.set_proven_identity(
+            k_b.to_bytes().to_vec(),
+            Some(crate::nip_fi_core::NipFiSession::new(TEST_ISS, None)),
+        );
         let _guard_b = registry.register(uuid::Uuid::new_v4(), community, ctrl_b);
 
         let ctrl_unrelated = CommunityConnectionControl::new(cancel_unrelated.clone());
-        ctrl_unrelated
-            .set_proven_identity(k_unrelated.to_bytes().to_vec(), Some(TEST_ISS.to_owned()));
+        ctrl_unrelated.set_proven_identity(
+            k_unrelated.to_bytes().to_vec(),
+            Some(crate::nip_fi_core::NipFiSession::new(TEST_ISS, None)),
+        );
         let _guard_unrelated = registry.register(uuid::Uuid::new_v4(), community, ctrl_unrelated);
 
         // Deliver k_b — capacity exhausted, no map entry added.
@@ -1420,7 +1425,7 @@ mod route_integration_tests {
                 state.conn_manager.set_authenticated_identity(
                     conn_id,
                     pubkey_bytes,
-                    Some(TEST_ISS.to_owned()),
+                    Some(crate::nip_fi_core::NipFiSession::new(TEST_ISS, None)),
                 );
                 (conn_id, cancel)
             };
@@ -1485,7 +1490,11 @@ mod route_integration_tests {
         let cancel_audio_target = CancellationToken::new();
         let _audio_target_guard = {
             let ctrl = CommunityConnectionControl::new(cancel_audio_target.clone());
-            audio_post_auth_register(&ctrl, target.to_bytes().to_vec(), Some(TEST_ISS.to_owned()));
+            audio_post_auth_register(
+                &ctrl,
+                target.to_bytes().to_vec(),
+                Some(crate::nip_fi_core::NipFiSession::new(TEST_ISS, None)),
+            );
             audio_registry.register(Uuid::new_v4(), community, ctrl)
         };
 
@@ -1498,7 +1507,7 @@ mod route_integration_tests {
             audio_post_auth_register(
                 &ctrl,
                 unrelated.to_bytes().to_vec(),
-                Some(TEST_ISS.to_owned()),
+                Some(crate::nip_fi_core::NipFiSession::new(TEST_ISS, None)),
             );
             audio_registry.register(Uuid::new_v4(), community, ctrl)
         };
@@ -1551,7 +1560,7 @@ mod route_integration_tests {
             audio_post_auth_register(
                 &ctrl,
                 target2.to_bytes().to_vec(),
-                Some(TEST_ISS.to_owned()),
+                Some(crate::nip_fi_core::NipFiSession::new(TEST_ISS, None)),
             );
             audio_registry.register(Uuid::new_v4(), community, ctrl)
         };
@@ -2111,14 +2120,14 @@ mod route_integration_tests {
             state.conn_manager.set_authenticated_identity(
                 conn_id,
                 key.to_bytes().to_vec(),
-                Some(issuer.to_owned()),
+                Some(crate::nip_fi_core::NipFiSession::new(issuer, None)),
             );
             let audio = CancellationToken::new();
             let ctrl = CommunityConnectionControl::new(audio.clone());
             crate::audio::handler::audio_post_auth_register(
                 &ctrl,
                 key.to_bytes().to_vec(),
-                Some(issuer.to_owned()),
+                Some(crate::nip_fi_core::NipFiSession::new(issuer, None)),
             );
             let _audio_guard =
                 state

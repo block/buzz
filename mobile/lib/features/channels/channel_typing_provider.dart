@@ -27,11 +27,16 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
   static const _ttlMs = 8000;
   static const _pruneIntervalMs = 1000;
 
+  /// How long a channel nobody shows keeps its typing subscription.
+  static const _detachDelay = Duration(seconds: 30);
+
   final String channelId;
   void Function()? _unsubscribe;
   Timer? _pruneTimer;
   Timer? _retryTimer;
   Timer? _healthyTimer;
+  Timer? _detachTimer;
+  bool _detached = false;
   int _generation = 0;
   final _activity = <(String, String?), _TypingActivity>{};
 
@@ -42,18 +47,34 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
     final sessionState = ref.watch(relaySessionProvider);
     final generation = ++_generation;
     _activity.clear();
+    // Riverpod defers rebuilding a provider nobody is listening to until it
+    // is listened to or read again, and then skips onResume. So a build
+    // always means the channel is wanted.
+    _detached = false;
 
+    ref.onCancel(() {
+      _detachTimer?.cancel();
+      _detachTimer = Timer(_detachDelay, () {
+        _detachTimer = null;
+        _detached = true;
+        _stop();
+        state = [];
+      });
+    });
+    ref.onResume(() {
+      _detachTimer?.cancel();
+      _detachTimer = null;
+      if (_detached) {
+        _detached = false;
+        Future.microtask(() {
+          if (ref.mounted) ref.invalidateSelf();
+        });
+      }
+    });
     ref.onDispose(() {
-      _generation++;
-      _activity.clear();
-      _unsubscribe?.call();
-      _unsubscribe = null;
-      _pruneTimer?.cancel();
-      _pruneTimer = null;
-      _retryTimer?.cancel();
-      _retryTimer = null;
-      _healthyTimer?.cancel();
-      _healthyTimer = null;
+      _detachTimer?.cancel();
+      _detachTimer = null;
+      _stop();
     });
 
     if (sessionState.status == SessionStatus.connected) {
@@ -61,6 +82,19 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
     }
 
     return [];
+  }
+
+  void _stop() {
+    _generation++;
+    _activity.clear();
+    _unsubscribe?.call();
+    _unsubscribe = null;
+    _pruneTimer?.cancel();
+    _pruneTimer = null;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _healthyTimer?.cancel();
+    _healthyTimer = null;
   }
 
   Future<void> _subscribeLive(int generation, [int attempt = 0]) async {

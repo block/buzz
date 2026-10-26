@@ -41,6 +41,7 @@ pub mod pocket;
 pub mod preprocessing;
 pub mod reconnect;
 pub mod relay_api;
+mod roster;
 pub mod state;
 pub mod stt;
 pub mod transcription;
@@ -99,12 +100,10 @@ use agent_tts_routing::{
 pub use pipeline::check_pipeline_hotstart;
 use pipeline::{
     await_inflight_tts_start, maybe_start_stt_pipeline, maybe_start_tts_pipeline,
-    post_connect_setup, PostConnectOutcome,
+    post_connect_setup, start_huddle_media, PostConnectOutcome,
 };
-use relay_api::{
-    count_human_members, fetch_channel_members, parse_channel_uuid, validate_pubkey_hex,
-    MAX_HUDDLE_AGENTS,
-};
+use relay_api::{parse_channel_uuid, validate_pubkey_hex, MAX_HUDDLE_AGENTS};
+use roster::fetch_huddle_roster;
 use window::close_huddle_window;
 
 fn normalize_huddle_channel_name(candidate: Option<String>, fallback: &str) -> String {
@@ -332,7 +331,14 @@ pub async fn start_huddle(
 
             // 7. Hydrate members, download models, start pipelines (incl. audio relay).
             // Audio relay failure is fatal — no point in a huddle without audio.
-            match post_connect_setup(&state, &ephemeral_channel_id, huddle_generation).await {
+            match post_connect_setup(
+                &state,
+                &ephemeral_channel_id,
+                huddle_generation,
+                start_huddle_media,
+            )
+            .await
+            {
                 Ok(PostConnectOutcome::Ready) => {}
                 Ok(PostConnectOutcome::Stale) => {
                     close_huddle_window(&app, &ephemeral_channel_id);
@@ -455,7 +461,14 @@ pub async fn join_huddle(
 
     // Hydrate members, download models, start pipelines (incl. audio relay).
     // Audio relay failure is fatal — no point in a huddle without audio.
-    match post_connect_setup(&state, &ephemeral_channel_id, huddle_generation).await {
+    match post_connect_setup(
+        &state,
+        &ephemeral_channel_id,
+        huddle_generation,
+        start_huddle_media,
+    )
+    .await
+    {
         Ok(PostConnectOutcome::Ready) => {}
         Ok(PostConnectOutcome::Stale) => {
             return Err("huddle join was superseded".to_owned());
@@ -566,9 +579,8 @@ async fn remove_huddle_agents(ephemeral_channel_id: &str, state: &AppState) {
         return;
     };
 
-    let agent_pubkeys = match fetch_channel_members(ephemeral_channel_id, Some("bot"), state).await
-    {
-        Ok(pubkeys) => pubkeys,
+    let agent_pubkeys = match fetch_huddle_roster(ephemeral_channel_id, state).await {
+        Ok(roster) => roster.agents,
         Err(e) => {
             eprintln!("buzz-desktop: fetch huddle agents for cleanup failed: {e}");
             return;
@@ -614,9 +626,12 @@ pub async fn leave_huddle(app: tauri::AppHandle, state: State<'_, AppState>) -> 
     // We check BEFORE removing self — the relay counts us as a member until
     // we leave. So "1 human remaining" means WE are the last one.
     if !parent_channel_id.is_empty() && !ephemeral_channel_id.is_empty() {
-        let humans_remaining = count_human_members(&ephemeral_channel_id, &state)
+        let humans_remaining = fetch_huddle_roster(&ephemeral_channel_id, &state)
             .await
-            // On fetch failure, assume 2 humans remain (safe default).
+            .ok()
+            .and_then(|roster| roster.humans_remaining())
+            // On fetch failure or an incomplete roster, assume 2 humans remain
+            // (safe default).
             // unwrap_or(1) would mean "I'm the last human" → triggers auto-archive,
             // ending the huddle for everyone on a transient REST failure. Using 2
             // means we skip the auto-end path and just remove ourselves — the huddle
@@ -729,7 +744,9 @@ pub async fn get_huddle_agent_pubkeys(state: State<'_, AppState>) -> Result<Vec<
         hs.ephemeral_channel_id.clone()
     };
     match eph_id {
-        Some(id) => fetch_channel_members(&id, Some("bot"), &state).await,
+        Some(id) => fetch_huddle_roster(&id, &state)
+            .await
+            .map(|roster| roster.agents),
         None => Ok(Vec::new()),
     }
 }

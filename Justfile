@@ -417,6 +417,10 @@ test-unit:
         # already runs it.
         cargo test -p buzz-auth --doc
         cargo nextest run -p buzz-voice --lib
+        # Inter-relay mesh: membership, gossip, registry, and loopback-UDP
+        # runtime tests. Infra-free (Redis-backed paths are unit-faked or
+        # never dialed). Keep the Cargo fallback in step.
+        cargo nextest run -p buzz-relay-mesh
         cargo nextest run -p buzz-cli
         # buzz-sdk builder/validation unit tests: pure event-builder and input
         # validation (e.g. the canvas writer-discipline/skew guard and the
@@ -532,12 +536,14 @@ test-unit:
         # (JWKS source + refresh-loop composition), which `--lib` cannot reach
         # because they live in the binary target; the nested
         # `tests::postgres_tests::` stays in the PostgreSQL lane.
-        # The fourth clause adds the startup step timers (startup_steps) and the
-        # env- and log-capture tests in telemetry and config. All three modules
-        # are infra-free; config parses env into a struct and never connects.
+        # The fourth clause adds the startup step timers (startup_steps), the
+        # mesh boot wiring (mesh_boot; Redis and Postgres point at refused
+        # ports), and the env- and log-capture tests in telemetry and config.
+        # All four modules are infra-free; config parses env into a struct and
+        # never connects.
         # `^config::` is anchored so it does not also select nip_fi_config.
         cargo nextest run -p buzz-relay --lib --bin buzz-relay \
-            -E 'test(/^api::admin::/) + test(/^push_runtime::/) + test(/^operator_listener::tests::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^handlers::system_channels::tests::/) + test(/^nip11::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_core::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^nip_fi_resolver::tests::/) + test(/^readiness::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::profiles::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + test(/^audio::join::tests::/) + test(/^audio::handler::tests::/) + test(/^nip_fi_gate::tests::/) + test(/^nip_fi_session::tests::/) + test(/^nip_fi_shadow::tests::/) + test(/^nip_fi_shadow_session::tests::/) + test(/^startup_steps::tests::/) + test(/^telemetry::tests::/) + test(/^config::tests::/) + test(=state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket) + test(=state::tests::periodic_revalidation_disconnects_inside_the_fenced_callback) + test(=state::tests::bare_community_disconnect_fails_closed_when_the_fence_is_unavailable) + test(=connection::tests::send_loop_sends_policy_close_when_community_is_archived) + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason) + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame) + test(=handlers::req::tests::timed_out_historical_read_deregisters_before_closed) + test(=handlers::req::tests::superseded_timeout_leaves_replacement_intact) + test(=handlers::req::tests::search_claim_retires_live_and_yields_to_replacement) + test(=handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner) + test(=handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim) + test(=handlers::req::tests::revoke_then_replacement_keeps_replacement_whole) + test(=handlers::req::tests::claims_after_connection_cleanup_are_refused) + test(=handlers::req::tests::dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::count_fallback_covers_filters_that_can_match_private_deletions) + test(=handlers::req::tests::group_state_t_and_creator_tags_reach_sql_only_for_group_state_kinds) + test(=api::bridge::postgres_tests::bridge_search_mode_extension_accepts_prefix_snake_or_camel_case) + test(=api::bridge::postgres_tests::bridge_search_sort_extension_selects_newest_only_when_named) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/) + test(/^env_filter_tests::/)) - test(/^tests::postgres_tests::/))'
+            -E 'test(/^api::admin::/) + test(/^push_runtime::/) + test(/^operator_listener::tests::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^handlers::system_channels::tests::/) + test(/^nip11::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_core::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^nip_fi_resolver::tests::/) + test(/^readiness::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::profiles::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + test(/^audio::join::tests::/) + test(/^audio::handler::tests::/) + test(/^nip_fi_gate::tests::/) + test(/^nip_fi_session::tests::/) + test(/^nip_fi_shadow::tests::/) + test(/^nip_fi_shadow_session::tests::/) + test(/^startup_steps::tests::/) + test(/^mesh_boot::tests::/) + test(/^telemetry::tests::/) + test(/^config::tests::/) + test(=state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket) + test(=state::tests::periodic_revalidation_disconnects_inside_the_fenced_callback) + test(=state::tests::bare_community_disconnect_fails_closed_when_the_fence_is_unavailable) + test(=connection::tests::send_loop_sends_policy_close_when_community_is_archived) + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason) + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame) + test(=handlers::req::tests::timed_out_historical_read_deregisters_before_closed) + test(=handlers::req::tests::superseded_timeout_leaves_replacement_intact) + test(=handlers::req::tests::search_claim_retires_live_and_yields_to_replacement) + test(=handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner) + test(=handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim) + test(=handlers::req::tests::revoke_then_replacement_keeps_replacement_whole) + test(=handlers::req::tests::claims_after_connection_cleanup_are_refused) + test(=handlers::req::tests::dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::count_fallback_covers_filters_that_can_match_private_deletions) + test(=handlers::req::tests::group_state_t_and_creator_tags_reach_sql_only_for_group_state_kinds) + test(=api::bridge::postgres_tests::bridge_search_mode_extension_accepts_prefix_snake_or_camel_case) + test(=api::bridge::postgres_tests::bridge_search_sort_extension_selects_newest_only_when_named) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/) + test(/^env_filter_tests::/)) - test(/^tests::postgres_tests::/))'
         # Note on audio::join::tests scope: the full suite is infra-free (no DB,
         # no Redis). The infra-free audio/FI regression witnesses — bootstrap
         # ordering barrier, CommitConfirmed arm, pending-close invisibility,
@@ -594,6 +600,9 @@ test-unit:
                 + test(=handlers::auth::tests::fi_invalid_nip42_proof_emits_terminal_evidence_rejected)
                 + test(=handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path)
                 + test(=handlers::auth::tests::shadow_root_auth_records_pairing_denial)
+                + test(=handlers::auth::tests::shadow_root_auth_records_unavailable_owner_read)
+                + test(=handlers::ingest::postgres_tests::relay_admin_ban_maps_to_blocked_auth_failure)
+                + test(=handlers::ingest::postgres_tests::relay_admin_internal_maps_to_error_not_client_fault)
                 + test(=handlers::auth::tests::shadow_root_invalid_nip42_retires_without_record)
                 + test(=handlers::auth::tests::nip42_denial_class_separates_internal_failure_from_bad_evidence)
                 + test(=handlers::event::tests::fanout_access::owner_only_kinds_keep_only_the_owner)
@@ -606,6 +615,7 @@ test-unit:
                 + test(=state::tests::conn_manager_disconnect_nip_fi_is_issuer_scoped)
                 + test(=state::tests::conn_manager_disconnect_nip_fi_sets_authorization_denied_reason)
                 + test(=state::tests::nip_fi_disconnect_audio_is_issuer_scoped)
+                + test(=state::tests::nip_fi_owner_disconnect_closes_owned_agent_sockets_on_root_and_audio)
                 + test(=state::tests::nip_fi_disconnect_closes_proven_audio_socket_and_sends_policy_close_reason)
                 + test(=state::tests::nip_fi_disconnect_closes_target_audio_only_and_preserves_collocated_peer)
                 + test(=state::tests::nip_fi_disconnect_does_not_close_different_pubkey_audio_socket)

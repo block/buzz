@@ -5,8 +5,8 @@
 //! would-deny where enforce checks them, the admit once the connection is
 //! actually admitted, or `deadline` when enforce's deadline passes first. An
 //! admitted session then records at most one end: `expired` at the deadline,
-//! or `revoked` when a deny for its key arrives once it registered. Every
-//! transition runs under one session lock, and a session whose socket was
+//! or `revoked` when a deny for its key or owner arrives once it registered.
+//! Every transition runs under one session lock, and a session whose socket was
 //! cancelled, or whose AUTH ended unadmitted for a non-NIP-FI reason, retires
 //! without a record.
 
@@ -18,12 +18,13 @@ use buzz_auth::{DenialClass, VerifiedAssertion};
 use nostr::PublicKey;
 use tokio_util::sync::CancellationToken;
 
+use crate::nip_fi_core::NipFiSession;
 use crate::nip_fi_shadow::{Stage, WouldDeny};
 use crate::state::AppState;
 
 #[derive(Clone, Copy)]
 enum Phase {
-    /// `revoked`: a deny for the key arrived after registration, which
+    /// `revoked`: a deny for the key or owner arrived after registration, which
     /// enforce's registered-session scan acts on whatever the phase.
     Pending {
         revoked: bool,
@@ -47,10 +48,11 @@ impl ShadowSessions {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Records one `revoked` end for each registered session of `pubkey`
-    /// under `issuer`, at once if admitted or at its admit if still pending;
-    /// a session already ended records nothing, so re-sent denies are
-    /// idempotent.
+    /// Records one `revoked` end for each registered session under `issuer`
+    /// whose asserted key or verified owner is `pubkey`, matched as enforce's
+    /// [`NipFiSession`] matches, at once if admitted or at its admit if still
+    /// pending; a session already ended records nothing, so re-sent denies
+    /// are idempotent.
     pub(crate) fn would_close(&self, issuer: &str, pubkey: &[u8]) {
         let live: Vec<_> = self
             .registered()
@@ -58,10 +60,10 @@ impl ShadowSessions {
             .filter_map(Weak::upgrade)
             .collect();
         for session in live {
-            let key = session.assertion.asserted_key().map(|k| k.to_bytes());
-            if session.assertion.identity().issuer() == issuer
-                && key.as_ref().map(|k| &k[..]) == Some(pubkey)
-            {
+            let assertion = &session.assertion;
+            if assertion.asserted_key().is_some_and(|key| {
+                NipFiSession::from_assertion(assertion).matches(issuer, &key.to_bytes(), pubkey)
+            }) {
                 session.revoke();
             }
         }
@@ -131,6 +133,24 @@ impl ShadowSession {
     pub(crate) fn observe_pairing(&self, pubkey: PublicKey) {
         if self.assertion.asserted_key() != Some(pubkey) {
             self.decide(Err((Stage::Pairing, DenialClass::AuthorizationDenied)));
+        }
+    }
+
+    /// At enforce's token-owner checks: records the would-deny when an agent
+    /// assertion's owner is banned or differs from the agent's stored owner.
+    pub(crate) async fn observe_owner(
+        &self,
+        state: &AppState,
+        community: buzz_core::CommunityId,
+        pubkey: PublicKey,
+    ) {
+        let Some(owner) = self.assertion.owner() else {
+            return;
+        };
+        if let Some(class) =
+            crate::handlers::auth::token_owner_denial(state, community, pubkey, owner).await
+        {
+            self.decide(Err((Stage::Owner, class)));
         }
     }
 
@@ -276,11 +296,10 @@ pub(crate) fn upgrade_denied(
 }
 
 fn deny_listed(state: &AppState, assertion: &VerifiedAssertion) -> bool {
-    let issuer = assertion.identity().issuer();
-    assertion
-        .asserted_key()
-        .zip(state.nip_fi_deny_map.as_deref())
-        .is_some_and(|(key, map)| map.is_denied(issuer, &key, chrono::Utc::now()))
+    state
+        .nip_fi_deny_map
+        .as_deref()
+        .is_some_and(|map| crate::nip_fi_core::assertion_denied(map, assertion, chrono::Utc::now()))
 }
 
 #[cfg(test)]
@@ -476,6 +495,115 @@ pub(crate) mod tests {
             crate::api::nip_fi::NipFiDisconnectApplyResult::Applied(merged) => merged,
             other => panic!("disconnect not applied: {other:?}"),
         }
+    }
+
+    /// An agent assertion for `agent` acting for `owner`, valid for an hour.
+    pub(crate) fn owned_assertion(agent: PublicKey, owner: PublicKey) -> VerifiedAssertion {
+        VerifiedAssertion::for_test(Some(agent), vec![Utc::now() + Duration::hours(1)])
+            .with_owner_for_test(owner)
+    }
+
+    // An owner's disconnect, delivered cross-pod after admission or between
+    // the deny-set check and the admit, ends each of its agents' ws and audio
+    // sessions `revoked` exactly once and closes no real socket, even one the
+    // real registry would match; the owner under another issuer and an
+    // ownerless session of the agent key take no end. Mutation: dropping the
+    // owner arm of `would_close` loses every `end/revoked`.
+    #[test]
+    fn owner_disconnect_ends_owned_agent_sessions_and_closes_nothing() {
+        let records = shadow_records_by_route(async {
+            let state = pod(8).await;
+            let (agent, owner) = (Keys::generate().public_key(), Keys::generate().public_key());
+            let owned = |route| {
+                let assertion = owned_assertion(agent, owner);
+                ShadowSession::start(
+                    &state,
+                    route,
+                    crate::nip_fi_shadow::BOUND.into(),
+                    assertion,
+                    Utc::now(),
+                )
+            };
+            let cancel = CancellationToken::new();
+            let control = crate::state::CommunityConnectionControl::new(cancel.clone());
+            let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(1);
+            control.set_terminal_frame_sender(terminal_tx);
+            control.set_proven_identity(
+                agent.to_bytes().to_vec(),
+                Some(NipFiSession::from_assertion(&owned_assertion(agent, owner))),
+            );
+            let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+            let _guard =
+                state
+                    .community_connections
+                    .register(uuid::Uuid::new_v4(), community, control);
+
+            let admitted = [owned("ws"), owned("audio")];
+            let pending = [owned("ws"), owned("audio")];
+            let ownerless = session(&state, Some(agent), Duration::hours(1));
+            for s in admitted.iter().chain([&ownerless]) {
+                auth(s, &state, agent);
+            }
+            for s in &pending {
+                s.observe_pairing(agent);
+                s.observe_deny_set(&state);
+            }
+            state
+                .nip_fi_shadow_sessions
+                .would_close("other-issuer", &owner.to_bytes());
+            for s in &admitted {
+                assert!(matches!(*s.phase.lock().unwrap(), Phase::Admitted));
+            }
+            for s in &pending {
+                let phase = s.phase.lock().unwrap();
+                assert!(matches!(*phase, Phase::Pending { revoked: false }));
+            }
+            deliver(&state, &owner);
+            revoke(&state, &owner);
+            for s in &pending {
+                s.admit();
+            }
+            assert!(!cancel.is_cancelled(), "shadow never cancels a socket");
+            assert!(terminal_rx.try_recv().is_err(), "shadow sends no frame");
+        });
+        let expected = [
+            "audio admit/admit",
+            "audio admit/admit",
+            "audio end/revoked",
+            "audio end/revoked",
+            "ws admit/admit",
+            "ws admit/admit",
+            "ws admit/admit",
+            "ws end/revoked",
+            "ws end/revoked",
+        ];
+        assert_eq!(records, expected);
+    }
+
+    // The shadow deny observer reads the owner's deny entry at the upgrade
+    // and after registration. Mutation: dropping the owner arm of
+    // `assertion_denied` records two admits instead.
+    #[test]
+    fn owner_deny_entry_records_deny_set_at_upgrade_and_after_registration() {
+        let (agent, owner) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let records = shadow_records(async move {
+            let state = shadow_state(Some(owner)).await;
+            let assertion = owned_assertion(agent, owner);
+            assert!(upgrade_denied(
+                &state,
+                &crate::nip_fi_shadow::BOUND.into(),
+                &assertion
+            ));
+            let s = ShadowSession::start(
+                &state,
+                "ws",
+                crate::nip_fi_shadow::BOUND.into(),
+                assertion,
+                Utc::now(),
+            );
+            auth(&s, &state, agent);
+        });
+        assert_eq!(records, ["deny_set/denied", "deny_set/denied"]);
     }
 
     /// A shadow pod whose deny map holds `capacity` entries for the

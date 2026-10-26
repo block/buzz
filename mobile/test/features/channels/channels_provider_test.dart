@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:fake_async/fake_async.dart';
@@ -9,10 +10,12 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
 
 part 'channels_provider_live_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
+part 'channels_provider_request_path_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -28,6 +31,7 @@ part 'channels_provider_readiness_cases.dart';
 /// events on demand.
 void main() {
   _unreadReadinessCases();
+  _requestPathCases();
   const myPk = 'me';
 
   test(
@@ -630,15 +634,15 @@ void main() {
 
       expect(await container.read(channelsProvider.future), isEmpty);
 
-      // The directory refresh parks on the member-count query and fails there
+      // The directory refresh parks on the member-metadata query and fails there
       // after the switch. A retired failure must not
       // overwrite the new scope's list or push it into an error state.
       session.memberships = [_membership(_channelA, myPk)];
-      session.pauseNextMemberCountQuery();
+      session.pauseNextMemberMetadataQuery();
       final staleRefresh = container
           .read(channelsProvider.notifier)
           .retryDirectory();
-      await session.nextMemberCountQueryStarted;
+      await session.nextMemberMetadataQueryStarted;
 
       session.memberships = [_membership(_channelB, myPk)];
       session.metadata = [_meta(id: _channelB, name: 'community-b-general')];
@@ -647,8 +651,8 @@ void main() {
           .update(baseUrl: 'https://community-b.example');
       await container.read(channelsProvider.future);
 
-      session.failClaimedMemberCountQuery = true;
-      session.resumePausedMemberCountQuery();
+      session.failClaimedMemberMetadataQuery = true;
+      session.resumePausedMemberMetadataQuery();
       await staleRefresh;
       await _settle();
 
@@ -722,19 +726,19 @@ void main() {
       expect(await container.read(channelsProvider.future), isEmpty);
 
       session.memberships = [_membership(_channelA, myPk)];
-      session.pauseNextMemberCountQuery();
+      session.pauseNextMemberMetadataQuery();
       final staleRefresh = container
           .read(channelsProvider.notifier)
           .retryDirectory();
-      await session.nextMemberCountQueryStarted;
+      await session.nextMemberMetadataQueryStarted;
 
       session.memberships = [_membership(_channelB, _otherPk)];
       session.metadata = [_meta(id: _channelB, name: 'second-identity-joined')];
       container.read(_testPubkeyProvider.notifier).set(_otherPk);
       await container.read(channelsProvider.future);
 
-      session.failClaimedMemberCountQuery = true;
-      session.resumePausedMemberCountQuery();
+      session.failClaimedMemberMetadataQuery = true;
+      session.resumePausedMemberMetadataQuery();
       await staleRefresh;
       await _settle();
 
@@ -754,11 +758,10 @@ void main() {
     final container = _buildContainer(session: session);
     addTearDown(container.dispose);
 
-    // Park all four reads. Any of them waiting on another would leave that one
+    // Park all three reads. Any of them waiting on another would leave that one
     // unsent.
     final metadataGate = session.metadataGate = Completer<void>();
     session.pauseNextHiddenDmQuery();
-    session.pauseNextMemberCountQuery();
     session.pauseNextHuddleStartQuery();
     final load = container.read(channelsProvider.future);
     await _settle();
@@ -771,17 +774,11 @@ void main() {
     };
     expect(
       sentKinds,
-      containsAll([
-        39000,
-        39002,
-        EventKind.dmVisibility,
-        EventKind.huddleStarted,
-      ]),
+      containsAll([39000, EventKind.dmVisibility, EventKind.huddleStarted]),
     );
 
     metadataGate.complete();
     session.resumePausedHiddenDmQuery();
-    session.resumePausedMemberCountQuery();
     session.resumePausedHuddleStartQuery();
     expect((await load).map((channel) => channel.id), [_channelA]);
   });
@@ -881,8 +878,8 @@ void main() {
     await container.read(channelsProvider.future);
     final notifier = container.read(channelsProvider.notifier);
 
-    // Park an older refresh on its Huddle-start query. Both of its membership
-    // fetches have already landed, so channel A is the list it is carrying.
+    // Park an older refresh on its Huddle-start query. Its membership snapshot
+    // has already landed, so channel A is the list it is carrying.
     session.pauseNextHuddleStartQuery();
     final olderRefresh = notifier.refresh();
     await session.nextHuddleStartQueryStarted;
@@ -2566,10 +2563,12 @@ NostrEvent _membership(
   String pubkey, {
   String? additionalPubkey,
   String? ownerPubkey,
+  int createdAt = 1,
+  String? eventId,
 }) => NostrEvent(
-  id: 'mem-$channelId',
+  id: eventId ?? 'mem-$channelId',
   pubkey: 'creator',
-  createdAt: 1,
+  createdAt: createdAt,
   kind: 39002,
   tags: [
     ['d', channelId],
@@ -2605,6 +2604,7 @@ NostrEvent _meta({
   int createdAt = 1,
   int? ttlSeconds,
   bool archived = false,
+  List<String> participants = const [],
 }) => NostrEvent(
   id: 'meta-$id',
   pubkey: 'creator',
@@ -2617,6 +2617,7 @@ NostrEvent _meta({
     [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
     if (archived) ['archived', 'true'],
+    for (final participant in participants) ['p', participant],
   ],
   content: '',
   sig: 'sig',
@@ -2700,7 +2701,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   List<NostrEvent> recentMessages;
   int membershipFailures;
   int directoryFailures = 0;
-  bool failClaimedMemberCountQuery = false;
+  bool failClaimedMemberMetadataQuery = false;
   bool failClaimedUnreadCatchUpQuery = false;
   int membershipRequestCount = 0;
   int metadataPageRequestCount = 0;
@@ -2731,9 +2732,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Completer<void>? _pausedHiddenDm;
   Completer<void>? _hiddenDmStarted;
   Completer<void>? _claimedHiddenDm;
-  Completer<void>? _pausedMemberCount;
-  Completer<void>? _memberCountStarted;
-  Completer<void>? _claimedMemberCount;
+  Completer<void>? _pausedMemberMetadata;
+  Completer<void>? _memberMetadataStarted;
+  Completer<void>? _claimedMemberMetadata;
   Completer<void>? _pausedHuddleStarts;
   Completer<void>? _huddleStartsStarted;
   Completer<void>? _claimedHuddleStarts;
@@ -2831,7 +2832,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
 
   /// Holds the next Huddle-start query open, one shot only.
   ///
-  /// Parks the older refresh AFTER both membership fetches have landed, so the
+  /// Parks the older refresh AFTER membership discovery has landed, so the
   /// only guard left between the park and the member-snapshot write is the
   /// fence on this leg.
   void pauseNextHuddleStartQuery() {
@@ -2860,28 +2861,28 @@ class _FakeRelaySession extends RelaySessionNotifier {
     paused.complete();
   }
 
-  /// Holds the next member-count query open, one shot only.
-  void pauseNextMemberCountQuery() {
-    if (_pausedMemberCount != null) {
-      throw StateError('A member-count query is already paused');
+  /// Holds the next member-metadata query open, one shot only.
+  void pauseNextMemberMetadataQuery() {
+    if (_pausedMemberMetadata != null) {
+      throw StateError('A member-metadata query is already paused');
     }
-    _pausedMemberCount = Completer<void>();
-    _memberCountStarted = Completer<void>();
+    _pausedMemberMetadata = Completer<void>();
+    _memberMetadataStarted = Completer<void>();
   }
 
-  /// Completes once the parked member-count query has been requested.
-  Future<void> get nextMemberCountQueryStarted async {
-    final started = _memberCountStarted;
+  /// Completes once the parked member-metadata query has been requested.
+  Future<void> get nextMemberMetadataQueryStarted async {
+    final started = _memberMetadataStarted;
     if (started == null) {
-      throw StateError('No member-count query is pending');
+      throw StateError('No member-metadata query is pending');
     }
     await started.future;
   }
 
-  /// Releases the parked member-count query so its response lands.
-  void resumePausedMemberCountQuery() {
-    final paused = _claimedMemberCount ?? _pausedMemberCount;
-    if (paused == null) throw StateError('No member-count query is paused');
+  /// Releases the parked member-metadata query so its response lands.
+  void resumePausedMemberMetadataQuery() {
+    final paused = _claimedMemberMetadata ?? _pausedMemberMetadata;
+    if (paused == null) throw StateError('No member-metadata query is paused');
     paused.complete();
   }
 
@@ -2929,21 +2930,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
       throw Exception('restricted: too many explicit channels');
     }
     if (filter.kinds.contains(39002) && filter.tags['#d'] != null) {
-      final paused = _pausedMemberCount;
-      if (paused != null) {
-        _claimedMemberCount = paused;
-        _pausedMemberCount = null;
-        _memberCountStarted!.complete();
-        _memberCountStarted = null;
-        await paused.future;
-        if (failClaimedMemberCountQuery) {
-          throw Exception('member-count fetch failed');
-        }
-      }
-      final ids = (filter.tags['#d'] ?? const <String>[]).toSet();
-      return memberships
-          .where((event) => ids.contains(event.getTagValue('d')))
-          .toList();
+      throw StateError('Membership rosters must reuse discovery events');
     }
     if (filter.kinds.contains(39002) && filter.tags['#p'] != null) {
       membershipRequestCount++;
@@ -2974,7 +2961,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     }
     if (filter.kinds.contains(EventKind.huddleStarted)) {
       // Claim the parked slot so the newer refresh's own Huddle query runs
-      // unblocked: one shot, exactly like the hidden-DM and member-count hooks.
+      // unblocked: one shot, exactly like the hidden-DM and member-metadata hooks.
       final paused = _pausedHuddleStarts;
       if (paused != null) {
         _claimedHuddleStarts = paused;
@@ -2993,9 +2980,22 @@ class _FakeRelaySession extends RelaySessionNotifier {
       if (ids == null) {
         throw StateError('Directory queries must use the HTTP query bridge');
       }
+      final snapshot = metadata
+          .where((e) => ids.contains(e.getTagValue('d')))
+          .toList();
+      final paused = _pausedMemberMetadata;
+      if (paused != null) {
+        _claimedMemberMetadata = paused;
+        _pausedMemberMetadata = null;
+        _memberMetadataStarted!.complete();
+        _memberMetadataStarted = null;
+        await paused.future;
+        if (failClaimedMemberMetadataQuery) {
+          throw Exception('member-metadata fetch failed');
+        }
+      }
       await metadataGate?.future;
-      // Member metadata query — return only matching `d` tags.
-      return metadata.where((e) => ids.contains(e.getTagValue('d'))).toList();
+      return snapshot;
     }
     // Per-filter websocket fallback of a message batch.
     messageHistoryCount++;

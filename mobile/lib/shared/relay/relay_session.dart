@@ -33,6 +33,9 @@ class _HistorySubscription {
   final Completer<List<NostrEvent>> completer;
   final Timer timeout;
 
+  /// The filter of a request held until the socket authenticates.
+  NostrFilter? heldFilter;
+
   _HistorySubscription({required this.completer, required this.timeout});
 }
 
@@ -328,15 +331,22 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           TimeoutException('Relay history request timed out after $timeout'),
         );
       }
-      _sendClose(subId);
+      if (sub?.heldFilter == null) _sendClose(subId);
     });
 
-    _historySubscriptions[subId] = _HistorySubscription(
+    final subscription = _HistorySubscription(
       completer: completer,
       timeout: timer,
     );
+    _historySubscriptions[subId] = subscription;
 
-    _sendReq(subId, filter);
+    // The relay rejects a REQ sent before NIP-42 AUTH completes. Hold it for
+    // the authenticated connection instead of paying a rejection and retry.
+    if (_socketConnected) {
+      _sendReq(subId, filter);
+    } else {
+      subscription.heldFilter = filter;
+    }
     return completer.future;
   }
 
@@ -385,7 +395,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       readyCompleter: readyCompleter,
     );
 
-    _sendReq(subId, filter);
+    // Before AUTH the relay closes it as auth-required, which is terminal.
+    // The replay on connect sends it instead.
+    if (_socketConnected) _sendReq(subId, filter);
 
     try {
       await readyCompleter.future.timeout(
@@ -573,6 +585,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     if (_disposed || _ageRestricted) return;
 
     final generation = ++_connectionGeneration;
+    // A replacement socket is unauthenticated until its AUTH completes.
+    _socketConnected = false;
     state = SessionState(
       status: _hasConnectedOnce
           ? SessionStatus.reconnecting
@@ -668,6 +682,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<void> _replayLiveSubscriptions(int generation) async {
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     if (!_isActiveConnection(generation)) return;
+    _sendHeldHistory();
 
     final entries = _liveSubscriptions.entries.toList();
     final visibleChannelId = _visibleChannelsByOwner.isEmpty
@@ -1020,6 +1035,16 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _sendReq(String subId, NostrFilter filter) {
     _socket?.send(['REQ', subId, filter.toJson()]);
+  }
+
+  void _sendHeldHistory() {
+    for (final MapEntry(key: subId, value: sub)
+        in _historySubscriptions.entries) {
+      final filter = sub.heldFilter;
+      if (filter == null) continue;
+      sub.heldFilter = null;
+      _sendReq(subId, filter);
+    }
   }
 
   void _sendClose(String subId) {

@@ -25,12 +25,14 @@ pub mod peer;
 pub mod registry;
 pub mod runtime;
 pub mod status;
+pub mod telemetry;
 pub mod wire;
 
 // Lane modules — one owner per file (see the mesh thread for lane map):
 //   endpoint.rs, peer.rs        — Mari (transport core)
 //   registry.rs, gossip.rs,
-//   membership.rs, status.rs    — Max (membership + /_mesh)
+//   membership.rs, status.rs,
+//   telemetry.rs                — Max (membership + /_mesh + metrics)
 // Session directory + tunnel routing live relay-side (Perci), consuming the
 // seams below; huddle fan-out lives in buzz-relay's audio module (Dawn).
 
