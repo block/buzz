@@ -7,6 +7,13 @@ use tokio::process::Command;
 use url::Url;
 use uuid::Uuid;
 
+fn admin_binary() -> std::ffi::OsString {
+    // Nextest relocates binaries when extracting an archive. Cargo's build-time
+    // path remains the fallback for local cargo test runs.
+    std::env::var_os("NEXTEST_BIN_EXE_buzz_admin")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_buzz-admin").into())
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
@@ -97,7 +104,7 @@ async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
         outputs.push(
             tokio::time::timeout(
                 std::time::Duration::from_secs(15),
-                Command::new(env!("CARGO_BIN_EXE_buzz-admin"))
+                Command::new(admin_binary())
                     .args(["user-deletions", "inventory", "--pubkey", input])
                     .env("DATABASE_URL", reader_url.as_str())
                     .kill_on_drop(true)
@@ -108,7 +115,7 @@ async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
             .unwrap(),
         );
     }
-    let demo = Command::new(env!("CARGO_BIN_EXE_buzz-admin"))
+    let demo = Command::new(admin_binary())
         .args(["user-deletions", "inventory"])
         .env("DATABASE_URL", reader_url.as_str())
         .kill_on_drop(true)
@@ -175,7 +182,7 @@ async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
 
 #[test]
 fn invalid_inventory_key_fails_before_database_connection() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_buzz-admin"))
+    let output = std::process::Command::new(admin_binary())
         .args(["user-deletions", "inventory", "--pubkey", "invalid-npub"])
         .env_remove("DATABASE_URL")
         .output()
@@ -189,7 +196,7 @@ fn invalid_inventory_key_fails_before_database_connection() {
 async fn workflow_cli(url: &str, args: &[&str], success: bool) -> Value {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        Command::new(env!("CARGO_BIN_EXE_buzz-admin"))
+        Command::new(admin_binary())
             .arg("user-deletions")
             .args(args)
             .env("DATABASE_URL", url)

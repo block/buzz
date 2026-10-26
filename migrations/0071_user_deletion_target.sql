@@ -8,4 +8,4 @@ ALTER TABLE entity_deletion_requests
     DROP CONSTRAINT entity_deletion_requests_entity_type_check,
     DROP CONSTRAINT entity_deletion_requests_target_check,
     ADD CONSTRAINT entity_deletion_requests_target_check
-        CHECK (octet_length(target) BETWEEN 1 AND 256 AND target = btrim(target)) NOT VALID;
+        CHECK (octet_length(target) >= 1 AND octet_length(target) <= 256 AND target = btrim(target)) NOT VALID;

@@ -2,7 +2,7 @@
 CREATE TABLE entity_deletion_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     entity_type TEXT NOT NULL DEFAULT 'user',
-    target TEXT NOT NULL CHECK (octet_length(target) BETWEEN 1 AND 256 AND target = btrim(target)),
+    target TEXT NOT NULL CHECK (octet_length(target) >= 1 AND octet_length(target) <= 256 AND target = btrim(target)),
     status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted', 'inventoried', 'approved', 'running', 'retry_wait', 'completed')),
     requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) BETWEEN 1 AND 256),
     reason TEXT CHECK (octet_length(reason) <= 4096),
