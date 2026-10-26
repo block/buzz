@@ -65,7 +65,11 @@ void main() {
             sync = MeSync(relay, config, prefs: prefs, connected: false);
             container.invalidate(meSyncProvider);
           }
-          return {'name': 'Saved chat', 'assistant': 'agent'};
+          return {
+            'name': 'Saved chat',
+            'assistant': 'agent',
+            'project': 'mobile',
+          };
         });
         addTearDown(
           () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -106,6 +110,7 @@ void main() {
         );
         expect(saved!.name, 'Saved chat');
         expect(saved.agent, 'agent');
+        expect(saved.project, 'mobile');
         expect(
           prefs.getString(MeChatCreation.storageKey(sync)),
           isNot(contains('Saved chat')),

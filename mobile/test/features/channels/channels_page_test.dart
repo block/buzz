@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+import 'package:buzz/shared/read_state/read_state_storage.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
@@ -6,6 +10,7 @@ import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'dart:async';
 
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:buzz/shared/channels/channel_list_snapshot.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
@@ -60,8 +65,8 @@ import '../../helpers/thread_ids.dart';
 
 part 'channels_page_test/presence_tests.dart';
 part 'channels_page_test/dm_recipient_layout_tests.dart';
-part 'channels_page_test/discovery_journey_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
+part 'channels_page_test/read_seed_journey.dart';
 
 void main() {
   setUpAll(() async {
@@ -159,7 +164,8 @@ void main() {
   }
 
   _communityUnreadLandingTests(buildTestable);
-  _discoveryJourneyTests(buildTestable);
+  _readSeedJourney(buildTestable);
+  _communityCachedLandingTests(buildTestable);
 
   final testChannels = [
     Channel(
@@ -2377,7 +2383,8 @@ void main() {
           );
           await tester.pump();
           final flyingAvatar = find.byKey(const Key('community-flying-avatar'));
-          expect(notifier.switchedIds, reduceMotion ? ['bravo'] : isEmpty);
+          // The switch starts with the centering motion, not after it.
+          expect(notifier.switchedIds, ['bravo']);
           if (nativeHeader) {
             expect(
               tester
@@ -2390,7 +2397,6 @@ void main() {
           final origin = tester.getCenter(flyingAvatar);
           await tester.pump(const Duration(milliseconds: 105));
           if (!reduceMotion) {
-            expect(notifier.switchedIds, isEmpty);
             final inFlight = tester.getCenter(flyingAvatar);
             const center = Offset(195, 422);
             expect(
@@ -2865,7 +2871,8 @@ void main() {
     expect(find.byType(PairingPage), findsOneWidget);
     expect(find.byType(FallbackPairingQrScanner), findsNothing);
     expect(find.text('Scan a QR code'), findsOneWidget);
-    expect(find.text('Use pairing code'), findsOneWidget);
+    expect(find.text('Use pairing code'), findsNothing);
+    expect(find.byKey(const Key('developer-pairing-trigger')), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
@@ -3018,270 +3025,7 @@ void main() {
       findsNothing,
     );
     expect(find.text('Message one or more people'), findsNothing);
-  });
-
-  testWidgets('browse action lists only channels eligible to join', (
-    tester,
-  ) async {
-    final channels = [
-      ...testChannels,
-      Channel(
-        id: 'open-to-join',
-        name: 'announcements',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'Community announcements',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 8,
-      ),
-      Channel(
-        id: 'private-channel',
-        name: 'private-planning',
-        channelType: 'stream',
-        visibility: 'private',
-        description: 'Private planning',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 4,
-      ),
-      Channel(
-        id: 'archived-channel',
-        name: 'old-announcements',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'Archived announcements',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 3,
-        archivedAt: DateTime(2025, 1, 2),
-      ),
-      Channel(
-        id: 'unjoined-dm',
-        name: 'Hidden DM',
-        channelType: 'dm',
-        visibility: 'open',
-        description: 'Direct message',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 2,
-      ),
-    ];
-
-    await tester.pumpWidget(
-      buildTestable(
-        disableAnimations: true,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const Key('browse-channels-button')));
-    await tester.pumpAndSettle();
-
-    expect(
-      find.byKey(const Key('browse-channel-open-to-join')),
-      findsOneWidget,
-    );
-    expect(find.byKey(const Key('browse-channel-1')), findsNothing);
-    expect(
-      find.byKey(const Key('browse-channel-private-channel')),
-      findsNothing,
-    );
-    expect(
-      find.byKey(const Key('browse-channel-archived-channel')),
-      findsNothing,
-    );
-    expect(find.byKey(const Key('browse-channel-unjoined-dm')), findsNothing);
-  });
-
-  testWidgets('browse action explains when no channels are discoverable', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      buildTestable(
-        disableAnimations: true,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const Key('browse-channels-button')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('No open channels available to join.'), findsOneWidget);
-  });
-
-  testWidgets('browse action retries an initial directory request problem', (
-    tester,
-  ) async {
-    final joinable = Channel(
-      id: 'retry-discovery',
-      name: 'community-help',
-      channelType: 'stream',
-      visibility: 'open',
-      description: 'Help from the community',
-      createdBy: 'abc',
-      createdAt: DateTime(2025),
-      memberCount: 0,
-    );
-    late _RetryingDirectoryNotifier notifier;
-    await tester.pumpWidget(
-      buildTestable(
-        disableAnimations: true,
-        overrides: [
-          channelsProvider.overrideWith(
-            () => notifier = _RetryingDirectoryNotifier(
-              initialChannels: testChannels,
-              retriedChannels: [...testChannels, joinable],
-            ),
-          ),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const Key('browse-channels-button')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Couldn’t load open channels.'), findsOneWidget);
-    expect(find.text('No open channels available to join.'), findsNothing);
-    expect(find.byKey(const Key('browse-channels-retry')), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('browse-channels-retry')));
-    await tester.pumpAndSettle();
-
-    expect(notifier.retryCount, 1);
-    expect(find.text('Couldn’t load open channels.'), findsNothing);
-    expect(
-      find.byKey(const Key('browse-channel-retry-discovery')),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('browse action exposes retry when refresh supersedes loading', (
-    tester,
-  ) async {
-    final joinable = Channel(
-      id: 'superseded-directory',
-      name: 'community-help',
-      channelType: 'stream',
-      visibility: 'open',
-      description: 'Help from the community',
-      createdBy: 'abc',
-      createdAt: DateTime(2025),
-      memberCount: 0,
-    );
-    late _SupersededDirectoryNotifier notifier;
-    await tester.pumpWidget(
-      buildTestable(
-        disableAnimations: true,
-        overrides: [
-          channelsProvider.overrideWith(
-            () => notifier = _SupersededDirectoryNotifier(
-              initialChannels: testChannels,
-              retriedChannels: [...testChannels, joinable],
-            ),
-          ),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const Key('browse-channels-button')));
-    await tester.pumpAndSettle();
-
-    expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
-
-    notifier.supersedeLoadingDirectory();
-    await tester.pumpAndSettle();
-
-    expect(find.byType(BuzzLoadingIndicator), findsNothing);
-    expect(find.text('Couldn’t load open channels.'), findsOneWidget);
-    expect(find.byKey(const Key('browse-channels-retry')), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('browse-channels-retry')));
-    await tester.pumpAndSettle();
-
-    expect(notifier.retryCount, 1);
-    expect(
-      find.byKey(const Key('browse-channel-superseded-directory')),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('browse action scrolls and joins an offscreen channel', (
-    tester,
-  ) async {
-    final channels = List.generate(
-      500,
-      (index) => Channel(
-        id: 'directory-$index',
-        name: 'channel-${index.toString().padLeft(3, '0')}',
-        channelType: 'stream',
-        visibility: 'open',
-        description: '',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 0,
-      ),
-    );
-    late _RecordingChannelActions actions;
-    await tester.pumpWidget(
-      buildTestable(
-        disableAnimations: true,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
-          channelActionsProvider.overrideWith(
-            (ref) => actions = _RecordingChannelActions(ref),
-          ),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const Key('browse-channels-button')));
-    await tester.pumpAndSettle();
-
-    expect(
-      find.byKey(const Key('browse-channel-directory-0')),
-      findsAtLeast(1),
-    );
-    expect(find.byKey(const Key('browse-channel-directory-499')), findsNothing);
-
-    final sheet = find.byType(BottomSheet).last;
-    final scrollable = find
-        .descendant(of: sheet, matching: find.byType(Scrollable))
-        .last;
-    expect(
-      tester.state<ScrollableState>(scrollable).position.maxScrollExtent,
-      greaterThan(0),
-    );
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('browse-channel-directory-499')),
-      500,
-      scrollable: scrollable,
-      maxScrolls: 100,
-    );
-    await tester.pumpAndSettle();
-
-    expect(
-      find.byKey(const Key('browse-channel-directory-499')),
-      findsOneWidget,
-    );
-    expect(find.byKey(const Key('browse-channel-directory-0')), findsNothing);
-
-    await tester.tap(
-      find.byKey(const Key('browse-channel-join-directory-499')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(actions.joinedChannelIds, ['directory-499']);
-    expect(find.byType(BottomSheet), findsNothing);
+    expect(find.byKey(const Key('browse-channels-button')), findsNothing);
   });
 
   testWidgets('create channel sheet lists type and visibility radio options', (
@@ -3979,51 +3723,6 @@ void main() {
     });
   }
 
-  testWidgets('seeds first loaded channels as read', (tester) async {
-    final channels = [
-      Channel(
-        id: '1',
-        name: 'general',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'General discussion',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 10,
-        lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
-          20 * 1000,
-          isUtc: true,
-        ),
-        isMember: true,
-      ),
-    ];
-    final readState = _FakeReadStateNotifier(
-      const ReadStateState(
-        isReady: true,
-        pubkey: 'pk',
-        contexts: {},
-        version: 0,
-      ),
-    );
-
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
-          readStateProvider.overrideWith(() => readState),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(readState.seededContexts, {'1': 20});
-    expect(readState.markedContexts, isEmpty);
-    expect(
-      tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w400,
-    );
-  });
-
   testWidgets('waits for read-state readiness before initial seeding', (
     tester,
   ) async {
@@ -4259,6 +3958,13 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }
 
   @override
+  void seedContextsRead(Map<String, int> contexts) {
+    for (final entry in contexts.entries) {
+      seedContextRead(entry.key, entry.value);
+    }
+  }
+
+  @override
   void seedContextRead(String contextId, int unixTimestamp) {
     seededContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
@@ -4335,98 +4041,4 @@ class _SwitchingUserCache extends UserCacheNotifier {
 class _CompletedPairingNotifier extends PairingNotifier {
   @override
   PairingState build() => const PairingState(status: PairingStatus.success);
-}
-
-class _RetryingDirectoryNotifier extends ChannelsNotifier {
-  _RetryingDirectoryNotifier({
-    required this.initialChannels,
-    required this.retriedChannels,
-  });
-
-  final List<Channel> initialChannels;
-  final List<Channel> retriedChannels;
-  int retryCount = 0;
-
-  @override
-  Future<List<Channel>> build() async => initialChannels;
-
-  @override
-  Future<void> ensureDirectoryLoaded() async {
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markError(_activeDirectoryScope(ref));
-  }
-
-  @override
-  Future<void> retryDirectory() async {
-    retryCount++;
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoading(_activeDirectoryScope(ref));
-    await Future<void>.delayed(Duration.zero);
-    state = AsyncData(retriedChannels);
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoaded(_activeDirectoryScope(ref));
-  }
-}
-
-class _SupersededDirectoryNotifier extends ChannelsNotifier {
-  _SupersededDirectoryNotifier({
-    required this.initialChannels,
-    required this.retriedChannels,
-  });
-
-  final List<Channel> initialChannels;
-  final List<Channel> retriedChannels;
-  final _directoryCompletion = Completer<void>();
-  int retryCount = 0;
-
-  @override
-  Future<List<Channel>> build() async => initialChannels;
-
-  @override
-  Future<void> ensureDirectoryLoaded() async {
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoading(_activeDirectoryScope(ref));
-    await _directoryCompletion.future;
-  }
-
-  /// Mirrors an ordinary refresh invalidating the active directory request.
-  void supersedeLoadingDirectory() {
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markError(_activeDirectoryScope(ref));
-    _directoryCompletion.complete();
-  }
-
-  @override
-  Future<void> retryDirectory() async {
-    retryCount++;
-    state = AsyncData(retriedChannels);
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoaded(_activeDirectoryScope(ref));
-  }
-}
-
-class _RecordingChannelActions extends ChannelActions {
-  _RecordingChannelActions(Ref ref)
-    : super(
-        ref: ref,
-        session: ref.read(relaySessionProvider.notifier),
-        signedEventRelay: SignedEventRelay(
-          session: ref.read(relaySessionProvider.notifier),
-          nsec: null,
-        ),
-        currentPubkey: 'self',
-      );
-
-  final List<String> joinedChannelIds = [];
-
-  @override
-  Future<void> joinChannel(String channelId) async {
-    joinedChannelIds.add(channelId);
-  }
 }

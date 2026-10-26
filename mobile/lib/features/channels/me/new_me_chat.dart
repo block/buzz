@@ -8,6 +8,8 @@ class _NewMeChat extends HookConsumerWidget {
     final pending = useMemoized(() => MeChatCreation.pending(sync));
     final name = useTextEditingController(text: pending?.name ?? '');
     final selected = useState<String?>(pending?.agent);
+    final project = useState<String?>(pending?.project);
+    final groups = ref.watch(meGroupsProvider);
     final channelId = useMemoized(() => pending?.id ?? const Uuid().v4());
     final frozenName = useState<String?>(pending?.name);
     final frozenAgent = useState<String?>(pending?.agent);
@@ -50,6 +52,34 @@ class _NewMeChat extends HookConsumerWidget {
             maxLength: 120,
             decoration: const InputDecoration(hintText: 'Chat name'),
             onChanged: (_) => error.value = null,
+          ),
+          const SizedBox(height: Grid.xs),
+          DropdownButtonFormField<String>(
+            key: const ValueKey('new-session-project'),
+            initialValue: project.value ?? '',
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: 'Project'),
+            items: [
+              const DropdownMenuItem(value: '', child: Text('No project')),
+              for (final group
+                  in groups.asData?.value.groups ?? <Map<String, dynamic>>[])
+                DropdownMenuItem(
+                  value: group['id'] as String,
+                  child: Text(group['name'] as String),
+                ),
+              if (project.value != null &&
+                  !(groups.asData?.value.groups ?? []).any(
+                    (group) => group['id'] == project.value,
+                  ))
+                DropdownMenuItem(
+                  value: project.value,
+                  child: const Text('Unavailable project'),
+                ),
+            ],
+            onChanged:
+                busy.value || frozenName.value != null || !groups.hasValue
+                ? null
+                : (value) => project.value = value == '' ? null : value,
           ),
           const SizedBox(height: Grid.xs),
           AppListRowRaw(
@@ -130,6 +160,7 @@ class _NewMeChat extends HookConsumerWidget {
                         channelId,
                         frozenName.value!,
                         frozenAgent.value!,
+                        project.value,
                       );
                       if (context.mounted) {
                         Navigator.of(

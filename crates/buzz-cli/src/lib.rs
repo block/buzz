@@ -662,7 +662,7 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override\n  buzz channels create --name notes --type stream --visibility private --unlisted  # never listed, even after it is made open"
     )]
     Create {
         /// Channel name
@@ -682,6 +682,13 @@ pub enum ChannelsCmd {
         /// many seconds pass without a new message.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
+        /// Create the channel unlisted: left out of channel lists for people
+        /// who are not members. Anyone can still read and join an unlisted
+        /// open channel by its id. Change it later with `channels update
+        /// --unlisted`. Refused if the relay does not advertise
+        /// `buzz-unlisted-channels`.
+        #[arg(long)]
+        unlisted: bool,
         /// Apply a desktop-local channel template by name (case-insensitive):
         /// supplies default type/visibility/description/canvas, and resolves
         /// its agent roster against the relay to add as members.
@@ -692,9 +699,9 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, visibility, join role, or ephemeral TTL
+    /// Update channel name, description, visibility, join role, unlisted, or ephemeral TTL
     #[command(
-        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private\n  buzz channels update --channel <uuid> --join-role guest"
+        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private\n  buzz channels update --channel <uuid> --join-role guest\n  buzz channels update --channel <uuid> --visibility open --unlisted true"
     )]
     Update {
         /// Channel UUID
@@ -721,6 +728,13 @@ pub enum ChannelsCmd {
         /// but not write. Does not change existing members. Owner/admin only.
         #[arg(long, value_enum)]
         join_role: Option<ChannelJoinRoleArg>,
+        /// Leave the channel out of channel lists for people who are not
+        /// members (`true`), or list it again (`false`). Anyone can still read
+        /// and join an unlisted open channel by its id. Matters only while the
+        /// channel is open. Owner/admin only. `true` is refused if the relay
+        /// does not advertise `buzz-unlisted-channels`.
+        #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
+        unlisted: Option<bool>,
     },
     /// Set the channel topic
     Topic {

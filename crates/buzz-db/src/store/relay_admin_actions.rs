@@ -703,6 +703,12 @@ pub async fn execute_kick_with_marker(
         .bind(action_id)
         .fetch_optional(tx.conn())
         .await?;
+    // Like every membership writer, remove under the channel's membership
+    // lock, so a roster publication either sees the member removed or
+    // commits before the removal. No channel lock is held yet, so the lock
+    // order holds.
+    crate::channel_members::acquire_channel_membership_lock(tx.conn(), community_id, channel_id)
+        .await?;
 
     let kick = sqlx::query(
         r#"
@@ -1689,6 +1695,11 @@ pub async fn deploy_kick_member(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    // Like every membership writer, remove under the channel's membership
+    // lock, so a roster publication either sees the member removed or
+    // commits before the removal.
+    crate::channel_members::acquire_channel_membership_lock(tx.conn(), community_id, channel_id)
+        .await?;
     // Use a direct UPDATE to avoid the tenant ownership check in channel::remove_member.
     // This is the deployment-authority primitive: no actor role check.
     let result = sqlx::query(
@@ -3840,14 +3851,27 @@ mod postgres_tests {
         };
 
         // First kick: member is present → Removed + step_marker committed.
-        let r1 = execute_kick_with_marker(
+        // It runs while a roster publication holds the member snapshot, and
+        // must wait for it.
+        let (kicked, kick_actor) = (target.clone(), actork.clone());
+        let r1 = assert_kick_waits_for_roster(
             &pool,
-            action_id,
-            lease_token1,
-            cid,
+            community_id,
             channel_id,
             &target,
-            &actork,
+            "marker-kick-vs-roster",
+            move |kick_pool| async move {
+                execute_kick_with_marker(
+                    &kick_pool,
+                    action_id,
+                    lease_token1,
+                    cid,
+                    channel_id,
+                    &kicked,
+                    &kick_actor,
+                )
+                .await
+            },
         )
         .await
         .expect("first kick");
@@ -4052,6 +4076,106 @@ mod postgres_tests {
             KickResult::AlreadyGone,
             "second kick must return AlreadyGone"
         );
+    }
+
+    /// Runs `kick` on its own session while a roster publication holds the
+    /// channel's member snapshot. The kick must wait for the snapshot's
+    /// membership lock, so the published roster cannot list a member whose
+    /// removal committed before it.
+    async fn assert_kick_waits_for_roster<F, T>(
+        pool: &PgPool,
+        community_id: Uuid,
+        channel_id: Uuid,
+        target: &[u8],
+        application_name: &str,
+        kick: impl FnOnce(PgPool) -> F,
+    ) -> T
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let snapshot = crate::channel_members::lock_member_snapshot(
+            pool,
+            CommunityId::from_uuid(community_id),
+            channel_id,
+            &[9u8; 32],
+        )
+        .await
+        .expect("capture locked roster");
+        assert!(
+            snapshot.members.iter().any(|m| m.pubkey == target),
+            "the captured roster lists the member before the kick"
+        );
+        let kick_pool = crate::test_support::named_pool(application_name).await;
+        let kick = tokio::spawn(kick(kick_pool));
+        crate::test_support::wait_for_lock_wait(pool, application_name).await;
+        assert!(!kick.is_finished(), "kick must wait for the roster fence");
+        let active: bool = sqlx::query_scalar(
+            "SELECT removed_at IS NULL FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(target)
+        .fetch_one(pool)
+        .await
+        .expect("read membership");
+        assert!(active, "the member stays active while the roster is held");
+        snapshot.release().await.expect("release roster fence");
+        kick.await.expect("kick task")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn deploy_kick_member_waits_for_roster_publication() {
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let actor = actor();
+        let target = vec![4u8; 32];
+        let channel_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
+            VALUES ($1, $2, 'kick-vs-roster', 'stream', 'open', $3)
+            "#,
+        )
+        .bind(channel_id)
+        .bind(community_id)
+        .bind(&actor)
+        .execute(&pool)
+        .await
+        .expect("create channel");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) VALUES ($1, $2, $3, 'member')",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(&target)
+        .execute(&pool)
+        .await
+        .expect("add member");
+
+        let kicked = target.clone();
+        let result = assert_kick_waits_for_roster(
+            &pool,
+            community_id,
+            channel_id,
+            &target,
+            "deploy-kick-vs-roster",
+            move |kick_pool| async move {
+                deploy_kick_member(
+                    &kick_pool,
+                    CommunityId::from_uuid(community_id),
+                    channel_id,
+                    &kicked,
+                    &actor,
+                )
+                .await
+            },
+        )
+        .await
+        .expect("kick after roster publication");
+        assert_eq!(result, KickResult::Removed);
     }
 
     // ── Reopen: terminal → open CAS + durable audit row ───────────────────────

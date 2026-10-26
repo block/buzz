@@ -20,7 +20,7 @@ extension _OnboardingColors on BuildContext {
   );
 
   ButtonStyle get _onboardingButtonStyle => FilledButton.styleFrom(
-    minimumSize: const Size(0, 48),
+    minimumSize: const Size(0, 52),
     padding: const EdgeInsets.symmetric(
       horizontal: Grid.lg,
       vertical: Grid.twelve,
@@ -33,7 +33,7 @@ extension _OnboardingColors on BuildContext {
   );
 
   ButtonStyle get _onboardingSecondaryButtonStyle => TextButton.styleFrom(
-    minimumSize: const Size(0, 44),
+    minimumSize: const Size(0, 52),
     padding: const EdgeInsets.symmetric(
       horizontal: Grid.md,
       vertical: Grid.xxs,

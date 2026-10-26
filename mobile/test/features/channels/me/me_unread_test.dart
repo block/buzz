@@ -74,6 +74,13 @@ class _Reads extends ReadStateNotifier {
   final bool ready;
   _Reads({this.empty = false, this.ready = true});
   @override
+  void seedContextsRead(Map<String, int> contexts) {
+    for (final entry in contexts.entries) {
+      seedContextRead(entry.key, entry.value);
+    }
+  }
+
+  @override
   void seedContextRead(String key, int timestamp) => read(key, timestamp);
   @override
   ReadStateState build() => ReadStateState(

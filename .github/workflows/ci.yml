@@ -53,6 +53,8 @@ jobs:
               - '.config/nextest.toml'
               - 'scripts/postgres-test-*.sh'
               - 'scripts/reconcile-schema-after-pgschema.sql'
+              - 'scripts/repair-events-pkey.sql'
+              - 'scripts/start-relay-for-tests.sh'
               - 'bin/pgschema'
               - 'bin/.pgschema-*.pkg'
               - 'scripts/check-postgres-test-discovery.py'

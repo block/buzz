@@ -236,7 +236,7 @@ class _SasVerificationView extends HookConsumerWidget {
                 TextButton(
                   style: context._onboardingSecondaryButtonStyle.copyWith(
                     minimumSize: const WidgetStatePropertyAll(
-                      Size.fromHeight(48),
+                      Size.fromHeight(52),
                     ),
                   ),
                   onPressed: showProtection

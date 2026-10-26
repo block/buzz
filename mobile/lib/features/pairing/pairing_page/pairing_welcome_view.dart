@@ -1,6 +1,7 @@
 part of '../pairing_page.dart';
 
-class _PairingWelcomeView extends StatelessWidget {
+class _PairingWelcomeView extends HookWidget {
+  final ValueNotifier<bool> optionsExpanded;
   final TextEditingController codeController;
   final bool isBusy;
   final bool pairingCodeExpanded;
@@ -11,6 +12,7 @@ class _PairingWelcomeView extends StatelessWidget {
   final VoidCallback? onAlreadyUseBuzz;
   final VoidCallback? onWelcomeBack;
   final bool connectionLanding;
+  final bool showConnectionOptions;
   final bool existingUser;
   final bool enteringCommunityLink;
   final bool creatingCommunity;
@@ -21,9 +23,11 @@ class _PairingWelcomeView extends StatelessWidget {
   final String? accountStatus;
   final Widget? setupContent;
   final String builderlabLabel;
+  final bool builderlabBusy;
   final ValueChanged<Uri> onOpenCommunity;
 
   const _PairingWelcomeView({
+    required this.optionsExpanded,
     required this.codeController,
     required this.isBusy,
     required this.pairingCodeExpanded,
@@ -35,6 +39,7 @@ class _PairingWelcomeView extends StatelessWidget {
     this.onAlreadyUseBuzz,
     this.onWelcomeBack,
     this.connectionLanding = false,
+    this.showConnectionOptions = true,
     this.existingUser = false,
     this.enteringCommunityLink = false,
     this.creatingCommunity = false,
@@ -45,6 +50,7 @@ class _PairingWelcomeView extends StatelessWidget {
     this.accountStatus,
     this.setupContent,
     this.builderlabLabel = 'Connect to Builderlab',
+    this.builderlabBusy = false,
   });
 
   @override
@@ -52,7 +58,7 @@ class _PairingWelcomeView extends StatelessWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final revealDuration = reducedMotion
         ? Duration.zero
-        : const Duration(milliseconds: 220);
+        : const Duration(milliseconds: 150);
 
     final selectedPage = creatingCommunity
         ? 4
@@ -61,7 +67,33 @@ class _PairingWelcomeView extends StatelessWidget {
         : existingUser
         ? 2
         : 1;
-    Widget actions(int page) => page == 3 || page == 4
+    List<Widget> connectionActions() => [
+      const SizedBox(height: Grid.xxs),
+      FilledButton(
+        style: context._onboardingGlassButtonStyle,
+        onPressed: onCommunityLink,
+        child: const Text('Enter a community link'),
+      ),
+      const SizedBox(height: Grid.xxs),
+      GestureDetector(
+        key: const Key('developer-pairing-trigger'),
+        excludeFromSemantics: true,
+        onDoubleTap: isBusy ? null : onAlreadyUseBuzz,
+        child: FilledButton(
+          style: context._onboardingGlassButtonStyle,
+          onPressed: isBusy ? null : onScan,
+          child: const Text('Scan a QR code'),
+        ),
+      ),
+    ];
+    final showingOptions =
+        optionsExpanded.value &&
+        !existingUser &&
+        setupContent == null &&
+        !showConnectionOptions;
+    Widget actions(int page) => page == 3 && optionsExpanded.value
+        ? const SizedBox.shrink()
+        : page == 3 || page == 4
         ? _CommunityLinkForm(
             onOpen: onOpenCommunity,
             onBack: onWelcomeBack,
@@ -92,39 +124,36 @@ class _PairingWelcomeView extends StatelessWidget {
                 const SizedBox(height: Grid.xs),
               ],
               if (page == 1) ...[
-                if (HostedEnvironment.enabled) ...[
+                if (HostedEnvironment.enabled)
                   FilledButton(
                     style: context._onboardingGlassButtonStyle,
                     onPressed: onBuilderlab,
-                    child: Text(builderlabLabel),
+                    child: builderlabBusy
+                        ? BuzzLoadingIndicator(
+                            size: 20,
+                            color: context._onboardingInk,
+                            semanticLabel: builderlabLabel,
+                          )
+                        : Text(builderlabLabel),
                   ),
+                if (!showConnectionOptions) ...[
                   const SizedBox(height: Grid.xxs),
+                  TextButton(
+                    style: context._onboardingGhostButtonStyle,
+                    onPressed: isBusy
+                        ? null
+                        : () => optionsExpanded.value = !optionsExpanded.value,
+                    child: const Text('Other options'),
+                  ),
                 ],
-                FilledButton(
-                  style: context._onboardingGlassButtonStyle,
-                  onPressed: onCommunityLink,
-                  child: const Text('Enter a community link'),
-                ),
-                if (HostedEnvironment.enabled && onCreateCommunity != null) ...[
-                  const SizedBox(height: Grid.xxs),
-                  FilledButton(
-                    style: context._onboardingGlassButtonStyle,
+                if (showConnectionOptions) ...connectionActions(),
+                if (HostedEnvironment.enabled &&
+                    showConnectionOptions &&
+                    onCreateCommunity != null)
+                  TextButton(
                     onPressed: isBusy ? null : onCreateCommunity,
                     child: const Text('Create a community'),
                   ),
-                ],
-                const SizedBox(height: Grid.xxs),
-                FilledButton(
-                  style: context._onboardingGlassButtonStyle,
-                  onPressed: isBusy ? null : onScan,
-                  child: const Text('Scan a QR code'),
-                ),
-                const SizedBox(height: Grid.xxs),
-                TextButton(
-                  style: context._onboardingGhostButtonStyle,
-                  onPressed: isBusy ? null : onAlreadyUseBuzz,
-                  child: const Text('Use pairing code'),
-                ),
               ] else ...[
                 if (!connectionLanding) ...[
                   FilledButton(
@@ -155,8 +184,8 @@ class _PairingWelcomeView extends StatelessWidget {
                 ],
                 AnimatedSwitcher(
                   duration: revealDuration,
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeInCubic,
+                  switchInCurve: Curves.easeOutQuad,
+                  switchOutCurve: Curves.easeOutCubic,
                   transitionBuilder: (child, animation) {
                     return SizeTransition(
                       sizeFactor: animation,
@@ -269,7 +298,7 @@ class _PairingWelcomeView extends StatelessWidget {
             ],
           );
 
-    return Padding(
+    final welcome = Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: Grid.gutter,
         vertical: Grid.sm,
@@ -343,7 +372,9 @@ class _PairingWelcomeView extends StatelessWidget {
                                             0,
                                           ),
                                           duration: revealDuration,
-                                          curve: Curves.easeInOutCubic,
+                                          curve: page == selectedPage
+                                              ? Curves.easeOutQuad
+                                              : Curves.easeOutCubic.flipped,
                                           child: SizedBox(
                                             width: double.infinity,
                                             child: actions(page),
@@ -361,6 +392,80 @@ class _PairingWelcomeView extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+    return PopScope(
+      canPop: !showingOptions,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && showingOptions && !enteringCommunityLink) {
+          optionsExpanded.value = false;
+        }
+      },
+      child: TweenAnimationBuilder<double>(
+        tween: Tween(end: showingOptions ? 1 : 0),
+        duration: reducedMotion
+            ? Duration.zero
+            : const Duration(milliseconds: 150),
+        curve: showingOptions
+            ? Curves.easeOutQuad
+            : Curves.easeOutCubic.flipped,
+        child: welcome,
+        builder: (context, progress, child) => Stack(
+          fit: StackFit.expand,
+          children: [
+            ExcludeFocus(
+              excluding: showingOptions,
+              child: ExcludeSemantics(
+                excluding: showingOptions,
+                child: IgnorePointer(
+                  ignoring: showingOptions,
+                  child: Opacity(
+                    opacity: 1 - progress,
+                    child: ImageFiltered(
+                      enabled: !reducedMotion && progress > 0 && progress < 1,
+                      imageFilter: ImageFilter.blur(
+                        sigmaX: 16 * progress,
+                        sigmaY: 16 * progress,
+                      ),
+                      child: child,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            if (showingOptions || progress > 0) ...[
+              Opacity(
+                opacity: progress,
+                child: Transform.translate(
+                  offset: Offset(0, reducedMotion ? 0 : 16 * (1 - progress)),
+                  child: IgnorePointer(
+                    ignoring: !showingOptions,
+                    child: ExcludeFocus(
+                      excluding: !showingOptions,
+                      child: ExcludeSemantics(
+                        excluding: !showingOptions,
+                        child: _OnboardingConnectionView(
+                          enteringLink: enteringCommunityLink,
+                          onCommunityLink: onCommunityLink,
+                          onBack: () {
+                            if (enteringCommunityLink) {
+                              onWelcomeBack?.call();
+                            } else {
+                              optionsExpanded.value = false;
+                            }
+                          },
+                          onOpenCommunity: onOpenCommunity,
+                          onScan: isBusy ? null : onScan,
+                          onPairing: isBusy ? null : onAlreadyUseBuzz,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

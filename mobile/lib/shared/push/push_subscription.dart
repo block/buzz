@@ -456,9 +456,12 @@ List<BuzzPushSubscription> buildDesiredBuzzPushSubscriptions({
   }
 
   final normalizedChannelIds = channelIds.map(_normalizeChannelID).toSet();
-  final normalizedMuted = mutedChannelIds.map(_normalizeChannelID).toSet();
-  final activeMuted =
-      normalizedMuted.intersection(normalizedChannelIds).toList()..sort();
+  // Mutes sync across every community and channel type, so only mutes of
+  // subscribed channels matter here; others need not fit the push grammar.
+  final activeMuted = {
+    for (final id in mutedChannelIds)
+      if (normalizedChannelIds.contains(id.toLowerCase())) id.toLowerCase(),
+  }.toList()..sort();
   final mutedIgnoreFilters = <BuzzPushFilter>[];
   for (final chunk in _chunks(activeMuted, buzzPushChannelChunkSize)) {
     mutedIgnoreFilters.add(
@@ -489,7 +492,7 @@ List<BuzzPushSubscription> buildDesiredBuzzPushSubscriptions({
     ),
   ];
 
-  final channels = normalizedChannelIds.difference(normalizedMuted).toList()
+  final channels = normalizedChannelIds.difference(activeMuted.toSet()).toList()
     ..sort();
   for (final chunk in _chunks(channels, buzzPushChannelChunkSize)) {
     subscriptions.add(

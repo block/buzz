@@ -2,6 +2,9 @@
 #![warn(missing_docs)]
 //! Shared durable whole-community deletion engine and store adapters.
 
+/// Synthetic user-deletion request intake.
+pub mod user;
+
 use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -546,6 +549,10 @@ fn resolve_submit_host(host: Option<&str>, relay_url: Option<&str>) -> Result<St
 }
 
 async fn connect_store() -> Result<DeletionStore> {
+    Ok(store(&connect_database().await?))
+}
+
+async fn connect_database() -> Result<Db> {
     let database_url = required_env("DATABASE_URL")?;
     // The scheduled drain starts in a fresh pod whose first connection can
     // outlast the relay's three-second budget.
@@ -559,7 +566,7 @@ async fn connect_store() -> Result<DeletionStore> {
         "deletion",
     )
     .await?;
-    Ok(store(&db))
+    Ok(db)
 }
 
 fn resolve_s3_region(buzz_region: Option<String>, aws_region: Option<String>) -> String {

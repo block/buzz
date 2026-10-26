@@ -33,6 +33,7 @@ use deadpool_redis;
 use crate::audio::AudioRoomManager;
 use crate::config::Config;
 use crate::connection::{ConnectionSubscriptions, RestartClose};
+use crate::nip_fi_core::NipFiSession;
 use crate::subscription::SubscriptionRegistry;
 
 pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
@@ -74,16 +75,18 @@ impl CommunityDisconnectReason {
     }
 }
 
-/// NIP-42-proven key and the NIP-FI issuer a socket was admitted under.
+/// NIP-42-proven key and the NIP-FI session a socket was admitted under.
 #[derive(Clone)]
 struct ProvenIdentity {
     pubkey: Vec<u8>,
-    nip_fi_issuer: Option<String>,
+    nip_fi: Option<NipFiSession>,
 }
 
 impl ProvenIdentity {
     fn matches(&self, issuer: &str, pubkey: &[u8]) -> bool {
-        self.pubkey == pubkey && self.nip_fi_issuer.as_deref() == Some(issuer)
+        self.nip_fi
+            .as_ref()
+            .is_some_and(|session| session.matches(issuer, &self.pubkey, pubkey))
     }
 }
 
@@ -92,7 +95,7 @@ impl ProvenIdentity {
 pub(crate) struct CommunityConnectionControl {
     cancel: CancellationToken,
     reason_tx: watch::Sender<Option<CommunityDisconnectReason>>,
-    /// NIP-42-proven pubkey plus the NIP-FI issuer the session was admitted
+    /// NIP-42-proven pubkey plus the NIP-FI session it was admitted
     /// under; matched by the registry's `disconnect_nip_fi` scan.  [FI-TRACE-DENY-SET]
     proven_identity: Arc<std::sync::RwLock<Option<ProvenIdentity>>>,
     /// Serializes NIP-FI denial writers across reason-win + terminal enqueue,
@@ -167,14 +170,11 @@ impl CommunityConnectionControl {
         self.reason_tx.subscribe()
     }
 
-    /// Records the NIP-42-proven pubkey and admitting NIP-FI issuer for this
+    /// Records the NIP-42-proven pubkey and admitting NIP-FI session for this
     /// connection so the registry can close it via `disconnect_nip_fi`.
-    pub(crate) fn set_proven_identity(&self, pubkey: Vec<u8>, nip_fi_issuer: Option<String>) {
+    pub(crate) fn set_proven_identity(&self, pubkey: Vec<u8>, nip_fi: Option<NipFiSession>) {
         if let Ok(mut slot) = self.proven_identity.write() {
-            *slot = Some(ProvenIdentity {
-                pubkey,
-                nip_fi_issuer,
-            });
+            *slot = Some(ProvenIdentity { pubkey, nip_fi });
         }
     }
 
@@ -271,7 +271,7 @@ impl CommunityConnectionControl {
         let nip_fi = self
             .proven_identity
             .read()
-            .is_ok_and(|id| id.as_ref().is_some_and(|id| id.nip_fi_issuer.is_some()));
+            .is_ok_and(|id| id.as_ref().is_some_and(|id| id.nip_fi.is_some()));
         if nip_fi {
             self.publish_authorization_denied(crate::nip_fi_session::NipFiWsRoute::Audio, None);
         } else {
@@ -311,10 +311,11 @@ struct ConnEntry {
     backpressure_count: Arc<AtomicU8>,
     subscriptions: ConnectionSubscriptions,
     authenticated_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
-    /// NIP-FI issuer the session was admitted under.  Written while holding
-    /// the `authenticated_pubkey` write lock and read under its read lock, so
-    /// `disconnect_nip_fi` never sees the pubkey without its issuer.
-    nip_fi_issuer: std::sync::RwLock<Option<String>>,
+    /// NIP-FI session (issuer and agent owner) the connection was admitted
+    /// under.  Written while holding the `authenticated_pubkey` write lock and
+    /// read under its read lock, so `disconnect_nip_fi` never sees the pubkey
+    /// without its session.
+    nip_fi: std::sync::RwLock<Option<NipFiSession>>,
     /// Owner of an admitted agent; revoking the owner closes this socket.
     admitted_owner: std::sync::OnceLock<[u8; 32]>,
     /// Set once AUTH succeeds. The pubkey is bound earlier so revocation can
@@ -714,7 +715,7 @@ impl ConnectionManager {
                 backpressure_count,
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
-                nip_fi_issuer: std::sync::RwLock::new(None),
+                nip_fi: std::sync::RwLock::new(None),
                 admitted_owner: std::sync::OnceLock::new(),
                 admitted: AtomicBool::new(false),
                 grace_limit,
@@ -745,20 +746,20 @@ impl ConnectionManager {
         self.set_authenticated_identity(conn_id, pubkey_bytes, None);
     }
 
-    /// Record the authenticated pubkey and the NIP-FI issuer it was admitted
-    /// under as one unit: the issuer is written while the pubkey write lock is
-    /// held, so a concurrent `disconnect_nip_fi` scan that sees the pubkey also
-    /// sees its issuer.  [FI-TRACE-DENY-SET]
+    /// Record the authenticated pubkey and the NIP-FI session it was admitted
+    /// under as one unit: the session is written while the pubkey write lock
+    /// is held, so a concurrent `disconnect_nip_fi` scan that sees the pubkey
+    /// also sees its issuer and owner.  [FI-TRACE-DENY-SET]
     pub(crate) fn set_authenticated_identity(
         &self,
         conn_id: Uuid,
         pubkey_bytes: Vec<u8>,
-        nip_fi_issuer: Option<String>,
+        nip_fi: Option<NipFiSession>,
     ) {
         if let Some(entry) = self.connections.get(&conn_id) {
             if let Ok(mut slot) = entry.authenticated_pubkey.write() {
-                if let Ok(mut issuer_slot) = entry.nip_fi_issuer.write() {
-                    *issuer_slot = nip_fi_issuer;
+                if let Ok(mut session_slot) = entry.nip_fi.write() {
+                    *session_slot = nip_fi;
                 }
                 *slot = Some(pubkey_bytes);
             }
@@ -894,7 +895,8 @@ impl ConnectionManager {
     }
 
     /// Close all live connections admitted under NIP-FI `issuer` whose proven
-    /// pubkey equals `pubkey`, **across all communities**.
+    /// pubkey or recorded agent owner equals `pubkey`, **across all
+    /// communities**.
     ///
     /// Used by the NIP-FI admin disconnect API: the deny entry is keyed by
     /// `(issuer, pubkey)` and spans every community this relay serves under
@@ -916,11 +918,13 @@ impl ConnectionManager {
                 .read()
                 .ok()
                 .map(|stored| {
-                    stored.as_deref() == Some(pubkey)
-                        && entry
-                            .nip_fi_issuer
-                            .read()
-                            .is_ok_and(|iss| iss.as_deref() == Some(issuer))
+                    stored.as_deref().is_some_and(|proven| {
+                        entry.nip_fi.read().is_ok_and(|session| {
+                            session
+                                .as_ref()
+                                .is_some_and(|s| s.matches(issuer, proven, pubkey))
+                        })
+                    })
                 })
                 .unwrap_or(false);
             if matches {
@@ -2572,7 +2576,11 @@ pub(crate) mod tests {
                 3,
                 CommunityConnectionControl::new(cancel.clone()),
             );
-            mgr.set_authenticated_identity(conn_id, key.clone(), issuer.map(str::to_owned));
+            mgr.set_authenticated_identity(
+                conn_id,
+                key.clone(),
+                issuer.map(|issuer| NipFiSession::new(issuer, None)),
+            );
             (cancel, terminal_ctrl_rx)
         };
         let (cancel_a, mut frames_a) = register(Some("https://issuer-a.example"));
@@ -2635,7 +2643,11 @@ pub(crate) mod tests {
             3,
             control,
         );
-        mgr.set_authenticated_identity(conn_id, pubkey.clone(), Some("test-issuer".to_owned()));
+        mgr.set_authenticated_identity(
+            conn_id,
+            pubkey.clone(),
+            Some(NipFiSession::new("test-issuer", None)),
+        );
 
         let closed = mgr.disconnect_nip_fi("test-issuer", &pubkey);
 
@@ -2668,7 +2680,10 @@ pub(crate) mod tests {
             let cancel = CancellationToken::new();
             let (terminal_tx, terminal_rx) = mpsc::channel::<WsMessage>(1);
             let control = CommunityConnectionControl::new(cancel.clone());
-            control.set_proven_identity(key.clone(), issuer.map(str::to_owned));
+            control.set_proven_identity(
+                key.clone(),
+                issuer.map(|issuer| NipFiSession::new(issuer, None)),
+            );
             control.set_terminal_frame_sender(terminal_tx);
             let guard = registry.register(Uuid::new_v4(), community, control);
             (cancel, terminal_rx, guard)
@@ -2714,7 +2729,10 @@ pub(crate) mod tests {
         let cancel = CancellationToken::new();
         let control = CommunityConnectionControl::new(cancel.clone());
         let reason_rx = control.disconnect_reason();
-        control.set_proven_identity(target_pubkey.clone(), Some("test-issuer".to_owned()));
+        control.set_proven_identity(
+            target_pubkey.clone(),
+            Some(NipFiSession::new("test-issuer", None)),
+        );
         let _guard = registry.register(Uuid::new_v4(), community, control);
 
         assert_eq!(registry.disconnect_nip_fi("test-issuer", &target_pubkey), 1);
@@ -2724,6 +2742,52 @@ pub(crate) mod tests {
             Some(CommunityDisconnectReason::AuthorizationDenied),
             "close reason must be AuthorizationDenied so send_loop sends 1008"
         );
+    }
+
+    /// A disconnect of an owner reaches its agents' sockets on both the root
+    /// manager and the audio registry, and leaves the owner's other issuer and
+    /// ownerless sockets of the same key alone.
+    #[test]
+    fn nip_fi_owner_disconnect_closes_owned_agent_sockets_on_root_and_audio() {
+        let (agent, owner) = (vec![0x51u8; 32], [0x52u8; 32]);
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xcb));
+        let owned = Some(NipFiSession::new("test-issuer", Some(owner)));
+
+        let mgr = ConnectionManager::new();
+        let root_conn = |session: Option<NipFiSession>| {
+            let conn_id = Uuid::new_v4();
+            let cancel = CancellationToken::new();
+            mgr.register(
+                conn_id,
+                mpsc::channel(8).0,
+                mpsc::channel(8).0,
+                mpsc::channel(1).0,
+                None,
+                cancel.clone(),
+                community,
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+                CommunityConnectionControl::new(cancel.clone()),
+            );
+            mgr.set_authenticated_identity(conn_id, agent.clone(), session);
+            cancel
+        };
+        let root_owned = root_conn(owned.clone());
+        let root_other_issuer = root_conn(Some(NipFiSession::new("other-issuer", Some(owner))));
+        let root_ownerless = root_conn(Some(NipFiSession::new("test-issuer", None)));
+
+        let registry = CommunityConnectionRegistry::new();
+        let audio_cancel = CancellationToken::new();
+        let audio = CommunityConnectionControl::new(audio_cancel.clone());
+        audio.set_proven_identity(agent.clone(), owned);
+        let _guard = registry.register(Uuid::new_v4(), community, audio);
+
+        assert_eq!(mgr.disconnect_nip_fi("test-issuer", &owner), 1);
+        assert_eq!(registry.disconnect_nip_fi("test-issuer", &owner), 1);
+        assert!(root_owned.is_cancelled() && audio_cancel.is_cancelled());
+        assert!(!root_other_issuer.is_cancelled());
+        assert!(!root_ownerless.is_cancelled());
     }
 
     #[test]
@@ -2736,12 +2800,15 @@ pub(crate) mod tests {
 
         let target_cancel = CancellationToken::new();
         let target_control = CommunityConnectionControl::new(target_cancel.clone());
-        target_control.set_proven_identity(target_pubkey.clone(), Some("test-issuer".to_owned()));
+        target_control.set_proven_identity(
+            target_pubkey.clone(),
+            Some(NipFiSession::new("test-issuer", None)),
+        );
         let _target_guard = registry.register(Uuid::new_v4(), community, target_control);
 
         let peer_cancel = CancellationToken::new();
         let peer_control = CommunityConnectionControl::new(peer_cancel.clone());
-        peer_control.set_proven_identity(peer_pubkey, Some("test-issuer".to_owned()));
+        peer_control.set_proven_identity(peer_pubkey, Some(NipFiSession::new("test-issuer", None)));
         let _peer_guard = registry.register(Uuid::new_v4(), community, peer_control);
 
         assert_eq!(registry.disconnect_nip_fi("test-issuer", &target_pubkey), 1);
@@ -2766,7 +2833,7 @@ pub(crate) mod tests {
 
         let cancel = CancellationToken::new();
         let control = CommunityConnectionControl::new(cancel.clone());
-        control.set_proven_identity(other_pubkey, Some("test-issuer".to_owned()));
+        control.set_proven_identity(other_pubkey, Some(NipFiSession::new("test-issuer", None)));
         let _guard = registry.register(Uuid::new_v4(), community, control);
 
         assert_eq!(registry.disconnect_nip_fi("test-issuer", &target_pubkey), 0);

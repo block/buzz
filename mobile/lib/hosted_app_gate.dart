@@ -5,6 +5,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'features/channels/deep_link_dispatcher.dart';
+import 'features/profile/profile_setup_page.dart';
 import 'features/onboarding/hosted_connect_page.dart';
 import 'features/onboarding/self_hosted_entry_sheet.dart';
 import 'shared/auth/auth.dart';
@@ -166,12 +167,13 @@ class HostedAppGate extends HookConsumerWidget {
                   ),
                 ),
               ),
+            if (flow.stage == HostedFlowStage.profile)
+              ProfileSetupPage(flow: flow),
             if (visible &&
+                flow.stage != HostedFlowStage.profile &&
                 !openingSignIn &&
                 !inlineAccountStatus &&
                 (!inlineEntry ||
-                    (flow.accountOnly &&
-                        flow.stage == HostedFlowStage.profile) ||
                     flow.stage == HostedFlowStage.chooseIdentity ||
                     flow.stage == HostedFlowStage.chooseCommunities ||
                     flow.stage == HostedFlowStage.communityConflict ||

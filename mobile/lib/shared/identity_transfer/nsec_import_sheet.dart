@@ -1,3 +1,5 @@
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
@@ -23,14 +25,32 @@ Future<bool> showNsecImportSheet(
 
 /// Transient secret input; only public preview and safe errors are displayed.
 class NsecImportSheet extends HookWidget {
-  const NsecImportSheet({super.key, required this.onImport, this.pickFile});
+  const NsecImportSheet({
+    super.key,
+    required this.onImport,
+    this.pickFile,
+    this.autofocus = true,
+  });
 
   final Future<void> Function(String nsec) onImport;
   final Future<String?> Function()? pickFile;
 
+  /// Allows a containing sheet to finish expanding before opening the keyboard.
+  final bool autofocus;
+
   @override
   Widget build(BuildContext context) {
     final input = useTextEditingController();
+    final focus = useFocusNode();
+    final autofocusRef = useRef(autofocus)..value = autofocus;
+    useEffect(() {
+      if (autofocus && defaultTargetPlatform == TargetPlatform.iOS) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (context.mounted && autofocusRef.value) focus.requestFocus();
+        });
+      }
+      return null;
+    }, [autofocus]);
     final publicKey = useState<String?>(null);
     final error = useState<String?>(null);
     final busy = useState(false);
@@ -93,27 +113,51 @@ class NsecImportSheet extends HookWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Your nsec is your private key. Only import a key you trust. It is never copied to the clipboard.',
-            ),
-            const SizedBox(height: Grid.sm),
-            TextField(
-              controller: input,
-              maxLength: 1024,
-              enabled: !busy.value,
-              obscureText: true,
-              autocorrect: false,
-              enableSuggestions: false,
-              enableIMEPersonalizedLearning: false,
-              decoration: const InputDecoration(
-                labelText: 'Private key (nsec)',
+            if (defaultTargetPlatform == TargetPlatform.iOS)
+              CupertinoTextField(
+                controller: input,
+                placeholder: 'Private key (nsec)',
+                padding: const EdgeInsets.all(Grid.gutter),
+                decoration: BoxDecoration(
+                  color: CupertinoColors.secondarySystemGroupedBackground
+                      .resolveFrom(context),
+                  borderRadius: BorderRadius.circular(Radii.container),
+                ),
+                focusNode: focus,
+                maxLength: 1024,
+                enabled: !busy.value,
+                obscureText: true,
+                autocorrect: false,
+                enableSuggestions: false,
+                enableIMEPersonalizedLearning: false,
+                onChanged: (_) {
+                  publicKey.value = null;
+                  error.value = null;
+                },
+              )
+            else
+              TextField(
+                controller: input,
+                maxLength: 1024,
+                enabled: !busy.value,
+                obscureText: true,
+                autocorrect: false,
+                enableSuggestions: false,
+                enableIMEPersonalizedLearning: false,
+                decoration: const InputDecoration(
+                  labelText: 'Private key (nsec)',
+                ),
+                onChanged: (_) {
+                  publicKey.value = null;
+                  error.value = null;
+                },
               ),
-              onChanged: (_) {
-                publicKey.value = null;
-                error.value = null;
-              },
-            ),
-            TextButton(
+            const SizedBox(height: Grid.xs),
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(52),
+                shape: const StadiumBorder(),
+              ),
               onPressed: busy.value ? null : chooseFile,
               child: const Text('Choose nsec file'),
             ),
@@ -127,7 +171,12 @@ class NsecImportSheet extends HookWidget {
             ],
             if (error.value != null)
               Text(error.value!, style: TextStyle(color: context.colors.error)),
+            const SizedBox(height: Grid.xs),
             FilledButton(
+              style: FilledButton.styleFrom(
+                minimumSize: const Size.fromHeight(52),
+                shape: const StadiumBorder(),
+              ),
               onPressed: busy.value ? null : submit,
               child: Text(
                 busy.value

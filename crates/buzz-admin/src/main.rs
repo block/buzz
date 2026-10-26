@@ -22,6 +22,7 @@
 mod communities;
 mod deletions;
 mod nip_fi;
+mod user_deletions;
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -126,6 +127,11 @@ enum Command {
         #[command(subcommand)]
         command: deletions::DeletionsCommand,
     },
+    /// Preview real user memberships or manage synthetic user-deletion requests.
+    UserDeletions {
+        #[command(subcommand)]
+        command: user_deletions::UserDeletionsCommand,
+    },
     /// Emit missing kind:39000/39001/39002 channel discovery events, or
     /// republish only a targeted channel's kind:39002 roster.
     ///
@@ -203,6 +209,7 @@ async fn run(cli: Cli) -> Result<i32> {
         } => cmd_list_product_feedback(limit).await,
         Command::Communities { command } => communities::run(command).await,
         Command::Deletions { command } => deletions::run(command).await,
+        Command::UserDeletions { command } => user_deletions::run(command).await,
         Command::NipFi { command } => nip_fi::run(command).await,
         Command::ReconcileChannels { channel, relay_key } => {
             reconcile_channels(channel, relay_key).await?;

@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */; };
 		BBAA00000000000000000011 /* IdentityFilePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000012 /* IdentityFilePlugin.swift */; };
 		BBAA00000000000000000001 /* HostedHpkeBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000002 /* HostedHpkeBackup.swift */; };
 		DAAB00000000000000000001 /* NativeTabler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAB00000000000000000002; };
@@ -35,6 +36,8 @@
 		4A71C0152F40B00100A17E01 /* HuddleMediaPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0162F40B00100A17E01 /* HuddleMediaPlugin.swift */; };
 		4A71C0172F40C00100A17E01 /* HuddleAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0182F40C00100A17E01 /* HuddleAudioEngine.swift */; };
 		4A71C0192F40D00100A17E01 /* NativeProfileTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */; };
+		7B81D0192F40D00100A17E01 /* NativeCommunityEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B81D01A2F40D00100A17E01 /* NativeCommunityEntry.swift */; };
+		7B81D0192F40D00100A17E91 /* NativeProfileSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B81D01A2F40D00100A17E91 /* NativeProfileSetup.swift */; };
 		4A71C01B2F40E00100A17E01 /* NativeSkinToneControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01C2F40E00100A17E01 /* NativeSkinToneControl.swift */; };
 		4A71C01D2F40F00100A17E01 /* ThemePaginationGlassControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01E2F40F00100A17E01 /* ThemePaginationGlassControl.swift */; };
 		CA8300012F50000100A17E01 /* IosMediaCarousel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8300022F50000100A17E01 /* IosMediaCarousel.swift */; };
@@ -98,6 +101,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSetupRecoveryTests.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000012 /* IdentityFilePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityFilePlugin.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000002 /* HostedHpkeBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedHpkeBackup.swift; sourceTree = "<group>"; };
 		DAAB00000000000000000002 /* NativeTabler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTabler.swift; sourceTree = "<group>"; };
@@ -129,6 +133,8 @@
 		4A71C0162F40B00100A17E01 /* HuddleMediaPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuddleMediaPlugin.swift; sourceTree = "<group>"; };
 		4A71C0182F40C00100A17E01 /* HuddleAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuddleAudioEngine.swift; sourceTree = "<group>"; };
 		4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeProfileTextEditor.swift; sourceTree = "<group>"; };
+		7B81D01A2F40D00100A17E01 /* NativeCommunityEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCommunityEntry.swift; sourceTree = "<group>"; };
+		7B81D01A2F40D00100A17E91 /* NativeProfileSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeProfileSetup.swift; sourceTree = "<group>"; };
 		4A71C01C2F40E00100A17E01 /* NativeSkinToneControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSkinToneControl.swift; sourceTree = "<group>"; };
 		4A71C01E2F40F00100A17E01 /* ThemePaginationGlassControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemePaginationGlassControl.swift; sourceTree = "<group>"; };
 		CA8300022F50000100A17E01 /* IosMediaCarousel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IosMediaCarousel.swift; sourceTree = "<group>"; };
@@ -202,6 +208,7 @@
 			isa = PBXGroup;
 			children = (
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
+				F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */,
 				AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */,
 				AB1200132F40400100A17E09 /* IdentityFilePluginTests.swift */,
 				BZZ0000000000000000002C /* BuzzCommunicationNotificationTests.swift */,
@@ -305,6 +312,8 @@
 				C0AF00000000000000000022 /* NativePresenceMenu.swift */,
 				C0AF00000000000000000012 /* NativeAddMembersSheet.swift */,
 				4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */,
+				7B81D01A2F40D00100A17E01 /* NativeCommunityEntry.swift */,
+				7B81D01A2F40D00100A17E91 /* NativeProfileSetup.swift */,
 				4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */,
 				4A71C01C2F40E00100A17E01 /* NativeSkinToneControl.swift */,
 				4A71C01E2F40F00100A17E01 /* ThemePaginationGlassControl.swift */,
@@ -609,6 +618,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
+				F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */,
 				AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */,
 				AB1200032F40400100A17E09 /* IdentityFilePluginTests.swift in Sources */,
 				BZZ0000000000000000002B /* BuzzCommunicationNotificationTests.swift in Sources */,
@@ -647,6 +657,8 @@
 				C0AF00000000000000000021 /* NativePresenceMenu.swift in Sources */,
 				C0AF00000000000000000011 /* NativeAddMembersSheet.swift in Sources */,
 				4A71C0192F40D00100A17E01 /* NativeProfileTextEditor.swift in Sources */,
+				7B81D0192F40D00100A17E01 /* NativeCommunityEntry.swift in Sources */,
+				7B81D0192F40D00100A17E91 /* NativeProfileSetup.swift in Sources */,
 				4A71C0192F40D00100A17E02 /* MeAvatarLoader.swift in Sources */,
 				4A71C01B2F40E00100A17E01 /* NativeSkinToneControl.swift in Sources */,
 				4A71C01D2F40F00100A17E01 /* ThemePaginationGlassControl.swift in Sources */,

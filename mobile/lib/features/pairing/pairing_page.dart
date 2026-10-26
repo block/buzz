@@ -8,6 +8,8 @@ import 'dart:math' show sqrt2;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart'
+    show CupertinoColors, CupertinoTextField;
 import 'package:flutter/foundation.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/services.dart';
@@ -34,6 +36,7 @@ part 'pairing_page/onboarding_colors.dart';
 part 'pairing_page/onboarding_glass_button.dart';
 part 'pairing_page/pairing_welcome_view.dart';
 part 'pairing_page/community_link_form.dart';
+part 'pairing_page/onboarding_connection_view.dart';
 part 'pairing_page/sas_verification_view.dart';
 part 'pairing_page/pairing_code_entry.dart';
 part 'pairing_page/pairing_error_shake.dart';
@@ -46,6 +49,7 @@ class PairingPage extends HookConsumerWidget {
   final VoidCallback? onAlreadyUseBuzz;
   final VoidCallback? onWelcomeBack;
   final bool connectionLanding;
+  final bool showConnectionOptions;
   final bool existingUser;
   final bool enteringCommunityLink;
   final bool creatingCommunity;
@@ -56,6 +60,7 @@ class PairingPage extends HookConsumerWidget {
   final String? accountStatus;
   final Widget? setupContent;
   final String builderlabLabel;
+  final bool builderlabBusy;
 
   const PairingPage({
     super.key,
@@ -64,6 +69,7 @@ class PairingPage extends HookConsumerWidget {
     this.onAlreadyUseBuzz,
     this.onWelcomeBack,
     this.connectionLanding = false,
+    this.showConnectionOptions = true,
     this.existingUser = false,
     this.enteringCommunityLink = false,
     this.creatingCommunity = false,
@@ -74,15 +80,20 @@ class PairingPage extends HookConsumerWidget {
     this.accountStatus,
     this.setupContent,
     this.builderlabLabel = 'Connect to Builderlab',
+    this.builderlabBusy = false,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final hostedFlow = useListenable(
+      HostedEnvironment.enabled ? ref.watch(hostedFlowProvider) : null,
+    );
     final pairingState = ref.watch(pairingProvider);
     final enrolledBiometrics = ref.watch(enrolledBiometricsProvider);
     final codeController = useTextEditingController();
     final fallbackScannerVisible = useState(false);
     final pairingCodeExpanded = useState(false);
+    final optionsExpanded = useState(false);
     final isBusy =
         pairingState.status == PairingStatus.connecting ||
         pairingState.status == PairingStatus.transferring ||
@@ -225,6 +236,8 @@ class PairingPage extends HookConsumerWidget {
             value: onboardingSystemOverlayStyle,
             child: _OnboardingBackground(
               child: Scaffold(
+                resizeToAvoidBottomInset:
+                    hostedFlow?.stage != HostedFlowStage.profile,
                 backgroundColor: Colors.transparent,
                 body: SafeArea(
                   child: Padding(
@@ -261,13 +274,17 @@ class PairingPage extends HookConsumerWidget {
             value: onboardingSystemOverlayStyle,
             child: _OnboardingBackground(
               child: Scaffold(
+                resizeToAvoidBottomInset:
+                    hostedFlow?.stage != HostedFlowStage.profile,
                 backgroundColor: Colors.transparent,
                 appBar: pairingAppBar,
                 body: SafeArea(
                   child: _PairingWelcomeView(
+                    optionsExpanded: optionsExpanded,
                     onAlreadyUseBuzz: onAlreadyUseBuzz,
                     onWelcomeBack: onWelcomeBack,
                     connectionLanding: connectionLanding,
+                    showConnectionOptions: showConnectionOptions,
                     existingUser: existingUser,
                     enteringCommunityLink: enteringCommunityLink,
                     creatingCommunity: creatingCommunity,
@@ -282,6 +299,7 @@ class PairingPage extends HookConsumerWidget {
                     accountStatus: accountStatus,
                     setupContent: setupContent,
                     builderlabLabel: builderlabLabel,
+                    builderlabBusy: builderlabBusy,
                     codeController: codeController,
                     isBusy: isBusy,
                     pairingCodeExpanded: pairingCodeExpanded.value,

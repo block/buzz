@@ -689,8 +689,8 @@ void main() {
       expect(confirmTopLeft.dx, Grid.sm);
       expect(tester.getSize(confirmFinder).width, scaffoldWidth - Grid.sm * 2);
       expect(tester.getSize(cancelFinder).width, scaffoldWidth - Grid.sm * 2);
-      expect(tester.getSize(confirmFinder).height, 48);
-      expect(tester.getSize(cancelFinder).height, 48);
+      expect(tester.getSize(confirmFinder).height, 52);
+      expect(tester.getSize(cancelFinder).height, 52);
       expect(
         find.textContaining(
           'Only continue if you started this pairing from your desktop.',

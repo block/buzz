@@ -48,6 +48,7 @@ class HostedJourneyFixture {
   final probes = <Community>[];
   String? refusedSelfHostedPubkey;
   final profileWrites = <String>[];
+  final profileAvatars = <String?>[];
   final recoveryScopes = <InviteJoinRecoveryScope>[];
   final rows = <Map<String, dynamic>>[];
   final cloudKeys = <nostr.Keys>[];
@@ -491,6 +492,12 @@ class _Profile extends ProfileNotifier {
   @override
   Future<void> updateDisplayName(String name) async {
     fixture.profileWrites.add(name);
+  }
+
+  @override
+  Future<void> updateSetup(String name, String? avatarUrl) async {
+    fixture.profileWrites.add(name);
+    fixture.profileAvatars.add(avatarUrl);
   }
 }
 

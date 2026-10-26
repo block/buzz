@@ -11171,13 +11171,18 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
 
+      expect(find.byKey(const ValueKey('agent-typing-dot-2')), findsOneWidget);
       expect(
-        find.byKey(const ValueKey('agent-typing-dot-2')),
-        findsNWidgets(2),
+        find.byKey(const ValueKey('inline-agent-typing-alice')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('inline-agent-typing-bob')),
+        findsOneWidget,
       );
     });
 
-    testWidgets('shows inline dots for all three typers', (tester) async {
+    testWidgets('shares one bubble among three typers', (tester) async {
       await tester.pumpWidget(
         _buildTestable(
           messages: [],
@@ -11205,9 +11210,18 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
 
+      expect(find.byKey(const ValueKey('agent-typing-dot-2')), findsOneWidget);
       expect(
-        find.byKey(const ValueKey('agent-typing-dot-2')),
-        findsNWidgets(3),
+        find.byKey(const ValueKey('inline-agent-typing-alice')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('inline-agent-typing-bob')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('inline-agent-typing-carol')),
+        findsOneWidget,
       );
     });
 

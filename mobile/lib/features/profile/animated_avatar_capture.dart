@@ -46,7 +46,11 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     required this.onPrepareChanged,
     this.initialFrames = const [],
     this.disposalBarrier,
+    this.previewKey,
   });
+
+  /// Identifies the visible avatar for the native sheet transition.
+  final GlobalKey? previewKey;
 
   /// The vertical space available to the capture surface.
   final double height;
@@ -427,6 +431,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                           .toDouble();
                     },
                     child: SizedBox.square(
+                      key: previewKey,
                       dimension: _animatedAvatarPreviewSize,
                       child: Stack(
                         fit: StackFit.expand,
@@ -585,6 +590,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
           key: const ValueKey('animated-avatar-capture-preview'),
           dimension: capturePreviewSize,
           child: Stack(
+            key: previewKey,
             fit: StackFit.expand,
             children: [
               Padding(

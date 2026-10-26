@@ -181,6 +181,55 @@ BEGIN
     END IF;
 END $$;
 
+-- pgschema moves the partition key to the front of a partitioned table's
+-- primary key when it creates the table, so events gets
+-- PRIMARY KEY (created_at, community_id, id) instead of the declared
+-- (community_id, created_at, id). Every later plan then drops and re-adds
+-- events_pkey and each declared child's key, which fails once the children are
+-- attached because their keys are inherited. Rebuild the key on the parent in
+-- the declared order; PostgreSQL recreates each partition's key with it.
+-- delivery_log already declares its partition key first. This block is a
+-- verbatim copy of scripts/repair-events-pkey.sql; keep the two identical.
+DO $$
+DECLARE
+    declared CONSTANT text := 'PRIMARY KEY (community_id, created_at, id)';
+BEGIN
+    -- Also runs before pgschema apply, when events may not exist yet.
+    IF to_regclass('events') IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF (
+        SELECT pg_get_constraintdef(oid) FROM pg_constraint
+        WHERE conrelid = 'events'::regclass AND contype = 'p'
+    ) IS DISTINCT FROM declared THEN
+        -- The rebuild locks events and every partition ACCESS EXCLUSIVE. Fail
+        -- fast instead of queueing behind a relay that still uses them.
+        BEGIN
+            PERFORM set_config('lock_timeout', '10s', true);
+            ALTER TABLE events DROP CONSTRAINT IF EXISTS events_pkey;
+            ALTER TABLE events
+                ADD CONSTRAINT events_pkey PRIMARY KEY (community_id, created_at, id);
+        EXCEPTION WHEN lock_not_available THEN
+            RAISE EXCEPTION 'timed out locking events to rebuild events_pkey'
+                USING HINT = 'Stop any relay using this database, then rerun.';
+        END;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE contype = 'p'
+          AND conrelid IN (
+              SELECT 'events'::regclass
+              UNION ALL
+              SELECT inhrelid FROM pg_inherits WHERE inhparent = 'events'::regclass
+          )
+          AND pg_get_constraintdef(oid) <> declared
+    ) THEN
+        RAISE EXCEPTION 'events and its partitions must have %', declared;
+    END IF;
+END $$;
+
 -- pgschema drops multi-column CHECK constraints. Restore the direct-action
 -- shape CHECK from schema/schema.sql (and migration 0055) verbatim.
 DO $$

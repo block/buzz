@@ -65,7 +65,6 @@ import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 
 part 'channels_page/body.dart';
-part 'channels_page/browse_channels_sheet.dart';
 part 'channels_page/sections.dart';
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
@@ -291,17 +290,21 @@ class ChannelsPage extends HookConsumerWidget {
     Future<Rect?> prepareCommunityLanding() async {
       // The list snapshot precedes unread history and DM profile hydration.
       // Both can still change weight, labels, and sorting behind the picker.
-      final channels = ref.read(channelsProvider).requireValue;
-      final dmPubkeys = {
-        for (final channel in channels)
-          if (channel.isMember && !channel.isArchived && channel.isDm)
-            ...channel.participantPubkeys,
-      };
-      await Future.wait([
-        ref.read(channelsProvider.notifier).waitForUnreadCatchUp(),
-        if (dmPubkeys.isNotEmpty)
-          ref.read(userCacheProvider.notifier).preload(dmPubkeys.toList()),
-      ]);
+      // A restored list is already usable offline. Refresh its unread state
+      // and participant profiles behind the page instead of gating navigation.
+      if (!ref.read(channelsProvider.notifier).hasCachedSnapshot) {
+        final channels = ref.read(channelsProvider).requireValue;
+        final dmPubkeys = {
+          for (final channel in channels)
+            if (channel.isMember && !channel.isArchived && channel.isDm)
+              ...channel.participantPubkeys,
+        };
+        await Future.wait([
+          ref.read(channelsProvider.notifier).waitForUnreadCatchUp(),
+          if (dmPubkeys.isNotEmpty)
+            ref.read(userCacheProvider.notifier).preload(dmPubkeys.toList()),
+        ]);
+      }
       if (!context.mounted || !communityFlightActive.value) return null;
       // Settle Home's scale and scroll while the loading backdrop is opaque.
       onSettingsTransitionProgress(0);

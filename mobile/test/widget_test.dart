@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
@@ -100,7 +101,18 @@ void main() {
     );
     await tester.pump();
     expect(find.bySemanticsLabel('Buzz'), findsOneWidget);
-    expect(find.text('Scan a QR code'), findsOneWidget);
+    expect(
+      find.text('Sign in with builderlab'),
+      HostedEnvironment.enabled ? findsOneWidget : findsNothing,
+    );
+    expect(
+      find.text('Other options'),
+      HostedEnvironment.enabled ? findsOneWidget : findsNothing,
+    );
+    expect(
+      find.text('Scan a QR code'),
+      HostedEnvironment.enabled ? findsNothing : findsOneWidget,
+    );
   });
 }
 

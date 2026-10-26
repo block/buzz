@@ -18,7 +18,15 @@ struct MeAgentAccessibilityTests {
           onCancel: {}, onSet: { _ in }
         )
         controller.loadViewIfNeeded()
-        let cell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 1))
+        precondition(controller.numberOfSections(in: controller.tableView) == 3)
+        let projectCell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 1))
+        let project = projectCell.accessoryView as! UIButton
+        precondition(project.accessibilityLabel == "Project")
+        precondition(project.accessibilityValue == "No project")
+        precondition(project.titleColor(for: .normal) == .label)
+        precondition(project.isEnabled == !locked)
+        precondition(project.showsMenuAsPrimaryAction && project.menu != nil)
+        let cell = controller.tableView(controller.tableView, cellForRowAt: IndexPath(row: 0, section: 2))
         let disabled = locked || empty
         precondition(cell.accessibilityTraits.contains(.notEnabled) == disabled)
         precondition(cell.accessibilityTraits.contains(.button) == !disabled)

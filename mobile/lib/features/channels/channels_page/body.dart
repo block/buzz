@@ -168,7 +168,7 @@ class _SliverChannelsList extends HookConsumerWidget {
           return;
         }
 
-        final notifier = ref.read(readStateProvider.notifier);
+        final seeds = <String, int>{};
         for (final channel in visibleChannels) {
           if (readState.effectiveTimestamp(channel.id) != null) {
             continue;
@@ -176,9 +176,10 @@ class _SliverChannelsList extends HookConsumerWidget {
 
           final lastMessageAt = dateTimeToUnixSeconds(channel.lastMessageAt);
           if (lastMessageAt != null) {
-            notifier.seedContextRead(channel.id, lastMessageAt);
+            seeds[channel.id] = lastMessageAt;
           }
         }
+        ref.read(readStateProvider.notifier).seedContextsRead(seeds);
         initialSeedComplete.value = true;
       });
     }, [readState.isReady, readState.pubkey, visibleChannels]);
@@ -254,25 +255,6 @@ class _SliverChannelsList extends HookConsumerWidget {
       ),
       sliver: SliverList.list(
         children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                key: const Key('browse-channels-button'),
-                icon: const Icon(BuzzIcons.compass),
-                label: const Text('Browse channels'),
-                onPressed: () => showBuzzModalBottomSheet<void>(
-                  context: context,
-                  title: 'Browse channels',
-                  constraints: _quickActionSheetConstraints(context),
-                  isScrollControlled: true,
-                  showDragHandle: true,
-                  builder: (_) => const _BrowseChannelsSheet(),
-                ),
-              ),
-            ),
-          ),
           if (visibleChannels.isEmpty)
             const _EmptyState()
           else ...[

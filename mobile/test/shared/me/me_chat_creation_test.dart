@@ -79,7 +79,12 @@ void main() {
         ),
       );
       MeSync service() => MeSync(RelaySessionNotifier(), config, prefs: prefs);
-      const intent = MeChatCreation('same-id', 'Private name', 'agent');
+      const intent = MeChatCreation(
+        'same-id',
+        'Private name',
+        'agent',
+        project: 'mobile',
+      );
       var created = false, member = false, placed = false, crash = true;
       final writes = [0, 0, 0];
       void boundary(int point) {
@@ -118,6 +123,16 @@ void main() {
       final pending = MeChatCreation.pending(restarted)!;
       expect(pending.name, intent.name);
       expect(pending.agent, intent.agent);
+      expect(pending.project, intent.project);
+      await expectLater(
+        MeChatCreation(
+          intent.id,
+          intent.name,
+          intent.agent,
+          project: 'other',
+        ).save(restarted),
+        throwsStateError,
+      );
       expect(
         prefs.getString(MeChatCreation.storageKey(restarted)),
         isNot(contains(intent.name)),

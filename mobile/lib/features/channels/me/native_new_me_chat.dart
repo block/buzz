@@ -43,6 +43,7 @@ Future<(Channel, String)?> _showNewMeChat(
     final id = pending?.id ?? const Uuid().v4();
     String name = pending?.name ?? '';
     String? assistant = pending?.agent;
+    String? project = pending?.project;
     String? error = pending == null ? null : 'Resume your unfinished chat.';
     var retry = pending != null;
     while (context.mounted) {
@@ -68,6 +69,12 @@ Future<(Channel, String)?> _showNewMeChat(
                   .toARGB32(),
               'containerCornerRadius': Radii.container,
               'selectedAssistant': assistant,
+              'selectedProject': project,
+              'projects': [
+                for (final group
+                    in ref.read(meGroupsProvider).requireValue.groups)
+                  {'id': group['id'], 'name': group['name']},
+              ],
               'fieldsLocked': retry,
               'error': error,
               'assistants': [
@@ -99,10 +106,19 @@ Future<(Channel, String)?> _showNewMeChat(
       if (draft == null || !context.mounted) return null;
       name = (draft['name'] as String? ?? '').trim();
       assistant = draft['assistant'] as String?;
+      project = draft['project'] as String?;
+      if (project == '') project = null;
       if (name.isEmpty || assistant == null) return null;
       retry = true;
       try {
-        final created = await _createMeChat(ref, sync, id, name, assistant);
+        final created = await _createMeChat(
+          ref,
+          sync,
+          id,
+          name,
+          assistant,
+          project,
+        );
         return (created, assistant);
       } catch (failure) {
         if (failure is MeRecoveryConflict && context.mounted) {
@@ -129,9 +145,10 @@ Future<Channel> _createMeChat(
   String channelId,
   String name,
   String assistant,
+  String? project,
 ) async {
   sync = _currentMeSync(ref, sync);
-  final intent = MeChatCreation(channelId, name, assistant);
+  final intent = MeChatCreation(channelId, name, assistant, project: project);
   await intent.save(sync);
   final owned = await isOwnedMeAssistant(sync, assistant);
   sync.check();
@@ -140,14 +157,13 @@ Future<Channel> _createMeChat(
   }
   final head = await sync.head();
   (head == null ? const MeGroups() : sync.decode(head))
-      .place(channelId)
+      .place(channelId, group: project)
       .encode(sync.community);
   final actions = ref.read(channelActionsProvider);
   return intent.complete<Channel>(
     sync,
     findChannel: () async {
-      ref.invalidate(channelsProvider);
-      final all = await ref.read(channelsProvider.future);
+      final all = await ref.read(channelsProvider.notifier).fetchFresh();
       return all.where((c) => c.id == channelId).firstOrNull;
     },
     createChannel: () => actions.createChannel(
@@ -166,8 +182,12 @@ Future<Channel> _createMeChat(
         actions.addMembers(channelId: channelId, pubkeys: [assistant]),
     isPlaced: () async {
       final latest = await sync.head();
-      return latest != null && sync.decode(latest).channels.contains(channelId);
+      if (latest == null) return false;
+      final groups = sync.decode(latest);
+      return groups.channels.contains(channelId) &&
+          (project == null || groups.assignments[channelId] == project);
     },
-    place: () => sync.update((current) => current.place(channelId)),
+    place: () =>
+        sync.update((current) => current.place(channelId, group: project)),
   );
 }

@@ -30,6 +30,8 @@ import os.log
     endpointGrantStore: endpointGrantStore,
     keychainAccessGroup: pushKeychainAccessGroup
   )
+  private var communityKeyboardChannel: FlutterMethodChannel?
+  private var communityKeyboardObserver: NSObjectProtocol?
   private var hapticsChannel: FlutterMethodChannel?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
@@ -44,6 +46,8 @@ import os.log
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
   private var nativeAddMembersSheetCoordinator: NativeAddMembersSheetCoordinator?
   private var nativeConfirmationDialogCoordinator: NativeConfirmationDialogCoordinator?
+  private var nativeProfileSetupCoordinator: NativeProfileSetupCoordinator?
+  private var nativeCommunityEntryCoordinator: NativeCommunityEntryCoordinator?
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
   private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
   private var identityFilePlugin: IdentityFilePlugin?
@@ -68,6 +72,20 @@ import os.log
     }
 
     let messenger = engineBridge.applicationRegistrar.messenger()
+    let keyboardChannel = FlutterMethodChannel(
+      name: "buzz/community_keyboard", binaryMessenger: messenger)
+    communityKeyboardChannel = keyboardChannel
+    if let observer = communityKeyboardObserver {
+      NotificationCenter.default.removeObserver(observer)
+    }
+    communityKeyboardObserver = NotificationCenter.default.addObserver(
+      forName: UIResponder.keyboardWillShowNotification, object: nil, queue: .main
+    ) { _ in
+      // Deliver after UIKit finishes preparing the keyboard in this run-loop turn.
+      DispatchQueue.main.async {
+        keyboardChannel.invokeMethod("willShow", arguments: nil)
+      }
+    }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
@@ -291,6 +309,12 @@ import os.log
         forPlugin: "BuzzNativeConfirmationDialog"
       )?.viewController
     )
+
+    nativeProfileSetupCoordinator = NativeProfileSetupCoordinator(messenger: messenger) { [weak self] engine in
+      let channel = FlutterMethodChannel(name: "buzz/media_upload", binaryMessenger: engine.binaryMessenger)
+      channel.setMethodCallHandler { [weak self] call, result in self?.handleMediaUploadMethodCall(call, result: result) }
+    }
+    nativeCommunityEntryCoordinator = NativeCommunityEntryCoordinator(messenger: messenger)
 
     let nativeProfileTextEditorRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeProfileTextEditor"

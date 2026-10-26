@@ -4,7 +4,12 @@ import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:buzz/features/onboarding/hosted_profile_setup.dart';
+import 'package:buzz/features/profile/profile_setup_page.dart';
+import 'package:buzz/features/profile/profile_setup_avatar_editor.dart';
+import 'package:buzz/features/profile/profile_avatar_draft.dart';
+import 'package:buzz/shared/emoji/emoji_avatar.dart';
+import 'package:buzz/shared/widgets/playing_avatar_image.dart';
+import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
@@ -52,6 +57,73 @@ void main() {
     );
   }
 
+  journey('system Back leaves community creation', (tester, f) async {
+    await f.initialize();
+    await f.mount(tester);
+    await f.tap(tester, 'Create a community');
+    expect(
+      tester.widget<PairingPage>(find.byType(PairingPage)).creatingCommunity,
+      isTrue,
+    );
+    await tester.binding.handlePopRoute();
+    await f.settle(tester);
+    expect(
+      tester.widget<PairingPage>(find.byType(PairingPage)).creatingCommunity,
+      isFalse,
+    );
+    expect(find.text('Create a community').hitTestable(), findsOneWidget);
+  });
+
+  journey('retiring profile setup removes both profile and avatar routes', (
+    tester,
+    f,
+  ) async {
+    await f.initialize();
+    f.rows.add(f.row('one'));
+    await f.mount(tester);
+    await f.tap(tester, 'Continue with Builderlab');
+    await tester.tap(find.byTooltip('Add profile photo'));
+    await f.settle(tester);
+    expect(find.byType(ProfileSetupAvatarEditor), findsOneWidget);
+    await f.link(tester, 'two');
+    expect(
+      find.byType(ProfileSetupAvatarEditor, skipOffstage: false),
+      findsNothing,
+    );
+    expect(find.text('Set up your profile', skipOffstage: false), findsNothing);
+    expect(f.profileWrites, isEmpty);
+  });
+
+  journey('fallback profile previews the accepted draft before saving', (
+    tester,
+    f,
+  ) async {
+    await f.initialize();
+    f.rows.add(f.row('one'));
+    await f.mount(tester);
+    await f.tap(tester, 'Continue with Builderlab');
+    await tester.tap(find.byTooltip('Add profile photo'));
+    await f.settle(tester);
+    final url = emojiAvatarDataUrl('🐝', 0xFFFFE75C);
+    Navigator.of(
+      tester.element(find.byType(ProfileSetupAvatarEditor)),
+    ).pop(ProfileUrlAvatarDraft(url));
+    await f.settle(tester);
+    expect(
+      tester
+          .widget<PlayingAvatarImage>(find.byType(PlayingAvatarImage))
+          .imageUrl,
+      url,
+    );
+    await tester.enterText(
+      find.byType(TextField).hitTestable(),
+      'Draft Person',
+    );
+    await f.tap(tester, 'Continue');
+    expect(f.profileWrites, ['Draft Person']);
+    expect(f.profileAvatars, [url]);
+  });
+
   journey(
     'QR credentials enter without an account when domain is not required',
     (tester, f) async {
@@ -71,7 +143,7 @@ void main() {
         expect(find.text('Create a community'), findsNothing);
         expect(find.text('Enter a community link'), findsOneWidget);
         expect(find.text('Scan a QR code'), findsOneWidget);
-        expect(find.text('Use pairing code'), findsOneWidget);
+        expect(find.text('Use pairing code'), findsNothing);
         await f.tap(tester, 'Enter a community link');
         expect(
           find.byKey(const Key('community-link-input')).hitTestable(),
@@ -384,7 +456,17 @@ void main() {
       expect((await f.storage.loadAll()).single.starterSetupIncomplete, isTrue);
       expect(find.text('Try again').hitTestable(), findsOneWidget);
       await f.tap(tester, 'Try again');
-      expect(find.byType(HostedProfileSetup), findsOneWidget);
+      expect(
+        find.byType(ProfileSetupPage, skipOffstage: false),
+        findsOneWidget,
+      );
+      expect(
+        find.ancestor(
+          of: find.byType(TextField).hitTestable(),
+          matching: find.byType(BottomSheet),
+        ),
+        findsOneWidget,
+      );
       expect(f.sent('/claim'), hasLength(1));
       expect(f.recoveryScopes, hasLength(3));
       expect(
@@ -477,17 +559,20 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Scan a QR code'), findsOneWidget);
-      expect(find.text('Use pairing code'), findsOneWidget);
+      expect(find.text('Use pairing code'), findsNothing);
       f.rows.addAll([f.row('one'), f.row('two')]);
       await f.tap(tester, 'Continue with Builderlab');
       // Joined communities are added automatically after choosing the identity.
       expect(find.byType(CheckboxListTile).hitTestable(), findsNothing);
-      expect(find.byType(HostedProfileSetup), findsOneWidget);
+      expect(
+        find.byType(ProfileSetupPage, skipOffstage: false),
+        findsOneWidget,
+      );
       final firstSaved = (await f.storage.loadAll()).firstWhere(
         (c) => c.name == 'one',
       );
       Navigator.of(
-        tester.element(find.byType(HostedProfileSetup)),
+        tester.element(find.byType(ProfileSetupPage, skipOffstage: false)),
         rootNavigator: true,
       ).pop();
       await f.settle(tester);
@@ -528,7 +613,10 @@ void main() {
         await f.tap(tester, 'Continue with Builderlab');
         // One discovered community is admitted automatically.
         expect(f.profileWrites, isEmpty);
-        expect(find.byType(HostedProfileSetup), findsNothing);
+        expect(
+          find.byType(ProfileSetupPage, skipOffstage: false),
+          findsNothing,
+        );
         final saved = (await f.storage.loadAll()).single;
         expect(saved.nsec, f.keys.nsec);
         expect(saved.pubkey, f.keys.public);
@@ -728,7 +816,10 @@ void main() {
       expect(await f.storage.loadAll(), isEmpty);
       await f.restart(tester);
       await f.tap(tester, 'Start login again');
-      expect(find.byType(HostedProfileSetup), findsOneWidget);
+      expect(
+        find.byType(ProfileSetupPage, skipOffstage: false),
+        findsOneWidget,
+      );
       await tester.enterText(find.byType(TextField).hitTestable(), 'Creator');
       await f.tap(tester, 'Continue');
       final saved = (await f.storage.loadAll()).single;

@@ -78,6 +78,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             flow.account.account == null) &&
         flow.stage != HostedFlowStage.idle &&
         flow.stage != HostedFlowStage.complete &&
+        flow.stage != HostedFlowStage.profile &&
         flow.stage != HostedFlowStage.chooseIdentity &&
         flow.stage != HostedFlowStage.chooseCommunities &&
         flow.stage != HostedFlowStage.communityConflict &&
@@ -95,7 +96,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
         : problem != null
         ? hostedFlowProblemMessage(problem)
         : busy
-        ? 'Connecting to Builderlab…'
+        ? null
         : flow.noCommunitiesToAdd
         ? 'No communities available to add. Scan a QR code or use an invite link.'
         : connected
@@ -117,10 +118,18 @@ class OnboardingAppEntry extends HookConsumerWidget {
           !creating.value &&
           !inlineSetup,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) back();
+        if (!didPop &&
+            (existingUser.value ||
+                creating.value ||
+                enteringCommunityLink.value ||
+                inlineSetup)) {
+          back();
+        }
       },
       child: PairingPage(
         connectionLanding: true,
+        showConnectionOptions:
+            !HostedEnvironment.enabled || addingCommunity || connected,
         addingCommunity: addingCommunity,
         existingUser: existingUser.value,
         enteringCommunityLink: enteringCommunityLink.value,
@@ -143,6 +152,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             ? null
             : () => unawaited(flow.signInAccount()),
         accountStatus: status,
+        builderlabBusy: busy,
         setupContent: flow != null && inlineSetup
             ? Column(
                 mainAxisSize: MainAxisSize.min,
@@ -158,7 +168,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             ? 'Connecting…'
             : connected
             ? 'Continue with Builderlab'
-            : 'Connect to Builderlab',
+            : 'Sign in with builderlab',
         onWelcomeBack: back,
         onAlreadyUseBuzz: () => existingUser.value = true,
       ),

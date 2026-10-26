@@ -335,9 +335,12 @@ pub async fn handle_side_effects(
     match kind {
         0 => handle_kind0_profile(tenant, event, state).await,
         5 => handle_standard_deletion_event(tenant, event, state).await,
-        9000 => handle_put_user(tenant, event, state).await,
+        // kind:9000 belongs to the put-user path in ingest, which reports
+        // each person's result.
+        9000 => Err(anyhow::anyhow!("kind:9000 requires apply_put_user")),
         9001 => handle_remove_user(tenant, event, state).await,
-        9002 => handle_edit_metadata(tenant, event, state).await,
+        // kind:9002 belongs to the atomic persistence path in ingest.
+        9002 => Err(anyhow::anyhow!("kind:9002 requires atomic persistence")),
         9005 => handle_delete_event_side_effect(tenant, event, state).await,
         9007 => handle_create_group(tenant, event, state).await,
         9008 => handle_delete_group(tenant, event, state).await,
@@ -578,82 +581,24 @@ pub async fn validate_admin_event(
 
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
-    // Reject mutations on archived channels — except kind:9002 with archived=false
-    // (unarchive), which must be allowed through so the channel can be restored,
-    // and a member leaving by themselves (still subject to the last-owner rule).
+    // Reject mutations on archived channels, except a member leaving by
+    // themselves (still subject to the last-owner rule). kind:9002 is not
+    // checked here: its atomic write decides the archive state under the
+    // channel row lock, after its duplicate check, so a resend that races
+    // the first commit is a duplicate and not a refusal.
     let channel = state
         .db
         .get_channel_for_event_write(tenant.community(), channel_id)
         .await
         .map_err(|_| anyhow::anyhow!("channel not found"))?;
-    let is_unarchive_request = kind == 9002
-        && event.tags.iter().any(|t| {
-            let parts = t.as_slice();
-            parts.len() >= 2 && parts[0] == "archived" && parts[1] == "false"
-        });
-    if channel.archived_at.is_some() && !is_unarchive_request && !is_self_departure(event) {
+    if kind != 9002 && channel.archived_at.is_some() && !is_self_departure(event) {
         return Err(anyhow::anyhow!("channel is archived"));
     }
 
     match kind {
-        9000 => {
-            // An absent role tag means "no role change requested": for an existing
-            // member that preserves the role they already hold, and only defaults
-            // to Member for a genuinely new member. Defaulting unconditionally to
-            // Member made a bare self-targeted PUT_USER silently demote an owner.
-            let role_str = extract_tag_value(event, "role");
-            let requested_role = match role_str {
-                Some(ref s) => match s.parse::<buzz_db::channel::MemberRole>() {
-                    Ok(r) => Some(r),
-                    Err(_) => return Err(anyhow::anyhow!("invalid role: {s}")),
-                },
-                None => None,
-            };
-
-            let members = state.db.get_members(tenant.community(), channel_id).await?;
-            let actor_role: Option<buzz_db::channel::MemberRole> = members
-                .iter()
-                .find(|m| m.pubkey == actor_bytes)
-                .and_then(|m| m.role.parse().ok());
-            let target_pubkey =
-                extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
-
-            let join_role =
-                buzz_db::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
-
-            // Authorization policy — visibility gate, elevated-grant gate,
-            // active-member role-change gate, and last-owner demotion — lives in
-            // `channel_authz`, which is pure and table-tested. The database reads
-            // it depends on stay here.
-            match channel_authz::decide_put_user(
-                &channel.visibility,
-                join_role,
-                actor_role,
-                requested_role,
-                &members,
-                &target_pubkey,
-                &actor_bytes,
-            )? {
-                // Self-add: always allowed regardless of policy.
-                PutUserDecision::Allow => Ok(()),
-                // Third-party add: check channel_add_policy on the target.
-                PutUserDecision::CheckAddPolicy => {
-                    if let Some((policy, owner)) = state
-                        .db
-                        .get_agent_channel_policy(tenant.community(), &target_pubkey)
-                        .await?
-                    {
-                        channel_authz::decide_channel_add_policy(
-                            &policy,
-                            owner.as_deref(),
-                            &actor_bytes,
-                        )?;
-                    }
-
-                    Ok(())
-                }
-            }
-        }
+        // Ingest validates kind:9000 with `validate_put_user`, which keeps
+        // each person's result for `apply_put_user`.
+        9000 => Err(anyhow::anyhow!("kind:9000 requires validate_put_user")),
         9001 => {
             // REMOVE_USER: self-remove allowed unless actor is the last owner; removing others requires owner/admin
             let target_pubkey =
@@ -696,6 +641,7 @@ pub async fn validate_admin_event(
                 "ttl",
                 "t",
                 "join_role",
+                "unlisted",
             ];
             let has_recognized = event
                 .tags
@@ -703,22 +649,24 @@ pub async fn validate_admin_event(
                 .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted)"
                 ));
             }
 
-            // Validate archived values before storage.
+            // Validate archived and unlisted values before storage. Both are
+            // partial updates, so turning one off must be explicit.
             for t in event.tags.iter() {
-                if t.kind().to_string() == "archived" {
+                let name = t.kind().to_string();
+                if name == "archived" || name == "unlisted" {
                     match t.content() {
                         Some("true") | Some("false") => {}
                         Some(v) => {
                             return Err(anyhow::anyhow!(
-                                "invalid archived value: {v} (must be \"true\" or \"false\")"
+                                "invalid {name} value: {v} (must be \"true\" or \"false\")"
                             ));
                         }
                         None => {
-                            return Err(anyhow::anyhow!("archived tag must have a value"));
+                            return Err(anyhow::anyhow!("{name} tag must have a value"));
                         }
                     }
                 }
@@ -806,7 +754,8 @@ pub async fn validate_admin_event(
                 labels.map_err(|e| anyhow::anyhow!("{e}"))?;
             }
 
-            // name/about/archived/visibility/ttl/labels/join_role require owner/admin;
+            // name/about/archived/visibility/ttl/labels/join_role/unlisted
+            // require owner/admin;
             // topic/purpose allow any member who may post.
             let has_privileged_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
@@ -817,6 +766,7 @@ pub async fn validate_admin_event(
                     || k == "ttl"
                     || k == "t"
                     || k == "join_role"
+                    || k == "unlisted"
             });
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
@@ -838,7 +788,7 @@ pub async fn validate_admin_event(
                             return Ok(());
                         }
                         Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl/label/join_role changes"
+                            "actor not authorized for name/about/archived/visibility/ttl/label/join_role/unlisted changes"
                         ))
                     }
                 }
@@ -974,14 +924,7 @@ pub async fn emit_system_message(
     content: serde_json::Value,
     idempotency_ts: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<()> {
-    let channel_tag = Tag::parse(["h", &channel_id.to_string()])?;
-
-    let ts = nostr::Timestamp::from(idempotency_ts.timestamp() as u64);
-    let event = EventBuilder::new(Kind::Custom(40099), content.to_string())
-        .tags([channel_tag])
-        .custom_created_at(ts)
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign system message: {e}"))?;
+    let event = sign_system_message(state, channel_id, content, idempotency_ts)?;
 
     // Durable insert is the completion boundary — propagate failure.
     state
@@ -990,16 +933,41 @@ pub async fn emit_system_message(
         .await
         .map_err(|e| anyhow::anyhow!("system message insert failed: {e}"))?;
 
-    // Fan out to subscribers: best-effort, clients can retrieve the persisted event.
+    fan_out_system_message(tenant, state, channel_id, &event).await;
+    Ok(())
+}
+
+/// Sign a kind:40099 system message for `channel_id` with the relay keypair.
+fn sign_system_message(
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    content: serde_json::Value,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<Event> {
+    let channel_tag = Tag::parse(["h", &channel_id.to_string()])?;
+    let ts = nostr::Timestamp::from(created_at.timestamp() as u64);
+    EventBuilder::new(Kind::Custom(40099), content.to_string())
+        .tags([channel_tag])
+        .custom_created_at(ts)
+        .sign_with_keys(&state.relay_keypair)
+        .map_err(|e| anyhow::anyhow!("failed to sign system message: {e}"))
+}
+
+/// Fan out a stored system message. Best-effort: clients can retrieve the
+/// persisted event.
+async fn fan_out_system_message(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    event: &Event,
+) {
     if let Err(e) = state
         .pubsub
-        .publish_event(tenant, EventTopic::Channel(channel_id), &event)
+        .publish_event(tenant, EventTopic::Channel(channel_id), event)
         .await
     {
         warn!("System message fan-out failed: {e}");
     }
-
-    Ok(())
 }
 
 /// Sign and fan out a fresh relay-signed `kind:39005` thread-summary overlay
@@ -1132,6 +1100,29 @@ pub async fn emit_membership_notification(
         warn!(%channel_id, "membership notice skipped: channel not found");
         return Ok(());
     };
+    emit_typed_membership_notification(
+        tenant,
+        state,
+        channel_id,
+        &channel_type,
+        target_pubkey,
+        actor_pubkey,
+        notification_kind,
+    )
+    .await
+}
+
+/// [`emit_membership_notification`] for a caller that already read the
+/// channel's type, such as a kind:9000 notifying several people.
+async fn emit_typed_membership_notification(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    channel_type: &str,
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+    notification_kind: u32,
+) -> anyhow::Result<()> {
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
     let channel_id_str = channel_id.to_string();
@@ -1158,7 +1149,7 @@ pub async fn emit_membership_notification(
     })
     .to_string();
 
-    let type_tag = Tag::parse([buzz_core::filter::NOTICE_CHANNEL_TYPE_TAG, &channel_type])
+    let type_tag = Tag::parse([buzz_core::filter::NOTICE_CHANNEL_TYPE_TAG, channel_type])
         .map_err(|e| anyhow::anyhow!("failed to build channel type tag: {e}"))?;
     let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
         .tags([p_tag, h_tag, type_tag])
@@ -1552,74 +1543,369 @@ async fn handle_kind0_profile(
     Ok(())
 }
 
-async fn handle_put_user(
+/// Most people one kind:9000 may name.
+pub(crate) const MAX_PUT_USER_TARGETS: usize = 100;
+
+/// One person a kind:9000 names.
+struct PutUserTarget {
+    pubkey: Vec<u8>,
+    /// `None` asks for no role change: an active member keeps their role, and
+    /// a new member gets the channel's `join_role`. Defaulting to Member made a
+    /// bare self-targeted PUT_USER silently demote an owner.
+    role: Option<MemberRole>,
+}
+
+/// The people a kind:9000 names, in tag order without repeats. As in NIP-29,
+/// each `["p", pubkey, role]` may carry its own role; the event's `role` tag
+/// is the fallback.
+fn put_user_targets(event: &Event) -> anyhow::Result<Vec<PutUserTarget>> {
+    let parse_role = |value: &str| {
+        value
+            .parse::<MemberRole>()
+            .map_err(|_| anyhow::anyhow!("invalid role: {value}"))
+    };
+    let event_role = extract_tag_value(event, "role")
+        .map(|value| parse_role(&value))
+        .transpose()?;
+    let mut targets: Vec<PutUserTarget> = Vec::new();
+    for tag in event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "p")
+    {
+        let values = tag.as_slice();
+        let pubkey = values
+            .get(1)
+            .and_then(|value| hex::decode(value).ok())
+            .filter(|bytes| bytes.len() == 32)
+            .ok_or_else(|| anyhow::anyhow!("p tag must be a 32-byte hex pubkey"))?;
+        let role = match values.get(2).filter(|value| !value.is_empty()) {
+            Some(value) => Some(parse_role(value)?),
+            None => event_role,
+        };
+        if !targets.iter().any(|target| target.pubkey == pubkey) {
+            targets.push(PutUserTarget { pubkey, role });
+        }
+    }
+    if targets.is_empty() {
+        anyhow::bail!("missing p tag");
+    }
+    if targets.len() > MAX_PUT_USER_TARGETS {
+        anyhow::bail!("a put-user may name at most {MAX_PUT_USER_TARGETS} people");
+    }
+    Ok(targets)
+}
+
+/// A validated kind:9000: each person it names, with the reason they were
+/// refused, if they were. At least one was not.
+pub(crate) struct PutUserPlan {
+    channel_id: Uuid,
+    targets: Vec<(PutUserTarget, Option<String>)>,
+}
+
+/// Validate a kind:9000 before storage, person by person, so one refused
+/// person does not refuse the others. Refuses the event only when the event
+/// itself is bad or nobody it names may be added.
+pub(crate) async fn validate_put_user(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PutUserPlan> {
     let channel_id =
-        extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
-    let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
-    let actor_bytes = event.pubkey.to_bytes().to_vec();
-
-    // No role tag = no role change: an existing member keeps their current
-    // role, and a new member gets the channel's `join_role`, whether they add
-    // themselves or someone else adds them. `put_member` resolves that under
-    // the channel's membership lock, together with every admission rule.
-    let requested: Option<MemberRole> = extract_tag_value(event, "role")
-        .map(|role_str| {
-            role_str
-                .parse()
-                .map_err(|_| anyhow::anyhow!("invalid role: {role_str}"))
-        })
-        .transpose()?;
-
-    state
+        extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing or invalid h tag"))?;
+    let channel = state
         .db
-        .put_member(
-            tenant.community(),
-            channel_id,
-            &target_pubkey,
-            requested,
-            Some(&actor_bytes),
-        )
+        .get_channel_for_event_write(tenant.community(), channel_id)
+        .await
+        .map_err(|_| anyhow::anyhow!("channel not found"))?;
+    if channel.archived_at.is_some() {
+        anyhow::bail!("channel is archived");
+    }
+    let targets = put_user_targets(event)?;
+
+    let actor_bytes = event.pubkey.to_bytes().to_vec();
+    let mut members = state.db.get_members(tenant.community(), channel_id).await?;
+    let join_role = buzz_db::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
+
+    // A third-party add also checks the target's channel_add_policy. Read
+    // every third party's policy in one query, before deciding anyone.
+    let policy_keys: Vec<Vec<u8>> = targets
+        .iter()
+        .filter(|target| target.pubkey != actor_bytes)
+        .map(|target| target.pubkey.clone())
+        .collect();
+    let policies = state
+        .db
+        .get_agent_channel_policies(tenant.community(), &policy_keys)
         .await?;
-    state.invalidate_membership(tenant, channel_id, &target_pubkey);
 
+    // Authorization policy — visibility gate, elevated-grant gate,
+    // active-member role-change gate, and last-owner demotion — lives in
+    // `channel_authz`, which is pure and table-tested. People are decided in
+    // tag order against a roster that each allowed person is applied to, the
+    // order `put_members` writes them in: an heir named first lets the sole
+    // owner step down after, and an owner who steps down can't then grant an
+    // elevated role.
+    let mut checked = Vec::with_capacity(targets.len());
+    for target in targets {
+        let actor_role: Option<MemberRole> = members
+            .iter()
+            .find(|m| m.pubkey == actor_bytes)
+            .and_then(|m| m.role.parse().ok());
+        let decision = channel_authz::decide_put_user(
+            &channel.visibility,
+            join_role,
+            actor_role,
+            target.role,
+            &members,
+            &target.pubkey,
+            &actor_bytes,
+        );
+        let outcome = match decision {
+            Err(denied) => Err(denied.to_string()),
+            // Self-add: always allowed regardless of policy.
+            Ok((PutUserDecision::Allow, role)) => Ok(role),
+            Ok((PutUserDecision::CheckAddPolicy, role)) => match policies.get(&target.pubkey) {
+                Some((policy, owner)) => {
+                    channel_authz::decide_channel_add_policy(policy, owner.as_deref(), &actor_bytes)
+                        .map(|()| role)
+                        .map_err(|denied| denied.to_string())
+                }
+                None => Ok(role),
+            },
+        };
+        let refusal = match outcome {
+            Ok(role) => {
+                match members.iter_mut().find(|m| m.pubkey == target.pubkey) {
+                    Some(member) => member.role = role.as_str().to_owned(),
+                    None => members.push(MemberRecord {
+                        channel_id,
+                        pubkey: target.pubkey.clone(),
+                        role: role.as_str().to_owned(),
+                        joined_at: chrono::Utc::now(),
+                        invited_by: Some(actor_bytes.clone()),
+                        removed_at: None,
+                    }),
+                }
+                None
+            }
+            Err(reason) => Some(reason),
+        };
+        checked.push((target, refusal));
+    }
+
+    if checked.iter().all(|(_, refusal)| refusal.is_some()) {
+        // One person keeps the single-add error text.
+        if let [(_, Some(reason))] = checked.as_slice() {
+            anyhow::bail!("{reason}");
+        }
+        let mut report = PutUserReport::default();
+        for (target, refusal) in checked {
+            report.reject(&target.pubkey, refusal.unwrap_or_default());
+        }
+        anyhow::bail!("{}", report.message());
+    }
+    Ok(PutUserPlan {
+        channel_id,
+        targets: checked,
+    })
+}
+
+/// What a kind:9000 did for each person it named, as hex pubkeys.
+#[derive(Default)]
+struct PutUserReport {
+    added: Vec<String>,
+    /// Already active members whose role changed.
+    updated: Vec<String>,
+    /// Already active members at the requested role: nothing changed.
+    already_member: Vec<String>,
+    /// Refused people, grouped by reason in first-seen order.
+    rejected: Vec<(String, Vec<String>)>,
+}
+
+impl PutUserReport {
+    fn reject(&mut self, pubkey: &[u8], reason: String) {
+        let pubkey = hex::encode(pubkey);
+        match self.rejected.iter_mut().find(|(seen, _)| *seen == reason) {
+            Some((_, pubkeys)) => pubkeys.push(pubkey),
+            None => self.rejected.push((reason, vec![pubkey])),
+        }
+    }
+
+    /// The OK message: `members: ` and a JSON object of the non-empty lists.
+    /// Grouping refusals by reason keeps 100 people well under a client's
+    /// receipt size limit.
+    fn message(&self) -> String {
+        let mut report = serde_json::Map::new();
+        for (key, pubkeys) in [
+            ("added", &self.added),
+            ("updated", &self.updated),
+            ("already_member", &self.already_member),
+        ] {
+            if !pubkeys.is_empty() {
+                report.insert(key.into(), serde_json::json!(pubkeys));
+            }
+        }
+        if !self.rejected.is_empty() {
+            let rejected: Vec<_> = self
+                .rejected
+                .iter()
+                .map(
+                    |(reason, pubkeys)| serde_json::json!({ "reason": reason, "pubkeys": pubkeys }),
+                )
+                .collect();
+            report.insert("rejected".into(), rejected.into());
+        }
+        format!("members: {}", serde_json::Value::Object(report))
+    }
+}
+
+/// Apply a stored kind:9000 and return its OK message. An event naming
+/// several people reports each person's result; one naming a single person
+/// keeps the empty message a single add has always had. `put_member` decides
+/// every admission rule again under the channel's membership lock, so a person
+/// validation allowed can still be refused here.
+pub(crate) async fn apply_put_user(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+    plan: PutUserPlan,
+) -> String {
+    let channel_id = plan.channel_id;
+    let batch = plan.targets.len() > 1;
+    let actor_bytes = event.pubkey.to_bytes().to_vec();
     let actor_hex = hex::encode(&actor_bytes);
-    let target_hex = hex::encode(&target_pubkey);
-    emit_system_message(
-        tenant,
-        state,
-        channel_id,
-        serde_json::json!({
-            "type": "member_joined",
-            "actor": actor_hex,
-            "target": target_hex,
-        }),
-        chrono::Utc::now(),
-    )
-    .await?;
-
-    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
-        warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+    let mut report = PutUserReport::default();
+    let mut allowed = Vec::with_capacity(plan.targets.len());
+    for (target, refusal) in plan.targets {
+        match refusal {
+            Some(reason) => report.reject(&target.pubkey, reason),
+            None => allowed.push(target),
+        }
     }
-
-    if let Err(e) = emit_membership_notification(
-        tenant,
-        state,
-        channel_id,
-        &target_pubkey,
-        &actor_bytes,
-        KIND_MEMBER_ADDED_NOTIFICATION,
-    )
-    .await
+    let puts: Vec<_> = allowed
+        .iter()
+        .map(|target| buzz_db::channel_members::MemberPut {
+            pubkey: &target.pubkey,
+            requested: target.role,
+        })
+        .collect();
+    let results = match state
+        .db
+        .put_members(tenant.community(), channel_id, &puts, Some(&actor_bytes))
+        .await
     {
-        warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+        Ok(results) => results,
+        // Nothing was written.
+        Err(e) => {
+            error!(channel = %channel_id, error = %e, "NIP-29 PUT_USER write failed");
+            for target in &allowed {
+                report.reject(&target.pubkey, "error: membership write failed".into());
+            }
+            Vec::new()
+        }
+    };
+    // Every person's notification is tagged with the channel's type: read it
+    // once. No channel row means no type to tag, so no notifications.
+    let channel_type = if results.iter().any(Result::is_ok) {
+        match state
+            .db
+            .channel_type_of(tenant.community(), channel_id)
+            .await
+        {
+            Ok(None) => {
+                warn!(%channel_id, "membership notice skipped: channel not found");
+                None
+            }
+            Ok(channel_type) => channel_type,
+            Err(e) => {
+                warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    for (target, result) in allowed.iter().zip(results) {
+        let put = match result {
+            Ok(put) => put,
+            Err(buzz_db::DbError::AccessDenied(reason)) => {
+                report.reject(&target.pubkey, reason);
+                continue;
+            }
+            Err(e) => {
+                error!(channel = %channel_id, error = %e, "NIP-29 PUT_USER write failed");
+                report.reject(&target.pubkey, "error: membership write failed".into());
+                continue;
+            }
+        };
+        state.invalidate_membership(tenant, channel_id, &target.pubkey);
+        let target_hex = hex::encode(&target.pubkey);
+        match put.prior_role {
+            // A no-op re-add posts no second "joined" notice, but still sends
+            // the member-added notification, which re-signals an agent that
+            // missed the first one.
+            Some(prior) if prior == put.member.role => report.already_member.push(target_hex),
+            prior => {
+                if let Err(e) = emit_system_message(
+                    tenant,
+                    state,
+                    channel_id,
+                    serde_json::json!({
+                        "type": "member_joined",
+                        "actor": actor_hex,
+                        "target": target_hex,
+                    }),
+                    chrono::Utc::now(),
+                )
+                .await
+                {
+                    warn!(channel = %channel_id, error = %e, "member_joined system message failed");
+                }
+                match prior {
+                    Some(_) => report.updated.push(target_hex),
+                    None => report.added.push(target_hex),
+                }
+            }
+        }
+
+        if let Some(channel_type) = &channel_type {
+            if let Err(e) = emit_typed_membership_notification(
+                tenant,
+                state,
+                channel_id,
+                channel_type,
+                &target.pubkey,
+                &actor_bytes,
+                KIND_MEMBER_ADDED_NOTIFICATION,
+            )
+            .await
+            {
+                warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+            }
+        }
     }
 
-    info!(channel = %channel_id, target = %target_hex, "NIP-29 PUT_USER processed");
-    Ok(())
+    if !report.added.is_empty() || !report.updated.is_empty() || !report.already_member.is_empty() {
+        if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+            warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+        }
+    }
+
+    info!(
+        channel = %channel_id,
+        added = report.added.len(),
+        updated = report.updated.len(),
+        already_member = report.already_member.len(),
+        rejected = report.rejected.iter().map(|(_, pubkeys)| pubkeys.len()).sum::<usize>(),
+        "NIP-29 PUT_USER processed"
+    );
+    if batch {
+        report.message()
+    } else {
+        String::new()
+    }
 }
 
 async fn handle_remove_user(
@@ -1691,281 +1977,225 @@ async fn handle_remove_user(
     Ok(())
 }
 
-async fn handle_edit_metadata(
+/// Persist an authorized kind:9002 event and the channel changes it names.
+///
+/// One transaction stores the event, applies every change and stores the
+/// system messages that announce them. If it fails, nothing is stored and the
+/// client is told so, so it can resend the same event. Live effects (cache
+/// invalidation, subscription eviction, fan-out, discovery events) run only
+/// after the commit.
+pub(crate) async fn persist_edit_metadata(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
     let channel_id =
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
     let actor_hex = hex::encode(&actor_bytes);
 
+    // kind:9002 is a partial update: a missing tag means "no change". If a
+    // tag repeats, its last value wins.
+    let mut edit = buzz_db::channel::ChannelMetadataEdit::default();
     for tag in event.tags.iter() {
-        let key = tag.kind().to_string();
-        if let Some(val) = tag.content() {
-            match key.as_str() {
-                "name" => {
-                    state
-                        .db
-                        .update_channel(
-                            tenant.community(),
-                            channel_id,
-                            buzz_db::channel::ChannelUpdate {
-                                name: Some(val.to_string()),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                }
-                "about" => {
-                    state
-                        .db
-                        .update_channel(
-                            tenant.community(),
-                            channel_id,
-                            buzz_db::channel::ChannelUpdate {
-                                description: Some(val.to_string()),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                }
-                "topic" => {
-                    state
-                        .db
-                        .set_topic(tenant.community(), channel_id, val, &actor_bytes)
-                        .await?;
-                    emit_system_message(
-                        tenant,
-                        state,
-                        channel_id,
-                        serde_json::json!({
-                            "type": "topic_changed", "actor": actor_hex, "topic": val
-                        }),
-                        chrono::Utc::now(),
-                    )
-                    .await?;
-                }
-                "purpose" => {
-                    state
-                        .db
-                        .set_purpose(tenant.community(), channel_id, val, &actor_bytes)
-                        .await?;
-                    emit_system_message(
-                        tenant,
-                        state,
-                        channel_id,
-                        serde_json::json!({
-                            "type": "purpose_changed", "actor": actor_hex, "purpose": val
-                        }),
-                        chrono::Utc::now(),
-                    )
-                    .await?;
-                }
-                "visibility" => {
-                    let was_open = state
-                        .db
-                        .get_channel_for_event_write(tenant.community(), channel_id)
-                        .await
-                        .map(|c| c.visibility == "open")
-                        .unwrap_or(false);
-                    state
-                        .db
-                        .update_channel(
-                            tenant.community(),
-                            channel_id,
-                            buzz_db::channel::ChannelUpdate {
-                                visibility: Some(val.to_string()),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                    // A visibility flip changes who can see the channel, so the
-                    // accessible-channels and visibility caches must be cleared
-                    // before any later event for this channel fans out.
-                    state.invalidate_all_accessible_channels(tenant);
-                    state.invalidate_channel_visibility(tenant, channel_id);
-                    // On open -> private, eagerly close non-members' live subs
-                    // for an immediate CLOSED on this node. The fan-out access
-                    // filter is the cluster-wide correctness backstop.
-                    if was_open && val == "private" {
-                        evict_non_member_channel_subscriptions(tenant, state, channel_id).await?;
-                    }
-                    emit_system_message(
-                        tenant,
-                        state,
-                        channel_id,
-                        serde_json::json!({
-                            "type": "visibility_changed", "actor": actor_hex, "visibility": val
-                        }),
-                        chrono::Utc::now(),
-                    )
-                    .await?;
-                }
-                "join_role" => {
-                    // Validated during authorization; parse again so a bad
-                    // value can never reach the column.
-                    let join_role: buzz_db::channel::ChannelJoinRole =
-                        val.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-                    state
-                        .db
-                        .update_channel(
-                            tenant.community(),
-                            channel_id,
-                            buzz_db::channel::ChannelUpdate {
-                                join_role: Some(join_role.as_str().to_string()),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                    emit_system_message(
-                        tenant,
-                        state,
-                        channel_id,
-                        serde_json::json!({
-                            "type": "join_role_changed", "actor": actor_hex, "join_role": join_role.as_str()
-                        }),
-                        chrono::Utc::now(),
-                    )
-                    .await?;
-                }
-                "ttl" => {
-                    // Empty string clears the TTL (permanent); otherwise it is a
-                    // positive integer of seconds, validated during authorization.
-                    // Fail closed: a parse failure must reject, never silently
-                    // clear the TTL to permanent.
-                    let ttl_change: Option<i32> = if val.is_empty() {
-                        None
-                    } else {
-                        Some(val.parse::<i32>().map_err(|_| {
-                            anyhow::anyhow!("invalid ttl value: {val} (must be a positive integer)")
-                        })?)
-                    };
-                    state
-                        .db
-                        .update_channel(
-                            tenant.community(),
-                            channel_id,
-                            buzz_db::channel::ChannelUpdate {
-                                ttl_seconds: Some(ttl_change),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                    emit_system_message(
-                        tenant,
-                        state,
-                        channel_id,
-                        serde_json::json!({
-                            "type": "ttl_changed", "actor": actor_hex, "ttl_seconds": ttl_change
-                        }),
-                        chrono::Utc::now(),
-                    )
-                    .await?;
-                }
-                "archived" => {
-                    match val {
-                        "true" => {
-                            state
-                                .db
-                                .archive_channel(tenant.community(), channel_id)
-                                .await?;
-                            emit_system_message(
-                                tenant,
-                                state,
-                                channel_id,
-                                serde_json::json!({
-                                    "type": "channel_archived", "actor": actor_hex
-                                }),
-                                chrono::Utc::now(),
-                            )
-                            .await?;
-                        }
-                        "false" => {
-                            state
-                                .db
-                                .unarchive_channel(tenant.community(), channel_id)
-                                .await?;
-                            emit_system_message(
-                                tenant,
-                                state,
-                                channel_id,
-                                serde_json::json!({
-                                    "type": "channel_unarchived", "actor": actor_hex
-                                }),
-                                chrono::Utc::now(),
-                            )
-                            .await?;
+        let Some(val) = tag.content() else { continue };
+        match tag.kind().to_string().as_str() {
+            "name" => edit.columns.name = Some(val.to_string()),
+            "about" => edit.columns.description = Some(val.to_string()),
+            "topic" => edit.topic = Some(val.to_string()),
+            "purpose" => edit.purpose = Some(val.to_string()),
+            "visibility" => edit.columns.visibility = Some(val.to_string()),
+            "join_role" => {
+                // Validated during authorization; parse again so a bad
+                // value can never reach the column.
+                let join_role: buzz_db::channel::ChannelJoinRole =
+                    val.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+                edit.columns.join_role = Some(join_role.as_str().to_string());
+            }
+            "ttl" => {
+                // Empty string clears the TTL (permanent); otherwise it is a
+                // positive integer of seconds, validated during authorization.
+                // Fail closed: a parse failure must reject, never silently
+                // clear the TTL to permanent.
+                edit.columns.ttl_seconds = Some(if val.is_empty() {
+                    None
+                } else {
+                    Some(val.parse::<i32>().map_err(|_| {
+                        anyhow::anyhow!("invalid ttl value: {val} (must be a positive integer)")
+                    })?)
+                });
+            }
+            "archived" => match val {
+                "true" => edit.archived = Some(true),
+                "false" => edit.archived = Some(false),
+                _ => {} // refused during authorization
+            },
+            "unlisted" => {
+                // Validated during authorization; fail closed so a bad value
+                // can never reach the column.
+                edit.columns.unlisted = Some(match val {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(anyhow::anyhow!("invalid unlisted value: {val}")),
+                });
+            }
+            _ => {}
+        }
+    }
+    // All `t` tags together form the new label set. `["t", ""]` alone clears it.
+    if let Some(labels) = channel_labels_from_tags(event) {
+        edit.columns.labels = Some(labels.map_err(|e| anyhow::anyhow!("{e}"))?);
+    }
 
-                            // Resubscribe connected agents after restore: archiving evicts their
-                            // live subscriptions (CLOSED "channel access revoked") and unarchive
-                            // otherwise emits no signal that makes a connected agent resubscribe.
-                            // We reuse the member_added notification (44100) purely as a resubscribe
-                            // trigger — no membership actually changed here — because it flows on the
-                            // agent's always-live global membership subscription, the same path
-                            // remove/re-add uses to recover. Humans self-heal via the re-emitted
-                            // kind:39000 discovery, so this is intentionally agent-scoped.
-                            //
-                            // Known limitation: emit_membership_notification builds a created_at=now
-                            // event with no nonce, and insert_event skips fan-out on a duplicate id.
-                            // Four sub-second toggles (archive->unarchive->archive->unarchive) on the
-                            // same channel by the same actor could collide ids and skip a fan-out.
-                            // Not reachable in practice — unarchive has a single human-driven caller;
-                            // the reaper only auto-archives — so we don't engineer around it.
-                            for member in state
-                                .db
-                                .get_members_for_event_write(tenant.community(), channel_id)
-                                .await?
-                            {
-                                if let Err(e) = emit_membership_notification(
-                                    tenant,
-                                    state,
-                                    channel_id,
-                                    &member.pubkey,
-                                    &actor_bytes,
-                                    KIND_MEMBER_ADDED_NOTIFICATION,
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        channel = %channel_id,
-                                        error = %e,
-                                        "post-unarchive resubscribe notification failed"
-                                    );
-                                }
-                            }
-                        }
-                        _ => {} // ignore invalid values
-                    }
-                }
-                _ => {}
+    let now = chrono::Utc::now();
+    let mut notices = Vec::new();
+    if let Some(topic) = &edit.topic {
+        notices.push(serde_json::json!({
+            "type": "topic_changed", "actor": actor_hex, "topic": topic
+        }));
+    }
+    if let Some(purpose) = &edit.purpose {
+        notices.push(serde_json::json!({
+            "type": "purpose_changed", "actor": actor_hex, "purpose": purpose
+        }));
+    }
+    if let Some(visibility) = &edit.columns.visibility {
+        notices.push(serde_json::json!({
+            "type": "visibility_changed", "actor": actor_hex, "visibility": visibility
+        }));
+    }
+    if let Some(join_role) = &edit.columns.join_role {
+        notices.push(serde_json::json!({
+            "type": "join_role_changed", "actor": actor_hex, "join_role": join_role
+        }));
+    }
+    if let Some(unlisted) = edit.columns.unlisted {
+        notices.push(serde_json::json!({
+            "type": "unlisted_changed", "actor": actor_hex, "unlisted": unlisted
+        }));
+    }
+    if let Some(ttl_seconds) = edit.columns.ttl_seconds {
+        notices.push(serde_json::json!({
+            "type": "ttl_changed", "actor": actor_hex, "ttl_seconds": ttl_seconds
+        }));
+    }
+    match edit.archived {
+        Some(true) => notices.push(serde_json::json!({
+            "type": "channel_archived", "actor": actor_hex
+        })),
+        Some(false) => notices.push(serde_json::json!({
+            "type": "channel_unarchived", "actor": actor_hex
+        })),
+        None => {}
+    }
+    let system_messages = notices
+        .into_iter()
+        .map(|content| sign_system_message(state, channel_id, content, now))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let new_visibility = edit.columns.visibility.clone();
+    let unlisted_changed = edit.columns.unlisted.is_some();
+    let unarchived = edit.archived == Some(false);
+    let write = state
+        .db
+        .apply_channel_metadata_event(
+            tenant.community(),
+            channel_id,
+            event,
+            edit,
+            &system_messages,
+        )
+        .await?;
+    if !write.inserted {
+        return Ok((write.stored, false));
+    }
+
+    // The changes are committed. What follows only updates live state, so a
+    // failure is logged; the next read sees the committed channel.
+    if unlisted_changed && new_visibility.is_none() {
+        // Unlisting changes which channels a read that names none can see;
+        // nobody loses access, so no subscription is evicted.
+        state.invalidate_all_accessible_channels(tenant);
+    }
+    if let Some(visibility) = new_visibility.as_deref() {
+        // A visibility flip changes who can see the channel, so the
+        // accessible-channels and visibility caches must be cleared
+        // before any later event for this channel fans out.
+        state.invalidate_all_accessible_channels(tenant);
+        state.invalidate_channel_visibility(tenant, channel_id);
+        // On open -> private, eagerly close non-members' live subs
+        // for an immediate CLOSED on this node. The fan-out access
+        // filter is the cluster-wide correctness backstop.
+        if write.previous_visibility == "open" && visibility == "private" {
+            if let Err(e) = evict_non_member_channel_subscriptions(tenant, state, channel_id).await
+            {
+                warn!(channel = %channel_id, error = %e, "non-member subscription eviction failed");
             }
         }
     }
-
-    // All `t` tags together form the new label set, so they are applied
-    // once after the loop. `["t", ""]` alone clears the set.
-    if let Some(labels) = channel_labels_from_tags(event) {
-        let labels = labels.map_err(|e| anyhow::anyhow!("{e}"))?;
-        state
-            .db
-            .update_channel(
-                tenant.community(),
-                channel_id,
-                buzz_db::channel::ChannelUpdate {
-                    labels: Some(labels),
-                    ..Default::default()
-                },
-            )
-            .await?;
+    for message in &system_messages {
+        fan_out_system_message(tenant, state, channel_id, message).await;
     }
-
+    if unarchived {
+        resubscribe_members_after_unarchive(tenant, state, channel_id, &actor_bytes).await;
+    }
     if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
         warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
     }
 
-    Ok(())
+    Ok((write.stored, true))
+}
+
+/// Resubscribe connected agents after restore: archiving evicts their
+/// live subscriptions (CLOSED "channel access revoked") and unarchive
+/// otherwise emits no signal that makes a connected agent resubscribe.
+/// We reuse the member_added notification (44100) purely as a resubscribe
+/// trigger — no membership actually changed here — because it flows on the
+/// agent's always-live global membership subscription, the same path
+/// remove/re-add uses to recover. Humans self-heal via the re-emitted
+/// kind:39000 discovery, so this is intentionally agent-scoped.
+///
+/// Known limitation: emit_membership_notification builds a created_at=now
+/// event with no nonce, and insert_event skips fan-out on a duplicate id.
+/// Four sub-second toggles (archive->unarchive->archive->unarchive) on the
+/// same channel by the same actor could collide ids and skip a fan-out.
+/// Not reachable in practice — unarchive has a single human-driven caller;
+/// the reaper only auto-archives — so we don't engineer around it.
+async fn resubscribe_members_after_unarchive(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    actor_bytes: &[u8],
+) {
+    let members = match state
+        .db
+        .get_members_for_event_write(tenant.community(), channel_id)
+        .await
+    {
+        Ok(members) => members,
+        Err(e) => {
+            warn!(channel = %channel_id, error = %e, "post-unarchive member read failed");
+            return;
+        }
+    };
+    for member in members {
+        if let Err(e) = emit_membership_notification(
+            tenant,
+            state,
+            channel_id,
+            &member.pubkey,
+            actor_bytes,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+        )
+        .await
+        {
+            warn!(
+                channel = %channel_id,
+                error = %e,
+                "post-unarchive resubscribe notification failed"
+            );
+        }
+    }
 }
 
 /// The channel label set named by an event's `["t", <label>]` tags, or
@@ -1993,6 +2223,27 @@ pub(crate) fn channel_labels_from_tags(
     } else {
         Some(buzz_core::channel::parse_channel_labels(values))
     }
+}
+
+/// The kind:9007 `["unlisted", "true"|"false"]` setting: whether a new
+/// channel starts out of channel listings for non-members. A missing tag means
+/// listed. Any other value is refused, as kind:9002 refuses it; the last tag
+/// wins, as in kind:9002.
+pub(crate) fn create_unlisted_from_tags(event: &Event) -> anyhow::Result<bool> {
+    let mut unlisted = false;
+    for tag in event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "unlisted")
+    {
+        unlisted = match tag.content() {
+            Some("true") => true,
+            Some("false") => false,
+            Some(v) => anyhow::bail!("invalid unlisted value: {v} (must be \"true\" or \"false\")"),
+            None => anyhow::bail!("unlisted tag must have a value"),
+        };
+    }
+    Ok(unlisted)
 }
 
 async fn handle_delete_event_side_effect(
@@ -2122,6 +2373,7 @@ async fn handle_create_group(
         .transpose()
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .unwrap_or_default();
+    let unlisted = create_unlisted_from_tags(event)?;
 
     // If the event has an h-tag UUID, ingest_event() already created the channel
     // via create_channel_with_id(). Fetch it rather than creating a duplicate.
@@ -2156,6 +2408,7 @@ async fn handle_create_group(
                         &actor_bytes,
                         ttl_seconds,
                         &labels,
+                        unlisted,
                     )
                     .await?;
                 metrics::counter!(
@@ -2179,6 +2432,7 @@ async fn handle_create_group(
                 &actor_bytes,
                 ttl_seconds,
                 &labels,
+                unlisted,
             )
             .await?;
         metrics::counter!(

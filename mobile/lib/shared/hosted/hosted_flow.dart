@@ -124,23 +124,35 @@ class HostedFlow extends ChangeNotifier {
   Completer<void>? _profileCompletion;
   Future<void> Function(String)? saveProfile;
 
-  Future<void> requestProfile(Future<void> Function(String) save) async {
+  Future<void> Function(String, Future<String> Function()?)? saveProfileDraft;
+
+  Future<void> requestProfile(
+    Future<void> Function(String) save, {
+    Future<void> Function(String, Future<String> Function()?)? saveDraft,
+  }) async {
     if (_disposed) return;
     final completion = Completer<void>();
     _profileCompletion = completion;
-    saveProfile = (name) async {
+    saveProfileDraft = (name, avatar) async {
       if (!identical(_profileCompletion, completion) ||
           completion.isCompleted) {
         throw AccountFailure.unavailable;
       }
-      await save(name);
+      if (saveDraft != null) {
+        await saveDraft(name, avatar);
+      } else {
+        await save(name);
+      }
       if (identical(_profileCompletion, completion)) finishProfile();
     };
+    final saveCurrentDraft = saveProfileDraft!;
+    saveProfile = (name) => saveCurrentDraft(name, null);
     _set(HostedFlowStage.profile);
     await completion.future;
     if (identical(_profileCompletion, completion)) {
       _profileCompletion = null;
       saveProfile = null;
+      saveProfileDraft = null;
       _set(HostedFlowStage.working);
     }
   }
@@ -154,6 +166,7 @@ class HostedFlow extends ChangeNotifier {
     final completion = _profileCompletion;
     _profileCompletion = null;
     saveProfile = null;
+    saveProfileDraft = null;
     if (completion != null && !completion.isCompleted) completion.complete();
   }
 

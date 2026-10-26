@@ -47,9 +47,9 @@ fn compact_event(event: &Value) -> Value {
 /// markers into `reply_to`, plus `thread_root` for nested replies; every other
 /// tag (channel, mentions, edit targets, diff provenance, ...) is kept verbatim.
 ///
-/// Other agent read surfaces trim the same fields; change them together:
-/// buzz-app's MCP (`src/buzz-mcp/tools.ts`, `Tools.messages`) and kgoose's
-/// hosted read tools (squareup/cash-server `BuzzExtensionClient.messageJson`).
+/// Other agent read surfaces trim the same fields, so change them together,
+/// including buzz-app's MCP (block/buzz-app `src/buzz-mcp/tools.ts`,
+/// `Tools.messages`).
 fn agent_event(event: &Value) -> Value {
     let raw_tags = event.get("tags").unwrap_or(&Value::Null);
     let thread = thread_markers(raw_tags).resolve();

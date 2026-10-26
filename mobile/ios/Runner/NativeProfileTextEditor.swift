@@ -245,6 +245,10 @@ private final class NativeProfileTextEditorViewController:
   private var hasFocusedEditor = false
   private var selectedAssistantAvatar: UIImage?
   private var selectedAssistant: String?
+  private var selectedProject: String?
+  private var projects: [[String: String]] {
+    chatOptions?["projects"] as? [[String: String]] ?? []
+  }
   private var isChatEditor: Bool { chatOptions != nil }
   private var isProjectEditor: Bool { chatOptions?["projectOnly"] as? Bool ?? false }
   private var assistants: [[String: String]] {
@@ -333,6 +337,7 @@ private final class NativeProfileTextEditorViewController:
     self.canvasLoaded = canvasLoaded
     self.chatOptions = chatOptions
     self.selectedAssistant = chatOptions?["selectedAssistant"] as? String
+    self.selectedProject = chatOptions?["selectedProject"] as? String
     self.onCancel = onCancel
     self.onSet = onSet
     super.init(style: .insetGrouped)
@@ -472,7 +477,7 @@ private final class NativeProfileTextEditorViewController:
             assistants.contains(where: { $0["id"] == selectedAssistant }),
             !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             currentValue.count <= 120 else { return }
-      onSet(["name": currentValue, "assistant": selectedAssistant])
+      onSet(["name": currentValue, "assistant": selectedAssistant, "project": selectedProject ?? ""])
     } else if isChannelEditor {
       guard !canonicalChannelName.isEmpty else { return }
       onSet(["action": "save", "name": canonicalChannelName, "description": textView.text ?? ""])
@@ -503,13 +508,13 @@ private final class NativeProfileTextEditorViewController:
 
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
-    if isChatEditor && indexPath.section == 1 {
+    if isChatEditor && indexPath.section == 2 {
       guard !fieldsLocked && !assistants.isEmpty else { return }
       view.endEditing(true)
       let picker = MeAssistantListController(assistants: assistants, selected: selectedAssistant, pageColor: pageBackgroundColor, rowColor: containerBackgroundColor) { [weak self] id, avatar in
         self?.selectedAssistantAvatar = avatar
         self?.selectedAssistant = id
-        self?.tableView.reloadSections(IndexSet(integer: 1), with: .none)
+        self?.tableView.reloadSections(IndexSet(integer: 2), with: .none)
         self?.updateNavigation()
       }
       navigationController?.pushViewController(picker, animated: true)
@@ -529,10 +534,10 @@ private final class NativeProfileTextEditorViewController:
     return false
   }
 
-  override func numberOfSections(in tableView: UITableView) -> Int { isProjectEditor ? 1 : isChatEditor ? 2 : isChannelEditor ? (hasCanvas && canEditCanvas ? 4 : 3) : 1 }
+  override func numberOfSections(in tableView: UITableView) -> Int { isProjectEditor ? 1 : isChatEditor ? 3 : isChannelEditor ? (hasCanvas && canEditCanvas ? 4 : 3) : 1 }
 
   override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-    guard isChatEditor && section == 1 else { return nil }
+    guard isChatEditor && section == 2 else { return nil }
     if let error = chatOptions?["error"] as? String { return error }
     return assistants.isEmpty
       ? "No agents are available for this account. Connect an agent on desktop, then try again."
@@ -548,7 +553,7 @@ private final class NativeProfileTextEditorViewController:
     _ tableView: UITableView,
     heightForRowAt indexPath: IndexPath
   ) -> CGFloat {
-    if isChatEditor && indexPath.section == 1 && selectedAssistant != nil { return 64 }
+    if isChatEditor && indexPath.section == 2 && selectedAssistant != nil { return 64 }
     if isChannelEditor && indexPath.section >= 2 { return UITableView.automaticDimension }
     return (isChannelEditor ? indexPath.section == 1 : multiline) ? 132 : 52
   }
@@ -564,6 +569,36 @@ private final class NativeProfileTextEditorViewController:
     cell.layer.cornerCurve = .continuous
     cell.clipsToBounds = true
     if isChatEditor && indexPath.section == 1 {
+      var content = cell.defaultContentConfiguration()
+      content.text = "Project"
+      content.textProperties.font = .preferredFont(forTextStyle: .body)
+      cell.contentConfiguration = content
+      let selected = projects.first { $0["id"] == selectedProject }
+      let name = selected?["name"] ?? (selectedProject == nil ? "No project" : "Unavailable project")
+      let button = UIButton(type: .system)
+      button.setTitle(name, for: .normal)
+      button.setTitleColor(.label, for: .normal)
+      button.setTitleColor(.secondaryLabel, for: .disabled)
+      button.titleLabel?.font = .preferredFont(forTextStyle: .body)
+      button.titleLabel?.adjustsFontForContentSizeCategory = true
+      button.accessibilityLabel = "Project"
+      button.accessibilityValue = name
+      button.isEnabled = !fieldsLocked
+      button.showsMenuAsPrimaryAction = true
+      let choices = [["id": "", "name": "No project"]] + projects
+      button.menu = UIMenu(children: choices.map { project in
+        let id = project["id"] ?? ""
+        return UIAction(title: project["name"] ?? "Project", state: id == (selectedProject ?? "") ? .on : .off) { [weak self] _ in
+          self?.view.endEditing(true)
+          self?.selectedProject = id.isEmpty ? nil : id
+          self?.tableView.reloadSections(IndexSet(integer: 1), with: .none)
+        }
+      })
+      button.titleLabel?.lineBreakMode = .byTruncatingTail
+      button.sizeToFit()
+      button.frame.size.width = min(button.frame.width, tableView.bounds.width * 0.55)
+      cell.accessoryView = button
+    } else if isChatEditor && indexPath.section == 2 {
       var content = cell.defaultContentConfiguration()
       let selected = assistants.first { $0["id"] == selectedAssistant }
       content.text = selected?["name"] ?? "Choose an agent"
