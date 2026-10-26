@@ -482,8 +482,8 @@ export class RelayClient {
   }
 
   /** Listen for channel access-revocation hints; authoritative state needs a refresh. */
-  subscribeToChannelAccessRevocations(listener: () => void) {
-    return this.channelAccessRevocations.subscribe(listener);
+  subscribeToChannelAccessRevocations(listener: () => void, channel?: string) {
+    return this.channelAccessRevocations.subscribe(listener, channel);
   }
 
   /** Current connection state — synchronous read. */

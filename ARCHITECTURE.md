@@ -683,6 +683,30 @@ Real-time voice lives inside `buzz-relay` (`src/audio/`), not a separate crate. 
 
 **Not yet built:** recording and per-track publishing (the corresponding kinds are reserved, no producer exists).
 
+**Desktop screen sharing:** native `xcap` capture is explicitly started from a
+display/window chooser. Kind `24811` carries H.264 video batches and stop
+notifications through the existing NIP-42-authenticated Nostr WebSocket. It is
+ephemeral: no database storage, no media upload, and no backfill. The relay
+requires exactly one `h` tag naming an active private ephemeral stream, checks
+membership and community boundaries, and parses in-band H.264 SPS dimensions
+without decoding pixels.
+
+Native capture runs continuously, targeting 30 FPS at up to 1920 x 1080 pixels.
+OpenH264 encodes inter-frame screen video at a 3 Mbps target bitrate, with periodic
+IDRs. Up to eight timestamped frames share one transport event: relay event rate
+does not cap playback FPS. Compressed batches are bounded to 176 KiB. Congestion
+drops dependencies and forces an IDR; it does not accumulate an unbounded queue.
+The browser transmuxes H.264 into live fragmented MP4 using jMuxer and plays it
+through its native video engine. The main desktop window drains the encoded
+queue so closing the companion does not end sharing. Share UUIDs, monotonic
+sequences, cancellation fences, and five-second viewer expiry retire stale streams.
+Publication/capture failure stops sharing and surfaces an error; starting another
+share is explicit. macOS requires Screen Recording permission. Wayland uses one
+persistent ScreenCast portal session and PipeWire/GStreamer stream for the whole
+share, including explicit cancellation while the OS chooser is open. X11,
+macOS, and Windows capture selected sources through xcap. Mobile
+viewing/publishing and camera video are not implemented.
+
 ---
 
 ### buzz-relay — The Server

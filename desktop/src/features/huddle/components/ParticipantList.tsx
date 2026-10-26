@@ -20,6 +20,8 @@ import {
   AgentVoiceMenu,
   type HuddleAgentVoiceSettings,
 } from "./AgentVoiceMenu";
+import { useHuddleCamera } from "../HuddleCameraContext";
+import { ScreenVideoPlayer } from "./ScreenVideoPlayer";
 
 type ParticipantListProps = {
   /** Pubkey hex strings from the Rust huddle state. */
@@ -150,6 +152,7 @@ export function HuddleParticipantsControl({
   appearance = "bar",
   className,
 }: ParticipantListProps) {
+  const { streams: cameraStreams } = useHuddleCamera();
   const { data } = useUsersBatchQuery(participants);
   const profiles = React.useMemo(() => {
     const resolvedProfiles: Record<
@@ -307,10 +310,14 @@ export function HuddleParticipantsControl({
       )}
       data-testid="huddle-participant-strip"
     >
-      {visibleIdentities.map((participant) =>
-        appearance === "room" ? (
+      {visibleIdentities.map((participant) => {
+        const cameraStream = cameraStreams.get(participant.pubkey);
+        return appearance === "room" ? (
           <div
-            className="buzz-huddle-participant-tile relative flex w-28 shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl border border-border/70 bg-muted/45 px-3 py-3"
+            className={cn(
+              "buzz-huddle-participant-tile relative flex shrink-0 flex-col items-center justify-center gap-1.5 rounded-lg border border-border/70 bg-muted/45 px-3 py-3",
+              cameraStream ? "w-44" : "w-28",
+            )}
             data-testid="huddle-participant-tile"
             key={participant.pubkey}
           >
@@ -333,7 +340,21 @@ export function HuddleParticipantsControl({
                 settings={resolvedAgentVoiceSettings[participant.pubkey]}
               />
             ) : null}
-            <ParticipantAvatar participant={participant} size="room" />
+            {cameraStream ? (
+              <div className="relative aspect-video w-full overflow-hidden rounded-md bg-black">
+                <ScreenVideoPlayer
+                  stream={cameraStream}
+                  label={`${participant.displayName}'s camera`}
+                  camera
+                  mirror={
+                    participant.pubkey.toLowerCase() ===
+                    selfProfile?.pubkey?.toLowerCase()
+                  }
+                />
+              </div>
+            ) : (
+              <ParticipantAvatar participant={participant} size="room" />
+            )}
             <div
               className="-mb-2 mt-1 flex h-5 w-full shrink-0 items-center justify-center"
               data-testid="huddle-participant-label-slot"
@@ -401,8 +422,8 @@ export function HuddleParticipantsControl({
               {participant.displayName}
             </TooltipContent>
           </Tooltip>
-        ),
-      )}
+        );
+      })}
       {hiddenParticipantCount > 0 ? (
         <PopoverTrigger asChild>
           <Button
