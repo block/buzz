@@ -41,9 +41,10 @@ named `router` or `*_router`, resolves literal or module-qualified `&str`
 constant paths, and applies `.nest(...)` prefixes from `router::build_router`.
 It fails when one of those registrations is missing from the table or a stale
 row remains, and on any shape it cannot classify: `.route_service`,
-`.nest_service`, or `.fallback_service` (except the allow-listed SPA fallback),
-`.nest` outside `build_router`, or a nest target that does not resolve to
-exactly one router builder. `scripts/check-community-ban-route-inventory.test.py`
+`.nest_service`, `.fallback_service`, or `.fallback` (except allow-listed
+registrations, each pinned to its builder and exact argument and allowed once),
+`.nest` outside `build_router`, a nest target that does not resolve to exactly
+one router builder, or a builder nested more than once. `scripts/check-community-ban-route-inventory.test.py`
 pins each of those shapes with a fixture. Run both directly with:
 
 ```bash

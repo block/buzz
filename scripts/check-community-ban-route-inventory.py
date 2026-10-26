@@ -339,13 +339,28 @@ def builder_prefixes(builders) -> dict[str, str]:
                 f"router::build_router: nest target {target} matches "
                 f"{len(candidates)} router builders, expected exactly 1"
             )
+        if candidates[0] in prefixes:
+            raise ValueError(
+                f"router::build_router: {candidates[0]} is nested more than once; "
+                "the inventory records one prefix per router builder"
+            )
         prefixes[candidates[0]] = prefix
     return prefixes
 
 
-# Service-style registrations bypass the per-route method classification, so
-# each one is a hard error unless it is allow-listed here with its builder.
-ALLOWED_SERVICE_REGISTRATIONS = {("router::build_router", "fallback_service")}
+# Service and fallback registrations bypass the per-route method
+# classification, so each one is a hard error unless this list names its
+# builder, call, and exact (whitespace-normalized) argument, once.
+ALLOWED_UNROUTED_REGISTRATIONS = {
+    # SPA static bundles; it only serves files, never a community API.
+    ("router::build_router", "fallback_service", "spa_fallback"),
+    # Unknown accessory paths answer 404 instead of SPA HTML.
+    (
+        "api::buzz_v1::router",
+        "fallback",
+        '|| async { auth::Error::new(axum::http::StatusCode::NOT_FOUND, "not_found") }',
+    ),
+}
 
 
 def collect_registered_routes() -> Counter:
@@ -360,6 +375,7 @@ def collect_registered_routes() -> Counter:
     prefixes = builder_prefixes(builders)
     registrations: Counter = Counter()
     errors = []
+    unrouted_seen = set()
     for path in production_sources():
         source = path.read_text()
         mask = mask_comments_and_strings(source)
@@ -373,7 +389,8 @@ def collect_registered_routes() -> Counter:
             return None
 
         for match in re.finditer(
-            r"\.\s*(route|nest|route_service|nest_service|fallback_service)\s*\(", mask
+            r"\.\s*(route|nest|route_service|nest_service|fallback_service|fallback)\s*\(",
+            mask,
         ):
             if in_ranges(match.start(), test_ranges):
                 continue
@@ -381,12 +398,22 @@ def collect_registered_routes() -> Counter:
             builder = enclosing_builder(match.start())
             line = source.count("\n", 0, match.start()) + 1
             location = f"{path.relative_to(ROOT)}:{line}"
-            if call.endswith("_service"):
-                if (builder, call) not in ALLOWED_SERVICE_REGISTRATIONS:
+            if call.endswith("_service") or call == "fallback":
+                opening = mask.find("(", match.start(), match.end())
+                argument = " ".join(
+                    source[opening + 1 : matching_delimiter(mask, opening)].split()
+                )
+                registration = (builder, call, argument)
+                if registration not in ALLOWED_UNROUTED_REGISTRATIONS:
                     errors.append(
                         f"{location}: production .{call} registration is not classified; "
                         "use .route with an HTTP method or allow-list it"
                     )
+                elif registration in unrouted_seen:
+                    errors.append(
+                        f"{location}: allow-listed .{call} registration appears more than once"
+                    )
+                unrouted_seen.add(registration)
             elif builder is None:
                 errors.append(
                     f"{location}: production .{call} registration "
