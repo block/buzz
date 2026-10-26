@@ -32,6 +32,7 @@ use buzz_relay_mesh::{
 };
 
 use crate::config::Config;
+use crate::startup_steps::{StartupStep, StepTimer};
 use crate::tunnel::directory::SessionDirectory;
 use crate::tunnel::reliable::{ReliableFrame, ReliableInbound, ReliableStreamRouter};
 
@@ -527,6 +528,9 @@ pub async fn boot_mesh(
         return Ok(None);
     }
 
+    // Each await that can stall boot is its own startup step, so a pod stuck
+    // in `mesh_boot` also shows which part (see `startup_steps`).
+    let step = StepTimer::start(StartupStep::MeshBind);
     let endpoint = MeshEndpoint::bind(config.mesh.bind_addr)
         .await
         .map_err(|e| {
@@ -535,6 +539,7 @@ pub async fn boot_mesh(
                 config.mesh.bind_addr
             )
         })?;
+    step.finish();
     let runtime_id = endpoint.runtime_id();
     let addrs = advertise_addrs(&endpoint);
     tracing::info!(
@@ -563,10 +568,12 @@ pub async fn boot_mesh(
 
     // First publish is part of boot: if Redis can't take the attested record,
     // peers can never find us — fail loudly now, not quietly forever.
+    let step = StepTimer::start(StartupStep::MeshPublish);
     registry
         .publish_ready(&ready_record)
         .await
         .map_err(|e| anyhow::anyhow!("mesh ready-registry publish failed: {e}"))?;
+    step.finish();
     tracing::info!(runtime_id = %runtime_id, "mesh ready record published");
 
     // The heartbeat is shutdown-gated only. Readiness terms deliberately do
@@ -581,7 +588,9 @@ pub async fn boot_mesh(
     let runtime = MeshRuntime::start(endpoint, membership, Some(registry));
     let owners = Arc::new(crate::audio::join::HuddleOwnerRegistry::new());
     // Dial seed peers now rather than waiting for the first reconcile tick.
+    let step = StepTimer::start(StartupStep::MeshInitialReconcile);
     runtime.reconcile_now().await;
+    step.finish();
 
     // Drain watcher: SIGTERM flips `shutting_down`; gossip `draining=true` so
     // peers stop routing new sessions here, then actively drain locally-owned
@@ -655,6 +664,73 @@ mod tests {
             .await
             .expect("off path is never an error");
         assert!(handle.is_none());
+    }
+
+    /// Each await in `boot_mesh` that can stall startup is its own startup
+    /// step, so a stuck or failed boot names the step. With Redis unreachable,
+    /// `mesh_bind` and `mesh_publish` both end and the reconcile step never
+    /// starts.
+    #[test]
+    fn mesh_boot_sub_steps_name_the_step_that_failed() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        use crate::startup_steps::{CURRENT_METRIC, SECONDS_METRIC};
+
+        // Held around `block_on`, not across an `.await`: the step timers fire
+        // the log callsites `startup_steps::tests` capture.
+        let _tracing = crate::test_support::tracing_dispatch_lock();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let result = metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
+                    config.mesh.enabled = true;
+                    config.mesh.bind_addr = "127.0.0.1:0".parse().unwrap();
+                    let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // refused
+                        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                        .unwrap();
+                    let db = buzz_db::Db::from_pool(
+                        sqlx::postgres::PgPoolOptions::new()
+                            .max_connections(1)
+                            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused") // sadscan:disable np.postgres.1
+                            .expect("lazy database pool"),
+                    );
+                    let keys = nostr::Keys::generate();
+                    boot_mesh(&config, pool, db, &keys, Arc::new(AtomicBool::new(false))).await
+                })
+        });
+        let Err(err) = result else {
+            panic!("boot must fail when Redis is unreachable");
+        };
+        assert!(err.to_string().contains("publish"), "{err}");
+
+        let gauges: std::collections::HashMap<(String, String), f64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| {
+                let key = key.key();
+                let phase = key
+                    .labels()
+                    .find(|l| l.key() == "phase")?
+                    .value()
+                    .to_owned();
+                match value {
+                    DebugValue::Gauge(v) => Some(((key.name().to_owned(), phase), v.into_inner())),
+                    _ => None,
+                }
+            })
+            .collect();
+        let get = |metric: &str, phase: &str| gauges.get(&(metric.to_owned(), phase.to_owned()));
+        for phase in ["mesh_bind", "mesh_publish"] {
+            assert_eq!(get(CURRENT_METRIC, phase), Some(&0.0), "{phase} must end");
+            assert!(get(SECONDS_METRIC, phase).is_some(), "{phase} duration");
+        }
+        assert_eq!(get(CURRENT_METRIC, "mesh_initial_reconcile"), None);
     }
 
     /// Blocker fix (Wren review of 8b077fdb): absent `BUZZ_MESH`, the mesh is

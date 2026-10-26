@@ -543,7 +543,9 @@ mod postgres_tests {
             "product_feedback",
             "replica_heartbeat",
             "community_deletion_requests",
+            "entity_deletion_approvals",
             "entity_deletion_requests",
+            "entity_deletion_stage_history",
             "community_deletion_approvals",
             "community_deletion_checkpoints",
             "community_deletion_manifest_keys",
@@ -770,12 +772,14 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 69);
-        assert_eq!(migrations[68].version, 69);
-        assert!(migrations[68]
+        assert_eq!(migrations.len(), 71);
+        assert_eq!(migrations[70].version, 71);
+        assert!(migrations[70]
             .sql
             .as_str()
             .contains("ADD COLUMN unlisted BOOLEAN NOT NULL DEFAULT FALSE"));
+        assert_eq!(migrations[69].version, 70);
+        assert_eq!(migrations[68].version, 69);
         assert_eq!(migrations[67].version, 68);
         assert!(migrations[67]
             .sql
@@ -2893,7 +2897,9 @@ mod postgres_tests {
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "entity_deletion_approvals",
             "entity_deletion_requests",
+            "entity_deletion_stage_history",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -2927,11 +2933,17 @@ mod postgres_tests {
              scripts/reconcile-schema-after-pgschema.sql and scripts/repair-events-pkey.sql"
         );
 
-        assert_eq!(
-            constraints(&desired, "entity_deletion_requests").await,
-            constraints(&migrated, "entity_deletion_requests").await,
-            "constraint parity mismatch for entity_deletion_requests"
-        );
+        for table in [
+            "entity_deletion_requests",
+            "entity_deletion_stage_history",
+            "entity_deletion_approvals",
+        ] {
+            assert_eq!(
+                constraints(&desired, table).await,
+                constraints(&migrated, table).await,
+                "constraint parity mismatch for {table}"
+            );
+        }
 
         desired.close().await;
         migrated.close().await;
