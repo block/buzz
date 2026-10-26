@@ -48,16 +48,18 @@ async fn await_idle_floor(read_pool: &PgPool, target: u32) {
     }
 }
 
-/// `buzz_db_route_decision` counters keyed by `(decision, reason)`.
-fn route_reasons(snapshotter: &Snapshotter) -> std::collections::HashMap<(String, String), u64> {
+/// Counters keyed by `(name, decision, reason)` labels, drained: each
+/// snapshot resets the recorder's counters to zero.
+fn drain_counters(
+    snapshotter: &Snapshotter,
+) -> std::collections::HashMap<(String, String, String), u64> {
     snapshotter
         .snapshot()
         .into_vec()
         .into_iter()
-        .filter(|(key, ..)| key.key().name() == "buzz_db_route_decision")
-        .map(|(key, _, _, value)| {
+        .filter_map(|(key, _, _, value)| {
             let DebugValue::Counter(n) = value else {
-                panic!("buzz_db_route_decision must be a counter");
+                return None;
             };
             let labels: Vec<_> = key.key().labels().collect();
             let get = |name: &str| {
@@ -67,30 +69,29 @@ fn route_reasons(snapshotter: &Snapshotter) -> std::collections::HashMap<(String
                     .map(|l| l.value().to_owned())
                     .unwrap_or_default()
             };
-            ((get("decision"), get("reason")), n)
+            Some((
+                (key.key().name().to_owned(), get("decision"), get("reason")),
+                n,
+            ))
         })
+        .collect()
+}
+
+/// `buzz_db_route_decision` counters keyed by `(decision, reason)`.
+fn route_reasons(snapshotter: &Snapshotter) -> std::collections::HashMap<(String, String), u64> {
+    drain_counters(snapshotter)
+        .into_iter()
+        .filter(|((name, ..), _)| name == "buzz_db_route_decision")
+        .map(|((_, decision, reason), n)| ((decision, reason), n))
         .collect()
 }
 
 /// `buzz_db_reader_release_closed_total` counters keyed by `reason`.
 fn release_closes(snapshotter: &Snapshotter) -> std::collections::HashMap<String, u64> {
-    snapshotter
-        .snapshot()
-        .into_vec()
+    drain_counters(snapshotter)
         .into_iter()
-        .filter(|(key, ..)| key.key().name() == "buzz_db_reader_release_closed_total")
-        .map(|(key, _, _, value)| {
-            let DebugValue::Counter(n) = value else {
-                panic!("buzz_db_reader_release_closed_total must be a counter");
-            };
-            let reason = key
-                .key()
-                .labels()
-                .find(|l| l.key() == "reason")
-                .map(|l| l.value().to_owned())
-                .unwrap_or_default();
-            (reason, n)
-        })
+        .filter(|((name, ..), _)| name == "buzz_db_reader_release_closed_total")
+        .map(|((_, _, reason), n)| (reason, n))
         .collect()
 }
 
@@ -362,36 +363,49 @@ async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
     );
 
     // The 5s release bound plus slack, as a literal so a loosened bound
-    // fails here.
+    // fails here. Snapshots drain the recorder, so totals accumulate.
     let stalled_at = Instant::now();
     let bound = Duration::from_secs(8);
+    let mut totals = std::collections::HashMap::<(String, String, String), u64>::new();
+    let served_by_reader = |totals: &std::collections::HashMap<(String, String, String), u64>| {
+        totals
+            .iter()
+            .filter(|((name, decision, _), _)| {
+                name == "buzz_db_route_decision" && decision == "replica"
+            })
+            .map(|(_, n)| n)
+            .sum::<u64>()
+    };
     loop {
         db.count_events_routed("stalled_reader_probe", &query)
             .await
             .expect("routed read answers");
-        let served_by_reader: u64 = route_reasons(&snapshotter)
-            .iter()
-            .filter(|((decision, _), _)| decision == "replica")
-            .map(|(_, n)| n)
-            .sum();
-        if served_by_reader > 0 {
+        for (key, n) in drain_counters(&snapshotter) {
+            *totals.entry(key).or_default() += n;
+        }
+        if served_by_reader(&totals) > 0 {
             break;
         }
         assert!(
             stalled_at.elapsed() < bound,
             "routed reads never reached the reader through a new connection within {bound:?}; \
-             size={} idle={} reasons={:?}",
+             size={} idle={} counters={totals:?}",
             read_pool.size(),
             read_pool.num_idle(),
-            route_reasons(&snapshotter)
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-
-    let closes = release_closes(&snapshotter);
+    let timeout_closes = totals
+        .get(&(
+            "buzz_db_reader_release_closed_total".to_owned(),
+            String::new(),
+            "timeout".to_owned(),
+        ))
+        .copied()
+        .unwrap_or_default();
     assert!(
-        closes.get("timeout").is_some_and(|n| *n >= 1),
-        "stalled sessions must be closed by the release timeout; got {closes:?}"
+        timeout_closes >= 1,
+        "stalled sessions must be closed by the release timeout; got {totals:?}"
     );
     drop(_guard);
     read_pool.close().await;
