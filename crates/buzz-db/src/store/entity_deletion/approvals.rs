@@ -21,8 +21,9 @@ impl EntityDeletionStore {
     /// Record approval of the saved inventory without creating or executing stages.
     ///
     /// An identical retry is read-only. Another operator adds retained evidence
-    /// without restarting the workflow. Callers must authenticate the operator
-    /// and authorize the operation before recording approval.
+    /// without restarting the workflow. This store does not authenticate the
+    /// operator: today's dummy CLI accepts self-asserted operator names. Callers
+    /// enabling real deletion must authenticate and authorize the operator.
     pub async fn approve(
         &self,
         id: Uuid,

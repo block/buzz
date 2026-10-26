@@ -1,11 +1,9 @@
 //! Read-only discovery of a public key's current community memberships.
 
-use super::UserDeletionStore;
+use super::{UserDeletionStore, MAX_COMMUNITIES};
 use crate::{DbError, Result};
 use serde_json::{json, Value};
 use uuid::Uuid;
-
-const MAX_COMMUNITIES: usize = 1000;
 
 /// Normalize a hex public key or NIP-19 npub to Buzz's lowercase hex form.
 /// This does not resolve an email, account, or other keys owned by the person.

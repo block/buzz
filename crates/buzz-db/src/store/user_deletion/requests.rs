@@ -61,6 +61,9 @@ impl UserDeletionStore {
             .bind(digest)
             .fetch_one(&mut *tx)
             .await?;
+            // Use the approval validator before committing either the request
+            // or inventory, so unsupported scopes leave no new request behind.
+            super::UserDeletionInventory::read(&request)?;
         }
         tx.commit().await?;
         Ok(request)

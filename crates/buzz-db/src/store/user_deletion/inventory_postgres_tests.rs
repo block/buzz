@@ -20,7 +20,9 @@ async fn user_approval_validates_inventory_shape_before_saving_evidence() {
     assert!(users
         .approve(request.id, "approver", &digest)
         .await
-        .is_err());
+        .unwrap_err()
+        .to_string()
+        .contains("owned-community execution is not supported yet"));
     let after = db
         .entity_deletion_store()
         .inspect(request.id)
@@ -100,9 +102,20 @@ async fn migration_schema_user_target_constraint_matches_desired_state() {
     let restricted_types: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_constraint WHERE conname = 'entity_deletion_requests_entity_type_check'",
     ).fetch_one(&mut *tx).await.unwrap();
-    assert_eq!(restricted_types, 0);
+    assert_eq!(restricted_types, 2);
 
     tx.rollback().await.unwrap();
+    let error = sqlx::query(
+        "INSERT INTO entity_deletion_requests (entity_type, target, requested_by)
+         VALUES ('repository', 'repository-123', 'operator')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().constraint(),
+        Some("entity_deletion_requests_entity_type_check")
+    );
     let users = Db::from_pool(pool.clone()).user_deletion_store();
     users
         .submit("demo:old-client", "operator", None)

@@ -11,6 +11,11 @@ handlers still print dummy messages: `gate_user`, then `purge_db` and
 `purge_agents` for each community. They do not fence users or delete data.
 There is no background worker to start; `user-deletions run` is the worker process.
 
+While execution uses dummy handlers, submit and execute requests only in an
+isolated, disposable development database. Production inventory preview may use
+read-only access. A completed dummy request permanently occupies that target's
+request row in the database where it ran.
+
 ## Build and choose a database
 
 ```bash
@@ -204,8 +209,10 @@ Preview uses a read-only transaction and needs no workflow tables or migrations.
 
 This covers current memberships only. It does not discover past participation,
 other keys owned by the person, or communities in other databases. Owners are
-reported by discovery, but approval rejects owner inventories until owned-community
-execution is implemented. The dummy fixture's former participant is synthetic.
+reported by discovery, but submission rejects owner inventories and rolls back
+the request until owned-community execution is implemented. Approval also rejects
+previously saved owner inventories. Both report "owned-community execution is not
+supported yet". The dummy fixture's former participant is synthetic.
 
 ## Schema and compatibility
 
@@ -214,8 +221,8 @@ check to accept a nonempty identifier of up to 256 bytes with no surrounding
 spaces, then validate in a separate transaction. Identity formats belong in the
 application, so this column can also store account IDs when account resolution
 is implemented. Today the CLI resolves only demo and hex/npub inputs.
-Migration 0071 also removes the user-only entity-type check. Workflow-specific
-commands validate the entity type before executing a request.
+The user-only entity-type check remains in place. Workflow-specific commands also
+validate the entity type before executing a request.
 Both use a 5-second lock timeout and 30-second statement timeout. The desired-state
 schema has the same final constraint. No data backfill, trigger, function, or
 foreign key is added. Existing demo targets remain valid. If you applied an

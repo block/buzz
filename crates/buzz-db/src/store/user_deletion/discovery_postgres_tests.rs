@@ -7,6 +7,62 @@ const PUBKEY: &str = "5e4083a7a793d02575876eaf47932b4835999f5af2653d26250a909b45
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn owner_preview_is_available_but_submission_rolls_back_until_scope_is_supported() {
+    let pool = PgPool::connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let store = Db::from_pool(pool.clone()).user_deletion_store();
+    let community = Uuid::new_v4();
+    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, 'owner.inventory.example')")
+        .bind(community)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'owner')")
+        .bind(community)
+        .bind(PUBKEY)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let preview = store.generate_inventory(PUBKEY).await.unwrap();
+    assert_eq!(preview["communities"][0]["relationship"], "owner");
+    let error = store.submit(PUBKEY, "operator", None).await.unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("owned-community execution is not supported yet"));
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM entity_deletion_requests WHERE target = $1")
+            .bind(PUBKEY)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+
+    // A refused submission must not reserve the target or retain stale inventory.
+    sqlx::query("UPDATE relay_members SET role = 'member' WHERE community_id = $1 AND pubkey = $2")
+        .bind(community)
+        .bind(PUBKEY)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let saved = store.submit(PUBKEY, "operator", None).await.unwrap();
+    assert_eq!(saved.status, "inventoried");
+    assert_eq!(
+        saved.inventory_manifest.as_ref().unwrap()["communities"][0]["relationship"],
+        "participant"
+    );
+    store
+        .approve(
+            saved.id,
+            "approver",
+            saved.inventory_digest.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn channel_memberships_discover_participants_deduplicate_and_preserve_owners() {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await

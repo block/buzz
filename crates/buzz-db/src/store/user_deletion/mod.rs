@@ -7,6 +7,8 @@ mod requests;
 pub use discovery::normalize_user_deletion_pubkey;
 pub use inventory::UserDeletionInventory;
 
+const MAX_COMMUNITIES: usize = 1000;
+
 /// Database operations that prepare user-deletion requests.
 #[derive(Clone)]
 pub struct UserDeletionStore {

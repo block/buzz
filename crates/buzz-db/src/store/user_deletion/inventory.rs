@@ -1,4 +1,5 @@
 //! Validation of saved inventories, independent of the intake identity format.
+use super::MAX_COMMUNITIES;
 use crate::entity_deletion::EntityRequest;
 use crate::{DbError, Result};
 use serde_json::{json, Value};
@@ -32,12 +33,17 @@ impl UserDeletionInventory {
         let rows = value["communities"]
             .as_array()
             .ok_or_else(|| invalid("missing communities"))?;
-        if rows.len() > 1000 {
-            return Err(invalid("inventory exceeds 1000 communities"));
+        if rows.len() > MAX_COMMUNITIES {
+            return Err(invalid(&format!(
+                "inventory exceeds {MAX_COMMUNITIES} communities"
+            )));
         }
         let mut seen = HashSet::new();
         let mut communities = Vec::new();
         for row in rows {
+            if row["relationship"] == "owner" {
+                return Err(invalid("owned-community execution is not supported yet"));
+            }
             let id = row["community_id"]
                 .as_str()
                 .and_then(|s| Uuid::parse_str(s).ok())
