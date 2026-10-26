@@ -2,6 +2,8 @@
 #![warn(missing_docs)]
 //! NIP-01 WebSocket relay for Buzz private team communication.
 
+/// Stdout access log: reads, auth attempts, and connection lifecycle.
+pub(crate) mod access;
 mod admission;
 mod build_info;
 mod rejection;

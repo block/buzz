@@ -438,11 +438,17 @@ async fn accessory_write_revocation_is_terminal_before_persistence() {
             .parse()
             .unwrap(),
     );
-    let principal =
-        super::auth::authorize(&state, &headers, &path.parse().unwrap(), "POST", Some(body))
-            .await
-            .ok()
-            .expect("admitted before revoke");
+    let principal = super::auth::authorize(
+        &state,
+        &crate::access::AccessSlot::default(),
+        &headers,
+        &path.parse().unwrap(),
+        "POST",
+        Some(body),
+    )
+    .await
+    .ok()
+    .expect("admitted before revoke");
     state
         .db
         .remove_relay_member(

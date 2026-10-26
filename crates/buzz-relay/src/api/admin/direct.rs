@@ -40,8 +40,10 @@ enum Kind {
     Delete,
 }
 
+#[allow(clippy::too_many_arguments)] // one Axum extractor per argument
 pub(super) async fn ban(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -49,11 +51,24 @@ pub(super) async fn ban(
     Query(q): Query<CommunityQuery>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    direct_action(state, method, uri, headers, Kind::Ban, target, q, body).await
+    direct_action(
+        state,
+        slot,
+        method,
+        uri,
+        headers,
+        Kind::Ban,
+        target,
+        q,
+        body,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)] // one Axum extractor per argument
 pub(super) async fn timeout(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -61,11 +76,24 @@ pub(super) async fn timeout(
     Query(q): Query<CommunityQuery>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    direct_action(state, method, uri, headers, Kind::Timeout, target, q, body).await
+    direct_action(
+        state,
+        slot,
+        method,
+        uri,
+        headers,
+        Kind::Timeout,
+        target,
+        q,
+        body,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)] // one Axum extractor per argument
 pub(super) async fn delete_event(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -73,7 +101,18 @@ pub(super) async fn delete_event(
     Query(q): Query<CommunityQuery>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    direct_action(state, method, uri, headers, Kind::Delete, target, q, body).await
+    direct_action(
+        state,
+        slot,
+        method,
+        uri,
+        headers,
+        Kind::Delete,
+        target,
+        q,
+        body,
+    )
+    .await
 }
 
 /// 409 `target_is_staff` when `target` is on the effective staff roster
@@ -102,6 +141,7 @@ pub(super) fn enforcement_failed(action_id: Uuid, error: &str) -> ApiError {
 #[allow(clippy::too_many_arguments)]
 async fn direct_action(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -110,7 +150,7 @@ async fn direct_action(
     q: CommunityQuery,
     body_bytes: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
         .act()?;
     let body: DirectBody = serde_json::from_slice(&body_bytes)

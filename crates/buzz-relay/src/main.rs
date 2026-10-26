@@ -1899,6 +1899,10 @@ mod env_filter_tests {
             otel.contains("relay-info") && otel.contains("datastore-info"),
             "{otel}"
         );
+        let access = logged(otel_filter(None), || {
+            tracing::warn!(target: "buzz_relay::access", "access-warn");
+        });
+        assert!(access.is_empty(), "{access}");
     }
 
     #[test]
