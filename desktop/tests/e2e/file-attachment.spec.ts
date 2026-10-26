@@ -725,3 +725,100 @@ test("a non-media attachment's remove button is named and keyboard-operable", as
   await page.keyboard.press("Enter");
   await expect(composer).not.toContainText("quarterly-report.pdf");
 });
+
+test("a long filename stays inside the narrow thread pane row", async ({
+  page,
+}) => {
+  // Regression: FileCard is an inline-flex (shrink-to-fit) box whose
+  // min-content width is set by its `truncate` (nowrap) filename. With only a
+  // 24rem cap it grew past a ~300px thread-pane row and clipped the download
+  // icon; `max-w-full` makes the cap min(24rem, 100%) so the card shrinks and
+  // the filename ellipsises instead.
+  const filename =
+    "Running onboarding-flow first run with a temporary identity and wiped communities.txt";
+  const sha256 = "b".repeat(64);
+  const url = `https://mock.relay/media/${sha256}.txt`;
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof (window as Window & { __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown })
+        .__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function",
+    null,
+    { timeout: 5_000 },
+  );
+  await page.evaluate(
+    async ({ content, mediaTags }) => {
+      const invoke = (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__: (
+            command: string,
+            payload: Record<string, unknown>,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      await invoke("send_channel_message", {
+        channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+        content,
+        mediaTags,
+      });
+    },
+    {
+      content: `[${filename}](${url})`,
+      mediaTags: [
+        [
+          "imeta",
+          `url ${url}`,
+          "m text/plain",
+          `x ${sha256}`,
+          "size 13312",
+          `filename ${filename}`,
+        ],
+      ],
+    },
+  );
+
+  await page.getByTestId("channel-general").click();
+  const timelineRow = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .filter({ has: page.getByTestId("file-card") })
+    .last();
+  await expect(timelineRow).toBeVisible();
+  await timelineRow.hover();
+  await timelineRow.getByRole("button", { name: "Reply" }).click();
+
+  // The thread head renders the same message in the default 380px pane.
+  const threadRow = page
+    .getByTestId("message-thread-panel")
+    .getByTestId("message-thread-head")
+    .getByTestId("message-row");
+  const card = threadRow.getByTestId("file-card");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("13 KB");
+
+  const [rowBox, cardBox, iconBox] = await Promise.all([
+    threadRow.boundingBox(),
+    card.boundingBox(),
+    card.locator("svg").last().boundingBox(),
+  ]);
+  if (!rowBox || !cardBox || !iconBox) {
+    throw new Error("Expected the thread row, card, and icon to lay out.");
+  }
+  // The pane is narrower than the card's 24rem cap, so the filename must be
+  // ellipsised — otherwise this test would not be exercising the overflow.
+  expect(rowBox.width).toBeLessThan(384);
+  await expect
+    .poll(() =>
+      card
+        .getByText(filename)
+        .evaluate((el) => el.scrollWidth > el.clientWidth),
+    )
+    .toBe(true);
+  expect(cardBox.x + cardBox.width).toBeLessThanOrEqual(
+    rowBox.x + rowBox.width + 0.5,
+  );
+  expect(iconBox.x + iconBox.width).toBeLessThanOrEqual(
+    rowBox.x + rowBox.width + 0.5,
+  );
+});
