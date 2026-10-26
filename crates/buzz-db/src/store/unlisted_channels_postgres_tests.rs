@@ -90,9 +90,14 @@ impl Fixture {
             .collect()
     }
 
-    async fn named_only(&self, reader: &Keys) -> Vec<(Uuid, String)> {
+    /// The named-only channels `reader` can read when a request names `named`.
+    async fn named_only(&self, reader: &Keys, named: &[Uuid]) -> Vec<(Uuid, String)> {
         self.db
-            .get_readable_named_only_channels(self.community, &reader.public_key().to_bytes())
+            .get_readable_named_only_channels(
+                self.community,
+                &reader.public_key().to_bytes(),
+                named,
+            )
             .await
             .expect("readable named-only channels")
     }
@@ -124,7 +129,7 @@ async fn unlisted_open_channel_is_named_only_for_non_members() {
     let shown = f.listed(&f.outsider).await;
     assert!(shown.contains(&listed));
     assert!(!shown.contains(&unlisted), "channel list");
-    let named = f.named_only(&f.outsider).await;
+    let named = f.named_only(&f.outsider, &[listed, unlisted]).await;
     assert!(
         named.contains(&(unlisted, "stream".to_owned())),
         "readable by name: {named:?}"
@@ -161,10 +166,37 @@ async fn unlisted_open_channel_is_named_only_for_non_members() {
     assert!(f.implicit(&stranger).await.contains(&unlisted));
     assert!(f.listed(&stranger).await.contains(&unlisted));
     assert!(!f
-        .named_only(&stranger)
+        .named_only(&stranger, &[unlisted])
         .await
         .iter()
         .any(|(id, _)| *id == unlisted));
+}
+
+/// Only the unlisted channels a request names are loaded, so the lookup stays
+/// small however many unlisted chats a community has.
+/// Mutation: drop `c.id = ANY($3)` from the unlisted branch of
+/// `get_readable_named_only_channels` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn only_the_named_unlisted_channels_are_loaded() {
+    let f = Fixture::new().await;
+    let a = f.channel("a", ChannelVisibility::Open).await;
+    let b = f.channel("b", ChannelVisibility::Open).await;
+    f.set_unlisted(a, true).await;
+    f.set_unlisted(b, true).await;
+
+    assert_eq!(
+        f.named_only(&f.outsider, &[a]).await,
+        [(a, "stream".to_owned())],
+        "naming A loads A and not B"
+    );
+    assert!(
+        f.named_only(&f.outsider, &[]).await.is_empty(),
+        "naming nothing loads no unlisted channel"
+    );
+    let both = f.named_only(&f.outsider, &[a, b]).await;
+    assert!(both.contains(&(a, "stream".to_owned())));
+    assert!(both.contains(&(b, "stream".to_owned())));
 }
 
 /// The flag is stored on its own and matters only while the channel is open:
@@ -182,7 +214,7 @@ async fn unlisted_private_channel_stays_private_and_opens_unlisted() {
     assert!(!f.implicit(&f.outsider).await.contains(&chat));
     assert!(!f.listed(&f.outsider).await.contains(&chat));
     assert!(
-        !f.named_only(&f.outsider)
+        !f.named_only(&f.outsider, &[chat])
             .await
             .iter()
             .any(|(id, _)| *id == chat),
@@ -204,7 +236,7 @@ async fn unlisted_private_channel_stays_private_and_opens_unlisted() {
     assert!(opened.unlisted, "opening keeps the stored flag");
     assert!(!f.implicit(&f.outsider).await.contains(&chat));
     assert!(f
-        .named_only(&f.outsider)
+        .named_only(&f.outsider, &[chat])
         .await
         .contains(&(chat, "stream".to_owned())));
 }
@@ -301,7 +333,7 @@ async fn channel_created_unlisted_is_never_listed() {
         assert!(!f.implicit(&f.outsider).await.contains(&chat));
         assert!(!f.listed(&f.outsider).await.contains(&chat));
         assert!(f
-            .named_only(&f.outsider)
+            .named_only(&f.outsider, &[chat])
             .await
             .contains(&(chat, "stream".to_owned())));
         assert!(f.implicit(&f.owner).await.contains(&chat));

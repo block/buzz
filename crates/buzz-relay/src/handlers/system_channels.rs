@@ -139,6 +139,17 @@ fn filter_needs_named_only_channels(filter: &Filter, implicit: &[Uuid]) -> bool 
     named_channels(filter).any(|id| !implicit.contains(&id))
 }
 
+/// The channels that `filters` name outside the implicit set, deduplicated.
+/// Only these can be unlisted channels the request reaches.
+fn named_outside(filters: &[Filter], implicit: &[Uuid]) -> Vec<Uuid> {
+    let mut seen: HashSet<Uuid> = implicit.iter().copied().collect();
+    filters
+        .iter()
+        .flat_map(named_channels)
+        .filter(|id| seen.insert(*id))
+        .collect()
+}
+
 /// The channels `filter` may read: the implicit set, plus the readable
 /// named-only channels the filter names, plus every readable system channel
 /// when it opts in.
@@ -186,10 +197,11 @@ pub(crate) async fn readable_named_only_channels_for_filters(
     {
         return Ok(NamedOnlyChannels::default());
     }
+    let named = named_outside(filters, implicit);
     let mut readable = NamedOnlyChannels::from_typed(
         state
             .db
-            .get_readable_named_only_channels(community, pubkey)
+            .get_readable_named_only_channels(community, pubkey, &named)
             .await?,
     );
     if let Some(allowed) = token_channel_ids {

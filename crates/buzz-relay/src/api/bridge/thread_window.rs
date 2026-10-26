@@ -100,13 +100,17 @@ async fn access_sets(
         .get_accessible_channel_ids(tenant.community(), &reader.to_bytes())
         .await
         .map_err(|e| database_error(context, e))?;
-    let system = if requests
+    let mut named: Vec<uuid::Uuid> = requests
         .iter()
-        .any(|request| !implicit.contains(&request.channel))
-    {
+        .map(|request| request.channel)
+        .filter(|channel| !implicit.contains(channel))
+        .collect();
+    named.sort_unstable();
+    named.dedup();
+    let system = if !named.is_empty() {
         state
             .db
-            .get_readable_named_only_channels(tenant.community(), &reader.to_bytes())
+            .get_readable_named_only_channels(tenant.community(), &reader.to_bytes(), &named)
             .await
             .map_err(|e| database_error(context, e))?
             .into_iter()

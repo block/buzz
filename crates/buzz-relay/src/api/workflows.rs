@@ -127,7 +127,7 @@ async fn authorize_workflow_read(
     let readable = accessible.contains(&channel_id)
         || state
             .db
-            .get_readable_named_only_channels(tenant.community(), &pubkey_bytes)
+            .get_readable_named_only_channels(tenant.community(), &pubkey_bytes, &[channel_id])
             .await
             .map_err(|error| {
                 internal_error(&format!(

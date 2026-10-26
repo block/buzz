@@ -1334,18 +1334,20 @@ pub async fn get_accessible_channel_ids(
 /// leaves out, each with its type:
 /// - channels of non-legacy types (system channels, and any type added later)
 ///   where it is an active member, and every open one;
-/// - every unlisted open channel of a legacy type. A member of one also has
-///   it through [`get_accessible_channel_ids`]; listing it here as well is
-///   harmless, since a filter's scope is deduplicated.
+/// - each unlisted open channel of a legacy type among `named`, the channels
+///   the request names. A member of one also has it through
+///   [`get_accessible_channel_ids`]; listing it here as well is harmless,
+///   since a filter's scope is deduplicated.
 ///
 /// Uncached, so a caller can trust it for a channel the request names. A
 /// read reaches one only by naming it, or, for system channels, by opting in
 /// to them. An unlisted channel has a legacy type, so a system opt-in never
-/// adds it.
+/// adds it, and only the named ones are loaded: a community can have many.
 pub async fn get_readable_named_only_channels(
     pool: &PgPool,
     community_id: CommunityId,
     pubkey: &[u8],
+    named: &[Uuid],
 ) -> Result<Vec<(Uuid, String)>> {
     let mut connection = crate::observability::acquire_writer(
         pool,
@@ -1369,7 +1371,7 @@ pub async fn get_readable_named_only_channels(
                 )
               )
             )
-            OR ({legacy_types} AND c.visibility = 'open' AND c.unlisted)
+            OR ({legacy_types} AND c.visibility = 'open' AND c.unlisted AND c.id = ANY($3))
           )
         "#,
         legacy_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
@@ -1378,6 +1380,7 @@ pub async fn get_readable_named_only_channels(
     let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
         .bind(pubkey)
+        .bind(named)
         .fetch_all(&mut *connection)
         .await?;
 
@@ -2093,14 +2096,15 @@ impl Db {
     }
 
     /// The channels of non-legacy types a pubkey can read (member, or open),
-    /// each with its type.
+    /// and the unlisted open channels among `named`, each with its type.
     #[datastore_span(name = "get_readable_named_only_channels", system = "postgresql")]
     pub async fn get_readable_named_only_channels(
         &self,
         community_id: CommunityId,
         pubkey: &[u8],
+        named: &[Uuid],
     ) -> Result<Vec<(Uuid, String)>> {
-        get_readable_named_only_channels(&self.pool, community_id, pubkey).await
+        get_readable_named_only_channels(&self.pool, community_id, pubkey, named).await
     }
 
     /// The type of channel `channel_id`, deleted or not, or `None` when no
