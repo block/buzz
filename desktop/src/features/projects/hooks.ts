@@ -60,6 +60,7 @@ import { fetchProjectsWorkItems } from "./projectWorkItems";
 import {
   projectDeletionMutationOptions,
   projectsQueryKey,
+  repositoryDeletionMutationOptions,
 } from "./projectDeletionMutation";
 import {
   eventToRepository,
@@ -961,4 +962,10 @@ export function useDeleteProjectMutation() {
   const queryClient = useQueryClient();
 
   return useMutation(projectDeletionMutationOptions(queryClient));
+}
+
+export function useDeleteRepositoryMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation(repositoryDeletionMutationOptions(queryClient));
 }

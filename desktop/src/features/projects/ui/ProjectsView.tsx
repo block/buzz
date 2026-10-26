@@ -10,6 +10,7 @@ import {
   type ProjectPullRequest,
   type Repository,
   useDeleteProjectMutation,
+  useDeleteRepositoryMutation,
   useProjectActivitySummariesQuery,
   useProjectLocalRepositoriesQuery,
   useProjectsQuery,
@@ -102,6 +103,7 @@ import {
   EMPTY_ITEMS,
   useContextWorkItems,
   useDeleteProjectHandler,
+  useDeleteRepositoryHandler,
   useOpenProjectTerminalHandler,
 } from "./projectsViewWorkItems";
 
@@ -240,6 +242,7 @@ export function ProjectsView() {
     ],
   );
   const deleteProjectMutation = useDeleteProjectMutation();
+  const deleteRepositoryMutation = useDeleteRepositoryMutation();
   const currentPubkey = identityQuery.data?.pubkey;
   const managedAgentPubkeys = React.useMemo(
     () =>
@@ -538,6 +541,9 @@ export function ProjectsView() {
   const handleDeleteProject = useDeleteProjectHandler(
     deleteProjectMutation.mutateAsync,
   );
+  const handleDeleteRepository = useDeleteRepositoryHandler(
+    deleteRepositoryMutation.mutateAsync,
+  );
 
   const { contextIssues, contextPullRequests } = useContextWorkItems(
     projectsWorkItemsQuery.data,
@@ -593,7 +599,9 @@ export function ProjectsView() {
   const repositoryItems = (
     <ProjectsOverviewRepositoryItems
       currentPubkey={currentPubkey}
+      deleteDisabled={deleteRepositoryMutation.isPending}
       localRepoNames={localRepoNames}
+      onDelete={handleDeleteRepository}
       onOpen={handleOpenRepository}
       onOpenTerminal={handleOpenRepositoryTerminal}
       profiles={profiles}
