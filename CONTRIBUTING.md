@@ -304,6 +304,17 @@ just ci
 This is the same check that runs in CI. PRs that fail `just ci` will not be
 merged. If `just ci` fails on formatting, `just fix-all` fixes it in one shot (`rustfmt` + Tauri fmt + desktop, web, and mobile formatters).
 
+Pull requests also get an advisory **flake check**. `scripts/flake-check.mjs
+select` maps the diff against the base branch to the Rust tests, desktop
+`node --test` files, Playwright smoke journeys and Flutter test files it
+changed: a hunk inside a test body selects that test; a change anywhere else
+in a test file (imports, helpers, hooks, the code under test beside Rust
+tests) or a new file selects the whole file. The `Flake check (…)` lanes then
+run that selection ten times with retries off, so a repetition that fails is
+a race in the test or the code under it, worth fixing before it lands. The
+lanes skip when no test changed and are not required to merge; their step
+summaries show the test × iteration table.
+
 ---
 
 ## Code Style

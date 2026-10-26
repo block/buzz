@@ -58,6 +58,8 @@ jobs:
       - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
+          # Named so the advisory flake lane (_ci-flake.yml) can restore it.
+          shared-key: unit-tests
           key: sherpa-cache-v1
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install cargo-nextest

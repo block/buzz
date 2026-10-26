@@ -1,0 +1,820 @@
+// Advisory pull-request flake check. `select` maps a diff to the tests it
+// changed, per runner; `rust`, `node` and `dart` repeat a selection and report
+// every iteration. Playwright repeats natively with --repeat-each, and
+// `playwright-summary` tabulates its JSON report afterwards.
+import { spawnSync } from "node:child_process";
+import {
+  appendFileSync,
+  copyFileSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+
+const root = fileURLToPath(new URL("../", import.meta.url));
+export const ITERATIONS = 10;
+// Repetitions spread across shards, so a whole-file selection stays inside
+// the Playwright lane's job timeout. Playwright shards at file × repetition
+// granularity (workers: 1, no fullyParallel), and the smoke lane runs ~1,500
+// journeys over ten ~11-minute shards, so five journeys × ten repetitions is a
+// few minutes of test time per shard. The regular smoke lane never uses more
+// than ten runners, so neither does this one.
+const JOURNEYS_PER_SHARD = 5;
+const MAX_SHARDS = 10;
+export const playwrightShards = (journeys) =>
+  Math.min(MAX_SHARDS, Math.max(1, Math.ceil(journeys / JOURNEYS_PER_SHARD)));
+// GitHub caps a job's outputs at 1 MiB in total. A selection this large is a
+// sweeping refactor, not a test change worth ten repetitions, so the lane
+// skips rather than overrunning its timeout.
+export const MAX_OUTPUT_BYTES = 64 * 1024;
+export const runners = ["rust", "node", "playwright", "dart"];
+// Mirrors desktop/package.json "test": plain helpers run under the TS loader;
+// jsdom tests also preload the DOM shim and force-exit past their timers.
+export const nodeTestArgs = (file) =>
+  file.endsWith(".jsdom-test.mjs")
+    ? [
+        "--import",
+        "./test-jsdom-setup.mjs",
+        "--import",
+        "./test-loader.mjs",
+        "--experimental-strip-types",
+        "--test-force-exit",
+        "--test",
+      ]
+    : ["--import", "./test-loader.mjs", "--experimental-strip-types", "--test"];
+// Mirrors the mobile test shards in .github/workflows/_ci-clients.yml.
+export const dartDefine =
+  "--dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example";
+// Mirrors the postgres-ci default-filter in .config/nextest.toml: those tests
+// are #[ignore]d and need Postgres, Redis, S3 or MinIO, so a selection that
+// reached one would fail every repetition without being flaky.
+const infraTests =
+  "test(/postgres_tests::/) | binary(/^postgres_/) | test(/(^|::)external_infra[^:]*::/)";
+
+// Mirrors desktop/package.json "test", desktop/playwright.config.ts testDir,
+// the root Cargo workspace's crates and mobile's test directory. Paths are
+// later split on whitespace in a shell, so admit only plain names.
+export function classify(file) {
+  if (!/^[\w./@-]+$/.test(file)) return undefined;
+  if (/^crates\/[^/]+\/(?:src|tests)\/(?!fixtures\/).*\.rs$/.test(file))
+    return "rust";
+  if (
+    /^desktop\/(?:src\/.*\.(?:test|jsdom-test)\.mjs|scripts\/[^/]+\.test\.mjs)$/.test(
+      file,
+    )
+  )
+    return "node";
+  if (/^desktop\/tests\/e2e\/[^/]+\.spec\.ts$/.test(file)) return "playwright";
+  if (/^mobile\/test\/.*_test\.dart$/.test(file)) return "dart";
+  return undefined;
+}
+
+// Line ranges of a -U0 diff: the new-side lines each hunk writes and the
+// old-side lines it removes (empty, end < start, for a pure insertion). A pure
+// deletion writes no lines and attaches to the line before it (0 at the top of
+// the file); `removed` keeps what it took out, since that line cannot tell.
+export function hunkRanges(diff) {
+  return [
+    ...diff.matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm),
+  ].map(([, oldStart, oldCount = "1", start, count = "1"]) => ({
+    start: Number(start),
+    end: Number(start) + Math.max(Number(count), 1) - 1,
+    removed: {
+      start: Number(oldStart),
+      end: Number(oldStart) + Number(oldCount) - 1,
+    },
+  }));
+}
+
+// Members that keep a `test`/`it` chain a test declaration. Anything else on
+// the chain is a group (`describe`), a hook (`test.beforeEach`), configuration
+// (`test.use`) or a harness object that happens to be named `test`.
+const declaring = [
+  "only",
+  "skip",
+  "fixme",
+  "fails",
+  "todo",
+  "concurrent",
+  "sequential",
+  "each",
+  "for",
+  "runIf",
+  "skipIf",
+];
+
+// The desktop app's TypeScript parses the specs; load it only for a selection
+// that needs it, so Rust-only runs work without desktop dependencies.
+let typescript;
+const ts = () =>
+  (typescript ??= createRequire(
+    new URL("../desktop/package.json", import.meta.url),
+  )("typescript"));
+
+// Line spans of every test declaration in a TypeScript spec, from its first
+// line to its closing parenthesis.
+export function testCalls(source, file) {
+  const t = ts();
+  const sourceFile = t.createSourceFile(
+    file,
+    source,
+    t.ScriptTarget.Latest,
+    true,
+  );
+  const lineAt = (position) =>
+    sourceFile.getLineAndCharacterOfPosition(position).line + 1;
+  const names = (callee) =>
+    t.isIdentifier(callee)
+      ? [callee.text]
+      : t.isPropertyAccessExpression(callee)
+        ? names(callee.expression)?.concat(callee.name.text)
+        : t.isCallExpression(callee)
+          ? names(callee.expression)
+          : undefined;
+  const calls = [];
+  const visit = (node) => {
+    const chain = t.isCallExpression(node) ? names(node.expression) : undefined;
+    if (
+      chain &&
+      ["test", "it"].includes(chain[0]) &&
+      chain.slice(1).every((member) => declaring.includes(member))
+    ) {
+      calls.push({
+        start: lineAt(node.getStart(sourceFile)),
+        end: lineAt(node.end - 1),
+      });
+      return;
+    }
+    t.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return calls;
+}
+
+// Rust source with every comment and literal blanked to spaces, newlines kept,
+// so attribute and brace scanning never see a `{` or `#[` inside a string,
+// char literal or comment. Lifetimes (`'a`) are kept; char literals are not.
+export function blankRust(source) {
+  let out = "";
+  let i = 0;
+  const blank = (end) => {
+    for (; i < end && i < source.length; i += 1)
+      out += source[i] === "\n" ? "\n" : " ";
+  };
+  const closingQuote = (from, raw = false, hashes = "") => {
+    for (let j = from; j < source.length; j += 1) {
+      if (source[j] === "\\" && !raw) j += 1;
+      else if (source[j] === '"' && source.startsWith(hashes, j + 1))
+        return j + 1 + hashes.length;
+    }
+    return source.length;
+  };
+  const rawPrefix = /[bc]?r(#*)"/y;
+  while (i < source.length) {
+    const rest = source.slice(i, i + 2);
+    rawPrefix.lastIndex = i;
+    const raw = rawPrefix.exec(source);
+    if (rest.startsWith("//")) {
+      const end = source.indexOf("\n", i);
+      blank(end === -1 ? source.length : end);
+    } else if (rest.startsWith("/*")) {
+      let depth = 0;
+      let j = i;
+      do {
+        if (source.startsWith("/*", j)) {
+          depth += 1;
+          j += 2;
+        } else if (source.startsWith("*/", j)) {
+          depth -= 1;
+          j += 2;
+        } else j += 1;
+      } while (depth > 0 && j < source.length);
+      blank(j);
+    } else if (raw) {
+      blank(closingQuote(i + raw[0].length, true, raw[1]));
+    } else if (/^[bc]?"/.test(rest)) {
+      blank(closingQuote(i + rest.indexOf('"') + 1));
+    } else if (source[i] === "'") {
+      const width = source.codePointAt(i + 1) > 0xffff ? 2 : 1;
+      if (source[i + 1] === "\\") blank(source.indexOf("'", i + 2) + 1);
+      else if (source[i + 1 + width] === "'") blank(i + width + 2);
+      else {
+        out += source[i];
+        i += 1;
+      }
+    } else {
+      out += source[i];
+      i += 1;
+    }
+  }
+  return out;
+}
+
+const matching = (text, open, close, from) => {
+  let depth = 0;
+  for (let j = from; j < text.length; j += 1) {
+    if (text[j] === open) depth += 1;
+    else if (text[j] === close) {
+      depth -= 1;
+      if (depth === 0) return j;
+    }
+  }
+  return text.length - 1;
+};
+
+// Every test function in a Rust file: a `fn` whose attribute block has an
+// attribute path ending in `test` (`#[test]`, `#[tokio::test]`, …), spanning
+// the first attribute line to the body's closing brace. `ignored` marks
+// `#[ignore]`, which nextest skips by default.
+export function rustTests(source) {
+  const text = blankRust(source);
+  const lineStarts = [0];
+  for (let i = 0; i < text.length; i += 1)
+    if (text[i] === "\n") lineStarts.push(i + 1);
+  const lineAt = (offset) => {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (lineStarts[mid] <= offset) low = mid;
+      else high = mid - 1;
+    }
+    return low + 1;
+  };
+  const tests = [];
+  const attribute = /#\[/g;
+  for (let match = attribute.exec(text); match; match = attribute.exec(text)) {
+    const paths = [];
+    let j = match.index;
+    while (text.startsWith("#[", j)) {
+      const close = matching(text, "[", "]", j + 1);
+      paths.push(/^\s*([\w:]+)/.exec(text.slice(j + 2, close))?.[1] ?? "");
+      j = close + 1;
+      while (/\s/.test(text[j] ?? "")) j += 1;
+    }
+    attribute.lastIndex = j;
+    if (!paths.some((path) => /^(?:\w+::)*test$/.test(path))) continue;
+    const fn =
+      /^(?:pub(?:\([\w\s:]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)/.exec(
+        text.slice(j),
+      );
+    if (!fn) continue;
+    const open = text.indexOf("{", j + fn[0].length);
+    if (open === -1) continue;
+    tests.push({
+      name: fn[1],
+      start: lineAt(match.index),
+      end: lineAt(matching(text, "{", "}", open)),
+      ignored: paths.includes("ignore"),
+    });
+  }
+  return tests;
+}
+
+// Bodies of the listed tests: their calls, keyed by the line the runner
+// listed. Runners only report a call-site line, which may sit inside the call,
+// so each listed line is owned by the enclosing test call; a listed line
+// outside every call leaves its lines to the whole-file rule.
+export function testBodies(calls, lines) {
+  const bodies = new Map();
+  for (const line of [...lines].sort((a, b) => a - b)) {
+    const call = calls.find(({ start, end }) => start <= line && line <= end);
+    if (call && !bodies.has(call)) bodies.set(call, { ...call, line });
+  }
+  return [...bodies.values()].sort((a, b) => a.start - b.start);
+}
+
+// The calls owning every line of a range, or undefined once a line lies
+// outside them all.
+function owners(calls, { start, end }) {
+  const found = [];
+  for (let line = start; line <= end; ) {
+    const call = calls.find((c) => c.start <= line && line <= c.end);
+    if (!call) return undefined;
+    found.push(call);
+    line = call.end + 1;
+  }
+  return found;
+}
+
+// A hunk whose every line lies in a test body selects those tests. A changed
+// line outside every body (imports, helpers, hooks or constants before,
+// between or after tests, or the code under test in a Rust module) can change
+// every test, so it, a new file, or a file with no listed tests selects the
+// whole file. Removed lines are judged by the old file's calls (`previous`): a
+// deletion attaches to its preceding line, which belongs to the test before a
+// removed hook, not to the hook.
+export function selectTests(
+  ranges,
+  bodies,
+  { added = false, previous = [] } = {},
+) {
+  if (added) return { whole: true, reason: "new file" };
+  if (bodies.length === 0) return { whole: true, reason: "no tests listed" };
+  const selected = new Set();
+  for (const { start, end, removed } of ranges) {
+    if (!owners(previous, removed))
+      return { whole: true, reason: "shared code removed" };
+    const current = owners(bodies, { start, end });
+    if (!current) return { whole: true, reason: "shared code changed" };
+    for (const body of current) selected.add(body.line);
+  }
+  return { lines: [...selected].sort((a, b) => a - b) };
+}
+
+// Rust tests a diff selects: hunks inside a test body select that test, any
+// other hunk selects every test in the file (the module's code under test
+// lives beside them), and `#[ignore]`d tests own their lines but never run.
+// A file without test functions is not a test file and selects nothing.
+export function selectRust(
+  diff,
+  source,
+  { added = false, previous = "" } = {},
+) {
+  const tests = rustTests(source);
+  if (tests.length === 0) return undefined;
+  const selection = selectTests(
+    hunkRanges(diff),
+    tests.map((test) => ({ ...test, line: test.start })),
+    { added, previous: added ? [] : rustTests(previous) },
+  );
+  const chosen = selection.whole
+    ? tests
+    : tests.filter((test) => selection.lines.includes(test.start));
+  return {
+    ...selection,
+    names: chosen.filter((test) => !test.ignored).map((test) => test.name),
+  };
+}
+
+const run = (command, args, options = {}) => {
+  const result = spawnSync(command, args, {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    ...options,
+  });
+  if (result.error) throw result.error;
+  return result;
+};
+const git = (...args) => {
+  const result = run("git", args);
+  if (result.status !== 0) throw new Error(`git ${args[0]}: ${result.stderr}`);
+  return result.stdout;
+};
+const summarize = (text) => {
+  if (process.env.GITHUB_STEP_SUMMARY)
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, text);
+  else process.stdout.write(text);
+};
+const cell = (value) => String(value).replaceAll("|", "\\|");
+
+// The `[package]` name of the crate owning a file under crates/.
+export function cratePackage(file) {
+  const manifest = readFileSync(
+    `${root}crates/${file.split("/")[1]}/Cargo.toml`,
+    "utf8",
+  );
+  return /^\[package\][\s\S]*?^name\s*=\s*"([^"]+)"/m.exec(manifest)[1];
+}
+
+// Smoke journeys per spec file as Playwright lists them. Integration-only
+// specs list nothing for the smoke project, so a selection of them stays empty.
+export function listPlaywright(files) {
+  const result = run(`${root}bin/pnpm`, [
+    "-C",
+    "desktop",
+    "--silent",
+    "exec",
+    "playwright",
+    "test",
+    "--project=smoke",
+    "--list",
+    "--reporter=json",
+    ...files,
+  ]);
+  const report = JSON.parse(result.stdout);
+  if (result.status !== 0 || report.errors.length)
+    throw new Error(
+      `playwright --list: ${report.errors.map((error) => error.message).join("\n") || result.stderr}`,
+    );
+  const specs = new Map(files.map((file) => [file, []]));
+  const collect = (suites) => {
+    for (const suite of suites) {
+      for (const spec of suite.specs ?? [])
+        if (spec.tests?.length)
+          specs.get(`desktop/tests/e2e/${spec.file}`)?.push(spec.line);
+      collect(suite.suites ?? []);
+    }
+  };
+  collect(report.suites);
+  return specs;
+}
+
+function select(base = "HEAD^1", head = "HEAD") {
+  const changed = git(
+    "diff",
+    "--name-status",
+    "--no-renames",
+    "-z",
+    "--diff-filter=AM",
+    base,
+    head,
+    "--",
+  ).split("\0");
+  const files = Object.fromEntries(runners.map((runner) => [runner, []]));
+  const added = new Set();
+  for (let i = 0; i + 1 < changed.length; i += 2) {
+    const [status, file] = [changed[i], changed[i + 1]];
+    const runner = classify(file);
+    if (runner) files[runner].push(file);
+    if (status === "A") added.add(file);
+  }
+  const journeys = files.playwright.length
+    ? listPlaywright(files.playwright)
+    : new Map();
+  const outputs = Object.fromEntries(runners.map((runner) => [runner, []]));
+  const rows = [];
+  const previous = (file) =>
+    added.has(file) ? "" : git("show", `${base}:${file}`);
+  const diff = (file) =>
+    git("diff", "-U0", "--no-color", base, head, "--", file);
+  for (const runner of runners) {
+    for (const file of files[runner]) {
+      let entries = [file];
+      let note = "whole file";
+      if (runner === "rust") {
+        const selection = selectRust(
+          diff(file),
+          readFileSync(`${root}${file}`, "utf8"),
+          {
+            added: added.has(file),
+            previous: previous(file),
+          },
+        );
+        if (!selection) continue;
+        const crate = cratePackage(file);
+        entries = selection.names.map((name) => `${crate}::${name}`);
+        note =
+          selection.names.length === 0
+            ? "excluded (ignored tests only)"
+            : selection.whole
+              ? `whole file (${selection.reason}): ${selection.names.length} test(s)`
+              : `${selection.names.length} changed test(s)`;
+      } else if (runner === "playwright") {
+        const listed = journeys.get(file) ?? [];
+        const source = readFileSync(`${root}${file}`, "utf8");
+        const selection = selectTests(
+          hunkRanges(diff(file)),
+          testBodies(testCalls(source, file), listed),
+          {
+            added: added.has(file),
+            previous: added.has(file) ? [] : testCalls(previous(file), file),
+          },
+        );
+        const lines = selection.whole ? listed : selection.lines;
+        entries = lines.map((line) => `${file}:${line}`);
+        note =
+          lines.length === 0
+            ? "excluded (no smoke journeys)"
+            : selection.whole
+              ? `whole file (${selection.reason}): ${lines.length} journey(s)`
+              : `${lines.length} changed journey(s)`;
+      }
+      outputs[runner].push(...entries);
+      rows.push(`| ${cell(file)} | ${runner} | ${cell(note)} |`);
+    }
+    if (Buffer.byteLength(outputs[runner].join(" ")) > MAX_OUTPUT_BYTES) {
+      rows.push(
+        `| *(${outputs[runner].length} ${runner} entries)* | ${runner} | selection exceeds ${MAX_OUTPUT_BYTES} bytes; lane skipped |`,
+      );
+      outputs[runner] = [];
+    }
+  }
+  summarize(
+    [
+      "## Flake check selection",
+      "",
+      ...(rows.length
+        ? ["| File | Runner | Selection |", "| --- | --- | --- |", ...rows]
+        : ["No Rust, node:test, Playwright or Flutter test files changed."]),
+      "",
+      "",
+    ].join("\n"),
+  );
+  const shards = playwrightShards(outputs.playwright.length);
+  const text = [
+    ...Object.entries(outputs).map(
+      ([key, entries]) => `${key}=${entries.join(" ")}\n`,
+    ),
+    `playwright_shards=${JSON.stringify(Array.from({ length: shards }, (_, i) => i + 1))}\n`,
+    `playwright_shard_total=${shards}\n`,
+  ].join("");
+  if (process.env.GITHUB_OUTPUT)
+    appendFileSync(process.env.GITHUB_OUTPUT, text);
+  else process.stdout.write(text);
+}
+
+const resultsDir = (runner) => {
+  const dir = `${root}test-results/flake/${runner}`;
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  return dir;
+};
+
+// Test × iteration table for a repeated selection; a run passes only when its
+// process exits 0 and every expected test reports. Tests that never ran in any
+// iteration are left out, so the table holds only the repeated ones.
+function report(title, runs) {
+  const columns = runs.map((_, i) => String(i + 1));
+  const mark = (status) =>
+    ({ passed: "✅", failed: "❌" })[status] ?? (status ? "⏭" : "—");
+  const ran = (status) => status === "passed" || status === "failed";
+  const tests = [
+    ...new Set(runs.flatMap((run) => [...run.statuses.keys()])),
+  ].filter((test) => runs.some((run) => ran(run.statuses.get(test))));
+  const failures = runs.filter((run) => !run.ok).length;
+  summarize(
+    [
+      `## ${title}: ${failures} of ${runs.length} iterations failed`,
+      "",
+      `| Test | ${columns.join(" | ")} | Failed |`,
+      `| --- | ${columns.map(() => ":-:").join(" | ")} | ---: |`,
+      `| **Run** | ${runs.map((run) => (run.ok ? "✅" : "❌")).join(" | ")} | ${failures}/${runs.length} |`,
+      ...tests.sort().map((test) => {
+        const statuses = runs.map((run) => run.statuses.get(test));
+        return `| ${cell(test)} | ${statuses.map(mark).join(" | ")} | ${statuses.filter((status) => status === "failed").length}/${runs.length} |`;
+      }),
+      "",
+      "",
+    ].join("\n"),
+  );
+  process.exitCode = failures === 0 ? 0 : 1;
+}
+
+const progress = (i, iterations, ok) =>
+  console.log(
+    `flake-check: iteration ${i}/${iterations} ${ok ? "passed" : "FAILED"}`,
+  );
+
+// Per-test statuses of a JUnit report, keyed `<classname> <name>`.
+export function parseJunit(xml) {
+  const decode = (text) =>
+    text.replace(
+      /&(quot|apos|lt|gt|amp);/g,
+      (_, entity) =>
+        ({ quot: '"', apos: "'", lt: "<", gt: ">", amp: "&" })[entity],
+    );
+  const statuses = new Map();
+  for (const chunk of xml.split("<testcase").slice(1)) {
+    const attributes = chunk.slice(0, chunk.indexOf(">"));
+    const body = chunk.split("</testsuite>")[0];
+    const name = decode(/\bname="([^"]*)"/.exec(attributes)[1]);
+    const classname = decode(
+      /\bclassname="([^"]*)"/.exec(attributes)?.[1] ?? "",
+    );
+    statuses.set(
+      `${classname} ${name}`,
+      /<(?:failure|error)[\s/>]/.test(body)
+        ? "failed"
+        : /<skipped[\s/>]/.test(body)
+          ? "skipped"
+          : "passed",
+    );
+  }
+  return statuses;
+}
+
+// nextest has no repeat flag, so run the filterset once per iteration under
+// the `flake` profile (.config/nextest.toml: no retries, JUnit per run). The
+// selection is listed first: a filterset matching no runnable test is a
+// selection of ignored or infrastructure-backed tests, not a failure.
+function repeatRust(entries, iterations) {
+  const byPackage = new Map();
+  for (const entry of entries) {
+    const [, crate, name] = /^(.+)::(\w+)$/.exec(entry) ?? [];
+    if (!crate)
+      throw new Error(`rust entry must be <package>::<test>: ${entry}`);
+    byPackage.set(crate, (byPackage.get(crate) ?? new Set()).add(name));
+  }
+  const filterset = `(${[...byPackage]
+    .map(
+      ([crate, names]) =>
+        `(package(=${crate}) & (${[...names].map((name) => `test(/(^|::)${name}$/)`).join(" | ")}))`,
+    )
+    .join(" | ")}) & !(${infraTests})`;
+  const packages = [...byPackage.keys()].flatMap((crate) => ["-p", crate]);
+  const listed = run("cargo", [
+    "nextest",
+    "list",
+    ...packages,
+    "-E",
+    filterset,
+    "--message-format",
+    "json",
+  ]);
+  if (listed.status !== 0)
+    throw new Error(`cargo nextest list: ${listed.stderr}`);
+  const expected = Object.entries(
+    JSON.parse(listed.stdout)["rust-suites"],
+  ).flatMap(([binary, suite]) =>
+    Object.entries(suite.testcases)
+      .filter(
+        ([, test]) =>
+          !test.ignored && test["filter-match"].status === "matches",
+      )
+      .map(([name]) => `${binary} ${name}`),
+  );
+  if (expected.length === 0) {
+    summarize(
+      "## Flake check (Rust): nothing to repeat\n\nEvery selected test is ignored or infrastructure-backed.\n\n",
+    );
+    return;
+  }
+  // nextest keeps its store under the workspace root's target/nextest, not
+  // CARGO_TARGET_DIR; the `flake` profile writes its JUnit report there.
+  const junit = `${root}target/nextest/flake/junit.xml`;
+  const dir = resultsDir("rust");
+  const runs = [];
+  for (let i = 1; i <= iterations; i += 1) {
+    rmSync(junit, { force: true });
+    const result = run(
+      "cargo",
+      ["nextest", "run", "--profile", "flake", ...packages, "-E", filterset],
+      { stdio: "inherit" },
+    );
+    let statuses = new Map();
+    try {
+      statuses = parseJunit(readFileSync(junit, "utf8"));
+      copyFileSync(junit, `${dir}/iter-${i}.xml`);
+    } catch {
+      statuses = new Map();
+    }
+    const ok =
+      result.status === 0 &&
+      expected.every((test) => statuses.get(test) === "passed");
+    runs.push({ ok, statuses });
+    progress(i, iterations, ok);
+  }
+  report("Flake check (Rust)", runs);
+}
+
+// node:test has no repeat flag either. Each file runs alone, so a failure is
+// attributed to its file; the regular lane's cross-file concurrency is not
+// reproduced here.
+function repeatNode(files, iterations) {
+  const dir = resultsDir("node");
+  const runs = [];
+  for (let i = 1; i <= iterations; i += 1) {
+    const statuses = new Map();
+    for (const file of files) {
+      const path = file.replace(/^desktop\//, "");
+      const result = run(process.execPath, [...nodeTestArgs(path), path], {
+        cwd: `${root}desktop`,
+      });
+      process.stdout.write(result.stdout);
+      process.stderr.write(result.stderr);
+      appendFileSync(
+        `${dir}/iter-${i}.log`,
+        `# ${file}\n${result.stdout}${result.stderr}\n`,
+      );
+      statuses.set(file, result.status === 0 ? "passed" : "failed");
+    }
+    const ok = [...statuses.values()].every((status) => status === "passed");
+    runs.push({ ok, statuses });
+    progress(i, iterations, ok);
+  }
+  report("Flake check (node:test)", runs);
+}
+
+// Per-test statuses of a `dart test` JSON report (one event per line), keyed
+// `<file> › <name>`. Hidden entries are the runner's own file-loading steps.
+export function parseDartReport(text, mobileRoot = `${root}mobile/`) {
+  const started = new Map();
+  const statuses = new Map();
+  for (const line of text.split("\n")) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event.type === "testStart") started.set(event.test.id, event.test);
+    if (event.type !== "testDone" || event.hidden) continue;
+    const test = started.get(event.testID);
+    if (!test) continue;
+    const file = fileURLToPath(test.url ?? "file:///").replace(mobileRoot, "");
+    statuses.set(
+      `${file} › ${test.name}`,
+      event.skipped
+        ? "skipped"
+        : event.result === "success"
+          ? "passed"
+          : "failed",
+    );
+  }
+  return statuses;
+}
+
+// `flutter test` has no repeat flag; each iteration recompiles only the
+// selected files, as the sharded mobile lane does.
+function repeatDart(files, iterations) {
+  const dir = resultsDir("dart");
+  const runs = [];
+  // The Justfile unsets these so a worktree's git context never reaches flutter.
+  const { GIT_DIR, GIT_WORK_TREE, ...env } = process.env;
+  for (let i = 1; i <= iterations; i += 1) {
+    const reportFile = `${dir}/iter-${i}.json`;
+    const result = run(
+      "flutter",
+      [
+        "test",
+        dartDefine,
+        `--file-reporter=json:${reportFile}`,
+        ...files.map((file) => file.replace(/^mobile\//, "")),
+      ],
+      { cwd: `${root}mobile`, env, stdio: "inherit" },
+    );
+    let statuses = new Map();
+    try {
+      statuses = parseDartReport(readFileSync(reportFile, "utf8"));
+    } catch {
+      statuses = new Map();
+    }
+    const ok = result.status === 0 && statuses.size > 0;
+    runs.push({ ok, statuses });
+    progress(i, iterations, ok);
+  }
+  report("Flake check (Flutter)", runs);
+}
+
+// Playwright's JSON report lists a `--repeat-each` journey once per
+// repetition, in order; `unexpected` is a failed repetition since the lane
+// runs with --retries=0.
+export function playwrightRepetitions(report) {
+  const repetitions = new Map();
+  const collect = (suites) => {
+    for (const suite of suites) {
+      for (const spec of suite.specs ?? []) {
+        const key = `${spec.file}:${spec.line} › ${spec.title}`;
+        const statuses = repetitions.get(key) ?? [];
+        for (const test of spec.tests ?? [])
+          statuses.push(
+            { expected: "passed", unexpected: "failed", flaky: "failed" }[
+              test.status
+            ] ?? "skipped",
+          );
+        repetitions.set(key, statuses);
+      }
+      collect(suite.suites ?? []);
+    }
+  };
+  collect(report.suites ?? []);
+  return repetitions;
+}
+
+function playwrightSummary(reportPath, title) {
+  const repetitions = playwrightRepetitions(
+    JSON.parse(readFileSync(reportPath, "utf8")),
+  );
+  const iterations = Math.max(
+    0,
+    ...[...repetitions.values()].map((s) => s.length),
+  );
+  const runs = Array.from({ length: iterations }, (_, i) => ({
+    ok: [...repetitions.values()].every((statuses) => statuses[i] !== "failed"),
+    statuses: new Map(
+      [...repetitions].map(([test, statuses]) => [test, statuses[i]]),
+    ),
+  }));
+  report(title, runs);
+  // Playwright already failed its own step; the summary only reports.
+  process.exitCode = 0;
+}
+
+function main() {
+  const [command, ...args] = process.argv.slice(2);
+  if (command === "select" && args.length <= 2) return select(...args);
+  if (command === "playwright-summary" && args.length === 2)
+    return playwrightSummary(...args);
+  const repeat = { rust: repeatRust, node: repeatNode, dart: repeatDart }[
+    command
+  ];
+  if (repeat) {
+    const iterations = Number(
+      args
+        .find((argument) => argument.startsWith("--iterations="))
+        ?.slice("--iterations=".length) ?? ITERATIONS,
+    );
+    const entries = args.filter((argument) => !argument.startsWith("--"));
+    if (Number.isInteger(iterations) && iterations > 0 && entries.length > 0)
+      return repeat(entries, iterations);
+  }
+  throw new Error(
+    "usage: flake-check select [base] [head] | rust|node|dart [--iterations=N] <entry…> | playwright-summary <report.json> <title>",
+  );
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) main();
