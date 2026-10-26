@@ -101,6 +101,40 @@ class RouteScannerFixtures(unittest.TestCase):
             ADMIN.replace('get(probe))', "get(probe)).fallback_service(service)"),
         )
 
+    def test_non_spa_fallback_service_in_build_router_is_rejected(self):
+        self.assert_rejected(
+            r"\.fallback_service registration is not classified",
+            build_router(
+                ".fallback_service(spa_fallback)"
+                '.merge(Router::new().route("/x", get(x)).fallback_service(private_service))'
+            ),
+        )
+
+    def test_repeated_spa_fallback_service_is_rejected(self):
+        self.assert_rejected(
+            r"\.fallback_service registration appears more than once",
+            build_router(".fallback_service(spa_fallback).fallback_service(spa_fallback)"),
+        )
+
+    def test_handler_fallback_is_rejected(self):
+        self.assert_rejected(
+            r"\.fallback registration is not classified",
+            build_router(".fallback(private_handler)"),
+        )
+
+    def test_handler_fallback_outside_build_router_is_rejected(self):
+        self.assert_rejected(
+            r"\.fallback registration is not classified",
+            build_router(),
+            ADMIN.replace('get(probe))', "get(probe)).fallback(private_handler)"),
+        )
+
+    def test_builder_nested_twice_is_rejected(self):
+        self.assert_rejected(
+            r"api::admin::router is nested more than once",
+            build_router('.nest("/alternate-admin", api::admin::router(state.clone()))'),
+        )
+
     def test_nest_outside_build_router_is_rejected(self):
         self.assert_rejected(
             r"\.nest registration outside router::build_router",
