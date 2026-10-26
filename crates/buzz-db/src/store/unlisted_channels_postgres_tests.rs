@@ -221,3 +221,89 @@ async fn group_metadata_publishes_the_stored_unlisted_flag() {
     let after = f.set_unlisted(chat, true).await;
     assert!(crate::channel::group_metadata_tags(&after, &[]).contains(&flag));
 }
+
+/// A channel can start unlisted (kind:9007 `["unlisted", "true"]`), through
+/// both create paths: the event-backed create a client UUID takes, and the
+/// relay-chosen-UUID create. It is never listed to non-members, even for a
+/// moment, and stays named-only once it is opened.
+/// Mutation: drop `unlisted` from either `INSERT INTO channels` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn channel_created_unlisted_is_never_listed() {
+    let f = Fixture::new().await;
+    let owner = f.owner.public_key().to_bytes();
+
+    let with_event = Uuid::new_v4();
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(9007), "")
+        .tags([
+            nostr::Tag::parse(["h", &with_event.to_string()]).expect("h tag"),
+            nostr::Tag::parse(["name", "solo"]).expect("name tag"),
+            nostr::Tag::parse(["visibility", "open"]).expect("visibility tag"),
+            nostr::Tag::parse(["unlisted", "true"]).expect("unlisted tag"),
+        ])
+        .sign_with_keys(&f.owner)
+        .expect("sign 9007");
+    let created =
+        f.db.create_channel_with_event(
+            f.community,
+            with_event,
+            crate::channel::NewChannel {
+                name: "solo",
+                channel_type: ChannelType::Stream,
+                visibility: ChannelVisibility::Open,
+                description: None,
+                created_by: &owner,
+                ttl_seconds: None,
+                labels: &[],
+                unlisted: true,
+                members: &[],
+            },
+            &event,
+        )
+        .await
+        .expect("create with event");
+    assert!(matches!(created, crate::channel::ChannelCreate::Created(_)));
+
+    let relay_chosen =
+        f.db.create_labeled_channel(
+            f.community,
+            "solo-2",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+            &[],
+            true,
+        )
+        .await
+        .expect("create labeled channel")
+        .id;
+
+    let listed = f.channel("listed", ChannelVisibility::Open).await;
+    assert!(
+        !f.db
+            .get_channel(f.community, listed)
+            .await
+            .expect("channel")
+            .unlisted,
+        "channels start listed by default"
+    );
+
+    for chat in [with_event, relay_chosen] {
+        assert!(
+            f.db.get_channel(f.community, chat)
+                .await
+                .expect("channel")
+                .unlisted,
+            "the setting is stored at creation"
+        );
+        assert!(!f.implicit(&f.outsider).await.contains(&chat));
+        assert!(!f.listed(&f.outsider).await.contains(&chat));
+        assert!(f
+            .named_only(&f.outsider)
+            .await
+            .contains(&(chat, "stream".to_owned())));
+        assert!(f.implicit(&f.owner).await.contains(&chat));
+    }
+}

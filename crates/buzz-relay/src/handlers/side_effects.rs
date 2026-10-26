@@ -1960,6 +1960,27 @@ pub(crate) fn channel_labels_from_tags(
     }
 }
 
+/// The kind:9007 `["unlisted", "true"|"false"]` setting: whether a new
+/// channel starts out of channel listings for non-members. A missing tag means
+/// listed. Any other value is refused, as kind:9002 refuses it; the last tag
+/// wins, as in kind:9002.
+pub(crate) fn create_unlisted_from_tags(event: &Event) -> anyhow::Result<bool> {
+    let mut unlisted = false;
+    for tag in event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "unlisted")
+    {
+        unlisted = match tag.content() {
+            Some("true") => true,
+            Some("false") => false,
+            Some(v) => anyhow::bail!("invalid unlisted value: {v} (must be \"true\" or \"false\")"),
+            None => anyhow::bail!("unlisted tag must have a value"),
+        };
+    }
+    Ok(unlisted)
+}
+
 async fn handle_delete_event_side_effect(
     tenant: &TenantContext,
     event: &Event,
@@ -2087,6 +2108,7 @@ async fn handle_create_group(
         .transpose()
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .unwrap_or_default();
+    let unlisted = create_unlisted_from_tags(event)?;
 
     // If the event has an h-tag UUID, ingest_event() already created the channel
     // via create_channel_with_id(). Fetch it rather than creating a duplicate.
@@ -2121,6 +2143,7 @@ async fn handle_create_group(
                         &actor_bytes,
                         ttl_seconds,
                         &labels,
+                        unlisted,
                     )
                     .await?;
                 metrics::counter!(
@@ -2144,6 +2167,7 @@ async fn handle_create_group(
                 &actor_bytes,
                 ttl_seconds,
                 &labels,
+                unlisted,
             )
             .await?;
         metrics::counter!(

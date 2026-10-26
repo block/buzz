@@ -2471,6 +2471,7 @@ struct ChannelCreateRequest {
     description: Option<String>,
     ttl_seconds: Option<i32>,
     labels: Vec<String>,
+    unlisted: bool,
     members: Vec<Vec<u8>>,
 }
 
@@ -3202,6 +3203,8 @@ async fn ingest_event_inner(
             .transpose()
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?
             .unwrap_or_default();
+        let unlisted = super::side_effects::create_unlisted_from_tags(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
 
         if let Some(client_uuid) = channel_id {
             let members = super::side_effects::initial_members(&event)
@@ -3220,6 +3223,7 @@ async fn ingest_event_inner(
                 }),
                 ttl_seconds: super::resolve_ttl(&event, state.config.ephemeral_ttl_override),
                 labels,
+                unlisted,
                 members,
             });
         }
@@ -3482,6 +3486,7 @@ async fn ingest_event_inner(
             created_by: &creator,
             ttl_seconds: create.ttl_seconds,
             labels: &create.labels,
+            unlisted: create.unlisted,
             members: &create.members,
         };
         match state

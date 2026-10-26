@@ -3272,6 +3272,293 @@ async fn test_nip29_unlisted_channel_wire() {
         .contains(&channel_id));
 }
 
+/// Submit one signed event over WebSocket and return the OK frame.
+async fn submit_ws(url: &str, signer: &Keys, kind: u16, tags: &[&[&str]]) -> (bool, String) {
+    let mut tags: Vec<Tag> = tags
+        .iter()
+        .map(|t| Tag::parse(t.iter().copied()).unwrap())
+        .collect();
+    tags.push(Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap());
+    let event = EventBuilder::new(Kind::Custom(kind), "")
+        .tags(tags)
+        .sign_with_keys(signer)
+        .unwrap();
+    let mut client = BuzzTestClient::connect(url, signer)
+        .await
+        .expect("connect submitter");
+    let ok = client.send_event(event).await.expect("send event");
+    client.disconnect().await.ok();
+    (ok.accepted, ok.message)
+}
+
+/// Create a private Solo-style chat (a private stream labelled `buzz.solo`)
+/// with kind:9007, adding `extra` tags, and return its id.
+async fn create_solo_chat_ws(url: &str, owner: &Keys, extra: &[&[&str]]) -> String {
+    let channel_id = uuid::Uuid::new_v4().to_string();
+    let name = format!("solo-e2e-{channel_id}");
+    let base: [&[&str]; 5] = [
+        &["h", &channel_id],
+        &["name", &name],
+        &["channel_type", "stream"],
+        &["visibility", "private"],
+        &["t", "buzz.solo"],
+    ];
+    let tags: Vec<&[&str]> = base.into_iter().chain(extra.iter().copied()).collect();
+    let (accepted, msg) = submit_ws(url, owner, 9007, &tags).await;
+    assert!(accepted, "create Solo chat: {msg}");
+    channel_id
+}
+
+/// Whether any event in `events` belongs to `channel_id`.
+fn any_in_channel(events: &[nostr::Event], channel_id: &str) -> bool {
+    events.iter().any(|e| {
+        e.tags
+            .iter()
+            .any(|t| t.kind().to_string() == "h" && t.content() == Some(channel_id))
+    })
+}
+
+/// The Solo sharing model through the real relay, one event per user action:
+///
+/// - **Create unlisted:** kind:9007 `["unlisted", "true"]` starts a private
+///   chat unlisted, and a later plain `["visibility", "open"]` keeps it
+///   unlisted.
+/// - **Share:** one kind:9002 with `visibility open` + `unlisted true` +
+///   `join_role guest`. A non-member does not list it, reads it by `#h`
+///   (history and live), and cannot post. A kind:9021 join (pin) lists it for
+///   them, still as a read-only guest; a kind:9022 leave (unpin) unlists it
+///   again and it stays readable by `#h`.
+/// - **Unshare:** kind:9002 `visibility private` closes the non-member's live
+///   subscription and refuses a new `#h` read.
+/// - **Convert to a channel:** one kind:9002 with `["t", ""]` +
+///   `unlisted false`. A non-member then finds it in discovery.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_solo_share_and_convert_wire() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let viewer = Keys::generate();
+    // A non-member whose accessible channels are cached before each change.
+    let stranger = Keys::generate();
+    let since = nostr::Timestamp::from(nostr::Timestamp::now().as_secs() - 1);
+    let h = SingleLetterTag::lowercase(Alphabet::H);
+    let messages = Filter::new().kind(Kind::Custom(9)).since(since);
+
+    // ── Create unlisted (kind:9007) ─────────────────────────────────────────
+    let (accepted, msg) = submit_ws(
+        &url,
+        &owner,
+        9007,
+        &[
+            &["h", &uuid::Uuid::new_v4().to_string()],
+            &["name", "solo-bad-unlisted"],
+            &["visibility", "private"],
+            &["unlisted", "yes"],
+        ],
+    )
+    .await;
+    assert!(!accepted, "an unknown unlisted value must be refused");
+    assert!(msg.contains("invalid unlisted value"), "{msg}");
+
+    let born_unlisted = create_solo_chat_ws(&url, &owner, &[&["unlisted", "true"]]).await;
+    let tags = group_metadata_tags(&url, &owner, &born_unlisted).await;
+    assert!(tags.contains(&vec!["unlisted".to_string()]), "{tags:?}");
+    assert!(tags.contains(&vec!["private".to_string()]), "{tags:?}");
+    assert!(listed_channel_ids(&url, &stranger, since).await.is_empty());
+    let (accepted, msg) = submit_ws(
+        &url,
+        &owner,
+        9002,
+        &[&["h", &born_unlisted], &["visibility", "open"]],
+    )
+    .await;
+    assert!(accepted, "open a chat created unlisted: {msg}");
+    assert!(
+        !listed_channel_ids(&url, &stranger, since)
+            .await
+            .contains(&born_unlisted),
+        "opening a chat created unlisted keeps it unlisted"
+    );
+    let tags = group_metadata_tags(&url, &stranger, &born_unlisted).await;
+    assert!(tags.contains(&vec!["unlisted".to_string()]), "{tags:?}");
+    assert!(tags.contains(&vec!["public".to_string()]), "{tags:?}");
+
+    // ── Share: one kind:9002 on an existing (listed) private chat ───────────
+    let chat = create_solo_chat_ws(&url, &owner, &[]).await;
+    let (accepted, msg) = post_ws(&url, &chat, &owner, "before sharing").await;
+    assert!(accepted, "owner post: {msg}");
+    assert!(!listed_channel_ids(&url, &stranger, since)
+        .await
+        .contains(&chat));
+    let (accepted, msg) = submit_ws(
+        &url,
+        &owner,
+        9002,
+        &[
+            &["h", &chat],
+            &["visibility", "open"],
+            &["unlisted", "true"],
+            &["join_role", "guest"],
+        ],
+    )
+    .await;
+    assert!(accepted, "share in one event: {msg}");
+    let tags = group_metadata_tags(&url, &viewer, &chat).await;
+    for flag in ["public", "unlisted", "restricted"] {
+        assert!(tags.contains(&vec![flag.to_string()]), "{flag}: {tags:?}");
+    }
+    assert!(
+        tags.contains(&vec!["join_role".to_string(), "guest".to_string()]),
+        "{tags:?}"
+    );
+    assert!(
+        !listed_channel_ids(&url, &stranger, since)
+            .await
+            .contains(&chat),
+        "a shared chat is not listed to a non-member"
+    );
+
+    // A non-member viewer reads it by `#h`, history and live, but can't post.
+    let named = messages.clone().custom_tags(h, [chat.as_str()]);
+    assert!(any_in_channel(
+        &req_events(&url, &viewer, named.clone()).await,
+        &chat
+    ));
+    assert!(!any_in_channel(
+        &req_events(&url, &viewer, messages.clone()).await,
+        &chat
+    ));
+    let mut live = BuzzTestClient::connect(&url, &viewer)
+        .await
+        .expect("connect viewer");
+    let live_sub = sub_id("solo-live");
+    live.subscribe(&live_sub, vec![named.clone()])
+        .await
+        .expect("subscribe by #h");
+    live.collect_until_eose(&live_sub, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+    let token = format!("live-{}", uuid::Uuid::new_v4().simple());
+    let (accepted, msg) = post_ws(&url, &chat, &owner, &token).await;
+    assert!(accepted, "owner post: {msg}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match live.recv_event(remaining).await.expect("live event") {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == live_sub && event.content == token => break,
+            RelayMessage::Closed { message, .. } => panic!("live sub closed: {message}"),
+            _ => {}
+        }
+    }
+    let (accepted, msg) = post_ws(&url, &chat, &viewer, "viewer post").await;
+    assert!(!accepted, "a guest-join chat is read-only to a non-member");
+    assert!(msg.contains("only members can post"), "{msg}");
+
+    // Pin (kind:9021): listed for the viewer, still a read-only guest.
+    let (accepted, msg) = join_ws(&url, &chat, &viewer).await;
+    assert!(accepted, "pin: {msg}");
+    assert!(listed_channel_ids(&url, &viewer, since)
+        .await
+        .contains(&chat));
+    assert!(any_in_channel(
+        &req_events(&url, &viewer, messages.clone()).await,
+        &chat
+    ));
+    let (accepted, msg) = post_ws(&url, &chat, &viewer, "guest post").await;
+    assert!(!accepted, "a pinned guest still cannot post");
+    assert!(msg.contains("only members can post"), "{msg}");
+    assert!(!listed_channel_ids(&url, &stranger, since)
+        .await
+        .contains(&chat));
+
+    // Unpin (kind:9022): unlisted for the viewer again, still readable by id.
+    let (accepted, msg) = self_departure_ws(&url, &chat, &viewer, 9022).await;
+    assert!(accepted, "unpin: {msg}");
+    assert!(
+        !listed_channel_ids(&url, &viewer, since)
+            .await
+            .contains(&chat),
+        "an unpinned chat leaves the viewer's list"
+    );
+    assert!(any_in_channel(
+        &req_events(&url, &viewer, named.clone()).await,
+        &chat
+    ));
+
+    // Unshare: the viewer's live subscription closes and a new read is refused.
+    let (accepted, msg) = submit_ws(
+        &url,
+        &owner,
+        9002,
+        &[&["h", &chat], &["visibility", "private"]],
+    )
+    .await;
+    assert!(accepted, "unshare: {msg}");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match live.recv_event(remaining).await.expect("CLOSED on unshare") {
+            RelayMessage::Closed {
+                subscription_id, ..
+            } if subscription_id == live_sub => break,
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == live_sub && event.kind == Kind::Custom(9) => {
+                panic!("a message reached the viewer after unsharing: {event:?}")
+            }
+            _ => {}
+        }
+    }
+    live.disconnect().await.ok();
+    let mut ws = BuzzTestClient::connect(&url, &viewer)
+        .await
+        .expect("connect");
+    let sid = sub_id("solo-unshared");
+    ws.subscribe(&sid, vec![named]).await.expect("subscribe");
+    match ws
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("reply to #h read")
+    {
+        RelayMessage::Closed { message, .. } => {
+            assert!(message.contains("restricted"), "{message}")
+        }
+        other => panic!("an unshared chat must refuse a non-member: {other:?}"),
+    }
+    ws.disconnect().await.ok();
+
+    // ── Convert to a channel: one kind:9002 ─────────────────────────────────
+    let (accepted, msg) = submit_ws(
+        &url,
+        &owner,
+        9002,
+        &[
+            &["h", &born_unlisted],
+            &["t", ""],
+            &["unlisted", "false"],
+            &["visibility", "open"],
+        ],
+    )
+    .await;
+    assert!(accepted, "convert in one event: {msg}");
+    let tags = group_metadata_tags(&url, &stranger, &born_unlisted).await;
+    assert!(!tags.contains(&vec!["unlisted".to_string()]), "{tags:?}");
+    assert!(
+        !tags.contains(&vec!["t".to_string(), "buzz.solo".to_string()]),
+        "converting clears the Solo label: {tags:?}"
+    );
+    assert!(
+        listed_channel_ids(&url, &stranger, since)
+            .await
+            .contains(&born_unlisted),
+        "a converted chat is listed to non-members"
+    );
+}
+
 /// Record `owner` as the NIP-OA owner of `agent`, by authenticating once.
 async fn record_agent_owner(url: &str, agent: &Keys, owner: &Keys) {
     let auth_tag = buzz_sdk::nip_oa::parse_auth_tag(

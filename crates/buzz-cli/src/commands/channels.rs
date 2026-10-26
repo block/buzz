@@ -662,6 +662,7 @@ pub async fn cmd_create_channel(
     visibility: &str,
     description: Option<&str>,
     ttl: Option<i64>,
+    unlisted: bool,
 ) -> Result<(), CliError> {
     match channel_type {
         "stream" | "forum" => {}
@@ -694,9 +695,16 @@ pub async fn cmd_create_channel(
         "forum" => buzz_sdk::ChannelKind::Forum,
         _ => unreachable!(),
     };
-    let builder =
-        buzz_sdk::build_create_channel(channel_uuid, name, Some(vis), Some(ct), description, ttl)
-            .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
+    let builder = buzz_sdk::build_create_channel(
+        channel_uuid,
+        name,
+        Some(vis),
+        Some(ct),
+        description,
+        ttl,
+        unlisted,
+    )
+    .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -1423,6 +1431,7 @@ pub async fn cmd_create_channel_from_template(
     visibility_override: Option<&str>,
     description: Option<&str>,
     ttl: Option<i64>,
+    unlisted: bool,
 ) -> Result<(), CliError> {
     let templates_path = channel_templates::resolve_templates_path(templates_file)?;
     let template: ChannelTemplateRecord =
@@ -1477,6 +1486,7 @@ pub async fn cmd_create_channel_from_template(
         Some(ct),
         effective_description,
         ttl,
+        unlisted,
     )
     .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
     let event = client.sign_event(builder)?;
@@ -1916,6 +1926,7 @@ pub async fn dispatch(
             visibility,
             description,
             ttl,
+            unlisted,
             template,
             templates_file,
         } => {
@@ -1929,6 +1940,7 @@ pub async fn dispatch(
                     visibility.as_ref().map(|v| v.to_string()).as_deref(),
                     description.as_deref(),
                     ttl,
+                    unlisted,
                 )
                 .await
             } else {
@@ -1945,6 +1957,7 @@ pub async fn dispatch(
                     &visibility.to_string(),
                     description.as_deref(),
                     ttl,
+                    unlisted,
                 )
                 .await
             }

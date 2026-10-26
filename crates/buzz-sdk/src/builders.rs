@@ -917,6 +917,11 @@ pub fn build_set_purpose(channel_id: Uuid, purpose: &str) -> Result<EventBuilder
 /// `ttl`: `Some(secs)` makes the channel ephemeral with that lifetime in
 /// seconds (the relay archives it once the deadline passes without activity);
 /// `None` leaves it permanent.
+///
+/// `unlisted`: `true` emits `["unlisted", "true"]`, so the channel starts out
+/// of channel listings for non-members; `false` emits nothing, and the
+/// channel is listed. Check the relay's NIP-11 `buzz-unlisted-channels`
+/// extension first: a relay without it ignores the tag.
 pub fn build_create_channel(
     channel_id: Uuid,
     name: &str,
@@ -924,6 +929,7 @@ pub fn build_create_channel(
     channel_type: Option<ChannelKind>,
     about: Option<&str>,
     ttl: Option<i32>,
+    unlisted: bool,
 ) -> Result<EventBuilder, SdkError> {
     let name = buzz_core::channel::canonical_channel_name(name);
     if name.trim().is_empty() {
@@ -941,6 +947,9 @@ pub fn build_create_channel(
     }
     if let Some(secs) = ttl {
         tags.push(tag(&["ttl", &secs.to_string()])?);
+    }
+    if unlisted {
+        tags.push(tag(&["unlisted", "true"])?);
     }
     Ok(EventBuilder::new(Kind::Custom(9007), "").tags(tags))
 }
@@ -3821,6 +3830,7 @@ mod tests {
                 Some(ChannelKind::Stream),
                 Some("General chat"),
                 None,
+                false,
             )
             .unwrap(),
         );
@@ -3842,6 +3852,7 @@ mod tests {
                 None::<ChannelKind>,
                 None,
                 None,
+                false,
             )
             .unwrap(),
         );
@@ -3859,6 +3870,7 @@ mod tests {
                 None::<ChannelKind>,
                 None,
                 None,
+                false,
             )
             .unwrap(),
         );
@@ -3875,9 +3887,33 @@ mod tests {
                 None::<ChannelKind>,
                 None,
                 None,
+                false,
             ),
             Err(SdkError::InvalidTag(_))
         ));
+    }
+
+    #[test]
+    fn create_channel_unlisted_emits_tag_only_when_set() {
+        let build = |unlisted| {
+            sign(
+                build_create_channel(
+                    uuid(),
+                    "solo",
+                    Some(Visibility::Private),
+                    Some(ChannelKind::Stream),
+                    None,
+                    None,
+                    unlisted,
+                )
+                .unwrap(),
+            )
+        };
+        assert!(has_tag(&build(true), "unlisted", "true"));
+        assert!(!build(false)
+            .tags
+            .iter()
+            .any(|t| t.kind().to_string() == "unlisted"));
     }
 
     #[test]
@@ -3891,6 +3927,7 @@ mod tests {
                 Some(ChannelKind::Stream),
                 None,
                 Some(3600),
+                false,
             )
             .unwrap(),
         );

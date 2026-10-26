@@ -114,6 +114,7 @@ pub async fn create_channel(
     created_by: &[u8],
     ttl_seconds: Option<i32>,
     labels: &[String],
+    unlisted: bool,
 ) -> Result<ChannelRecord> {
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
@@ -138,9 +139,9 @@ pub async fn create_channel(
 
     sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10)
         "#,
     )
     .bind(id)
@@ -152,6 +153,7 @@ pub async fn create_channel(
     .bind(created_by)
     .bind(ttl_seconds)
     .bind(labels)
+    .bind(unlisted)
     .execute(tx.conn())
     .await?;
 
@@ -229,6 +231,7 @@ pub async fn create_channel_with_id(
             created_by,
             ttl_seconds,
             labels,
+            unlisted: false,
             members: &[],
         },
     )
@@ -272,6 +275,8 @@ pub struct NewChannel<'a> {
     pub ttl_seconds: Option<i32>,
     /// Labels validated by `buzz_core::channel::parse_channel_labels`.
     pub labels: &'a [String],
+    /// Leave the channel out of listings for non-members from the start.
+    pub unlisted: bool,
     /// 32-byte pubkeys added as ordinary members invited by the creator. The
     /// caller has authorized each addition.
     pub members: &'a [Vec<u8>],
@@ -345,6 +350,7 @@ async fn insert_channel_rows(
         created_by,
         ttl_seconds,
         labels,
+        unlisted,
         members,
     } = channel;
     let community_id = tx.community();
@@ -368,9 +374,9 @@ async fn insert_channel_rows(
 
     let rows_affected = sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10)
         ON CONFLICT (community_id, id) DO NOTHING
         "#,
     )
@@ -383,6 +389,7 @@ async fn insert_channel_rows(
     .bind(created_by)
     .bind(ttl_seconds)
     .bind(labels)
+    .bind(unlisted)
     .execute(tx.conn())
     .await?
     .rows_affected();
@@ -1512,6 +1519,7 @@ impl Db {
             created_by,
             ttl_seconds,
             &[],
+            false,
         )
         .await
     }
@@ -1599,7 +1607,8 @@ impl Db {
         .await
     }
 
-    /// Creates a channel with a relay-chosen UUID and an initial label set.
+    /// Creates a channel with a relay-chosen UUID, an initial label set and
+    /// an initial unlisted flag.
     #[allow(clippy::too_many_arguments)]
     #[datastore_span(name = "create_labeled_channel", system = "postgresql")]
     pub async fn create_labeled_channel(
@@ -1612,6 +1621,7 @@ impl Db {
         created_by: &[u8],
         ttl_seconds: Option<i32>,
         labels: &[String],
+        unlisted: bool,
     ) -> Result<ChannelRecord> {
         create_channel(
             &self.pool,
@@ -1623,6 +1633,7 @@ impl Db {
             created_by,
             ttl_seconds,
             labels,
+            unlisted,
         )
         .await
     }
@@ -2260,6 +2271,7 @@ mod postgres_tests {
             created_by,
             ttl_seconds: None,
             labels: &[],
+            unlisted: false,
             members,
         }
     }
