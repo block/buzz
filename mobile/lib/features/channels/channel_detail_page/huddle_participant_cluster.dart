@@ -42,6 +42,7 @@ class _HuddleParticipantCluster extends HookWidget {
     required this.activeSpeakerPubkeys,
     required this.speakerLevels,
     required this.workingAgentPubkeys,
+    required this.agentPubkeys,
     required this.movementDuration,
     required this.entryDuration,
     required this.exitDuration,
@@ -58,6 +59,9 @@ class _HuddleParticipantCluster extends HookWidget {
   final Set<String> activeSpeakerPubkeys;
   final Map<String, double> speakerLevels;
   final Set<String> workingAgentPubkeys;
+
+  /// Lowercase pubkeys that the Huddle roster counts as agents.
+  final Set<String> agentPubkeys;
   final Duration movementDuration;
   final Duration entryDuration;
   final Duration exitDuration;
@@ -147,6 +151,7 @@ class _HuddleParticipantCluster extends HookWidget {
                 active: activeSpeakerPubkeys.contains(pubkey),
                 speakerLevel: speakerLevels[pubkey] ?? 0,
                 preparingResponse: workingAgentPubkeys.contains(pubkey),
+                isHuddleAgent: agentPubkeys.contains(pubkey.toLowerCase()),
                 slot: lastSlots[pubkey]!,
                 present: visiblePubkeySet.contains(pubkey),
                 movementDuration: movementDuration,
@@ -183,6 +188,7 @@ class _HuddleAnimatedParticipant extends StatelessWidget {
     required this.active,
     required this.speakerLevel,
     required this.preparingResponse,
+    required this.isHuddleAgent,
     required this.slot,
     required this.present,
     required this.movementDuration,
@@ -198,6 +204,7 @@ class _HuddleAnimatedParticipant extends StatelessWidget {
   final bool active;
   final double speakerLevel;
   final bool preparingResponse;
+  final bool isHuddleAgent;
   final _HuddleClusterSlot slot;
   final bool present;
   final Duration movementDuration;
@@ -251,6 +258,7 @@ class _HuddleAnimatedParticipant extends StatelessWidget {
             active: active,
             speakerLevel: speakerLevel,
             preparingResponse: preparingResponse,
+            isHuddleAgent: isHuddleAgent,
             frameSize: frameSize,
             onTap: onTap,
           ),
