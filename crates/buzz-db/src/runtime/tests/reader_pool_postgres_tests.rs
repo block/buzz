@@ -246,9 +246,9 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
         .await
         .expect("connect admin");
     let (writer, wname) = create_scratch_db(&admin, "proof_tx").await;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "ALTER DATABASE \"{wname}\" SET default_transaction_isolation = 'repeatable read'"
-    ))
+    )))
     .execute(&admin)
     .await
     .expect("default the scratch database to repeatable read");
