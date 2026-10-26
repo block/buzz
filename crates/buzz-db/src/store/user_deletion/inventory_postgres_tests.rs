@@ -107,6 +107,32 @@ async fn migration_schema_user_target_constraint_matches_desired_state() {
         .submit(&"ab".repeat(32), "operator", None)
         .await
         .unwrap();
-    assert!(sqlx::query("INSERT INTO entity_deletion_requests (target, requested_by) VALUES ('not-a-key', 'operator')")
-        .execute(&pool).await.is_err());
+    // Storage remains identity-format agnostic. Account lookup belongs in intake.
+    use nostr::ToBech32;
+    let npub = nostr::PublicKey::parse(&"ab".repeat(32))
+        .unwrap()
+        .to_bech32()
+        .unwrap();
+    for target in ["builderlab:account-123", npub.as_str()] {
+        sqlx::query(
+            "INSERT INTO entity_deletion_requests (target, requested_by) VALUES ($1, 'operator')",
+        )
+        .bind(target)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    for target in ["", " ", " account-123", "account-123 ", &"x".repeat(257)] {
+        assert!(sqlx::query(
+            "INSERT INTO entity_deletion_requests (target, requested_by) VALUES ($1, 'operator')"
+        )
+        .bind(target)
+        .execute(&pool)
+        .await
+        .is_err());
+    }
+    assert!(users
+        .submit("builderlab:account-123", "operator", None)
+        .await
+        .is_err());
 }

@@ -15,7 +15,7 @@ pub struct EntityRequest {
     pub id: Uuid,
     /// Currently always `user`.
     pub entity_type: String,
-    /// Canonical hex public key or a synthetic `demo:` label.
+    /// Identity identifier; current intake saves a canonical public key or `demo:` label.
     pub target: String,
     /// Intake, approval, execution (`running`/`retry_wait`), or `completed`.
     pub status: String,

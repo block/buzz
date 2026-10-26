@@ -210,10 +210,15 @@ execution is implemented. The dummy fixture's former participant is synthetic.
 ## Schema and compatibility
 
 Apply migrations 0071 and 0072 before real-key submission. They widen the target
-check to accept canonical public keys, then validate in a separate transaction.
+check to accept a nonempty identifier of up to 256 bytes with no surrounding
+spaces, then validate in a separate transaction. Identity formats belong in the
+application, so this column can also store account IDs when account resolution
+is implemented. Today the CLI resolves only demo and hex/npub inputs.
 Both use a 5-second lock timeout and 30-second statement timeout. The desired-state
 schema has the same final constraint. No data backfill, trigger, function, or
-foreign key is added. Existing demo targets remain valid.
+foreign key is added. Existing demo targets remain valid. If you applied an
+earlier draft of these migrations, use a fresh disposable test database; do not
+rewrite migration checksums.
 
 The new reader accepts both community-only inventories and saved version-1 demo
 inventories from #8520. Old manifests and their handler inputs are preserved on
