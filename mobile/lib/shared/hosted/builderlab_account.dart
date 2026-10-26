@@ -204,8 +204,9 @@ class BuilderlabAccountClient {
   }
 
   /// An absent status means screening does not apply to this account. Any
-  /// status other than OK, including one this build does not know, needs
-  /// setup in Builderlab, matching the web app.
+  /// other status that is not OK, including one this build does not know,
+  /// gets the account-setup message, so a refusal never says whether the
+  /// account is pending review or rejected.
   static bool _needsAccountSetup(Object? accountStatus) =>
       accountStatus != null && accountStatus != 'ACCOUNT_STATUS_OK';
 

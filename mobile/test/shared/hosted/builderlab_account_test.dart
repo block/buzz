@@ -288,13 +288,32 @@ void main() {
   test(
     'a refused request names account setup only when status needs it',
     () async {
-      for (final (accountStatus, refusal) in [
-        (null, AccountFailure.denied),
-        ('ACCOUNT_STATUS_OK', AccountFailure.denied),
-        ('ACCOUNT_STATUS_NEEDS_DETAILS', AccountFailure.accountSetupRequired),
-        ('ACCOUNT_STATUS_PENDING', AccountFailure.accountSetupRequired),
-        ('ACCOUNT_STATUS_REJECTED', AccountFailure.accountSetupRequired),
-        ('ACCOUNT_STATUS_UNSPECIFIED', AccountFailure.accountSetupRequired),
+      Map<String, Object> status(String value) => {'account_status': value};
+      for (final (accountFields, refusal) in [
+        (<String, Object>{}, AccountFailure.denied),
+        (
+          <String, Object>{
+            'account_standing': {
+              'details_status': 'ACCOUNT_DETAILS_STATUS_MISSING',
+              'screening_status': 'ACCOUNT_SCREENING_STATUS_NOT_SCREENED',
+            },
+          },
+          AccountFailure.denied,
+        ),
+        (status('ACCOUNT_STATUS_OK'), AccountFailure.denied),
+        (
+          status('ACCOUNT_STATUS_NEEDS_DETAILS'),
+          AccountFailure.accountSetupRequired,
+        ),
+        (status('ACCOUNT_STATUS_PENDING'), AccountFailure.accountSetupRequired),
+        (
+          status('ACCOUNT_STATUS_REJECTED'),
+          AccountFailure.accountSetupRequired,
+        ),
+        (
+          status('ACCOUNT_STATUS_UNSPECIFIED'),
+          AccountFailure.accountSetupRequired,
+        ),
       ]) {
         final client = BuilderlabAccountClient(
           httpClient: MockClient((request) async {
@@ -308,7 +327,7 @@ void main() {
                     : {
                         'subject': 'account-1',
                         'expires_at': expiry,
-                        'account_status': ?accountStatus,
+                        ...accountFields,
                       },
               ),
               200,
@@ -319,7 +338,7 @@ void main() {
         await expectLater(
           client.currentIdentity(),
           throwsA(refusal),
-          reason: '$accountStatus',
+          reason: '$accountFields',
         );
         await client.clearLocalSession();
       }
