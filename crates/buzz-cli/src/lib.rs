@@ -685,7 +685,8 @@ pub enum ChannelsCmd {
         /// Create the channel unlisted: left out of channel lists for people
         /// who are not members. Anyone can still read and join an unlisted
         /// open channel by its id. Change it later with `channels update
-        /// --unlisted`.
+        /// --unlisted`. Refused if the relay does not advertise
+        /// `buzz-unlisted-channels`.
         #[arg(long)]
         unlisted: bool,
         /// Apply a desktop-local channel template by name (case-insensitive):
@@ -730,7 +731,8 @@ pub enum ChannelsCmd {
         /// Leave the channel out of channel lists for people who are not
         /// members (`true`), or list it again (`false`). Anyone can still read
         /// and join an unlisted open channel by its id. Matters only while the
-        /// channel is open. Owner/admin only.
+        /// channel is open. Owner/admin only. `true` is refused if the relay
+        /// does not advertise `buzz-unlisted-channels`.
         #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
         unlisted: Option<bool>,
     },
