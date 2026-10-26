@@ -169,10 +169,11 @@ and join it, but it does not show up for people who are not members.
 - kind:9007 also takes `["unlisted", "true"|"false"]`, so a channel can
   start unlisted; a missing tag means listed. Any other value is refused
   before the event is stored, as on kind:9002.
-- For a non-member, an unlisted open channel is left out of every read that
-  does not name it: a filter without `#h` (including kind:39000 discovery
-  without `#d`, and `#P` creator queries), COUNT, NIP-50 search, artifact
-  queries and the channel list. A filter that names it by `#h`, or by `#d`
+- For a non-member, an unlisted open channel, of any type, is left out of
+  every read that does not name it: a filter without `#h` (including
+  kind:39000 discovery without `#d`, and the system-channel opt-in by `#P`
+  or `#t:["system"]`), COUNT, NIP-50 search, artifact queries and the
+  channel list. A filter that names it by `#h`, or by `#d`
   on a filter whose kinds are all 39000–39003, reads it under the ordinary
   open-channel rules. This is the same "named-only" rule that applies to
   system channels ([NIP-CL](docs/nips/NIP-CL.md)).

@@ -114,7 +114,7 @@ async fn access_sets(
             .await
             .map_err(|e| database_error(context, e))?
             .into_iter()
-            .map(|(id, _)| id)
+            .map(|channel| channel.id)
             .collect()
     } else {
         Vec::new()

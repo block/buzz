@@ -34,8 +34,10 @@ use crate::state::AppState;
 
 /// The named-only channels a request may add to a filter's scope: the
 /// readable channels of non-legacy types, and which of them are system
-/// channels. A filter reads one only by naming it; a filter that opts in also
-/// reads every system one (see the module docs).
+/// channels the opt-in may add. A filter reads one only by naming it; a
+/// filter that opts in also reads every such system one (see the module
+/// docs). An unlisted system channel the reader is not a member of is never
+/// one of them, so only a filter that names it reads it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct NamedOnlyChannels {
     ids: Vec<Uuid>,
@@ -52,12 +54,28 @@ impl NamedOnlyChannels {
         channels
     }
 
+    /// From [`buzz_db::channel_members::get_readable_named_only_channels`],
+    /// which says which channels the opt-in may add.
+    pub(crate) fn from_readable(
+        rows: impl IntoIterator<Item = buzz_db::channel_members::ReadableNamedOnlyChannel>,
+    ) -> Self {
+        let mut channels = Self::default();
+        for row in rows {
+            channels.insert_with_opt_in(row.id, &row.channel_type, row.opt_in);
+        }
+        channels
+    }
+
     fn insert(&mut self, id: Uuid, channel_type: &str) {
+        self.insert_with_opt_in(id, channel_type, true);
+    }
+
+    fn insert_with_opt_in(&mut self, id: Uuid, channel_type: &str, opt_in: bool) {
         if self.ids.contains(&id) {
             return;
         }
         self.ids.push(id);
-        if channel_type == buzz_core::channel::ChannelType::System.as_str() {
+        if opt_in && channel_type == buzz_core::channel::ChannelType::System.as_str() {
             self.system.push(id);
         }
     }
@@ -198,7 +216,7 @@ pub(crate) async fn readable_named_only_channels_for_filters(
         return Ok(NamedOnlyChannels::default());
     }
     let named = named_outside(filters, implicit);
-    let mut readable = NamedOnlyChannels::from_typed(
+    let mut readable = NamedOnlyChannels::from_readable(
         state
             .db
             .get_readable_named_only_channels(community, pubkey, &named)

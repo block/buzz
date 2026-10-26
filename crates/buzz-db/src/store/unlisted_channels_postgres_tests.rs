@@ -44,11 +44,22 @@ impl Fixture {
 
     /// A channel created by `owner`, who becomes its owner member.
     async fn channel(&self, name: &str, visibility: ChannelVisibility) -> Uuid {
+        self.typed_channel(name, ChannelType::Stream, visibility)
+            .await
+    }
+
+    /// [`Self::channel`] of `channel_type`.
+    async fn typed_channel(
+        &self,
+        name: &str,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+    ) -> Uuid {
         self.db
             .create_channel(
                 self.community,
                 name,
-                ChannelType::Stream,
+                channel_type,
                 visibility,
                 None,
                 &self.owner.public_key().to_bytes(),
@@ -90,8 +101,31 @@ impl Fixture {
             .collect()
     }
 
-    /// The named-only channels `reader` can read when a request names `named`.
+    /// The named-only channels `reader` can read when a request names
+    /// `named`, each with its type.
     async fn named_only(&self, reader: &Keys, named: &[Uuid]) -> Vec<(Uuid, String)> {
+        self.readable(reader, named)
+            .await
+            .into_iter()
+            .map(|channel| (channel.id, channel.channel_type))
+            .collect()
+    }
+
+    /// The named-only channels `reader` can read when a request names
+    /// `named`, each with whether the system-channel opt-in may add it.
+    async fn opt_in(&self, reader: &Keys, named: &[Uuid]) -> Vec<(Uuid, bool)> {
+        self.readable(reader, named)
+            .await
+            .into_iter()
+            .map(|channel| (channel.id, channel.opt_in))
+            .collect()
+    }
+
+    async fn readable(
+        &self,
+        reader: &Keys,
+        named: &[Uuid],
+    ) -> Vec<crate::channel_members::ReadableNamedOnlyChannel> {
         self.db
             .get_readable_named_only_channels(
                 self.community,
@@ -197,6 +231,53 @@ async fn only_the_named_unlisted_channels_are_loaded() {
     let both = f.named_only(&f.outsider, &[a, b]).await;
     assert!(both.contains(&(a, "stream".to_owned())));
     assert!(both.contains(&(b, "stream".to_owned())));
+}
+
+/// An unlisted open system channel is read only by naming it, for a
+/// non-member: the system-channel opt-in (`#t:["system"]`, `#P`) needs every
+/// readable system channel, but never gets this one. Its members keep it as
+/// before, and a listed open system channel is loaded and opted in to as
+/// before.
+/// Mutation: drop `NOT c.unlisted OR c.id = ANY($3)` from the system branch
+/// of `get_readable_named_only_channels` → RED (naming nothing loads it); make
+/// its `opt_in` always true → RED (the outsider may opt in to it).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_unlisted_system_channel_is_read_only_by_name() {
+    let f = Fixture::new().await;
+    let listed = f
+        .typed_channel("listed", ChannelType::System, ChannelVisibility::Open)
+        .await;
+    let unlisted = f
+        .typed_channel("unlisted", ChannelType::System, ChannelVisibility::Open)
+        .await;
+    f.set_unlisted(unlisted, true).await;
+
+    // A non-member that names nothing (an opt-in alone) gets only the listed one.
+    assert_eq!(
+        f.opt_in(&f.outsider, &[]).await,
+        [(listed, true)],
+        "opt-in discovery leaves the unlisted system channel out"
+    );
+    // Naming it reads it, but the opt-in still may not add it.
+    let named = f.opt_in(&f.outsider, &[unlisted]).await;
+    assert_eq!(named.len(), 2, "{named:?}");
+    assert!(named.contains(&(listed, true)));
+    assert!(named.contains(&(unlisted, false)), "readable by name only");
+
+    // Its member keeps it, for the opt-in too, whether or not it is named.
+    for names in [&[][..], &[unlisted][..]] {
+        let member = f.opt_in(&f.owner, names).await;
+        assert_eq!(member.len(), 2, "{member:?}");
+        assert!(member.contains(&(listed, true)));
+        assert!(member.contains(&(unlisted, true)), "a member opts in to it");
+    }
+
+    // Listing it again puts it back in discovery.
+    f.set_unlisted(unlisted, false).await;
+    let relisted = f.opt_in(&f.outsider, &[]).await;
+    assert_eq!(relisted.len(), 2, "{relisted:?}");
+    assert!(relisted.contains(&(unlisted, true)));
 }
 
 /// The flag is stored on its own and matters only while the channel is open:

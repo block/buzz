@@ -136,7 +136,7 @@ async fn authorize_workflow_read(
                 .into_response()
             })?
             .iter()
-            .any(|(id, _)| *id == channel_id);
+            .any(|channel| channel.id == channel_id);
     if !readable {
         return Err(not_found());
     }
