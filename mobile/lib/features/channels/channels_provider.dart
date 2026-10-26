@@ -348,6 +348,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       fence,
       parsedMetas.values,
       myPk,
+      refreshCached: fetchLastMessage,
     );
     // Latest-message filters depend on channel identity/privacy, not names.
     // Start them alongside profiles, and observe both errors immediately.

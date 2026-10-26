@@ -39,18 +39,30 @@ void _requestPathCases() {
     );
     expect(session.profileRequests, 1);
 
-    // A fresh channel snapshot consumes live cache updates without another
-    // profile query. Blank names preserve the existing handle fallback.
-    container
-        .read(userCacheProvider.notifier)
-        .cacheProfileEvent(
-          _requestProfile(
-            'alice',
-            name: ' ',
-            handle: ' alice@example.com ',
-            createdAt: 2,
-          ),
-        );
+    // Full refreshes discover relay-side profile changes without another
+    // surface injecting a live cache event. Blank names retain the fallback.
+    session.profiles = [
+      _requestProfile(
+        'alice',
+        name: ' ',
+        handle: ' alice@example.com ',
+        createdAt: 2,
+      ),
+    ];
+    // Ordinary reconnects stay metadata-only and reuse the admitted profile.
+    session.setStatus(SessionStatus.disconnected);
+    await _settle();
+    session.setStatus(SessionStatus.connected);
+    await _settle();
+    expect(session.profileRequests, 1);
+    expect(
+      container
+          .read(channelsProvider)
+          .requireValue
+          .single
+          .displayLabel(currentPubkey: 'me'),
+      'Alice',
+    );
     await container.read(channelsProvider.notifier).refresh();
     expect(
       container
@@ -60,12 +72,14 @@ void _requestPathCases() {
           .displayLabel(currentPubkey: 'me'),
       'alice@example.com',
     );
-    expect(session.profileRequests, 1);
-    container
-        .read(userCacheProvider.notifier)
-        .cacheProfileEvent(
-          _requestProfile('alice', name: ' ', handle: ' ', createdAt: 3),
-        );
+    expect(session.profileRequests, 2);
+    expect(
+      container.read(userCacheProvider)['alice']?.nip05Handle?.trim(),
+      'alice@example.com',
+    );
+    session.profiles = [
+      _requestProfile('alice', name: ' ', handle: ' ', createdAt: 3),
+    ];
     await container.read(channelsProvider.notifier).refresh();
     expect(
       container
@@ -75,6 +89,7 @@ void _requestPathCases() {
           .displayLabel(currentPubkey: 'me'),
       'Unknown identity',
     );
+    expect(session.profileRequests, 3);
   });
 
   test(

@@ -198,8 +198,9 @@ Future<Map<String, String>> _resolveDmDisplayNames(
   Ref ref,
   _ChannelRefreshFence fence,
   Iterable<ChannelData> channelMetas,
-  String myPk,
-) async {
+  String myPk, {
+  required bool refreshCached,
+}) async {
   final dmParticipants = <String>{};
   final myPkLower = myPk.toLowerCase();
   for (final data in channelMetas) {
@@ -213,7 +214,9 @@ Future<Map<String, String>> _resolveDmDisplayNames(
 
   final profiles = await _fenced(
     fence,
-    ref.read(userCacheProvider.notifier).resolve(dmParticipants.toList()),
+    ref
+        .read(userCacheProvider.notifier)
+        .resolve(dmParticipants.toList(), refreshCached: refreshCached),
   );
   final displayNames = <String, String>{};
   for (final profile in profiles.values) {

@@ -53,18 +53,22 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     state = {...state, profile.pubkey.toLowerCase(): profile};
   }
 
-  /// Resolves missing profiles through verified batch admission.
+  /// Resolves profiles through verified batch admission.
   ///
   /// Unlike [preload], failures propagate to callers whose result requires
-  /// profile hydration. Cached profiles remain reusable within this scope.
-  Future<Map<String, UserProfile>> resolve(List<String> pubkeys) async {
+  /// profile hydration. Set [refreshCached] for a full revalidation; otherwise
+  /// cached profiles remain reusable within this scope.
+  Future<Map<String, UserProfile>> resolve(
+    List<String> pubkeys, {
+    bool refreshCached = false,
+  }) async {
     final requested = pubkeys.map((pubkey) => pubkey.toLowerCase()).toSet();
-    final missing = requested
-        .where((pubkey) => !state.containsKey(pubkey))
+    final toFetch = requested
+        .where((pubkey) => refreshCached || !state.containsKey(pubkey))
         .toList();
     final generation = _generation;
     final session = ref.read(relaySessionProvider.notifier);
-    for (final batch in _profileQueryBatches(missing)) {
+    for (final batch in _profileQueryBatches(toFetch)) {
       if (!_isCurrent(generation)) {
         throw StateError('Profile request belongs to a retired cache');
       }
