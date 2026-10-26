@@ -8818,6 +8818,7 @@ pub(crate) mod postgres_tests {
                         &nostr::Keys::generate(),
                     )
                     .await
+                    .map(|write| write.outcome)
                     .expect("seed owner as a community member");
                 state
                     .db
@@ -8829,6 +8830,7 @@ pub(crate) mod postgres_tests {
                         &nostr::Keys::generate(),
                     )
                     .await
+                    .map(|write| write.outcome)
                     .expect("seed agent's own moderator role");
 
                 let stored_owner = scenario == "stored-banned-owner";
