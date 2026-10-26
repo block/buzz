@@ -207,5 +207,3 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i seeds/operator_listener_outbox.sql
 \i seeds/relay_operator_audit.sql
 \i seeds/storage_accounting_snapshots.sql
-
--- Fence any community-scoped table that lacks an explicit attach.
