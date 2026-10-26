@@ -22,10 +22,11 @@ import { reconcileConfiguredManagedAgentRuntimes } from "@/features/agents/manag
  * Reconciliation is keyed by canonical relay URL: each configured relay is
  * reconciled once it appears (so adding a community mid-session spawns pairs
  * there without needing the add flow to also switch communities), and a relay
- * whose reconcile fails is retried with a capped backoff (5s / 30s / 2m) rather
- * than left un-spawned until the next switch or relaunch. Relays that reconcile
+ * whose reconcile fails is retried with a capped backoff (5s / 30s, capped at
+ * 2m thereafter) rather than permanently abandoned. Relays that reconcile
  * cleanly are never re-hit; once nothing is outstanding, no timer is left
- * running.
+ * running. Network online and window focus events immediately re-trigger
+ * reconciliation for any failing relays.
  */
 export function useManagedAgentRuntimeReconciliation(
   communities: readonly { relayUrl: string }[],
@@ -65,7 +66,7 @@ export function useManagedAgentRuntimeReconciliation(
         }
       }
       clearRetryTimer();
-      if (soonest === null) return; // all failing relays hit the retry cap
+      if (soonest === null) return;
       retryTimerRef.current = setTimeout(() => {
         retryTimerRef.current = null;
         if (!cancelled) runReconcile();
@@ -132,11 +133,35 @@ export function useManagedAgentRuntimeReconciliation(
         });
     };
 
+    const onResume = () => {
+      // Re-trigger an immediate attempt on network recovery or window focus
+      // if any relays are currently failing and not already in flight.
+      if (
+        !cancelled &&
+        failuresRef.current.size > 0 &&
+        inFlightRef.current.size === 0
+      ) {
+        clearRetryTimer();
+        runReconcile();
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") onResume();
+    };
+
+    window.addEventListener("online", onResume);
+    window.addEventListener("focus", onResume);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     runReconcile();
 
     return () => {
       cancelled = true;
       clearRetryTimer();
+      window.removeEventListener("online", onResume);
+      window.removeEventListener("focus", onResume);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [communities, queryClient]);
 }
