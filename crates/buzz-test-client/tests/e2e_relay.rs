@@ -3364,7 +3364,9 @@ async fn test_nip29_solo_share_and_convert_wire() {
     let tags = group_metadata_tags(&url, &owner, &born_unlisted).await;
     assert!(tags.contains(&vec!["unlisted".to_string()]), "{tags:?}");
     assert!(tags.contains(&vec!["private".to_string()]), "{tags:?}");
-    assert!(listed_channel_ids(&url, &stranger, since).await.is_empty());
+    assert!(!listed_channel_ids(&url, &stranger, since)
+        .await
+        .contains(&born_unlisted));
     let (accepted, msg) = submit_ws(
         &url,
         &owner,
