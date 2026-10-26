@@ -423,3 +423,117 @@ async fn put_user_names_at_most_one_hundred_people() {
         Some(100)
     );
 }
+
+/// The relay decides people in tag order, each against the roster the people
+/// before them left, as `put_members` writes them. A sole owner who names an
+/// heir first may then step down; stepping down first is refused, since no
+/// heir exists yet; an heir refused by their add policy is never counted.
+/// Mutations: decide everyone against the roster before the event → the
+/// heir-first owner stays owner → RED; count a policy-refused heir → the
+/// owner steps down with no heir → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn put_user_decides_each_person_after_the_ones_before() {
+    let state = state().await;
+    let tenant = community(&state, "put-user-ordered").await;
+    let (owner, heir, refusing) = (Keys::generate(), Keys::generate(), Keys::generate());
+    refuse_third_party_adds(&state, &tenant, &refusing).await;
+    let (owner_hex, heir_hex, refusing_hex) = (
+        owner.public_key().to_hex(),
+        heir.public_key().to_hex(),
+        refusing.public_key().to_hex(),
+    );
+    let last_owner = "cannot demote the last owner — transfer ownership first";
+
+    // Heir first: ownership moves in one event.
+    let channel_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let result = ingest(
+        &state,
+        &tenant,
+        put_user(
+            &owner,
+            channel_id,
+            &[&[&heir_hex, "owner"], &[&owner_hex, "member"]],
+            &[],
+        ),
+        &owner,
+    )
+    .await
+    .expect("heir first");
+    assert_eq!(
+        report(&result.message),
+        serde_json::json!({ "added": [heir_hex], "updated": [owner_hex] })
+    );
+    assert_eq!(
+        role_of(&state, &tenant, channel_id, &heir).await.as_deref(),
+        Some("owner")
+    );
+    assert_eq!(
+        role_of(&state, &tenant, channel_id, &owner).await.as_deref(),
+        Some("member")
+    );
+
+    // Step down first: refused, the heir is still added.
+    let channel_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let result = ingest(
+        &state,
+        &tenant,
+        put_user(
+            &owner,
+            channel_id,
+            &[&[&owner_hex, "member"], &[&heir_hex, "owner"]],
+            &[],
+        ),
+        &owner,
+    )
+    .await
+    .expect("step down first");
+    assert_eq!(
+        report(&result.message),
+        serde_json::json!({
+            "added": [heir_hex],
+            "rejected": [{ "reason": last_owner, "pubkeys": [owner_hex] }],
+        })
+    );
+    assert_eq!(
+        role_of(&state, &tenant, channel_id, &owner).await.as_deref(),
+        Some("owner")
+    );
+
+    // A policy-refused heir doesn't count: nobody can be added.
+    let channel_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let refused = match ingest(
+        &state,
+        &tenant,
+        put_user(
+            &owner,
+            channel_id,
+            &[&[&refusing_hex, "owner"], &[&owner_hex, "member"]],
+            &[],
+        ),
+        &owner,
+    )
+    .await
+    {
+        Err(IngestError::Rejected(message)) => message,
+        Err(error) => panic!("expected a rejection, got {error:?}"),
+        Ok(result) => panic!("expected a rejection, got OK {}", result.message),
+    };
+    let json = refused.strip_prefix("invalid: ").expect("invalid prefix");
+    assert_eq!(
+        report(json),
+        serde_json::json!({
+            "rejected": [
+                {
+                    "reason": "policy:nobody — this agent has disabled external channel additions",
+                    "pubkeys": [refusing_hex],
+                },
+                { "reason": last_owner, "pubkeys": [owner_hex] },
+            ],
+        })
+    );
+    assert_eq!(
+        role_of(&state, &tenant, channel_id, &owner).await.as_deref(),
+        Some("owner")
+    );
+}

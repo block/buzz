@@ -129,7 +129,8 @@ pub enum PutUserDecision {
 ///
 /// The database read for the target's agent channel-add policy stays with the
 /// caller: this returns [`PutUserDecision::CheckAddPolicy`] when that read is
-/// still required.
+/// still required. It also returns the role the target would hold, so a
+/// caller deciding several people in order can apply each to its roster.
 pub fn decide_put_user(
     visibility: &str,
     join_role: ChannelJoinRole,
@@ -138,7 +139,7 @@ pub fn decide_put_user(
     members: &[MemberRecord],
     target: &[u8],
     actor: &[u8],
-) -> Result<PutUserDecision, ChannelAuthzError> {
+) -> Result<(PutUserDecision, MemberRole), ChannelAuthzError> {
     // The admission rules are defined once, in `decide_member_put`.
     // `add_member` applies them again under the channel's membership lock (it
     // also covers callers that skip this validator); deciding here too means
@@ -166,10 +167,10 @@ pub fn decide_put_user(
 
     // Self-add: always allowed regardless of the target's agent policy.
     if target == actor {
-        return Ok(PutUserDecision::Allow);
+        return Ok((PutUserDecision::Allow, role));
     }
 
-    Ok(PutUserDecision::CheckAddPolicy)
+    Ok((PutUserDecision::CheckAddPolicy, role))
 }
 
 /// Evaluate a target agent's `channel_add_policy` for a third-party add.
@@ -657,7 +658,8 @@ mod tests {
                     &members,
                     &pk(*target),
                     &pk(*actor),
-                ),
+                )
+                .map(|(decision, _)| decision),
                 *expected,
                 "visibility {visibility} roster {entries:?} actor {actor} target {target} requested {requested_role:?}"
             );
@@ -757,7 +759,8 @@ mod tests {
                     &members,
                     &pk(*target),
                     &pk(9),
-                ),
+                )
+                .map(|(decision, _)| decision),
                 *expected,
                 "join_role {join_role} actor {actor_role:?} target {target} requested {requested:?}"
             );

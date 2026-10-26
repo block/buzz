@@ -1619,65 +1619,75 @@ pub(crate) async fn validate_put_user(
     let targets = put_user_targets(event)?;
 
     let actor_bytes = event.pubkey.to_bytes().to_vec();
-    let members = state.db.get_members(tenant.community(), channel_id).await?;
-    let actor_role: Option<MemberRole> = members
-        .iter()
-        .find(|m| m.pubkey == actor_bytes)
-        .and_then(|m| m.role.parse().ok());
+    let mut members = state.db.get_members(tenant.community(), channel_id).await?;
     let join_role = buzz_db::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
 
-    // Authorization policy — visibility gate, elevated-grant gate,
-    // active-member role-change gate, and last-owner demotion — lives in
-    // `channel_authz`, which is pure and table-tested. The database reads it
-    // depends on stay here, and are made once for the whole event.
-    let decisions: Vec<_> = targets
-        .iter()
-        .map(|target| {
-            channel_authz::decide_put_user(
-                &channel.visibility,
-                join_role,
-                actor_role,
-                target.role,
-                &members,
-                &target.pubkey,
-                &actor_bytes,
-            )
-        })
-        .collect();
-    // A third-party add also checks the target's channel_add_policy.
+    // A third-party add also checks the target's channel_add_policy. Read
+    // every third party's policy in one query, before deciding anyone.
     let policy_keys: Vec<Vec<u8>> = targets
         .iter()
-        .zip(&decisions)
-        .filter(|(_, decision)| matches!(decision, Ok(PutUserDecision::CheckAddPolicy)))
-        .map(|(target, _)| target.pubkey.clone())
+        .filter(|target| target.pubkey != actor_bytes)
+        .map(|target| target.pubkey.clone())
         .collect();
     let policies = state
         .db
         .get_agent_channel_policies(tenant.community(), &policy_keys)
         .await?;
-    let checked: Vec<_> = targets
-        .into_iter()
-        .zip(decisions)
-        .map(|(target, decision)| {
-            let refusal = match decision {
-                Err(denied) => Some(denied.to_string()),
-                // Self-add: always allowed regardless of policy.
-                Ok(PutUserDecision::Allow) => None,
-                Ok(PutUserDecision::CheckAddPolicy) => {
-                    policies.get(&target.pubkey).and_then(|(policy, owner)| {
-                        channel_authz::decide_channel_add_policy(
-                            policy,
-                            owner.as_deref(),
-                            &actor_bytes,
-                        )
-                        .err()
-                        .map(|denied| denied.to_string())
-                    })
+
+    // Authorization policy — visibility gate, elevated-grant gate,
+    // active-member role-change gate, and last-owner demotion — lives in
+    // `channel_authz`, which is pure and table-tested. People are decided in
+    // tag order against a roster that each allowed person is applied to, the
+    // order `put_members` writes them in: an heir named first lets the sole
+    // owner step down after, and an owner who steps down can't then grant an
+    // elevated role.
+    let mut checked = Vec::with_capacity(targets.len());
+    for target in targets {
+        let actor_role: Option<MemberRole> = members
+            .iter()
+            .find(|m| m.pubkey == actor_bytes)
+            .and_then(|m| m.role.parse().ok());
+        let decision = channel_authz::decide_put_user(
+            &channel.visibility,
+            join_role,
+            actor_role,
+            target.role,
+            &members,
+            &target.pubkey,
+            &actor_bytes,
+        );
+        let outcome = match decision {
+            Err(denied) => Err(denied.to_string()),
+            // Self-add: always allowed regardless of policy.
+            Ok((PutUserDecision::Allow, role)) => Ok(role),
+            Ok((PutUserDecision::CheckAddPolicy, role)) => match policies.get(&target.pubkey) {
+                Some((policy, owner)) => {
+                    channel_authz::decide_channel_add_policy(policy, owner.as_deref(), &actor_bytes)
+                        .map(|()| role)
+                        .map_err(|denied| denied.to_string())
                 }
-            };
-            (target, refusal)
-        })
-        .collect();
+                None => Ok(role),
+            },
+        };
+        let refusal = match outcome {
+            Ok(role) => {
+                match members.iter_mut().find(|m| m.pubkey == target.pubkey) {
+                    Some(member) => member.role = role.as_str().to_owned(),
+                    None => members.push(MemberRecord {
+                        channel_id,
+                        pubkey: target.pubkey.clone(),
+                        role: role.as_str().to_owned(),
+                        joined_at: chrono::Utc::now(),
+                        invited_by: Some(actor_bytes.clone()),
+                        removed_at: None,
+                    }),
+                }
+                None
+            }
+            Err(reason) => Some(reason),
+        };
+        checked.push((target, refusal));
+    }
 
     if checked.iter().all(|(_, refusal)| refusal.is_some()) {
         // One person keeps the single-add error text.
