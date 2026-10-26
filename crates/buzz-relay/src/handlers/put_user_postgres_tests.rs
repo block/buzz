@@ -22,8 +22,11 @@ fn put_user(actor: &Keys, channel_id: Uuid, p_tags: &[&[&str]], extra: &[&[&str]
     for tag in extra {
         tags.push(Tag::parse(tag.iter().copied()).unwrap());
     }
+    // An actor may name themselves (stepping down, or a self-add); the
+    // builder drops a `p` tag for its own key unless told not to.
     EventBuilder::new(Kind::Custom(9000), "")
         .tags(tags)
+        .allow_self_tagging()
         .sign_with_keys(actor)
         .expect("sign 9000")
 }
