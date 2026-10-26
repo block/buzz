@@ -122,7 +122,9 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/push_gateway_delivery_request_replays.sql
 \i tables/public/replica_heartbeat.sql
 \i tables/public/community_deletion_requests.sql
+\i tables/public/entity_deletion_approvals.sql
 \i tables/public/entity_deletion_requests.sql
+\i tables/public/entity_deletion_stage_history.sql
 \i tables/public/community_deletion_approvals.sql
 \i tables/public/community_deletion_checkpoints.sql
 \i tables/public/community_deletion_manifest_keys.sql
@@ -195,7 +197,9 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i seeds/push_gateway_delivery_request_replays.sql
 \i seeds/replica_heartbeat.sql
 \i seeds/community_deletion_requests.sql
+\i seeds/entity_deletion_approvals.sql
 \i seeds/entity_deletion_requests.sql
+\i seeds/entity_deletion_stage_history.sql
 \i seeds/community_deletion_approvals.sql
 \i seeds/community_deletion_checkpoints.sql
 \i seeds/community_deletion_manifest_keys.sql

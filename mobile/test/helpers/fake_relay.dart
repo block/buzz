@@ -22,7 +22,9 @@ import 'package:nostr/nostr.dart' as nostr;
 /// recorded and fails the test at teardown, because app code often catches
 /// relay errors and falls back.
 class FakeRelay {
-  FakeRelay() {
+  /// [now] is the session's wall clock, so a test can model OS suspension:
+  /// time passes while no timer runs.
+  FakeRelay({DateTime Function()? now}) : _now = now {
     addTearDown(() {
       expect(unanswerable, isEmpty, reason: 'requests FakeRelay cannot answer');
     });
@@ -32,21 +34,22 @@ class FakeRelay {
   final stored = <NostrEvent>[];
   final published = <NostrEvent>[];
   final reqs = <List<dynamic>>[];
-  final closedSubscriptions = <String>[];
   final queries = <List<Map<String, dynamic>>>[];
   final sockets = <FakeRelaySocket>[];
   final unanswerable = <String>[];
   final _rejections = <({bool Function(NostrEvent) match, String message})>[];
   Completer<void>? _okHold;
   Completer<void>? _echoHold;
-  Completer<void>? _eoseHold;
-  Completer<void>? _queryHold;
+  Completer<void>? _reqHold;
+  Completer<void>? _authHold;
+  final DateTime Function()? _now;
 
   String get pubkey => keys.public;
 
   late final session = RelaySessionNotifier(
     socketFactory: _openSocket,
     httpClient: MockClient(_handleHttp),
+    now: _now,
   );
 
   List<Override> get overrides => [
@@ -63,9 +66,6 @@ class FakeRelay {
     stored.add(event);
     _fanOut(event);
   }
-
-  /// Replays an already stored event without inserting another history row.
-  void replay(NostrEvent event) => _fanOut(event);
 
   /// Signs an event as [author] (default: a fresh member, not the app user).
   NostrEvent sign({
@@ -98,11 +98,21 @@ class FakeRelay {
   /// The relay dispatches after commit, so echo and OK have no fixed order.
   Completer<void> holdEcho() => _echoHold = Completer<void>();
 
-  /// Withholds the next REQ's EOSE while live events remain deliverable.
-  Completer<void> holdEose() => _eoseHold = Completer<void>();
+  /// Holds new REQs until the completer completes, as a relay's access checks
+  /// would: they read stored events, start live fan-out and reach EOSE only
+  /// once admitted. Events committed meanwhile reach them only through replay.
+  Completer<void> holdReq() => _reqHold = Completer<void>();
 
-  /// Withholds the next HTTP response after taking its history snapshot.
-  Completer<void> holdQuery() => _queryHold = Completer<void>();
+  /// Keeps the next connection unauthenticated until the completer completes.
+  /// Like the relay, it answers a REQ sent before AUTH with CLOSED.
+  Completer<void> holdAuth() => _authHold = Completer<void>();
+
+  /// REQs the relay rejected because they arrived before AUTH.
+  final reqsBeforeAuth = <List<dynamic>>[];
+
+  /// Filters of the live subscriptions open on the current connection.
+  Iterable<List<Map<String, dynamic>>> get liveFilters =>
+      sockets.isEmpty ? const [] : sockets.last._live.values;
 
   /// Drops the current connection, as a network loss would. Its live
   /// subscriptions and queued replies die with it; stored history survives.
@@ -128,23 +138,36 @@ class FakeRelay {
   void _receive(FakeRelaySocket socket, List<dynamic> message) {
     switch (message.first) {
       case 'REQ':
-        reqs.add(message);
         final subId = message[1] as String;
+        if (!socket._authenticated) {
+          reqsBeforeAuth.add(message);
+          scheduleMicrotask(
+            () => socket._reply([
+              'CLOSED',
+              subId,
+              'auth-required: not authenticated',
+            ]),
+          );
+          return;
+        }
+        reqs.add(message);
         final filters = message.skip(2).cast<Map<String, dynamic>>().toList();
-        final history = _query(filters);
-        if (history == null) return;
-        socket._live[subId] = filters;
-        final eoseHold = _eoseHold;
-        _eoseHold = null;
-        scheduleMicrotask(() async {
-          for (final event in history) {
-            socket._reply(['EVENT', subId, event.toJson()]);
-          }
-          if (eoseHold != null) await eoseHold.future;
-          socket._reply(['EOSE', subId]);
-        });
+        void admit() {
+          if (!socket._authenticated) return;
+          final history = _query(filters);
+          if (history == null) return;
+          socket._live[subId] = filters;
+          scheduleMicrotask(() {
+            for (final event in history) {
+              socket._reply(['EVENT', subId, event.toJson()]);
+            }
+            socket._reply(['EOSE', subId]);
+          });
+        }
+
+        final hold = _reqHold;
+        hold == null ? admit() : hold.future.then((_) => admit());
       case 'CLOSE':
-        closedSubscriptions.add(message[1] as String);
         socket._live.remove(message[1]);
       case 'EVENT':
         _publish(
@@ -240,6 +263,13 @@ class FakeRelay {
     final until = filter['until'] as int?;
     if (since != null && event.createdAt < since) return false;
     if (until != null && event.createdAt > until) return false;
+    // Buzz pagination: strictly after the cursor in `created_at DESC, id ASC`.
+    final beforeId = filter['before_id'] as String?;
+    if (beforeId != null &&
+        event.createdAt == until &&
+        event.id.compareTo(beforeId) <= 0) {
+      return false;
+    }
     for (final MapEntry(:key, :value) in filter.entries) {
       if (!key.startsWith('#')) continue;
       final name = key.substring(1);
@@ -267,9 +297,6 @@ class FakeRelay {
         ? _channelWindow(filters.single)
         : _query(filters);
     if (events == null) return http.Response('unanswerable', 501);
-    final queryHold = _queryHold;
-    _queryHold = null;
-    if (queryHold != null) await queryHold.future;
     return http.Response(jsonEncode([for (final e in events) e.toJson()]), 200);
   }
 
@@ -346,10 +373,16 @@ class FakeRelaySocket extends RelaySocket {
   final void Function(Object? error) _onDisconnected;
   final _live = <String, List<Map<String, dynamic>>>{};
   bool _open = false;
+  bool _authenticated = false;
 
   @override
   Future<void> connect() async {
     _open = true;
+    final hold = _relay._authHold;
+    _relay._authHold = null;
+    if (hold != null) await hold.future;
+    if (!_open) return;
+    _authenticated = true;
     _onConnected();
   }
 
@@ -364,6 +397,7 @@ class FakeRelaySocket extends RelaySocket {
   @override
   void dispose() {
     _open = false;
+    _authenticated = false;
     _live.clear();
   }
 
@@ -378,7 +412,15 @@ class FakeRelaySocket extends RelaySocket {
   }
 }
 
-const _filterKeys = {'ids', 'authors', 'kinds', 'since', 'until', 'limit'};
+const _filterKeys = {
+  'ids',
+  'authors',
+  'kinds',
+  'since',
+  'until',
+  'limit',
+  'before_id',
+};
 const _windowKeys = {
   'top_level',
   'include_summaries',

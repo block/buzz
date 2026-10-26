@@ -173,11 +173,13 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         ? null
         : _captureSnapshotWriter(pubkey, relayBaseUrl);
     final connected = Completer<void>();
+    var connectionVersion = 0;
     final sessionState = ref.read(relaySessionProvider);
     final waitingForInitialConnection =
         sessionState.status != SessionStatus.connected;
     ref.listen(relaySessionProvider, (previous, next) {
       if (next.status != SessionStatus.connected) return;
+      if (previous?.status != SessionStatus.connected) connectionVersion++;
       if (waitingForInitialConnection && !connected.isCompleted) {
         connected.complete();
       } else if (previous?.status != SessionStatus.connected) {
@@ -191,9 +193,19 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Re-fetch when the app returns to foreground so channels created on
     // another device while mobile was backgrounded appear immediately.
     ref.listen(appLifecycleProvider, (prev, next) {
-      if (next == AppLifecycleState.resumed) {
-        refresh();
-      }
+      if (next != AppLifecycleState.resumed) return;
+      // Resume is published before the session hears it. Let the session
+      // decide first: one that reconnects reconciles when it connects, so
+      // refreshing here too would fetch the same list twice.
+      final versionBeforeResume = connectionVersion;
+      scheduleMicrotask(() {
+        if (!ref.mounted) return;
+        // A fast reconnect may already have reconciled before this callback.
+        if (connectionVersion == versionBeforeResume &&
+            ref.read(relaySessionProvider).status == SessionStatus.connected) {
+          refresh();
+        }
+      });
     });
 
     ref.onDispose(() {

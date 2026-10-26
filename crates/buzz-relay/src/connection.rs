@@ -1480,16 +1480,26 @@ pub(crate) mod tests {
         auth: AuthState,
         nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
     ) -> TestConn {
+        test_conn_in(
+            auth,
+            nip_fi_assertion,
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+        )
+    }
+
+    /// [`test_conn`] whose tenant is `community`.
+    pub(crate) fn test_conn_in(
+        auth: AuthState,
+        nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
+        community: buzz_core::tenant::CommunityId,
+    ) -> TestConn {
         let (send_tx, send_rx) = mpsc::channel(4);
         let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
         let (terminal_ctrl_tx, terminal_rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let conn = ConnectionState {
             conn_id: Uuid::new_v4(),
-            tenant: TenantContext::resolved(
-                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
-                "test.local".to_string(),
-            ),
+            tenant: TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
             auth_state: StdMutex::new(auth),
             subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

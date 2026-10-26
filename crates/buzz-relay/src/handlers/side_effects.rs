@@ -335,7 +335,9 @@ pub async fn handle_side_effects(
     match kind {
         0 => handle_kind0_profile(tenant, event, state).await,
         5 => handle_standard_deletion_event(tenant, event, state).await,
-        9000 => handle_put_user(tenant, event, state).await,
+        // kind:9000 belongs to the put-user path in ingest, which reports
+        // each person's result.
+        9000 => Err(anyhow::anyhow!("kind:9000 requires apply_put_user")),
         9001 => handle_remove_user(tenant, event, state).await,
         // kind:9002 belongs to the atomic persistence path in ingest.
         9002 => Err(anyhow::anyhow!("kind:9002 requires atomic persistence")),
@@ -594,64 +596,9 @@ pub async fn validate_admin_event(
     }
 
     match kind {
-        9000 => {
-            // An absent role tag means "no role change requested": for an existing
-            // member that preserves the role they already hold, and only defaults
-            // to Member for a genuinely new member. Defaulting unconditionally to
-            // Member made a bare self-targeted PUT_USER silently demote an owner.
-            let role_str = extract_tag_value(event, "role");
-            let requested_role = match role_str {
-                Some(ref s) => match s.parse::<buzz_db::channel::MemberRole>() {
-                    Ok(r) => Some(r),
-                    Err(_) => return Err(anyhow::anyhow!("invalid role: {s}")),
-                },
-                None => None,
-            };
-
-            let members = state.db.get_members(tenant.community(), channel_id).await?;
-            let actor_role: Option<buzz_db::channel::MemberRole> = members
-                .iter()
-                .find(|m| m.pubkey == actor_bytes)
-                .and_then(|m| m.role.parse().ok());
-            let target_pubkey =
-                extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
-
-            let join_role =
-                buzz_db::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
-
-            // Authorization policy — visibility gate, elevated-grant gate,
-            // active-member role-change gate, and last-owner demotion — lives in
-            // `channel_authz`, which is pure and table-tested. The database reads
-            // it depends on stay here.
-            match channel_authz::decide_put_user(
-                &channel.visibility,
-                join_role,
-                actor_role,
-                requested_role,
-                &members,
-                &target_pubkey,
-                &actor_bytes,
-            )? {
-                // Self-add: always allowed regardless of policy.
-                PutUserDecision::Allow => Ok(()),
-                // Third-party add: check channel_add_policy on the target.
-                PutUserDecision::CheckAddPolicy => {
-                    if let Some((policy, owner)) = state
-                        .db
-                        .get_agent_channel_policy(tenant.community(), &target_pubkey)
-                        .await?
-                    {
-                        channel_authz::decide_channel_add_policy(
-                            &policy,
-                            owner.as_deref(),
-                            &actor_bytes,
-                        )?;
-                    }
-
-                    Ok(())
-                }
-            }
-        }
+        // Ingest validates kind:9000 with `validate_put_user`, which keeps
+        // each person's result for `apply_put_user`.
+        9000 => Err(anyhow::anyhow!("kind:9000 requires validate_put_user")),
         9001 => {
             // REMOVE_USER: self-remove allowed unless actor is the last owner; removing others requires owner/admin
             let target_pubkey =
@@ -1148,6 +1095,29 @@ pub async fn emit_membership_notification(
         warn!(%channel_id, "membership notice skipped: channel not found");
         return Ok(());
     };
+    emit_typed_membership_notification(
+        tenant,
+        state,
+        channel_id,
+        &channel_type,
+        target_pubkey,
+        actor_pubkey,
+        notification_kind,
+    )
+    .await
+}
+
+/// [`emit_membership_notification`] for a caller that already read the
+/// channel's type, such as a kind:9000 notifying several people.
+async fn emit_typed_membership_notification(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    channel_type: &str,
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+    notification_kind: u32,
+) -> anyhow::Result<()> {
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
     let channel_id_str = channel_id.to_string();
@@ -1174,7 +1144,7 @@ pub async fn emit_membership_notification(
     })
     .to_string();
 
-    let type_tag = Tag::parse([buzz_core::filter::NOTICE_CHANNEL_TYPE_TAG, &channel_type])
+    let type_tag = Tag::parse([buzz_core::filter::NOTICE_CHANNEL_TYPE_TAG, channel_type])
         .map_err(|e| anyhow::anyhow!("failed to build channel type tag: {e}"))?;
     let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
         .tags([p_tag, h_tag, type_tag])
@@ -1568,74 +1538,369 @@ async fn handle_kind0_profile(
     Ok(())
 }
 
-async fn handle_put_user(
+/// Most people one kind:9000 may name.
+pub(crate) const MAX_PUT_USER_TARGETS: usize = 100;
+
+/// One person a kind:9000 names.
+struct PutUserTarget {
+    pubkey: Vec<u8>,
+    /// `None` asks for no role change: an active member keeps their role, and
+    /// a new member gets the channel's `join_role`. Defaulting to Member made a
+    /// bare self-targeted PUT_USER silently demote an owner.
+    role: Option<MemberRole>,
+}
+
+/// The people a kind:9000 names, in tag order without repeats. As in NIP-29,
+/// each `["p", pubkey, role]` may carry its own role; the event's `role` tag
+/// is the fallback.
+fn put_user_targets(event: &Event) -> anyhow::Result<Vec<PutUserTarget>> {
+    let parse_role = |value: &str| {
+        value
+            .parse::<MemberRole>()
+            .map_err(|_| anyhow::anyhow!("invalid role: {value}"))
+    };
+    let event_role = extract_tag_value(event, "role")
+        .map(|value| parse_role(&value))
+        .transpose()?;
+    let mut targets: Vec<PutUserTarget> = Vec::new();
+    for tag in event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "p")
+    {
+        let values = tag.as_slice();
+        let pubkey = values
+            .get(1)
+            .and_then(|value| hex::decode(value).ok())
+            .filter(|bytes| bytes.len() == 32)
+            .ok_or_else(|| anyhow::anyhow!("p tag must be a 32-byte hex pubkey"))?;
+        let role = match values.get(2).filter(|value| !value.is_empty()) {
+            Some(value) => Some(parse_role(value)?),
+            None => event_role,
+        };
+        if !targets.iter().any(|target| target.pubkey == pubkey) {
+            targets.push(PutUserTarget { pubkey, role });
+        }
+    }
+    if targets.is_empty() {
+        anyhow::bail!("missing p tag");
+    }
+    if targets.len() > MAX_PUT_USER_TARGETS {
+        anyhow::bail!("a put-user may name at most {MAX_PUT_USER_TARGETS} people");
+    }
+    Ok(targets)
+}
+
+/// A validated kind:9000: each person it names, with the reason they were
+/// refused, if they were. At least one was not.
+pub(crate) struct PutUserPlan {
+    channel_id: Uuid,
+    targets: Vec<(PutUserTarget, Option<String>)>,
+}
+
+/// Validate a kind:9000 before storage, person by person, so one refused
+/// person does not refuse the others. Refuses the event only when the event
+/// itself is bad or nobody it names may be added.
+pub(crate) async fn validate_put_user(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PutUserPlan> {
     let channel_id =
-        extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
-    let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
-    let actor_bytes = event.pubkey.to_bytes().to_vec();
-
-    // No role tag = no role change: an existing member keeps their current
-    // role, and a new member gets the channel's `join_role`, whether they add
-    // themselves or someone else adds them. `put_member` resolves that under
-    // the channel's membership lock, together with every admission rule.
-    let requested: Option<MemberRole> = extract_tag_value(event, "role")
-        .map(|role_str| {
-            role_str
-                .parse()
-                .map_err(|_| anyhow::anyhow!("invalid role: {role_str}"))
-        })
-        .transpose()?;
-
-    state
+        extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing or invalid h tag"))?;
+    let channel = state
         .db
-        .put_member(
-            tenant.community(),
-            channel_id,
-            &target_pubkey,
-            requested,
-            Some(&actor_bytes),
-        )
+        .get_channel_for_event_write(tenant.community(), channel_id)
+        .await
+        .map_err(|_| anyhow::anyhow!("channel not found"))?;
+    if channel.archived_at.is_some() {
+        anyhow::bail!("channel is archived");
+    }
+    let targets = put_user_targets(event)?;
+
+    let actor_bytes = event.pubkey.to_bytes().to_vec();
+    let mut members = state.db.get_members(tenant.community(), channel_id).await?;
+    let join_role = buzz_db::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
+
+    // A third-party add also checks the target's channel_add_policy. Read
+    // every third party's policy in one query, before deciding anyone.
+    let policy_keys: Vec<Vec<u8>> = targets
+        .iter()
+        .filter(|target| target.pubkey != actor_bytes)
+        .map(|target| target.pubkey.clone())
+        .collect();
+    let policies = state
+        .db
+        .get_agent_channel_policies(tenant.community(), &policy_keys)
         .await?;
-    state.invalidate_membership(tenant, channel_id, &target_pubkey);
 
+    // Authorization policy — visibility gate, elevated-grant gate,
+    // active-member role-change gate, and last-owner demotion — lives in
+    // `channel_authz`, which is pure and table-tested. People are decided in
+    // tag order against a roster that each allowed person is applied to, the
+    // order `put_members` writes them in: an heir named first lets the sole
+    // owner step down after, and an owner who steps down can't then grant an
+    // elevated role.
+    let mut checked = Vec::with_capacity(targets.len());
+    for target in targets {
+        let actor_role: Option<MemberRole> = members
+            .iter()
+            .find(|m| m.pubkey == actor_bytes)
+            .and_then(|m| m.role.parse().ok());
+        let decision = channel_authz::decide_put_user(
+            &channel.visibility,
+            join_role,
+            actor_role,
+            target.role,
+            &members,
+            &target.pubkey,
+            &actor_bytes,
+        );
+        let outcome = match decision {
+            Err(denied) => Err(denied.to_string()),
+            // Self-add: always allowed regardless of policy.
+            Ok((PutUserDecision::Allow, role)) => Ok(role),
+            Ok((PutUserDecision::CheckAddPolicy, role)) => match policies.get(&target.pubkey) {
+                Some((policy, owner)) => {
+                    channel_authz::decide_channel_add_policy(policy, owner.as_deref(), &actor_bytes)
+                        .map(|()| role)
+                        .map_err(|denied| denied.to_string())
+                }
+                None => Ok(role),
+            },
+        };
+        let refusal = match outcome {
+            Ok(role) => {
+                match members.iter_mut().find(|m| m.pubkey == target.pubkey) {
+                    Some(member) => member.role = role.as_str().to_owned(),
+                    None => members.push(MemberRecord {
+                        channel_id,
+                        pubkey: target.pubkey.clone(),
+                        role: role.as_str().to_owned(),
+                        joined_at: chrono::Utc::now(),
+                        invited_by: Some(actor_bytes.clone()),
+                        removed_at: None,
+                    }),
+                }
+                None
+            }
+            Err(reason) => Some(reason),
+        };
+        checked.push((target, refusal));
+    }
+
+    if checked.iter().all(|(_, refusal)| refusal.is_some()) {
+        // One person keeps the single-add error text.
+        if let [(_, Some(reason))] = checked.as_slice() {
+            anyhow::bail!("{reason}");
+        }
+        let mut report = PutUserReport::default();
+        for (target, refusal) in checked {
+            report.reject(&target.pubkey, refusal.unwrap_or_default());
+        }
+        anyhow::bail!("{}", report.message());
+    }
+    Ok(PutUserPlan {
+        channel_id,
+        targets: checked,
+    })
+}
+
+/// What a kind:9000 did for each person it named, as hex pubkeys.
+#[derive(Default)]
+struct PutUserReport {
+    added: Vec<String>,
+    /// Already active members whose role changed.
+    updated: Vec<String>,
+    /// Already active members at the requested role: nothing changed.
+    already_member: Vec<String>,
+    /// Refused people, grouped by reason in first-seen order.
+    rejected: Vec<(String, Vec<String>)>,
+}
+
+impl PutUserReport {
+    fn reject(&mut self, pubkey: &[u8], reason: String) {
+        let pubkey = hex::encode(pubkey);
+        match self.rejected.iter_mut().find(|(seen, _)| *seen == reason) {
+            Some((_, pubkeys)) => pubkeys.push(pubkey),
+            None => self.rejected.push((reason, vec![pubkey])),
+        }
+    }
+
+    /// The OK message: `members: ` and a JSON object of the non-empty lists.
+    /// Grouping refusals by reason keeps 100 people well under a client's
+    /// receipt size limit.
+    fn message(&self) -> String {
+        let mut report = serde_json::Map::new();
+        for (key, pubkeys) in [
+            ("added", &self.added),
+            ("updated", &self.updated),
+            ("already_member", &self.already_member),
+        ] {
+            if !pubkeys.is_empty() {
+                report.insert(key.into(), serde_json::json!(pubkeys));
+            }
+        }
+        if !self.rejected.is_empty() {
+            let rejected: Vec<_> = self
+                .rejected
+                .iter()
+                .map(
+                    |(reason, pubkeys)| serde_json::json!({ "reason": reason, "pubkeys": pubkeys }),
+                )
+                .collect();
+            report.insert("rejected".into(), rejected.into());
+        }
+        format!("members: {}", serde_json::Value::Object(report))
+    }
+}
+
+/// Apply a stored kind:9000 and return its OK message. An event naming
+/// several people reports each person's result; one naming a single person
+/// keeps the empty message a single add has always had. `put_member` decides
+/// every admission rule again under the channel's membership lock, so a person
+/// validation allowed can still be refused here.
+pub(crate) async fn apply_put_user(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+    plan: PutUserPlan,
+) -> String {
+    let channel_id = plan.channel_id;
+    let batch = plan.targets.len() > 1;
+    let actor_bytes = event.pubkey.to_bytes().to_vec();
     let actor_hex = hex::encode(&actor_bytes);
-    let target_hex = hex::encode(&target_pubkey);
-    emit_system_message(
-        tenant,
-        state,
-        channel_id,
-        serde_json::json!({
-            "type": "member_joined",
-            "actor": actor_hex,
-            "target": target_hex,
-        }),
-        chrono::Utc::now(),
-    )
-    .await?;
-
-    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
-        warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+    let mut report = PutUserReport::default();
+    let mut allowed = Vec::with_capacity(plan.targets.len());
+    for (target, refusal) in plan.targets {
+        match refusal {
+            Some(reason) => report.reject(&target.pubkey, reason),
+            None => allowed.push(target),
+        }
     }
-
-    if let Err(e) = emit_membership_notification(
-        tenant,
-        state,
-        channel_id,
-        &target_pubkey,
-        &actor_bytes,
-        KIND_MEMBER_ADDED_NOTIFICATION,
-    )
-    .await
+    let puts: Vec<_> = allowed
+        .iter()
+        .map(|target| buzz_db::channel_members::MemberPut {
+            pubkey: &target.pubkey,
+            requested: target.role,
+        })
+        .collect();
+    let results = match state
+        .db
+        .put_members(tenant.community(), channel_id, &puts, Some(&actor_bytes))
+        .await
     {
-        warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+        Ok(results) => results,
+        // Nothing was written.
+        Err(e) => {
+            error!(channel = %channel_id, error = %e, "NIP-29 PUT_USER write failed");
+            for target in &allowed {
+                report.reject(&target.pubkey, "error: membership write failed".into());
+            }
+            Vec::new()
+        }
+    };
+    // Every person's notification is tagged with the channel's type: read it
+    // once. No channel row means no type to tag, so no notifications.
+    let channel_type = if results.iter().any(Result::is_ok) {
+        match state
+            .db
+            .channel_type_of(tenant.community(), channel_id)
+            .await
+        {
+            Ok(None) => {
+                warn!(%channel_id, "membership notice skipped: channel not found");
+                None
+            }
+            Ok(channel_type) => channel_type,
+            Err(e) => {
+                warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    for (target, result) in allowed.iter().zip(results) {
+        let put = match result {
+            Ok(put) => put,
+            Err(buzz_db::DbError::AccessDenied(reason)) => {
+                report.reject(&target.pubkey, reason);
+                continue;
+            }
+            Err(e) => {
+                error!(channel = %channel_id, error = %e, "NIP-29 PUT_USER write failed");
+                report.reject(&target.pubkey, "error: membership write failed".into());
+                continue;
+            }
+        };
+        state.invalidate_membership(tenant, channel_id, &target.pubkey);
+        let target_hex = hex::encode(&target.pubkey);
+        match put.prior_role {
+            // A no-op re-add posts no second "joined" notice, but still sends
+            // the member-added notification, which re-signals an agent that
+            // missed the first one.
+            Some(prior) if prior == put.member.role => report.already_member.push(target_hex),
+            prior => {
+                if let Err(e) = emit_system_message(
+                    tenant,
+                    state,
+                    channel_id,
+                    serde_json::json!({
+                        "type": "member_joined",
+                        "actor": actor_hex,
+                        "target": target_hex,
+                    }),
+                    chrono::Utc::now(),
+                )
+                .await
+                {
+                    warn!(channel = %channel_id, error = %e, "member_joined system message failed");
+                }
+                match prior {
+                    Some(_) => report.updated.push(target_hex),
+                    None => report.added.push(target_hex),
+                }
+            }
+        }
+
+        if let Some(channel_type) = &channel_type {
+            if let Err(e) = emit_typed_membership_notification(
+                tenant,
+                state,
+                channel_id,
+                channel_type,
+                &target.pubkey,
+                &actor_bytes,
+                KIND_MEMBER_ADDED_NOTIFICATION,
+            )
+            .await
+            {
+                warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+            }
+        }
     }
 
-    info!(channel = %channel_id, target = %target_hex, "NIP-29 PUT_USER processed");
-    Ok(())
+    if !report.added.is_empty() || !report.updated.is_empty() || !report.already_member.is_empty() {
+        if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+            warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+        }
+    }
+
+    info!(
+        channel = %channel_id,
+        added = report.added.len(),
+        updated = report.updated.len(),
+        already_member = report.already_member.len(),
+        rejected = report.rejected.iter().map(|(_, pubkeys)| pubkeys.len()).sum::<usize>(),
+        "NIP-29 PUT_USER processed"
+    );
+    if batch {
+        report.message()
+    } else {
+        String::new()
+    }
 }
 
 async fn handle_remove_user(

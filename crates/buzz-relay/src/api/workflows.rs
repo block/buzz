@@ -82,6 +82,7 @@ async fn authorize_workflow_read(
     )
     .await?;
     let pubkey = *admission.proven_pubkey();
+    let token_owner = admission.token_owner();
     let (event_id_bytes, signed_created_at) = admission.into_extra();
 
     bridge::enforce_http_admission(state, &tenant, &pubkey)
@@ -95,10 +96,11 @@ async fn authorize_workflow_read(
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     super::relay_members::enforce_relay_membership(
         state,
-        tenant.community(),
+        &tenant,
         &pubkey_bytes,
         auth_tag,
         signed_created_at,
+        token_owner,
     )
     .await
     .map_err(|e| e.into_response())?;

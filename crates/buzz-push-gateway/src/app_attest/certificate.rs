@@ -1,7 +1,7 @@
 //! Apple certificate adapters; path and signature validation remain in webpki.
 use super::error::AppAttestError as Error;
 use aws_lc_rs::digest::{digest, SHA256};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use rustls_pki_types::{CertificateDer, UnixTime};
 use x509_parser::{certificate::X509Certificate, parse_x509_certificate};
 
@@ -86,7 +86,7 @@ pub(super) fn public_key(bytes: &[u8]) -> Result<[u8; 65], Error> {
     }
     let key = p256::PublicKey::from_sec1_bytes(spki.subject_public_key.data.as_ref())
         .map_err(|_| Error::InvalidPublicKey)?;
-    key.to_encoded_point(false)
+    key.to_sec1_point(false)
         .as_bytes()
         .try_into()
         .map_err(|_| Error::InvalidPublicKey)

@@ -1,4 +1,5 @@
 import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -12,7 +13,7 @@ const _channel = '11111111-1111-4111-8111-111111111111';
 
 void main() {
   test(
-    'a channel loads, follows live messages, settles sends and recovers',
+    'a channel loads, follows, settles sends, recovers and detaches once left',
     () {
       fakeAsync((async) {
         final relay = FakeRelay();
@@ -26,12 +27,12 @@ void main() {
           ],
         );
         relay.seed([message('first', now - 20), message('second', now - 10)]);
-        final eose = relay.holdEose();
-        final history = relay.holdQuery();
 
+        // The relay admits the live REQ only after its access checks.
+        final admitted = relay.holdReq();
         final container = ProviderContainer(overrides: relay.overrides);
         addTearDown(container.dispose);
-        final messages = container.listen(
+        var messages = container.listen(
           channelMessagesProvider(_channel),
           (_, _) {},
         );
@@ -62,26 +63,13 @@ void main() {
           container.read(relaySessionProvider).status,
           SessionStatus.connected,
         );
-        expect(
-          relay.queries,
-          hasLength(1),
-          reason: 'history starts while live EOSE is still pending',
-        );
-        final overlap = message('during history', liveSince());
-        relay.deliver(overlap);
+        // History waits for the live EOSE, so a message committed before the
+        // relay admits the REQ is read, however long ago it was signed.
+        expect(relay.queries, isEmpty);
+        relay.seed([message('committed as it opened', now - 60)]);
+        admitted.complete();
         settle();
-        history.complete();
-        settle();
-        expect(timeline(), ['first', 'second', 'during history']);
-        expect(
-          eose.isCompleted,
-          isFalse,
-          reason: 'history is usable before live EOSE',
-        );
-        eose.complete();
-        relay.replay(overlap);
-        settle();
-        expect(timeline(), ['first', 'second', 'during history']);
+        expect(timeline(), ['committed as it opened', 'first', 'second']);
         expect(relay.queries, hasLength(1), reason: 'read the channel window');
         expect(
           relay.reqs.where((req) => (req[1] as String).startsWith('h-')),
@@ -144,24 +132,49 @@ void main() {
         settle();
         expect(timeline(), contains('after reconnect'));
         expect(timeline().where((text) => text == 'hello'), hasLength(1));
-        // A retired initialization may still be waiting for EOSE after its
-        // history has loaded. Its eventual ready result must close that REQ,
-        // leaving the replacement subscription delivering exactly once.
-        final lateEose = relay.holdEose();
-        container.invalidate(channelMessagesProvider(_channel));
-        settle();
-        final retiredSubId = relay.reqs.last[1] as String;
-        container.invalidate(channelMessagesProvider(_channel));
-        settle();
-        lateEose.complete();
-        settle();
-        expect(relay.closedSubscriptions, contains(retiredSubId));
-        relay.deliver(message('after replacement', liveSince()));
-        settle();
-        expect(
-          timeline().where((text) => text == 'after replacement'),
-          hasLength(1),
+
+        // A chat left for a while stops following live, typing included;
+        // returning shows the cached rows at once and catches up on what
+        // arrived meanwhile.
+        bool follows({required bool typing}) => relay.liveFilters.any(
+          (filters) => filters.any(
+            (filter) =>
+                ((filter['#h'] as List?)?.contains(_channel) ?? false) &&
+                (filter['kinds'] as List).contains(EventKind.typingIndicator) ==
+                    typing,
+          ),
         );
+        bool followsChannel() =>
+            follows(typing: false) && follows(typing: true);
+        bool followsNothing() =>
+            !follows(typing: false) && !follows(typing: true);
+        var typing = container.listen(
+          channelTypingProvider(_channel),
+          (_, _) {},
+        );
+        settle();
+        expect(followsChannel(), isTrue);
+        messages.close();
+        typing.close();
+        async.elapse(const Duration(seconds: 29));
+        expect(followsChannel(), isTrue, reason: 'a brief cover keeps it');
+        async.elapse(const Duration(seconds: 2));
+        expect(followsNothing(), isTrue);
+        // A reconnect while it's hidden must not strand it detached.
+        relay.drop();
+        async.elapse(const Duration(seconds: 2));
+        expect(followsNothing(), isTrue);
+        relay.deliver(message('while away', liveSince() + 1));
+        messages = container.listen(
+          channelMessagesProvider(_channel),
+          (_, _) {},
+        );
+        typing = container.listen(channelTypingProvider(_channel), (_, _) {});
+        expect(timeline(), contains('after reconnect'));
+        settle();
+        expect(followsChannel(), isTrue);
+        expect(timeline(), contains('while away'));
+        expect(timeline().where((text) => text == 'hello'), hasLength(1));
       });
     },
   );

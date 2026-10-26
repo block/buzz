@@ -627,6 +627,7 @@ jobs:
           cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip43_membership_snapshots_are_rejected -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip29_departure_wire -- --ignored --nocapture
+          cargo test -p buzz-test-client --test e2e_relay nip29_batch_put_user_wire -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip29_announce_channel_wire -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip29_member_raises_guest_agent -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip29_guest_is_read_only_in_normal_channel -- --ignored --nocapture

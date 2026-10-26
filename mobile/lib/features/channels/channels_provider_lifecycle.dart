@@ -171,10 +171,14 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
   // Arm recovery before the first network load succeeds. A restored snapshot
   // needs one full load; subsequent reconnects keep the metadata-only backstop.
   void _startBackstopTimer() {
-    _backstopTimer ??= Timer.periodic(
-      ChannelsNotifier._backstopInterval,
-      (_) => unawaited(_refreshInBackground()),
-    );
+    _backstopTimer ??= Timer.periodic(ChannelsNotifier._backstopInterval, (_) {
+      // After suspension, a missed tick can precede the resumed lifecycle
+      // event. Keep recovery armed, but never poll while backgrounded.
+      if (_lifecycleRef.read(appLifecycleProvider) ==
+          AppLifecycleState.resumed) {
+        unawaited(_refreshInBackground());
+      }
+    });
   }
 
   Future<void> _refreshInBackground({bool queueIfBusy = false}) async {

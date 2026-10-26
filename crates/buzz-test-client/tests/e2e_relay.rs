@@ -1387,6 +1387,93 @@ async fn test_nip29_put_user_nobody_blocks() {
     ws.disconnect().await.expect("disconnect");
 }
 
+/// NIP-29 kind 9000 (PUT_USER) naming several people over the wire: each is
+/// added on its own, a refused agent does not refuse the others, and the OK
+/// message reports every result.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_batch_put_user_wire() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let (person, bot, refusing) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let (person_hex, bot_hex, refusing_hex) = (
+        person.public_key().to_hex(),
+        bot.public_key().to_hex(),
+        refusing.public_key().to_hex(),
+    );
+
+    let policy_event = EventBuilder::new(
+        Kind::Custom(10100),
+        serde_json::json!({ "channel_add_policy": "nobody" }).to_string(),
+    )
+    .sign_with_keys(&refusing)
+    .expect("sign kind:10100");
+    let resp = reqwest::Client::new()
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &refusing_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&policy_event).unwrap())
+        .send()
+        .await
+        .expect("set policy request");
+    assert!(
+        resp.status().is_success(),
+        "set policy failed: {}",
+        resp.status()
+    );
+
+    let channel_id = create_test_channel(&owner_keys).await;
+    let mut ws = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let put_user = |p_tags: &[&[&str]]| {
+        let mut tags = vec![Tag::parse(["h", &channel_id]).unwrap()];
+        for tag in p_tags {
+            tags.push(Tag::parse(["p"].iter().chain(tag.iter()).copied()).unwrap());
+        }
+        EventBuilder::new(Kind::Custom(9000), "")
+            .tags(tags)
+            .sign_with_keys(&owner_keys)
+            .expect("sign kind 9000")
+    };
+    let report = |message: &str| -> serde_json::Value {
+        serde_json::from_str(message.strip_prefix("members: ").expect("members report"))
+            .expect("members report JSON")
+    };
+
+    let ok = ws
+        .send_event(put_user(&[
+            &[&person_hex],
+            &[&refusing_hex],
+            &[&bot_hex, "bot"],
+        ]))
+        .await
+        .expect("send batch kind 9000");
+    assert!(ok.accepted, "batch put-user refused: {}", ok.message);
+    assert_eq!(
+        report(&ok.message),
+        serde_json::json!({
+            "added": [person_hex, bot_hex],
+            "rejected": [{
+                "reason": "policy:nobody — this agent has disabled external channel additions",
+                "pubkeys": [refusing_hex],
+            }],
+        })
+    );
+
+    let ok = ws
+        .send_event(put_user(&[&[&person_hex], &[&bot_hex, "bot"]]))
+        .await
+        .expect("resend names in a new kind 9000");
+    assert!(ok.accepted, "repeat put-user refused: {}", ok.message);
+    assert_eq!(
+        report(&ok.message),
+        serde_json::json!({ "already_member": [person_hex, bot_hex] })
+    );
+
+    ws.disconnect().await.expect("disconnect");
+}
+
 /// NIP-29 kind 9000 (PUT_USER): self-add bypasses "nobody" policy — an agent can always add itself.
 #[tokio::test]
 #[ignore]

@@ -12,7 +12,7 @@
 //!
 //! | Series | Labels | One increment per |
 //! |---|---|---|
-//! | `buzz_nip_fi_shadow_total` | `route` (`http`, `ws`, `audio`), `stage`, `outcome`, `community` | NIP-FI decision enforce would make: one per HTTP request that reaches admission, one per WebSocket upgrade enforce would refuse, and one per observed session: at the AUTH where enforce would admit or deny it, or `deadline` when its deadline passes first. A request or upgrade whose community binding goes stale before enforce's final re-check also records `deadline` |
+//! | `buzz_nip_fi_shadow_total` | `route` (`http`, `ws`, `audio`), `stage`, `outcome`, `community` | NIP-FI decision enforce would make: one per HTTP request that reaches admission, one per WebSocket upgrade enforce would refuse, and one per observed session: at the AUTH where enforce would admit or deny it, or `deadline` when its deadline passes first. A request or upgrade whose community binding goes stale before enforce's final re-check also records `deadline`. An agent assertion enforce would refuse for its token owner, banned or not the agent's stored owner, records `owner` |
 //! | `buzz_nip_fi_shadow_strict_proof_total` | `route` (`bridge`, `blossom`), `outcome` (`pass`, `rejected`), `community` | strict NIP-98 side check on a route whose proof is stricter in enforce (payload tag, Blossom proof); not every request runs one |
 //! | `buzz_nip_fi_shadow_session_end_total` | `route` (`ws`, `audio`), `reason` (`expired`, `revoked`), `community` | admitted shadow session enforce would have ended; a session never admitted records none |
 //! | `buzz_nip_fi_shadow_disconnect_total` | `route` (`admin`, `cross_pod`), `outcome` | disconnect-path event that moves a real disconnect counter in enforce: an accepted admin command, a capacity rejection, a subscriber lag, or a cross-pod capacity or poison failsafe. An admin command refused for its header, body, proof, replay, or a dependency error records nothing |
@@ -44,6 +44,7 @@ pub(crate) enum Stage {
     Pairing,
     DenySet,
     Deadline,
+    Owner,
 }
 
 impl Stage {
@@ -56,6 +57,7 @@ impl Stage {
             Self::Pairing => "pairing",
             Self::DenySet => "deny_set",
             Self::Deadline => "deadline",
+            Self::Owner => "owner",
         }
     }
 }
