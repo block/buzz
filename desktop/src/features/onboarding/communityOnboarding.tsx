@@ -15,6 +15,7 @@ export type CommunityOnboardingSource =
   | "deep-link-join";
 
 export type CommunityOnboardingStage =
+  | "invite-consent"
   | "claiming"
   | "connecting"
   | "profile"
@@ -61,6 +62,7 @@ export type CommunityOnboardingTransactionPatch = Partial<
   Pick<
     CommunityOnboardingTransaction,
     | "stage"
+    | "policyReceipt"
     | "relayUrl"
     | "communityId"
     | "previousCommunityId"
@@ -106,6 +108,7 @@ function isTransaction(
     typeof transaction.createdAt === "string" &&
     typeof transaction.updatedAt === "string" &&
     [
+      "invite-consent",
       "claiming",
       "connecting",
       "profile",

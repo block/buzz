@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/hosted/hosted_join_policy.dart';
 import '../../shared/hosted/community_entry_requirements.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/deeplink/deep_link.dart';
@@ -75,6 +76,7 @@ class InviteJoinState {
   final bool requiresFreshInvite;
   final bool isStarterSetupRecovery;
   final String? focusChannelId;
+  final HostedJoinPolicy? joinPolicy;
 
   const InviteJoinState({
     this.status = InviteJoinStatus.idle,
@@ -85,6 +87,7 @@ class InviteJoinState {
     this.requiresFreshInvite = false,
     this.isStarterSetupRecovery = false,
     this.focusChannelId,
+    this.joinPolicy,
   });
 
   InviteJoinState copyWith({
@@ -96,7 +99,11 @@ class InviteJoinState {
     bool? requiresFreshInvite,
     bool? isStarterSetupRecovery,
     Object? focusChannelId = _unset,
+    Object? joinPolicy = _unset,
   }) => InviteJoinState(
+    joinPolicy: identical(joinPolicy, _unset)
+        ? this.joinPolicy
+        : joinPolicy as HostedJoinPolicy?,
     status: status ?? this.status,
     invite: invite ?? this.invite,
     host: host ?? this.host,
@@ -156,9 +163,25 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       host: _hostFromRelay(invite.relayUrl),
       communityName: Community.nameFromUrl(invite.relayUrl),
     );
+    try {
+      CommunityEntryRequirements.requireSelfHosted(invite.relayUrl);
+      final policy = await loadJoinPolicy(
+        client: ref.read(inviteJoinHttpClientProvider),
+        origin: Uri.parse(invite.relayUrl),
+        allowLegacyRelay: true,
+      );
+      if (!ref.mounted || state.invite != invite) return;
+      state = state.copyWith(joinPolicy: policy);
+    } catch (error) {
+      if (!ref.mounted || state.invite != invite) return;
+      state = state.copyWith(
+        status: InviteJoinStatus.error,
+        errorMessage: _friendlyInviteError(error),
+      );
+    }
   }
 
-  Future<void> confirmJoin() async {
+  Future<void> confirmJoin({String? acceptedPolicyVersion}) async {
     final invite = state.invite;
     if (invite == null ||
         state.requiresFreshInvite ||
@@ -202,11 +225,28 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         return;
       }
 
+      final receipt = await freshJoinPolicyReceipt(
+        client: ref.read(inviteJoinHttpClientProvider),
+        origin: Uri.parse(invite.relayUrl),
+        code: invite.code,
+        allowLegacyRelay: true,
+        checkCurrent: () {
+          if (!ref.mounted || state.invite != invite) {
+            throw StateError('Invite changed');
+          }
+        },
+        confirm: (policy) async {
+          final accepted =
+              state.joinPolicy?.version == policy.version &&
+              acceptedPolicyVersion == policy.version;
+          state = state.copyWith(joinPolicy: policy);
+          return accepted;
+        },
+      );
       final keys = ref.read(inviteKeyGeneratorProvider)();
       final body = jsonEncode({
         'code': invite.code,
-        if (invite.policyReceipt != null)
-          'policy_receipt': invite.policyReceipt,
+        'policy_receipt': ?receipt,
       });
       final relayUri = Uri.parse(invite.relayUrl);
       validateInviteRelayUri(relayUri);
@@ -254,6 +294,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       state = state.copyWith(isStarterSetupRecovery: true);
       await startStarterSetupRecovery();
     } catch (error) {
+      if (!ref.mounted || state.invite != invite) return;
       final requiresFreshInvite = _requiresFreshInvite(error);
       state = state.copyWith(
         status: InviteJoinStatus.error,
@@ -431,8 +472,8 @@ String _communityNameFromClaim(Map<String, dynamic> claim, String relayUrl) {
 
 bool _requiresFreshInvite(Object error) {
   final message = error.toString();
-  return message.contains('join_policy_required') ||
-      message.contains('invite_exhausted');
+  return message.contains('invite_exhausted') ||
+      error == HostedInviteFailure.exhausted;
 }
 
 String _friendlyInviteError(Object error) {
@@ -448,8 +489,9 @@ String _friendlyInviteError(Object error) {
     return 'This invite has reached its use limit. Ask for a new invite.';
   }
   if (message.contains('invite_invalid')) return 'This invite is not valid.';
-  if (message.contains('join_policy_required')) {
-    return 'This invite approval has expired. Re-open the invite link to try again.';
+  if (message.contains('join_policy_required') ||
+      error == HostedInviteFailure.policyRequired) {
+    return 'Review and accept the current community policy to continue.';
   }
   if (message.contains('SocketException') ||
       message.contains('Connection refused') ||

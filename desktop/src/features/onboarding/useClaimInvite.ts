@@ -1,8 +1,11 @@
 import * as React from "react";
 
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
-import { inviteClaimErrorMessage } from "@/shared/api/inviteHelpers";
-import { claimInvite } from "@/shared/api/invites";
+import {
+  inviteClaimErrorMessage,
+  inviteErrorMessage,
+} from "@/shared/api/inviteHelpers";
+import { claimInvite, getJoinPolicy } from "@/shared/api/invites";
 
 /**
  * Drive the `claiming` stage after machine onboarding completes: claim the
@@ -17,28 +20,55 @@ import { claimInvite } from "@/shared/api/invites";
 export function useClaimInvite() {
   const { transaction, update } = useCommunityOnboarding();
   const [isPending, setIsPending] = React.useState(false);
+  const currentTransaction = React.useRef(transaction);
+  React.useEffect(() => {
+    currentTransaction.current = transaction;
+    return () => {
+      currentTransaction.current = null;
+    };
+  }, [transaction]);
 
   React.useEffect(() => {
     if (transaction?.stage !== "claiming" || transaction.error || isPending) {
       return;
     }
     setIsPending(true);
-    void claimInvite(
-      transaction.relayUrl,
-      transaction.inviteCode ?? "",
-      transaction.policyReceipt,
-    )
-      .then(() => {
-        update({ stage: "connecting", error: undefined }, transaction.id);
-      })
-      .catch((error: unknown) =>
+    void (async () => {
+      const policy = !transaction.policyReceipt
+        ? await getJoinPolicy(transaction.relayUrl, "webview")
+        : null;
+      if (currentTransaction.current !== transaction) return;
+      if (policy) {
+        update({ stage: "invite-consent" }, transaction.id);
+        return;
+      }
+      await claimInvite(
+        transaction.relayUrl,
+        transaction.inviteCode ?? "",
+        transaction.policyReceipt,
+      );
+      update({ stage: "connecting", error: undefined }, transaction.id);
+    })()
+      .catch((error: unknown) => {
+        if (currentTransaction.current !== transaction) return;
+        if (inviteErrorMessage(error).includes("join_policy_required")) {
+          update(
+            {
+              stage: "invite-consent",
+              policyReceipt: undefined,
+              error: undefined,
+            },
+            transaction.id,
+          );
+          return;
+        }
         update(
           {
             error: inviteClaimErrorMessage(error),
           },
           transaction.id,
-        ),
-      )
+        );
+      })
       .finally(() => setIsPending(false));
   }, [isPending, transaction, update]);
 }

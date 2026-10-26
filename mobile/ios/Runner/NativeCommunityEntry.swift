@@ -321,7 +321,9 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
         UIAccessibility.post(notification: .announcement, argument: error)
       }
       self.navigationController?.sheetPresentationController?.invalidateDetents()
-      if result["joined"] as? Bool == true {
+      if result["continueInFlutter"] as? Bool == true {
+        self.finish?(false)
+      } else if result["joined"] as? Bool == true {
         self.input.text = nil
         self.finish?(true)
       } else { completion?(result) }

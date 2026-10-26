@@ -19,6 +19,80 @@ import '../../shared/community/community_storage_test.dart';
 
 void main() {
   test(
+    'receipt-less invite requires current native consent before acceptance and claim',
+    () async {
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final auth = _RecordingAuthNotifier();
+      final requests = <String>[];
+      var version = 'v1';
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          authProvider.overrideWith(() => auth),
+          inviteJoinRecoveryProvider.overrideWithValue(
+            (_) => _successfulRecovery(),
+          ),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              requests.add(request.url.path);
+              if (request.url.path == '/api/join-policy') {
+                return http.Response(
+                  jsonEncode({
+                    'policy': {
+                      'version': version,
+                      'terms_markdown': 'Terms',
+                      'age_attestation_required': true,
+                    },
+                  }),
+                  200,
+                );
+              }
+              if (request.url.path == '/api/invites/accept-policy') {
+                expect(jsonDecode(request.body), {
+                  'code': 'code',
+                  'policy_version': version,
+                  'age_confirmed': true,
+                });
+                return http.Response('{"receipt":"fresh"}', 200);
+              }
+              expect(jsonDecode(request.body), {
+                'code': 'code',
+                'policy_receipt': 'fresh',
+              });
+              return http.Response(
+                '{"status":"joined","host":"relay.example.com","role":"member"}',
+                200,
+              );
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final notifier = container.read(inviteJoinProvider.notifier);
+      await notifier.prepare(
+        const InviteDeepLink(
+          relayUrl: 'wss://relay.example.com',
+          code: 'code',
+          policyReceipt: 'untrusted-browser-receipt',
+        ),
+      );
+      expect(container.read(inviteJoinProvider).joinPolicy?.version, 'v1');
+      await notifier.confirmJoin();
+      expect(requests.where((path) => path != '/api/join-policy'), isEmpty);
+      version = 'v2';
+      await notifier.confirmJoin(acceptedPolicyVersion: 'v1');
+      expect(container.read(inviteJoinProvider).joinPolicy?.version, 'v2');
+      expect(requests.where((path) => path != '/api/join-policy'), isEmpty);
+      await notifier.confirmJoin(acceptedPolicyVersion: 'v2');
+      expect(
+        container.read(inviteJoinProvider).status,
+        InviteJoinStatus.success,
+      );
+      expect(requests.where((path) => path == '/api/invites/claim').length, 1);
+    },
+  );
+
+  test(
     'legacy invite entry refuses staging before key generation or claim',
     () async {
       final storage = CommunityStorage(secure: FakeSecureStorage());
@@ -32,7 +106,7 @@ void main() {
             return nostr.Keys.generate();
           }),
           inviteJoinHttpClientProvider.overrideWithValue(
-            http_testing.MockClient((_) async {
+            _policyFreeClient((_) async {
               requests++;
               return http.Response('{}', 500);
             }),
@@ -88,7 +162,7 @@ void main() {
               return nostr.Keys.generate();
             }),
             inviteJoinHttpClientProvider.overrideWithValue(
-              http_testing.MockClient((request) async {
+              _policyFreeClient((request) async {
                 claimRequests++;
                 return http.Response('{}', 500);
               }),
@@ -137,7 +211,7 @@ void main() {
             (_) => _successfulRecovery(),
           ),
           inviteJoinHttpClientProvider.overrideWithValue(
-            http_testing.MockClient((request) async {
+            _policyFreeClient((request) async {
               capturedRequest = request;
               return http.Response(
                 jsonEncode({
@@ -411,7 +485,7 @@ void main() {
                 _FakeInviteJoinRecovery(error: Exception('relay disconnected')),
           ),
           inviteJoinHttpClientProvider.overrideWithValue(
-            http_testing.MockClient((request) async {
+            _policyFreeClient((request) async {
               claimRequests++;
               return http.Response(
                 jsonEncode({
@@ -455,7 +529,7 @@ void main() {
             (_) => _successfulRecovery(),
           ),
           inviteJoinHttpClientProvider.overrideWithValue(
-            http_testing.MockClient((request) async {
+            _policyFreeClient((request) async {
               claimRequests++;
               return http.Response('{}', 500);
             }),
@@ -527,7 +601,7 @@ void main() {
     },
   );
 
-  test('join_policy_required requires a fresh link and cannot retry', () async {
+  test('join_policy_required can renew consent without a fresh link', () async {
     final keys = nostr.Keys.generate();
     var attempts = 0;
     final storage = CommunityStorage(secure: FakeSecureStorage());
@@ -536,7 +610,7 @@ void main() {
         communityStorageProvider.overrideWithValue(storage),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
         inviteJoinHttpClientProvider.overrideWithValue(
-          http_testing.MockClient((request) async {
+          _policyFreeClient((request) async {
             attempts++;
             return http.Response(
               jsonEncode({'error': 'join_policy_required'}),
@@ -561,14 +635,14 @@ void main() {
 
     final state = container.read(inviteJoinProvider);
     expect(state.status, InviteJoinStatus.error);
-    expect(state.requiresFreshInvite, isTrue);
+    expect(state.requiresFreshInvite, isFalse);
     expect(
       state.errorMessage,
-      'This invite approval has expired. Re-open the invite link to try again.',
+      'Review and accept the current community policy to continue.',
     );
 
     await container.read(inviteJoinProvider.notifier).confirmJoin();
-    expect(attempts, 1);
+    expect(attempts, 2);
   });
 
   test('invite_exhausted requires a fresh invite and cannot retry', () async {
@@ -580,7 +654,7 @@ void main() {
         communityStorageProvider.overrideWithValue(storage),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
         inviteJoinHttpClientProvider.overrideWithValue(
-          http_testing.MockClient((request) async {
+          _policyFreeClient((request) async {
             attempts++;
             return http.Response(
               jsonEncode({'error': 'invite_exhausted'}),
@@ -638,7 +712,7 @@ void main() {
             (_) => _successfulRecovery(),
           ),
           inviteJoinHttpClientProvider.overrideWithValue(
-            http_testing.MockClient((request) async {
+            _policyFreeClient((request) async {
               attempts++;
               expect(jsonDecode(request.body)['code'], 'same-code');
               return attempts == 1
@@ -676,65 +750,66 @@ void main() {
     });
   }
 
-  test('failed claim can be retried and preserves policy receipt', () async {
-    final keys = nostr.Keys.generate();
-    var attempts = 0;
-    final bodies = <String>[];
-    final storage = CommunityStorage(secure: FakeSecureStorage());
-    final auth = _RecordingAuthNotifier();
-    final container = ProviderContainer(
-      overrides: [
-        communityStorageProvider.overrideWithValue(storage),
-        authProvider.overrideWith(() => auth),
-        inviteKeyGeneratorProvider.overrideWithValue(() => keys),
-        inviteJoinRecoveryProvider.overrideWithValue(
-          (_) => _successfulRecovery(),
-        ),
-        inviteJoinHttpClientProvider.overrideWithValue(
-          http_testing.MockClient((request) async {
-            attempts++;
-            bodies.add(request.body);
-            if (attempts == 1) {
-              return http.Response(jsonEncode({'error': 'temporary'}), 503);
-            }
-            return http.Response(
-              jsonEncode({
-                'status': 'joined',
-                'host': 'relay.example.com',
-                'role': 'member',
-              }),
-              200,
-            );
-          }),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
-
-    await container
-        .read(inviteJoinProvider.notifier)
-        .prepare(
-          const InviteDeepLink(
-            relayUrl: 'wss://relay.example.com',
-            code: 'code',
-            policyReceipt: 'receipt.value',
+  test(
+    'failed claim can be retried without reusing a browser receipt',
+    () async {
+      final keys = nostr.Keys.generate();
+      var attempts = 0;
+      final bodies = <String>[];
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final auth = _RecordingAuthNotifier();
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          authProvider.overrideWith(() => auth),
+          inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+          inviteJoinRecoveryProvider.overrideWithValue(
+            (_) => _successfulRecovery(),
           ),
-        );
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
-    expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
+          inviteJoinHttpClientProvider.overrideWithValue(
+            _policyFreeClient((request) async {
+              attempts++;
+              bodies.add(request.body);
+              if (attempts == 1) {
+                return http.Response(jsonEncode({'error': 'temporary'}), 503);
+              }
+              return http.Response(
+                jsonEncode({
+                  'status': 'joined',
+                  'host': 'relay.example.com',
+                  'role': 'member',
+                }),
+                200,
+              );
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
 
-    await container.read(inviteJoinProvider.notifier).confirmJoin();
+      await container
+          .read(inviteJoinProvider.notifier)
+          .prepare(
+            const InviteDeepLink(
+              relayUrl: 'wss://relay.example.com',
+              code: 'code',
+              policyReceipt: 'receipt.value',
+            ),
+          );
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+      expect(container.read(inviteJoinProvider).status, InviteJoinStatus.error);
 
-    expect(container.read(inviteJoinProvider).status, InviteJoinStatus.success);
-    expect(attempts, 2);
-    expect(
-      bodies,
-      everyElement(
-        jsonEncode({'code': 'code', 'policy_receipt': 'receipt.value'}),
-      ),
-    );
-    expect(auth.authenticatedCommunities, hasLength(1));
-  });
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+
+      expect(
+        container.read(inviteJoinProvider).status,
+        InviteJoinStatus.success,
+      );
+      expect(attempts, 2);
+      expect(bodies, everyElement(jsonEncode({'code': 'code'})));
+      expect(auth.authenticatedCommunities, hasLength(1));
+    },
+  );
 
   test('builds a fresh recovery with the second community identity', () async {
     final firstKeys = nostr.Keys.generate();
@@ -761,7 +836,7 @@ void main() {
           });
         }),
         inviteJoinHttpClientProvider.overrideWithValue(
-          http_testing.MockClient(
+          _policyFreeClient(
             (request) async => http.Response(
               jsonEncode({
                 'status': 'joined',
@@ -870,3 +945,10 @@ class _RecordingAuthNotifier extends AuthNotifier {
     );
   }
 }
+
+http.Client _policyFreeClient(
+  Future<http.Response> Function(http.Request) claim,
+) => http_testing.MockClient((request) async {
+  if (request.url.path == '/api/join-policy') return http.Response('{}', 200);
+  return claim(request);
+});

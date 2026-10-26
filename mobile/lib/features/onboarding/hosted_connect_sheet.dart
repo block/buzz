@@ -9,7 +9,7 @@ import '../../shared/utils/string_utils.dart';
 import '../../shared/theme/grid.dart';
 import '../../shared/theme/theme_extensions.dart';
 import 'hosted_community_selection.dart';
-import 'hosted_join_policy_view.dart';
+import '../../shared/hosted/hosted_join_policy_view.dart';
 import 'hosted_profile_setup.dart';
 
 /// Presents the app-scoped real flow without retaining credentials or keys.
