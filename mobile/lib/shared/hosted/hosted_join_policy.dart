@@ -1,5 +1,7 @@
 import 'dart:convert';
+
 import 'package:http/http.dart' as http;
+
 import 'builderlab_account.dart';
 import 'bounded_http_response.dart';
 
@@ -30,12 +32,14 @@ enum HostedInviteFailure {
 Future<Map<String, dynamic>> readJoinResponse(
   http.Client client,
   http.Request request, {
+  bool allowNotFound = false,
   int maxBytes = 65536,
 }) async {
   final http.Response response;
   final Map<String, dynamic> data;
   try {
     response = await boundedHttpResponse(client, request, maxBytes: maxBytes);
+    if (allowNotFound && response.statusCode == 404) return {};
     if (response.statusCode == 429 ||
         (response.statusCode >= 500 && response.statusCode < 600)) {
       throw AccountFailure.unavailable;
@@ -67,6 +71,7 @@ Future<String?> freshJoinPolicyReceipt({
   required String code,
   required Future<bool> Function(HostedJoinPolicy) confirm,
   required void Function() checkCurrent,
+  bool allowLegacyRelay = false,
 }) async {
   Future<Map<String, dynamic>> send(
     String method,
@@ -76,41 +81,30 @@ Future<String?> freshJoinPolicyReceipt({
     checkCurrent();
     final request = http.Request(
       method,
-      origin.replace(scheme: 'https', path: path),
+      origin.replace(
+        scheme: origin.scheme == 'ws' || origin.scheme == 'http'
+            ? 'http'
+            : 'https',
+        path: path,
+      ),
     )..followRedirects = false;
     if (body != null) {
       request.headers['Content-Type'] = 'application/json';
       request.body = jsonEncode(body);
     }
-    // The relay permits two 256 KiB Markdown documents. Allow their JSON
-    // escaping (up to six bytes per input byte), plus the policy envelope.
-    // Receipt and claim responses retain the ordinary 64 KiB bound.
-    final data = await readJoinResponse(
-      client,
-      request,
-      maxBytes: path == '/api/join-policy' ? 4 * 1024 * 1024 : 65536,
-    );
+    final data = await readJoinResponse(client, request);
     checkCurrent();
     return data;
   }
 
-  final data = await send('GET', '/api/join-policy');
-  final raw = data['policy'];
-  if (raw == null) return null;
-  if (raw is! Map ||
-      raw['version'] is! String ||
-      (raw['version'] as String).isEmpty ||
-      raw['age_attestation_required'] is! bool ||
-      (raw['terms_markdown'] != null && raw['terms_markdown'] is! String) ||
-      (raw['privacy_markdown'] != null && raw['privacy_markdown'] is! String)) {
-    throw AccountFailure.invalidResponse;
-  }
-  final policy = HostedJoinPolicy(
-    version: raw['version'] as String,
-    ageRequired: raw['age_attestation_required'] as bool,
-    terms: raw['terms_markdown'] as String?,
-    privacy: raw['privacy_markdown'] as String?,
+  checkCurrent();
+  final policy = await loadJoinPolicy(
+    client: client,
+    origin: origin,
+    allowLegacyRelay: allowLegacyRelay,
   );
+  checkCurrent();
+  if (policy == null) return null;
   if (!await confirm(policy)) throw HostedInviteFailure.policyRequired;
   checkCurrent();
   final accepted = await send('POST', '/api/invites/accept-policy', {
@@ -123,4 +117,46 @@ Future<String?> freshJoinPolicyReceipt({
     throw AccountFailure.invalidResponse;
   }
   return receipt;
+}
+
+/// Fetch a policy without accepting it; legacy self-hosted relays may omit it.
+Future<HostedJoinPolicy?> loadJoinPolicy({
+  required http.Client client,
+  required Uri origin,
+  bool allowLegacyRelay = false,
+}) async {
+  final request = http.Request(
+    'GET',
+    origin.replace(
+      scheme: origin.scheme == 'ws' || origin.scheme == 'http'
+          ? 'http'
+          : 'https',
+      path: '/api/join-policy',
+    ),
+  )..followRedirects = false;
+  // The relay permits two 256 KiB Markdown documents. Allow their JSON
+  // escaping (up to six bytes per input byte), plus the policy envelope.
+  // Receipt and claim responses retain the ordinary 64 KiB bound.
+  final data = await readJoinResponse(
+    client,
+    request,
+    allowNotFound: allowLegacyRelay,
+    maxBytes: 4 * 1024 * 1024,
+  );
+  final raw = data['policy'];
+  if (raw == null) return null;
+  if (raw is! Map ||
+      raw['version'] is! String ||
+      (raw['version'] as String).isEmpty ||
+      raw['age_attestation_required'] is! bool ||
+      (raw['terms_markdown'] != null && raw['terms_markdown'] is! String) ||
+      (raw['privacy_markdown'] != null && raw['privacy_markdown'] is! String)) {
+    throw AccountFailure.invalidResponse;
+  }
+  return HostedJoinPolicy(
+    version: raw['version'] as String,
+    ageRequired: raw['age_attestation_required'] as bool,
+    terms: raw['terms_markdown'] as String?,
+    privacy: raw['privacy_markdown'] as String?,
+  );
 }

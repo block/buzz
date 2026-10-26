@@ -304,6 +304,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         final inviteState = ref.read(inviteJoinProvider);
         final status = inviteState.status;
         if (status == InviteJoinStatus.confirming ||
+            status == InviteJoinStatus.error ||
             inviteState.isStarterSetupRecovery) {
           final sheet = showInviteJoinSheet(navigatorContext);
           if (status == InviteJoinStatus.claiming &&
