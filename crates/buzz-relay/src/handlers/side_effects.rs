@@ -642,6 +642,7 @@ pub async fn validate_admin_event(
                 "t",
                 "join_role",
                 "unlisted",
+                "auto_join",
             ];
             let has_recognized = event
                 .tags
@@ -649,7 +650,7 @@ pub async fn validate_admin_event(
                 .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join)"
                 ));
             }
 
@@ -724,6 +725,47 @@ pub async fn validate_admin_event(
                 }
             }
 
+            // `auto_join` is a community setting, not a channel one: the
+            // relay joins every new community member into the channel. So it
+            // takes the actor's *relay* role (owner or admin), not a channel
+            // role, and the actor need not be a channel member. Only a
+            // stream channel can be a default channel; the open-and-
+            // unarchived requirement is decided in the write, under the
+            // channel row lock, on the state the event leaves behind.
+            let mut sets_auto_join = false;
+            for t in event.tags.iter() {
+                if t.kind().to_string() == "auto_join" {
+                    match t.content() {
+                        Some("true") | Some("false") => sets_auto_join = true,
+                        Some(v) => {
+                            return Err(anyhow::anyhow!(
+                                "invalid auto_join value: {v} (must be \"true\" or \"false\")"
+                            ));
+                        }
+                        None => {
+                            return Err(anyhow::anyhow!("auto_join tag must have a value"));
+                        }
+                    }
+                }
+            }
+            if sets_auto_join {
+                let relay_role = state
+                    .db
+                    .get_relay_member(tenant.community(), &event.pubkey.to_hex())
+                    .await?
+                    .map(|m| m.role);
+                if !matches!(relay_role.as_deref(), Some("owner" | "admin")) {
+                    return Err(anyhow::anyhow!(
+                        "actor not authorized: auto_join requires a relay owner or admin"
+                    ));
+                }
+                if channel.channel_type != buzz_db::channel::ChannelType::Stream.as_str() {
+                    return Err(anyhow::anyhow!(
+                        "auto_join is only available on stream channels"
+                    ));
+                }
+            }
+
             // Validate ttl values before storage. Empty string clears the TTL
             // (channel becomes permanent); any other value must parse as a
             // positive integer number of seconds. A bare tag with no value is
@@ -755,8 +797,13 @@ pub async fn validate_admin_event(
             }
 
             // name/about/archived/visibility/ttl/labels/join_role/unlisted
-            // require owner/admin;
-            // topic/purpose allow any member who may post.
+            // require owner/admin; topic/purpose allow any member who may
+            // post; auto_join was decided above by relay role, so an event
+            // carrying only that tag needs neither.
+            let has_member_tag = event.tags.iter().any(|t| {
+                let k = t.kind().to_string();
+                k == "topic" || k == "purpose"
+            });
             let has_privileged_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
                 k == "name"
@@ -792,7 +839,7 @@ pub async fn validate_admin_event(
                         ))
                     }
                 }
-            } else {
+            } else if has_member_tag {
                 // topic/purpose: any member whose role may post (never a
                 // guest).
                 let is_member = state
@@ -819,6 +866,8 @@ pub async fn validate_admin_event(
                 } else {
                     Err(anyhow::anyhow!("only members can change topic or purpose"))
                 }
+            } else {
+                Ok(())
             }
         }
         9005 => {
@@ -2051,6 +2100,15 @@ pub(crate) async fn persist_edit_metadata(
                     val.parse().map_err(|e: String| anyhow::anyhow!(e))?;
                 edit.columns.join_role = Some(join_role.as_str().to_string());
             }
+            "auto_join" => {
+                // Validated during authorization; fail closed on a resend
+                // that somehow carries another value.
+                edit.columns.auto_join = Some(match val {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(anyhow::anyhow!("invalid auto_join value: {val}")),
+                });
+            }
             "ttl" => {
                 // Empty string clears the TTL (permanent); otherwise it is a
                 // positive integer of seconds, validated during authorization.
@@ -2111,6 +2169,11 @@ pub(crate) async fn persist_edit_metadata(
     if let Some(unlisted) = edit.columns.unlisted {
         notices.push(serde_json::json!({
             "type": "unlisted_changed", "actor": actor_hex, "unlisted": unlisted
+        }));
+    }
+    if let Some(auto_join) = edit.columns.auto_join {
+        notices.push(serde_json::json!({
+            "type": "auto_join_changed", "actor": actor_hex, "auto_join": auto_join
         }));
     }
     if let Some(ttl_seconds) = edit.columns.ttl_seconds {

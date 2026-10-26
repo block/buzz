@@ -6,7 +6,7 @@ use nostr::{EventBuilder, Keys, Kind, Tag};
 use uuid::Uuid;
 
 use crate::handlers::group_state_postgres_tests::{
-    community, create_channel, edit_channel, http_auth, state,
+    community, create_channel, edit_channel, group_state_tags, http_auth, state,
 };
 use crate::handlers::ingest::ingest_event;
 
@@ -348,6 +348,263 @@ async fn join_role_edit_is_applied_and_announced() {
         .filter_map(|stored| serde_json::from_str::<serde_json::Value>(&stored.event.content).ok())
         .any(|content| content["type"] == "join_role_changed" && content["join_role"] == "guest");
     assert!(announced, "one join_role_changed system message");
+}
+
+/// `auto_join` is a community setting: only a relay owner or admin may set
+/// it, on an open, unarchived stream channel, and kind:39000 advertises it
+/// only while it is effective. Mutations: drop the relay-role tier → the
+/// channel owner's edit is accepted (RED); drop the in-transaction guard →
+/// `true` on a private or archived channel is accepted (RED); mirror the
+/// column instead of the effective state in `group_metadata_tags` → the tag
+/// survives the flip to private (RED).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn auto_join_is_relay_admin_only_and_advertised_while_effective() {
+    let state = state().await;
+    let tenant = community(&state, "edit-auto-join").await;
+    let owner = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let notices_before = count_kind(&state, &tenant, channel_id, 40099).await;
+    let advertised = |tags: Vec<Vec<String>>| tags.contains(&vec!["auto_join".to_string()]);
+
+    // The channel owner is not a relay owner or admin: refused, nothing changes.
+    let refused = edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        channel_id,
+        &[&["auto_join", "true"]],
+    )
+    .await
+    .expect_err("channel owner must not set auto_join");
+    assert!(
+        refused.contains("relay owner or admin"),
+        "channel owner refusal: {refused}"
+    );
+    assert!(
+        !state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("channel")
+            .auto_join
+    );
+    assert!(!advertised(
+        group_state_tags(&state, &tenant, channel_id, 39000).await
+    ));
+
+    // A relay admin who is not a channel member sets it. One transaction
+    // stores the event, the column and one `auto_join_changed` notice, and
+    // the republished kind:39000 advertises it.
+    let admin = Keys::generate();
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &admin.public_key().to_hex(),
+            "admin",
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("seed relay admin");
+    edit_channel(
+        &state,
+        &tenant,
+        &admin,
+        channel_id,
+        &[&["auto_join", "true"]],
+    )
+    .await
+    .expect("relay admin sets auto_join");
+    assert!(
+        state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("channel")
+            .auto_join
+    );
+    assert!(advertised(
+        group_state_tags(&state, &tenant, channel_id, 39000).await
+    ));
+    let notices = state
+        .db
+        .query_events(&EventQuery {
+            kinds: Some(vec![40099]),
+            channel_id: Some(channel_id),
+            ..EventQuery::for_community(tenant.community())
+        })
+        .await
+        .expect("query events");
+    assert_eq!(notices.len(), notices_before + 1);
+    assert!(
+        notices
+            .iter()
+            .filter_map(
+                |stored| serde_json::from_str::<serde_json::Value>(&stored.event.content).ok()
+            )
+            .any(|content| content["type"] == "auto_join_changed" && content["auto_join"] == true),
+        "one auto_join_changed system message"
+    );
+    let listed = state
+        .db
+        .list_auto_join_channels(tenant.community())
+        .await
+        .expect("list auto_join channels");
+    assert_eq!(
+        listed.iter().map(|c| c.id).collect::<Vec<_>>(),
+        [channel_id]
+    );
+
+    // Private: the stored value stays, but it is no longer effective, so the
+    // tag disappears and the relay would not join anyone.
+    edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        channel_id,
+        &[&["visibility", "private"]],
+    )
+    .await
+    .expect("make private");
+    assert!(
+        state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("channel")
+            .auto_join
+    );
+    assert!(!advertised(
+        group_state_tags(&state, &tenant, channel_id, 39000).await
+    ));
+    assert!(state
+        .db
+        .list_auto_join_channels(tenant.community())
+        .await
+        .expect("list auto_join channels")
+        .is_empty());
+
+    // `true` is refused on a private channel; `false` is not. Opening and
+    // flagging in one event is accepted: the guard sees the event's result.
+    // `visibility` still needs the channel owner, so that event comes from
+    // the owner once they are also on the relay roster: both tiers run.
+    // The nonce keeps this from signing the same event id as the accepted
+    // edit above, which the relay would drop as a duplicate.
+    let refused = edit_channel(
+        &state,
+        &tenant,
+        &admin,
+        channel_id,
+        &[&["auto_join", "true"], &["nonce", "private"]],
+    )
+    .await
+    .expect_err("auto_join=true on a private channel");
+    assert!(
+        refused.contains("open, unarchived"),
+        "private refusal: {refused}"
+    );
+    edit_channel(
+        &state,
+        &tenant,
+        &admin,
+        channel_id,
+        &[&["auto_join", "false"]],
+    )
+    .await
+    .expect("auto_join=false on a private channel");
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &owner.public_key().to_hex(),
+            "owner",
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("seed relay owner");
+    edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        channel_id,
+        &[&["visibility", "open"], &["auto_join", "true"]],
+    )
+    .await
+    .expect("open and flag in one event");
+    assert!(advertised(
+        group_state_tags(&state, &tenant, channel_id, 39000).await
+    ));
+
+    // Archived and forum channels cannot be default channels. Archiving and
+    // flagging in one event is refused by the guard on the event's result,
+    // and nothing of that event applies; on a channel that is already
+    // archived the archive fence refuses the edit first.
+    let archived_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let refused = edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        archived_id,
+        &[&["archived", "true"], &["auto_join", "true"]],
+    )
+    .await
+    .expect_err("archive and flag in one event");
+    assert!(
+        refused.contains("open, unarchived"),
+        "archive-and-flag refusal: {refused}"
+    );
+    assert!(
+        state
+            .db
+            .get_channel(tenant.community(), archived_id)
+            .await
+            .expect("channel")
+            .archived_at
+            .is_none(),
+        "a refused event archives nothing"
+    );
+    edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        archived_id,
+        &[&["archived", "true"]],
+    )
+    .await
+    .expect("archive");
+    let refused = edit_channel(
+        &state,
+        &tenant,
+        &admin,
+        archived_id,
+        &[&["auto_join", "true"]],
+    )
+    .await
+    .expect_err("auto_join=true on an archived channel");
+    assert!(refused.contains("archived"), "archived refusal: {refused}");
+    let forum_id = create_channel(&state, &tenant, &owner, &[&["channel_type", "forum"]]).await;
+    let refused = edit_channel(&state, &tenant, &admin, forum_id, &[&["auto_join", "true"]])
+        .await
+        .expect_err("auto_join=true on a forum");
+    assert!(
+        refused.contains("stream channels"),
+        "forum refusal: {refused}"
+    );
+    for id in [archived_id, forum_id] {
+        assert!(
+            !state
+                .db
+                .get_channel(tenant.community(), id)
+                .await
+                .expect("channel")
+                .auto_join
+        );
+    }
 }
 
 /// Sign a kind:9002 that sets `archived` to `value` on `channel_id`.

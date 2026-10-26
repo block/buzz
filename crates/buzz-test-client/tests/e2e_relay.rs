@@ -3133,19 +3133,30 @@ async fn set_join_role_ws(
     signer: &Keys,
     join_role: &str,
 ) -> (bool, String) {
+    set_metadata_ws(url, channel_id, signer, "join_role", join_role).await
+}
+
+/// Submit a kind:9002 with one `[tag, value]` setting and return the OK frame.
+async fn set_metadata_ws(
+    url: &str,
+    channel_id: &str,
+    signer: &Keys,
+    tag: &str,
+    value: &str,
+) -> (bool, String) {
     // The nonce keeps a repeated setting within one second from signing the
     // same event id as the earlier one, which the relay drops as a duplicate.
     let event = EventBuilder::new(Kind::Custom(9002), "")
         .tags([
             Tag::parse(["h", channel_id]).unwrap(),
-            Tag::parse(["join_role", join_role]).unwrap(),
+            Tag::parse([tag, value]).unwrap(),
             Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
         ])
         .sign_with_keys(signer)
         .unwrap();
     let mut client = BuzzTestClient::connect(url, signer)
         .await
-        .expect("connect join_role actor");
+        .expect("connect kind:9002 actor");
     let ok = client.send_event(event).await.expect("send kind:9002");
     client.disconnect().await.ok();
     (ok.accepted, ok.message)
@@ -3713,6 +3724,31 @@ async fn test_nip29_announce_channel_wire() {
         !tags.contains(&vec!["closed".to_string()]),
         "open channels accept kind:9021 joins: {tags:?}"
     );
+    assert!(
+        !tags.contains(&vec!["auto_join".to_string()]),
+        "no channel is a default channel until a relay admin asks: {tags:?}"
+    );
+
+    // `auto_join` is a community setting: the channel owner, who is not on
+    // the relay roster, cannot set it; a relay owner can, and kind:39000
+    // then advertises the bare tag.
+    let (accepted, msg) = set_metadata_ws(&url, &channel_id, &owner, "auto_join", "true").await;
+    assert!(!accepted, "channel owner must not set auto_join");
+    assert!(msg.contains("relay owner or admin"), "{msg}");
+    let relay_owner = Keys::generate();
+    seed_relay_owner(&relay_owner).await;
+    assert_eq!(
+        set_metadata_ws(&url, &channel_id, &relay_owner, "auto_join", "true").await,
+        (true, String::new())
+    );
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(tags.contains(&vec!["auto_join".to_string()]), "{tags:?}");
+    assert_eq!(
+        set_metadata_ws(&url, &channel_id, &relay_owner, "auto_join", "false").await,
+        (true, String::new())
+    );
+    let tags = group_metadata_tags(&url, &owner, &channel_id).await;
+    assert!(!tags.contains(&vec!["auto_join".to_string()]), "{tags:?}");
 
     // A non-member of an open announce channel cannot write, and cannot
     // self-add as a member.
