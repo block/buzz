@@ -35,6 +35,7 @@ const COMMUNITY_BAN_MATRIX_CASES: &[&str] = &[
     "count",
     "gif_search",
     "gif_share",
+    "profile_search",
     "workflow_runs",
     "workflow_approvals",
     "invite_mint",
@@ -270,7 +271,9 @@ fn request_body(case: &str, actor: &Principal) -> Vec<u8> {
             "limit": 1
         }]))
         .expect("serialize Nostr filter"),
-        "gif_search" | "gif_share" | "invite_mint" | "buzz_read_state" => b"{".to_vec(),
+        "gif_search" | "gif_share" | "profile_search" | "invite_mint" | "buzz_read_state" => {
+            b"{".to_vec()
+        }
         "media_upload" => b"not an image file".to_vec(),
         "git_upload_pack" | "git_receive_pack" => Vec::new(),
         "git_default_post" => serde_json::to_vec(&serde_json::json!({

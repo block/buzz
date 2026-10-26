@@ -37,13 +37,18 @@ combination space (PR #6807). Scope Playwright locators — unscoped
 classifies the relay's production Axum routes by listener, method, path,
 authentication plane, membership behavior, and community-restriction behavior.
 The inventory guard finds direct `.route(...)` calls in production functions
-named `router` or `*_router`, resolves literal or declared `&str` paths, and
-applies direct literal `.nest(...)` prefixes from the relay router. It fails
-when one of those registrations is missing from the table or a stale row
-remains. Run it directly with:
+named `router` or `*_router`, resolves literal or module-qualified `&str`
+constant paths, and applies `.nest(...)` prefixes from `router::build_router`.
+It fails when one of those registrations is missing from the table or a stale
+row remains, and on any shape it cannot classify: `.route_service`,
+`.nest_service`, or `.fallback_service` (except the allow-listed SPA fallback),
+`.nest` outside `build_router`, or a nest target that does not resolve to
+exactly one router builder. `scripts/check-community-ban-route-inventory.test.py`
+pins each of those shapes with a fixture. Run both directly with:
 
 ```bash
 python3 scripts/check-community-ban-route-inventory.py
+python3 scripts/check-community-ban-route-inventory.test.py
 ```
 
 `just test-unit` and `just test` run the guard; CI also runs the ignored HTTP

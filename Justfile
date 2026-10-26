@@ -397,9 +397,10 @@ test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
     ./scripts/test-ensure-local-relay-key.sh
+    python3 scripts/check-community-ban-route-inventory.py
+    python3 scripts/check-community-ban-route-inventory.test.py
     # Shared Huddle transport, codec, and loopback authentication regressions.
     cargo test -p buzz-audio-client
-    python3 scripts/check-community-ban-route-inventory.py
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
         # Mesh JWKS proxy-bypass regression: infra-free loopback I/O with
