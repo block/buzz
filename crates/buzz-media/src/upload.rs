@@ -14,7 +14,7 @@ use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
     looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content,
-    validate_video_file,
+    validate_mp4_file, ValidatedMp4,
 };
 
 /// Shared buffered-upload pipeline for the image and generic-file paths.
@@ -278,13 +278,15 @@ pub async fn process_file_upload(
     .await
 }
 
-/// Process a video upload end-to-end using a streaming pipeline.
+/// Process an MP4 (video, or audio-only `audio/mp4`) upload end-to-end using a
+/// streaming pipeline.
 ///
 /// Unlike [`process_upload`], this function:
 /// 1. Streams the request body to a [`tempfile::NamedTempFile`] while computing
 ///    SHA-256 incrementally — the full body is never in RAM simultaneously.
 /// 2. Verifies the Blossom auth event `x` tag against the computed hash.
-/// 3. Runs full MP4 validation (codec, duration, resolution, moov placement).
+/// 3. Runs full MP4 validation (codec, duration, resolution, moov placement,
+///    metadata); a file with one AAC track and no video is stored as `audio/mp4`.
 /// 4. Stores the blob via [`MediaStorage::put_file`] (streaming read from disk).
 /// 5. Writes a sidecar with `duration_secs` (no thumbnail — desktop handles that).
 ///
@@ -399,7 +401,6 @@ pub async fn process_video_upload(
     if !looks_like_mp4_iso_bmff(&first_bytes) {
         return Err(MediaError::UnsupportedContainer);
     }
-    let mime = "video/mp4".to_string();
 
     // --- 3. Verify Blossom auth: x tag must match computed SHA-256 ---
     let auth = auth_event.clone();
@@ -418,12 +419,12 @@ pub async fn process_video_upload(
     // --- 4. Full MP4 validation on the temp file ---
     let tmp_path_clone = tmp_path.clone();
     let cfg = config.clone();
-    let video_meta =
-        tokio::task::spawn_blocking(move || validate_video_file(&tmp_path_clone, &cfg))
-            .await
-            .map_err(|_| MediaError::Internal)??;
+    let validated = tokio::task::spawn_blocking(move || validate_mp4_file(&tmp_path_clone, &cfg))
+        .await
+        .map_err(|_| MediaError::Internal)??;
 
-    let ext = "mp4";
+    let mime = validated.mime_type().to_string();
+    let ext = mime_to_ext(&mime);
     let key = format!("{sha256_hex}.{ext}");
     let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256_hex);
 
@@ -469,14 +470,17 @@ pub async fn process_video_upload(
 
     // --- 7. Build metadata (no thumbnail for video — desktop handles that) ---
     let meta = BlobMeta {
-        dim: format!("{}x{}", video_meta.width, video_meta.height),
+        dim: match &validated {
+            ValidatedMp4::Video(meta) => format!("{}x{}", meta.width, meta.height),
+            ValidatedMp4::Audio { .. } => String::new(),
+        },
         blurhash: String::new(),
         thumb_url: String::new(),
         ext: ext.to_string(),
         mime_type: mime.clone(),
         size: file_size,
         uploaded_at,
-        duration_secs: Some(video_meta.duration_secs),
+        duration_secs: Some(validated.duration_secs()),
     };
 
     // Record before publishing the sidecar serve gate. See the buffered path.
