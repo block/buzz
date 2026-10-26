@@ -310,10 +310,16 @@ select` maps the diff against the base branch to the Rust tests, desktop
 changed: a hunk inside a test body selects that test; a change anywhere else
 in a test file (imports, helpers, hooks, the code under test beside Rust
 tests) or a new file selects the whole file. The `Flake check (…)` lanes then
-run that selection ten times with retries off, so a repetition that fails is
-a race in the test or the code under it, worth fixing before it lands. The
-lanes skip when no test changed and are not required to merge; their step
-summaries show the test × iteration table.
+run that selection ten times with retries off; a repetition that fails is
+usually a race in the test or the code under it, worth fixing before it
+lands, though a test that needs infrastructure or the regular lane's
+cross-file concurrency can fail every repetition instead. Some changed tests
+are deliberately not repeated: `#[ignore]`d and Postgres-backed Rust tests,
+Playwright specs outside the `smoke` project, `*.perf.ts` measurements, and a
+selection too large for its lane (over 64 KiB of entries, or more Playwright
+journeys than ten repetitions can finish within the lane's timeout).
+The lanes skip when no test changed and are not required to merge; their
+step summaries show the selection and the test × iteration table.
 
 ---
 

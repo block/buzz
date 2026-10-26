@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import {
   appendFileSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -16,18 +17,26 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
 export const ITERATIONS = 10;
 // Repetitions spread across shards, so a whole-file selection stays inside
-// the Playwright lane's job timeout. Playwright shards at file × repetition
-// granularity (workers: 1, no fullyParallel), and the smoke lane runs ~1,500
-// journeys over ten ~11-minute shards, so five journeys × ten repetitions is a
-// few minutes of test time per shard. The regular smoke lane never uses more
-// than ten runners, so neither does this one.
+// the Playwright lane's 45-minute job timeout. Playwright shards at file ×
+// repetition granularity (workers: 1, no fullyParallel). The regular smoke
+// lane runs ~150 journeys per shard in ~11 minutes, about 4.5 s each, so five
+// journeys × ten repetitions is a few minutes of test time per shard; it never
+// uses more than ten runners, so neither does this one. Past ten shards each
+// one grows instead, and the timeout minus dependency setup and the E2E build
+// (~10 minutes, more when apt retries) leaves room for about 250 journey-runs
+// (~19 minutes) per shard, so a selection beyond that many journeys skips the
+// lane with a note rather than timing out.
 const JOURNEYS_PER_SHARD = 5;
 const MAX_SHARDS = 10;
+const MAX_JOURNEY_RUNS_PER_SHARD = 250;
 export const playwrightShards = (journeys) =>
   Math.min(MAX_SHARDS, Math.max(1, Math.ceil(journeys / JOURNEYS_PER_SHARD)));
-// GitHub caps a job's outputs at 1 MiB in total. A selection this large is a
-// sweeping refactor, not a test change worth ten repetitions, so the lane
-// skips rather than overrunning its timeout.
+export const MAX_PLAYWRIGHT_JOURNEYS = Math.floor(
+  (MAX_JOURNEY_RUNS_PER_SHARD * MAX_SHARDS) / ITERATIONS,
+);
+// GitHub caps a job's outputs at 1 MiB in total. A selection this large, like
+// one past the journey cap, is a sweeping refactor rather than a test change
+// worth ten repetitions, so the lane skips rather than overrunning its timeout.
 export const MAX_OUTPUT_BYTES = 64 * 1024;
 export const runners = ["rust", "node", "playwright", "dart"];
 // Mirrors desktop/package.json "test": plain helpers run under the TS loader;
@@ -55,7 +64,9 @@ const infraTests =
 
 // Mirrors desktop/package.json "test", desktop/playwright.config.ts testDir,
 // the root Cargo workspace's crates and mobile's test directory. Paths are
-// later split on whitespace in a shell, so admit only plain names.
+// later split on whitespace in a shell, so admit only plain names. The
+// desktop `*.perf.ts` measurements are deliberately not specs here: they time
+// the app rather than assert on it, so a slow repetition is not a flake.
 export function classify(file) {
   if (!/^[\w./@-]+$/.test(file)) return undefined;
   if (/^crates\/[^/]+\/(?:src|tests)\/(?!fixtures\/).*\.rs$/.test(file))
@@ -95,6 +106,7 @@ const declaring = [
   "only",
   "skip",
   "fixme",
+  "fail",
   "fails",
   "todo",
   "concurrent",
@@ -226,10 +238,18 @@ const matching = (text, open, close, from) => {
 
 // Every test function in a Rust file: a `fn` whose attribute block has an
 // attribute path ending in `test` (`#[test]`, `#[tokio::test]`, …), spanning
-// the first attribute line to the body's closing brace. `ignored` marks
-// `#[ignore]`, which nextest skips by default.
+// the first attribute line to the body's closing brace. `name` is the path
+// within the file through its inline modules (`tests::plain`), so a namesake
+// in another module stays a different test. `ignored` marks `#[ignore]`,
+// which nextest skips by default.
 export function rustTests(source) {
   const text = blankRust(source);
+  const modules = [];
+  const inline = /\bmod\s+(\w+)\s*\{/g;
+  for (let m = inline.exec(text); m; m = inline.exec(text)) {
+    const open = m.index + m[0].length - 1;
+    modules.push({ name: m[1], open, close: matching(text, "{", "}", open) });
+  }
   const lineStarts = [0];
   for (let i = 0; i < text.length; i += 1)
     if (text[i] === "\n") lineStarts.push(i + 1);
@@ -263,8 +283,11 @@ export function rustTests(source) {
     if (!fn) continue;
     const open = text.indexOf("{", j + fn[0].length);
     if (open === -1) continue;
+    const path = modules
+      .filter((mod) => mod.open < match.index && match.index < mod.close)
+      .map((mod) => mod.name);
     tests.push({
-      name: fn[1],
+      name: [...path, fn[1]].join("::"),
       start: lineAt(match.index),
       end: lineAt(matching(text, "{", "}", open)),
       ignored: paths.includes("ignore"),
@@ -371,17 +394,50 @@ const summarize = (text) => {
 };
 const cell = (value) => String(value).replaceAll("|", "\\|");
 
+const crateDir = (file) => `${root}crates/${file.split("/")[1]}`;
+
 // The `[package]` name of the crate owning a file under crates/.
 export function cratePackage(file) {
-  const manifest = readFileSync(
-    `${root}crates/${file.split("/")[1]}/Cargo.toml`,
-    "utf8",
-  );
+  const manifest = readFileSync(`${crateDir(file)}/Cargo.toml`, "utf8");
   return /^\[package\][\s\S]*?^name\s*=\s*"([^"]+)"/m.exec(manifest)[1];
 }
 
-// Smoke journeys per spec file as Playwright lists them. Integration-only
-// specs list nothing for the smoke project, so a selection of them stays empty.
+// Cargo target flags building only the test binaries a file can be part of:
+// src/** is the lib (when the crate has one) or a bin, tests/<stem>.rs and
+// tests/<dir>/*.rs (with a main.rs) the integration test of that name. A
+// file placed by a custom `[[test]]` path builds every target instead.
+export function rustTarget(file) {
+  const [, , kind, first, second] = file.split("/");
+  if (kind === "src") {
+    const lib =
+      existsSync(`${crateDir(file)}/src/lib.rs`) ||
+      /^\[lib\]/m.test(readFileSync(`${crateDir(file)}/Cargo.toml`, "utf8"));
+    return lib ? ["--lib", "--bins"] : ["--bins"];
+  }
+  if (second === undefined) return ["--test", first.replace(/\.rs$/, "")];
+  return existsSync(`${crateDir(file)}/tests/${first}/main.rs`)
+    ? ["--test", first]
+    : [];
+}
+
+// The module path a file's items carry in their binary under cargo's layout
+// conventions: src/a/b.rs is a::b, a mod.rs/main.rs/lib.rs names its directory
+// or the root, src/bin/x.rs and tests/<target>.rs are roots, tests/<target>/x.rs
+// is x. A `#[path]` attribute can break this; repeatRust then falls back to the
+// in-file path alone.
+export function rustModulePath(file) {
+  const [, , kind, ...parts] = file.replace(/\.rs$/, "").split("/");
+  if (kind === "tests") parts.shift();
+  else if (parts[0] === "bin") parts.splice(0, 2);
+  if (["mod", "main"].includes(parts.at(-1)) || parts.join() === "lib")
+    parts.pop();
+  return parts;
+}
+
+// Smoke journeys per spec file as Playwright lists them, each line once (a
+// looped declaration is listed once per iteration). Integration-only specs
+// list nothing for the smoke project, which Playwright reports as its "No
+// tests found" error, so a selection of them stays empty.
 export function listPlaywright(files) {
   const result = run(`${root}bin/pnpm`, [
     "-C",
@@ -396,21 +452,24 @@ export function listPlaywright(files) {
     ...files,
   ]);
   const report = JSON.parse(result.stdout);
-  if (result.status !== 0 || report.errors.length)
+  const empty =
+    report.errors.length === 1 &&
+    /No tests found/.test(report.errors[0].message);
+  if ((result.status !== 0 || report.errors.length) && !empty)
     throw new Error(
       `playwright --list: ${report.errors.map((error) => error.message).join("\n") || result.stderr}`,
     );
-  const specs = new Map(files.map((file) => [file, []]));
+  const specs = new Map(files.map((file) => [file, new Set()]));
   const collect = (suites) => {
     for (const suite of suites) {
       for (const spec of suite.specs ?? [])
         if (spec.tests?.length)
-          specs.get(`desktop/tests/e2e/${spec.file}`)?.push(spec.line);
+          specs.get(`desktop/tests/e2e/${spec.file}`)?.add(spec.line);
       collect(suite.suites ?? []);
     }
   };
-  collect(report.suites);
-  return specs;
+  collect(empty ? [] : report.suites);
+  return new Map([...specs].map(([file, lines]) => [file, [...lines]]));
 }
 
 function select(base = "HEAD^1", head = "HEAD") {
@@ -454,9 +513,11 @@ function select(base = "HEAD^1", head = "HEAD") {
             previous: previous(file),
           },
         );
-        if (!selection) continue;
-        const crate = cratePackage(file);
-        entries = selection.names.map((name) => `${crate}::${name}`);
+        if (!selection) {
+          rows.push(`| ${cell(file)} | ${runner} | no test functions |`);
+          continue;
+        }
+        entries = selection.names.map((name) => `${file}::${name}`);
         note =
           selection.names.length === 0
             ? "excluded (ignored tests only)"
@@ -486,9 +547,16 @@ function select(base = "HEAD^1", head = "HEAD") {
       outputs[runner].push(...entries);
       rows.push(`| ${cell(file)} | ${runner} | ${cell(note)} |`);
     }
-    if (Buffer.byteLength(outputs[runner].join(" ")) > MAX_OUTPUT_BYTES) {
+    const exceeded =
+      Buffer.byteLength(outputs[runner].join(" ")) > MAX_OUTPUT_BYTES
+        ? `selection exceeds ${MAX_OUTPUT_BYTES} bytes`
+        : runner === "playwright" &&
+            outputs[runner].length > MAX_PLAYWRIGHT_JOURNEYS
+          ? `selection exceeds ${MAX_PLAYWRIGHT_JOURNEYS} journeys, which ${ITERATIONS} repetitions would not finish in time`
+          : undefined;
+    if (exceeded) {
       rows.push(
-        `| *(${outputs[runner].length} ${runner} entries)* | ${runner} | selection exceeds ${MAX_OUTPUT_BYTES} bytes; lane skipped |`,
+        `| *(${outputs[runner].length} ${runner} entries)* | ${runner} | ${exceeded}; lane skipped |`,
       );
       outputs[runner] = [];
     }
@@ -587,45 +655,81 @@ export function parseJunit(xml) {
   return statuses;
 }
 
-// nextest has no repeat flag, so run the filterset once per iteration under
-// the `flake` profile (.config/nextest.toml: no retries, JUnit per run). The
-// selection is listed first: a filterset matching no runnable test is a
-// selection of ignored or infrastructure-backed tests, not a failure.
-function repeatRust(entries, iterations) {
-  const byPackage = new Map();
-  for (const entry of entries) {
-    const [, crate, name] = /^(.+)::(\w+)$/.exec(entry) ?? [];
-    if (!crate)
-      throw new Error(`rust entry must be <package>::<test>: ${entry}`);
-    byPackage.set(crate, (byPackage.get(crate) ?? new Set()).add(name));
+// The listed tests an entry stands for: a test the file's module path predicts
+// exactly when nextest lists one, otherwise every test whose name ends in the
+// in-file path (a `#[path]` module breaks the prediction; a namesake in another
+// module is then repeated too rather than nothing).
+export function chooseRust(tests, candidates) {
+  const chosen = new Map();
+  for (const { path, exact } of tests) {
+    const suffix = candidates.filter(
+      ({ name }) => name === path || name.endsWith(`::${path}`),
+    );
+    const predicted = suffix.filter(({ name }) => name === exact);
+    for (const test of predicted.length ? predicted : suffix)
+      chosen.set(`${test.binary} ${test.name}`, test);
   }
-  const filterset = `(${[...byPackage]
-    .map(
-      ([crate, names]) =>
-        `(package(=${crate}) & (${[...names].map((name) => `test(/(^|::)${name}$/)`).join(" | ")}))`,
-    )
-    .join(" | ")}) & !(${infraTests})`;
-  const packages = [...byPackage.keys()].flatMap((crate) => ["-p", crate]);
-  const listed = run("cargo", [
-    "nextest",
-    "list",
-    ...packages,
-    "-E",
-    filterset,
-    "--message-format",
-    "json",
-  ]);
-  if (listed.status !== 0)
-    throw new Error(`cargo nextest list: ${listed.stderr}`);
-  const expected = Object.entries(
-    JSON.parse(listed.stdout)["rust-suites"],
-  ).flatMap(([binary, suite]) =>
-    Object.entries(suite.testcases)
-      .filter(
-        ([, test]) =>
-          !test.ignored && test["filter-match"].status === "matches",
-      )
-      .map(([name]) => `${binary} ${name}`),
+  return [...chosen.values()];
+}
+
+// nextest has no repeat flag, so run the selection once per iteration under
+// the `flake` profile (.config/nextest.toml: no retries, JUnit per run), one
+// cargo invocation per package so each builds only the targets its files can
+// be in. The selection is listed first, by in-file path, and narrowed with
+// chooseRust to exact (binary, test) pairs; a selection listing no runnable
+// test is one of ignored or infrastructure-backed tests, not a failure.
+function repeatRust(entries, iterations) {
+  const groups = new Map();
+  for (const entry of entries) {
+    const [, file, path] =
+      /^(crates\/[^:]+\.rs)::((?:\w+::)*\w+)$/.exec(entry) ?? [];
+    if (!file)
+      throw new Error(`rust entry must be <file>::<module::test>: ${entry}`);
+    const crate = cratePackage(file);
+    const group = groups.get(crate) ?? { targets: new Set(), tests: [] };
+    const targets = rustTarget(file);
+    if (targets.length === 0) group.every = true;
+    for (const target of targets) group.targets.add(target);
+    group.tests.push({
+      path,
+      exact: [...rustModulePath(file), path].join("::"),
+    });
+    groups.set(crate, group);
+  }
+  const runs = [];
+  for (const [crate, group] of groups) {
+    group.args = ["-p", crate, ...(group.every ? [] : group.targets)];
+    const suffixes = [...new Set(group.tests.map(({ path }) => path))]
+      .map((path) => `test(/(^|::)${path}$/)`)
+      .join(" | ");
+    const listed = run("cargo", [
+      "nextest",
+      "list",
+      ...group.args,
+      "-E",
+      `(${suffixes}) & !(${infraTests})`,
+      "--message-format",
+      "json",
+    ]);
+    if (listed.status !== 0)
+      throw new Error(`cargo nextest list: ${listed.stderr}`);
+    const candidates = Object.entries(
+      JSON.parse(listed.stdout)["rust-suites"],
+    ).flatMap(([binary, suite]) =>
+      Object.entries(suite.testcases)
+        .filter(
+          ([, test]) =>
+            !test.ignored && test["filter-match"].status === "matches",
+        )
+        .map(([name]) => ({ binary, name })),
+    );
+    group.chosen = chooseRust(group.tests, candidates);
+    group.filterset = group.chosen
+      .map(({ binary, name }) => `(binary_id(=${binary}) & test(=${name}))`)
+      .join(" | ");
+  }
+  const expected = [...groups.values()].flatMap((group) =>
+    group.chosen.map(({ binary, name }) => `${binary} ${name}`),
   );
   if (expected.length === 0) {
     summarize(
@@ -637,24 +741,35 @@ function repeatRust(entries, iterations) {
   // CARGO_TARGET_DIR; the `flake` profile writes its JUnit report there.
   const junit = `${root}target/nextest/flake/junit.xml`;
   const dir = resultsDir("rust");
-  const runs = [];
   for (let i = 1; i <= iterations; i += 1) {
-    rmSync(junit, { force: true });
-    const result = run(
-      "cargo",
-      ["nextest", "run", "--profile", "flake", ...packages, "-E", filterset],
-      { stdio: "inherit" },
-    );
-    let statuses = new Map();
-    try {
-      statuses = parseJunit(readFileSync(junit, "utf8"));
-      copyFileSync(junit, `${dir}/iter-${i}.xml`);
-    } catch {
-      statuses = new Map();
+    const statuses = new Map();
+    let ok = true;
+    for (const [crate, group] of groups) {
+      if (group.chosen.length === 0) continue;
+      rmSync(junit, { force: true });
+      const result = run(
+        "cargo",
+        [
+          "nextest",
+          "run",
+          "--profile",
+          "flake",
+          ...group.args,
+          "-E",
+          group.filterset,
+        ],
+        { stdio: "inherit" },
+      );
+      ok &&= result.status === 0;
+      try {
+        for (const [test, status] of parseJunit(readFileSync(junit, "utf8")))
+          statuses.set(test, status);
+        copyFileSync(junit, `${dir}/iter-${i}-${crate}.xml`);
+      } catch {
+        ok = false;
+      }
     }
-    const ok =
-      result.status === 0 &&
-      expected.every((test) => statuses.get(test) === "passed");
+    ok &&= expected.every((test) => statuses.get(test) === "passed");
     runs.push({ ok, statuses });
     progress(i, iterations, ok);
   }

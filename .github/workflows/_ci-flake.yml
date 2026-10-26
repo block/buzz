@@ -35,18 +35,30 @@ jobs:
           # diff is exactly the pull request's change without a full clone.
           fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      # Only a changed spec needs desktop dependencies: Playwright lists its
+      # smoke journeys and the desktop app's TypeScript parses it. Pull
+      # requests without one skip the install.
+      - name: Check for changed Playwright specs
+        id: specs
+        run: |
+          if git diff --quiet --diff-filter=AM HEAD^1 HEAD -- 'desktop/tests/e2e/*.spec.ts'; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Get pnpm store directory
+        if: steps.specs.outputs.changed == 'true'
         id: pnpm-cache
         run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
       - name: Restore pnpm store cache
+        if: steps.specs.outputs.changed == 'true'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: pnpm-${{ runner.os }}-
-      # Playwright lists the smoke journeys of a changed spec, and the desktop
-      # app's TypeScript parses it.
       - name: Install desktop dependencies
+        if: steps.specs.outputs.changed == 'true'
         run: just desktop-install-ci
       - name: Map changed hunks to tests
         id: select
@@ -64,13 +76,17 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
-      # Restores the Unit Tests lane's cache read-only: this lane only runs on
-      # pull requests, so it never saves one of its own.
+      # Restores the Unit Tests lane's cache (_ci-rust.yml) read-only; this
+      # lane never saves one of its own. The restore only hits while the cache
+      # key matches: the same shared-key, and rust-cache's environment hash —
+      # the CARGO*/RUST*/CC* environment variables, the lockfiles and the rustc
+      # version — must stay identical to the Unit Tests job's, so any env this
+      # job sets must be set there too (scripts/test-rust-cache-contract.sh
+      # checks the key).
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          shared-key: unit-tests
-          key: sherpa-cache-v1
-          save-if: ${{ github.event_name != 'pull_request' }}
+          shared-key: unit-tests-sherpa-cache-v1
+          save-if: false
       - name: Install cargo-nextest
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
         with:

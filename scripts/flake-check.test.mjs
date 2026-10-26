@@ -2,16 +2,21 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  chooseRust,
   classify,
   cratePackage,
   dartDefine,
   hunkRanges,
+  ITERATIONS,
   listPlaywright,
+  MAX_PLAYWRIGHT_JOURNEYS,
   nodeTestArgs,
   parseDartReport,
   parseJunit,
   playwrightRepetitions,
   playwrightShards,
+  rustModulePath,
+  rustTarget,
   rustTests,
   selectRust,
   selectTests,
@@ -108,12 +113,16 @@ test("Playwright test calls span the declaration; groups, hooks and configuratio
     "  }",
     "});",
     'test.describe.configure({ mode: "serial" });',
+    'test.fail("known broken", async () => {',
+    "  await Promise.resolve();",
+    "});",
     "",
   ].join("\n");
   const calls = testCalls(spec, "x.spec.ts");
   assert.deepEqual(calls, [
     { start: 8, end: 11 },
     { start: 13, end: 15 },
+    { start: 19, end: 21 },
   ]);
   // Playwright lists a looped declaration once per iteration, at one line.
   assert.deepEqual(testBodies(calls, [13, 13, 8]), [
@@ -170,14 +179,96 @@ const rustSource = [
   "",
 ].join("\n");
 
-test("Rust test functions span their attribute block to the closing brace, through strings, chars and comments", () => {
+test("Rust test functions span their attribute block to the closing brace, through strings, chars and comments, named by their inline module path", () => {
   assert.deepEqual(rustTests(rustSource), [
-    { name: "plain", start: 19, end: 22, ignored: false },
-    { name: "needs_infra", start: 24, end: 30, ignored: true },
-    { name: "also_ignored", start: 32, end: 34, ignored: true },
-    { name: "in_nested_module", start: 37, end: 40, ignored: false },
+    { name: "tests::plain", start: 19, end: 22, ignored: false },
+    { name: "tests::needs_infra", start: 24, end: 30, ignored: true },
+    { name: "tests::also_ignored", start: 32, end: 34, ignored: true },
+    {
+      name: "tests::postgres_tests::in_nested_module",
+      start: 37,
+      end: 40,
+      ignored: false,
+    },
   ]);
   assert.deepEqual(rustTests("fn main() {}\n"), []);
+});
+
+test("same-named Rust tests in different modules are distinct, and a hunk selects only its own", () => {
+  const source = [
+    "mod alpha {",
+    "    #[test]",
+    "    fn same() {}",
+    "}",
+    "pub(crate) mod beta {",
+    "    mod tests {",
+    "        #[test]",
+    "        fn same() { let _ = 1; }",
+    "    }",
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(
+    rustTests(source).map((test) => test.name),
+    ["alpha::same", "beta::tests::same"],
+  );
+  assert.deepEqual(
+    selectRust(diff([8, 1, 8, 1]), source, { previous: source }),
+    {
+      lines: [7],
+      names: ["beta::tests::same"],
+    },
+  );
+  // The file's path predicts the rest of the name; cargo's layout rules.
+  for (const [file, modules] of [
+    ["crates/buzz-relay/src/lib.rs", []],
+    ["crates/buzz-relay/src/main.rs", []],
+    ["crates/buzz-relay/src/api/mod.rs", ["api"]],
+    ["crates/buzz-relay/src/handlers/auth.rs", ["handlers", "auth"]],
+    ["crates/buzz-test-client/src/bin/mention.rs", []],
+    ["crates/buzz-test-client/tests/e2e_relay.rs", []],
+    ["crates/x/tests/suite/main.rs", []],
+    ["crates/x/tests/suite/helpers.rs", ["helpers"]],
+  ])
+    assert.deepEqual(rustModulePath(file), modules, file);
+  // Listed candidates: the predicted name wins; without it every suffix
+  // match is kept rather than nothing.
+  const candidates = [
+    { binary: "buzz-relay", name: "api::relay_members::tests::same" },
+    { binary: "buzz-relay", name: "handlers::auth::tests::same" },
+    { binary: "buzz-relay", name: "handlers::auth::tests::other" },
+    {
+      binary: "buzz-relay::bin/buzz-relay",
+      name: "handlers::auth::tests::same",
+    },
+  ];
+  assert.deepEqual(
+    chooseRust(
+      [{ path: "tests::same", exact: "handlers::auth::tests::same" }],
+      candidates,
+    ),
+    [candidates[1], candidates[3]],
+  );
+  assert.deepEqual(
+    chooseRust(
+      [
+        { path: "tests::same", exact: "elsewhere::tests::same" },
+        { path: "tests::other", exact: "handlers::auth::tests::other" },
+      ],
+      candidates,
+    ),
+    [candidates[0], candidates[1], candidates[3], candidates[2]],
+  );
+});
+
+test("Rust files build only the targets they can be part of", () => {
+  for (const [file, flags] of [
+    ["crates/buzz-relay/src/api/mod.rs", ["--lib", "--bins"]],
+    ["crates/buzz-admin/src/main.rs", ["--bins"]],
+    ["crates/buzz-test-client/tests/e2e_relay.rs", ["--test", "e2e_relay"]],
+    ["crates/buzz-agent/tests/common/mod.rs", []],
+  ])
+    assert.deepEqual(rustTarget(file), flags, file);
 });
 
 test("Rust selection: a hunk inside a test selects it, elsewhere selects every runnable test; ignored tests never run", () => {
@@ -185,7 +276,7 @@ test("Rust selection: a hunk inside a test selects it, elsewhere selects every r
     selectRust(text, rustSource, { previous: rustSource, ...options });
   assert.deepEqual(select(diff([21, 1, 21, 1])), {
     lines: [19],
-    names: ["plain"],
+    names: ["tests::plain"],
   });
   // Inside an ignored test: owned, so not shared code, but nothing to run.
   assert.deepEqual(select(diff([28, 0, 29, 1])), { lines: [24], names: [] });
@@ -194,7 +285,7 @@ test("Rust selection: a hunk inside a test selects it, elsewhere selects every r
   const whole = (reason) => ({
     whole: true,
     reason,
-    names: ["plain", "in_nested_module"],
+    names: ["tests::plain", "tests::postgres_tests::in_nested_module"],
   });
   assert.deepEqual(select(diff([4, 0, 5, 1])), whole("shared code changed"));
   assert.deepEqual(
@@ -281,24 +372,83 @@ test("hunks inside tests select those tests; shared code, new or unlisted files 
   );
 });
 
-test("Playwright lists smoke journeys per spec; integration-only specs list none", () => {
+test("Playwright lists smoke journeys per spec once each; integration-only specs list none", () => {
   const smoke = "desktop/tests/e2e/channel-sort.spec.ts";
+  const looped = "desktop/tests/e2e/claude-effort-picker.spec.ts";
   const integration = "desktop/tests/e2e/agents.spec.ts";
-  const listed = listPlaywright([smoke, integration]);
+  // Alone, an integration spec makes Playwright exit 1 with "No tests found".
+  assert.deepEqual(listPlaywright([integration]), new Map([[integration, []]]));
+  const listed = listPlaywright([smoke, looped, integration]);
   assert.deepEqual(listed.get(integration), []);
   const lines = listed.get(smoke);
   assert.ok(lines.length > 0, "a smoke spec must list its journeys");
   assert.equal(
     testBodies(testCalls(read(`../${smoke}`), smoke), lines).length,
-    new Set(lines).size,
+    lines.length,
     "every listed journey must be owned by a test call",
+  );
+  // A looped declaration is listed once per iteration at the same line.
+  const loopedLines = listed.get(looped);
+  assert.deepEqual(loopedLines, [...new Set(loopedLines)]);
+  assert.ok(
+    /^\s*for \(const .+\) \{\n\s+test\(/m.test(read(`../${looped}`)),
+    "the looped spec must still declare a test inside a loop",
   );
 });
 
-test("Playwright repetitions get one shard per five journeys, at most ten", () => {
+test("Playwright repetitions get one shard per five journeys, at most ten, and a selection past ~19 minutes per shard skips", () => {
   assert.deepEqual(
     [0, 1, 5, 6, 18, 40, 41, 50, 51, 200].map(playwrightShards),
     [1, 1, 1, 2, 4, 8, 9, 10, 10, 10],
+  );
+  // 250 journey-runs per shard at ~4.5 s each, over ten shards.
+  assert.equal(MAX_PLAYWRIGHT_JOURNEYS, 250);
+  assert.equal(ITERATIONS, 10);
+});
+
+test("nextest's JUnit classname is the binary id its list reports", () => {
+  // Captured from cargo-nextest 0.9.136 on one buzz-core test: `cargo nextest
+  // list -p buzz-core --lib -E 'test(=kind::tests::no_duplicate_kind_values)'
+  // --message-format json` (trimmed to the matching testcase) and the
+  // target/nextest/flake/junit.xml of `cargo nextest run --profile flake` with
+  // the same arguments. repeatRust keys expectations as `<binary-id> <name>`
+  // from the list and reads statuses as `<classname> <name>` from the report,
+  // so the two must agree.
+  const list = {
+    "rust-suites": {
+      "buzz-core": {
+        "package-name": "buzz-core",
+        "binary-id": "buzz-core",
+        "binary-name": "buzz_core",
+        kind: "lib",
+        status: "listed",
+        testcases: {
+          "kind::tests::no_duplicate_kind_values": {
+            kind: "test",
+            ignored: false,
+            "filter-match": { status: "matches" },
+          },
+        },
+      },
+    },
+  };
+  const junit = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<testsuites name="nextest-run" tests="1" failures="0" errors="0" uuid="01abf963-07b0-46d9-8f00-e212969d85a8" timestamp="2026-10-27T00:32:44.093+11:00" time="0.042">',
+    '    <testsuite name="buzz-core" tests="1" disabled="0" errors="0" failures="0">',
+    '        <testcase name="kind::tests::no_duplicate_kind_values" classname="buzz-core" timestamp="2026-10-27T00:32:44.094+11:00" time="0.040">',
+    "        </testcase>",
+    "    </testsuite>",
+    "</testsuites>",
+    "",
+  ].join("\n");
+  const expected = Object.entries(list["rust-suites"]).flatMap(
+    ([binary, suite]) =>
+      Object.keys(suite.testcases).map((name) => `${binary} ${name}`),
+  );
+  assert.deepEqual(
+    parseJunit(junit),
+    new Map(expected.map((test) => [test, "passed"])),
   );
 });
 
