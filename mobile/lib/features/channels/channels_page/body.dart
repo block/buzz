@@ -168,7 +168,7 @@ class _SliverChannelsList extends HookConsumerWidget {
           return;
         }
 
-        final notifier = ref.read(readStateProvider.notifier);
+        final seeds = <String, int>{};
         for (final channel in visibleChannels) {
           if (readState.effectiveTimestamp(channel.id) != null) {
             continue;
@@ -176,9 +176,10 @@ class _SliverChannelsList extends HookConsumerWidget {
 
           final lastMessageAt = dateTimeToUnixSeconds(channel.lastMessageAt);
           if (lastMessageAt != null) {
-            notifier.seedContextRead(channel.id, lastMessageAt);
+            seeds[channel.id] = lastMessageAt;
           }
         }
+        ref.read(readStateProvider.notifier).seedContextsRead(seeds);
         initialSeedComplete.value = true;
       });
     }, [readState.isReady, readState.pubkey, visibleChannels]);
