@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import * as React from "react";
+import { HuddleScreenProvider } from "./HuddleScreenContext";
 
 import { setupAudioWorklet, type AudioWorkletHandle } from "./lib/audioWorklet";
 import { type AudioInputDevice, useAudioDevices } from "./lib/useAudioDevices";
 import { usePipelineHotstart } from "./lib/usePipelineHotstart";
 import { formatHuddleActionError } from "./lib/huddleError";
+import { acquireHuddleMicrophone } from "./lib/huddleMicrophone";
 import {
   type VoiceInputMode,
   useHuddlePttState,
@@ -543,16 +545,10 @@ export function HuddleProvider({
     [resetSpeakerActivity],
   );
 
-  /** Shared media setup: get mic, setup AudioWorklet, confirm active.
+  /** Shared media setup: optional mic, AudioWorklet when available, confirm active.
    *  Used by both startHuddle and joinHuddle after the Rust backend call succeeds. */
   const connectAndSetupMedia = React.useCallback(
-    async (
-      joinInfo: HuddleJoinInfo,
-      myToken: number,
-    ): Promise<{
-      worklet: AudioWorkletHandle;
-      stream: MediaStream;
-    }> => {
+    async (joinInfo: HuddleJoinInfo, myToken: number): Promise<void> => {
       // Fetch self pubkey once for TTS filtering
       if (!selfPubkeyRef.current) {
         try {
@@ -565,19 +561,20 @@ export function HuddleProvider({
 
       if (tokenRef.current !== myToken) throw new Error("superseded");
 
-      // Get mic — Rust backend owns the audio WS connection.
-      // Request 48 kHz to match the Opus encoder and worklet buffer size (960 samples = 20ms).
-      const audioConstraints: MediaTrackConstraints = {
-        echoCancellation: true,
-        noiseSuppression: true,
-        sampleRate: 48000,
-      };
-      if (selectedDeviceId) {
-        audioConstraints.deviceId = { exact: selectedDeviceId };
+      const stream = await acquireHuddleMicrophone(
+        navigator.mediaDevices,
+        selectedDeviceId,
+        () => tokenRef.current === myToken,
+      );
+      // Native playout and screen capture do not require an audio input.
+      if (!stream) {
+        if (tokenRef.current !== myToken) throw new Error("superseded");
+        setLocalAudioTrack(null);
+        setMicConnected(false);
+        setEphemeralChannelId(joinInfo.ephemeral_channel_id);
+        await invoke("confirm_huddle_active");
+        return;
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints,
-      });
       const audioTrack = stream.getAudioTracks()[0];
 
       // Wrap post-getUserMedia steps so the stream is always cleaned up on
@@ -607,8 +604,6 @@ export function HuddleProvider({
         workletRef.current = worklet;
         setEphemeralChannelId(joinInfo.ephemeral_channel_id);
         await invoke("confirm_huddle_active");
-
-        return { worklet, stream };
       } catch (err) {
         // Always stop the mic stream on any failure path.
         stream.getTracks().forEach((t) => {
@@ -949,7 +944,12 @@ export function HuddleProvider({
   return (
     <HuddleContext.Provider value={contextValue}>
       <HuddleLevelsContext.Provider value={levelsValue}>
-        {children}
+        <HuddleScreenProvider
+          channelId={ephemeralChannelId}
+          ownsCapture={ownsAudioSession}
+        >
+          {children}
+        </HuddleScreenProvider>
       </HuddleLevelsContext.Provider>
     </HuddleContext.Provider>
   );

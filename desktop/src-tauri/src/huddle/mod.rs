@@ -41,6 +41,7 @@ pub mod pocket;
 pub mod preprocessing;
 pub mod reconnect;
 pub mod relay_api;
+pub mod screen;
 pub mod state;
 pub mod stt;
 pub mod transcription;
@@ -601,11 +602,13 @@ pub async fn leave_huddle(app: tauri::AppHandle, state: State<'_, AppState>) -> 
             return Ok(()); // Nothing to leave.
         }
         hs.phase = HuddlePhase::Leaving;
+        hs.stop_screen_capture();
         (
             hs.parent_channel_id.clone().unwrap_or_default(),
             hs.ephemeral_channel_id.clone().unwrap_or_default(),
         )
     };
+    state.emit_huddle_state_changed();
 
     // Auto-end: check if any human participants remain. If not, end the huddle
     // (emit HUDDLE_ENDED + archive). If others remain, just remove self from
@@ -674,11 +677,13 @@ pub async fn end_huddle(
             return Err("only the huddle creator can end it — use leave_huddle instead".into());
         }
         hs.phase = HuddlePhase::Leaving;
+        hs.stop_screen_capture();
         (
             hs.parent_channel_id.clone().unwrap_or_default(),
             hs.ephemeral_channel_id.clone().unwrap_or_default(),
         )
     };
+    state.emit_huddle_state_changed();
 
     emit_end_and_archive(&parent_channel_id, &ephemeral_channel_id, &state).await;
 
@@ -688,7 +693,7 @@ pub async fn end_huddle(
     Ok(())
 }
 
-/// Confirm that the frontend has established mic + AudioWorklet.
+/// Confirm that the frontend is ready, with mic capture or listen-only media.
 /// Transitions from Connected → Active. No-op if already Active.
 #[tauri::command]
 pub async fn confirm_huddle_active(state: State<'_, AppState>) -> Result<(), String> {
