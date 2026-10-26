@@ -521,3 +521,93 @@ async fn close_during_a_live_head_read_sends_nothing_more() {
         .unwrap();
     no_frame(&mut rx).await;
 }
+
+/// Run an ordinary `REQ "s"` through the real handler.
+async fn ordinary_req(f: &Fixture, conn: &Arc<ConnectionState>, filters: Vec<Value>) {
+    let filters: Vec<nostr::Filter> = filters
+        .into_iter()
+        .map(|filter| serde_json::from_value(filter).expect("filter"))
+        .collect();
+    let before_ids = vec![None; filters.len()];
+    super::req::handle_req(
+        "s".into(),
+        filters,
+        before_ids,
+        Arc::clone(conn),
+        Arc::clone(&f.state),
+    )
+    .await;
+}
+
+/// An ordinary `REQ` that replaces a live sync or a live subscription with
+/// the same ID retires it, also when `handle_req` refuses the new request
+/// (mixed search) or answers it once (huddle liveness) without registering
+/// it. A later change in the channel then sends nothing under that ID.
+/// Mutation: refuse mixed search with a bare `CLOSED`, or answer liveness
+/// without claiming the ID → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn refused_or_one_shot_replacement_retires_the_old_holder() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let home = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+    let mixed = vec![
+        json!({"search": "x", "#h": [home]}),
+        json!({"kinds": [45010], "#h": [home]}),
+    ];
+    let liveness = vec![json!({"kinds": [buzz_core::kind::KIND_HUDDLE_LIVENESS], "#h": [home]})];
+    for (sync_holder, replacement, terminal) in [
+        (
+            true,
+            &mixed,
+            json!([
+                "CLOSED",
+                "s",
+                "error: mixed search and non-search filters not supported"
+            ]),
+        ),
+        (
+            false,
+            &mixed,
+            json!([
+                "CLOSED",
+                "s",
+                "error: mixed search and non-search filters not supported"
+            ]),
+        ),
+        (true, &liveness, json!(["EOSE", "s"])),
+        (false, &liveness, json!(["EOSE", "s"])),
+    ] {
+        let case = format!("sync holder: {sync_holder}, replacement: {terminal}");
+        let (conn, mut rx) = connect(&f, &owner);
+        if sync_holder {
+            start_sync(&f, &conn, sync_filter(&[home])).await.unwrap();
+        } else {
+            ordinary_req(
+                &f,
+                &conn,
+                vec![json!({"kinds": [45010], "#h": [home], "limit": 0})],
+            )
+            .await;
+        }
+        assert!(initial_set(&mut rx).await.is_empty(), "{case}");
+
+        ordinary_req(&f, &conn, replacement.clone()).await;
+        assert_eq!(frame(&mut rx).await, terminal, "{case}");
+        assert!(conn.subscriptions.lock().await.is_empty(), "{case}");
+        assert!(
+            !f.state.artifact_syncs.contains(conn.conn_id, "s"),
+            "{case}"
+        );
+        assert!(
+            f.state
+                .sub_registry
+                .get_filters(conn.conn_id, "s")
+                .is_none(),
+            "{case}"
+        );
+
+        revision(&f, &owner, home, Uuid::new_v4(), "create", None).await;
+        no_frame(&mut rx).await;
+    }
+}

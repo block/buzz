@@ -28,7 +28,7 @@ pub async fn handle_close(sub_id: String, conn: Arc<ConnectionState>, state: Arc
 /// Refuse a `REQ` or sync `REQ` with `CLOSED reason`. A `REQ` replaces
 /// whatever held its ID (NIP-01), and `CLOSED` tells the client the ID is
 /// closed, so the old holder is retired before the frame, under the lifecycle
-/// lock. Every refusal before a request's handler runs goes through here. If
+/// lock. Every refusal before a request claims its ID goes through here. If
 /// the frame cannot be queued, the connection is cancelled: the client would
 /// otherwise never learn that the old holder is gone.
 pub(crate) async fn refuse(sub_id: &str, reason: &str, conn: &ConnectionState, state: &AppState) {

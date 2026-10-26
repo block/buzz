@@ -2231,6 +2231,96 @@ pub(crate) mod tests {
         }
     }
 
+    /// An ordinary REQ that `handle_req` itself refuses, before it claims its
+    /// ID, still replaces the old holder (NIP-01): a live subscription or an
+    /// artifact sync must not keep using an ID the client was told is closed.
+    /// Covers the auth, scope, channel-count and database-error refusals.
+    /// Mutation: send any of them as a bare `CLOSED` → RED.
+    #[tokio::test]
+    async fn in_handler_req_refusal_retires_the_old_holder() {
+        use buzz_pubsub::EventTopic;
+        let mut scoped = auth_context();
+        scoped.scopes = vec![buzz_auth::Scope::ChannelsRead];
+        let channel = uuid::Uuid::new_v4();
+        let too_many: Vec<String> = (0..=handlers::req::MAX_EXPLICIT_CHANNEL_VALUES)
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect();
+        let cases = [
+            (
+                AuthState::Failed,
+                serde_json::json!({"kinds": [1]}),
+                "auth-required: not authenticated",
+            ),
+            (
+                AuthState::Authenticated(scoped),
+                serde_json::json!({"kinds": [1]}),
+                "restricted: insufficient scope",
+            ),
+            (
+                authenticated_state(),
+                serde_json::json!({"kinds": [1], "#h": too_many}),
+                "restricted: too many explicit channels",
+            ),
+            (
+                authenticated_state(),
+                serde_json::json!({"search": "x"}),
+                "error: database error",
+            ),
+        ];
+        for ((auth, filter, reason), sync_holder) in cases
+            .into_iter()
+            .flat_map(|case| [(case.clone(), false), (case, true)])
+        {
+            let case = format!("{reason}, sync holder: {sync_holder}");
+            let state = crate::state::tests::test_state_with_unreachable_database_url(
+                "postgres://127.0.0.1:1/none",
+            )
+            .await;
+            let (conn, mut rx) = test_conn_with_auth(auth);
+            let topic = EventTopic::Channel(channel);
+            handlers::req::claim_live_subscription(
+                "s",
+                &[nostr::Filter::new().kind(Kind::TextNote)],
+                Some(&[channel]),
+                &conn,
+                &state,
+            )
+            .await
+            .expect("claim the old holder");
+            if sync_holder {
+                state.artifact_syncs.insert_idle(conn.conn_id, "s");
+            }
+
+            let filter = serde_json::from_value(filter).expect("filter");
+            handlers::req::handle_req(
+                "s".into(),
+                vec![filter],
+                vec![None],
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            )
+            .await;
+
+            assert!(conn.subscriptions.lock().await.is_empty(), "{case}");
+            assert!(
+                state.sub_registry.get_filters(conn.conn_id, "s").is_none(),
+                "{case}"
+            );
+            assert!(!state.artifact_syncs.contains(conn.conn_id, "s"), "{case}");
+            assert_eq!(
+                state.pubsub.topic_refcount(&conn.tenant, topic).await,
+                0,
+                "{case}"
+            );
+            let mut frame = read_frame(&mut rx);
+            if frame[0] == "NOTICE" {
+                frame = read_frame(&mut rx);
+            }
+            assert_eq!(frame, serde_json::json!(["CLOSED", "s", reason]), "{case}");
+            assert!(rx.try_recv().is_err(), "{case}: nothing follows CLOSED");
+        }
+    }
+
     /// A pre-handler refusal whose `CLOSED` cannot be queued has already
     /// retired the old holder, so it cancels the connection: the client
     /// learns the ID is gone from the disconnect. The queue is full but
