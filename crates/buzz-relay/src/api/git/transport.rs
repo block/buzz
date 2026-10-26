@@ -8,6 +8,9 @@
 //! Auth: NIP-98 on all routes (clone + push). No public repos for v1.
 //! Transport: shells out to `git --stateless-rpc` with `env_clear()`.
 
+// Response is the natural error type for axum handlers.
+#![allow(clippy::result_large_err)]
+
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -4780,11 +4783,13 @@ mod off_mode_precedence_tests {
                 const GIT_TEST_ISSUER: &str = "https://git-pack-test.issuer.invalid";
                 const GIT_TEST_AUDIENCE: &str = "https://git-pack-test.relay.invalid";
                 const GIT_TEST_KID: &str = "git-pack-test-key-1";
-                const GIT_TEST_EC_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-                    MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-                    WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-                    zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-                    -----END PRIVATE KEY-----\n";
+                const GIT_TEST_EC_PEM: &str = concat!(
+                    "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- test-only ES256 fixture
+                    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+                    "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+                    "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+                    "-----END PRIVATE KEY-----\n",
+                );
 
                 let jwks: JwkSet = serde_json::from_value(serde_json::json!({
                     "keys": [{
