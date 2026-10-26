@@ -81,6 +81,9 @@ run_unit_tests() {
   run_test_step "community-ban route inventory" \
     python3 scripts/check-community-ban-route-inventory.py
 
+  run_test_step "community-ban route scanner fixtures" \
+    python3 scripts/check-community-ban-route-inventory.test.py
+
   run_test_step "buzz-core tests" \
     cargo test -p buzz-core --lib -- --nocapture
 

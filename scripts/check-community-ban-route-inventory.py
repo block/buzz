@@ -191,14 +191,24 @@ def in_ranges(position: int, ranges: list[tuple[int, int]]) -> bool:
     return any(start <= position < end for start, end in ranges)
 
 
+def module_path(path: Path) -> str:
+    module_parts = list(path.relative_to(RELAY_SRC).with_suffix("").parts)
+    if module_parts[-1] in {"mod", "lib", "main"}:
+        module_parts.pop()
+    return "::".join(module_parts)
+
+
+def production_sources():
+    for path in sorted(RELAY_SRC.rglob("*.rs")):
+        if "tests" in path.parts or path.name.endswith("_tests.rs"):
+            continue
+        yield path
+
+
 def router_functions(path: Path, source: str, mask: str):
     pattern = re.compile(r"\bfn\s+([A-Za-z_]\w*)\s*\(")
     excluded = test_module_ranges(mask)
-    relative = path.relative_to(RELAY_SRC).with_suffix("")
-    module_parts = list(relative.parts)
-    if module_parts[-1] == "mod":
-        module_parts.pop()
-    module = "::".join(module_parts)
+    module = module_path(path)
 
     for match in pattern.finditer(mask):
         name = match.group(1)
@@ -241,31 +251,52 @@ def string_value(expression: str) -> str | None:
     return raw.group(2) if raw else None
 
 
-def route_constants() -> dict[str, str]:
+def route_constants() -> dict[tuple[str, str], str]:
+    """Map `(module, NAME)` to each production `&str` constant's value.
+
+    Keyed by module so same-named constants in different modules (for example
+    `api::gifs::SEARCH_PATH` and `api::profiles::SEARCH_PATH`) stay distinct.
+    """
     constants = {}
     pattern = re.compile(
         r"(?:pub(?:\([^)]*\))?\s+)?const\s+([A-Za-z_]\w*)\s*:\s*&str\s*=\s*"
         r'("(?:\\.|[^"\\])*"|r(?:#+)?".*?"(?:#+)?)\s*;',
         re.DOTALL,
     )
-    for path in RELAY_SRC.rglob("*.rs"):
-        if "tests" in path.parts or path.name.endswith("_tests.rs"):
-            continue
+    for path in production_sources():
+        module = module_path(path)
         for match in pattern.finditer(path.read_text()):
             value = string_value(match.group(2))
             if value is not None:
-                constants[match.group(1)] = value
+                constants[(module, match.group(1))] = value
     return constants
 
 
-def route_path(expression: str, constants: dict[str, str]) -> str:
+def route_path(expression: str, constants: dict[tuple[str, str], str], module: str) -> str:
     literal = string_value(expression)
     if literal is not None:
         return literal
-    constant = re.search(r"([A-Za-z_]\w*)\s*$", expression.strip())
-    if constant and constant.group(1) in constants:
-        return constants[constant.group(1)]
-    raise ValueError(f"route path is not a literal or known string constant: {expression.strip()}")
+    reference = re.fullmatch(
+        r"(?:(?:crate|self)::)?((?:[A-Za-z_]\w*::)*)([A-Za-z_]\w*)", expression.strip()
+    )
+    if reference is None:
+        raise ValueError(
+            f"route path is not a literal or known string constant: {expression.strip()}"
+        )
+    qualifier = reference.group(1).rstrip(":")
+    name = reference.group(2)
+    candidates = [key for key in constants if key[1] == name]
+    if qualifier:
+        candidates = [
+            key for key in candidates if key[0] == qualifier or key[0].endswith(f"::{qualifier}")
+        ]
+    elif len(candidates) > 1:
+        candidates = [key for key in candidates if key[0] == module]
+    if len(candidates) != 1:
+        raise ValueError(
+            f"route path is not a literal or known string constant: {expression.strip()}"
+        )
+    return constants[candidates[0]]
 
 
 def registered_calls(mask: str, source: str, function_start: int, function_end: int, call: str):
@@ -291,25 +322,36 @@ def builder_prefixes(builders) -> dict[str, str]:
     if main is None:
         raise ValueError("could not find relay router::build_router")
     _, _, path, source, mask, start, _, end = main
+    constants = route_constants()
     prefixes = {}
     for first, second_mask, second_source in registered_calls(mask, source, start, end, "nest"):
-        prefix = route_path(first, route_constants())
+        prefix = route_path(first, constants, module_path(path))
         target_match = re.search(r"((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)\s*\(", second_mask)
-        if prefix is None or target_match is None:
-            continue
-        target = target_match.group(1)
+        if target_match is None:
+            raise ValueError(
+                f"router::build_router: nest target is not a router builder call: "
+                f"{second_source.strip()}"
+            )
+        target = re.sub(r"^(?:crate|self)::", "", target_match.group(1))
         candidates = [b[0] for b in builders if b[0] == target or b[0].endswith(f"::{target}")]
-        if len(candidates) == 1:
-            prefixes[candidates[0]] = prefix
+        if len(candidates) != 1:
+            raise ValueError(
+                f"router::build_router: nest target {target} matches "
+                f"{len(candidates)} router builders, expected exactly 1"
+            )
+        prefixes[candidates[0]] = prefix
     return prefixes
+
+
+# Service-style registrations bypass the per-route method classification, so
+# each one is a hard error unless it is allow-listed here with its builder.
+ALLOWED_SERVICE_REGISTRATIONS = {("router::build_router", "fallback_service")}
 
 
 def collect_registered_routes() -> Counter:
     constants = route_constants()
     builders = []
-    for path in RELAY_SRC.rglob("*.rs"):
-        if "tests" in path.parts or path.name.endswith("_tests.rs"):
-            continue
+    for path in production_sources():
         source = path.read_text()
         mask = mask_comments_and_strings(source)
         for qualified_name, name, start, brace, end in router_functions(path, source, mask):
@@ -318,23 +360,42 @@ def collect_registered_routes() -> Counter:
     prefixes = builder_prefixes(builders)
     registrations: Counter = Counter()
     errors = []
-    for path in RELAY_SRC.rglob("*.rs"):
-        if "tests" in path.parts or path.name.endswith("_tests.rs"):
-            continue
+    for path in production_sources():
         source = path.read_text()
         mask = mask_comments_and_strings(source)
         test_ranges = test_module_ranges(mask)
-        router_ranges = [
-            (builder[6], builder[7]) for builder in builders if builder[2] == path
-        ]
-        for match in re.finditer(r"\.\s*route\s*\(", mask):
+        path_builders = [builder for builder in builders if builder[2] == path]
+
+        def enclosing_builder(position: int) -> str | None:
+            for builder in path_builders:
+                if builder[6] <= position < builder[7]:
+                    return builder[0]
+            return None
+
+        for match in re.finditer(
+            r"\.\s*(route|nest|route_service|nest_service|fallback_service)\s*\(", mask
+        ):
             if in_ranges(match.start(), test_ranges):
                 continue
-            if not any(start <= match.start() < end for start, end in router_ranges):
-                line = source.count("\n", 0, match.start()) + 1
+            call = match.group(1)
+            builder = enclosing_builder(match.start())
+            line = source.count("\n", 0, match.start()) + 1
+            location = f"{path.relative_to(ROOT)}:{line}"
+            if call.endswith("_service"):
+                if (builder, call) not in ALLOWED_SERVICE_REGISTRATIONS:
+                    errors.append(
+                        f"{location}: production .{call} registration is not classified; "
+                        "use .route with an HTTP method or allow-list it"
+                    )
+            elif builder is None:
                 errors.append(
-                    f"{path.relative_to(ROOT)}:{line}: production .route registration "
+                    f"{location}: production .{call} registration "
                     "is outside a recognized router builder"
+                )
+            elif call == "nest" and builder != "router::build_router":
+                errors.append(
+                    f"{location}: production .nest registration outside "
+                    "router::build_router is not classified"
                 )
 
     for qualified_name, name, path, source, mask, _, start, end in builders:
@@ -342,7 +403,7 @@ def collect_registered_routes() -> Counter:
         prefix = prefixes.get(qualified_name, "")
         for path_expression, method_mask, _ in registered_calls(mask, source, start, end, "route"):
             try:
-                route = route_path(path_expression, constants)
+                route = route_path(path_expression, constants, module_path(path))
             except ValueError as error:
                 errors.append(f"{path.relative_to(ROOT)}::{name}: {error}")
                 continue
