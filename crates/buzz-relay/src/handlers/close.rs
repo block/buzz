@@ -39,6 +39,22 @@ pub(crate) async fn refuse(sub_id: &str, reason: &str, conn: &ConnectionState, s
     }
 }
 
+/// Queue `frame` for `sub_id` only while the request holding `owner` still
+/// owns the ID. A request that a newer same-ID REQ replaced sends nothing:
+/// its late `EOSE` would otherwise tell a replacing sync that a set it never
+/// sent is complete. Returns whether the frame was queued.
+pub(crate) async fn send_if_owner(
+    sub_id: &str,
+    owner: u64,
+    frame: String,
+    conn: &ConnectionState,
+) -> bool {
+    #[cfg(test)]
+    test_seam::pause_at(&test_seam::SEND_PAUSE).await;
+    let subs = conn.subscriptions.lock().await;
+    subs.get(sub_id) == Some(&owner) && conn.send(frame)
+}
+
 /// Monotonic source of subscription owner tokens. Each REQ claims its sub ID
 /// with a fresh token, so a superseded request can tell it no longer owns it.
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
@@ -151,6 +167,7 @@ pub(crate) mod test_seam {
         pub(crate) static PAUSE: Arc<Pause>;
         pub(crate) static RELEASE_PAUSE: Arc<Pause>;
         pub(crate) static CLEANUP_PAUSE: Arc<Pause>;
+        pub(crate) static SEND_PAUSE: Arc<Pause>;
     }
 
     pub(crate) async fn pause_at(point: &'static tokio::task::LocalKey<Arc<Pause>>) {

@@ -621,3 +621,73 @@ async fn refused_or_one_shot_replacement_retires_the_old_holder() {
         no_frame(&mut rx).await;
     }
 }
+
+/// A same-ID sync that replaces a history, search or huddle-liveness `REQ`
+/// while that request waits to send gets only its own frames: the old
+/// request's late frames, `EOSE` included, must not reach the sync's
+/// client. The old request pauses just before its first frame.
+/// Mutation: drop the owner check in `close::send_if_owner` → stale frames
+/// follow the sync's `EOSE` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_replaced_req_sends_nothing_under_a_sync_that_took_its_id() {
+    use super::close::test_seam::{Pause, SEND_PAUSE};
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let history: fn(Uuid) -> Vec<Value> = |home| vec![json!({"kinds": [45010], "#h": [home]})];
+    let search: fn(Uuid) -> Vec<Value> = |home| vec![json!({"search": "x", "#h": [home]})];
+    let liveness: fn(Uuid) -> Vec<Value> =
+        |home| vec![json!({"kinds": [buzz_core::kind::KIND_HUDDLE_LIVENESS], "#h": [home]})];
+    for (name, old_req) in [
+        ("history", history),
+        ("search", search),
+        ("liveness", liveness),
+    ] {
+        let home = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+        let created = revision(&f, &owner, home, Uuid::new_v4(), "create", None).await;
+        let (conn, mut rx) = connect(&f, &owner);
+        let pause = Arc::new(Pause::default());
+        let stale = tokio::spawn({
+            let (f_conn, state) = (Arc::clone(&conn), Arc::clone(&f.state));
+            let filters: Vec<nostr::Filter> = old_req(home)
+                .into_iter()
+                .map(|filter| serde_json::from_value(filter).expect("filter"))
+                .collect();
+            let before_ids = vec![None; filters.len()];
+            SEND_PAUSE.scope(
+                Arc::clone(&pause),
+                super::req::handle_req("s".into(), filters, before_ids, f_conn, state),
+            )
+        });
+        tokio::time::timeout(Duration::from_secs(10), pause.reached.notified())
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the old REQ reaches its first send"));
+
+        let sync = start_sync(&f, &conn, sync_filter(&[home]));
+        assert_eq!(
+            initial_set(&mut rx).await,
+            vec![created.id.to_hex()],
+            "{name}"
+        );
+        // The seam pauses before every send; release each one.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !stale.is_finished() {
+                pause.resume.notify_one();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{name}: the old REQ ends"));
+        stale.await.unwrap();
+        no_frame(&mut rx).await;
+        assert!(
+            f.state.artifact_syncs.contains(conn.conn_id, "s"),
+            "{name}: the sync still holds the ID"
+        );
+        super::close::handle_close("s".into(), Arc::clone(&conn), Arc::clone(&f.state)).await;
+        tokio::time::timeout(Duration::from_secs(5), sync)
+            .await
+            .expect("sync task ends on CLOSE")
+            .unwrap();
+    }
+}

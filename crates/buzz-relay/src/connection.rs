@@ -2321,6 +2321,39 @@ pub(crate) mod tests {
         }
     }
 
+    /// A REQ for a new ID refused at the subscription limit cancels the
+    /// connection when its `CLOSED` cannot be queued: the client would
+    /// otherwise wait on a request the relay refused.
+    /// Mutation: ignore the `send` result on that refusal → RED.
+    #[tokio::test]
+    async fn subscription_limit_refusal_with_a_full_queue_cancels_the_connection() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, _rx) = test_conn_with_auth(authenticated_state());
+        {
+            let mut subs = conn.subscriptions.lock().await;
+            for index in 0..handlers::req::MAX_SUBSCRIPTIONS {
+                subs.insert(format!("held-{index}"), 0);
+            }
+        }
+        while conn
+            .send_tx
+            .try_send(WsMessage::Text("filler".into()))
+            .is_ok()
+        {}
+
+        handlers::req::handle_req(
+            "s".into(),
+            vec![nostr::Filter::new().kind(Kind::TextNote)],
+            vec![None],
+            Arc::clone(&conn),
+            Arc::clone(&state),
+        )
+        .await;
+
+        assert!(conn.cancel.is_cancelled());
+        assert!(!conn.subscriptions.lock().await.contains_key("s"));
+    }
+
     /// A pre-handler refusal whose `CLOSED` cannot be queued has already
     /// retired the old holder, so it cancels the connection: the client
     /// learns the ID is gone from the disconnect. The queue is full but

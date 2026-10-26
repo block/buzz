@@ -466,10 +466,14 @@ async fn claim(
         return None;
     }
     if !subs.contains_key(sub_id) && subs.len() >= super::req::MAX_SUBSCRIPTIONS {
-        conn.send(RelayMessage::closed(
+        // A new ID has no old holder to retire, but a lost CLOSED would leave
+        // the client waiting on a refused sync.
+        if !conn.send(RelayMessage::closed(
             sub_id,
             "error: too many subscriptions",
-        ));
+        )) {
+            conn.cancel.cancel();
+        }
         return None;
     }
     super::close::retire_locked(&mut subs, sub_id, conn, state).await;
