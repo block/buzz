@@ -15,6 +15,7 @@ import {
   parseJunit,
   playwrightRepetitions,
   playwrightShards,
+  rustGroups,
   rustModulePath,
   rustTarget,
   rustTests,
@@ -261,14 +262,45 @@ test("same-named Rust tests in different modules are distinct, and a hunk select
   );
 });
 
-test("Rust files build only the targets they can be part of", () => {
+test("Rust files build only the targets they can be part of, merged per package one whole flag each", () => {
   for (const [file, flags] of [
-    ["crates/buzz-relay/src/api/mod.rs", ["--lib", "--bins"]],
-    ["crates/buzz-admin/src/main.rs", ["--bins"]],
-    ["crates/buzz-test-client/tests/e2e_relay.rs", ["--test", "e2e_relay"]],
+    ["crates/buzz-relay/src/api/mod.rs", [["--lib"], ["--bins"]]],
+    ["crates/buzz-admin/src/main.rs", [["--bins"]]],
+    ["crates/buzz-test-client/tests/e2e_relay.rs", [["--test", "e2e_relay"]]],
     ["crates/buzz-agent/tests/common/mod.rs", []],
   ])
     assert.deepEqual(rustTarget(file), flags, file);
+  // Two integration tests keep two `--test` flags: `--test codec connection`
+  // would make nextest filter on a test named "connection" and repeat nothing.
+  const args = (...entries) =>
+    [...rustGroups(entries).values()].map((group) => group.args);
+  assert.deepEqual(
+    args(
+      "crates/buzz-audio-client/tests/codec.rs::roundtrip",
+      "crates/buzz-audio-client/tests/connection.rs::connects",
+    ),
+    [["-p", "buzz-audio-client", "--test", "codec", "--test", "connection"]],
+  );
+  assert.deepEqual(
+    args(
+      "crates/buzz-audio-client/src/wire.rs::tests::frame",
+      "crates/buzz-audio-client/src/jitter.rs::tests::order",
+      "crates/buzz-audio-client/tests/codec.rs::roundtrip",
+    ),
+    [["-p", "buzz-audio-client", "--lib", "--bins", "--test", "codec"]],
+  );
+  // A custom-path file builds every target of its package; packages stay apart.
+  assert.deepEqual(
+    args(
+      "crates/buzz-agent/tests/regressions.rs::replay",
+      "crates/buzz-agent/tests/common/mod.rs::helper",
+      "crates/buzz-admin/src/main.rs::tests::parses",
+    ),
+    [
+      ["-p", "buzz-agent"],
+      ["-p", "buzz-admin", "--bins"],
+    ],
+  );
 });
 
 test("Rust selection: a hunk inside a test selects it, elsewhere selects every runnable test; ignored tests never run", () => {

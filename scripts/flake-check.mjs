@@ -402,21 +402,23 @@ export function cratePackage(file) {
   return /^\[package\][\s\S]*?^name\s*=\s*"([^"]+)"/m.exec(manifest)[1];
 }
 
-// Cargo target flags building only the test binaries a file can be part of:
-// src/** is the lib (when the crate has one) or a bin, tests/<stem>.rs and
-// tests/<dir>/*.rs (with a main.rs) the integration test of that name. A
-// file placed by a custom `[[test]]` path builds every target instead.
+// Cargo target flags building only the test binaries a file can be part of,
+// one flag per entry so rustGroups can merge files' flags without splitting
+// `--test <name>`: src/** is the lib (when the crate has one) or a bin,
+// tests/<stem>.rs and tests/<dir>/*.rs (with a main.rs) the integration test
+// of that name. A file placed by a custom `[[test]]` path builds every target
+// instead.
 export function rustTarget(file) {
   const [, , kind, first, second] = file.split("/");
   if (kind === "src") {
     const lib =
       existsSync(`${crateDir(file)}/src/lib.rs`) ||
       /^\[lib\]/m.test(readFileSync(`${crateDir(file)}/Cargo.toml`, "utf8"));
-    return lib ? ["--lib", "--bins"] : ["--bins"];
+    return lib ? [["--lib"], ["--bins"]] : [["--bins"]];
   }
-  if (second === undefined) return ["--test", first.replace(/\.rs$/, "")];
+  if (second === undefined) return [["--test", first.replace(/\.rs$/, "")]];
   return existsSync(`${crateDir(file)}/tests/${first}/main.rs`)
-    ? ["--test", first]
+    ? [["--test", first]]
     : [];
 }
 
@@ -672,13 +674,12 @@ export function chooseRust(tests, candidates) {
   return [...chosen.values()];
 }
 
-// nextest has no repeat flag, so run the selection once per iteration under
-// the `flake` profile (.config/nextest.toml: no retries, JUnit per run), one
-// cargo invocation per package so each builds only the targets its files can
-// be in. The selection is listed first, by in-file path, and narrowed with
-// chooseRust to exact (binary, test) pairs; a selection listing no runnable
-// test is one of ignored or infrastructure-backed tests, not a failure.
-function repeatRust(entries, iterations) {
+// The repeat's cargo invocation per package: `-p <crate>` plus the target
+// flags of its selected files, each whole flag once (`--test codec --test
+// connection`; merging tokens instead gave `--test codec connection`, which
+// nextest reads as a test-name filter that matches nothing), and the tests
+// to list in those targets.
+export function rustGroups(entries) {
   const groups = new Map();
   for (const entry of entries) {
     const [, file, path] =
@@ -686,19 +687,35 @@ function repeatRust(entries, iterations) {
     if (!file)
       throw new Error(`rust entry must be <file>::<module::test>: ${entry}`);
     const crate = cratePackage(file);
-    const group = groups.get(crate) ?? { targets: new Set(), tests: [] };
+    const group = groups.get(crate) ?? { targets: new Map(), tests: [] };
     const targets = rustTarget(file);
     if (targets.length === 0) group.every = true;
-    for (const target of targets) group.targets.add(target);
+    for (const target of targets) group.targets.set(target.join(" "), target);
     group.tests.push({
       path,
       exact: [...rustModulePath(file), path].join("::"),
     });
     groups.set(crate, group);
   }
+  for (const [crate, group] of groups)
+    group.args = [
+      "-p",
+      crate,
+      ...(group.every ? [] : [...group.targets.values()].flat()),
+    ];
+  return groups;
+}
+
+// nextest has no repeat flag, so run the selection once per iteration under
+// the `flake` profile (.config/nextest.toml: no retries, JUnit per run), one
+// cargo invocation per package so each builds only the targets its files can
+// be in. The selection is listed first, by in-file path, and narrowed with
+// chooseRust to exact (binary, test) pairs; a selection listing no runnable
+// test is one of ignored or infrastructure-backed tests, not a failure.
+function repeatRust(entries, iterations) {
+  const groups = rustGroups(entries);
   const runs = [];
-  for (const [crate, group] of groups) {
-    group.args = ["-p", crate, ...(group.every ? [] : group.targets)];
+  for (const group of groups.values()) {
     const suffixes = [...new Set(group.tests.map(({ path }) => path))]
       .map((path) => `test(/(^|::)${path}$/)`)
       .join(" | ");

@@ -75,7 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
       # Restores the Unit Tests lane's cache (_ci-rust.yml) read-only; this
       # lane never saves one of its own. The restore only hits while the cache
       # key matches: the same shared-key, and rust-cache's environment hash —
@@ -99,7 +99,7 @@ jobs:
         run: node scripts/flake-check.mjs rust --iterations=10 $SELECTED
       - name: Rust iteration reports
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: flake-rust
           path: test-results/flake
@@ -134,7 +134,7 @@ jobs:
         run: node scripts/flake-check.mjs node --iterations=10 $SELECTED
       - name: node:test iteration logs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: flake-node
           path: test-results/flake
@@ -203,7 +203,7 @@ jobs:
         run: node scripts/flake-check.mjs playwright-summary desktop/playwright-report.json "Flake check (Playwright smoke, $SHARD/$SHARD_TOTAL)"
       - name: Playwright repetition artifacts
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: flake-playwright-${{ matrix.shard }}
           path: |
@@ -252,7 +252,7 @@ jobs:
         run: node scripts/flake-check.mjs dart --iterations=10 $SELECTED
       - name: Flutter iteration reports
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: flake-dart
           path: test-results/flake
