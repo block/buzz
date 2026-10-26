@@ -98,6 +98,19 @@ impl ReaderOperation {
             Self::Maintenance => PoolOperation::ReaderMaintenance,
         }
     }
+
+    /// Whether a dropped checkout must close the connection under SQLx's
+    /// bounded `close_on_drop` instead of returning it to the pool.
+    ///
+    /// Maintenance reads run under relay-side deadlines that drop them
+    /// mid-query when a reader goes dark, and the reader pool is shared with
+    /// serving reads. The pool's release check is bounded, but SQLx's own
+    /// release ping after it is not, so a returned connection whose reader
+    /// goes silent in that window still strands its slot. Close-on-drop
+    /// bounds the whole release. Serving reads keep pooled reuse.
+    pub(crate) const fn bounded_release(self) -> bool {
+        matches!(self, Self::Maintenance)
+    }
 }
 
 impl PoolOperation {

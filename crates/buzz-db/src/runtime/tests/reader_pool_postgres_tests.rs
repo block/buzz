@@ -236,6 +236,9 @@ async fn terminated_warm_reader_connection_fails_closed_to_writer() {
 /// cancelled begin queues no `ROLLBACK`, and the release ping consumes the
 /// late `BEGIN` reply: without the reader pool's release check, the
 /// connection comes back `idle in transaction` once the reader resumes.
+/// The database defaults to `REPEATABLE READ`, the isolation routed reads
+/// begin with, so the check only sees the open transaction because reader
+/// sessions pin their own default.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
 async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
@@ -243,14 +246,21 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
         .await
         .expect("connect admin");
     let (writer, wname) = create_scratch_db(&admin, "proof_tx").await;
+    sqlx::query(&format!(
+        "ALTER DATABASE \"{wname}\" SET default_transaction_isolation = 'repeatable read'"
+    ))
+    .execute(&admin)
+    .await
+    .expect("default the scratch database to repeatable read");
     let writer_options = writer.connect_options();
     let proxy = crate::test_support::PausingProxy::spawn(
         writer_options.get_host().to_owned(),
         writer_options.get_port(),
     )
     .await;
-    let read_pool = Db::read_pool_options(5)
-        .connect_lazy_with((*writer_options).clone().host("127.0.0.1").port(proxy.port));
+    let read_pool = Db::read_pool_options(5).connect_lazy_with(Db::reader_connect_options(
+        (*writer_options).clone().host("127.0.0.1").port(proxy.port),
+    ));
     let mut db = Db::from_pools(writer.clone(), read_pool.clone());
     db.fence().force_open_for_tests(chrono::Utc::now());
     db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(30)));
@@ -331,8 +341,9 @@ async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
     )
     .await;
     // Floor 1, ceiling 2: both slots end up on stalled sessions.
-    let read_pool = Db::read_pool_options(2)
-        .connect_lazy_with((*writer_options).clone().host("127.0.0.1").port(proxy.port));
+    let read_pool = Db::read_pool_options(2).connect_lazy_with(Db::reader_connect_options(
+        (*writer_options).clone().host("127.0.0.1").port(proxy.port),
+    ));
     let mut db = Db::from_pools(writer.clone(), read_pool.clone());
     db.fence().force_open_for_tests(chrono::Utc::now());
     db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(30)));

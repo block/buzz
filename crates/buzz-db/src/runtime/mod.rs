@@ -1021,10 +1021,23 @@ impl Db {
     /// the server/role default is already tighter, so no replica read is
     /// unbounded; per-call `SET LOCAL` caps still apply on top.
     fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
+        let options: sqlx::postgres::PgConnectOptions = url.parse()?;
         Ok(Self::read_pool_options(max_connections)
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-            .connect_lazy(url)?)
+            .connect_lazy_with(Self::reader_connect_options(options)))
+    }
+
+    /// Reader session options: pins `default_transaction_isolation` to
+    /// `read committed` in the startup packet (no extra round trip), which
+    /// overrides any database or role default. The release check in
+    /// [`Db::read_pool_options`] relies on it: routed reads begin
+    /// `REPEATABLE READ`, so a session default of `read committed` is what
+    /// makes a transaction left open by a dropped `BEGIN` visible.
+    pub(crate) fn reader_connect_options(
+        options: sqlx::postgres::PgConnectOptions,
+    ) -> sqlx::postgres::PgConnectOptions {
+        options.options([("default_transaction_isolation", "read committed")])
     }
 
     /// Upper bound on a reader connection's release check (see
@@ -1050,10 +1063,17 @@ impl Db {
     /// reader answers, that connection would otherwise go back to the pool
     /// `idle in transaction`. Closing it ends the session, and the server
     /// rolls the transaction back. Routed reads only begin `REPEATABLE READ`
-    /// (see [`Db::proved_reader`]), so an isolation level other than the
-    /// session default means a transaction is still open. A reader whose
-    /// default is already `REPEATABLE READ` hides that case from the check;
-    /// the timeout still bounds the slot.
+    /// (see [`Db::proved_reader`]) and reader sessions default to `READ
+    /// COMMITTED` (see [`Db::reader_connect_options`]), so an isolation level
+    /// other than the session default means a transaction is still open.
+    ///
+    /// Residual window: after the check passes, sqlx sends its own release
+    /// ping, which has no timeout. A reader that goes silent in that one
+    /// round trip strands that one slot until the socket fails. That is
+    /// bounded by the releases in flight at that instant, and later checkouts
+    /// of silent connections go through the proof timeout and this check.
+    /// Checkouts that must never strand a slot use `close_on_drop` (see
+    /// `ReaderOperation::bounded_release`).
     pub(crate) fn read_pool_options(max_connections: u32) -> PgPoolOptions {
         PgPoolOptions::new()
             .max_connections(max_connections)
@@ -1348,6 +1368,11 @@ impl Db {
                 }
             };
         let mut conn = conn;
+        if operation.bounded_release() {
+            // Must precede the first post-acquire await: a caller deadline
+            // can drop this checkout at any of them.
+            conn.close_on_drop();
+        }
         // The proof is the reader's first wire round trip (no pre-acquire
         // ping, see `connect_read_pool`), so it carries the liveness bound:
         // a half-open socket to a vanished reader would otherwise hang the
