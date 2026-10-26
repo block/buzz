@@ -72,6 +72,28 @@ fn route_reasons(snapshotter: &Snapshotter) -> std::collections::HashMap<(String
         .collect()
 }
 
+/// `buzz_db_reader_release_closed_total` counters keyed by `reason`.
+fn release_closes(snapshotter: &Snapshotter) -> std::collections::HashMap<String, u64> {
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(key, ..)| key.key().name() == "buzz_db_reader_release_closed_total")
+        .map(|(key, _, _, value)| {
+            let DebugValue::Counter(n) = value else {
+                panic!("buzz_db_reader_release_closed_total must be a counter");
+            };
+            let reason = key
+                .key()
+                .labels()
+                .find(|l| l.key() == "reason")
+                .map(|l| l.value().to_owned())
+                .unwrap_or_default();
+            (reason, n)
+        })
+        .collect()
+}
+
 /// The boot ping fills the reader pool to its warm floor, so a freshly
 /// started pod meets its first routed reads with established connections
 /// instead of dialing each one inside the 150ms reader acquire budget.
@@ -211,13 +233,11 @@ async fn terminated_warm_reader_connection_fails_closed_to_writer() {
 /// return the connection to the pool with a server-side transaction open.
 /// sqlx counts the transaction only once `BEGIN` is acknowledged, so a
 /// cancelled begin queues no `ROLLBACK`, and the release ping consumes the
-/// late `BEGIN` reply: dropped instead of detached, the connection comes
-/// back `idle in transaction` once the reader resumes.
+/// late `BEGIN` reply: without the reader pool's release check, the
+/// connection comes back `idle in transaction` once the reader resumes.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
 async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
-    use sqlx::postgres::PgPoolOptions;
-
     let admin = PgPool::connect(&admin_url().await)
         .await
         .expect("connect admin");
@@ -228,11 +248,7 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
         writer_options.get_port(),
     )
     .await;
-    let read_pool = PgPoolOptions::new()
-        .max_connections(5)
-        .min_connections(1)
-        .test_before_acquire(false)
-        .acquire_timeout(Db::READER_ACQUIRE_TIMEOUT)
+    let read_pool = Db::read_pool_options(5)
         .connect_lazy_with((*writer_options).clone().host("127.0.0.1").port(proxy.port));
     let mut db = Db::from_pools(writer.clone(), read_pool.clone());
     db.fence().force_open_for_tests(chrono::Utc::now());
@@ -246,12 +262,13 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
-    let count = {
-        let _guard = metrics::set_default_local_recorder(&recorder);
-        db.count_events_routed("proof_mid_begin_probe", &query)
-            .await
-    }
-    .expect("writer fallback answers while the reader is paused");
+    // Held until the release check has run: sqlx runs it in a task spawned
+    // on this (current-thread) runtime.
+    let guard = metrics::set_default_local_recorder(&recorder);
+    let count = db
+        .count_events_routed("proof_mid_begin_probe", &query)
+        .await
+        .expect("writer fallback answers while the reader is paused");
     assert_eq!(count, 0, "writer answered on an empty scratch database");
     let reasons = route_reasons(&snapshotter);
     assert_eq!(
@@ -281,7 +298,102 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    drop(guard);
+    let closes = release_closes(&snapshotter);
+    assert_eq!(
+        closes.get("open_transaction"),
+        Some(&1),
+        "the release check must close the connection left inside BEGIN; got {closes:?}"
+    );
 
+    read_pool.close().await;
+    drop_scratch_db(&admin, writer, &wname).await;
+}
+
+/// A reader failover whose old sockets stop answering without closing must
+/// not strand the reader pool. Each stalled warm connection costs one routed
+/// read a proof timeout; once the release check gives up on those sockets,
+/// their slots are freed and routed reads reach the reader again through
+/// new connections, instead of falling back to the writer until the kernel
+/// gives up on the old sockets.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires Postgres"]
+async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (writer, wname) = create_scratch_db(&admin, "stall_r").await;
+    let writer_options = writer.connect_options();
+    let proxy = crate::test_support::PausingProxy::spawn(
+        writer_options.get_host().to_owned(),
+        writer_options.get_port(),
+    )
+    .await;
+    // Floor 1, ceiling 2: both slots end up on stalled sessions.
+    let read_pool = Db::read_pool_options(2)
+        .connect_lazy_with((*writer_options).clone().host("127.0.0.1").port(proxy.port));
+    let mut db = Db::from_pools(writer.clone(), read_pool.clone());
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(30)));
+    db.read_pool_boot_ping_for_tests().await;
+    await_idle_floor(&read_pool, 1).await;
+    {
+        let first = read_pool.acquire().await.expect("first warm connection");
+        let second = read_pool.acquire().await.expect("second warm connection");
+        drop((first, second));
+    }
+    await_idle_floor(&read_pool, 2).await;
+
+    proxy.stall_established();
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    for _ in 0..2 {
+        db.count_events_routed("stalled_reader_probe", &query)
+            .await
+            .expect("writer fallback answers while the reader is stalled");
+    }
+    let reasons = route_reasons(&snapshotter);
+    assert_eq!(
+        reasons.get(&("writer".to_owned(), "reader_proof_timeout".to_owned())),
+        Some(&2),
+        "each stalled warm connection must cost one proof timeout; got {reasons:?}"
+    );
+
+    // The 5s release bound plus slack, as a literal so a loosened bound
+    // fails here.
+    let stalled_at = Instant::now();
+    let bound = Duration::from_secs(8);
+    loop {
+        db.count_events_routed("stalled_reader_probe", &query)
+            .await
+            .expect("routed read answers");
+        let served_by_reader: u64 = route_reasons(&snapshotter)
+            .iter()
+            .filter(|((decision, _), _)| decision == "replica")
+            .map(|(_, n)| n)
+            .sum();
+        if served_by_reader > 0 {
+            break;
+        }
+        assert!(
+            stalled_at.elapsed() < bound,
+            "routed reads never reached the reader through a new connection within {bound:?}; \
+             size={} idle={} reasons={:?}",
+            read_pool.size(),
+            read_pool.num_idle(),
+            route_reasons(&snapshotter)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let closes = release_closes(&snapshotter);
+    assert!(
+        closes.get("timeout").is_some_and(|n| *n >= 1),
+        "stalled sessions must be closed by the release timeout; got {closes:?}"
+    );
+    drop(_guard);
     read_pool.close().await;
     drop_scratch_db(&admin, writer, &wname).await;
 }

@@ -319,19 +319,40 @@ pub(crate) async fn wait_for_lock_wait(pool: &sqlx::PgPool, application_name: &s
 /// `docker pause` on a replica. While paused, every session (established or
 /// new) holds the bytes it receives with both sockets open; on resume the
 /// held bytes are delivered in order and the sessions carry on.
+///
+/// [`PausingProxy::stall_established`] instead holds only the sessions open
+/// at that moment, for good, while later sessions relay normally: a failover
+/// whose old sockets stop answering without closing.
 pub(crate) struct PausingProxy {
     pub(crate) port: u16,
-    paused: tokio::sync::watch::Sender<bool>,
+    hold: tokio::sync::watch::Sender<ProxyHold>,
+    next_session: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Which proxy sessions hold their bytes.
+#[derive(Clone, Copy, Default)]
+struct ProxyHold {
+    all: bool,
+    /// Sessions numbered below this hold their bytes.
+    below: u64,
+}
+
+impl ProxyHold {
+    fn holds(self, session: u64) -> bool {
+        self.all || session < self.below
+    }
 }
 
 impl PausingProxy {
     pub(crate) async fn spawn(upstream_host: String, upstream_port: u16) -> Self {
+        use std::sync::atomic::Ordering;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         async fn pump(
             mut from: tokio::net::tcp::OwnedReadHalf,
             mut to: tokio::net::tcp::OwnedWriteHalf,
-            mut paused: tokio::sync::watch::Receiver<bool>,
+            mut hold: tokio::sync::watch::Receiver<ProxyHold>,
+            session: u64,
         ) {
             let mut buf = [0u8; 8192];
             loop {
@@ -341,7 +362,7 @@ impl PausingProxy {
                 if n == 0 {
                     return;
                 }
-                if paused.wait_for(|paused| !paused).await.is_err() {
+                if hold.wait_for(|hold| !hold.holds(session)).await.is_err() {
                     return;
                 }
                 if to.write_all(&buf[..n]).await.is_err() {
@@ -354,10 +375,13 @@ impl PausingProxy {
             .await
             .expect("bind proxy");
         let port = listener.local_addr().expect("proxy addr").port();
-        let (paused, _) = tokio::sync::watch::channel(false);
-        let accept_paused = paused.subscribe();
+        let (hold, _) = tokio::sync::watch::channel(ProxyHold::default());
+        let accept_hold = hold.subscribe();
+        let next_session = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let accept_next = next_session.clone();
         tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
+                let session = accept_next.fetch_add(1, Ordering::SeqCst);
                 let Ok(server) =
                     tokio::net::TcpStream::connect((upstream_host.as_str(), upstream_port)).await
                 else {
@@ -365,14 +389,34 @@ impl PausingProxy {
                 };
                 let (client_read, client_write) = client.into_split();
                 let (server_read, server_write) = server.into_split();
-                tokio::spawn(pump(client_read, server_write, accept_paused.clone()));
-                tokio::spawn(pump(server_read, client_write, accept_paused.clone()));
+                tokio::spawn(pump(
+                    client_read,
+                    server_write,
+                    accept_hold.clone(),
+                    session,
+                ));
+                tokio::spawn(pump(
+                    server_read,
+                    client_write,
+                    accept_hold.clone(),
+                    session,
+                ));
             }
         });
-        Self { port, paused }
+        Self {
+            port,
+            hold,
+            next_session,
+        }
     }
 
     pub(crate) fn set_paused(&self, paused: bool) {
-        self.paused.send_replace(paused);
+        self.hold.send_modify(|hold| hold.all = paused);
+    }
+
+    /// Hold every session open now, for good; later sessions relay normally.
+    pub(crate) fn stall_established(&self) {
+        let below = self.next_session.load(std::sync::atomic::Ordering::SeqCst);
+        self.hold.send_modify(|hold| hold.below = below);
     }
 }

@@ -1681,9 +1681,9 @@ mod postgres_tests {
 
     /// A fleet collection abandoned at its relay-side deadline on a reader
     /// that went dark mid-query must release its slot in the shared reader
-    /// pool within SQLx's bounded close-on-drop, not hold it until the kernel
-    /// gives up on the socket. SQLx's default return-to-pool path pings the
-    /// dark connection with no timeout while holding the slot.
+    /// pool within the reader pool's bounded release check, not hold it until
+    /// the kernel gives up on the socket. SQLx's own return-to-pool ping waits
+    /// on the dark connection with no timeout while holding the slot.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn abandoned_fleet_collection_releases_its_reader_slot() {
@@ -1709,13 +1709,12 @@ mod postgres_tests {
         .await;
         let proxied: PgConnectOptions =
             (*reader_options).clone().host("127.0.0.1").port(proxy.port);
-        // One slot, so a stranded slot blocks every later acquire. No
-        // before-acquire ping, so the stall lands after the checkout is
-        // handed out, where the relay deadline drops it.
-        let read_pool = PgPoolOptions::new()
-            .max_connections(1)
+        // The production reader options with one slot, so a stranded slot
+        // blocks every later acquire, and no warm floor, so nothing redials
+        // it. No before-acquire ping, so the stall lands after the checkout
+        // is handed out, where the relay deadline drops it.
+        let read_pool = Db::read_pool_options(1)
             .min_connections(0)
-            .test_before_acquire(false)
             .acquire_timeout(Duration::from_secs(15))
             .connect_with(proxied)
             .await
@@ -1740,7 +1739,7 @@ mod postgres_tests {
 
         // A fresh Db has a cold Aurora capability cache, so the first
         // post-acquire await is the capability probe, as in production after
-        // a failed boot ping. This pins close-on-drop ahead of that await.
+        // a failed boot ping: the checkout is abandoned before any `BEGIN`.
         let cold = Db::from_pools(writer.clone(), read_pool.clone());
         cold.fence().force_open_for_tests(Utc::now());
         proxy.set_paused(true);
@@ -1753,14 +1752,14 @@ mod postgres_tests {
         .await
         .expect_err("a dark reader must stall the collection until its deadline");
 
-        // Still paused: only close-on-drop can free the slot now. Without it,
-        // the abandoned checkout's release ping waits on the stalled session
-        // and the slot stays held (`min_connections(0)`, so nothing redials).
+        // Still paused: only the bounded release check can free the slot now.
+        // Without it, the abandoned checkout's release ping waits on the
+        // stalled session and the slot stays held.
         let started = Instant::now();
         while read_pool.size() != 0 {
             assert!(
                 started.elapsed() < Duration::from_secs(8),
-                "slot release must be bounded by close-on-drop, still held after {:?}",
+                "slot release must be bounded by the release check, still held after {:?}",
                 started.elapsed()
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
