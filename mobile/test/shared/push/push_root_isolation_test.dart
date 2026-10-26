@@ -18,6 +18,8 @@ import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
+import 'package:buzz/shared/push/push_subscription.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -174,32 +176,74 @@ void main() {
       ).copyWith(pushNotificationsEnabled: true);
       var fail = true;
       var attempts = 0;
-      final outbox = BuzzPushLeaseRevocationOutbox(
-        storage: BuzzPushLeaseRevocationStorage(secure: FakeSecureStorage()),
-        publisher: (_) async {},
+      final journal = BuzzPushLeaseRevocationStorage(
+        secure: FakeSecureStorage(),
       );
-      addTearDown(outbox.dispose);
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final removals = [for (var i = 0; i < 2; i++) _removableCommunity(i)];
+      for (final removal in removals) {
+        await storage.save(removal);
+      }
+      final published = <String>[];
+      const nativePush = MethodChannel('buzz/push');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        nativePush,
+        (call) async {
+          if (call.method != 'endpointGrants') return null;
+          return [
+            {
+              'relayOrigin': 'wss://relay.example',
+              'relayPubkey': 'a' * 64,
+              'installationId': '0' * 32,
+              'endpointGrant': 'opaque',
+              'endpointHash': 'b' * 64,
+              'endpointEpoch': 1,
+              'generation': 1,
+              'expiresAt': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,
+            },
+          ];
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          nativePush,
+          null,
+        ),
+      );
       await tester.pumpWidget(
         ProviderScope(
           retry: (_, _) => null,
           overrides: [
             savedPrefsProvider.overrideWithValue(prefs),
+            communityStorageProvider.overrideWithValue(storage),
+            communitySnapshotWriterProvider.overrideWithValue((_) async {}),
             authProvider.overrideWith(_Auth.new),
             relaySessionProvider.overrideWith(_Session.new),
             activeCommunityProvider.overrideWith((_) async => community),
             currentRelayPushDescriptorProvider.overrideWith(
               (_) async => _descriptor,
             ),
-            buzzPushLeaseRevocationOutboxProvider.overrideWith((_) {
+            buzzPushLeaseRevocationOutboxProvider.overrideWith((ref) {
               attempts++;
               if (fail) throw StateError('injected push dependency failure');
+              final outbox = BuzzPushLeaseRevocationOutbox(
+                storage: journal,
+                publisher: (record) async =>
+                    published.add(record.installationId),
+              );
+              ref.onDispose(outbox.dispose);
               return outbox;
             }),
           ],
           child: BuzzPushBootstrap(
-            child: MaterialApp(
-              theme: AppTheme.light(),
-              home: const Text('Core app'),
+            child: Consumer(
+              builder: (context, ref, _) => MaterialApp(
+                theme: AppTheme.light(),
+                home: TextButton(
+                  onPressed: () => retryBuzzPushSetup(ref),
+                  child: const Text('Core app'),
+                ),
+              ),
             ),
           ),
         ),
@@ -227,6 +271,25 @@ void main() {
         isTrue,
       );
       await _capture(tester, 'notification-setup-failed');
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SettingsPage)),
+      );
+      final communities = container.read(communityListProvider.notifier);
+      // A removal attempted while initialization is broken caches a failed
+      // callback provider. Recovery must refresh it as well as the worker.
+      await expectLater(
+        communities.removeCommunity(removals.first.id),
+        throwsA(
+          predicate(
+            (error) =>
+                error.toString().contains('injected push dependency failure'),
+          ),
+        ),
+      );
+      expect(
+        (await storage.loadAll()).map((value) => value.id),
+        contains(removals.first.id),
+      );
       // Exhaust automatic retries. Persistent failures stay visible, but stop
       // waking forever. Manual recovery remains available after exhaustion.
       for (final seconds in [5, 10, 20, 60]) {
@@ -247,6 +310,23 @@ void main() {
         tester.state<NavigatorState>(find.byType(Navigator)),
         same(navigator),
       );
+      await communities.removeCommunity(removals.first.id);
+      await tester.pump();
+      expect(published, [removals.first.pushLeaseInstallationId]);
+      expect(await journal.loadAll(), isEmpty);
+
+      // Community removal has now cached this worker's callbacks. Retrying an
+      // unrelated setup operation must not dispose that healthy worker.
+      navigator.pop();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Core app'));
+      await tester.pumpAndSettle();
+      await communities.removeCommunity(removals.last.id);
+      await tester.pump();
+      expect(published, [
+        for (final removal in removals) removal.pushLeaseInstallationId,
+      ]);
+      expect(await journal.loadAll(), isEmpty);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;
@@ -396,4 +476,18 @@ Future<void> _capture(WidgetTester tester, String name) async {
     await File('$directory/$name.png').writeAsBytes(data!.buffer.asUint8List());
     image.dispose();
   });
+}
+
+Community _removableCommunity(int index) {
+  final keys = nostr.Keys('${index + 1}' * 64);
+  return Community.create(
+    name: 'Removed $index',
+    relayUrl: 'https://relay.example',
+    nsec: keys.nsec,
+    pubkey: keys.public,
+  ).copyWith(
+    pushNotificationsEnabled: true,
+    pushSubscriptionState: const BuzzPushLeaseSubscriptionState.desired()
+        .withReservedGeneration(4),
+  );
 }

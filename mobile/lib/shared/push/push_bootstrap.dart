@@ -211,7 +211,14 @@ final buzzPushSetupStatusProvider = Provider.autoDispose<AsyncValue<void>>((
 
 /// Retries push-owned setup dependencies without resetting the app or session.
 void retryBuzzPushSetup(WidgetRef ref) {
-  ref.invalidate(buzzPushLeaseRevocationOutboxProvider);
+  // Unrelated setup failures must not dispose a healthy cleanup worker.
+  // Reconstruct only a worker whose provider actually failed to initialize.
+  try {
+    ref.read(buzzPushLeaseRevocationOutboxProvider);
+  } catch (error, stack) {
+    reportPushSetupError('revocation worker retry', error, stack);
+    ref.invalidate(buzzPushLeaseRevocationOutboxProvider);
+  }
   ref.invalidate(currentRelayPushDescriptorProvider);
   ref.invalidate(pushSubscriptionSyncProvider);
   ref.invalidate(_pendingNotificationResponseProvider);
