@@ -285,6 +285,47 @@ void main() {
     expect(await stored(), isNull);
   });
 
+  test(
+    'a refused request names account setup only when status needs it',
+    () async {
+      for (final (accountStatus, refusal) in [
+        (null, AccountFailure.denied),
+        ('ACCOUNT_STATUS_OK', AccountFailure.denied),
+        ('ACCOUNT_STATUS_NEEDS_DETAILS', AccountFailure.accountSetupRequired),
+        ('ACCOUNT_STATUS_PENDING', AccountFailure.accountSetupRequired),
+        ('ACCOUNT_STATUS_REJECTED', AccountFailure.accountSetupRequired),
+        ('ACCOUNT_STATUS_UNSPECIFIED', AccountFailure.accountSetupRequired),
+      ]) {
+        final client = BuilderlabAccountClient(
+          httpClient: MockClient((request) async {
+            if (request.url.path.endsWith('/current')) {
+              return http.Response('{}', 403);
+            }
+            return http.Response(
+              jsonEncode(
+                request.url.path.endsWith('/exchange')
+                    ? {'session_credential': 'secret', 'expires_at': expiry}
+                    : {
+                        'subject': 'account-1',
+                        'expires_at': expiry,
+                        'account_status': ?accountStatus,
+                      },
+              ),
+              200,
+            );
+          }),
+        );
+        await client.exchange(code: 'code', verifier: verifier);
+        await expectLater(
+          client.currentIdentity(),
+          throwsA(refusal),
+          reason: '$accountStatus',
+        );
+        await client.clearLocalSession();
+      }
+    },
+  );
+
   test('authenticated post accepts only Buzz account routes', () async {
     final client = BuilderlabAccountClient(
       httpClient: MockClient((_) async => fail('no request expected')),

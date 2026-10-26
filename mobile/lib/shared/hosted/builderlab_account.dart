@@ -196,18 +196,18 @@ class BuilderlabAccountClient {
       throw AccountFailure.invalidResponse;
     }
     if (!parsed.isAfter(DateTime.now().toUtc())) throw AccountFailure.signedOut;
-    final standing = result['account_standing'];
-    final needsSetup =
-        standing is Map &&
-        (standing['details_status'] == 'ACCOUNT_DETAILS_STATUS_MISSING' ||
-            standing['screening_status'] ==
-                'ACCOUNT_SCREENING_STATUS_NOT_SCREENED');
     return BuilderlabAccount(
       subject: subject,
       expiresAt: parsed,
-      needsAccountSetup: needsSetup,
+      needsAccountSetup: _needsAccountSetup(result['account_status']),
     );
   }
+
+  /// An absent status means screening does not apply to this account. Any
+  /// status other than OK, including one this build does not know, needs
+  /// setup in Builderlab, matching the web app.
+  static bool _needsAccountSetup(Object? accountStatus) =>
+      accountStatus != null && accountStatus != 'ACCOUNT_STATUS_OK';
 
   /// Public identity metadata only. Private-key recovery belongs to the identity
   /// storage owner, which must derive and verify the key before any persistence.
