@@ -2,7 +2,8 @@
 //!
 //! Split out of `media.rs` to keep that file under the desktop line-size
 //! limit. These helpers are used by the upload pipeline to normalize any
-//! video to H.264/AAC/MP4/fast-start (guaranteed to pass the relay's
+//! video to H.264/AAC/MP4/fast-start within the relay's resolution envelope
+//! (guaranteed to pass the relay's
 //! `validate_video_file()`) and to produce a JPEG poster frame.
 
 use crate::managed_agents::resolve_command;
@@ -184,11 +185,28 @@ fn run_ffmpeg_with_cancellation(
     }
 }
 
+/// The relay's video resolution envelope, applied independent of orientation
+/// (see `validate_video_file()` in `buzz-media`).
+const MAX_VIDEO_SHORT_EDGE: u32 = 2160;
+const MAX_VIDEO_LONG_EDGE: u32 = 3840;
+
+/// ffmpeg `-vf` for video uploads: shrink (never enlarge) to fit the relay's
+/// envelope keeping the aspect ratio, then pad odd dimensions to even for
+/// yuv420p. Without the scale, a full-screen recording from a larger Retina
+/// display (e.g. 3420×2224) transcodes fine and is then rejected by the relay.
+fn video_filter() -> String {
+    let (short, long) = (MAX_VIDEO_SHORT_EDGE, MAX_VIDEO_LONG_EDGE);
+    format!(
+        "scale=w='min(iw,if(gte(iw,ih),{long},{short}))':h='min(ih,if(gte(iw,ih),{short},{long}))'\
+         :force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    )
+}
+
 /// Transcode any video file to H.264/AAC/MP4/fast-start via ffmpeg.
 ///
 /// Always re-encodes — handles HEVC, VP9, ProRes, non-faststart MP4, 10-bit,
-/// wrong pixel format, MOV containers, etc. Output is guaranteed to pass the
-/// relay's `validate_video_file()`.
+/// wrong pixel format, MOV containers, oversized resolutions, etc. Output is
+/// guaranteed to pass the relay's `validate_video_file()`.
 ///
 /// Returns the path to a temp file. Caller must clean up.
 fn transcode_to_mp4_with_cancellation(
@@ -236,8 +254,10 @@ fn transcode_to_mp4_with_cancellation(
                 "23",
                 "-pix_fmt",
                 "yuv420p",
-                "-vf",
-                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            ])
+            .arg("-vf")
+            .arg(video_filter())
+            .args([
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -775,7 +795,19 @@ mod tests {
                 return;
             }
         };
-        let relay_config = buzz_media_pkg::MediaConfig {
+        let metadata =
+            buzz_media_pkg::validation::validate_video_file(&output, &relay_media_config())
+                .expect("relay rejected the canonical voice-note envelope");
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&output);
+
+        assert!(metadata.has_audio);
+        assert_eq!((metadata.width, metadata.height), (16, 16));
+        assert!(metadata.duration_secs > 0.0);
+    }
+
+    fn relay_media_config() -> buzz_media_pkg::MediaConfig {
+        buzz_media_pkg::MediaConfig {
             s3_endpoint: String::new(),
             s3_access_key: String::new(),
             s3_secret_key: String::new(),
@@ -790,15 +822,76 @@ mod tests {
             upload_records_enabled: false,
             upload_ip_header: None,
             upload_port_header: None,
-        };
-        let metadata = buzz_media_pkg::validation::validate_video_file(&output, &relay_config)
-            .expect("relay rejected the canonical voice-note envelope");
+        }
+    }
+
+    /// Generate a 1-second H.264 test video of the given size and run it
+    /// through the upload transcode and the relay's validator. `None` when
+    /// ffmpeg is missing or can't encode H.264, so CI without it skips.
+    fn transcode_and_validate(
+        width: u32,
+        height: u32,
+    ) -> Option<Result<buzz_media_pkg::VideoMeta, buzz_media_pkg::MediaError>> {
+        let ffmpeg = find_ffmpeg().ok()?;
+        let source =
+            std::env::temp_dir().join(format!("buzz-size-test-{}.mp4", uuid::Uuid::new_v4()));
+        let generated = std::process::Command::new(&ffmpeg)
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size={width}x{height}:rate=1"))
+            .args(["-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&source)
+            .output()
+            .expect("run ffmpeg fixture generation");
+        if !generated.status.success() {
+            let _ = std::fs::remove_file(&source);
+            return None;
+        }
+
+        let output =
+            transcode_to_mp4_with_cancellation(&source, &ffmpeg, None).expect("transcode fixture");
+        let result =
+            buzz_media_pkg::validation::validate_video_file(&output, &relay_media_config());
         let _ = std::fs::remove_file(&source);
         let _ = std::fs::remove_file(&output);
+        Some(result)
+    }
 
-        assert!(metadata.has_audio);
-        assert_eq!((metadata.width, metadata.height), (16, 16));
-        assert!(metadata.duration_secs > 0.0);
+    #[test]
+    fn test_transcode_shrinks_oversized_video_into_relay_envelope() {
+        // A full-screen recording on a 15" MacBook Air is 3420×2224: over the
+        // relay's 2160 short edge. Both orientations must fit after transcode.
+        for (width, height) in [(3420, 2224), (2224, 3420)] {
+            let Some(result) = transcode_and_validate(width, height) else {
+                eprintln!("skipping oversized-video round-trip: ffmpeg cannot encode H.264");
+                return;
+            };
+            let meta = result.unwrap_or_else(|e| {
+                panic!("relay rejected a transcoded {width}x{height} video: {e:?}")
+            });
+            assert!(meta.width.min(meta.height) <= MAX_VIDEO_SHORT_EDGE);
+            assert!(meta.width.max(meta.height) <= MAX_VIDEO_LONG_EDGE);
+            assert_eq!(meta.width.min(meta.height), MAX_VIDEO_SHORT_EDGE);
+            let (source_ratio, output_ratio) = (
+                width as f64 / height as f64,
+                meta.width as f64 / meta.height as f64,
+            );
+            assert!(
+                (source_ratio - output_ratio).abs() < 0.01,
+                "aspect ratio changed: {width}x{height} -> {}x{}",
+                meta.width,
+                meta.height
+            );
+        }
+    }
+
+    #[test]
+    fn test_transcode_keeps_size_of_video_within_relay_envelope() {
+        let Some(result) = transcode_and_validate(640, 360) else {
+            eprintln!("skipping small-video round-trip: ffmpeg cannot encode H.264");
+            return;
+        };
+        let meta = result.expect("relay rejected a transcoded 640x360 video");
+        assert_eq!((meta.width, meta.height), (640, 360));
     }
 
     /// Round-trip transcode test, gated on ffmpeg being present so CI without
