@@ -618,6 +618,55 @@ fn archive_event(owner: &Keys, channel_id: Uuid, value: &str) -> nostr::Event {
         .expect("sign 9002")
 }
 
+/// The loader returns every effective default channel. It used to stop at 32
+/// while kind:9002 kept accepting the flag past that, so the kind:39000 tag
+/// promised a join the relay never made for the newest channels. Mutation:
+/// put a `LIMIT` back on `list_auto_join_channels` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn every_default_channel_is_listed() {
+    let state = state().await;
+    let tenant = community(&state, "auto-join-all").await;
+    let admin = Keys::generate();
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &admin.public_key().to_hex(),
+            "admin",
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("seed relay admin");
+
+    let mut flagged = Vec::new();
+    for _ in 0..33 {
+        let channel_id = create_channel(&state, &tenant, &admin, &[]).await;
+        edit_channel(
+            &state,
+            &tenant,
+            &admin,
+            channel_id,
+            &[&["auto_join", "true"]],
+        )
+        .await
+        .expect("relay admin sets auto_join");
+        flagged.push(channel_id);
+    }
+
+    let listed: Vec<Uuid> = state
+        .db
+        .list_auto_join_channels(tenant.community())
+        .await
+        .expect("list auto_join channels")
+        .iter()
+        .map(|channel| channel.id)
+        .collect();
+    assert_eq!(listed, flagged, "every flagged channel, oldest first");
+}
+
 /// A resend checked after its first copy committed is a duplicate.
 /// Validation runs on the new archive state and must not refuse the resend;
 /// the write must then report it as a duplicate, with no change and no

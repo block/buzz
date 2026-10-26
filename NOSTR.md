@@ -219,7 +219,10 @@ message in the channel.
 When someone becomes a community member (an invite claim or a kind:9030 add)
 the relay joins them to every effective default channel as a self-join: the
 body of kind:9021, so the channel's `join_role` applies and the channel gets
-its `member_joined` kind:40099, kind:39002 and kind:44100. It does this once,
+its `member_joined` kind:40099, kind:39002 and kind:44100. There is no cap on
+how many channels that is: whatever carries the kind:39000 tag is joined, and
+the work a new member costs grows with the number of channels an owner or
+admin flags. It does this once,
 at that moment, and never again on login or reconnect, so a later kind:9022
 leave stands. A channel that fails to join is logged and counted
 (`buzz_auto_join_failures_total`), not retried: the kind:39000 tag is the
