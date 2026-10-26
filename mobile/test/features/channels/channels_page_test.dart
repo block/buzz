@@ -6,6 +6,7 @@ import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'dart:async';
 
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:buzz/shared/channels/channel_list_snapshot.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
@@ -158,6 +159,7 @@ void main() {
   }
 
   _communityUnreadLandingTests(buildTestable);
+  _communityCachedLandingTests(buildTestable);
 
   final testChannels = [
     Channel(
@@ -2375,7 +2377,8 @@ void main() {
           );
           await tester.pump();
           final flyingAvatar = find.byKey(const Key('community-flying-avatar'));
-          expect(notifier.switchedIds, reduceMotion ? ['bravo'] : isEmpty);
+          // The switch starts with the centering motion, not after it.
+          expect(notifier.switchedIds, ['bravo']);
           if (nativeHeader) {
             expect(
               tester
@@ -2388,7 +2391,6 @@ void main() {
           final origin = tester.getCenter(flyingAvatar);
           await tester.pump(const Duration(milliseconds: 105));
           if (!reduceMotion) {
-            expect(notifier.switchedIds, isEmpty);
             final inFlight = tester.getCenter(flyingAvatar);
             const center = Offset(195, 422);
             expect(

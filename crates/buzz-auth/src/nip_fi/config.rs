@@ -79,7 +79,12 @@ pub(crate) const MAX_JTI_BYTES: usize = 512;
 /// v2 (PR #7221): `nostr_pubkey` absence now unconditionally rejects — the
 /// per-issuer `require_attested_key` knob is removed and the NIP-FI v2 spec
 /// requirement is always enforced.
-pub(crate) const VERIFIER_CONTRACT_VERSION: u32 = 2;
+///
+/// v3 (PR #8401): dedicated policies also accept the `nip-fi-agent+jwt` agent
+/// type, which requires a `nostr_owner_pubkey` claim (a valid lowercase key
+/// distinct from the asserted key); a `nip-fi+jwt` or `at+jwt` token carrying
+/// `nostr_owner_pubkey` with any value, `null` included, is rejected.
+pub(crate) const VERIFIER_CONTRACT_VERSION: u32 = 3;
 
 /// The transport-contract fingerprint folded into [`TransportContractId`].
 /// **Bump on any change** to the client-attached parsing, attachment,
@@ -89,6 +94,10 @@ pub(crate) const TRANSPORT_CONTRACT_VERSION: u32 = 1;
 /// The fixed name of the Nostr-key claim ([NIP-FI.md](../../../../docs/nips/NIP-FI.md),
 /// "Assertion validation"). Not configurable: other encodings and aliases deny.
 pub const NOSTR_PUBKEY_CLAIM: &str = "nostr_pubkey";
+
+/// The fixed name of the owner-key claim on an agent assertion (NIP-FI.md,
+/// "Agent keys"). Same encoding as [`NOSTR_PUBKEY_CLAIM`].
+pub const NOSTR_OWNER_PUBKEY_CLAIM: &str = "nostr_owner_pubkey";
 
 /// The fixed identity-subject claim. Identity is the exact tuple `(iss, sub)`
 /// (NIP-FI.md:35-41), so the subject coordinate is always the JWT `sub` claim
@@ -326,7 +335,9 @@ pub enum TokenClass {
         /// The mutually exclusive resource-owner/client-subject contract.
         subject_class: SubjectClassContract,
     },
-    /// A dedicated Buzz assertion: protected `typ` is exactly `nip-fi+jwt`.
+    /// A dedicated Buzz assertion: protected `typ` is exactly `nip-fi+jwt`
+    /// (human; `nostr_owner_pubkey` forbidden) or `nip-fi-agent+jwt` (agent;
+    /// `nostr_owner_pubkey` required).
     DedicatedNipFi,
 }
 
@@ -792,7 +803,7 @@ mod jwks_transport_identity_tests {
 
         assert_eq!(
             hex::encode(policy(contract).id().as_bytes()),
-            "fae0dd479d79306c5eef135594f678a5cdf3a2ee45770e20a7e83395fc76857f",
+            "29ecb98c34dc7574616d72caf1565cda35585a15f682f0d30f6c011342a555d8",
             "public_https mode omits the mesh transport tag"
         );
     }
@@ -808,7 +819,7 @@ mod jwks_transport_identity_tests {
 
         assert_eq!(
             hex::encode(policy(contract).id().as_bytes()),
-            "dca3e998388ae75bdea6bb2070c8f28b8d389a8b874de96e7852dd1f71b14bcd",
+            "da846eec66b2e084ac3557d8e5c2a3a2faf12946e965c82d2ef46f91b6fa014e",
             "mesh transport is part of policy identity"
         );
     }

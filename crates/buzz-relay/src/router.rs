@@ -710,12 +710,9 @@ async fn nip11_or_ws_handler(
     // `asserted_key` is `None` → no key to check → pass through.
     // [FI-TRACE-DENY-SET]
     if let Some(assertion) = &nip_fi_assertion {
-        if let Some(key) = assertion.asserted_key() {
-            if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-                if deny_map.is_denied(assertion.identity().issuer(), &key, chrono::Utc::now()) {
-                    return http_denial(buzz_auth::DenialClass::AuthorizationDenied)
-                        .into_response();
-                }
+        if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
+                return http_denial(buzz_auth::DenialClass::AuthorizationDenied).into_response();
             }
         }
     }

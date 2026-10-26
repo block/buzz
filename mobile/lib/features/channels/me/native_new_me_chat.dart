@@ -163,8 +163,7 @@ Future<Channel> _createMeChat(
   return intent.complete<Channel>(
     sync,
     findChannel: () async {
-      ref.invalidate(channelsProvider);
-      final all = await ref.read(channelsProvider.future);
+      final all = await ref.read(channelsProvider.notifier).fetchFresh();
       return all.where((c) => c.id == channelId).firstOrNull;
     },
     createChannel: () => actions.createChannel(

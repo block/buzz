@@ -422,34 +422,40 @@ async fn delivery_worker_loop(state: &AppState) {
     let mut idle_delay = Duration::from_millis(500);
     loop {
         let mut found = false;
-        match state.db.active_community_hosts().await {
-            Ok(communities) => {
-                for community in communities {
-                    let community = buzz_core::CommunityId::from_uuid(community.id);
-                    let until = Utc::now() + TimeDelta::seconds(CLAIM_SECS);
-                    match state.db.claim_due_push_wakes(community, 16, until).await {
-                        Ok(wakes) => {
-                            for wake in wakes {
-                                found = true;
-                                deliver_one(state, &http, wake).await;
-                            }
+        let mut after = None;
+        loop {
+            let communities = match state.db.due_push_wake_communities(after).await {
+                Ok(communities) if communities.is_empty() => break,
+                Ok(communities) => communities,
+                Err(e) => {
+                    error!("push worker discovery failed: {e}");
+                    break;
+                }
+            };
+            // Advance even when a candidate loses its work or refuses admission.
+            // Busy early communities must not prevent later pages getting a turn.
+            after = communities.last().copied();
+            for community in communities {
+                let until = Utc::now() + TimeDelta::seconds(CLAIM_SECS);
+                match state.db.claim_due_push_wakes(community, 16, until).await {
+                    Ok(wakes) => {
+                        for wake in wakes {
+                            found = true;
+                            deliver_one(state, &http, wake).await;
                         }
-                        // The community left `active` after the host scan; the
-                        // next scan skips it, so this is not worth a warning.
-                        Err(e @ buzz_db::DbError::AccessDenied(_)) => {
-                            debug!(%community, "push wake claim refused: {e}")
-                        }
-                        Err(e) => warn!(%community, "push wake claim failed: {e}"),
                     }
+                    // Discovery is advisory; admission still enforces lifecycle.
+                    Err(e @ buzz_db::DbError::AccessDenied(_)) => {
+                        debug!(%community, "push wake claim refused: {e}")
+                    }
+                    Err(e) => warn!(%community, "push wake claim failed: {e}"),
                 }
             }
-            Err(e) => error!("push worker community scan failed: {e}"),
         }
         if found {
             idle_delay = Duration::from_millis(500);
         } else {
-            // Empty sweeps back off so an idle worker stops paying a full
-            // per-community claim scan every 500ms forever.
+            // Preserve the existing idle cadence without per-community claims.
             tokio::time::sleep(idle_delay).await;
             idle_delay = (idle_delay * 2).min(IDLE_POLL_CEILING);
         }
@@ -940,6 +946,10 @@ mod tests {
         assert_eq!(bodies[1]["request_id"], request_id.to_string());
     }
 }
+
+#[cfg(test)]
+#[path = "push_runtime/delivery_postgres_tests.rs"]
+mod delivery_postgres_tests;
 
 #[cfg(test)]
 mod shutdown_tests {

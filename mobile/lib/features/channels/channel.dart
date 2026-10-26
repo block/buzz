@@ -81,6 +81,28 @@ class Channel {
         : null,
   );
 
+  /// Inverse of [Channel.fromJson].
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'channel_type': channelType,
+    'labels': labels,
+    'visibility': visibility,
+    'description': description,
+    'topic': topic,
+    'purpose': purpose,
+    'created_by': createdBy,
+    'created_at': createdAt.toIso8601String(),
+    'member_count': memberCount,
+    'last_message_at': lastMessageAt?.toIso8601String(),
+    'archived_at': archivedAt?.toIso8601String(),
+    'participants': participants,
+    'participant_pubkeys': participantPubkeys,
+    'is_member': isMember,
+    'ttl_seconds': ttlSeconds,
+    'ttl_deadline': ttlDeadline?.toIso8601String(),
+  };
+
   bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
 
   /// Solo presentation is carried by NIP-CL metadata, not project filing.

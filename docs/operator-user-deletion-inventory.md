@@ -216,7 +216,7 @@ supported yet". The dummy fixture's former participant is synthetic.
 
 ## Schema and compatibility
 
-Apply migrations 0071 and 0072 before real-key submission. They widen the target
+Apply migrations 0072 and 0073 before real-key submission. They widen the target
 check to accept a nonempty identifier of up to 256 bytes with no surrounding
 spaces, then validate in a separate transaction. Identity formats belong in the
 application, so this column can also store account IDs when account resolution
