@@ -1217,6 +1217,110 @@ async fn system_channels_are_found_by_type_or_creator() {
     );
 }
 
+/// An unlisted open system channel is read only by naming it, for a
+/// non-member: `#t:["system"]` and `#P` discovery leave it out, also when a
+/// sibling filter in the same request names it, and naming it by `#h` or
+/// `#d` reads it. Its members still find it by the opt-in (NIP-CL).
+/// Mutation: make `opt_in` always true in `get_readable_named_only_channels`,
+/// or ignore it in `NamedOnlyChannels::from_readable` → RED (the sibling of a
+/// filter that names it finds it). The branch that loads it only when named
+/// is covered in buzz-db (`an_unlisted_system_channel_is_read_only_by_name`).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn unlisted_system_channels_are_found_only_by_name() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+
+    let listed = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    let unlisted =
+        create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    edit_channel(
+        &f.state,
+        &f.tenant,
+        &owner,
+        listed,
+        &[&["visibility", "open"]],
+    )
+    .await
+    .expect("open the listed system channel");
+    edit_channel(
+        &f.state,
+        &f.tenant,
+        &owner,
+        unlisted,
+        &[&["visibility", "open"], &["unlisted", "true"]],
+    )
+    .await
+    .expect("open the system channel unlisted");
+    let h = unlisted.to_string();
+    let message = publish(&f, &owner, 9, "hello", &[&["h", &h]]).await;
+    let listed_meta = group_state_id(&f, listed, 39000).await;
+    let unlisted_meta = group_state_id(&f, unlisted, 39000).await;
+
+    // Opt-in discovery: members find both, outsiders only the listed one.
+    for opt_in in [
+        json!({"kinds": [39000], "#t": ["system"]}),
+        json!({"kinds": [39000], "#P": [owner_hex]}),
+    ] {
+        assert_eq!(
+            sorted(req(&f, &owner, opt_in.clone()).await),
+            sorted(vec![listed_meta.clone(), unlisted_meta.clone()]),
+            "member {opt_in}"
+        );
+        assert_eq!(
+            req(&f, &outsider, opt_in.clone()).await,
+            vec![listed_meta.clone()],
+            "outsider {opt_in}"
+        );
+        assert_eq!(
+            count(&f, &outsider, opt_in.clone()).await,
+            1,
+            "outsider COUNT {opt_in}"
+        );
+        assert_eq!(
+            bridge_ids(bridge(&f, &outsider, "/query", json!([opt_in])).await),
+            vec![listed_meta.clone()],
+            "outsider bridge /query {opt_in}"
+        );
+    }
+
+    // Naming it reads it.
+    assert_eq!(
+        req(&f, &outsider, json!({"kinds": [9], "#h": [h]})).await,
+        vec![message.clone()],
+        "outsider #h"
+    );
+    assert_eq!(
+        req(&f, &outsider, json!({"kinds": [39000], "#d": [h]})).await,
+        vec![unlisted_meta.clone()],
+        "outsider #d"
+    );
+
+    // A sibling that opts in does not gain the channel the first filter names.
+    let filters = json!([
+        {"kinds": [9], "#h": [h]},
+        {"kinds": [39000], "#t": ["system"]},
+    ]);
+    let expected = sorted(vec![message, listed_meta]);
+    assert_eq!(
+        sorted(req_all(&f, &outsider, filters.clone()).await),
+        expected,
+        "outsider REQ with a naming sibling"
+    );
+    assert_eq!(
+        count_all(&f, &outsider, filters.clone()).await,
+        2,
+        "outsider COUNT with a naming sibling"
+    );
+    assert_eq!(
+        sorted(bridge_ids(bridge(&f, &outsider, "/query", filters).await)),
+        expected,
+        "outsider bridge /query with a naming sibling"
+    );
+}
+
 /// GET a workflow's runs as `reader`, returning the response status.
 async fn workflow_runs_status(f: &Fixture, reader: &Keys, workflow: Uuid) -> u16 {
     use axum::body::Body;

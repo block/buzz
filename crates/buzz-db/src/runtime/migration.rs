@@ -772,7 +772,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 70);
+        assert_eq!(migrations.len(), 71);
+        assert_eq!(migrations[70].version, 71);
+        assert!(migrations[70]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN unlisted BOOLEAN NOT NULL DEFAULT FALSE"));
         assert_eq!(migrations[69].version, 70);
         assert_eq!(migrations[68].version, 69);
         assert_eq!(migrations[67].version, 68);
@@ -2743,7 +2748,8 @@ mod postgres_tests {
     /// test-relay launchers take — and migrates another through the latest
     /// migration, then asserts the admin and entity-intake tables have identical
     /// column definitions (name, type, nullability, default) and index shapes, including each
-    /// key's catalog sort/null options (`pg_index.indoption`). Columns are keyed
+    /// key's catalog sort/null options (`pg_index.indoption`), and that the
+    /// `channels` columns match. Columns are keyed
     /// by name, not ordinal, because migrations append via `ALTER TABLE` while
     /// `schema.sql` declares them inline — positions legitimately differ, shapes
     /// must not. Entity-intake constraints are also compared in the live catalog.
@@ -2910,6 +2916,15 @@ mod postgres_tests {
                  migration and schema.sql must both use a representable shape."
             );
         }
+        // `channels` columns only: pgschema re-emits `idx_channels_id_live`
+        // without its `INCLUDE (community_id)`, an index drift that predates
+        // this check.
+        assert_eq!(
+            columns(&desired, "channels").await,
+            columns(&migrated, "channels").await,
+            "column parity mismatch for channels: schema.sql desired state has drifted \
+             from the migrations; update schema/tables/public/channels.sql to match"
+        );
         assert_eq!(
             events_key_defs(&desired).await,
             events_key_defs(&migrated).await,
