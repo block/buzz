@@ -32,12 +32,15 @@ class FakeRelay {
   final stored = <NostrEvent>[];
   final published = <NostrEvent>[];
   final reqs = <List<dynamic>>[];
+  final closedSubscriptions = <String>[];
   final queries = <List<Map<String, dynamic>>>[];
   final sockets = <FakeRelaySocket>[];
   final unanswerable = <String>[];
   final _rejections = <({bool Function(NostrEvent) match, String message})>[];
   Completer<void>? _okHold;
   Completer<void>? _echoHold;
+  Completer<void>? _eoseHold;
+  Completer<void>? _queryHold;
 
   String get pubkey => keys.public;
 
@@ -60,6 +63,9 @@ class FakeRelay {
     stored.add(event);
     _fanOut(event);
   }
+
+  /// Replays an already stored event without inserting another history row.
+  void replay(NostrEvent event) => _fanOut(event);
 
   /// Signs an event as [author] (default: a fresh member, not the app user).
   NostrEvent sign({
@@ -92,6 +98,12 @@ class FakeRelay {
   /// The relay dispatches after commit, so echo and OK have no fixed order.
   Completer<void> holdEcho() => _echoHold = Completer<void>();
 
+  /// Withholds the next REQ's EOSE while live events remain deliverable.
+  Completer<void> holdEose() => _eoseHold = Completer<void>();
+
+  /// Withholds the next HTTP response after taking its history snapshot.
+  Completer<void> holdQuery() => _queryHold = Completer<void>();
+
   /// Drops the current connection, as a network loss would. Its live
   /// subscriptions and queued replies die with it; stored history survives.
   void drop([Object? error]) => sockets.last.drop(error);
@@ -122,13 +134,17 @@ class FakeRelay {
         final history = _query(filters);
         if (history == null) return;
         socket._live[subId] = filters;
-        scheduleMicrotask(() {
+        final eoseHold = _eoseHold;
+        _eoseHold = null;
+        scheduleMicrotask(() async {
           for (final event in history) {
             socket._reply(['EVENT', subId, event.toJson()]);
           }
+          if (eoseHold != null) await eoseHold.future;
           socket._reply(['EOSE', subId]);
         });
       case 'CLOSE':
+        closedSubscriptions.add(message[1] as String);
         socket._live.remove(message[1]);
       case 'EVENT':
         _publish(
@@ -251,6 +267,9 @@ class FakeRelay {
         ? _channelWindow(filters.single)
         : _query(filters);
     if (events == null) return http.Response('unanswerable', 501);
+    final queryHold = _queryHold;
+    _queryHold = null;
+    if (queryHold != null) await queryHold.future;
     return http.Response(jsonEncode([for (final e in events) e.toJson()]), 200);
   }
 

@@ -26,6 +26,8 @@ void main() {
           ],
         );
         relay.seed([message('first', now - 20), message('second', now - 10)]);
+        final eose = relay.holdEose();
+        final history = relay.holdQuery();
 
         final container = ProviderContainer(overrides: relay.overrides);
         addTearDown(container.dispose);
@@ -60,7 +62,26 @@ void main() {
           container.read(relaySessionProvider).status,
           SessionStatus.connected,
         );
-        expect(timeline(), ['first', 'second']);
+        expect(
+          relay.queries,
+          hasLength(1),
+          reason: 'history starts while live EOSE is still pending',
+        );
+        final overlap = message('during history', liveSince());
+        relay.deliver(overlap);
+        settle();
+        history.complete();
+        settle();
+        expect(timeline(), ['first', 'second', 'during history']);
+        expect(
+          eose.isCompleted,
+          isFalse,
+          reason: 'history is usable before live EOSE',
+        );
+        eose.complete();
+        relay.replay(overlap);
+        settle();
+        expect(timeline(), ['first', 'second', 'during history']);
         expect(relay.queries, hasLength(1), reason: 'read the channel window');
         expect(
           relay.reqs.where((req) => (req[1] as String).startsWith('h-')),
@@ -123,6 +144,24 @@ void main() {
         settle();
         expect(timeline(), contains('after reconnect'));
         expect(timeline().where((text) => text == 'hello'), hasLength(1));
+        // A retired initialization may still be waiting for EOSE after its
+        // history has loaded. Its eventual ready result must close that REQ,
+        // leaving the replacement subscription delivering exactly once.
+        final lateEose = relay.holdEose();
+        container.invalidate(channelMessagesProvider(_channel));
+        settle();
+        final retiredSubId = relay.reqs.last[1] as String;
+        container.invalidate(channelMessagesProvider(_channel));
+        settle();
+        lateEose.complete();
+        settle();
+        expect(relay.closedSubscriptions, contains(retiredSubId));
+        relay.deliver(message('after replacement', liveSince()));
+        settle();
+        expect(
+          timeline().where((text) => text == 'after replacement'),
+          hasLength(1),
+        );
       });
     },
   );
