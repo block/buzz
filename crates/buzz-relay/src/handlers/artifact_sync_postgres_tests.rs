@@ -384,6 +384,49 @@ async fn membership_removal_resyncs_the_whole_sync() {
         .is_empty());
 }
 
+/// Rule 3 under a channel-scoped token: the token bounds what the reader
+/// can read, so a move to a channel outside it sends the source removal,
+/// never the destination head, even though the pubkey can read that
+/// channel. Mutation: drop the token bound on the live head read → the
+/// moved head is sent → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn scoped_token_gets_only_the_removal_for_a_move_outside_it() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let source = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+    let destination = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+    let d = Uuid::new_v4();
+    let created = revision(&f, &owner, source, d, "create", None).await;
+
+    let (conn, mut rx) = connect(&f, &owner);
+    match &mut *conn.auth_state.lock().unwrap() {
+        crate::connection::AuthState::Authenticated(ctx) => {
+            ctx.channel_ids = Some(vec![source]);
+        }
+        _ => unreachable!("test connections are authenticated"),
+    }
+    let task = start_sync(&f, &conn, sync_filter(&[source]));
+    assert_eq!(initial_set(&mut rx).await, vec![created.id.to_hex()]);
+
+    let moved = revision(&f, &owner, destination, d, "move", Some(&created)).await;
+    let message = frame(&mut rx).await;
+    assert_eq!(
+        (message[0].as_str(), message[2]["kind"].as_u64()),
+        (Some("EVENT"), Some(45011)),
+        "{message}"
+    );
+    assert_ne!(message[2]["id"].as_str(), Some(moved.id.to_hex().as_str()));
+    no_frame(&mut rx).await;
+
+    super::close::handle_close("s".into(), Arc::clone(&conn), Arc::clone(&f.state)).await;
+    assert_eq!(frame(&mut rx).await, json!(["CLOSED", "s", ""]));
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("sync task ends on CLOSE")
+        .unwrap();
+}
+
 /// Rule 2: an unreadable or unknown channel gets `CLOSED restricted` and
 /// no `EOSE`, with the same reason for both.
 #[tokio::test]

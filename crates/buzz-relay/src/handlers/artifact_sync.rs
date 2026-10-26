@@ -345,7 +345,7 @@ pub async fn handle_sync(
             return;
         }
     };
-    let reader = match conn.auth_state_snapshot() {
+    let (reader, bound) = match conn.auth_state_snapshot() {
         AuthState::Authenticated(ctx) => {
             if !ctx.scopes.is_empty() && !ctx.scopes.contains(&Scope::MessagesRead) {
                 refuse(&sub_id, "restricted: insufficient scope", &conn, &state).await;
@@ -359,7 +359,7 @@ pub async fn handle_sync(
                     return;
                 }
             }
-            ctx.pubkey.to_bytes().to_vec()
+            (ctx.pubkey.to_bytes().to_vec(), ctx.channel_ids)
         }
         _ => {
             refuse(&sub_id, "auth-required: not authenticated", &conn, &state).await;
@@ -428,7 +428,15 @@ pub async fn handle_sync(
     drop(permit);
 
     run_live(
-        &sub_id, owner, &filter, &reader, in_set, &handle, &conn, &state,
+        &sub_id,
+        owner,
+        &filter,
+        &reader,
+        bound.as_deref(),
+        in_set,
+        &handle,
+        &conn,
+        &state,
     )
     .await;
 }
@@ -645,12 +653,15 @@ async fn try_send_owned(
 /// Rules 3–5 after `EOSE`: read each changed head, one read at a time, and
 /// send it. A dropped frame or a resync request ends the sync. `in_set` is
 /// the client's copy as this sync sent it: the `d` of each artifact in scope.
+/// `bound` is a channel-scoped token's channels: the reader reads no head
+/// outside them, even where its pubkey could.
 #[allow(clippy::too_many_arguments)]
 async fn run_live(
     sub_id: &str,
     owner: u64,
     filter: &ArtifactSyncFilter,
     reader: &[u8],
+    bound: Option<&[Uuid]>,
     mut in_set: HashSet<Uuid>,
     handle: &SyncHandle,
     conn: &ConnectionState,
@@ -672,7 +683,11 @@ async fn run_live(
                 .artifact_head(conn.tenant.community(), reader, d, &filter.channels)
                 .await
             {
-                Ok(head) => head,
+                Ok(head) => head.filter(|(head, _)| {
+                    bound.is_none_or(|allowed| {
+                        head.channel_id.is_some_and(|id| allowed.contains(&id))
+                    })
+                }),
                 Err(e) => {
                     warn!(conn_id = %conn.conn_id, "artifact sync head read failed: {e}");
                     close(sub_id, owner, "error: sync read failed", conn, state).await;
@@ -690,8 +705,11 @@ async fn run_live(
                 continue;
             }
             // A head the reader cannot read leaves only the source removal.
+            // Without one, nothing the reader may read can remove the
+            // artifact from its copy, so the copy is no longer exact.
             let Some(event) = head.map(|(head, _)| head.event).or(removal) else {
-                continue;
+                close(sub_id, owner, "resync: artifact left scope", conn, state).await;
+                return;
             };
             #[cfg(test)]
             super::close::test_seam::pause_at(&test_seam::LIVE_SEND_PAUSE).await;
