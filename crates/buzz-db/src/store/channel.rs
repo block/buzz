@@ -619,9 +619,10 @@ async fn list_channels_with_operation(
 /// The most channels the relay joins a new community member into.
 pub const AUTO_JOIN_CHANNEL_LIMIT: i64 = 32;
 
-/// Lists the channels whose `auto_join` is effective: set, open, unarchived
-/// and not deleted. Oldest first, so the first default channel a member sees
-/// is the one that was flagged first. Bounded by [`AUTO_JOIN_CHANNEL_LIMIT`].
+/// Lists the channels whose `auto_join` is effective: set on a stream channel
+/// that is open, unarchived and not deleted. Oldest first, so the first
+/// default channel a member sees is the one that was flagged first. Bounded by
+/// [`AUTO_JOIN_CHANNEL_LIMIT`].
 pub async fn list_auto_join_channels(
     pool: &PgPool,
     community_id: CommunityId,
@@ -641,8 +642,8 @@ pub async fn list_auto_join_channels(
                purpose, purpose_set_by, purpose_set_at,
                ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
         FROM channels
-        WHERE community_id = $1 AND auto_join AND visibility = 'open'
-          AND archived_at IS NULL AND deleted_at IS NULL
+        WHERE community_id = $1 AND auto_join AND channel_type = 'stream'
+          AND visibility = 'open' AND archived_at IS NULL AND deleted_at IS NULL
         ORDER BY created_at ASC
         LIMIT $2
         "#,
@@ -655,7 +656,7 @@ pub async fn list_auto_join_channels(
         tracing::warn!(
             community = %community_id,
             limit = AUTO_JOIN_CHANNEL_LIMIT,
-            "auto_join channel list hit its cap; later channels are not applied"
+            "auto_join channel list reached its cap; any channel beyond it is not applied"
         );
     }
     rows.into_iter().map(row_to_channel_record).collect()

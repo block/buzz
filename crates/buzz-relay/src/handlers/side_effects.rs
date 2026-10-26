@@ -866,8 +866,15 @@ pub async fn validate_admin_event(
                 } else {
                     Err(anyhow::anyhow!("only members can change topic or purpose"))
                 }
-            } else {
+            } else if sets_auto_join {
                 Ok(())
+            } else {
+                // Every recognized tag must be authorized by one of the arms
+                // above; a tag added to `RECOGNIZED_TAGS` but to neither list
+                // is refused rather than accepted with no authorization.
+                Err(anyhow::anyhow!(
+                    "kind:9002 metadata tag has no authorization rule"
+                ))
             }
         }
         9005 => {

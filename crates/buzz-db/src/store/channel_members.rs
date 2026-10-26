@@ -1837,7 +1837,7 @@ pub async fn get_accessible_channels(
                c.nip29_group_id, c.topic_required, c.max_members,
                c.topic, c.topic_set_by, c.topic_set_at,
                c.purpose, c.purpose_set_by, c.purpose_set_at,
-               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role, c.unlisted,
+               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role, c.unlisted, c.auto_join,
                (cm.channel_id IS NOT NULL) AS is_member
         FROM channels c
         LEFT JOIN channel_members cm
