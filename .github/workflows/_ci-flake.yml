@@ -23,6 +23,7 @@ jobs:
       contents: read
     outputs:
       rust: ${{ steps.select.outputs.rust }}
+      tauri: ${{ steps.select.outputs.tauri }}
       node: ${{ steps.select.outputs.node }}
       playwright: ${{ steps.select.outputs.playwright }}
       playwright_shards: ${{ steps.select.outputs.playwright_shards }}
@@ -102,6 +103,71 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: flake-rust
+          path: test-results/flake
+          if-no-files-found: ignore
+          retention-days: 7
+
+  flake-tauri:
+    name: Flake check (Desktop Tauri)
+    needs: [flake-select]
+    if: needs.flake-select.outputs.tauri != ''
+    runs-on: ubuntu-latest
+    # Same bound as a Desktop Tauri lane (_ci-desktop.yml): ci-apt-retry.sh
+    # bounds the apt step at ~34m worst case and a cold build needs ~15m.
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      # Restores the Desktop Tauri core lane's cache (_ci-desktop.yml)
+      # read-only, under the same constraints as flake-rust's restore above:
+      # the workspace, shared-key and environment hash must stay identical to
+      # that job's.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: desktop/src-tauri
+          shared-key: desktop-core
+          save-if: false
+      - name: Install Tauri dependencies (Linux)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          CI_APT_ATTEMPT_SECONDS=90 scripts/ci-apt-retry.sh sudo apt-get update
+          scripts/ci-apt-retry.sh sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
+        with:
+          tool: cargo-nextest@0.9.136
+      # tauri-build validates the sidecar binaries at compile time; the Desktop
+      # Tauri recipes create the same empty stubs.
+      - name: Create sidecar stubs
+        run: just _ensure-sidecar-stubs
+      # Same script as flake-rust, against the Tauri workspace's manifest and
+      # its own .config/nextest.toml `flake` profile.
+      - name: Repeat changed desktop Tauri tests
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          SELECTED: ${{ needs.flake-select.outputs.tauri }}
+        run: node scripts/flake-check.mjs tauri --iterations=10 $SELECTED
+      - name: Desktop Tauri iteration reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flake-tauri
           path: test-results/flake
           if-no-files-found: ignore
           retention-days: 7

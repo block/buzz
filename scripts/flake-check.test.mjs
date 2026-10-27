@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   chooseRust,
   classify,
@@ -15,10 +19,15 @@ import {
   parseJunit,
   playwrightRepetitions,
   playwrightShards,
+  runners,
+  rustFilterset,
   rustGroups,
+  rustImporters,
+  rustIncludes,
   rustModulePath,
   rustTarget,
   rustTests,
+  rustWorkspaces,
   selectRust,
   selectTests,
   testBodies,
@@ -26,6 +35,47 @@ import {
 } from "./flake-check.mjs";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+const root = fileURLToPath(new URL("../", import.meta.url));
+const git = (args, env = {}) =>
+  execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+// `select` over a synthetic head tree: HEAD's tree with a comment appended to
+// each given file, so only those files differ and no test body changes. The
+// outputs are keyed per runner as the workflow reads them.
+function selectAppending(...files) {
+  const dir = mkdtempSync(join(tmpdir(), "flake-select-"));
+  try {
+    const env = { GIT_INDEX_FILE: join(dir, "index") };
+    git(["read-tree", "HEAD"], env);
+    for (const file of files) {
+      const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+        cwd: root,
+        encoding: "utf8",
+        input: `${git(["show", `HEAD:${file}`])}// flake-check probe\n`,
+      }).trim();
+      git(["update-index", "--cacheinfo", `100644,${blob},${file}`], env);
+    }
+    const tree = git(["write-tree"], env).trim();
+    const result = spawnSync(
+      process.execPath,
+      [join(root, "scripts/flake-check.mjs"), "select", "HEAD", tree],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const outputs = Object.fromEntries(
+      [...result.stdout.matchAll(/^(\w+)=(.*)$/gm)].map(([, key, value]) => [
+        key,
+        value.split(" ").filter(Boolean),
+      ]),
+    );
+    return { summary: result.stdout, outputs };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 // A hunk writing new-side lines start..end; by default it removed nothing.
 const hunk = (start, end, removed = { start: start + 1, end: start }) => ({
   start,
@@ -40,6 +90,10 @@ test("classification follows each runner's test file layout", () => {
   for (const [file, runner] of [
     ["crates/buzz-core/src/filter.rs", "rust"],
     ["crates/buzz-test-client/tests/e2e_relay.rs", "rust"],
+    ["desktop/src-tauri/src/lib.rs", "tauri"],
+    ["desktop/src-tauri/tests/rodio_mixer_diagnostic.rs", "tauri"],
+    ["desktop/src-tauri/crates/buzz-terminal/src/lib.rs", "tauri"],
+    ["desktop/src-tauri/crates/buzz-terminal/tests/latency.rs", "tauri"],
     ["desktop/src/features/channels/lib/channelDescription.test.mjs", "node"],
     ["desktop/src/shared/ui/thing.jsdom-test.mjs", "node"],
     ["desktop/scripts/demo-build-config.test.mjs", "node"],
@@ -50,7 +104,9 @@ test("classification follows each runner's test file layout", () => {
   for (const file of [
     "crates/buzz-core/Cargo.toml",
     "crates/buzz-feature-flags/tests/fixtures/relay-feature-selection/src/main.rs",
-    "desktop/src-tauri/src/lib.rs",
+    "desktop/src-tauri/build.rs",
+    "desktop/src-tauri/tests/fixtures/x.rs",
+    "desktop/src-tauri/crates/buzz-terminal/Cargo.toml",
     "desktop/src/features/channels/lib/channelDescription.ts",
     "desktop/tests/e2e/helpers/animations.ts",
     "desktop/tests/e2e/typing-latency.perf.ts",
@@ -64,6 +120,9 @@ test("classification follows each runner's test file layout", () => {
     "crates/buzz-core/src/$(id).rs",
   ])
     assert.equal(classify(file), undefined, file);
+  // Each Rust runner names the cargo workspace its lane repeats.
+  assert.deepEqual(Object.keys(rustWorkspaces), ["rust", "tauri"]);
+  assert.ok(runners.includes("tauri"));
 });
 
 test("-U0 hunks map to new-side ranges, with deletions attached to the preceding line and their old-side lines kept", () => {
@@ -230,6 +289,12 @@ test("same-named Rust tests in different modules are distinct, and a hunk select
     ["crates/buzz-test-client/tests/e2e_relay.rs", []],
     ["crates/x/tests/suite/main.rs", []],
     ["crates/x/tests/suite/helpers.rs", ["helpers"]],
+    ["desktop/src-tauri/src/app_state.rs", ["app_state"]],
+    ["desktop/src-tauri/tests/rodio_mixer_diagnostic.rs", []],
+    [
+      "desktop/src-tauri/crates/buzz-terminal/src/grid/cell.rs",
+      ["grid", "cell"],
+    ],
   ])
     assert.deepEqual(rustModulePath(file), modules, file);
   // Listed candidates: the predicted name wins; without it every suffix
@@ -268,12 +333,21 @@ test("Rust files build only the targets they can be part of, merged per package 
     ["crates/buzz-admin/src/main.rs", [["--bins"]]],
     ["crates/buzz-test-client/tests/e2e_relay.rs", [["--test", "e2e_relay"]]],
     ["crates/buzz-agent/tests/common/mod.rs", []],
+    ["desktop/src-tauri/src/lib.rs", [["--lib"], ["--bins"]]],
+    [
+      "desktop/src-tauri/tests/rodio_mixer_diagnostic.rs",
+      [["--test", "rodio_mixer_diagnostic"]],
+    ],
+    [
+      "desktop/src-tauri/crates/buzz-terminal/tests/latency.rs",
+      [["--test", "latency"]],
+    ],
   ])
     assert.deepEqual(rustTarget(file), flags, file);
   // Two integration tests keep two `--test` flags: `--test codec connection`
   // would make nextest filter on a test named "connection" and repeat nothing.
   const args = (...entries) =>
-    [...rustGroups(entries).values()].map((group) => group.args);
+    [...rustGroups(entries).groups.values()].map((group) => group.args);
   assert.deepEqual(
     args(
       "crates/buzz-audio-client/tests/codec.rs::roundtrip",
@@ -301,6 +375,167 @@ test("Rust files build only the targets they can be part of, merged per package 
       ["-p", "buzz-admin", "--bins"],
     ],
   );
+  // The Tauri workspace's packages are addressed by its manifest, and never
+  // mixed into a root-workspace invocation.
+  const tauri = rustGroups([
+    "desktop/src-tauri/tests/rodio_mixer_diagnostic.rs::single_queue_serializes_sources",
+    "desktop/src-tauri/crates/buzz-terminal/tests/latency.rs::g3_renderer_acquire_stays_within_frame_budget",
+  ]);
+  assert.equal(tauri.runner, "tauri");
+  assert.equal(rustWorkspaces[tauri.runner], "desktop/src-tauri/Cargo.toml");
+  assert.deepEqual(
+    [...tauri.groups.values()].map((group) => group.args),
+    [
+      ["-p", "buzz-desktop", "--test", "rodio_mixer_diagnostic"],
+      ["-p", "buzz-terminal", "--test", "latency"],
+    ],
+  );
+  assert.equal(
+    rustGroups(["crates/buzz-core/src/filter.rs::tests::a"]).runner,
+    "rust",
+  );
+  assert.throws(
+    () =>
+      rustGroups([
+        "crates/buzz-core/src/filter.rs::tests::a",
+        "desktop/src-tauri/src/lib.rs::tests::b",
+      ]),
+    /span workspaces/,
+  );
+  assert.throws(
+    () => rustGroups(["desktop/src/x.rs::tests::a"]),
+    /rust entry must be/,
+  );
+  // The root workspace's listing excludes its Postgres-backed tests by name
+  // and binary; nextest rejects `binary(/^postgres_/)` in the Tauri
+  // workspace, where no such binary exists, so that listing carries no
+  // exclusion.
+  assert.equal(
+    rustFilterset("rust", ["tests::a", "b", "tests::a"]),
+    "(test(/(^|::)tests::a$/) | test(/(^|::)b$/)) & !(test(/postgres_tests::/) | binary(/^postgres_/) | test(/(^|::)external_infra[^:]*::/))",
+  );
+  assert.equal(rustFilterset("tauri", ["a"]), "(test(/(^|::)a$/))");
+  assert.doesNotMatch(rustFilterset("tauri", ["a"]), /binary\(/);
+});
+
+test("a helper under tests/ selects the integration binaries that include it", () => {
+  const helper = "crates/x/tests/common/mod.rs";
+  const includes = (target, ...lines) =>
+    rustIncludes(target, `${lines.join("\n")}\n`, helper);
+  // `mod common;` in a crate root, in any form; not in a comment or string.
+  assert.ok(
+    includes("crates/x/tests/a.rs", "mod common;", "#[test] fn t() {}"),
+  );
+  assert.ok(includes("crates/x/tests/a.rs", "pub(crate) mod   common ;"));
+  assert.ok(!includes("crates/x/tests/a.rs", "// uses mod common; elsewhere"));
+  assert.ok(!includes("crates/x/tests/a.rs", 'const S: &str = "mod common;";'));
+  assert.ok(!includes("crates/x/tests/a.rs", "mod commonplace;", "mod other;"));
+  // `#[path]` reaching the file itself or its directory's mod.rs.
+  assert.ok(
+    includes("crates/x/tests/a.rs", '#[path = "common/mod.rs"]', "mod shared;"),
+  );
+  assert.ok(
+    includes(
+      "crates/x/tests/a.rs",
+      '#[path="../tests/common/mod.rs"] mod shared;',
+    ),
+  );
+  assert.ok(
+    !includes("crates/x/tests/a.rs", '#[path = "other/mod.rs"]', "mod shared;"),
+  );
+  assert.ok(
+    rustIncludes(
+      "crates/x/tests/a.rs",
+      '#[path = "common/mod.rs"] mod shared;\n',
+      "crates/x/tests/common/util.rs",
+    ),
+  );
+  // A tests/<dir>/main.rs target owns every file under its directory.
+  assert.ok(
+    rustIncludes(
+      "crates/x/tests/suite/main.rs",
+      "",
+      "crates/x/tests/suite/util.rs",
+    ),
+  );
+  assert.ok(!rustIncludes("crates/x/tests/suite/main.rs", "", helper));
+  assert.ok(
+    rustIncludes(
+      "crates/x/tests/suite/main.rs",
+      '#[path = "../common/mod.rs"]\nmod common;\n',
+      helper,
+    ),
+  );
+  // The real importers of buzz-agent's shared harness: the files declaring
+  // `mod common;`, not the suites that do not.
+  assert.deepEqual(rustImporters("crates/buzz-agent/tests/common/mod.rs"), {
+    importers: [
+      "crates/buzz-agent/tests/anthropic_continuation.rs",
+      "crates/buzz-agent/tests/fake_llm.rs",
+      "crates/buzz-agent/tests/permission_boundary.rs",
+      "crates/buzz-agent/tests/regressions.rs",
+    ],
+    scanned: true,
+  });
+  for (const importer of rustImporters("crates/buzz-agent/tests/common/mod.rs")
+    .importers)
+    assert.match(read(`../${importer}`), /^mod common;$/m, importer);
+  assert.doesNotMatch(
+    read("../crates/buzz-agent/tests/golden_transcripts.rs"),
+    /^mod common;$/m,
+  );
+});
+
+test("select, through its entry point, repeats a changed Tauri test and the binaries including a changed helper", () => {
+  // Reviewer probes on #8613: before, both produced an empty selection and
+  // every repeat lane skipped.
+  const tauri = selectAppending(
+    "desktop/src-tauri/tests/rodio_mixer_diagnostic.rs",
+  );
+  assert.match(
+    tauri.summary,
+    /\| desktop\/src-tauri\/tests\/rodio_mixer_diagnostic\.rs \| tauri \| whole file \(shared code changed\): 3 test\(s\) \|/,
+  );
+  assert.deepEqual(tauri.outputs.rust, []);
+  assert.deepEqual(
+    tauri.outputs.tauri,
+    rustTests(read("../desktop/src-tauri/tests/rodio_mixer_diagnostic.rs")).map(
+      (test) =>
+        `desktop/src-tauri/tests/rodio_mixer_diagnostic.rs::${test.name}`,
+    ),
+  );
+  assert.equal(tauri.outputs.tauri.length, 3);
+
+  const helper = selectAppending("crates/buzz-agent/tests/common/mod.rs");
+  assert.match(
+    helper.summary,
+    /\| crates\/buzz-agent\/tests\/common\/mod\.rs \| rust \| helper for: anthropic_continuation, fake_llm, permission_boundary, regressions: \d+ test\(s\) \|/,
+  );
+  const binaries = new Set(
+    helper.outputs.rust.map((entry) => entry.split("::")[0]),
+  );
+  assert.deepEqual([...binaries].sort(), [
+    "crates/buzz-agent/tests/anthropic_continuation.rs",
+    "crates/buzz-agent/tests/fake_llm.rs",
+    "crates/buzz-agent/tests/permission_boundary.rs",
+    "crates/buzz-agent/tests/regressions.rs",
+  ]);
+  assert.ok(helper.outputs.rust.length > 0);
+  // Changed together, the helper and an importer select each test once.
+  const both = selectAppending(
+    "crates/buzz-agent/tests/common/mod.rs",
+    "crates/buzz-agent/tests/fake_llm.rs",
+  );
+  assert.deepEqual(both.outputs.rust, [...new Set(both.outputs.rust)]);
+  assert.deepEqual(both.outputs.rust.length, helper.outputs.rust.length);
+  // A src/** file without test functions still selects nothing: the regular
+  // lanes run what depends on it.
+  const source = selectAppending("crates/buzz-core/src/lib.rs");
+  assert.match(
+    source.summary,
+    /\| crates\/buzz-core\/src\/lib\.rs \| rust \| no test functions \|/,
+  );
+  assert.deepEqual(source.outputs.rust, []);
 });
 
 test("Rust selection: a hunk inside a test selects it, elsewhere selects every runnable test; ignored tests never run", () => {
@@ -614,16 +849,39 @@ test("repeat invocations mirror the lanes they stand in for", () => {
       `scripts/mobile-test-shard.sh \${{ matrix.shard }} 3 ${dartDefine}`,
     ),
   );
-  assert.match(
-    read("../.config/nextest.toml"),
-    /^\[profile\.flake\]\n(?:#.*\n)*retries = 0\nfail-fast = false\n\n\[profile\.flake\.junit\]\npath = "junit\.xml"\n/m,
-  );
+  // nextest reads its config from the workspace root, so each Rust workspace
+  // carries the flake profile.
+  for (const config of [
+    "../.config/nextest.toml",
+    "../desktop/src-tauri/.config/nextest.toml",
+  ])
+    assert.match(
+      read(config),
+      /^\[profile\.flake\]\n(?:#.*\n)*retries = 0\nfail-fast = false\n\n\[profile\.flake\.junit\]\npath = "junit\.xml"\n/m,
+      config,
+    );
   const flake = read("../.github/workflows/_ci-flake.yml");
-  for (const runner of ["rust", "node", "dart"])
+  for (const runner of ["rust", "tauri", "node", "dart"])
     assert.ok(
       flake.includes(`flake-check.mjs ${runner} --iterations=10 $SELECTED`),
       runner,
     );
+  // The Tauri lane builds what the Desktop Tauri core lane does: the same
+  // workspace cache, system packages and sidecar stubs.
+  const desktop = read("../.github/workflows/_ci-desktop.yml");
+  const packages = (text) =>
+    /apt-get install -y --no-install-recommends \\\n((?: {12}\S+(?: \\)?\n)+)/.exec(
+      text,
+    )?.[1];
+  assert.ok(packages(desktop), "Desktop Tauri apt packages");
+  assert.equal(packages(flake), packages(desktop));
+  assert.match(
+    flake,
+    /flake-tauri:\n(?: {4}.*\n)*? {6}- uses: Swatinem\/rust-cache@\w+\n {8}with:\n {10}workspaces: desktop\/src-tauri\n {10}shared-key: desktop-core\n {10}save-if: false\n/,
+  );
+  assert.match(desktop, /- lane: core\n {12}cache: desktop-core\n/);
+  assert.ok(flake.includes("run: just _ensure-sidecar-stubs"));
+  assert.ok(read("../Justfile").includes("\n_ensure-sidecar-stubs:\n"));
   assert.ok(flake.includes("--repeat-each=10 --retries=0"));
   // The lanes are advisory: ci.yml calls the workflow on pull requests only,
   // and no required gate depends on it.

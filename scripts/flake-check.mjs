@@ -8,10 +8,12 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
 } from "node:fs";
 import { createRequire } from "node:module";
+import { posix as path } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -38,7 +40,43 @@ export const MAX_PLAYWRIGHT_JOURNEYS = Math.floor(
 // one past the journey cap, is a sweeping refactor rather than a test change
 // worth ten repetitions, so the lane skips rather than overrunning its timeout.
 export const MAX_OUTPUT_BYTES = 64 * 1024;
-export const runners = ["rust", "node", "playwright", "dart"];
+export const runners = ["rust", "tauri", "node", "playwright", "dart"];
+// The two cargo workspaces, by runner: the root workspace's crates, and the
+// desktop Tauri workspace (desktop/src-tauri and its crates/*), which the
+// Desktop Tauri lane (_ci-desktop.yml) builds with its own manifest, system
+// dependencies and cache. Each is repeated by its own lane with nextest run
+// against that manifest.
+export const rustWorkspaces = {
+  rust: "Cargo.toml",
+  tauri: "desktop/src-tauri/Cargo.toml",
+};
+const rustLayouts = [
+  {
+    runner: "rust",
+    pattern: /^(crates\/[^/]+)\/(src|tests)\/((?!fixtures\/).*)\.rs$/,
+  },
+  {
+    runner: "tauri",
+    pattern:
+      /^(desktop\/src-tauri(?:\/crates\/[^/]+)?)\/(src|tests)\/((?!fixtures\/).*)\.rs$/,
+  },
+];
+
+// A Rust file's place in its workspace: the runner, its package directory,
+// whether it is under src or tests, and its path below that without `.rs`.
+export function rustFile(file) {
+  for (const { runner, pattern } of rustLayouts) {
+    const match = pattern.exec(file);
+    if (match)
+      return {
+        runner,
+        dir: match[1],
+        kind: match[2],
+        parts: match[3].split("/"),
+      };
+  }
+  return undefined;
+}
 // Mirrors desktop/package.json "test": plain helpers run under the TS loader;
 // jsdom tests also preload the DOM shim and force-exit past their timers.
 export const nodeTestArgs = (file) =>
@@ -58,19 +96,34 @@ export const dartDefine =
   "--dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example";
 // Mirrors the postgres-ci default-filter in .config/nextest.toml: those tests
 // are #[ignore]d and need Postgres, Redis, S3 or MinIO, so a selection that
-// reached one would fail every repetition without being flaky.
-const infraTests =
-  "test(/postgres_tests::/) | binary(/^postgres_/) | test(/(^|::)external_infra[^:]*::/)";
+// reached one would fail every repetition without being flaky. The convention
+// is the root workspace's; nextest rejects a `binary()` predicate matching no
+// test binary in the workspace, and the Tauri workspace has none, so it gets
+// no exclusion.
+const infraTests = {
+  rust: "test(/postgres_tests::/) | binary(/^postgres_/) | test(/(^|::)external_infra[^:]*::/)",
+};
+
+// The nextest filterset listing a workspace's candidates for the selected
+// in-file test paths, less its infrastructure-backed tests.
+export function rustFilterset(runner, paths) {
+  const suffixes = [...new Set(paths)]
+    .map((path) => `test(/(^|::)${path}$/)`)
+    .join(" | ");
+  return infraTests[runner]
+    ? `(${suffixes}) & !(${infraTests[runner]})`
+    : `(${suffixes})`;
+}
 
 // Mirrors desktop/package.json "test", desktop/playwright.config.ts testDir,
-// the root Cargo workspace's crates and mobile's test directory. Paths are
+// the two cargo workspaces' packages and mobile's test directory. Paths are
 // later split on whitespace in a shell, so admit only plain names. The
 // desktop `*.perf.ts` measurements are deliberately not specs here: they time
 // the app rather than assert on it, so a slow repetition is not a flake.
 export function classify(file) {
   if (!/^[\w./@-]+$/.test(file)) return undefined;
-  if (/^crates\/[^/]+\/(?:src|tests)\/(?!fixtures\/).*\.rs$/.test(file))
-    return "rust";
+  const rust = rustFile(file);
+  if (rust) return rust.runner;
   if (
     /^desktop\/(?:src\/.*\.(?:test|jsdom-test)\.mjs|scripts\/[^/]+\.test\.mjs)$/.test(
       file,
@@ -350,7 +403,8 @@ export function selectTests(
 // Rust tests a diff selects: hunks inside a test body select that test, any
 // other hunk selects every test in the file (the module's code under test
 // lives beside them), and `#[ignore]`d tests own their lines but never run.
-// A file without test functions is not a test file and selects nothing.
+// A file without test functions selects nothing of its own; `select` decides
+// what that means by where the file lives.
 export function selectRust(
   diff,
   source,
@@ -394,9 +448,9 @@ const summarize = (text) => {
 };
 const cell = (value) => String(value).replaceAll("|", "\\|");
 
-const crateDir = (file) => `${root}crates/${file.split("/")[1]}`;
+const crateDir = (file) => `${root}${rustFile(file).dir}`;
 
-// The `[package]` name of the crate owning a file under crates/.
+// The `[package]` name of the package owning a Rust file.
 export function cratePackage(file) {
   const manifest = readFileSync(`${crateDir(file)}/Cargo.toml`, "utf8");
   return /^\[package\][\s\S]*?^name\s*=\s*"([^"]+)"/m.exec(manifest)[1];
@@ -409,16 +463,16 @@ export function cratePackage(file) {
 // of that name. A file placed by a custom `[[test]]` path builds every target
 // instead.
 export function rustTarget(file) {
-  const [, , kind, first, second] = file.split("/");
+  const { kind, parts } = rustFile(file);
   if (kind === "src") {
     const lib =
       existsSync(`${crateDir(file)}/src/lib.rs`) ||
       /^\[lib\]/m.test(readFileSync(`${crateDir(file)}/Cargo.toml`, "utf8"));
     return lib ? [["--lib"], ["--bins"]] : [["--bins"]];
   }
-  if (second === undefined) return [["--test", first.replace(/\.rs$/, "")]];
-  return existsSync(`${crateDir(file)}/tests/${first}/main.rs`)
-    ? [["--test", first]]
+  if (parts.length === 1) return [["--test", parts[0]]];
+  return existsSync(`${crateDir(file)}/tests/${parts[0]}/main.rs`)
+    ? [["--test", parts[0]]]
     : [];
 }
 
@@ -428,12 +482,67 @@ export function rustTarget(file) {
 // is x. A `#[path]` attribute can break this; repeatRust then falls back to the
 // in-file path alone.
 export function rustModulePath(file) {
-  const [, , kind, ...parts] = file.replace(/\.rs$/, "").split("/");
+  const { kind, parts: below } = rustFile(file);
+  const parts = [...below];
   if (kind === "tests") parts.shift();
   else if (parts[0] === "bin") parts.splice(0, 2);
   if (["mod", "main"].includes(parts.at(-1)) || parts.join() === "lib")
     parts.pop();
   return parts;
+}
+
+// Whether an integration-test target (tests/<stem>.rs or tests/<dir>/main.rs)
+// compiles a helper file under tests/ into its binary: a main.rs owns its
+// directory, and any target's source declares `mod <first>;` for the
+// helper's first path component under tests/ (a crate root resolves
+// `mod common;` to tests/common/mod.rs or tests/common.rs), or a `#[path]`
+// attribute names the helper's file or the mod.rs of a directory holding it.
+// Declarations are read with comments and strings blanked; `#[path]` strings
+// are read raw, since blanking would erase them.
+export function rustIncludes(target, source, helper) {
+  const targetDir = path.dirname(target);
+  const [first] = rustFile(helper).parts;
+  if (path.basename(target) === "main.rs" && helper.startsWith(`${targetDir}/`))
+    return true;
+  if (new RegExp(`\\bmod\\s+${first}\\s*;`).test(blankRust(source)))
+    return true;
+  for (const [, named] of source.matchAll(/#\[\s*path\s*=\s*"([^"]+)"\s*\]/g)) {
+    const resolved = path.normalize(path.join(targetDir, named));
+    if (resolved === helper) return true;
+    if (
+      path.basename(resolved) === "mod.rs" &&
+      helper.startsWith(`${path.dirname(resolved)}/`)
+    )
+      return true;
+  }
+  return false;
+}
+
+// The integration-test targets of a helper's package that include it, as
+// files. A helper no target is found to include (a layout rustIncludes does
+// not read) falls back to every target, so a helper change is never left
+// unrepeated by the scan.
+export function rustImporters(helper) {
+  const { dir } = rustFile(helper);
+  const tests = `${dir}/tests`;
+  const targets = readdirSync(`${root}${tests}`, { withFileTypes: true })
+    .flatMap((entry) =>
+      entry.isFile() && entry.name.endsWith(".rs")
+        ? [`${tests}/${entry.name}`]
+        : entry.isDirectory() &&
+            existsSync(`${root}${tests}/${entry.name}/main.rs`)
+          ? [`${tests}/${entry.name}/main.rs`]
+          : [],
+    )
+    .filter((target) => target !== helper)
+    .sort();
+  const importers = targets.filter((target) =>
+    rustIncludes(target, readFileSync(`${root}${target}`, "utf8"), helper),
+  );
+  return {
+    importers: importers.length ? importers : targets,
+    scanned: importers.length > 0,
+  };
 }
 
 // Smoke journeys per spec file as Playwright lists them, each line once (a
@@ -502,11 +611,16 @@ function select(base = "HEAD^1", head = "HEAD") {
     added.has(file) ? "" : git("show", `${base}:${file}`);
   const diff = (file) =>
     git("diff", "-U0", "--no-color", base, head, "--", file);
+  // Every runnable test of a Rust file, as entries.
+  const wholeRust = (file) =>
+    rustTests(readFileSync(`${root}${file}`, "utf8"))
+      .filter((test) => !test.ignored)
+      .map((test) => `${file}::${test.name}`);
   for (const runner of runners) {
     for (const file of files[runner]) {
       let entries = [file];
       let note = "whole file";
-      if (runner === "rust") {
+      if (rustWorkspaces[runner]) {
         const selection = selectRust(
           diff(file),
           readFileSync(`${root}${file}`, "utf8"),
@@ -515,17 +629,37 @@ function select(base = "HEAD^1", head = "HEAD") {
             previous: previous(file),
           },
         );
-        if (!selection) {
+        if (selection) {
+          entries = selection.names.map((name) => `${file}::${name}`);
+          note =
+            selection.names.length === 0
+              ? "excluded (ignored tests only)"
+              : selection.whole
+                ? `whole file (${selection.reason}): ${selection.names.length} test(s)`
+                : `${selection.names.length} changed test(s)`;
+        } else if (rustFile(file).kind === "tests") {
+          // A tests/** file without test functions is a helper module that
+          // integration binaries compile in (`mod common;`), so a change to
+          // it can change every test of each binary that includes it: select
+          // those binaries whole. The ignored and infrastructure exclusions
+          // still apply downstream, as for any whole-file selection.
+          const { importers, scanned } = rustImporters(file);
+          entries = importers.flatMap(wholeRust);
+          const names = importers.map(
+            (importer) => rustFile(importer).parts[0],
+          );
+          note =
+            importers.length === 0
+              ? "helper with no integration tests to repeat"
+              : `helper for${scanned ? "" : " (no importer found; every integration test)"}: ${names.join(", ")}: ${entries.length} test(s)`;
+        } else {
+          // A src/** file without test functions is the code under test, not
+          // a test file. This is deliberate: the regular lanes build and run
+          // everything that depends on it, and repeating its crate's whole
+          // suite for any source change would not be a changed-test check.
           rows.push(`| ${cell(file)} | ${runner} | no test functions |`);
           continue;
         }
-        entries = selection.names.map((name) => `${file}::${name}`);
-        note =
-          selection.names.length === 0
-            ? "excluded (ignored tests only)"
-            : selection.whole
-              ? `whole file (${selection.reason}): ${selection.names.length} test(s)`
-              : `${selection.names.length} changed test(s)`;
       } else if (runner === "playwright") {
         const listed = journeys.get(file) ?? [];
         const source = readFileSync(`${root}${file}`, "utf8");
@@ -549,6 +683,9 @@ function select(base = "HEAD^1", head = "HEAD") {
       outputs[runner].push(...entries);
       rows.push(`| ${cell(file)} | ${runner} | ${cell(note)} |`);
     }
+    // A helper and a file that includes it, changed together, select the
+    // same tests twice.
+    outputs[runner] = [...new Set(outputs[runner])];
     const exceeded =
       Buffer.byteLength(outputs[runner].join(" ")) > MAX_OUTPUT_BYTES
         ? `selection exceeds ${MAX_OUTPUT_BYTES} bytes`
@@ -569,7 +706,9 @@ function select(base = "HEAD^1", head = "HEAD") {
       "",
       ...(rows.length
         ? ["| File | Runner | Selection |", "| --- | --- | --- |", ...rows]
-        : ["No Rust, node:test, Playwright or Flutter test files changed."]),
+        : [
+            "No Rust, desktop Tauri, node:test, Playwright or Flutter test files changed.",
+          ]),
       "",
       "",
     ].join("\n"),
@@ -678,53 +817,65 @@ export function chooseRust(tests, candidates) {
 // flags of its selected files, each whole flag once (`--test codec --test
 // connection`; merging tokens instead gave `--test codec connection`, which
 // nextest reads as a test-name filter that matches nothing), and the tests
-// to list in those targets.
+// to list in those targets. Every entry must belong to one workspace, whose
+// runner is returned with the groups.
 export function rustGroups(entries) {
   const groups = new Map();
+  const workspaces = new Set();
   for (const entry of entries) {
-    const [, file, path] =
-      /^(crates\/[^:]+\.rs)::((?:\w+::)*\w+)$/.exec(entry) ?? [];
-    if (!file)
+    const [, file, test] = /^([^:]+\.rs)::((?:\w+::)*\w+)$/.exec(entry) ?? [];
+    const place = file && rustFile(file);
+    if (!place)
       throw new Error(`rust entry must be <file>::<module::test>: ${entry}`);
+    workspaces.add(place.runner);
     const crate = cratePackage(file);
     const group = groups.get(crate) ?? { targets: new Map(), tests: [] };
     const targets = rustTarget(file);
     if (targets.length === 0) group.every = true;
     for (const target of targets) group.targets.set(target.join(" "), target);
     group.tests.push({
-      path,
-      exact: [...rustModulePath(file), path].join("::"),
+      path: test,
+      exact: [...rustModulePath(file), test].join("::"),
     });
     groups.set(crate, group);
   }
+  if (workspaces.size > 1)
+    throw new Error(
+      `rust entries span workspaces: ${[...workspaces].join(", ")}`,
+    );
   for (const [crate, group] of groups)
     group.args = [
       "-p",
       crate,
       ...(group.every ? [] : [...group.targets.values()].flat()),
     ];
-  return groups;
+  return { groups, runner: [...workspaces][0] };
 }
 
 // nextest has no repeat flag, so run the selection once per iteration under
-// the `flake` profile (.config/nextest.toml: no retries, JUnit per run), one
-// cargo invocation per package so each builds only the targets its files can
-// be in. The selection is listed first, by in-file path, and narrowed with
-// chooseRust to exact (binary, test) pairs; a selection listing no runnable
-// test is one of ignored or infrastructure-backed tests, not a failure.
+// the `flake` profile (the workspace's .config/nextest.toml: no retries, JUnit
+// per run), one cargo invocation per package so each builds only the targets
+// its files can be in. The selection is listed first, by in-file path, and
+// narrowed with chooseRust to exact (binary, test) pairs; a selection listing
+// no runnable test is one of ignored or infrastructure-backed tests, not a
+// failure. The Tauri workspace is addressed by its manifest; the root one is
+// cargo's default.
 function repeatRust(entries, iterations) {
-  const groups = rustGroups(entries);
+  const { groups, runner } = rustGroups(entries);
+  const manifest = rustWorkspaces[runner];
+  const cargoArgs = runner === "rust" ? [] : ["--manifest-path", manifest];
   const runs = [];
   for (const group of groups.values()) {
-    const suffixes = [...new Set(group.tests.map(({ path }) => path))]
-      .map((path) => `test(/(^|::)${path}$/)`)
-      .join(" | ");
     const listed = run("cargo", [
       "nextest",
       "list",
+      ...cargoArgs,
       ...group.args,
       "-E",
-      `(${suffixes}) & !(${infraTests})`,
+      rustFilterset(
+        runner,
+        group.tests.map(({ path }) => path),
+      ),
       "--message-format",
       "json",
     ]);
@@ -756,8 +907,12 @@ function repeatRust(entries, iterations) {
   }
   // nextest keeps its store under the workspace root's target/nextest, not
   // CARGO_TARGET_DIR; the `flake` profile writes its JUnit report there.
-  const junit = `${root}target/nextest/flake/junit.xml`;
-  const dir = resultsDir("rust");
+  const junit = path.join(
+    root,
+    path.dirname(manifest),
+    "target/nextest/flake/junit.xml",
+  );
+  const dir = resultsDir(runner);
   for (let i = 1; i <= iterations; i += 1) {
     const statuses = new Map();
     let ok = true;
@@ -769,6 +924,7 @@ function repeatRust(entries, iterations) {
         [
           "nextest",
           "run",
+          ...cargoArgs,
           "--profile",
           "flake",
           ...group.args,
@@ -790,7 +946,10 @@ function repeatRust(entries, iterations) {
     runs.push({ ok, statuses });
     progress(i, iterations, ok);
   }
-  report("Flake check (Rust)", runs);
+  report(
+    runner === "rust" ? "Flake check (Rust)" : "Flake check (Desktop Tauri)",
+    runs,
+  );
 }
 
 // node:test has no repeat flag either. Each file runs alone, so a failure is
@@ -931,9 +1090,12 @@ function main() {
   if (command === "select" && args.length <= 2) return select(...args);
   if (command === "playwright-summary" && args.length === 2)
     return playwrightSummary(...args);
-  const repeat = { rust: repeatRust, node: repeatNode, dart: repeatDart }[
-    command
-  ];
+  const repeat = {
+    rust: repeatRust,
+    tauri: repeatRust,
+    node: repeatNode,
+    dart: repeatDart,
+  }[command];
   if (repeat) {
     const iterations = Number(
       args
@@ -945,7 +1107,7 @@ function main() {
       return repeat(entries, iterations);
   }
   throw new Error(
-    "usage: flake-check select [base] [head] | rust|node|dart [--iterations=N] <entry…> | playwright-summary <report.json> <title>",
+    "usage: flake-check select [base] [head] | rust|tauri|node|dart [--iterations=N] <entry…> | playwright-summary <report.json> <title>",
   );
 }
 
