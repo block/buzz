@@ -45,6 +45,7 @@ class MeAssistantList extends ConsumerWidget {
                         child: AppListRowRaw(
                           leading: AvatarImage(
                             imageUrl:
+                                agent.avatarUrl ??
                                 (profiles[agent.pubkey] ??
                                         ref
                                             .read(userCacheProvider.notifier)

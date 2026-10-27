@@ -154,6 +154,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             : () => unawaited(flow.signInAccount()),
         accountStatus: status,
         builderlabBusy: busy,
+        signInPending: signingIn || busy,
         setupContent: flow != null && inlineSetup
             ? Column(
                 mainAxisSize: MainAxisSize.min,
@@ -169,7 +170,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             ? 'Connecting…'
             : connected
             ? 'Continue with Builderlab'
-            : 'Sign in with builderlab',
+            : 'Sign in with email',
         onWelcomeBack: back,
         onAlreadyUseBuzz: () => existingUser.value = true,
       ),

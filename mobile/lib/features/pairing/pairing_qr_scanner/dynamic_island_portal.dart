@@ -2,11 +2,13 @@ part of '../pairing_qr_scanner.dart';
 
 // A smooth, non-bouncy spring inspired by Apple's public motion guidance;
 // these are our timings, not private Dynamic Island animation constants.
-const _dynamicIslandOpenDuration = Duration(milliseconds: 440);
-const _dynamicIslandCloseDuration = Duration(milliseconds: 360);
+const _dynamicIslandOpenDuration = Duration(milliseconds: 230);
+const _dynamicIslandCloseDuration = Duration(milliseconds: 230);
 
 class _DynamicIslandQrScannerPortal extends HookWidget {
-  const _DynamicIslandQrScannerPortal();
+  const _DynamicIslandQrScannerPortal({this.onProgress});
+
+  final ValueChanged<double>? onProgress;
 
   @override
   Widget build(BuildContext context) {
@@ -15,7 +17,6 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
     final isClosing = useState(false);
     final canPop = useState(false);
     final hasHandledResult = useRef(false);
-    final cameraMounted = useRef(false);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
 
     useEffect(() {
@@ -25,6 +26,29 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
         unawaited(controller.dispose());
       };
     }, [controller]);
+
+    useEffect(() {
+      var active = true;
+      void publish() {
+        if (active) onProgress?.call(animation.value.clamp(0.0, 1.0));
+      }
+
+      void changed() {
+        // Reduced motion can update the controller while this route builds.
+        if (WidgetsBinding.instance.schedulerPhase ==
+            SchedulerPhase.persistentCallbacks) {
+          WidgetsBinding.instance.addPostFrameCallback((_) => publish());
+        } else {
+          publish();
+        }
+      }
+
+      animation.addListener(changed);
+      return () {
+        active = false;
+        animation.removeListener(changed);
+      };
+    }, [animation, onProgress]);
 
     Future<void> finish(String? result) async {
       if (canPop.value) return;
@@ -74,6 +98,7 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
     void closePortal() {
       if (isClosing.value || hasHandledResult.value) return;
       hasHandledResult.value = true;
+      unawaited(_setDynamicIslandScannerStatusBarHidden(false));
       isClosing.value = true;
     }
 
@@ -130,16 +155,6 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
                       final scannerOpacity = geometry.scannerOpacityAt(
                         progress,
                       );
-                      // Once revealed, keep the camera mounted until the route
-                      // closes. Native camera teardown can stall a moving frame.
-                      if (scannerOpacity > 0) cameraMounted.value = true;
-                      final introLabelOpacity = isClosing.value
-                          ? 0.0
-                          : geometry.introLabelOpacityAt(progress);
-                      final promptOpacity = math.max(
-                        introLabelOpacity,
-                        scannerOpacity,
-                      );
 
                       return Positioned.fromRect(
                         rect: frame,
@@ -156,17 +171,18 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
                             child: Stack(
                               fit: StackFit.expand,
                               children: [
-                                if (cameraMounted.value)
-                                  Opacity(
-                                    opacity: scannerOpacity,
-                                    child: _QrScannerCamera(
-                                      controller: controller,
-                                      onDetect: handleDetection,
-                                    ),
+                                // Start warming the camera on the first frame,
+                                // and keep it mounted throughout dismissal.
+                                Opacity(
+                                  opacity: scannerOpacity,
+                                  child: _QrScannerCamera(
+                                    controller: controller,
+                                    onDetect: handleDetection,
                                   ),
+                                ),
                                 IgnorePointer(
                                   child: Opacity(
-                                    opacity: promptOpacity,
+                                    opacity: scannerOpacity,
                                     child: Center(
                                       child: Text(
                                         'Scan a QR code',

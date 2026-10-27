@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:buzz/shared/me/me_assistants.dart';
+import 'package:buzz/shared/me/me_archived_agents.dart';
+import 'package:buzz/shared/me/me_agent_inventory.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,10 +12,12 @@ import 'package:pointycastle/digests/sha256.dart';
 
 class _Relay extends RelaySessionNotifier {
   final List<List<NostrEvent>> pages;
-  final requestedPages = <int>[];
+  List<NostrEvent>? inventory;
+  List<List<NostrEvent>>? inventoryPages;
+  int inventoryReads = 0;
   final requestedTags = <Map<String, dynamic>>[];
   final requestedAuthors = <List<String>?>[];
-  _Relay(this.pages);
+  _Relay(this.pages, {this.inventory});
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
   @override
@@ -21,12 +25,19 @@ class _Relay extends RelaySessionNotifier {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    expect(filters.single.kinds, [0]);
-    requestedTags.add(filters.single.toJson());
-    requestedAuthors.add(filters.single.authors);
-    final page = filters.single.toJson()['page'] as int;
-    requestedPages.add(page);
-    return pages[page - 1];
+    final filter = filters.single;
+    requestedTags.add(filter.toJson());
+    if (filter.kinds.single == 30177) {
+      return inventoryPages?[inventoryReads++] ?? inventory ?? const [];
+    }
+    expect(filter.kinds, [0]);
+    expect(
+      filter.authors,
+      isNotEmpty,
+      reason: 'Never scan all community profiles',
+    );
+    requestedAuthors.add(filter.authors);
+    return pages.expand((p) => p).toList();
   }
 }
 
@@ -68,7 +79,25 @@ void main() {
     );
   }
 
-  ProviderContainer setup(_Relay relay) {
+  NostrEvent listing(
+    String pubkey, {
+    String name = 'Saved agent',
+    int time = 1,
+    String? content,
+  }) => NostrEvent.fromJson(
+    nostr.Event.from(
+      kind: 30177,
+      content: content ?? jsonEncode({'name': name}),
+      secretKey: owner.secret,
+      createdAt: time,
+      tags: [
+        ['d', pubkey],
+      ],
+    ).toMap(),
+  );
+
+  ProviderContainer setup(_Relay relay, {Set<String> archived = const {}}) {
+    relay.inventory ??= [listing(agent.public)];
     final sync = MeSync(
       relay,
       RelayConfig(
@@ -83,29 +112,41 @@ void main() {
       overrides: [
         relaySessionProvider.overrideWith(() => relay),
         meSyncProvider.overrideWithValue(sync),
+        meArchivedAgentsProvider.overrideWith((ref) async => archived),
       ],
     );
     addTearDown(container.dispose);
     return container;
   }
 
-  test('finds owned kind 0 agents without legacy directory entries', () async {
-    final valid = profile(agent, ownedBy: owner);
-    final forged = valid.toJson()..['pubkey'] = other.public;
-    final container = setup(
-      _Relay([
-        [
-          profile(owner),
-          profile(nostr.Keys.generate(), ownedBy: other),
-          NostrEvent.fromJson(forged),
-          valid,
-        ],
-      ]),
-    );
-    final choices = await container.read(meAssistantsProvider.future);
-    expect(choices.map((a) => a.pubkey), [agent.public]);
-    expect(choices.single.displayName, 'My assistant');
-  });
+  test(
+    'lists current inventory with verified ownership, name and artwork',
+    () async {
+      final valid = profile(
+        agent,
+        ownedBy: owner,
+        content: {
+          'display_name': 'Profile name',
+          'picture': 'https://example.com/agent.png',
+        },
+      );
+      final forged = valid.toJson()..['pubkey'] = other.public;
+      final container = setup(
+        _Relay([
+          [
+            profile(owner),
+            profile(nostr.Keys.generate(), ownedBy: other),
+            NostrEvent.fromJson(forged),
+            valid,
+          ],
+        ]),
+      );
+      final choices = await container.read(meAssistantsProvider.future);
+      expect(choices.map((a) => a.pubkey), [agent.public]);
+      expect(choices.single.displayName, 'Saved agent');
+      expect(choices.single.avatarUrl, 'https://example.com/agent.png');
+    },
+  );
   for (final malformed in [7, true, 'wrong', <String, Object>{}, <Object>[]]) {
     test(
       'malformed optional profile fields do not poison directory: $malformed',
@@ -135,7 +176,7 @@ void main() {
         final choices = await container.read(meAssistantsProvider.future);
         expect(
           choices.singleWhere((a) => a.pubkey == agent.public).displayName,
-          'My assistant',
+          'Saved agent',
         );
         expect(
           await isOwnedMeAssistant(
@@ -147,6 +188,32 @@ void main() {
       },
     );
   }
+  test(
+    'inventory pagination advances and rejects a repeated full page',
+    () async {
+      final first = listing(agent.public, time: 2);
+      final last = listing(other.public, time: 1);
+      final page = List.filled(200, first);
+      final relay = _Relay([])
+        ..inventoryPages = [
+          page,
+          [last],
+        ];
+      final sync = setup(relay).read(meSyncProvider);
+      expect(
+        (await loadMeAgentInventory(sync)).keys,
+        unorderedEquals([agent.public, other.public]),
+      );
+      expect(relay.requestedTags.last['until'], 2);
+      expect(relay.requestedTags.last['before_id'], first.id);
+      expect(relay.requestedTags.first['authors'], [owner.public]);
+      relay.inventoryReads = 0;
+      relay.inventoryPages = [page, page];
+      await expectLater(loadMeAgentInventory(sync), throwsStateError);
+      expect(relay.inventoryReads, 2);
+    },
+  );
+
   test('latest profile removes obsolete ownership', () async {
     final container = setup(
       _Relay([
@@ -155,38 +222,78 @@ void main() {
     );
     expect(await container.read(meAssistantsProvider.future), isEmpty);
   });
-  test('reads beyond the first directory page', () async {
-    final relay = _Relay([
-      [for (var i = 0; i < 100; i++) profile(owner, time: i + 1)],
-      [profile(agent, ownedBy: owner)],
-    ]);
-    expect(
-      (await setup(relay).read(meAssistantsProvider.future)).single.pubkey,
-      agent.public,
-    );
-    expect(relay.requestedPages, [1, 2]);
-  });
   test(
-    'directory discovery is bounded even when the relay keeps paging',
+    'omits historical, removed and archived agents without losing ownership checks',
     () async {
-      final repeated = [
-        for (var i = 0; i < 99; i++) profile(agent, ownedBy: owner, time: i),
-      ];
-      final relay = _Relay([
-        for (var page = 0; page < 11; page++)
-          [...repeated, profile(agent, ownedBy: owner, time: 100 + page)],
-      ]);
-      await expectLater(
-        setup(relay).read(meAssistantsProvider.future),
-        throwsStateError,
+      final archivedAgent = nostr.Keys.generate();
+      final removed = nostr.Keys.generate();
+      final historical = nostr.Keys.generate();
+      final relay = _Relay(
+        [
+          [
+            for (final key in [agent, archivedAgent, removed, historical])
+              profile(key, ownedBy: owner),
+          ],
+        ],
+        inventory: [
+          listing(agent.public),
+          for (final field in ['id', 'sig'])
+            NostrEvent.fromJson(
+              listing(agent.public, time: 3, content: '{}').toJson()
+                ..[field] = '0' * (field == 'id' ? 64 : 128),
+            ),
+          listing(archivedAgent.public),
+          listing(removed.public),
+          listing(removed.public, time: 2, content: '{}'),
+        ],
       );
-      expect(relay.requestedPages.length, 10);
-      for (final filter in relay.requestedTags) {
-        expect(filter.containsKey('#auth'), isFalse);
-        expect(filter['limit'], 100);
-      }
+      final container = setup(relay, archived: {archivedAgent.public});
+      expect(
+        (await container.read(
+          meAssistantsProvider.future,
+        )).map((a) => a.pubkey),
+        [agent.public],
+      );
+      expect(
+        relay.requestedAuthors.single,
+        unorderedEquals([agent.public, archivedAgent.public]),
+      );
+      expect(
+        await isOwnedMeAssistant(
+          container.read(meSyncProvider),
+          historical.public,
+        ),
+        isTrue,
+      );
     },
   );
+  test(
+    'empty inventory is authoritative and does not scan historical profiles',
+    () async {
+      final relay = _Relay([
+        [profile(agent, ownedBy: owner)],
+      ], inventory: []);
+      expect(await setup(relay).read(meAssistantsProvider.future), isEmpty);
+      expect(relay.requestedAuthors, isEmpty);
+    },
+  );
+  test('inventory rejects records outside owner scope', () async {
+    final foreign = NostrEvent.fromJson(
+      nostr.Event.from(
+        kind: 30177,
+        content: '{"name":"Foreign"}',
+        secretKey: other.secret,
+        tags: [
+          ['d', agent.public],
+        ],
+      ).toMap(),
+    );
+    final container = setup(_Relay([], inventory: [foreign]));
+    await expectLater(
+      loadMeAgentInventory(container.read(meSyncProvider)),
+      throwsStateError,
+    );
+  });
   for (final conditions in ['kind=1', 'created_at>1', 'created_at<1']) {
     test(
       'discovery and send revalidation reject inapplicable $conditions',

@@ -28,10 +28,15 @@ class _NewMeChat extends HookConsumerWidget {
       );
     }
     final choices = directory.asData?.value ?? [];
-    final chosen = choices
-        .where((agent) => agent.pubkey == selected.value)
-        .firstOrNull;
     final profile = ref.watch(userCacheProvider)[selected.value];
+    final chosen =
+        choices.where((agent) => agent.pubkey == selected.value).firstOrNull ??
+        (frozenAgent.value == null
+            ? null
+            : AgentDirectoryEntry(
+                pubkey: frozenAgent.value!,
+                displayName: profile?.label ?? frozenAgent.value!,
+              ));
     return SingleChildScrollView(
       padding: EdgeInsets.fromLTRB(
         Grid.gutter,

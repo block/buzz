@@ -13,6 +13,8 @@ import 'package:flutter/cupertino.dart'
 import 'package:flutter/foundation.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -35,6 +37,7 @@ part 'pairing_page/onboarding_background.dart';
 part 'pairing_page/onboarding_colors.dart';
 part 'pairing_page/onboarding_glass_button.dart';
 part 'pairing_page/pairing_welcome_view.dart';
+part 'pairing_page/two_finger_double_tap.dart';
 part 'pairing_page/community_link_form.dart';
 part 'pairing_page/onboarding_connection_view.dart';
 part 'pairing_page/sas_verification_view.dart';
@@ -61,6 +64,7 @@ class PairingPage extends HookConsumerWidget {
   final Widget? setupContent;
   final String builderlabLabel;
   final bool builderlabBusy;
+  final bool signInPending;
 
   const PairingPage({
     super.key,
@@ -81,6 +85,7 @@ class PairingPage extends HookConsumerWidget {
     this.setupContent,
     this.builderlabLabel = 'Connect to Builderlab',
     this.builderlabBusy = false,
+    this.signInPending = false,
   });
 
   @override
@@ -92,6 +97,7 @@ class PairingPage extends HookConsumerWidget {
     final enrolledBiometrics = ref.watch(enrolledBiometricsProvider);
     final codeController = useTextEditingController();
     final fallbackScannerVisible = useState(false);
+    final islandScannerProgress = useValueNotifier(0.0);
     final pairingCodeExpanded = useState(false);
     final optionsExpanded = useState(false);
     final isBusy =
@@ -137,6 +143,7 @@ class PairingPage extends HookConsumerWidget {
     }
 
     Future<void> openScanner() async {
+      unawaited(HapticFeedback.selectionClick());
       final usesDynamicIslandPortal = await usesDynamicIslandQrScannerPortal();
       if (!context.mounted) {
         return;
@@ -147,7 +154,17 @@ class PairingPage extends HookConsumerWidget {
         return;
       }
 
-      final code = await showDynamicIslandPairingQrScanner(context);
+      String? code;
+      try {
+        code = await showDynamicIslandPairingQrScanner(
+          context,
+          onProgress: (value) {
+            if (context.mounted) islandScannerProgress.value = value;
+          },
+        );
+      } finally {
+        if (context.mounted) islandScannerProgress.value = 0;
+      }
       await handleScannerResult(code);
     }
 
@@ -279,43 +296,67 @@ class PairingPage extends HookConsumerWidget {
                 backgroundColor: Colors.transparent,
                 appBar: pairingAppBar,
                 body: SafeArea(
-                  child: _PairingWelcomeView(
-                    optionsExpanded: optionsExpanded,
-                    onAlreadyUseBuzz: onAlreadyUseBuzz,
-                    onWelcomeBack: onWelcomeBack,
-                    connectionLanding: connectionLanding,
-                    showConnectionOptions: showConnectionOptions,
-                    existingUser: existingUser,
-                    enteringCommunityLink: enteringCommunityLink,
-                    creatingCommunity: creatingCommunity,
-                    onSubmitCommunity: onSubmitCommunity,
-                    onCommunityLink: onCommunityLink,
-                    onCreateCommunity: onCreateCommunity,
-                    onOpenCommunity: (uri) {
-                      FocusManager.instance.primaryFocus?.unfocus();
-                      ref.read(pendingDeepLinkProvider.notifier).open(uri);
-                    },
-                    onBuilderlab: onBuilderlab,
-                    accountStatus: accountStatus,
-                    setupContent: setupContent,
-                    builderlabLabel: builderlabLabel,
-                    builderlabBusy: builderlabBusy,
-                    codeController: codeController,
-                    isBusy: isBusy,
-                    pairingCodeExpanded: pairingCodeExpanded.value,
-                    errorMessage: pairingState.status == PairingStatus.error
-                        ? pairingState.errorMessage
-                        : null,
-                    onScan: openScanner,
-                    onTogglePairingCode: () {
-                      pairingCodeExpanded.value = !pairingCodeExpanded.value;
-                    },
-                    onConnect: () {
-                      final code = codeController.text.trim();
-                      if (code.isNotEmpty) {
-                        unawaited(handleScannerResult(code));
-                      }
-                    },
+                  child: ValueListenableBuilder<double>(
+                    valueListenable: islandScannerProgress,
+                    builder: (context, progress, child) => ExcludeFocus(
+                      excluding: progress > 0,
+                      child: ExcludeSemantics(
+                        excluding: progress > 0,
+                        child: IgnorePointer(
+                          ignoring: progress > 0,
+                          child: Opacity(
+                            key: const Key('scanner-welcome-opacity'),
+                            opacity: 1 - progress,
+                            child: Transform.scale(
+                              key: const Key('scanner-welcome-scale'),
+                              scale: MediaQuery.disableAnimationsOf(context)
+                                  ? 1
+                                  : 1 - 0.04 * progress,
+                              child: child,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    child: _PairingWelcomeView(
+                      optionsExpanded: optionsExpanded,
+                      onAlreadyUseBuzz: onAlreadyUseBuzz,
+                      onWelcomeBack: onWelcomeBack,
+                      connectionLanding: connectionLanding,
+                      showConnectionOptions: showConnectionOptions,
+                      existingUser: existingUser,
+                      enteringCommunityLink: enteringCommunityLink,
+                      creatingCommunity: creatingCommunity,
+                      onSubmitCommunity: onSubmitCommunity,
+                      onCommunityLink: onCommunityLink,
+                      onCreateCommunity: onCreateCommunity,
+                      onOpenCommunity: (uri) {
+                        FocusManager.instance.primaryFocus?.unfocus();
+                        ref.read(pendingDeepLinkProvider.notifier).open(uri);
+                      },
+                      onBuilderlab: onBuilderlab,
+                      accountStatus: accountStatus,
+                      setupContent: setupContent,
+                      builderlabLabel: builderlabLabel,
+                      builderlabBusy: builderlabBusy,
+                      signInPending: signInPending,
+                      codeController: codeController,
+                      isBusy: isBusy,
+                      pairingCodeExpanded: pairingCodeExpanded.value,
+                      errorMessage: pairingState.status == PairingStatus.error
+                          ? pairingState.errorMessage
+                          : null,
+                      onScan: openScanner,
+                      onTogglePairingCode: () {
+                        pairingCodeExpanded.value = !pairingCodeExpanded.value;
+                      },
+                      onConnect: () {
+                        final code = codeController.text.trim();
+                        if (code.isNotEmpty) {
+                          unawaited(handleScannerResult(code));
+                        }
+                      },
+                    ),
                   ),
                 ),
               ),
