@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/community/community.dart';
@@ -5,6 +8,7 @@ import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/crypto/nip_oa.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/storage/secure_storage.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -236,6 +240,85 @@ void main() {
       expect(controller.deletedAgents, {fakeAgent});
       await controller.run(controller.refresh);
       expect(controller.agents, isEmpty);
+    },
+  );
+
+  test('a setup whose instructions were lost asks for them again', () async {
+    final registry = FakeRegistry(bound: fakeOwner.public)
+      ..failInstructions = true;
+    final controller = await _controller(registry);
+    final community = _community();
+    expect(
+      await controller.create(community, 'Scout', instructions: 'Private.'),
+      isFalse,
+    );
+    final request = controller.pending!['request'];
+    // Device-only secure storage is gone; preferences survived (a restore).
+    await accountSecureStorage.delete(key: '$_scope:instructions:$request');
+
+    final restarted = RelayFakeController(registry);
+    addTearDown(() {
+      restarted.dispose();
+      restarted.relayAuth.dispose();
+    });
+    expect(await restarted.run(restarted.refresh), isTrue);
+    expect(restarted.pending?['instructionsMissing'], isTrue);
+    expect(restarted.status, contains('Enter its instructions again'));
+
+    registry
+      ..failInstructions = false
+      ..calls.clear();
+    expect(
+      await restarted.create(community, 'Scout', instructions: 'Again.'),
+      isTrue,
+    );
+    expect(
+      registry.bodies['/v3/beekeeper/update-agent']?['agent_instructions'],
+      'Again.',
+    );
+    expect(restarted.pending, isNull);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('$_scope:pending'), isNull);
+  });
+
+  test(
+    'registrations use a WebSocket URL for https-saved communities',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final kinds = <int>[];
+      server.listen((request) async {
+        final peer = await WebSocketTransformer.upgrade(request);
+        addTearDown(peer.close);
+        peer.listen((frame) {
+          final data = jsonDecode(frame as String) as List;
+          final event = Map<String, dynamic>.from(data[1] as Map);
+          if (data.first == 'EVENT') kinds.add(event['kind'] as int);
+          peer.add(jsonEncode(['OK', event['id'], true, '']));
+        });
+        peer.add(jsonEncode(['AUTH', 'challenge']));
+      });
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      await AccountIdentityStore()
+          .forSubject(fakeSubject)
+          .create(fakeOwner.nsec);
+      final controller = RemoteAgentController(
+        account: registry,
+        keys: AccountIdentityStore(),
+        relayAuth: HostedRelayAuth(registry),
+      );
+      addTearDown(() {
+        controller.dispose();
+        controller.relayAuth.dispose();
+      });
+      // Stored the way paired communities may keep it: an HTTP(S) origin.
+      final relay = 'http://127.0.0.1:${server.port}';
+      await controller.publishPolicy(relay, {
+        'pubkey': fakeAgent,
+        'name': 'Scout',
+      });
+      await controller.removePolicy(relay, fakeAgent);
+      expect(kinds, [30177, 5]);
     },
   );
 

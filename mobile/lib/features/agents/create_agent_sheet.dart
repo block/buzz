@@ -35,6 +35,8 @@ class CreateAgentSheet extends HookConsumerWidget {
     final active = ref.watch(activeCommunityProvider).asData?.value;
     final sameCommunity = active?.id == community.id;
     final pending = controller.pending != null;
+    final instructionsMissing =
+        controller.pending?['instructionsMissing'] == true;
     final canCreate =
         !controller.busy && sameCommunity && name.text.trim().isNotEmpty;
     final actionStyle = IconButton.styleFrom(
@@ -134,7 +136,8 @@ class CreateAgentSheet extends HookConsumerWidget {
                 const SizedBox(height: Grid.sm),
                 TextField(
                   controller: instructions,
-                  enabled: !controller.busy && !pending,
+                  enabled:
+                      !controller.busy && (!pending || instructionsMissing),
                   minLines: 4,
                   maxLines: 6,
                   textCapitalization: TextCapitalization.sentences,

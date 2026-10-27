@@ -250,9 +250,12 @@ class RemoteAgentController extends ChangeNotifier {
     agents = listed
         .where((row) => !deletedAgents.contains(row['agent_pubkey']))
         .toList();
-    status = pending == null
-        ? ''
-        : 'Unfinished setup saved. Resume to use the same agent.';
+    status = switch (pending) {
+      null => '',
+      {'instructionsMissing': true} =>
+        'Unfinished setup saved. Enter its instructions again, then Resume.',
+      _ => 'Unfinished setup saved. Resume to use the same agent.',
+    };
   }
 
   /// Requires this account's saved key to be its current server binding.
@@ -282,9 +285,12 @@ class RemoteAgentController extends ChangeNotifier {
         key: '$scope:instructions:${restored!['request']}',
       );
       if (instructions == null) {
-        throw StateError('Saved agent instructions are unavailable.');
+        // Preferences can outlive device-only secure storage, for example
+        // after a device restore. Keep the setup and ask for them again.
+        restored['instructionsMissing'] = true;
+      } else {
+        restored['instructions'] = instructions;
       }
-      restored['instructions'] = instructions;
     }
     deletedAgents = prefs.getStringList('$scope:deleted')?.toSet() ?? {};
     pending = restored;
@@ -294,7 +300,9 @@ class RemoteAgentController extends ChangeNotifier {
   Future<void> _savePending(Map<String, dynamic> value) async {
     final scope = _storageScope;
     final prefs = await SharedPreferences.getInstance();
-    final persisted = Map<String, dynamic>.from(value)..remove('instructions');
+    final persisted = Map<String, dynamic>.from(value)
+      ..remove('instructions')
+      ..remove('hasInstructions');
     final instructions = value['instructions'] as String?;
     if (instructions != null && instructions.isNotEmpty) {
       await accountSecureStorage.write(
@@ -347,6 +355,14 @@ class RemoteAgentController extends ChangeNotifier {
     var setup = Map<String, dynamic>.from(pending!);
     if (setup['owner'] != owner || setup['community'] != community.relayUrl) {
       throw StateError('Finish the pending setup in its original community.');
+    }
+    if (setup['instructionsMissing'] == true) {
+      if (instructions.trim().length > 20000) {
+        throw StateError('Use at most 20,000 characters for instructions.');
+      }
+      setup = {...setup, 'instructions': instructions.trim()}
+        ..remove('instructionsMissing');
+      await _savePending(setup);
     }
     if (setup['pubkey'] == null) {
       status = 'Creating remote identity…';
