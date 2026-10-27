@@ -10957,6 +10957,66 @@ mod tests {
             assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
         }
 
+        /// Through `build_router`, an audio upgrade without an assertion hands
+        /// its shadow line to the socket, which writes it at the verified AUTH
+        /// with that key while the socket stays open. Mutation: passing `None`
+        /// instead of `shadow_line` to `handle_audio_connection` writes the
+        /// line as `absent` at upgrade.
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        #[tokio::test]
+        async fn shadow_audio_router_writes_line_at_auth_while_open() {
+            use std::sync::Arc;
+            use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+            let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
+            let base = audio_test_state_real_db()
+                .await
+                .expect("postgres-ci provides a database");
+            let (tenant, channel_id, key) = seed_audio_fixture(base.db.pool()).await;
+            let mut state = (*base).clone();
+            let config = Arc::make_mut(&mut state.config);
+            config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
+            config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                &format!("https://{}", tenant.host()),
+                &["https://issuer.test"],
+            );
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test listener");
+            let addr = listener.local_addr().expect("test listener addr");
+            let app = crate::router::build_router(Arc::new(state))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let mut req = format!("ws://{addr}/huddle/{channel_id}/audio")
+                .into_client_request()
+                .expect("request");
+            req.headers_mut()
+                .insert("host", tenant.host().parse().unwrap());
+            let (mut client, _) = tokio_tungstenite::connect_async(req)
+                .await
+                .expect("shadow admits the upgrade");
+            send_audio_auth(&mut client, &key, &format!("ws://{}", tenant.host()), 1).await;
+
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(10), client.next())
+                    .await
+                    .expect("joined timeout")
+                {
+                    Some(Ok(Message::Text(t))) if t.contains("\"joined\"") => break,
+                    Some(Ok(_)) => {}
+                    other => panic!("expected joined, got {other:?}"),
+                }
+            }
+
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+            assert!(lines[0].contains(&proven), "{lines:?}");
+            drop(client);
+            server.abort();
+        }
+
         /// The archived-channel exit sends its error and Close, then releases
         /// the huddle lease in Redis, which can stall with no deadline. The
         /// socket must end within the bounded wait for the client's Close
