@@ -111,7 +111,14 @@ void main() {
       expect(previewRect!.width, greaterThan(0));
       expect(previewRect!.height, greaterThan(0));
       if (anchor != null) {
-        expect(previewRect, anchor.translate(0, -140));
+        expect(previewRect, Rect.fromLTWH(anchor.left, 56, 220, 220));
+        final circle = tester.getRect(
+          find.byKey(const ValueKey('avatar-preview-position')),
+        );
+        final search = tester.getRect(
+          find.byKey(const ValueKey('emoji-avatar-search')),
+        );
+        expect(circle.top - 40, closeTo(search.top - circle.bottom, 0.01));
         expect(find.text('Cancel'), findsNothing);
         expect(find.text('Profile photo'), findsNothing);
         // UIKit owns the buttons; exercise the same channel as its Done action.
@@ -133,7 +140,7 @@ void main() {
           tester
               .getTopLeft(find.byKey(const ValueKey('avatar-preview-position')))
               .dy,
-          80.0,
+          66.0,
         );
         await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
           'buzz/profile_avatar_sheet',
@@ -160,7 +167,7 @@ void main() {
           tester
               .getTopLeft(find.byKey(const ValueKey('avatar-preview-position')))
               .dy,
-          80,
+          66,
         );
         expect(
           tester

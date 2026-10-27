@@ -373,13 +373,6 @@ class ProfileAvatarEditor extends HookConsumerWidget {
         final animatedPreviewSize = animatedModeHeight < 400 ? 180.0 : 228.0;
         final animatedPreviewTop =
             basePreviewTop + (animatedPreviewSize - _previewBlockSize) / 2;
-        final displayedPreviewTop = returningToEmoji
-            ? animatedPreviewTop +
-                  (previewTop - animatedPreviewTop) * modeTransitionProgress
-            : previewTop;
-        if (mode != ProfileAvatarMode.animated) {
-          retainedPreviewTop.value = previewTop;
-        }
         final fixedContentTop =
             previewTop +
             (anchoredPreview?.height ?? _previewBlockSize) +
@@ -393,6 +386,24 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             : mode == ProfileAvatarMode.image && isCapturingImage.value
             ? imageCameraTop
             : fixedContentTop;
+        // Keep the picker fixed and balance the whole preview circle between
+        // the mode selector and the search row in the embedded setup editor.
+        final centeredEmojiTop =
+            (topPadding +
+                _modeControlHeight +
+                modeTop -
+                (anchoredPreview?.height ?? _previewBlockSize)) /
+            2;
+        final displayedPreviewTop =
+            anchoredPreview != null && mode == ProfileAvatarMode.emoji
+            ? centeredEmojiTop
+            : returningToEmoji
+            ? animatedPreviewTop +
+                  (previewTop - animatedPreviewTop) * modeTransitionProgress
+            : previewTop;
+        if (mode != ProfileAvatarMode.animated) {
+          retainedPreviewTop.value = displayedPreviewTop;
+        }
         final modeHeight = max(0.0, viewportHeight - controlsBottom - modeTop);
         final contentHeight =
             anchoredPreview != null && mode == ProfileAvatarMode.emoji
