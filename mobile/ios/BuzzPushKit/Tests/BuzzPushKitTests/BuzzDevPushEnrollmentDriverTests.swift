@@ -395,21 +395,26 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
   func testRejectedEnrollmentReplayIsReplacedOnlyOnTerminalStatus() async throws {
     // A journaled request the gateway rejects must not be replayed for its whole
     // lifetime, nor replaced (with a fresh App Attest key) on every retry; a
-    // transient failure must keep the journal. A fresh 409 models a request that
-    // committed before its response was lost and was rejected once its
-    // attestation certificate expired: the replacement conflicts with the live
-    // installation and its consumed challenge then returns 404.
+    // transient failure, or a 400 that a later policy change could lift, must
+    // keep the journal. A fresh status of 0 drops the replacement request, whose
+    // replay then finds its challenge expired: an ordinary loss, not a
+    // rejection. A fresh 409 conflicts with a live installation for the same
+    // token, for example one whose request committed before its response was
+    // lost and was rejected once its attestation certificate expired; its
+    // consumed challenge then returns 404, as does a fresh 404's replay.
     let interval = BuzzDevPushEnrollmentDriver.rejectedEnrollmentReplacementSeconds
-    let cases: [(replay: Int, fresh: Int?, elapsed: Int64, legacy: Bool)] = [
-      (400, 201, interval, false), (401, 201, interval, false), (404, 201, 0, false),
-      (401, 201, 0, true), (401, nil, interval - 1, false), (401, 401, interval, false),
-      (401, 409, interval, false), (503, nil, interval, false),
+    let cases: [(replay: Int, fresh: Int?, elapsed: Int64, legacy: Bool, keys: Int)] = [
+      (400, nil, interval, false, 1), (401, 201, interval, false, 2),
+      (404, 201, 0, false, 2), (404, 0, 0, false, 3), (404, 404, 0, false, 2),
+      (404, 409, 0, false, 2), (401, 201, 0, true, 2),
+      (401, nil, interval - 1, false, 1), (401, 401, interval, false, 2),
+      (401, 409, interval, false, 2), (503, nil, interval, false, 1),
     ]
-    for (replayStatus, freshStatus, elapsed, legacy) in cases {
-      let fresh = freshStatus.map(String.init) ?? "none"
+    for (replayStatus, freshStatus, elapsed, legacy, keys) in cases {
+      let fresh = freshStatus.map { $0 == 0 ? "dropped" : String($0) } ?? "none"
       let label = "replay \(replayStatus), fresh \(fresh) after \(elapsed)s, legacy \(legacy)"
       // Status for a later exact replay of a fresh request.
-      let freshReplayStatus = freshStatus == 409 ? 404 : freshStatus
+      let freshReplayStatus = [0, 409].contains(freshStatus) ? 404 : freshStatus
       let store = MemoryGrantStore()
       let appAttest = RecordingAppAttest()
       var clock = Self.now
@@ -420,9 +425,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
         lifetimeSeconds: 30 * 86_400
       )
       var challengeCount = 0
-      var failChallenge = false
       var replayRequests = 0
-      var freshRequests = 0
       var sentChallenges = Set<String>()
       URLProtocolStub.handler = { request in
         switch (request.httpMethod, request.url?.absoluteString) {
@@ -431,10 +434,6 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
             "push": ["keys": [["pubkey": Self.relayPubkey, "current": true]]]
           ])
         case ("POST", "http://push.example/v1/installations/challenges"):
-          if failChallenge {
-            failChallenge = false
-            throw URLError(.notConnectedToInternet)
-          }
           challengeCount += 1
           return Self.response(request, status: 200, json: [
             "challenge_id": [Self.firstChallengeId, Self.secondChallengeId].indices
@@ -451,13 +450,13 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
             if replayRequests == 1 { throw URLError(.networkConnectionLost) }
             return Self.response(request, status: replayStatus, json: ["error": "rejected"])
           }
-          freshRequests += 1
           let challengeId = try XCTUnwrap(body["challenge_id"] as? String)
           let isReplay = !sentChallenges.insert(challengeId).inserted
           let status = try XCTUnwrap(
             isReplay ? freshReplayStatus : freshStatus,
             "\(label) must keep the journal"
           )
+          if status == 0 { throw URLError(.networkConnectionLost) }
           guard status == 201 else {
             return Self.response(request, status: status, json: ["error": "rejected"])
           }
@@ -504,43 +503,71 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
             (attempt == 0 ? freshStatus : freshReplayStatus) ?? replayStatus,
             label
           )
-          XCTAssertEqual(
-            store.pending.first?.challengeId,
-            freshStatus == nil ? Self.firstChallengeId : Self.secondChallengeId,
-            label
-          )
+          let challengeId = try XCTUnwrap(store.pending.first?.challengeId, label)
+          if freshStatus == nil {
+            XCTAssertEqual(challengeId, Self.firstChallengeId, label)
+          } else {
+            XCTAssertNotEqual(challengeId, Self.firstChallengeId, label)
+          }
+        } catch let error as URLError where freshStatus == 0 {
+          // Each retry replaces the lost replacement at once and loses it again.
+          XCTAssertEqual(error.code, .networkConnectionLost, label)
+          XCTAssertNotEqual(store.pending.first?.challengeId, Self.firstChallengeId, label)
         }
       }
-      XCTAssertEqual(freshRequests, freshStatus == nil ? 0 : freshStatus == 201 ? 1 : 2, label)
-      XCTAssertEqual(appAttest.preparedAttestations.count, freshStatus == nil ? 1 : 2, label)
+      XCTAssertEqual(appAttest.preparedAttestations.count, keys, label)
+      if freshStatus == 0 {
+        XCTAssertEqual(store.pending.first?.rejectedReplacements ?? 0, 0, label)
+        // An ordinary replacement that fails after generating its key still
+        // records the attempt, so the next retry waits instead of generating
+        // another key, however old the journal was.
+        clock += 4 * interval
+        appAttest.failAttestation = true
+        do {
+          _ = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+          XCTFail("Expected the simulated attestation failure: \(label)")
+        } catch {
+          XCTAssertEqual((error as NSError).domain, NSURLErrorDomain, label)
+        }
+        await Self.assertEnrollmentStatus(driver, token, 404, label)
+        XCTAssertEqual(appAttest.preparedAttestations.count, keys + 1, label)
+      }
 
-      guard let freshStatus, let freshReplayStatus, freshStatus != 201 else { continue }
+      guard let freshStatus, let freshReplayStatus, [401, 404, 409].contains(freshStatus) else {
+        continue
+      }
       // Each consecutive replacement doubles the wait before the next one.
       XCTAssertEqual(store.pending.first?.rejectedReplacements, 1, label)
       clock += interval
       await Self.assertEnrollmentStatus(driver, token, freshReplayStatus, label)
       XCTAssertEqual(appAttest.preparedAttestations.count, 2, label)
 
-      // A replacement that fails before its request is durable keeps the
-      // rejected journal and its count, even across a driver restart.
+      // A replacement that fails after generating its key keeps the rejected
+      // journal with the attempt recorded, so retries wait instead of
+      // generating more keys, even across a driver restart.
       clock += interval
-      failChallenge = true
+      appAttest.failAttestation = true
       do {
         _ = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
-        XCTFail("Expected the simulated challenge failure: \(label)")
+        XCTFail("Expected the simulated attestation failure: \(label)")
       } catch {
         XCTAssertEqual((error as NSError).domain, NSURLErrorDomain, label)
       }
-      XCTAssertEqual(store.pending.first?.rejectedReplacements, 1, label)
+      XCTAssertEqual(appAttest.preparedAttestations.count, 3, label)
+      XCTAssertEqual(store.pending.first?.challengeId, Self.secondChallengeId, label)
+      XCTAssertEqual(store.pending.first?.rejectedReplacements, 2, label)
       let restarted = try makeDriver(
         store: store,
         appAttest: appAttest,
         now: { Date(timeIntervalSince1970: TimeInterval(clock)) },
         lifetimeSeconds: 30 * 86_400
       )
-      await Self.assertEnrollmentStatus(restarted, token, freshStatus, label)
+      await Self.assertEnrollmentStatus(restarted, token, freshReplayStatus, label)
       XCTAssertEqual(appAttest.preparedAttestations.count, 3, label)
-      XCTAssertEqual(store.pending.first?.rejectedReplacements, 2, label)
+      clock += 4 * interval
+      await Self.assertEnrollmentStatus(restarted, token, freshStatus, label)
+      XCTAssertEqual(appAttest.preparedAttestations.count, 4, label)
+      XCTAssertEqual(store.pending.first?.rejectedReplacements, 3, label)
     }
   }
 
@@ -1487,6 +1514,8 @@ private final class RecordingAppAttest: BuzzDevAppAttesting {
   var clientData: [Data] = []
   var preparedAttestations: [BuzzDevAttestation] = []
   var assertionKeyIds: [String] = []
+  /// Fails the next attestation after its key was generated.
+  var failAttestation = false
 
   func prepareAttestation() async throws -> BuzzDevAttestation {
     let prepared = BuzzDevAttestation(
@@ -1501,6 +1530,10 @@ private final class RecordingAppAttest: BuzzDevAppAttesting {
     _ prepared: BuzzDevAttestation,
     clientData: Data
   ) async throws -> BuzzDevAttestation {
+    if failAttestation {
+      failAttestation = false
+      throw URLError(.notConnectedToInternet)
+    }
     self.clientData.append(clientData)
     return prepared
   }

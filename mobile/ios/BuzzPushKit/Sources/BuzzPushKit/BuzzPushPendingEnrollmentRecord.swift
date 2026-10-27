@@ -28,10 +28,13 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
   public let attestation: String?
   /// Highest delegation generation reserved before a network request.
   public let delegationGeneration: Int64
-  /// Unix time the journaled installation request was prepared; nil when there
-  /// is none or the journal predates this field.
+  /// Unix time the journaled installation request was prepared, or its latest
+  /// replacement attempt began; nil when there is none or the journal predates
+  /// this field.
   public let preparedAt: Int64?
-  /// Consecutive gateway-rejected journals this one replaced; nil means none.
+  /// Gateway rejections and replacement attempts recorded for this journal and
+  /// the rejected journals it replaced, which lengthen the wait before the
+  /// next replacement; nil or 0 means none.
   public let rejectedReplacements: Int?
 
   /// Creates a gateway-scoped durable record from authenticated enrollment state.

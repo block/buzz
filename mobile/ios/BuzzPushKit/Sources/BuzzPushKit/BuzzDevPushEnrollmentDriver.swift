@@ -407,12 +407,13 @@ public final class BuzzDevPushEnrollmentDriver {
     try await enroll(deviceToken: deviceToken, relayURL: relayURL, replacing: nil)
   }
 
-  /// `rejected` is a journal the gateway terminally rejected. It stays durable,
-  /// with its rejection count, until a fresh request overwrites it.
+  /// `rejected` names a journal the gateway terminally rejected. It stays
+  /// durable, with its replacement attempt recorded, until a fresh request
+  /// overwrites it.
   private func enroll(
     deviceToken: Data,
     relayURL: URL,
-    replacing rejected: BuzzPushPendingEnrollmentRecord?
+    replacing rejected: Replacement?
   ) async throws -> BuzzPushEndpointGrantRecord {
     precondition(!deviceToken.isEmpty, "The APNs device token must not be empty")
     let relayOrigin = try Self.relayOrigin(relayURL)
@@ -430,7 +431,10 @@ public final class BuzzDevPushEnrollmentDriver {
       gatewayOrigin: gatewayOrigin,
       relayOrigin: relayOrigin.text
     )
-    let pendingEnrollment = journal == rejected ? nil : journal
+    // Match the rejected request by its challenge, so a stored copy that differs
+    // in any other field cannot be resumed again.
+    let pendingEnrollment =
+      rejected != nil && journal?.challengeId == rejected?.journal.challengeId ? nil : journal
     if let pending = pendingEnrollment,
       pending.relayPubkey != relayPubkey || pending.endpointHash != endpointHash
         || pending.expiresAt <= nowSeconds
@@ -439,12 +443,16 @@ public final class BuzzDevPushEnrollmentDriver {
       // replacing it. A token/key change does not make a response-lost request
       // safe to discard, nor does it require revoking sibling installations.
       if pending.expiresAt > nowSeconds {
-        if case .rejected = try await resumeEnrollment(
+        if case .rejected(let replacement) = try await resumeEnrollment(
           pending,
           storedRecords: storedRecords,
           relayMetadataPubkey: nil
         ) {
-          return try await enroll(deviceToken: deviceToken, relayURL: relayURL, replacing: pending)
+          return try await enroll(
+            deviceToken: deviceToken,
+            relayURL: relayURL,
+            replacing: replacement
+          )
         }
       } else {
         try store.removePendingEnrollment(
@@ -559,7 +567,7 @@ public final class BuzzDevPushEnrollmentDriver {
         keyId: attestation.keyId,
         attestation: attestation.attestation,
         preparedAt: nowSeconds,
-        rejectedReplacements: rejected.map { ($0.rejectedReplacements ?? 0) + 1 }
+        rejectedReplacements: rejected?.rejectedReplacements
       )
       // The exact signed request is durable before the first network attempt.
       // Saving it is also what replaces a rejected journal.
@@ -574,8 +582,12 @@ public final class BuzzDevPushEnrollmentDriver {
       ) {
       case .completed(let record):
         return record
-      case .rejected:
-        return try await enroll(deviceToken: deviceToken, relayURL: relayURL, replacing: pending)
+      case .rejected(let replacement):
+        return try await enroll(
+          deviceToken: deviceToken,
+          relayURL: relayURL,
+          replacing: replacement
+        )
       }
     }
     return try await completeEnrollment(
@@ -588,7 +600,14 @@ public final class BuzzDevPushEnrollmentDriver {
   private enum Resumption {
     case completed(BuzzPushEndpointGrantRecord)
     /// The gateway terminally rejected the journal, which may now be replaced.
-    case rejected
+    case rejected(Replacement)
+  }
+
+  private struct Replacement {
+    /// The rejected journal as saved, with the replacement attempt recorded.
+    let journal: BuzzPushPendingEnrollmentRecord
+    /// The rejection count the fresh request carries.
+    let rejectedReplacements: Int
   }
 
   private func resumeEnrollment(
@@ -604,37 +623,46 @@ public final class BuzzDevPushEnrollmentDriver {
           relayMetadataPubkey: relayMetadataPubkey
         )
       )
-    } catch BuzzDevPushEnrollmentError.unexpectedStatus(
-      route: "v1/installations", _, let actual, _
-    ) where pending.gatewayInstallationHandle == nil && replacesRejectedJournal(pending, actual) {
+    } catch let error as BuzzDevPushEnrollmentError {
       // Only a terminal response permits replacing the old journal with a fresh
       // challenge and key. A fresh request's failure propagates instead of
       // recursively retrying forever.
-      return .rejected
+      guard case .unexpectedStatus(route: "v1/installations", _, let actual, _) = error,
+        pending.gatewayInstallationHandle == nil,
+        let replacement = try replacement(of: pending, status: actual)
+      else { throw error }
+      return .rejected(replacement)
     }
   }
 
   /// 404 means the exact replay found no committed installation and its
-  /// challenge is gone. The gateway returns 400 and 401 before looking up a
-  /// committed installation, so the same bytes can never recover one, even
-  /// when an earlier attempt committed and its response was lost. Every
-  /// replacement generates and attests a new App Attest key, so only a first
-  /// 404 replaces at once. Otherwise the journal must be old enough, with the
-  /// wait doubling for each consecutive replacement. That bounds new keys when
-  /// a replacement itself fails, for example with 409 against a live
-  /// installation for the same token, whose next replay then returns 404.
-  private func replacesRejectedJournal(
-    _ pending: BuzzPushPendingEnrollmentRecord,
-    _ status: Int
-  ) -> Bool {
-    guard [400, 401, 404].contains(status) else { return false }
+  /// challenge is gone, which an ordinary lost request also causes, so a
+  /// journal with no recorded rejection is replaced at once. 401 means the
+  /// gateway rejected the attestation before looking up a committed
+  /// installation, so the same bytes can never recover one. Every replacement
+  /// generates and attests a new App Attest key, so a 401, or a 404 for a
+  /// journal with a recorded rejection (such as a 409 against a live
+  /// installation for the same token, whose consumed challenge then replays as
+  /// 404), replaces only once the journal is old enough, with the wait
+  /// doubling for each rejection. Each attempt is saved before any key is
+  /// generated, so a replacement that fails also waits. A 400 can be a
+  /// temporary policy rejection of a request that did commit, so it keeps the
+  /// journal.
+  private func replacement(
+    of pending: BuzzPushPendingEnrollmentRecord,
+    status: Int
+  ) throws -> Replacement? {
     let replacements = pending.rejectedReplacements ?? 0
-    guard status != 404 || replacements > 0, let preparedAt = pending.preparedAt else {
-      return true
-    }
+    let isRejection = status == 401 || (status == 404 && replacements > 0)
+    guard isRejection || status == 404 else { return nil }
     let nowSeconds = Int64(now().timeIntervalSince1970)
-    let wait = Self.rejectedEnrollmentReplacementSeconds << min(replacements, 20)
-    return nowSeconds - preparedAt >= wait
+    if isRejection, let preparedAt = pending.preparedAt {
+      let wait = Self.rejectedEnrollmentReplacementSeconds << min(replacements, 20)
+      guard nowSeconds - preparedAt >= wait else { return nil }
+    }
+    let attempt = pending.with(preparedAt: nowSeconds, rejectedReplacements: replacements + 1)
+    try store.savePendingEnrollment(attempt)
+    return Replacement(journal: attempt, rejectedReplacements: isRejection ? replacements + 1 : 0)
   }
 
   private func completeEnrollment(
@@ -668,12 +696,28 @@ public final class BuzzDevPushEnrollmentDriver {
           route: "pending development enrollment"
         )
       }
-      installation = try await enrollInstallation(
-        challenge: Challenge(id: challengeUUID, value: challengeValue),
-        endpoint: endpoint,
-        expiresAt: pending.expiresAt,
-        attestation: BuzzDevAttestation(keyId: keyId, attestation: attestation)
-      )
+      do {
+        installation = try await enrollInstallation(
+          challenge: Challenge(id: challengeUUID, value: challengeValue),
+          endpoint: endpoint,
+          expiresAt: pending.expiresAt,
+          attestation: BuzzDevAttestation(keyId: keyId, attestation: attestation)
+        )
+      } catch let error as BuzzDevPushEnrollmentError {
+        // A request answered 409 or 404 consumed or outlived its challenge, so
+        // its replay returns 404. Record the rejection so that 404 waits instead
+        // of replacing at once. A replay's own 404 is decided on the journal as
+        // loaded, so this mark does not throttle an ordinary lost request.
+        if case .unexpectedStatus(route: "v1/installations", _, let actual, _) = error,
+          actual == 404 || actual == 409,
+          (pending.rejectedReplacements ?? 0) == 0
+        {
+          try store.savePendingEnrollment(
+            pending.with(preparedAt: pending.preparedAt, rejectedReplacements: 1)
+          )
+        }
+        throw error
+      }
       pending = BuzzPushPendingEnrollmentRecord(
         gatewayOrigin: gatewayOrigin,
         relayOrigin: pending.relayOrigin,
@@ -1114,4 +1158,27 @@ private struct RelayInformation: Decodable {
 private struct RelayKeys {
   let pushPubkey: String
   let metadataPubkey: String?
+}
+
+extension BuzzPushPendingEnrollmentRecord {
+  /// This journal with only its replacement bookkeeping changed.
+  fileprivate func with(preparedAt: Int64?, rejectedReplacements: Int) -> Self {
+    Self(
+      gatewayOrigin: gatewayOrigin,
+      relayOrigin: relayOrigin,
+      relayPubkey: relayPubkey,
+      endpoint: endpoint,
+      endpointHash: endpointHash,
+      expiresAt: expiresAt,
+      installationId: installationId,
+      gatewayInstallationHandle: gatewayInstallationHandle,
+      challengeId: challengeId,
+      challenge: challenge,
+      keyId: keyId,
+      attestation: attestation,
+      delegationGeneration: delegationGeneration,
+      preparedAt: preparedAt,
+      rejectedReplacements: rejectedReplacements
+    )
+  }
 }
