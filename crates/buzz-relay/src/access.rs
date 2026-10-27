@@ -1331,7 +1331,7 @@ pub(crate) mod tests {
         tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
                 .json()
-                .flatten_event(true)
+                .event_format(crate::telemetry::TraceContextLookup::default().json_formatter(false))
                 .with_writer(move || writer.clone()),
         )
     }
@@ -1346,7 +1346,7 @@ pub(crate) mod tests {
         (r, out)
     }
 
-    /// Run `f` with JSON logs (flattened, as in production) captured.
+    /// Run `f` with JSON logs captured, using production's JSON formatter.
     pub(crate) fn capture<R>(f: impl FnOnce() -> R) -> (R, Captured) {
         let _lock = crate::test_support::tracing_dispatch_lock();
         let out = Captured::default();

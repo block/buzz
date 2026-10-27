@@ -2719,7 +2719,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Each parsed REQ and COUNT frame advances its read counter by exactly
+    /// Each parsed REQ, sync and COUNT frame advances its read counter by exactly
     /// one, even when refused; other frames count nothing.
     #[tokio::test(flavor = "current_thread")]
     async fn dispatcher_counts_each_req_and_count_frame_once() {
@@ -2736,13 +2736,14 @@ pub(crate) mod tests {
         for raw in [
             serde_json::json!(["REQ", "r", {"kinds": [1]}]),
             serde_json::json!(["COUNT", "c", {"kinds": [1]}]),
+            serde_json::json!(["REQ", "y", {"artifact": "current", "#h": [uuid::Uuid::new_v4().to_string()]}]),
             serde_json::json!(["CLOSE", "r"]),
         ] {
             handle_text_message(raw.to_string(), Arc::clone(&conn), Arc::clone(&state)).await;
         }
 
         let scrape = handle.render();
-        for kind in ["req", "count"] {
+        for kind in ["req", "count", "sync"] {
             assert!(
                 scrape.contains(&format!("buzz_ws_reads_total{{type=\"{kind}\"}} 1\n")),
                 "{scrape}"
