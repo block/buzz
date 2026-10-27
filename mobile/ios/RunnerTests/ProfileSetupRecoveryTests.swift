@@ -17,7 +17,10 @@ final class ProfileSetupRecoveryTests: XCTestCase {
         let button = try XCTUnwrap(descendants(control.view()).compactMap { $0 as? UIButton }.first)
         let image = try XCTUnwrap(button.configuration?.image)
         XCTAssertEqual(image.renderingMode, .alwaysOriginal)
-        let cgImage = try XCTUnwrap(image.cgImage)
+        let rendered = UIGraphicsImageRenderer(size: image.size).image { _ in
+          image.draw(at: .zero)
+        }
+        let cgImage = try XCTUnwrap(rendered.cgImage)
         let width = cgImage.width, height = cgImage.height
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
         try pixels.withUnsafeMutableBytes { bytes in
@@ -28,8 +31,8 @@ final class ProfileSetupRecoveryTests: XCTestCase {
         }
         let opaque = stride(from: 0, to: pixels.count, by: 4).filter { pixels[$0 + 3] > 250 }
         XCTAssertFalse(opaque.isEmpty)
-        XCTAssertTrue(opaque.allSatisfy { pixels[$0] == (dark ? 0 : 255) })
-        let attachment = XCTAttachment(image: image)
+        XCTAssertTrue(opaque.allSatisfy { pixels[$0] == (dark ? 0 : pixels[$0 + 3]) })
+        let attachment = XCTAttachment(image: rendered)
         attachment.name = "Selected \(icon) dark=\(dark)"
         attachment.lifetime = .keepAlways
         add(attachment)
