@@ -51,7 +51,10 @@ overrides:
   "markdown-it@14.1.1": 14.3.3 # GHSA-253c-mchw-3w2r, GHSA-6v5v-wf23-fmfq, GHSA-gfr2-rv44-r23c, GHSA-r7fv-28h4-cvq7, GHSA-vfgh-jcmw-g37q
   "nanoid@3.3.16": 3.3.18 # GHSA-2v37-7h3g-55p8
   "nanoid@3.3.17": 3.3.18 # GHSA-2v37-7h3g-55p8
-  "postcss@8.5.19": 8.5.23 # GHSA-fxqj-rqcc-2cmp
+  # Package-wide pin: converges the tree on one postcss (the tailwind path
+  # previously floated 8.5.26, also fixed). PostCSS plugins break across two
+  # copies; 8.5.23 is the fixed version of GHSA-fxqj-rqcc-2cmp.
+  "postcss": 8.5.23 # GHSA-fxqj-rqcc-2cmp
   # OSV fixes GHSA-rj75-hqrm-r3gf in 6.1.5 (6.x line) and 7.1.6+ (7.x line).
   # The only consumer, @tailwindcss/typography 0.5.20 (latest), pins 6.0.10
   # exactly, so we take the same-major fix instead of forcing a major on it.
@@ -64,6 +67,10 @@ overrides:
   # of the tiptap tree floated to 1.12.0 — two copies broke desktop tsc
   # (duplicate private classes). One copy at 1.12.4 satisfies every range.
   "prosemirror-transform": 1.12.4
+  # Same duplicate-instance class: @tiptap/pm 3.32.0 floats prosemirror-model
+  # 1.25.12 while tiptap-markdown/prosemirror-markdown kept 1.25.4 — one copy
+  # (markdown output must be assignable to editor state).
+  "prosemirror-model": 1.25.12
   "seroval@1.5.4": 1.6.3 # GHSA-jp82-f5mq-hwhp, GHSA-p6vx-979v-rg4c
   "source-map-js@1.2.1": 1.2.2 # GHSA-68fv-2mgg-jv7q
   "vite@8.0.16": 8.1.6 # GHSA-587h-7wmj-h5pm, GHSA-698v-4r3x-3vcv, GHSA-9jrq-w75r-8gcw, GHSA-r825-w8mm-5pxw, GHSA-rq7h-c2jc-7f22

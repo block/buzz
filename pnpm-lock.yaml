@@ -41,10 +41,11 @@ overrides:
   markdown-it@14.1.1: 14.3.3
   nanoid@3.3.16: 3.3.18
   nanoid@3.3.17: 3.3.18
-  postcss@8.5.19: 8.5.23
+  postcss: 8.5.23
   postcss-selector-parser@6.0.10: 6.1.5
   prosemirror-view: 1.42.3
   prosemirror-transform: 1.12.4
+  prosemirror-model: 1.25.12
   seroval@1.5.4: 1.6.3
   source-map-js@1.2.1: 1.2.2
   vite@8.0.16: 8.1.6
@@ -3227,9 +3228,6 @@ packages:
 
   prosemirror-model@1.25.12:
     resolution: {integrity: sha512-Ue2gTmXMa7EhpLNhC7J+h4+ykD8ha12K6rrZFFKKJHBForfIStw5gJ6Zrf1mqqAa9NmpmEB4wp9bKmA4eUVjWg==}
-
-  prosemirror-model@1.25.4:
-    resolution: {integrity: sha512-PIM7E43PBxKce8OQeezAs9j4TP+5yDpZVbuurd1h5phUxEKIu+G2a+EUZzIC5nS1mJktDJWzbqS23n1tsAf5QA==}
 
   prosemirror-schema-list@1.5.1:
     resolution: {integrity: sha512-927lFx/uwyQaGwJxLWCZRkjXG0p48KpMj6ueoYiu4JX05GGuGcgzAy62dfiV8eFZftgyBUvLx76RsMe20fJl+Q==}
@@ -6655,13 +6653,9 @@ snapshots:
     dependencies:
       '@types/markdown-it': 14.1.2
       markdown-it: 14.3.3
-      prosemirror-model: 1.25.4
+      prosemirror-model: 1.25.12
 
   prosemirror-model@1.25.12:
-    dependencies:
-      orderedmap: 2.1.1
-
-  prosemirror-model@1.25.4:
     dependencies:
       orderedmap: 2.1.1
 
