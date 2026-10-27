@@ -410,7 +410,8 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
       let driver = try makeDriver(
         store: store,
         appAttest: appAttest,
-        now: { Date(timeIntervalSince1970: TimeInterval(clock)) }
+        now: { Date(timeIntervalSince1970: TimeInterval(clock)) },
+        lifetimeSeconds: 30 * 86_400
       )
       var challengeCount = 0
       var replayRequests = 0
@@ -488,6 +489,21 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
       }
       XCTAssertEqual(freshRequests, freshStatus == nil ? 0 : freshStatus == 201 ? 1 : 2, label)
       XCTAssertEqual(appAttest.preparedAttestations.count, freshStatus == nil ? 1 : 2, label)
+
+      guard freshStatus == 401 else { continue }
+      // Each consecutive replacement doubles the wait before the next one.
+      XCTAssertEqual(store.pending.first?.rejectedReplacements, 1)
+      for (advance, keys) in [(interval, 2), (interval, 3)] {
+        clock += advance
+        do {
+          _ = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+          XCTFail("Expected the persistent rejection")
+        } catch BuzzDevPushEnrollmentError.unexpectedStatus(
+          route: "v1/installations", _, actual: 401, _
+        ) {}
+        XCTAssertEqual(appAttest.preparedAttestations.count, keys)
+      }
+      XCTAssertEqual(store.pending.first?.rejectedReplacements, 2)
     }
   }
 
@@ -1219,7 +1235,9 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     },
     now: @escaping () -> Date = {
       Date(timeIntervalSince1970: TimeInterval(BuzzDevPushEnrollmentDriverTests.now))
-    }
+    },
+    lifetimeSeconds: Int64 = BuzzDevPushEnrollmentDriverTests.expiresAt
+      - BuzzDevPushEnrollmentDriverTests.now
   ) throws -> BuzzDevPushEnrollmentDriver {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [URLProtocolStub.self]
@@ -1229,7 +1247,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
       session: URLSession(configuration: configuration),
       appAttest: appAttest,
       now: now,
-      lifetimeSeconds: Self.expiresAt - Self.now,
+      lifetimeSeconds: lifetimeSeconds,
       installationIdBytes: installationIdBytes
     )
   }

@@ -31,6 +31,8 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
   /// Unix time the journaled installation request was prepared; nil when there
   /// is none or the journal predates this field.
   public let preparedAt: Int64?
+  /// Consecutive gateway-rejected journals this one replaced; nil means none.
+  public let rejectedReplacements: Int?
 
   /// Creates a gateway-scoped durable record from authenticated enrollment state.
   public init(
@@ -47,7 +49,8 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     keyId: String? = nil,
     attestation: String? = nil,
     delegationGeneration: Int64 = 0,
-    preparedAt: Int64? = nil
+    preparedAt: Int64? = nil,
+    rejectedReplacements: Int? = nil
   ) {
     self.gatewayOrigin = gatewayOrigin
     self.relayOrigin = relayOrigin
@@ -63,6 +66,7 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     self.attestation = attestation
     self.delegationGeneration = delegationGeneration
     self.preparedAt = preparedAt
+    self.rejectedReplacements = rejectedReplacements
   }
 
 }
