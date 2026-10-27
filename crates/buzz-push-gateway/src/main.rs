@@ -17,11 +17,18 @@ use std::{
     },
 };
 use tracing_subscriber::EnvFilter;
+
+/// Without `RUST_LOG`, keep the gateway's own warnings, such as App Attest
+/// rejection reasons, instead of `EnvFilter`'s error-only default.
+fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
+    EnvFilter::new(rust_log.unwrap_or("buzz_push_gateway=warn"))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(log_env_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .init();
     if std::env::args().nth(1).as_deref() == Some("--migrate-only") {
         let database_url = std::env::var("DATABASE_URL")?;
@@ -145,5 +152,23 @@ async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(not(unix))]
     {
         tokio::signal::ctrl_c().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_env_filter;
+    use tracing_subscriber::filter::LevelFilter;
+
+    #[test]
+    fn default_log_filter_keeps_gateway_warnings() {
+        assert_eq!(
+            log_env_filter(None).max_level_hint(),
+            Some(LevelFilter::WARN)
+        );
+        assert_eq!(
+            log_env_filter(Some("info")).max_level_hint(),
+            Some(LevelFilter::INFO)
+        );
     }
 }
