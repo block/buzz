@@ -191,6 +191,15 @@ void main() {
         await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
           'buzz/profile_avatar_sheet',
           const StandardMethodCodec().encodeMethodCall(
+            const MethodCall('reveal'),
+          ),
+          (_) {},
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          'buzz/profile_avatar_sheet',
+          const StandardMethodCodec().encodeMethodCall(
             const MethodCall('done'),
           ),
           (_) {},
