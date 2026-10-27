@@ -466,7 +466,12 @@ import os.log
         )
         return
       }
-      UIApplication.shared.setStatusBarHidden(hidden, with: .fade)
+      let controller = UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .flatMap(\.windows)
+        .compactMap { $0.rootViewController as? BuzzFlutterViewController }
+        .first
+      controller?.setScannerStatusBarHidden(hidden)
       result(nil)
     case "performDynamicIslandQrScanSuccessHaptic":
       let generator = UINotificationFeedbackGenerator()
