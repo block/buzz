@@ -1,6 +1,6 @@
-//! User target validation and synthetic inventory generation.
+//! Validation of saved inventories, independent of the intake identity format.
+use super::MAX_COMMUNITIES;
 use crate::entity_deletion::EntityRequest;
-use crate::store::entity_deletion::requests::validate_operator;
 use crate::{DbError, Result};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -9,51 +9,6 @@ use uuid::Uuid;
 fn invalid(message: &str) -> DbError {
     DbError::DeletionSafety(message.into())
 }
-pub(super) fn validate_submission(
-    target: &str,
-    requested_by: &str,
-    reason: Option<&str>,
-) -> Result<()> {
-    let slug = target.strip_prefix("demo:").unwrap_or_default();
-    if slug.is_empty()
-        || slug.len() > 64
-        || !slug.as_bytes()[0].is_ascii_alphanumeric()
-        || !slug
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-    {
-        return Err(DbError::DeletionSafety(
-            "target must be demo:<1..64 lowercase letters, digits, underscores or hyphens>".into(),
-        ));
-    }
-    validate_operator(requested_by)?;
-    if reason.is_some_and(|r| r.len() > 4096) {
-        return Err(DbError::DeletionSafety("reason exceeds 4096 bytes".into()));
-    }
-    Ok(())
-}
-
-pub(super) fn demo_inventory(target: &str) -> serde_json::Value {
-    serde_json::json!({
-        "version": 1,
-        "target": target,
-        "communities": [
-            {
-                "community_id": "00000000-0000-0000-0000-00000000000b",
-                "label": "demo:community-b",
-                "relationship": "participant",
-                "action": "delete_subject_data"
-            },
-            {
-                "community_id": "00000000-0000-0000-0000-00000000000c",
-                "label": "demo:community-c",
-                "relationship": "former_participant",
-                "action": "delete_subject_data"
-            }
-        ]
-    })
-}
-
 /// Validated user-deletion inventory, shared by preparation and workflow policy.
 pub struct UserDeletionInventory {
     /// Communities in approved processing order, with their saved attributes.
@@ -66,33 +21,36 @@ impl UserDeletionInventory {
         if request.entity_type != "user" {
             return Err(invalid("user workflow requires entity_type user"));
         }
-        validate_submission(
-            &request.target,
-            &request.requested_by,
-            request.reason.as_deref(),
-        )?;
         let value = request
             .inventory_manifest
             .as_ref()
             .ok_or_else(|| invalid("missing inventory"))?;
-        if value["version"] != 1 || value["target"] != request.target {
+        // Preserve old manifests and their exact saved handler inputs on resume.
+        let legacy = value.get("version").is_some() || value.get("target").is_some();
+        if legacy && (value["version"] != 1 || value["target"] != request.target) {
             return Err(invalid("unsupported inventory version or target"));
         }
         let rows = value["communities"]
             .as_array()
             .ok_or_else(|| invalid("missing communities"))?;
-        if rows.len() > 1000 {
-            return Err(invalid("inventory exceeds 1000 communities"));
+        if rows.len() > MAX_COMMUNITIES {
+            return Err(invalid(&format!(
+                "inventory exceeds {MAX_COMMUNITIES} communities"
+            )));
         }
         let mut seen = HashSet::new();
         let mut communities = Vec::new();
         for row in rows {
+            if row["relationship"] == "owner" {
+                return Err(invalid("owned-community execution is not supported yet"));
+            }
             let id = row["community_id"]
                 .as_str()
                 .and_then(|s| Uuid::parse_str(s).ok())
                 .ok_or_else(|| invalid("invalid inventory community id"))?;
             if !seen.insert(id)
-                || row["action"] != "delete_subject_data"
+                || (legacy && row["action"] != "delete_subject_data")
+                || (!legacy && row.get("action").is_some())
                 || !matches!(
                     row["relationship"].as_str(),
                     Some("participant" | "former_participant")

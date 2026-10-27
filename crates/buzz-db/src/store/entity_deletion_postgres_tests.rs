@@ -125,7 +125,7 @@ async fn desired_schema_has_plain_intake_without_database_guards() {
         .expect("community catalog");
     assert!(sqlx::query(
         "INSERT INTO entity_deletion_requests (target, requested_by)
-         VALUES ('real-user', 'operator-a')",
+         VALUES ('', 'operator-a')",
     )
     .execute(&store.pool)
     .await

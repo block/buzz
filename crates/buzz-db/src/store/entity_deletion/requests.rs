@@ -8,14 +8,14 @@ pub(crate) const REQUEST_COLUMNS: &str =
     "id, entity_type, target, status, requested_by, reason, created_at,
      updated_at, inventory_manifest, inventory_digest";
 
-/// A demonstration request; approval authorizes only the synthetic workflow.
+/// A persisted request whose identity and workflow are selected by intake.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct EntityRequest {
     /// Stable request identifier.
     pub id: Uuid,
-    /// Currently always `user`.
+    /// Workflow discriminator supplied by intake.
     pub entity_type: String,
-    /// Synthetic `demo:` label, not a resolved account identity.
+    /// Opaque identity identifier supplied by intake.
     pub target: String,
     /// Intake, approval, execution (`running`/`retry_wait`), or `completed`.
     pub status: String,
@@ -27,7 +27,7 @@ pub struct EntityRequest {
     pub created_at: DateTime<Utc>,
     /// Time of the last change; identical resubmissions do not change it.
     pub updated_at: DateTime<Utc>,
-    /// Saved synthetic communities in processing order; absent on legacy intake.
+    /// Saved communities in processing order; absent on legacy intake.
     pub inventory_manifest: Option<serde_json::Value>,
     /// SHA-256 of the saved inventory.
     pub inventory_digest: Option<String>,

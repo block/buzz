@@ -41,6 +41,7 @@ class ChannelActions {
     List<String> labels = const [],
     String? description,
     int? ttlSeconds,
+    bool waitForChannelList = true,
   }) async {
     final resolvedChannelId = channelId ?? _newUuidV4();
     final tags = buildCreateChannelTags(
@@ -55,7 +56,56 @@ class ChannelActions {
     _ensureCommunityValid();
     await _signedEventRelay.submit(kind: 9007, content: '', tags: tags);
     _ensureCommunityValid();
+    if (!waitForChannelList) {
+      // Solo can open from its own confirmed metadata and roster. Reconcile
+      // the sidebar independently of unrelated channels' message history.
+      _ref.invalidate(channelsProvider);
+      return await findJoinedChannel(resolvedChannelId) ??
+          (throw StateError('Channel was created but is not visible yet'));
+    }
     return _refreshChannelsAndRead(resolvedChannelId);
+  }
+
+  /// Read one channel for creation recovery without reloading every membership
+  /// and every channel's recent messages. Missing membership fails closed.
+  Future<Channel?> findJoinedChannel(String channelId) async {
+    _ensureCommunityValid();
+    final events = await _session.fetchHistory(
+      NostrFilter(
+        kinds: const [39000, 39002],
+        tags: {
+          '#d': [channelId],
+        },
+        limit: 2,
+      ),
+    );
+    _ensureCommunityValid();
+    final metadata = events
+        .where((e) => e.kind == 39000 && e.getTagValue('d') == channelId)
+        .firstOrNull;
+    final roster = events
+        .where((e) => e.kind == 39002 && e.getTagValue('d') == channelId)
+        .firstOrNull;
+    if (metadata == null || roster == null) return null;
+    final members = membersFromEvent(roster);
+    if (!members.any((m) => m.pubkey == _currentPubkey)) return null;
+    final details = channelDetailsFromEvent(metadata);
+    return Channel(
+      id: channelId,
+      name: details.name,
+      channelType: details.channelType,
+      labels: details.labels,
+      visibility: details.visibility,
+      description: details.description,
+      topic: details.topic,
+      createdBy: details.createdBy,
+      createdAt: details.createdAt,
+      memberCount: members.length,
+      isMember: true,
+      archivedAt: details.archivedAt,
+      ttlSeconds: details.ttlSeconds,
+      ttlDeadline: details.ttlDeadline,
+    );
   }
 
   /// Open (or create) a DM channel with the given pubkeys.

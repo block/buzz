@@ -158,6 +158,7 @@ pub async fn workflow_runs(
         .into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn workflow_runs_inner(
     state: Arc<AppState>,
     workflow_id: Uuid,
@@ -235,6 +236,7 @@ pub async fn run_approvals(
         .into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn run_approvals_inner(
     state: Arc<AppState>,
     workflow_id: Uuid,

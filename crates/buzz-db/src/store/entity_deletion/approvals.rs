@@ -11,7 +11,7 @@ pub struct EntityApproval {
     pub request_id: Uuid,
     /// SHA-256 of the inventory this operator approved.
     pub inventory_digest: String,
-    /// Self-asserted demo identity, not authenticated real-deletion authorization.
+    /// Operator identifier supplied by the caller; this store does not authenticate it.
     pub approved_by: String,
     /// Time this approval was first recorded.
     pub approved_at: DateTime<Utc>,
@@ -21,8 +21,9 @@ impl EntityDeletionStore {
     /// Record approval of the saved inventory without creating or executing stages.
     ///
     /// An identical retry is read-only. Another operator adds retained evidence
-    /// without restarting the workflow. The operator identity is self-asserted and
-    /// this demo-only boundary does not authorize real user deletion.
+    /// without restarting the workflow. This store does not authenticate the
+    /// operator: today's dummy CLI accepts self-asserted operator names. Callers
+    /// enabling real deletion must authenticate and authorize the operator.
     pub async fn approve(
         &self,
         id: Uuid,

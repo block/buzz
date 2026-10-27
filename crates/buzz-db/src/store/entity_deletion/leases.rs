@@ -1,4 +1,4 @@
-//! Parent-request ownership and stage attempts for the synthetic workflow.
+//! Parent-request ownership and stage attempts for deletion workflows.
 
 use std::time::Duration;
 
@@ -35,7 +35,7 @@ pub struct EntityExecution {
     pub next_attempt_at: Option<DateTime<Utc>>,
     /// Last recorded stage failure.
     pub last_error: Option<String>,
-    /// Time all synthetic stages completed.
+    /// Time the workflow completed.
     pub completed_at: Option<DateTime<Utc>>,
 }
 

@@ -7,7 +7,6 @@ class _OnboardingConnectionView extends HookWidget {
     required this.onCommunityLink,
     required this.onBack,
     required this.onOpenCommunity,
-    required this.onScan,
     required this.onPairing,
   });
 
@@ -15,7 +14,6 @@ class _OnboardingConnectionView extends HookWidget {
   final VoidCallback? onCommunityLink;
   final VoidCallback? onBack;
   final ValueChanged<Uri> onOpenCommunity;
-  final VoidCallback? onScan;
   final VoidCallback? onPairing;
 
   double _textProgress(double progress, bool opening) =>
@@ -145,7 +143,7 @@ class _OnboardingConnectionView extends HookWidget {
                                   child: const _ConnectionHeading(
                                     title: 'Connect to a community',
                                     subtitle:
-                                        'Scan a QR code or enter a community link to continue.',
+                                        'Enter a community link or use a pairing code to continue.',
                                   ),
                                 ),
                                 _ConnectionMotionLayer(
@@ -173,12 +171,11 @@ class _OnboardingConnectionView extends HookWidget {
                             active: !enteringLink,
                             maintainSize: true,
                             child: _OnboardingChoiceContainer(
-                              title: 'Scan a QR code',
+                              title: 'Use a pairing code',
                               icon: BuzzIcons.qrcode,
                               subtitle:
-                                  'Scan a community or desktop pairing code.',
-                              onTap: onScan,
-                              onIconDoubleTap: onPairing,
+                                  'Paste the pairing code from your desktop app.',
+                              onTap: onPairing,
                             ),
                           ),
                         ),
@@ -408,7 +405,6 @@ class _OnboardingChoiceContainer extends StatelessWidget {
     required this.subtitle,
     required this.icon,
     this.onTap,
-    this.onIconDoubleTap,
     this.transparent = false,
   });
 
@@ -417,7 +413,6 @@ class _OnboardingChoiceContainer extends StatelessWidget {
   final IconData icon;
   final bool transparent;
   final VoidCallback? onTap;
-  final VoidCallback? onIconDoubleTap;
 
   @override
   Widget build(BuildContext context) => Semantics(
@@ -445,20 +440,13 @@ class _OnboardingChoiceContainer extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     ExcludeSemantics(
-                      child: GestureDetector(
-                        key: onIconDoubleTap == null
-                            ? null
-                            : const Key('developer-pairing-trigger'),
-                        excludeFromSemantics: true,
-                        onDoubleTap: onIconDoubleTap,
-                        child: SizedBox(
-                          width: Grid.sm,
-                          height: Grid.sm,
-                          child: Icon(
-                            icon,
-                            size: Grid.sm,
-                            color: context.colors.onSurface,
-                          ),
+                      child: SizedBox(
+                        width: Grid.sm,
+                        height: Grid.sm,
+                        child: Icon(
+                          icon,
+                          size: Grid.sm,
+                          color: context.colors.onSurface,
                         ),
                       ),
                     ),

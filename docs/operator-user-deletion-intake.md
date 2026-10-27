@@ -1,11 +1,20 @@
 # Prepare and approve a synthetic user-deletion request
 
-Submit saves a request and a fixed dummy inventory: community B (participant),
-then community C (former participant). These are artificial UUIDs, not discovered
-communities. Approve saves authorization without creating stages. The
-`run` command initializes execution through `get_next_stage`, dispatches dummy
-handlers, and asks the transition function for the next saved row. No user or
-community data is deleted. Only `demo:` labels are accepted.
+For read-only discovery of actual memberships from a hex key or npub, see
+[Preview a user's current-community inventory](operator-user-deletion-inventory.md).
+
+Submit saves a request and its inventory together. By default (`--pubkey demo`),
+this is community B (participant), then community C (former participant).
+Use `--pubkey <hex-or-npub>` to discover current communities instead. The request
+stores the normalized hex key as its target; the inventory contains only
+community IDs, labels and relationships. `--target demo:<label>` still works for
+separate demo runs and cannot be combined with `--pubkey`.
+
+Approve saves authorization without creating stages. The `run` command initializes
+execution through `get_next_stage`, dispatches dummy handlers, and asks the
+transition function for the next saved row. No user or community data is deleted.
+See [the inventory walkthrough](operator-user-deletion-inventory.md) for both
+complete paths.
 
 ## Prepare a local database
 
@@ -48,7 +57,7 @@ The command prints the saved row as JSON. It contains:
 | `reason` | `null`, unless supplied with `--reason` |
 | `created_at` | Submission time |
 | `updated_at` | Same time; no execution has started |
-| `inventory_manifest` | Ordered dummy communities and their actions |
+| `inventory_manifest` | Ordered communities and relationships |
 | `inventory_digest` | SHA-256 identifying the saved inventory |
 
 List recent requests, then inspect the UUID returned above:
@@ -161,7 +170,7 @@ table, and execution fields were added to requests. If you tested an earlier
 draft, use a fresh disposable local database;
 do not edit its sqlx checksums or erase its saved demo requests.
 
-This executor revision does not change SQL schema. Earlier draft requests whose
+PR #8520 did not change SQL schema. Earlier draft requests whose
 stage metadata predates saved inputs/results/predecessor IDs are not a supported
 resume format. Keep their records intact and submit a new `demo:` label to test
 this version. Approval no longer creates a gate row; it is initialized by the

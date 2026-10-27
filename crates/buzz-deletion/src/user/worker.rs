@@ -25,6 +25,14 @@ pub(super) async fn run(
     options: &RunOptions,
     shutdown: &CancellationToken,
 ) -> Result<i32> {
+    // The command selects this workflow; shared storage accepts other entity types.
+    let request = store.get(id).await?;
+    if request.entity_type != "user" {
+        bail!(
+            "user-deletions run does not support entity type {}",
+            request.entity_type
+        );
+    }
     let Some(lease) = store.claim(id, owner, DEFAULT_LEASE_DURATION).await? else {
         if store.get(id).await?.status == "completed" {
             return Ok(0);

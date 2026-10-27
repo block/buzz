@@ -223,6 +223,7 @@ pub async fn search(
     search_inner(state, headers, body).await.into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn search_inner(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -299,6 +300,7 @@ pub async fn share(
     share_inner(state, headers, body).await.into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn share_inner(
     state: Arc<AppState>,
     headers: HeaderMap,

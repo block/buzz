@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
@@ -6,9 +7,14 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/widgets/app_list.dart';
+import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
@@ -20,48 +26,27 @@ import 'package:pointycastle/digests/sha256.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _EmptyChannels extends ChannelsNotifier {
-  _EmptyChannels(this.existing);
-  final bool existing;
-  int freshReads = 0;
   @override
   Future<List<Channel>> build() async => [];
-  @override
-  Future<List<Channel>> fetchFresh({bool fetchDirectory = false}) async {
-    freshReads++;
-    return [
-      if (existing)
-        Channel(
-          id: '10000000-0000-4000-8000-000000000001',
-          name: 'Mobile Solo',
-          channelType: 'stream',
-          visibility: 'private',
-          description: '',
-          createdBy: 'me',
-          createdAt: DateTime.utc(2026),
-          memberCount: 1,
-          isMember: true,
-        ),
-    ];
-  }
 }
 
 class _Relay extends RelaySessionNotifier {
   final NostrEvent profile;
   final submitted = <NostrEvent>[];
-  _Relay(this.profile);
+  _Relay(this.profile, this.existing);
+  final List<NostrEvent> existing;
 
   @override
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
-  }) async =>
-      filters.any((filter) => filter.kinds.contains(0)) ? [profile] : [];
+  }) async => [profile];
 
   @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [];
+  }) async => filter.kinds.contains(39000) ? existing : [];
 
   @override
   Future<NostrEvent> publish(
@@ -82,6 +67,7 @@ void main() {
           ? 'interrupted Solo recovery uses fresh membership before creating'
           : 'New Solo chat submits its discovery label through the production action',
       (tester) async {
+        final flutterSheet = defaultTargetPlatform == TargetPlatform.android;
         SharedPreferences.setMockInitialValues({});
         final prefs = await SharedPreferences.getInstance();
         final owner = nostr.Keys.generate(), agent = nostr.Keys.generate();
@@ -108,29 +94,89 @@ void main() {
             ],
           ).toMap(),
         );
-        final relay = _Relay(profile);
+        const channelId = '10000000-0000-4000-8000-000000000001';
+        final relay = _Relay(profile, [
+          if (recoverExisting)
+            for (final kind in [39000, 39002])
+              NostrEvent.fromJson(
+                nostr.Event.from(
+                  kind: kind,
+                  content: '',
+                  secretKey: owner.secret,
+                  tags: [
+                    ['d', channelId],
+                    if (kind == 39000) ['name', 'Mobile Solo'],
+                    if (kind == 39002) ['p', owner.public],
+                  ],
+                ).toMap(),
+              ),
+        ]);
         final config = RelayConfig(
           baseUrl: 'https://relay.test',
           nsec: owner.nsec,
         );
         final sync = MeSync(relay, config, prefs: prefs);
-        final channels = _EmptyChannels(recoverExisting);
         if (recoverExisting) {
           await MeChatCreation(
-            '10000000-0000-4000-8000-000000000001',
+            channelId,
             'Mobile Solo',
             agent.public,
           ).save(sync);
         }
         const bridge = MethodChannel('buzz/profile_text_editor');
+        // Let native chrome mount while the real verification isolate runs.
+        const platformViews = MethodChannel('flutter/platform_views');
+        final nativeViews = <MethodChannel>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          platformViews,
+          (call) async {
+            if (call.method == 'create') {
+              final args = call.arguments as Map<Object?, Object?>;
+              final channel = MethodChannel(
+                '${args['viewType']}/${args['id']}',
+              );
+              nativeViews.add(channel);
+              tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+                channel,
+                (_) async => null,
+              );
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            platformViews,
+            null,
+          ),
+        );
+        addTearDown(() {
+          for (final channel in nativeViews) {
+            tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+              channel,
+              null,
+            );
+          }
+        });
+        final directory = Completer<List<AgentDirectoryEntry>>();
+        if (flutterSheet) directory.complete([]);
+        final draft = Completer<Map<String, String>>();
+        String? presentationId;
+        Map<Object?, Object?>? agentUpdate;
+        Object? savedAssistant;
         var forms = 0;
-        final formErrors = <Object?>[];
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
           call,
         ) async {
-          formErrors.add((call.arguments as Map)['error']);
+          if (call.method == 'updateChatAssistants') {
+            agentUpdate = call.arguments as Map<Object?, Object?>;
+            return null;
+          }
           if (++forms > 1) return null;
-          return {'name': 'Mobile Solo', 'assistant': agent.public};
+          final arguments = call.arguments as Map;
+          presentationId = arguments['presentationId'] as String;
+          savedAssistant = arguments['savedAssistant'];
+          return draft.future;
         });
         addTearDown(
           () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -142,14 +188,13 @@ void main() {
           ProviderScope(
             overrides: [
               meSyncProvider.overrideWithValue(sync),
+              relaySessionProvider.overrideWith(() => relay),
               meGroupsProvider.overrideWith(
                 (ref) => Stream.value(const MeGroups()),
               ),
-              meAssistantsProvider.overrideWith((ref) async => []),
-              channelsProvider.overrideWith(() => channels),
-              channelMembersProvider(
-                '10000000-0000-4000-8000-000000000001',
-              ).overrideWith((ref) async => []),
+              meAssistantsProvider.overrideWith((ref) => directory.future),
+              channelsProvider.overrideWith(_EmptyChannels.new),
+              channelMembersProvider(channelId).overrideWith((ref) async => []),
               channelActionsProvider.overrideWith(
                 (ref) => ChannelActions(
                   ref: ref,
@@ -166,30 +211,120 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        tester
+        final start = tester
             .widget<FrostedAppBar>(find.byType(FrostedAppBar))
             .nativeActions!
             .firstWhere((action) => action.label == 'New chat')
-            .onPressed!();
+            .onPressed!;
+        // Ownership verification runs in a real isolate; pumpAndSettle alone
+        // only drains the widget test's fake clock, not that computation.
+        start();
         await tester.pumpAndSettle();
         if (recoverExisting) {
           await tester.tap(find.text('Resume'));
           await tester.pumpAndSettle();
-          // Continue to member setup using the existing channel. A stale lookup
-          // would instead submit a second kind:9007 creation command.
-          expect(channels.freshReads, 1, reason: formErrors.toString());
-          expect(relay.submitted.where((e) => e.kind == 9007), isEmpty);
-          return;
         }
+        if (flutterSheet) {
+          final row = find.byKey(const ValueKey('new-session-assistant'));
+          if (!recoverExisting) {
+            expect(find.text('Choose an agent'), findsOneWidget);
+            await tester.enterText(
+              find.byKey(const ValueKey('new-session-name')),
+              'Mobile Solo',
+            );
+            await tester.tap(find.text('Create chat'));
+            await tester.pumpAndSettle();
+            expect(
+              find.text('Enter a name and choose an agent.'),
+              findsOneWidget,
+            );
+            expect(relay.submitted, isEmpty);
+            expect(MeChatCreation.pending(sync), isNull);
+            await tester.pumpWidget(const SizedBox.shrink());
+            await tester.pumpAndSettle();
+            return;
+          }
+          final semantics = tester.ensureSemantics();
+          await tester.pump();
+          expect(find.text('Choose an agent'), findsNothing);
+          expect(find.text(agent.public), findsOneWidget);
+          expect(find.bySemanticsLabel(agent.public), findsOneWidget);
+          expect(tester.widget<AppListRowRaw>(row).onTap, isNull);
+          final container = ProviderScope.containerOf(tester.element(row));
+          container
+              .read(userCacheProvider.notifier)
+              .put(
+                UserProfile(pubkey: agent.public, displayName: 'Saved agent'),
+              );
+          await tester.pumpAndSettle();
+          expect(find.text('Saved agent'), findsOneWidget);
+          expect(find.bySemanticsLabel('Saved agent'), findsOneWidget);
+          expect(tester.widget<AppListRowRaw>(row).onTap, isNull);
+          semantics.dispose();
+          await tester.tap(find.text('Retry'));
+        } else {
+          expect(
+            forms,
+            1,
+            reason: 'Compose opens even while agents are loading',
+          );
+          if (recoverExisting) {
+            expect(savedAssistant, {
+              'id': agent.public,
+              'name': agent.public,
+              'avatarUrl': '',
+            });
+          }
+          directory.complete([
+            AgentDirectoryEntry(
+              pubkey: agent.public,
+              displayName: 'Owned agent',
+            ),
+          ]);
+          await tester.pumpAndSettle();
+          expect(agentUpdate?['presentationId'], presentationId);
+          expect(
+            (agentUpdate?['assistants'] as List).single['id'],
+            agent.public,
+          );
+          draft.complete({'name': 'Mobile Solo', 'assistant': agent.public});
+        }
+        for (
+          var attempts = 0;
+          attempts < 100 && relay.submitted.isEmpty;
+          attempts++
+        ) {
+          await tester.pumpAndSettle();
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 50)),
+          );
+        }
+        await tester.pumpAndSettle();
         final command = relay.submitted.single;
-        expect(command.kind, 9007);
-        expect(command.pubkey, owner.public);
-        expect(command.tags, contains(equals(['t', 'buzz.solo'])));
-        expect(command.tags, contains(equals(['channel_type', 'stream'])));
-        expect(command.tags, contains(equals(['visibility', 'private'])));
-        expect(command.tags.where((tag) => tag.first == 'P'), isEmpty);
+        if (recoverExisting) {
+          expect(relay.submitted.where((event) => event.kind == 9007), isEmpty);
+          expect(
+            command.kind,
+            9000,
+            reason: 'Recovery continues with member setup',
+          );
+          expect(MeChatCreation.pending(sync)?.id, channelId);
+          expect(command.tags, contains(equals(['p', agent.public])));
+        } else {
+          expect(command.kind, 9007);
+          expect(command.pubkey, owner.public);
+          expect(command.tags, contains(equals(['t', 'buzz.solo'])));
+          expect(command.tags, contains(equals(['channel_type', 'stream'])));
+          expect(command.tags, contains(equals(['visibility', 'private'])));
+          expect(command.tags.where((tag) => tag.first == 'P'), isEmpty);
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
       },
-      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      variant: TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
     );
   }
 }
