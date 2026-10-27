@@ -332,6 +332,11 @@ pub(crate) mod tests {
         collect(body, false, false)
     }
 
+    /// [`shadow_records`] plus the would-deny lines `body` logged.
+    pub(crate) fn shadow_logged(body: impl Future<Output = ()>) -> (Vec<String>, Vec<String>) {
+        crate::nip_fi_shadow::tests::would_deny_lines(|| shadow_records(body))
+    }
+
     /// [`shadow_records`], each prefixed with its `route` label.
     pub(crate) fn shadow_records_by_route(body: impl Future<Output = ()>) -> Vec<String> {
         collect(body, true, false)
@@ -362,6 +367,7 @@ pub(crate) mod tests {
             };
             let record = match key.name() {
                 "buzz_nip_fi_shadow_total" => {
+                    crate::nip_fi_shadow::tests::assert_shadow_schema(key);
                     format!("{}/{}", label("stage").unwrap(), label("outcome").unwrap())
                 }
                 "buzz_nip_fi_shadow_session_end_total" => {

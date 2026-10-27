@@ -1604,6 +1604,25 @@ mod tests {
         assert_eq!(records, ["pairing/denied"]);
     }
 
+    // The pairing would-deny names the key AUTH proved, not the one the
+    // token asserts. Mutation: attributing the asserted key, or none, fails.
+    #[test]
+    fn shadow_root_pairing_denial_logs_the_proven_key() {
+        use crate::nip_fi_shadow_session::tests::{shadow_logged, shadow_state};
+        let signer = Keys::generate();
+        let asserted = Keys::generate().public_key();
+        let (records, lines) = shadow_logged(async {
+            let state = std::sync::Arc::new(shadow_state(None).await);
+            let (t, event) = shadow_root_conn(&state, asserted, &signer, HOUR);
+            handle_auth(event, std::sync::Arc::clone(&t.conn), state).await;
+        });
+        assert_eq!(records, ["pairing/denied"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("reason=\"key_mismatch\""), "{lines:?}");
+        let proven = format!("pubkey=\"{}\"", signer.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
+    }
+
     // A failed owner read records `owner` as unavailable, as enforce fails
     // closed, and changes nothing else. The state's database is unreachable.
     // Mutation: deleting root's `observe_owner` call loses the record.

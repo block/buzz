@@ -6537,6 +6537,25 @@ mod tests {
         }
     }
 
+    // The pairing would-deny names the key AUTH proved, not the one the
+    // token asserts. Mutation: attributing the asserted key, or none, fails.
+    #[test]
+    fn shadow_audio_pairing_denial_logs_the_proven_key() {
+        use crate::nip_fi_shadow_session::tests::{shadow_logged, shadow_state};
+        let key = nostr::Keys::generate();
+        let asserted = nostr::Keys::generate().public_key();
+        let (records, lines) = shadow_logged(async {
+            let state = Arc::new(shadow_state(None).await);
+            let (session, _) = shadow_audio_auth(state, &key, asserted).await;
+            session.expire();
+        });
+        assert_eq!(records, ["pairing/denied"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("reason=\"key_mismatch\""), "{lines:?}");
+        let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
+    }
+
     /// Consumes Ping/Pong until the socket terminates (Close, EOF or error)
     /// within 5s; panics on any data frame or if termination never arrives.
     async fn assert_terminates_without_data<S>(client: &mut S, tag: &str)

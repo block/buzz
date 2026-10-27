@@ -432,10 +432,12 @@ async fn observe_shadow_verdict<D: HttpDenyMap>(
                 .map(|()| (proof.pubkey, assertion.owner()))
                 .map_err(|class| {
                     WouldDeny::new(Stage::Deadline, class, crate::nip_fi_shadow::STALE)
-                        .by(Some(proof.pubkey))
                 }),
             Err(_) => Ok((proof.pubkey, assertion.owner())),
         });
+    // Every step names the verified proof key, if any, including community
+    // and cardinality, which enforce decides before reaching it.
+    verdict = verdict.map_err(|deny| deny.by(signed));
     if let (Ok((agent, Some(owner))), Some(state)) = (verdict, owner_state) {
         if let Some((class, reason)) = observe_owner(state, headers, agent, owner).await {
             verdict = Err(WouldDeny::new(Stage::Owner, class, reason).by(Some(agent)));
@@ -537,7 +539,7 @@ where
             if let AssertionRejection::Verifier(e) = rejection {
                 tracing::debug!(code = e.code(), "nip-fi assertion denied at http ingress");
             }
-            WouldDeny::assertion(rejection).by(Some(proof.pubkey))
+            WouldDeny::assertion(rejection)
         })?;
 
     // Step 6: key pairing — assertion.asserted_key MUST equal proven NIP-98 key.
@@ -550,15 +552,18 @@ where
         } else {
             "no_asserted_key"
         };
-        let deny = WouldDeny::new(Stage::Pairing, DenialClass::AuthorizationDenied, reason);
-        return Err(deny.by(Some(proof.pubkey)));
+        return Err(WouldDeny::new(
+            Stage::Pairing,
+            DenialClass::AuthorizationDenied,
+            reason,
+        ));
     }
 
     // Step 7: deny-map check — (iss, pubkey) and, for an agent assertion,
     // (iss, owner) must not be in an active deny window.  Private-state
     // denial.  [FI-INV-14] [NIP-FI.md:624-627]
     if assertion_denied(deny_map, &assertion, Utc::now()) {
-        return Err(crate::nip_fi_shadow::DENY_SET.by(Some(proof.pubkey)));
+        return Err(crate::nip_fi_shadow::DENY_SET);
     }
 
     Ok((proof, assertion))
@@ -1851,6 +1856,63 @@ mod tests {
             .expect("shadow admits an unmapped Host");
             assert_eq!(admission.proven_pubkey, key);
             assert!(admission.assertion.is_none());
+        }
+    }
+
+    // A shadow would-deny names the proven NIP-98 key even when it refuses
+    // before the proof step, and `absent` when nothing was proven; an
+    // unsigned `X-Pubkey` never counts as proven. Mutation: dropping the
+    // proof-key attribution logs `absent` for the unmapped Host.
+    #[test]
+    fn shadow_would_deny_logs_the_proven_key_or_absent() {
+        let key = any_pubkey();
+        let mut unmapped = bearer_headers("Bearer a.b.c");
+        unmapped.insert(
+            axum::http::header::HOST,
+            HeaderValue::from_static("other.example"),
+        );
+        let mut unsigned = axum::http::HeaderMap::new();
+        unsigned.insert(
+            axum::http::header::HOST,
+            HeaderValue::from_static(crate::nip_fi_core::test_support::TEST_HOST),
+        );
+        unsigned.insert("x-pubkey", HeaderValue::from_str(&key.to_hex()).unwrap());
+        let cases = [
+            (unmapped, true, "community_unresolved", key.to_hex()),
+            (unsigned, false, "missing_proof", "absent".to_owned()),
+        ];
+        for (headers, proven, reason, pubkey) in cases {
+            let ((), lines) = crate::nip_fi_shadow::tests::would_deny_lines(|| {
+                let _ = admit_stateless::<_, (), _>(
+                    &headers,
+                    || {
+                        if proven {
+                            Ok(Nip98Proof::new(key, ()))
+                        } else {
+                            crate::api::bridge::verify_bridge_auth_with_options(
+                                &headers, "GET", "u", None, false, false,
+                            )
+                            .map(|auth| auth.proof(()))
+                            .map_err(axum::response::IntoResponse::into_response)
+                        }
+                    },
+                    &communities(),
+                    None,
+                    NipFiMode::Shadow,
+                    &AlwaysAdmitStubDenyMap,
+                )
+                .now_or_never()
+                .expect("env resolution never waits");
+            });
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(
+                lines[0].contains(&format!("reason=\"{reason}\"")),
+                "{lines:?}"
+            );
+            assert!(
+                lines[0].contains(&format!("pubkey=\"{pubkey}\"")),
+                "{lines:?}"
+            );
         }
     }
 

@@ -113,7 +113,8 @@ impl Stage {
 pub(crate) const BOUND: &str = "bound";
 /// The `community` label of a verdict whose community did not resolve.
 const UNMAPPED: &str = "unmapped";
-/// The reason for a Host that resolved to no community.
+/// The reason for a Host whose community resolution failed: it maps to no
+/// community, or the lookup itself was unavailable.
 pub(crate) const UNRESOLVED: &str = "community_unresolved";
 /// The deny-set step's would-deny, before attribution.
 pub(crate) const DENY_SET: WouldDeny =
@@ -272,7 +273,7 @@ async fn observe_unbound(state: &crate::state::AppState, headers: &HeaderMap) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -295,6 +296,9 @@ mod tests {
             let key = key.key();
             if key.name() != metric {
                 continue;
+            }
+            if metric == "buzz_nip_fi_shadow_total" {
+                assert_shadow_schema(key);
             }
             let label = |name| {
                 key.labels()
@@ -455,11 +459,9 @@ mod tests {
         }
     }
 
-    /// Record `verdicts` under an info-level subscriber; return the log text
-    /// and the shadow counter labels.
-    fn record_logged(
-        verdicts: Vec<Result<(), super::WouldDeny>>,
-    ) -> (String, Vec<(String, String, String)>) {
+    /// Run `body` under an info-level subscriber; return its result and the
+    /// `nip-fi shadow would-deny` lines it logged.
+    pub(crate) fn would_deny_lines<R>(body: impl FnOnce() -> R) -> (R, Vec<String>) {
         let _tracing = crate::test_support::tracing_dispatch_lock();
         let out = Captured::default();
         let writer = out.clone();
@@ -468,15 +470,44 @@ mod tests {
             .with_writer(move || writer.clone())
             .with_ansi(false)
             .finish();
+        // With one live dispatcher, tracing-core caches a callsite's
+        // interest from whichever thread first hits it, so a parallel test
+        // without a subscriber can disable this one's would-deny line. A
+        // second live dispatcher makes registration consult every one.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let result = tracing::subscriber::with_default(subscriber, body);
+        let log = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        let lines = log
+            .lines()
+            .filter(|l| l.contains("nip-fi shadow would-deny"))
+            .map(str::to_owned)
+            .collect();
+        (result, lines)
+    }
+
+    /// Fail unless a `buzz_nip_fi_shadow_total` key carries exactly the
+    /// bounded label set, with a known `route`.
+    pub(crate) fn assert_shadow_schema(key: &metrics::Key) {
+        let mut names: Vec<&str> = key.labels().map(|l| l.key()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["community", "outcome", "route", "stage"], "{key:?}");
+        let route = key.labels().find(|l| l.key() == "route").unwrap().value();
+        assert!(["http", "ws", "audio"].contains(&route), "{key:?}");
+    }
+
+    /// Record `verdicts`; return the would-deny lines and the shadow counter
+    /// labels.
+    fn record_logged(
+        verdicts: Vec<Result<(), super::WouldDeny>>,
+    ) -> (Vec<String>, Vec<(String, String, String)>) {
         let recorder = DebuggingRecorder::new();
-        tracing::subscriber::with_default(subscriber, || {
+        let ((), lines) = would_deny_lines(|| {
             let _guard = metrics::set_default_local_recorder(&recorder);
             for verdict in verdicts {
                 super::record_for("http", super::BOUND.into(), verdict);
             }
         });
-        let log = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
-        (log, shadow_counts(&recorder))
+        (lines, shadow_counts(&recorder))
     }
 
     // Mutations: logging at debug, dropping `reason` or `pubkey`, logging an
@@ -486,7 +517,7 @@ mod tests {
         use super::{Stage, WouldDeny};
         use buzz_auth::DenialClass;
         let key = nostr::Keys::generate().public_key();
-        let (log, counts) = record_logged(vec![
+        let (lines, counts) = record_logged(vec![
             Err(WouldDeny::new(
                 Stage::Owner,
                 DenialClass::AuthorizationDenied,
@@ -500,7 +531,7 @@ mod tests {
             )),
             Ok(()),
         ]);
-        let lines: Vec<&str> = log.lines().collect();
+        let log = lines.join("\n");
         assert_eq!(lines.len(), 2, "{log}");
         assert!(lines
             .iter()
