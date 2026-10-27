@@ -2719,6 +2719,37 @@ pub(crate) mod tests {
         }
     }
 
+    /// Each parsed REQ and COUNT frame advances its read counter by exactly
+    /// one, even when refused; other frames count nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatcher_counts_each_req_and_count_frame_once() {
+        let (recorder, handle) = crate::metrics::readiness_test_recorder();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+        let state = crate::state::tests::test_state().await;
+        let (conn, _rx) = test_conn_with_auth(AuthState::Failed);
+        let permits = state.handler_semaphore.available_permits();
+        let _held = Arc::clone(&state.handler_semaphore)
+            .acquire_many_owned(permits as u32)
+            .await
+            .expect("hold every handler permit");
+
+        for raw in [
+            serde_json::json!(["REQ", "r", {"kinds": [1]}]),
+            serde_json::json!(["COUNT", "c", {"kinds": [1]}]),
+            serde_json::json!(["CLOSE", "r"]),
+        ] {
+            handle_text_message(raw.to_string(), Arc::clone(&conn), Arc::clone(&state)).await;
+        }
+
+        let scrape = handle.render();
+        for kind in ["req", "count"] {
+            assert!(
+                scrape.contains(&format!("buzz_ws_reads_total{{type=\"{kind}\"}} 1\n")),
+                "{scrape}"
+            );
+        }
+    }
+
     #[derive(Debug, Default)]
     struct MockSinkState {
         messages: Vec<WsMessage>,

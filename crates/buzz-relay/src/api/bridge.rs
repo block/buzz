@@ -6167,6 +6167,111 @@ pub(crate) mod postgres_tests {
         assert_eq!(line["authors"], "*", "an open dimension is `*`: {line}");
     }
 
+    /// Every HTTP line names its verb itself, since the `http.request` span
+    /// is absent under an access-only filter and when a request is dropped
+    /// (Tower enters the span only while polling).
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn http_lines_carry_the_verb_without_the_span() {
+        use crate::access::tests::{assert_one_aborted_line, capture_access_only};
+        use tracing::Level;
+        let state = nip_fi_off_test_state().await.expect("local Postgres");
+        let host = with_community(&state).await;
+        let community = crate::tenant::bind_community(&state.db, &host)
+            .await
+            .expect("bind community")
+            .community();
+        let keys = Keys::generate();
+
+        // A served, non-empty read under an access-only INFO filter.
+        let event = EventBuilder::new(Kind::TextNote, "")
+            .sign_with_keys(&keys)
+            .expect("sign event");
+        state
+            .db
+            .insert_event(community, &event, None)
+            .await
+            .expect("insert event");
+        let body = format!(
+            r#"[{{"kinds":[1],"authors":["{}"]}}]"#,
+            keys.public_key().to_hex()
+        );
+        let headers = make_nip98_headers(
+            &keys,
+            &format!("https://{host}/query"),
+            "POST",
+            body.as_bytes(),
+        );
+        let (guard, out) = capture_access_only(Level::INFO);
+        let status = oneshot_request(
+            Arc::clone(&state),
+            "POST",
+            "/query",
+            &host,
+            headers,
+            body.as_bytes(),
+        )
+        .await;
+        drop(guard);
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "exactly one access line: {lines:?}");
+        let line = &lines[0];
+        assert_eq!(
+            (&line["level"], &line["result_count"]),
+            (&"INFO".into(), &1.into()),
+            "{line}"
+        );
+        assert_eq!(line["http_method"], "POST", "{line}");
+        assert_eq!(line["pubkey"], keys.public_key().to_hex(), "{line}");
+        assert!(!out.raw().contains("http.request"), "{}", out.raw());
+
+        // A refusal under an access-only WARN filter.
+        let mut members_only = (*state).clone();
+        Arc::make_mut(&mut members_only.config).require_relay_membership = true;
+        let outsider = Keys::generate();
+        let headers = make_nip98_headers(
+            &outsider,
+            &format!("https://{host}/query"),
+            "POST",
+            QUERY_BODY,
+        );
+        let (guard, out) = capture_access_only(Level::WARN);
+        let status = oneshot_request(
+            Arc::new(members_only),
+            "POST",
+            "/query",
+            &host,
+            headers,
+            QUERY_BODY,
+        )
+        .await;
+        drop(guard);
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        let line = assert_one_auth_line(&out.lines(), "denied", Some("not_relay_member"));
+        assert_eq!(line["level"], "WARN", "{line}");
+        assert_eq!(line["http_method"], "POST", "{line}");
+        assert_eq!(line["pubkey"], outsider.public_key().to_hex(), "{line}");
+
+        // A request dropped mid-replay, with every target on.
+        let mut stalled = (*state).clone();
+        let replay = Arc::new(crate::access::tests::StallingReplayGuard::default());
+        stalled.nip98_replay = replay.clone();
+        let headers =
+            make_nip98_headers(&keys, &format!("https://{host}/query"), "POST", QUERY_BODY);
+        let (guard, out) = crate::access::tests::capture_scoped();
+        tokio::select! {
+            _ = oneshot_request(Arc::new(stalled), "POST", "/query", &host, headers, QUERY_BODY) => {
+                panic!("the replay check must stall");
+            }
+            () = replay.arrived.notified() => {}
+        }
+        drop(guard);
+        let line = assert_one_aborted_line(&out, &keys.public_key());
+        assert_eq!(line["http_method"], "POST", "{line}");
+        assert_eq!(line["route"], "/query", "{line}");
+    }
+
     /// POST `body` to `route` signed by `keys` for `signed_url`, and return
     /// the status and every access line the request wrote.
     async fn post_access_lines(
