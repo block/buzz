@@ -281,9 +281,7 @@ fn validate_filter(
     for value in h.into_iter().flatten() {
         check_string(value, limits.max_string_len)?;
         let uuid = uuid::Uuid::parse_str(value).map_err(|_| "invalid h tag".to_string())?;
-        // Channels include UUIDv5 starter IDs; only canonical text matters
-        // for exact event-tag matching, not the UUID version or variant.
-        if uuid.to_string() != *value {
+        if uuid.get_version_num() != 4 || uuid.to_string() != *value {
             return Err("invalid h tag".into());
         }
     }
@@ -701,60 +699,6 @@ mod tests {
             validate_plaintext(&body, &limits()).unwrap_err(),
             "generation must be a positive safe integer"
         );
-    }
-
-    #[test]
-    fn channel_filters_accept_starter_uuids_in_positive_and_ignore_filters() {
-        let starter = "fee88e92-da9f-5958-a910-48db3264ad38";
-        let filter = serde_json::json!({"kinds": [9], "#h": [starter]});
-        let body = serde_json::json!({
-            "v": 1, "origin": "o", "generation": 1, "active": true,
-            "transport": "apns", "endpoint": "token",
-            "subscriptions": [{"filter": filter, "class": "default", "ignore": [filter]}]
-        });
-        let body = parse_plaintext(&body.to_string(), 4096).unwrap();
-        assert_eq!(validate_plaintext(&body, &limits()), Ok(()));
-    }
-
-    #[test]
-    fn channel_filter_grammar_and_limits_remain_exact() {
-        for channel in [
-            "123e4567-e89b-42d3-a456-426614174000",
-            "fee88e92-da9f-5958-a910-48db3264ad38",
-            "01890abc-def0-7890-abcd-0123456789ab",
-            "00000000-0000-0000-0000-000000000000",
-            "ffffffff-ffff-ffff-ffff-ffffffffffff",
-        ] {
-            let filter = serde_json::json!({"kinds": [9], "#h": [channel]});
-            assert!(validate_filter(filter.as_object().unwrap(), &limits(), true).is_ok());
-        }
-        let channel = "fee88e92-da9f-5958-a910-48db3264ad38";
-        for invalid in [
-            String::new(),
-            channel.to_uppercase(),
-            channel.replace('-', ""),
-            format!("{{{channel}}}"),
-            format!("urn:uuid:{channel}"),
-            format!("{channel} "),
-            format!("{channel}\n"),
-            "gee88e92-da9f-5958-a910-48db3264ad38".into(),
-            "a".repeat(129),
-        ] {
-            let filter = serde_json::json!({"kinds": [9], "#h": [invalid]});
-            for require_narrowing in [true, false] {
-                assert!(
-                    validate_filter(filter.as_object().unwrap(), &limits(), require_narrowing)
-                        .is_err(),
-                    "accepted {invalid:?}"
-                );
-            }
-        }
-        let filter = serde_json::json!({"kinds": [9], "#h": [channel]});
-        let mut short = limits();
-        short.max_string_len = 35;
-        assert!(validate_filter(filter.as_object().unwrap(), &short, true).is_err());
-        let filter = serde_json::json!({"kinds": [9], "#h": vec![channel; 5]});
-        assert!(validate_filter(filter.as_object().unwrap(), &limits(), true).is_err());
     }
 
     #[test]

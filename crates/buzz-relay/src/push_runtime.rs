@@ -804,8 +804,7 @@ mod tests {
         let member = nostr::Keys::generate();
         let outsider = nostr::Keys::generate();
         let sender = nostr::Keys::generate();
-        // Starter channels use UUIDv5. Exact scope and membership must still hold.
-        let legacy = uuid::Uuid::parse_str("fee88e92-da9f-5958-a910-48db3264ad38").unwrap();
+        let legacy = uuid::Uuid::new_v4();
         let system = uuid::Uuid::new_v4();
         let future = uuid::Uuid::new_v4();
         let author = |keys: &nostr::Keys| keys.public_key().to_bytes().to_vec();

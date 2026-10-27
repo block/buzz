@@ -130,7 +130,7 @@ On acceptance the executor returns `OK true` and commits the stored event, the e
 Each subscription `filter` is a NIP-01 filter object under these restrictions — a *restriction* of NIP-01, so the executor's existing matcher runs unchanged and all grammar work is sunk at write time:
 
 1. **Narrowing selector.** Each filter MUST contain at least one of: `#p` (self only), `#h` (1–`max_h` channels), or `authors` (1–`max_authors` pubkeys). Bare kinds-only, since-only, or empty filters MUST be rejected (`invalid: lease filter not narrowed`).
-2. **Exact values only.** Every `authors` and `#p` value MUST be exactly 64 lowercase hex characters (a full pubkey), and every `#e` value exactly 64 lowercase hex characters (a full event id); anything shorter, longer, or mixed-case is rejected (`invalid: non-exact match value`). This forecloses NIP-01 prefix matching from inside a lease. Each `#h` value MUST be a non-empty string of at most `max_string_len` bytes and MUST additionally satisfy the channel-identifier grammar the descriptor names in `h_grammar` (e.g. `"uuid-lowercase"` for Buzz); an executor MUST reject values failing its advertised grammar.
+2. **Exact values only.** Every `authors` and `#p` value MUST be exactly 64 lowercase hex characters (a full pubkey), and every `#e` value exactly 64 lowercase hex characters (a full event id); anything shorter, longer, or mixed-case is rejected (`invalid: non-exact match value`). This forecloses NIP-01 prefix matching from inside a lease. Each `#h` value MUST be a non-empty string of at most `max_string_len` bytes and MUST additionally satisfy the channel-identifier grammar the descriptor names in `h_grammar` (e.g. `"uuid-v4-lowercase"` for Buzz); an executor MUST reject values failing its advertised grammar.
 3. **Self-scoped `#p`.** Every `#p` value MUST equal the lease author (`invalid: p-tag must be self`). A lease MUST NOT register a wake on another user's mentions — that is a surveillance primitive, and it would signal the existence of events the author may not read.
 4. **Bounded, allow-listed kinds.** Each filter MUST include `kinds` (1–`max_kinds` entries), each drawn from the executor's advertised `push_kinds` (`invalid: kind not push-eligible`). Ephemeral kinds (20000–29999), presence, typing, and relay-signed snapshot kinds MUST NOT be push-eligible.
 5. **No time-travel, no ids, no limit, no search.** `since`, `until`, `ids`, `limit`, and `search` MUST be rejected, not silently ignored. The lease's liveness window is its `expiration`; `ids` waking is nonsensical for future events.
@@ -177,7 +177,7 @@ Until this draft has an upstream NIP number, executors MUST NOT advertise it in 
                       { "id": "com.example.app/android", "transport": "fcm" } ],
     "push_kinds": [9, 1059, 40007, 46010, 7],
     "urgent_kinds": [46010],
-    "h_grammar": "uuid-lowercase",
+    "h_grammar": "uuid-v4-lowercase",
     "class_support": { "apns": ["silent","default","time_sensitive","urgent"],
                        "fcm": ["silent","default","time_sensitive","urgent"] },
     "limitation": {
@@ -448,8 +448,5 @@ Zombie leases (e.g. `#h` after leaving a channel) are neutralized by match-time 
 - `exec` tag: executor encryption-key identifier for `kind:30350`
 - NIP-11 `supported_extensions`: contains `"nip-pl"` pre-numbering; descriptor object `push` as specified in Executor Discovery
 - Classes: `silent`, `default`, `time_sensitive`, `urgent`
-- `h_grammar` values:
-  - `"uuid-lowercase"`: exactly 36 ASCII characters in lowercase hyphenated UUID form (`8-4-4-4-12` hexadecimal digits). No UUID version or variant restriction. Buzz uses this grammar because channel IDs include UUIDv5 starter channels as well as UUIDv4 channels.
-  - `"uuid-v4-lowercase"`: the legacy Buzz grammar, restricted to UUID version 4 in canonical lowercase hyphenated form.
-  - Origins may register additional grammars with this NIP.
+- `h_grammar` values: `"uuid-v4-lowercase"` (initial entry; origins may register additional grammars with this NIP)
 - Public APNs gateway profile: base URL `https://push.buzz.xyz`; app profile `buzz-ios-dogfood`; wire version `1`

@@ -348,7 +348,7 @@ fn push_descriptor(
             "current": true
         }],
         "push_kinds": crate::handlers::push_lease::PUSH_KINDS,
-        "h_grammar": "uuid-lowercase",
+        "h_grammar": "uuid-v4-lowercase",
         "class_support": {"apns": ["default"]},
         "limitation": {
             "max_lease_ttl": 2592000,
@@ -553,7 +553,6 @@ mod tests {
         let descriptor = push_descriptor(true, "ws://relay", "key", &keys, Some("tenant.example"))
             .expect("configured push descriptor");
         assert_eq!(descriptor["origin"], "ws://tenant.example");
-        assert_eq!(descriptor["h_grammar"], "uuid-lowercase");
         assert_eq!(
             descriptor["push_kinds"],
             serde_json::json!(crate::handlers::push_lease::PUSH_KINDS)

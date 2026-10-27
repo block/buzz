@@ -22,19 +22,14 @@ stable specification after validating the design through launch and use.
 
 ## Channel identifier grammar
 
-Push filters use the same UUID identifiers as Buzz channels, including UUIDv5
-starter channels. The relay advertises `h_grammar: "uuid-lowercase"`: exactly
-36 lowercase ASCII characters in hyphenated `8-4-4-4-12` hexadecimal form,
-without a version or variant restriction. Canonical text is required because
-filters match event tags exactly. Array and string limits, community scoping,
-and channel membership checks still apply.
+Relays advertise `h_grammar: "uuid-v4-lowercase"`. Mobile also accepts
+`uuid-lowercase`, which drops the UUID version and variant restriction so
+UUIDv5 starter channels can be subscribed. Against a `uuid-v4-lowercase` relay,
+mobile checks positive and ignore channel filters before enrollment or
+publication. It keeps the desired filters and rechecks relay capabilities every
+five minutes rather than sending a lease the relay would reject.
 
-Mobile accepts both this descriptor and the older `uuid-v4-lowercase`
-descriptor. Mobile checks both positive and ignore channel filters against
-the advertised grammar before enrollment or publication. A lease requiring
-non-v4 IDs on an older relay remains unavailable until that relay upgrades;
-mobile preserves all desired filters and rechecks capabilities every five
-minutes instead of sending an invalid lease. Deploy
-mobile support for `uuid-lowercase` before changing the relay advertisement:
-older mobile clients reject that descriptor and cannot renew their push leases.
-The new grammar does not alter existing UUIDv4 subscriptions.
+Do not change the relay advertisement until mobile builds that only parse
+`uuid-v4-lowercase` have drained. Those builds parse the descriptor before
+renewal, opt-out and revocation, so a new grammar would leave their existing
+leases active until expiry.
