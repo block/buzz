@@ -1,13 +1,18 @@
+import 'dart:convert';
+
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 final fakeOwner = nostr.Keys('0' * 63 + '1');
-final fakeAgent = nostr.Keys('0' * 63 + '2').public;
+final fakeAgentKeys = nostr.Keys('0' * 63 + '2');
+final fakeAgent = fakeAgentKeys.public;
 const fakeSubject = 'remote-owner';
 
 /// Fakes only the Builderlab network boundary.
@@ -36,6 +41,7 @@ class FakeRegistry extends BuilderlabAccountClient {
   ValueListenable<String?> get subjectChanges => _changes;
   bool failInstructions = false;
   bool rejectRegistration = false;
+  bool loseRegistration = false;
   Object deleteStatus = 1;
   final calls = <String>[];
   final bodies = <String, Map<String, dynamic>>{};
@@ -62,13 +68,17 @@ class FakeRegistry extends BuilderlabAccountClient {
       case '/v3/beekeeper/list-agents':
         return {'status': 1, 'agents': listed};
       case '/v3/beekeeper/register-agent':
-        if (rejectRegistration) throw StateError('Registration rejected.');
+        if (rejectRegistration) {
+          return {'status': 'REGISTER_AGENT_STATUS_NAME_TAKEN'};
+        }
         listed.add({
           'agent_pubkey': fakeAgent,
           'agent_id': 'agent',
           'agent_name': body['agent_name'],
           'status': 'BEEKEEPER_AGENT_STATUS_ACTIVE',
         });
+        // The server committed the identity, but the response never arrived.
+        if (loseRegistration) throw StateError('Connection lost.');
         return {'status': 1, 'agent_pubkey': fakeAgent, 'agent_id': 'agent'};
       case '/v3/beekeeper/attest-agent':
         return {'status': 'ATTEST_AGENT_STATUS_ACTIVE'};
@@ -107,4 +117,32 @@ class RelayFakeController extends RemoteAgentController {
     registry.calls.add('remove-registration');
     if (rejectRemoval) throw StateError('Relay rejected deletion');
   }
+}
+
+/// A signed agent profile carrying [owner]'s attestation under [conditions].
+NostrEvent signedAgentProfile(
+  nostr.Keys agent,
+  nostr.Keys owner, {
+  String conditions = '',
+  String content = '{}',
+}) {
+  final pubkey = agent.public;
+  final digest = sha256
+      .convert(utf8.encode('nostr:agent-auth:$pubkey:$conditions'))
+      .toString();
+  final auth = [
+    'auth',
+    owner.public,
+    conditions,
+    nostr.Schnorr.sign(secretKey: owner.secret, message: digest),
+  ];
+  return NostrEvent.fromJson(
+    nostr.Event.from(
+      kind: 0,
+      content: content,
+      secretKey: agent.secret,
+      createdAt: 100,
+      tags: [auth],
+    ).toMap(),
+  );
 }

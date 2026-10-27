@@ -28,16 +28,8 @@ class _Relay extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async => [
-    for (final pubkey in filter.authors ?? const <String>[])
-      NostrEvent(
-        id: pubkey,
-        pubkey: pubkey,
-        createdAt: 1,
-        kind: 0,
-        tags: [signOwnerAuthorization(fakeOwner, pubkey)],
-        content: '{"name":"Scout"}',
-        sig: '',
-      ),
+    if (filter.authors?.contains(fakeAgent) ?? false)
+      signedAgentProfile(fakeAgentKeys, fakeOwner, content: '{"name":"Scout"}'),
   ];
 }
 

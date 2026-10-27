@@ -159,9 +159,7 @@ class CreateAgentSheet extends HookConsumerWidget {
                     style: TextStyle(color: context.colors.error),
                   ),
                 ],
-                if (pending &&
-                    controller.pending?['pubkey'] == null &&
-                    !controller.busy)
+                if (controller.canDiscardPending && !controller.busy)
                   TextButton(
                     onPressed: () async {
                       error.value = null;

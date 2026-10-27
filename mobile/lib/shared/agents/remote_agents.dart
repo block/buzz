@@ -80,7 +80,7 @@ Future<Set<String>> ownedCommunityAgents(
   return {
     for (final event in events)
       if (keys.contains(event.pubkey) &&
-          verifiedOaOwnerPubkey(event.tags, event.pubkey) == owner)
+          verifiedProfileOaOwnerPubkey(event) == owner)
         event.pubkey,
   };
 }
@@ -367,10 +367,21 @@ class RemoteAgentController extends ChangeNotifier {
     if (setup['pubkey'] == null) {
       status = 'Creating remote identity…';
       _notify();
+      // Once sent, the server may allocate an identity even if the response is
+      // lost. Only Resume, with the same idempotency key, can recover it.
+      setup = {...setup, 'registering': true};
+      await _savePending(setup);
       final result = await account.post('/v3/beekeeper/register-agent', {
         'agent_name': setup['name'],
         'idempotency_key': setup['request'],
       });
+      if (!hasStatus(result, 'UNATTESTED', 1) &&
+          result['status'] != null &&
+          result['agent_pubkey'] == null) {
+        // An explicit rejection allocated nothing, so it can be discarded.
+        setup = {...setup}..remove('registering');
+        await _savePending(setup);
+      }
       requireStatus(result, 'UNATTESTED', 1);
       final pubkey = result['agent_pubkey'];
       if (pubkey is! String ||
@@ -417,14 +428,21 @@ class RemoteAgentController extends ChangeNotifier {
     status = '${setup['name']} is ready. Mention it in a channel.';
   });
 
+  /// Whether [pending] provably has no server identity: registration was never
+  /// sent, or the server explicitly rejected it.
+  bool get canDiscardPending =>
+      pending != null &&
+      pending!['pubkey'] == null &&
+      pending!['registering'] != true;
+
   /// Abandons an unfinished setup that never got a server identity, such as
-  /// one whose registration the server rejects. Setups with an identity can
-  /// only be resumed, so no registered agent is orphaned.
+  /// one whose registration the server rejects. Setups that have or may have
+  /// an identity can only be resumed, so no registered agent is orphaned.
   Future<bool> discardPending() => run(() async {
     final setup = pending;
     if (setup == null) return;
-    if (setup['pubkey'] != null) {
-      throw StateError('This setup already has an agent. Resume it.');
+    if (!canDiscardPending) {
+      throw StateError('This setup may already have an agent. Resume it.');
     }
     final scope = _storageScope;
     final prefs = await SharedPreferences.getInstance();
@@ -534,8 +552,14 @@ class RemoteAgentController extends ChangeNotifier {
     if (agent == null || id is! String || id.isEmpty) {
       throw StateError('Owned remote agent ID is unavailable. Refresh Agents.');
     }
-    if (pending != null) {
-      throw StateError('Finish pending agent setup before deleting an agent.');
+    // Block only the setup's own agent, or any agent while the setup's
+    // identity is unknown, since it could be the one being deleted.
+    final setupAgent = pending?['pubkey'];
+    if (setupAgent == pubkey ||
+        (setupAgent == null && pending?['registering'] == true)) {
+      throw StateError(
+        'Resume the unfinished setup before deleting this agent.',
+      );
     }
     final prefs = await SharedPreferences.getInstance();
     check();
@@ -625,12 +649,17 @@ List<String> signOwnerAuthorization(nostr.Keys owner, String agent) {
 
 /// Accepts the registry's numeric or `*_<suffix>` enum form, nothing else.
 void requireStatus(Map<String, dynamic> result, String suffix, int numeric) {
+  if (hasStatus(result, suffix, numeric)) return;
   final status = result['status'];
-  if (status == numeric || (status is String && status.endsWith('_$suffix'))) {
-    return;
-  }
   throw StateError(
     'Builderlab did not confirm $suffix '
     '(${status is String || status is num ? status : 'missing status'}).',
   );
+}
+
+/// Whether [result] reports [suffix] in the registry's numeric or `*_<suffix>`
+/// enum form.
+bool hasStatus(Map<String, dynamic> result, String suffix, int numeric) {
+  final status = result['status'];
+  return status == numeric || (status is String && status.endsWith('_$suffix'));
 }

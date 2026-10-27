@@ -21,6 +21,9 @@ import '../../helpers/remote_agents_fixture.dart';
 
 final _scope = 'remote-agents:${HostedEnvironment.origin.host}:$fakeSubject';
 
+/// Deterministic test keys.
+nostr.Keys _keys(String last) => nostr.Keys('0' * 63 + last);
+
 Community _community({String? pubkey}) => Community.create(
   name: 'Test',
   relayUrl: 'wss://test.${HostedEnvironment.communitySuffix}',
@@ -333,7 +336,8 @@ void main() {
       await controller.create(community, 'Scout', instructions: 'Private.'),
       isFalse,
     );
-    expect(controller.status, 'Registration rejected.');
+    expect(controller.status, contains('NAME_TAKEN'));
+    expect(controller.canDiscardPending, isTrue);
     final request = controller.pending!['request'];
     expect(prefs.getString('$_scope:pending'), isNotNull);
 
@@ -345,17 +349,63 @@ void main() {
       isNull,
     );
 
-    // Once registered, the setup holds a real agent and can only resume.
+    // A lost response may hide a committed identity, so it can only resume.
     registry
       ..rejectRegistration = false
-      ..failInstructions = true;
+      ..loseRegistration = true;
     expect(
       await controller.create(community, 'Scout', instructions: 'Private.'),
       isFalse,
     );
+    expect(controller.pending?['pubkey'], isNull);
+    expect(controller.canDiscardPending, isFalse);
+    expect(await controller.discardPending(), isFalse);
+    final lost = controller.pending!['request'];
+    expect(jsonDecode(prefs.getString('$_scope:pending')!)['request'], lost);
+
+    // Until the identity is known, any listed agent could be the lost one.
+    final other = _keys('3').public;
+    registry.listed = [
+      ...registry.listed,
+      {'agent_pubkey': other, 'agent_id': 'remote-id'},
+    ];
+    await controller.run(controller.refresh);
+    final elsewhere = Community.create(
+      name: 'Other',
+      relayUrl: 'wss://other.${HostedEnvironment.communitySuffix}',
+      pubkey: fakeOwner.public,
+      nsec: fakeOwner.nsec,
+    );
+    Future<bool> remove(String pubkey) => controller.deleteAgent(
+      pubkey: pubkey,
+      community: elsewhere,
+      isCurrent: () => true,
+      fetch: (_) async => [],
+    );
+    expect(await remove(other), isFalse);
+    expect(controller.status, contains('Resume the unfinished setup'));
+
+    // Resume reuses the idempotency key and recovers the same identity.
+    registry
+      ..loseRegistration = false
+      ..failInstructions = true
+      ..bodies.clear();
+    expect(await controller.create(community, 'Scout'), isFalse);
+    expect(
+      registry.bodies['/v3/beekeeper/register-agent']?['idempotency_key'],
+      lost,
+    );
     expect(controller.pending?['pubkey'], fakeAgent);
     expect(await controller.discardPending(), isFalse);
     expect(controller.pending?['pubkey'], fakeAgent);
+
+    // Once known, the unfinished setup blocks deleting only its own agent.
+    expect(await remove(fakeAgent), isFalse);
+    expect(controller.status, contains('Resume the unfinished setup'));
+    expect(await remove(other), isTrue);
+    expect(controller.deletedAgents, {other});
+    expect(controller.pending?['pubkey'], fakeAgent);
+    expect(prefs.getString('$_scope:pending'), isNotNull);
   });
 
   test('another account never sees the previous registry', () async {
@@ -398,12 +448,19 @@ void main() {
   test(
     'availability requires an owned profile and a live registration',
     () async {
-      final other = nostr.Keys('0' * 63 + '3').public;
-      final elsewhere = nostr.Keys('0' * 63 + '5').public;
+      String key(String last) => _keys(last).public;
+      final other = key('3');
+      final elsewhere = key('5');
+      final forged = signedAgentProfile(_keys('8'), fakeOwner).toJson()
+        ..['sig'] = '0' * 128;
       final profiles = [
-        _profile(fakeAgent, fakeOwner),
+        signedAgentProfile(fakeAgentKeys, fakeOwner),
         // Attested by someone else, so not this owner's agent.
-        _profile(other, nostr.Keys('0' * 63 + '4')),
+        signedAgentProfile(_keys('3'), _keys('4')),
+        // Signed conditions that exclude this profile, and a forged envelope.
+        signedAgentProfile(_keys('6'), fakeOwner, conditions: 'kind=1'),
+        signedAgentProfile(_keys('7'), fakeOwner, conditions: 'created_at<50'),
+        NostrEvent.fromJson(forged),
       ];
       var registrations = <NostrEvent>[];
       Future<List<NostrEvent>> fetch(NostrFilter filter) async {
@@ -416,7 +473,7 @@ void main() {
         return registrations;
       }
 
-      final keys = {fakeAgent, other, elsewhere};
+      final keys = {fakeAgent, other, elsewhere, key('6'), key('7'), key('8')};
       // The list keeps owned agents, so an interrupted delete stays retryable.
       expect(await ownedCommunityAgents(keys, fakeOwner.public, fetch), {
         fakeAgent,
@@ -516,16 +573,6 @@ class _AgentPresence extends PresenceCacheNotifier {
   Map<String, String> build() => {fakeAgent: 'offline'};
 }
 
-NostrEvent _profile(String pubkey, nostr.Keys owner) => NostrEvent(
-  id: 'profile-$pubkey',
-  pubkey: pubkey,
-  createdAt: 1,
-  kind: 0,
-  tags: [signOwnerAuthorization(owner, pubkey)],
-  content: '{}',
-  sig: '',
-);
-
 NostrEvent _registration(String agent) => NostrEvent(
   id: 'registration-$agent',
   pubkey: fakeOwner.public,
@@ -550,7 +597,7 @@ class _AgentRelay extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async => switch (filter.kinds.single) {
-    0 => [_profile(fakeAgent, fakeOwner)],
+    0 => [signedAgentProfile(fakeAgentKeys, fakeOwner)],
     30177 when live => [_registration(fakeAgent)],
     _ => [],
   };
