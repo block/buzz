@@ -84,6 +84,7 @@ String buzzPushPublicationAttemptKey({
   token,
   descriptor.executorKeyId,
   descriptor.executorPubkey,
+  descriptor.hGrammar,
   buzzPushSubscriptionsFingerprint(subscriptions),
 ].join('|');
 
@@ -428,8 +429,13 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
               },
             );
           } catch (error, stack) {
-            publicationAttempt.failed(
+            publicationAttempt.retryAfter(
               attempt,
+              // Re-fetch capabilities after a relay upgrade without repeatedly
+              // enrolling or publishing a lease the old relay cannot accept.
+              delay: error is BuzzPushChannelGrammarException
+                  ? const Duration(minutes: 5)
+                  : _pushBootstrapRetryDelay,
               retry: () {
                 if (context.mounted) publicationRetry.value += 1;
               },
@@ -490,6 +496,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     final descriptor = await ref.read(buzzPushDescriptorFetcherProvider)(
       config.baseUrl,
     );
+    validateBuzzPushChannelGrammar(descriptor, desired);
     final grant = await enrollBuzzPush(
       config.wsUrl,
       Env.pushGatewayUrl,

@@ -2970,15 +2970,30 @@ pub(crate) mod tests {
     /// The same test state with an explicit database target. This lets handler
     /// tests deterministically exercise fail-closed database seams without
     /// depending on whether a developer has the normal test database running.
+    /// Its pool waits only 100 ms for a connection, so closed-port targets
+    /// fail fast.
     pub(crate) async fn test_state_with_database_url(database_url: &str) -> Arc<AppState> {
+        test_state_with_database_url_and_pool_options(
+            database_url,
+            sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(100)),
+        )
+        .await
+    }
+
+    /// Test state whose config and writer pool both target `database_url`,
+    /// with the caller's pool options.
+    pub(crate) async fn test_state_with_database_url_and_pool_options(
+        database_url: &str,
+        options: sqlx::postgres::PgPoolOptions,
+    ) -> Arc<AppState> {
         // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.database_url = database_url.to_owned();
         config.read_database_url = None;
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(std::time::Duration::from_millis(100))
+        let pool = options
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         build_test_state(config, pool).await

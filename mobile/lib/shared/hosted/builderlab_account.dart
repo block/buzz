@@ -65,6 +65,16 @@ class BuilderlabAccountClient {
   static final origin = HostedEnvironment.origin;
   static const _prefix = '/api/goose';
 
+  /// Remote-agent registry routes, shared with desktop.
+  static const _beekeeperRoutes = {
+    '/v3/beekeeper/register-agent',
+    '/v3/beekeeper/update-agent',
+    '/v3/beekeeper/delete-agent',
+    '/v3/beekeeper/attest-agent',
+    '/v3/beekeeper/list-agents',
+    '/v3/beekeeper/add-buzz-subscription',
+  };
+
   /// Sessions are scoped per origin so staging never reads production state.
   static final _storageKey =
       'buzz_hosted_session_${origin.host.replaceAll('.', '_')}_v1';
@@ -76,6 +86,10 @@ class BuilderlabAccountClient {
   bool _disposed = false;
 
   BuilderlabAccount? get account => _account;
+
+  /// The signed-in subject, notifying when an account signs in, out or changes.
+  ValueListenable<String?> get subjectChanges => _subject;
+  final _subject = ValueNotifier<String?>(null);
 
   /// Runs operations one at a time in call order, so a callback exchange that
   /// arrives during startup restore waits instead of failing.
@@ -184,6 +198,7 @@ class BuilderlabAccountClient {
   BuilderlabAccount _adopt(String credential, BuilderlabAccount verified) {
     if (_disposed) throw AccountFailure.unavailable;
     _credential = credential;
+    _subject.value = verified.subject;
     return _account = verified;
   }
 
@@ -238,8 +253,13 @@ class BuilderlabAccountClient {
     String? signingKey,
     String? expectedSubject,
   }) {
-    if (!RegExp(r'^/v1/buzz(/[a-z0-9_-]+)+$').hasMatch(path)) {
-      throw ArgumentError.value(path, 'path', 'not a /v1/buzz/ route');
+    if (!RegExp(r'^/v1/buzz(/[a-z0-9_-]+)+$').hasMatch(path) &&
+        !_beekeeperRoutes.contains(path)) {
+      throw ArgumentError.value(
+        path,
+        'path',
+        'not an allowed Builderlab route',
+      );
     }
     return _serial(() async {
       final credential = _credential;
@@ -293,6 +313,7 @@ class BuilderlabAccountClient {
   Future<void> _clear() async {
     _credential = null;
     _account = null;
+    if (!_disposed) _subject.value = null;
     try {
       await _storage.delete(key: _storageKey);
     } catch (_) {
@@ -360,6 +381,7 @@ class BuilderlabAccountClient {
     _disposed = true;
     _credential = null;
     _account = null;
+    _subject.dispose();
     _http.close();
   }
 }

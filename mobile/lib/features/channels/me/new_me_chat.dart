@@ -97,10 +97,9 @@ class _NewMeChat extends HookConsumerWidget {
                     isAgent: true,
                     backgroundColor: context.controlSurface,
                     fallback: Text(
-                      profile?.initial ??
-                          (chosen.displayName?.isNotEmpty == true
-                              ? chosen.displayName![0]
-                              : 'A'),
+                      chosen.displayName?.trim().isNotEmpty == true
+                          ? chosen.displayName!.trim()[0].toUpperCase()
+                          : profile?.initial ?? 'A',
                     ),
                   ),
             title: Text(chosen?.displayName ?? 'Choose an agent'),
