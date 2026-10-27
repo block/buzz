@@ -130,8 +130,12 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
           if (MediaQuery.disableAnimationsOf(context)) {
             transition.value = 0;
           } else {
-            transition.reverse();
+            await transition.reverse().orCancel;
           }
+        }
+        if (call.method == 'hide') {
+          // Let UIKit replace this view only after the final avatar is painted.
+          await WidgetsBinding.instance.endOfFrame;
         }
         if (call.method == 'reveal') {
           if (MediaQuery.disableAnimationsOf(context)) {

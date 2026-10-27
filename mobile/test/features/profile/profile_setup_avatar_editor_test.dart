@@ -172,22 +172,28 @@ void main() {
         await tester.pump(const Duration(milliseconds: 100));
         expect(paintedWidth(), closeTo(220, 0.01));
         // Saving returns to the full-size native avatar, without shrinking.
-        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-          'buzz/profile_avatar_sheet',
-          const StandardMethodCodec().encodeMethodCall(
-            const MethodCall('hide', {
-              'x': 290.0,
-              'y': 220.0,
-              'width': 220.0,
-              'height': 220.0,
-            }),
-          ),
-          (_) {},
-        );
+        var hideCompleted = false;
+        final hiding = tester.binding.defaultBinaryMessenger
+            .handlePlatformMessage(
+              'buzz/profile_avatar_sheet',
+              const StandardMethodCodec().encodeMethodCall(
+                const MethodCall('hide', {
+                  'x': 290.0,
+                  'y': 220.0,
+                  'width': 220.0,
+                  'height': 220.0,
+                }),
+              ),
+              (_) => hideCompleted = true,
+            );
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 100));
         expect(paintedWidth(), closeTo(220, 0.01));
+        expect(hideCompleted, isFalse);
         await tester.pump(const Duration(milliseconds: 100));
+        await tester.pump();
+        await hiding;
+        expect(hideCompleted, isTrue);
         await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
           'buzz/profile_avatar_sheet',
           const StandardMethodCodec().encodeMethodCall(

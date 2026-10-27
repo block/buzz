@@ -155,8 +155,10 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
         controller.setEditorVisible(false)
         let frame = controller.editorFrame
         let rect = controller.avatarFrame(in: controller.view).offsetBy(dx: -frame.minX, dy: -frame.minY)
-        self.avatarChannel?.invokeMethod("hide", arguments: ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height])
-        self.animateAvatarMotion { self.avatarController?.view.alpha = 0 } completion: {
+        // Keep the moving avatar opaque until Flutter has drawn its final
+        // collapsed frame, then replace it with the native avatar in one handoff.
+        self.avatarChannel?.invokeMethod("hide", arguments: ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height]) { [weak self, weak controller] _ in
+          guard let self, self.session == session, self.avatarEngine === engine else { return }
           self.restoreProfilePage(controller)
         }
         result(nil)
@@ -210,16 +212,6 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     controller.setAvatarHidden(true)
     avatarController?.view.alpha = 1
     UIAccessibility.post(notification: .screenChanged, argument: avatarController?.view)
-  }
-
-  // Use the same motion and timing in both directions.
-  private func animateAvatarMotion(_ animations: @escaping () -> Void, completion: @escaping () -> Void) {
-    if UIAccessibility.isReduceMotionEnabled { animations(); completion(); return }
-    let timing = UICubicTimingParameters(controlPoint1: CGPoint(x: 0.215, y: 0.61), controlPoint2: CGPoint(x: 0.355, y: 1))
-    let animator = UIViewPropertyAnimator(duration: 0.2, timingParameters: timing)
-    animator.addAnimations(animations)
-    animator.addCompletion { _ in completion() }
-    animator.startAnimation()
   }
 
   /// Both failed startup and normal editor return must leave a retryable sheet.
