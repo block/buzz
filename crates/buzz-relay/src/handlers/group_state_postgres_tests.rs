@@ -17,9 +17,11 @@ use buzz_auth::Scope;
 /// closed-port tests fail fast, and a first connect to a busy CI database can
 /// take longer than that (`PoolTimedOut`).
 pub(crate) async fn state() -> Arc<AppState> {
-    let pool =
-        sqlx::PgPool::connect_lazy(&crate::test_support::database_url()).expect("lazy pg pool");
-    crate::state::tests::test_state_with_database_pool(pool).await
+    crate::state::tests::test_state_with_database_url_and_pool_options(
+        &crate::test_support::database_url(),
+        sqlx::postgres::PgPoolOptions::new(),
+    )
+    .await
 }
 
 pub(crate) async fn community(state: &AppState, label: &str) -> TenantContext {
