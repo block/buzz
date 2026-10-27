@@ -108,6 +108,15 @@ class ComposeBar extends HookConsumerWidget {
       onDraftIdentityChanged: voiceNote.onDraftIdentityChanged,
     );
     final clipboardHasImage = useState(false);
+    _useComposerSeed(
+      ref: ref,
+      channelId: channelId,
+      threadHeadId: threadHeadId,
+      voiceNote: voiceNoteRef,
+      attachments: attachments,
+      uploadError: uploadError,
+      draftRevision: draftRevision,
+    );
     final hasAttachments = attachments.value.isNotEmpty;
     final customEmoji = ref.watch(customEmojiListProvider);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);

@@ -17,6 +17,12 @@
 		C0AF00000000000000000011 /* NativeAddMembersSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000012 /* NativeAddMembersSheet.swift */; };
 		BZZ00000000000000000001 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000006 /* NotificationService.swift */; };
 		BZZ00000000000000000002 /* NotificationService.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000009 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		BZS000000000000000000001 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZS000000000000000000006 /* ShareViewController.swift */; };
+		BZS000000000000000000018 /* ShareComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZS000000000000000000019 /* ShareComposerView.swift */; };
+		BZS000000000000000000002 /* BuzzShareInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZS00000000000000000000A /* BuzzShareInbox.swift */; };
+		BZS000000000000000000003 /* BuzzShareInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZS00000000000000000000A /* BuzzShareInbox.swift */; };
+		BZS000000000000000000004 /* ShareInboxBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZS00000000000000000000B /* ShareInboxBridge.swift */; };
+		BZS000000000000000000005 /* ShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BZS000000000000000000009 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BZZ00000000000000000020 /* BuzzPushKit in Frameworks */ = {isa = PBXBuildFile; productRef = BZZ00000000000000000022 /* BuzzPushKit */; };
 		BZZ00000000000000000025 /* BuzzPushKit in Frameworks */ = {isa = PBXBuildFile; productRef = BZZ00000000000000000022 /* BuzzPushKit */; };
 		DCAF00000000000000000001 /* IosNavigationBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCAF00000000000000000002 /* IosNavigationBar.swift */; };
@@ -84,6 +90,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				BZZ00000000000000000002 /* NotificationService.appex in Embed App Extensions */,
+				BZS000000000000000000005 /* ShareExtension.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -113,6 +120,13 @@
 		BZZ00000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BZZ00000000000000000008 /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = NotificationService.entitlements; sourceTree = "<group>"; };
 		BZZ00000000000000000009 /* NotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		BZS000000000000000000006 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		BZS000000000000000000019 /* ShareComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareComposerView.swift; sourceTree = "<group>"; };
+		BZS000000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BZS000000000000000000008 /* ShareExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ShareExtension.entitlements; sourceTree = "<group>"; };
+		BZS000000000000000000009 /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		BZS00000000000000000000A /* BuzzShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzShareInbox.swift; sourceTree = "<group>"; };
+		BZS00000000000000000000B /* ShareInboxBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareInboxBridge.swift; sourceTree = "<group>"; };
 		BZZ0000000000000000000A /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Runner.entitlements; sourceTree = "<group>"; };
 		DCAF00000000000000000002 /* IosNavigationBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IosNavigationBar.swift; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
@@ -176,6 +190,13 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		BZS000000000000000000011 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BZZ0000000000000000000C /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -204,6 +225,25 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		BZS00000000000000000000C /* ShareExtension */ = {
+			isa = PBXGroup;
+			children = (
+				BZS000000000000000000006 /* ShareViewController.swift */,
+				BZS000000000000000000019 /* ShareComposerView.swift */,
+				BZS000000000000000000007 /* Info.plist */,
+				BZS000000000000000000008 /* ShareExtension.entitlements */,
+			);
+			path = ShareExtension;
+			sourceTree = "<group>";
+		};
+		BZS00000000000000000000D /* BuzzShareInbox */ = {
+			isa = PBXGroup;
+			children = (
+				BZS00000000000000000000A /* BuzzShareInbox.swift */,
+			);
+			path = BuzzShareInbox;
+			sourceTree = "<group>";
+		};
 		331C8082294A63A400263BE5 /* RunnerTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -255,6 +295,8 @@
 			isa = PBXGroup;
 			children = (
 				BZZ0000000000000000000B /* NotificationService */,
+				BZS00000000000000000000C /* ShareExtension */,
+				BZS00000000000000000000D /* BuzzShareInbox */,
 				9740EEB11CF90186004384FC /* Flutter */,
 				97C146F01CF9000F007C117D /* Runner */,
 				97C146EF1CF9000F007C117D /* Products */,
@@ -270,6 +312,7 @@
 				97C146EE1CF9000F007C117D /* Runner.app */,
 				331C8081294A63A400263BE5 /* RunnerTests.xctest */,
 				BZZ00000000000000000009 /* NotificationService.appex */,
+				BZS000000000000000000009 /* ShareExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -295,6 +338,7 @@
 				BZZ0000000000000000002A /* PushSnapshotBridge.swift */,
 				DCAF00000000000000000002 /* IosNavigationBar.swift */,
 				DAAB00000000000000000002 /* NativeTabler.swift */,
+				BZS00000000000000000000B /* ShareInboxBridge.swift */,
 				331C809A294A618700263BE5 /* MediaSanitizer.swift */,
 				4A71C0022F40100100A17E01 /* InlinePhotoPicker.swift */,
 				4A71C0042F40200100A17E01 /* NativeAttachmentPopover.swift */,
@@ -416,6 +460,23 @@
 			productReference = BZZ00000000000000000009 /* NotificationService.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		BZS00000000000000000000E /* ShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BZS00000000000000000000F /* Build configuration list for PBXNativeTarget "ShareExtension" */;
+			buildPhases = (
+				BZS000000000000000000010 /* Sources */,
+				BZS000000000000000000011 /* Frameworks */,
+				BZS000000000000000000012 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ShareExtension;
+			productName = ShareExtension;
+			productReference = BZS000000000000000000009 /* ShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -427,6 +488,9 @@
 				ORGANIZATIONNAME = "";
 				TargetAttributes = {
 					BZZ0000000000000000000E = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					BZS00000000000000000000E = {
 						CreatedOnToolsVersion = 15.0;
 					};
 					331C8080294A63A400263BE5 = {
@@ -458,11 +522,19 @@
 				97C146ED1CF9000F007C117D /* Runner */,
 				331C8080294A63A400263BE5 /* RunnerTests */,
 				BZZ0000000000000000000E /* NotificationService */,
+				BZS00000000000000000000E /* ShareExtension */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		BZS000000000000000000012 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BZZ00000000000000000010 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -605,6 +677,16 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		BZS000000000000000000010 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BZS000000000000000000001 /* ShareViewController.swift in Sources */,
+				BZS000000000000000000018 /* ShareComposerView.swift in Sources */,
+				BZS000000000000000000002 /* BuzzShareInbox.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BZZ0000000000000000000D /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -640,6 +722,8 @@
 				BZZ00000000000000000029 /* PushSnapshotBridge.swift in Sources */,
 				DCAF00000000000000000001 /* IosNavigationBar.swift in Sources */,
 				DAAB00000000000000000001 /* NativeTabler.swift in Sources */,
+				BZS000000000000000000003 /* BuzzShareInbox.swift in Sources */,
+				BZS000000000000000000004 /* ShareInboxBridge.swift in Sources */,
 				331C809B294A63AB00263BE5 /* MediaSanitizer.swift in Sources */,
 				4A71C0012F40100100A17E01 /* InlinePhotoPicker.swift in Sources */,
 				4A71C0032F40200100A17E01 /* NativeAttachmentPopover.swift in Sources */,
@@ -1089,6 +1173,81 @@
 			};
 			name = Profile;
 		};
+		BZS000000000000000000013 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 9740EEB21CF90195004384FC /* Debug.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				OTHER_LDFLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).ShareExtension";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		BZS000000000000000000014 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				OTHER_LDFLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).ShareExtension";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		BZS000000000000000000015 /* Profile */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				OTHER_LDFLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).ShareExtension";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Profile;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -1128,6 +1287,16 @@
 				97C147061CF9000F007C117D /* Debug */,
 				97C147071CF9000F007C117D /* Release */,
 				249021D4217E4FDB00AE95B9 /* Profile */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BZS00000000000000000000F /* Build configuration list for PBXNativeTarget "ShareExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BZS000000000000000000013 /* Debug */,
+				BZS000000000000000000014 /* Release */,
+				BZS000000000000000000015 /* Profile */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
