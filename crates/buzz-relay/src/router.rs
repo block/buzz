@@ -653,7 +653,7 @@ async fn nip11_or_ws_handler(
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    let (upgrade_checked, nip_fi_assertion, shadow_assertion, nip_fi_deadline) = {
+    let (upgrade_checked, nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
         let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
@@ -685,14 +685,16 @@ async fn nip11_or_ws_handler(
                 .await
                 .into_assertions()
             {
-                Ok((assertion, shadow, deadline)) => (true, assertion, shadow, deadline),
+                Ok((assertion, shadow, deadline, line)) => {
+                    (true, assertion, shadow, deadline, line)
+                }
                 Err(resp) => return (*resp).into_response(),
             }
         } else {
             // Not a WS upgrade shape — a NIP-11 request or a plain browser GET.
             // The `Ok(ws)` arm below backstops any extractor-accepted shape this
             // predicate misses. [F3-H2-GATE]
-            (false, None, None, Default::default())
+            (false, None, None, Default::default(), None)
         }
     };
 
@@ -770,7 +772,7 @@ async fn nip11_or_ws_handler(
             // For HTTP/1.1 requests, `nip_fi_assertion` was already set above
             // and this block is unreachable (the h1 denial is returned before
             // we get here).
-            let (nip_fi_assertion, shadow_assertion) = if !upgrade_checked {
+            let (nip_fi_assertion, shadow_assertion, shadow_line) = if !upgrade_checked {
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
                 use crate::nip_fi_session::NipFiWsRoute::Root;
                 use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
@@ -782,13 +784,13 @@ async fn nip11_or_ws_handler(
                     .await
                     .into_assertions()
                 {
-                    Ok((assertion, shadow, _deadline)) => {
-                        (assertion, shadow.map(|(a, c)| (a, c.shadow_label())))
+                    Ok((assertion, shadow, _deadline, line)) => {
+                        (assertion, shadow.map(|(a, c)| (a, c.shadow_label())), line)
                     }
                     Err(resp) => return (*resp).into_response(),
                 }
             } else {
-                (nip_fi_assertion, shadow_assertion)
+                (nip_fi_assertion, shadow_assertion, shadow_line)
             };
 
             // Shutting down: refuse new sockets instead of accepting a
@@ -823,6 +825,7 @@ async fn nip11_or_ws_handler(
                         tenant,
                         nip_fi_assertion,
                         shadow,
+                        shadow_line,
                         connection_time,
                     )
                 })

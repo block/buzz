@@ -356,6 +356,7 @@ where
         let proof = extract_nip98();
         if mode.observes_only() {
             let signed = proof.as_ref().ok().filter(|p| p.signed).map(|p| p.pubkey);
+            crate::nip_fi_shadow::prove_guard(signed);
             observe_shadow_verdict(
                 headers,
                 communities,

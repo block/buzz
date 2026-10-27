@@ -355,6 +355,7 @@ pub(crate) fn compute_session_deadline(
 
 /// Acquires a connection semaphore permit, sends the NIP-42 AUTH challenge,
 /// then drives the send, heartbeat, and receive loops until the connection closes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_connection(
     socket: WebSocket,
     state: Arc<AppState>,
@@ -362,6 +363,7 @@ pub(crate) async fn handle_connection(
     tenant: TenantContext,
     nip_fi_assertion: Option<buzz_auth::VerifiedAssertion>,
     nip_fi_shadow: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
+    shadow_line: Option<crate::nip_fi_shadow::PendingLine>,
     connection_time: chrono::DateTime<chrono::Utc>,
 ) {
     // Held through bootstrap, the active handler and any refusal drain, so a
@@ -393,6 +395,9 @@ pub(crate) async fn handle_connection(
     let (pre_terminal_ctrl_tx, pre_terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
     let control = CommunityConnectionControl::new(cancel);
     control.attach_nip_fi_shadow(nip_fi_shadow);
+    // Held for the connection's life; its first verified AUTH attributes it.
+    let shadow_line = shadow_line.map(Arc::new);
+    control.attach_nip_fi_line(shadow_line.as_ref());
     let drain_reason = control.disconnect_reason();
     let pre_expiry_task = pre_session_deadline.map(|deadline| {
         crate::nip_fi_session::spawn_nip_fi_expiry_task(
@@ -3295,6 +3300,7 @@ pub(crate) mod tests {
                                     tenant_i,
                                     Some(assertion_i),
                                     None,
+                                    None,
                                     conn_time,
                                 )
                                 .await
@@ -3908,6 +3914,7 @@ pub(crate) mod terminal_close_delivery_tests {
                             tenant,
                             assertion,
                             None,
+                            None,
                             chrono::Utc::now(),
                         )
                     })
@@ -4009,5 +4016,62 @@ pub(crate) mod terminal_close_delivery_tests {
                 .is_err(),
             "the active handler must not have started"
         );
+    }
+
+    // An upgrade would-deny's line is held by the real `handle_connection`
+    // and written once the socket ends; one that never proves a key by AUTH
+    // logs `absent`. The state's database is unreachable, so bootstrap
+    // refuses the socket before any AUTH.
+    #[test]
+    fn upgrade_would_deny_line_without_auth_logs_absent_at_close() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ((), lines) = crate::nip_fi_shadow::tests::would_deny_lines(|| {
+            rt.block_on(async {
+                let state = crate::state::tests::test_state_with_database_url(
+                    "postgres://127.0.0.1:1/none",
+                )
+                .await;
+                let line = crate::nip_fi_shadow::tests::upgrade_line("ws");
+                let line = Arc::into_inner(line).expect("sole owner");
+                let line = Arc::new(Mutex::new(Some(line)));
+                let ended = Arc::new(tokio::sync::Notify::new());
+                let tenant = TenantContext::resolved(
+                    buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                    "test.local".to_owned(),
+                );
+                let notify = Arc::clone(&ended);
+                let app = Router::new().route(
+                    "/",
+                    get(move |ws: WebSocketUpgrade| async move {
+                        let line = line.lock().await.take();
+                        ws.on_upgrade(move |socket| async move {
+                            let addr = "127.0.0.1:1234".parse().expect("client address");
+                            let now = chrono::Utc::now();
+                            handle_connection(socket, state, addr, tenant, None, None, line, now)
+                                .await;
+                            notify.notify_one();
+                        })
+                    }),
+                );
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+                let address = listener.local_addr().expect("listener address");
+                let server = tokio::spawn(async move { axum::serve(listener, app).await });
+                let client = connect(address).await;
+                tokio::time::timeout(Duration::from_secs(10), ended.notified())
+                    .await
+                    .expect("the connection ends without AUTH");
+                drop(client);
+                server.abort();
+            })
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("reason=\"missing_assertion\""),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("pubkey=\"absent\""), "{lines:?}");
     }
 }

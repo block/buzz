@@ -108,6 +108,8 @@ pub(crate) struct CommunityConnectionControl {
     owner: Arc<std::sync::OnceLock<[u8; 32]>>,
     /// Shadow-mode observation of this socket; no enforce path reads it.
     nip_fi_shadow: Arc<std::sync::OnceLock<Arc<crate::nip_fi_shadow_session::ShadowSession>>>,
+    /// A shadow upgrade would-deny's line, owned by the connection task.
+    nip_fi_line: Arc<std::sync::OnceLock<std::sync::Weak<crate::nip_fi_shadow::PendingLine>>>,
 }
 
 impl CommunityConnectionControl {
@@ -121,6 +123,7 @@ impl CommunityConnectionControl {
             pubkey: Arc::default(),
             owner: Arc::default(),
             nip_fi_shadow: Arc::default(),
+            nip_fi_line: Arc::default(),
         }
     }
 
@@ -133,6 +136,22 @@ impl CommunityConnectionControl {
         if let Some(session) = session {
             session.fence(self.cancel.clone());
             let _ = self.nip_fi_shadow.set(session);
+        }
+    }
+
+    /// Lets the socket's AUTH attribute its shadow upgrade would-deny line,
+    /// which the connection task owns and writes when it ends.
+    pub(crate) fn attach_nip_fi_line(&self, line: Option<&Arc<crate::nip_fi_shadow::PendingLine>>) {
+        if let Some(line) = line {
+            let _ = self.nip_fi_line.set(Arc::downgrade(line));
+        }
+    }
+
+    /// Attributes the socket's shadow upgrade would-deny line, if any, to
+    /// `pubkey`, which a NIP-42 AUTH just verified.
+    pub(crate) fn prove_nip_fi_line(&self, pubkey: nostr::PublicKey) {
+        if let Some(line) = self.nip_fi_line.get().and_then(std::sync::Weak::upgrade) {
+            line.prove(pubkey);
         }
     }
 

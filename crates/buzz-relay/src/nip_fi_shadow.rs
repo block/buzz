@@ -11,7 +11,11 @@
 //! cardinality stays bounded: `reason`, one value from a fixed snake_case set
 //! naming the private condition the public `outcome` class collapses, and
 //! `pubkey`, the hex Nostr key of the would-be-refused client where the step
-//! knows one, else `absent`. An admit writes no line. No token, assertion,
+//! knows one, else `absent`. A router-guard or upgrade would-deny precedes
+//! any proof, so its line waits for the key the client later proves: the
+//! request's verified NIP-98 key, or the connection's first verified NIP-42
+//! AUTH key. It is written when the request or connection ends, with
+//! `absent` if no key was proven; its counter increments at once. An admit writes no line. No token, assertion,
 //! claim other than the public Nostr key, or issuer is logged.
 //! [FI-TRACE-PRIVACY-NONPUBLIC]
 //!
@@ -144,6 +148,17 @@ pub(crate) fn record_for(
     if guard_denied() == Some(true) {
         return;
     }
+    // Dropping the would-deny's line writes it now.
+    drop(record_pending(route, community, verdict));
+}
+
+/// Count `verdict`, returning a would-deny's line unwritten, for the key the
+/// client later proves.
+pub(crate) fn record_pending(
+    route: &'static str,
+    community: SharedString,
+    verdict: Result<(), WouldDeny>,
+) -> Option<PendingLine> {
     let (stage, outcome) = match verdict {
         Ok(()) => ("admit", "admit"),
         Err(deny) => (deny.stage.label(), class_label(deny.class)),
@@ -157,17 +172,53 @@ pub(crate) fn record_for(
     )
     .increment(1);
     // The counter is the record; only a would-deny earns a line.
-    if let Err(deny) = verdict {
-        let pubkey = deny
+    let deny = verdict.err()?;
+    let pubkey = std::sync::OnceLock::new();
+    if let Some(key) = deny.pubkey {
+        let _ = pubkey.set(key);
+    }
+    Some(PendingLine {
+        route,
+        stage,
+        outcome,
+        reason: deny.reason,
+        community,
+        pubkey,
+    })
+}
+
+/// A counted would-deny's info line, written when dropped, naming the first
+/// key proven for it, else `absent`.
+pub(crate) struct PendingLine {
+    route: &'static str,
+    stage: &'static str,
+    outcome: &'static str,
+    reason: &'static str,
+    community: SharedString,
+    pubkey: std::sync::OnceLock<PublicKey>,
+}
+
+impl PendingLine {
+    /// Attribute the line to `pubkey`, a key the client proved, unless an
+    /// earlier proof already did.
+    pub(crate) fn prove(&self, pubkey: PublicKey) {
+        let _ = self.pubkey.set(pubkey);
+    }
+}
+
+impl Drop for PendingLine {
+    fn drop(&mut self) {
+        let pubkey = self
             .pubkey
-            .map_or_else(|| "absent".to_owned(), |k| k.to_hex());
+            .get()
+            .map_or_else(|| "absent".to_owned(), PublicKey::to_hex);
         tracing::info!(
-            route,
-            stage,
-            outcome,
-            reason = deny.reason,
+            route = self.route,
+            stage = self.stage,
+            outcome = self.outcome,
+            reason = self.reason,
             pubkey,
-            %community,
+            community = %self.community,
             "nip-fi shadow would-deny"
         );
     }
@@ -180,28 +231,38 @@ async fn resolution(state: &crate::state::AppState, headers: &HeaderMap) -> Reso
 }
 
 tokio::task_local! {
-    /// Set by the router guard in shadow: whether enforce's guard would deny.
-    static GUARD_DENIED: bool;
+    /// Set by the router guard in shadow: the line of enforce's guard
+    /// would-deny, if any, written when the request ends.
+    static GUARD_DENIED: Option<PendingLine>;
 }
 
-/// Record the router guard's would-deny, then run the request inside its
+/// Count the router guard's would-deny, then run the request inside its
 /// verdict.  Enforce never lets a guard-denied request reach a handler, so
-/// none of that request's handler-side records are emitted.
+/// none of that request's handler-side records are emitted; the guard's line
+/// is written as the request ends, naming the key its handler proved.
 pub(crate) async fn observe_guard<F: std::future::Future>(
     community: SharedString,
     verdict: Result<(), WouldDeny>,
     run: F,
 ) -> F::Output {
-    let denied = verdict.is_err();
-    if denied {
-        record_for("http", community, verdict);
-    }
-    GUARD_DENIED.scope(denied, run).await
+    let line = verdict
+        .is_err()
+        .then(|| record_pending("http", community, verdict))
+        .flatten();
+    GUARD_DENIED.scope(line, run).await
 }
 
 /// The enclosing router guard's verdict; `None` outside a guarded request.
 fn guard_denied() -> Option<bool> {
-    GUARD_DENIED.try_with(|denied| *denied).ok()
+    GUARD_DENIED.try_with(Option::is_some).ok()
+}
+
+/// Attribute the enclosing router guard's would-deny line to the request's
+/// verified NIP-98 key.
+pub(crate) fn prove_guard(signed: Option<PublicKey>) {
+    if let Some(key) = signed {
+        let _ = GUARD_DENIED.try_with(|line| line.as_ref().map(|l| l.prove(key)));
+    }
 }
 
 const fn class_label(class: DenialClass) -> &'static str {
@@ -483,6 +544,16 @@ pub(crate) mod tests {
             .map(str::to_owned)
             .collect();
         (result, lines)
+    }
+
+    /// The counted line of a `route` upgrade would-deny for a missing
+    /// assertion, as `check_nip_fi_at_upgrade` hands it to the connection.
+    pub(crate) fn upgrade_line(route: &'static str) -> Arc<super::PendingLine> {
+        let missing = crate::nip_fi_core::AssertionRejection::Transport(
+            buzz_auth::DenialClass::MissingEvidence,
+        );
+        let verdict = Err(super::WouldDeny::assertion(missing));
+        Arc::new(super::record_pending(route, super::BOUND.into(), verdict).unwrap())
     }
 
     /// Fail unless a `buzz_nip_fi_shadow_total` key carries exactly the

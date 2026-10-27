@@ -441,6 +441,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
 
+            conn.community_control.prove_nip_fi_line(pubkey);
             let shadow = conn.community_control.nip_fi_shadow();
             if let Some(shadow) = shadow {
                 shadow.observe_pairing(pubkey);
@@ -1619,6 +1620,41 @@ mod tests {
         assert_eq!(records, ["pairing/denied"]);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("reason=\"key_mismatch\""), "{lines:?}");
+        let proven = format!("pubkey=\"{}\"", signer.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
+    }
+
+    // An upgrade would-deny's line names the key the connection's AUTH
+    // verifies, and is counted once, at the upgrade. Mutation: deleting
+    // root's `prove_nip_fi_line` logs `absent`.
+    #[test]
+    fn shadow_upgrade_would_deny_logs_the_root_auth_key() {
+        use crate::nip_fi_shadow_session::tests::{shadow_logged, shadow_state};
+        let signer = Keys::generate();
+        let (records, lines) = shadow_logged(async {
+            let state = std::sync::Arc::new(shadow_state(None).await);
+            let line = crate::nip_fi_shadow::tests::upgrade_line("ws");
+            let challenge = "upgrade-would-deny-challenge".to_owned();
+            let pending = AuthState::Pending {
+                challenge: challenge.clone(),
+                started_at: Instant::now(),
+            };
+            let nil = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
+            let t = crate::connection::tests::test_conn_in(pending, None, nil);
+            t.conn.community_control.attach_nip_fi_line(Some(&line));
+            let event = EventBuilder::new(Kind::Authentication, "")
+                .tag(Tag::parse(["relay", "ws://test.local"]).unwrap())
+                .tag(Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(&signer)
+                .unwrap();
+            handle_auth(event, std::sync::Arc::clone(&t.conn), state).await;
+        });
+        assert_eq!(records, ["assertion/missing"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("reason=\"missing_assertion\""),
+            "{lines:?}"
+        );
         let proven = format!("pubkey=\"{}\"", signer.public_key().to_hex());
         assert!(lines[0].contains(&proven), "{lines:?}");
     }

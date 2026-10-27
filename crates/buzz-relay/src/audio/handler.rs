@@ -95,7 +95,7 @@ pub async fn ws_audio_handler(
     // WebSocket handshake. Running pre-lookup means a denied request skips the tenant
     // lookup (a resolver miss costs one bounded binding lookup) and the gate is reachable in tests without a live community.
     // [FI-TRACE-TRANSPORT-CLOSED] [NIP-FI.md §Admission pairing sequence]
-    let (nip_fi_assertion, shadow_assertion, nip_fi_deadline) = {
+    let (nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
         use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
         let mode = state.config.nip_fi.mode;
         let verifier = state.nip_fi_verifier.as_deref();
@@ -187,6 +187,7 @@ pub async fn ws_audio_handler(
             permit,
             nip_fi_assertion,
             shadow,
+            shadow_line,
             connection_time,
         )
     })
@@ -236,6 +237,7 @@ pub(crate) async fn handle_audio_connection(
     _permit: OwnedSemaphorePermit,
     nip_fi_assertion: Option<VerifiedAssertion>,
     nip_fi_shadow: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
+    shadow_line: Option<crate::nip_fi_shadow::PendingLine>,
     connection_time: chrono::DateTime<chrono::Utc>,
 ) {
     let cancel = CancellationToken::new();
@@ -265,6 +267,9 @@ pub(crate) async fn handle_audio_connection(
         tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
     let control = CommunityConnectionControl::new(cancel);
     control.attach_nip_fi_shadow(nip_fi_shadow);
+    // Held for the connection's life; its first verified AUTH attributes it.
+    let shadow_line = shadow_line.map(Arc::new);
+    control.attach_nip_fi_line(shadow_line.as_ref());
     let drain_reason = control.disconnect_reason();
     let pre_expiry_task = audio_session_deadline.map(|deadline| {
         crate::nip_fi_session::spawn_nip_fi_expiry_task(
@@ -749,6 +754,7 @@ async fn run_active_audio_connection(
         crate::nip_fi_test_hooks::record_pairing_reached_after_cancel(tenant.community());
     }
 
+    control.prove_nip_fi_line(pubkey);
     if let Some(shadow) = control.nip_fi_shadow() {
         shadow.observe_pairing(pubkey);
         shadow
@@ -6270,6 +6276,7 @@ mod tests {
                                     permit,
                                     Some(assertion_i),
                                     None,
+                                    None,
                                     conn_time,
                                 )
                                 .await
@@ -6404,11 +6411,22 @@ mod tests {
         session: Arc<crate::nip_fi_shadow_session::ShadowSession>,
         community: buzz_core::tenant::CommunityId,
     ) -> Vec<String> {
+        let control = crate::state::CommunityConnectionControl::new(CancellationToken::new());
+        control.attach_nip_fi_shadow(Some(Arc::clone(&session)));
+        audio_auth_on(state, key, control, community).await
+    }
+
+    /// Serves one audio connection under `control` in `community`, sends
+    /// `key`'s AUTH and returns the text frames until the handler ends it.
+    async fn audio_auth_on(
+        state: Arc<crate::state::AppState>,
+        key: &nostr::Keys,
+        control: crate::state::CommunityConnectionControl,
+        community: buzz_core::tenant::CommunityId,
+    ) -> Vec<String> {
         use chrono::Utc;
         let tenant =
             buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string());
-        let control = crate::state::CommunityConnectionControl::new(CancellationToken::new());
-        control.attach_nip_fi_shadow(Some(Arc::clone(&session)));
         let slot = Arc::new(std::sync::Mutex::new(Some(control)));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -6552,6 +6570,31 @@ mod tests {
         assert_eq!(records, ["pairing/denied"]);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("reason=\"key_mismatch\""), "{lines:?}");
+        let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
+    }
+
+    // An upgrade would-deny's line names the key the audio AUTH verifies,
+    // and is counted once, at the upgrade. Mutation: deleting audio's
+    // `prove_nip_fi_line` logs `absent`.
+    #[test]
+    fn shadow_upgrade_would_deny_logs_the_audio_auth_key() {
+        use crate::nip_fi_shadow_session::tests::{shadow_logged, shadow_state};
+        let key = nostr::Keys::generate();
+        let (records, lines) = shadow_logged(async {
+            let state = Arc::new(shadow_state(None).await);
+            let line = crate::nip_fi_shadow::tests::upgrade_line("audio");
+            let control = crate::state::CommunityConnectionControl::new(CancellationToken::new());
+            control.attach_nip_fi_line(Some(&line));
+            let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+            audio_auth_on(state, &key, control, community).await;
+        });
+        assert_eq!(records, ["assertion/missing"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("reason=\"missing_assertion\""),
+            "{lines:?}"
+        );
         let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
         assert!(lines[0].contains(&proven), "{lines:?}");
     }
@@ -11032,6 +11075,7 @@ mod tests {
                                     channel_id,
                                     permit,
                                     Some(assertion),
+                                    None,
                                     None,
                                     Utc::now(),
                                 )
@@ -16044,6 +16088,7 @@ mod tests {
                                 Uuid::new_v4(),
                                 permit,
                                 Some(expired_assertion()),
+                                None,
                                 None,
                                 chrono::Utc::now(),
                             )
