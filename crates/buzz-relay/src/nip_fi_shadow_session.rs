@@ -19,7 +19,7 @@ use nostr::PublicKey;
 use tokio_util::sync::CancellationToken;
 
 use crate::nip_fi_core::NipFiSession;
-use crate::nip_fi_shadow::{Stage, WouldDeny};
+use crate::nip_fi_shadow::{Stage, WouldDeny, DENY_SET};
 use crate::state::AppState;
 
 #[derive(Clone, Copy)]
@@ -132,7 +132,13 @@ impl ShadowSession {
     /// NIP-42 key is not the asserted one, or the assertion has no key.
     pub(crate) fn observe_pairing(&self, pubkey: PublicKey) {
         if self.assertion.asserted_key() != Some(pubkey) {
-            self.decide(Err((Stage::Pairing, DenialClass::AuthorizationDenied)));
+            let reason = if self.assertion.asserted_key().is_some() {
+                "key_mismatch"
+            } else {
+                "no_asserted_key"
+            };
+            let deny = WouldDeny::new(Stage::Pairing, DenialClass::AuthorizationDenied, reason);
+            self.decide(Err(deny.by(Some(pubkey))));
         }
     }
 
@@ -147,10 +153,11 @@ impl ShadowSession {
         let Some(owner) = self.assertion.owner() else {
             return;
         };
-        if let Some(class) =
+        if let Some((class, reason)) =
             crate::handlers::auth::token_owner_denial(state, community, pubkey, owner).await
         {
-            self.decide(Err((Stage::Owner, class)));
+            let deny = WouldDeny::new(Stage::Owner, class, reason);
+            self.decide(Err(deny.by(Some(pubkey))));
         }
     }
 
@@ -161,7 +168,7 @@ impl ShadowSession {
             .registered()
             .insert(self.id, Arc::downgrade(self));
         if deny_listed(state, &self.assertion) {
-            self.decide(Err((Stage::DenySet, DenialClass::AuthorizationDenied)));
+            self.decide(Err(DENY_SET.by(self.assertion.asserted_key())));
         }
     }
 
@@ -178,7 +185,12 @@ impl ShadowSession {
         self.transition(|phase| match *phase {
             Phase::Pending { revoked: false } => {
                 *phase = Phase::Ended;
-                let verdict = Err((Stage::Deadline, DenialClass::EvidenceRejected));
+                let deny = WouldDeny::new(
+                    Stage::Deadline,
+                    DenialClass::EvidenceRejected,
+                    "session_deadline",
+                );
+                let verdict = Err(deny.by(self.assertion.asserted_key()));
                 crate::nip_fi_shadow::record_for(self.route, self.community.clone(), verdict);
             }
             Phase::Admitted => self.end(phase, "expired"),
@@ -289,7 +301,7 @@ pub(crate) fn upgrade_denied(
 ) -> bool {
     let denied = deny_listed(state, assertion);
     if denied {
-        let verdict = Err((Stage::DenySet, DenialClass::AuthorizationDenied));
+        let verdict = Err(DENY_SET.by(assertion.asserted_key()));
         crate::nip_fi_shadow::record_for("ws", community.clone(), verdict);
     }
     denied

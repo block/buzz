@@ -130,16 +130,24 @@ pub(crate) async fn token_owner_denial(
     community: buzz_core::CommunityId,
     agent: nostr::PublicKey,
     owner: nostr::PublicKey,
-) -> Option<buzz_auth::DenialClass> {
+) -> Option<(buzz_auth::DenialClass, &'static str)> {
     let ban = principal_ban_outcome(state, community, &owner, false).await;
     if let Some(denial) = ban_admission_denial(ban) {
-        return Some(denial.class);
+        let reason = match ban {
+            BanOutcome::Banned => "owner_banned",
+            _ => "owner_ban_unavailable",
+        };
+        return Some((denial.class, reason));
     }
     // No stored owner yet: enforce would link this one.
     let link = crate::api::relay_members::stored_owner_link(state, community, &agent, &owner)
         .await
         .unwrap_or(crate::api::relay_members::OwnerLink::Linked);
-    owner_link_denial(link, true).map(|denial| denial.class)
+    let reason = match link {
+        crate::api::relay_members::OwnerLink::Conflict => "not_stored_owner",
+        _ => "owner_link_unavailable",
+    };
+    owner_link_denial(link, true).map(|denial| (denial.class, reason))
 }
 
 fn ban_denial(outcome: BanOutcome) -> Option<(&'static str, &'static str, AuthOutcome)> {

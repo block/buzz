@@ -58,7 +58,12 @@ pub(crate) fn observe_deadline(
     match community.deadline().check() {
         Ok(()) => Some((assertion, label)),
         Err(class) => {
-            let verdict = Err((crate::nip_fi_shadow::Stage::Deadline, class));
+            let verdict = Err(crate::nip_fi_shadow::WouldDeny::new(
+                crate::nip_fi_shadow::Stage::Deadline,
+                class,
+                crate::nip_fi_shadow::STALE,
+            )
+            .by(assertion.asserted_key()));
             crate::nip_fi_shadow::record_for(route.shadow_label(), label, verdict);
             None
         }
@@ -108,15 +113,13 @@ pub(crate) async fn check_nip_fi_at_upgrade<'a>(
         if mode.observes_only() {
             let community = communities.resolve(headers).await;
             let verdict = match &community {
-                Err(class) => Err((crate::nip_fi_shadow::Stage::Community, *class)),
-                Ok(binding) => {
-                    evaluate_attached_assertion(headers, binding, verifier).map_err(|rejection| {
-                        (
-                            crate::nip_fi_shadow::Stage::Assertion,
-                            rejection.denial_class(),
-                        )
-                    })
-                }
+                Err(class) => Err(crate::nip_fi_shadow::WouldDeny::new(
+                    crate::nip_fi_shadow::Stage::Community,
+                    *class,
+                    crate::nip_fi_shadow::UNRESOLVED,
+                )),
+                Ok(binding) => evaluate_attached_assertion(headers, binding, verifier)
+                    .map_err(crate::nip_fi_shadow::WouldDeny::assertion),
             };
             match (verdict, community) {
                 (Ok(assertion), Ok(community)) => {

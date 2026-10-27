@@ -96,7 +96,7 @@ pub(crate) async fn resolve_for_admission(
         Err(_) => communities.resolve(headers).await,
     }
 }
-use crate::nip_fi_shadow::Stage;
+use crate::nip_fi_shadow::{Stage, WouldDeny};
 
 // ── Deny-map seam ─────────────────────────────────────────────────────────────
 
@@ -382,8 +382,8 @@ where
         deny_map,
         extract_nip98,
     )
-    .map_err(|(stage, class)| {
-        let reason = match stage {
+    .map_err(|deny| {
+        let reason = match deny.stage {
             Stage::Pairing => Some("nip_fi_http_key_mismatch"),
             Stage::DenySet => Some("nip_fi_http_denied_pubkey"),
             _ => None,
@@ -391,7 +391,7 @@ where
         if let Some(reason) = reason {
             metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
         }
-        http_denial(class)
+        http_denial(deny.class)
     })?;
     // The handler may have awaited (tenant lookup) since the guard resolved
     // the community; a snapshot that went stale meanwhile admits nothing.
@@ -430,12 +430,15 @@ async fn observe_shadow_verdict<D: HttpDenyMap>(
                 .deadline()
                 .check()
                 .map(|()| (proof.pubkey, assertion.owner()))
-                .map_err(|class| (Stage::Deadline, class)),
+                .map_err(|class| {
+                    WouldDeny::new(Stage::Deadline, class, crate::nip_fi_shadow::STALE)
+                        .by(Some(proof.pubkey))
+                }),
             Err(_) => Ok((proof.pubkey, assertion.owner())),
         });
     if let (Ok((agent, Some(owner))), Some(state)) = (verdict, owner_state) {
-        if let Some(class) = observe_owner(state, headers, agent, owner).await {
-            verdict = Err((Stage::Owner, class));
+        if let Some((class, reason)) = observe_owner(state, headers, agent, owner).await {
+            verdict = Err(WouldDeny::new(Stage::Owner, class, reason).by(Some(agent)));
         }
     }
     crate::nip_fi_shadow::record("http", &community, verdict.map(|_| ()));
@@ -449,7 +452,7 @@ async fn observe_owner(
     headers: &HeaderMap,
     agent: PublicKey,
     owner: PublicKey,
-) -> Option<DenialClass> {
+) -> Option<(DenialClass, &'static str)> {
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -458,7 +461,7 @@ async fn observe_owner(
         Ok(tenant) => tenant,
         Err(crate::tenant::BindError::UnmappedHost) => return None,
         Err(crate::tenant::BindError::Lookup(_)) => {
-            return Some(DenialClass::AuthorizationUnavailable)
+            return Some((DenialClass::AuthorizationUnavailable, "tenant_unavailable"))
         }
     };
     crate::handlers::auth::token_owner_denial(state, tenant.community(), agent, owner).await
@@ -490,7 +493,7 @@ fn evaluate_enforce_steps<D, X, E, F>(
     verifier: Option<&dyn VerifyAssertion>,
     deny_map: &D,
     extract_nip98: F,
-) -> Result<(Nip98Proof<X>, VerifiedAssertion), crate::nip_fi_shadow::WouldDeny>
+) -> Result<(Nip98Proof<X>, VerifiedAssertion), WouldDeny>
 where
     D: HttpDenyMap,
     F: FnOnce() -> Result<Nip98Proof<X>, E>,
@@ -499,7 +502,8 @@ where
     // evidence (`Authorization`, NIP-98, assertion) is examined. Explicit
     // here because some admitted routes are exempt from the router guard.
     // [NIP-FI.md:266-268]
-    let community = community.map_err(|c| (Stage::Community, *c))?;
+    let community = community
+        .map_err(|c| WouldDeny::new(Stage::Community, *c, crate::nip_fi_shadow::UNRESOLVED))?;
 
     // Step 2 — cardinality gate: exactly one Authorization field per
     // NIP-FI.md:695-700.
@@ -510,18 +514,21 @@ where
     // closes the attack where a relay-aware adversary slips a second credential
     // past the NIP-98 verifier.  [FI-INV-15]
     if headers.get_all("authorization").iter().count() > 1 {
-        return Err((Stage::Cardinality, DenialClass::EvidenceRejected));
+        return Err(WouldDeny::new(
+            Stage::Cardinality,
+            DenialClass::EvidenceRejected,
+            "duplicate_authorization",
+        ));
     }
 
     // Step 3: NIP-98.  Failure is a NIP-FI DenialClass, not a legacy error.
     // [NIP-FI.md §Admission procedure step 3; FI-TRACE-DENIAL-ORACLE]
     let proof = extract_nip98().map_err(|_legacy| {
-        let class = if headers.contains_key("authorization") {
-            DenialClass::EvidenceRejected
+        if headers.contains_key("authorization") {
+            WouldDeny::new(Stage::Nip98, DenialClass::EvidenceRejected, "invalid_proof")
         } else {
-            DenialClass::MissingEvidence
-        };
-        (Stage::Nip98, class)
+            WouldDeny::new(Stage::Nip98, DenialClass::MissingEvidence, "missing_proof")
+        }
     })?;
 
     // Steps 4–5: extract and verify the assertion.
@@ -530,7 +537,7 @@ where
             if let AssertionRejection::Verifier(e) = rejection {
                 tracing::debug!(code = e.code(), "nip-fi assertion denied at http ingress");
             }
-            (Stage::Assertion, rejection.denial_class())
+            WouldDeny::assertion(rejection).by(Some(proof.pubkey))
         })?;
 
     // Step 6: key pairing — assertion.asserted_key MUST equal proven NIP-98 key.
@@ -538,14 +545,20 @@ where
     // is a private-state denial (403).  [FI-INV-05] [FI-TRACE-DENIAL-ORACLE]
     if !asserted_key_matches(&assertion, proof.pubkey) {
         tracing::debug!(proven = %proof.pubkey.to_hex(), "NIP-FI HTTP key pairing mismatch");
-        return Err((Stage::Pairing, DenialClass::AuthorizationDenied));
+        let reason = if assertion.asserted_key().is_some() {
+            "key_mismatch"
+        } else {
+            "no_asserted_key"
+        };
+        let deny = WouldDeny::new(Stage::Pairing, DenialClass::AuthorizationDenied, reason);
+        return Err(deny.by(Some(proof.pubkey)));
     }
 
     // Step 7: deny-map check — (iss, pubkey) and, for an agent assertion,
     // (iss, owner) must not be in an active deny window.  Private-state
     // denial.  [FI-INV-14] [NIP-FI.md:624-627]
     if assertion_denied(deny_map, &assertion, Utc::now()) {
-        return Err((Stage::DenySet, DenialClass::AuthorizationDenied));
+        return Err(crate::nip_fi_shadow::DENY_SET.by(Some(proof.pubkey)));
     }
 
     Ok((proof, assertion))

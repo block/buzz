@@ -4,9 +4,16 @@
 //! and once per HTTP request. Labels are bounded and never the raw `Host`: the
 //! community label is the configured URI for the `env` source (a set bounded
 //! by config), `bound` for the `database` source, and `unmapped` when the
-//! community did not resolve. No token, claim, or issuer is logged. The one
-//! key logged is the NIP-98 proof key, in the debug line of the key-pairing step shadow shares with
-//! enforce. [FI-TRACE-PRIVACY-NONPUBLIC]
+//! community did not resolve.
+//!
+//! Each would-deny also writes one info line, `nip-fi shadow would-deny`,
+//! carrying the metric's labels plus two fields kept off the metric so its
+//! cardinality stays bounded: `reason`, one value from a fixed snake_case set
+//! naming the private condition the public `outcome` class collapses, and
+//! `pubkey`, the hex Nostr key of the would-be-refused client where the step
+//! knows one, else `absent`. An admit writes no line. No token, assertion,
+//! claim other than the public Nostr key, or issuer is logged.
+//! [FI-TRACE-PRIVACY-NONPUBLIC]
 //!
 //! # Metrics
 //!
@@ -28,11 +35,51 @@ use axum::http::HeaderMap;
 use buzz_auth::DenialClass;
 
 use metrics::SharedString;
+use nostr::PublicKey;
 
+use crate::nip_fi_core::AssertionRejection;
 use crate::nip_fi_http::Resolution;
 
-/// Which enforce step would have denied, and with which class.
-pub(crate) type WouldDeny = (Stage, DenialClass);
+/// Which enforce step would have denied, with which public class, the private
+/// reason behind it, and the client's key when the step knows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WouldDeny {
+    pub(crate) stage: Stage,
+    pub(crate) class: DenialClass,
+    reason: &'static str,
+    pubkey: Option<PublicKey>,
+}
+
+impl WouldDeny {
+    /// A would-deny whose client key is not known at `stage`.
+    pub(crate) const fn new(stage: Stage, class: DenialClass, reason: &'static str) -> Self {
+        Self {
+            stage,
+            class,
+            reason,
+            pubkey: None,
+        }
+    }
+
+    /// The same would-deny, attributed to `pubkey`.
+    pub(crate) const fn by(self, pubkey: Option<PublicKey>) -> Self {
+        Self { pubkey, ..self }
+    }
+
+    /// The assertion step's would-deny for `rejection`.
+    pub(crate) fn assertion(rejection: AssertionRejection) -> Self {
+        let reason = match rejection {
+            AssertionRejection::Transport(DenialClass::MissingEvidence) => "missing_assertion",
+            AssertionRejection::Transport(_) => "malformed_assertion",
+            AssertionRejection::VerifierUnavailable => "verifier_unavailable",
+            AssertionRejection::Verifier(e) => {
+                let code = e.code();
+                code.strip_prefix("nip_fi_").unwrap_or(code)
+            }
+        };
+        Self::new(Stage::Assertion, rejection.denial_class(), reason)
+    }
+}
 
 /// The enforce step a would-deny stops at: the shadow `stage` label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +113,13 @@ impl Stage {
 pub(crate) const BOUND: &str = "bound";
 /// The `community` label of a verdict whose community did not resolve.
 const UNMAPPED: &str = "unmapped";
+/// The reason for a Host that resolved to no community.
+pub(crate) const UNRESOLVED: &str = "community_unresolved";
+/// The deny-set step's would-deny, before attribution.
+pub(crate) const DENY_SET: WouldDeny =
+    WouldDeny::new(Stage::DenySet, DenialClass::AuthorizationDenied, "deny_set");
+/// The reason for a community binding that went stale before admission.
+pub(crate) const STALE: &str = "community_stale";
 
 /// The `community` label of `community`.
 pub(crate) fn label(community: &Resolution) -> SharedString {
@@ -86,11 +140,36 @@ pub(crate) fn record_for(
     community: SharedString,
     verdict: Result<(), WouldDeny>,
 ) {
+    if guard_denied() == Some(true) {
+        return;
+    }
     let (stage, outcome) = match verdict {
         Ok(()) => ("admit", "admit"),
-        Err((stage, class)) => (stage.label(), class_label(class)),
+        Err(deny) => (deny.stage.label(), class_label(deny.class)),
     };
-    emit(route, community, stage, outcome);
+    metrics::counter!(
+        "buzz_nip_fi_shadow_total",
+        "route" => route,
+        "stage" => stage,
+        "outcome" => outcome,
+        "community" => community.clone()
+    )
+    .increment(1);
+    // The counter is the record; only a would-deny earns a line.
+    if let Err(deny) = verdict {
+        let pubkey = deny
+            .pubkey
+            .map_or_else(|| "absent".to_owned(), |k| k.to_hex());
+        tracing::info!(
+            route,
+            stage,
+            outcome,
+            reason = deny.reason,
+            pubkey,
+            %community,
+            "nip-fi shadow would-deny"
+        );
+    }
 }
 
 /// The request's community, from the router guard's resolution when there is
@@ -122,24 +201,6 @@ pub(crate) async fn observe_guard<F: std::future::Future>(
 /// The enclosing router guard's verdict; `None` outside a guarded request.
 fn guard_denied() -> Option<bool> {
     GUARD_DENIED.try_with(|denied| *denied).ok()
-}
-
-fn emit(route: &'static str, community: SharedString, stage: &'static str, outcome: &'static str) {
-    if guard_denied() == Some(true) {
-        return;
-    }
-    metrics::counter!(
-        "buzz_nip_fi_shadow_total",
-        "route" => route,
-        "stage" => stage,
-        "outcome" => outcome,
-        "community" => community.clone()
-    )
-    .increment(1);
-    // The counter is the record; only a would-deny earns a (debug) line.
-    if stage != "admit" {
-        tracing::debug!(route, stage, outcome, %community, "nip-fi shadow would-deny");
-    }
 }
 
 const fn class_label(class: DenialClass) -> &'static str {
@@ -202,7 +263,7 @@ async fn observe_unbound(state: &crate::state::AppState, headers: &HeaderMap) {
     if nip_fi.mode.observes_only() {
         let community = resolution(state, headers).await;
         let verdict = match &community {
-            Err(class) => Err((Stage::Community, *class)),
+            Err(class) => Err(WouldDeny::new(Stage::Community, *class, UNRESOLVED)),
             Ok(_) if guard_denied() == Some(false) => Ok(()),
             Ok(_) => return,
         };
@@ -379,6 +440,113 @@ mod tests {
                 assert!(shadow_counts(&recorder).is_empty());
             }
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Record `verdicts` under an info-level subscriber; return the log text
+    /// and the shadow counter labels.
+    fn record_logged(
+        verdicts: Vec<Result<(), super::WouldDeny>>,
+    ) -> (String, Vec<(String, String, String)>) {
+        let _tracing = crate::test_support::tracing_dispatch_lock();
+        let out = Captured::default();
+        let writer = out.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let recorder = DebuggingRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            for verdict in verdicts {
+                super::record_for("http", super::BOUND.into(), verdict);
+            }
+        });
+        let log = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        (log, shadow_counts(&recorder))
+    }
+
+    // Mutations: logging at debug, dropping `reason` or `pubkey`, logging an
+    // admit, or adding either field to the counter's labels → RED.
+    #[test]
+    fn would_deny_logs_reason_and_pubkey_at_info_off_the_metric() {
+        use super::{Stage, WouldDeny};
+        use buzz_auth::DenialClass;
+        let key = nostr::Keys::generate().public_key();
+        let (log, counts) = record_logged(vec![
+            Err(WouldDeny::new(
+                Stage::Owner,
+                DenialClass::AuthorizationDenied,
+                "owner_banned",
+            )
+            .by(Some(key))),
+            Err(WouldDeny::new(
+                Stage::Nip98,
+                DenialClass::MissingEvidence,
+                "missing_proof",
+            )),
+            Ok(()),
+        ]);
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2, "{log}");
+        assert!(lines
+            .iter()
+            .all(|l| l.contains(" INFO ") && l.contains("nip-fi shadow would-deny")));
+        assert!(lines[0].contains("reason=\"owner_banned\""), "{log}");
+        assert!(
+            lines[0].contains(&format!("pubkey=\"{}\"", key.to_hex())),
+            "{log}"
+        );
+        assert!(lines[1].contains("reason=\"missing_proof\""), "{log}");
+        assert!(lines[1].contains("pubkey=\"absent\""), "{log}");
+        let label =
+            |stage: &str, outcome: &str| ("bound".to_owned(), stage.to_owned(), outcome.to_owned());
+        assert_eq!(
+            counts,
+            [
+                label("admit", "admit"),
+                label("nip98", "missing"),
+                label("owner", "denied")
+            ]
+        );
+    }
+
+    // Each verifier error names itself without the wire prefix, and the
+    // assertion step never borrows another step's attribution.
+    #[test]
+    fn assertion_reason_is_the_verifier_code_unprefixed() {
+        use crate::nip_fi_core::AssertionRejection;
+        use buzz_auth::DenialClass;
+        let deny = super::WouldDeny::assertion(AssertionRejection::Transport(
+            DenialClass::MissingEvidence,
+        ));
+        assert_eq!(deny.reason, "missing_assertion");
+        assert_eq!(deny.pubkey, None);
+        let deny = super::WouldDeny::assertion(AssertionRejection::VerifierUnavailable);
+        assert_eq!(
+            (deny.reason, deny.class),
+            (
+                "verifier_unavailable",
+                DenialClass::AuthorizationUnavailable
+            )
+        );
+        let deny = super::WouldDeny::assertion(AssertionRejection::Verifier(
+            buzz_auth::VerifierError::Expired,
+        ));
+        assert_eq!(deny.reason, "expired");
     }
 
     /// Mode semantics live in `NipFiMode`'s predicates. Naming a variant in

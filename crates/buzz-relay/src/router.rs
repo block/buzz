@@ -206,7 +206,9 @@ async fn nip_fi_assertion_guard(
         (Ok(()), Ok(community)) => {
             crate::nip_fi_http::with_resolved_community(Ok(community), next.run(request)).await
         }
-        (Err((_, class)), _) | (Ok(()), Err(class)) => http_denial(class),
+        (Err(crate::nip_fi_shadow::WouldDeny { class, .. }), _) | (Ok(()), Err(class)) => {
+            http_denial(class)
+        }
     }
 }
 
@@ -222,19 +224,20 @@ fn nip_fi_guard_steps(
     headers: &axum::http::HeaderMap,
     community: Result<&buzz_auth::CommunityBinding, &buzz_auth::DenialClass>,
 ) -> Result<(), crate::nip_fi_shadow::WouldDeny> {
-    let community = community.map_err(|class| (crate::nip_fi_shadow::Stage::Community, *class))?;
+    let community = community.map_err(|class| {
+        crate::nip_fi_shadow::WouldDeny::new(
+            crate::nip_fi_shadow::Stage::Community,
+            *class,
+            crate::nip_fi_shadow::UNRESOLVED,
+        )
+    })?;
     crate::nip_fi_core::evaluate_attached_assertion(
         headers,
         community,
         state.nip_fi_verifier.as_deref(),
     )
     .map(drop)
-    .map_err(|rejection| {
-        (
-            crate::nip_fi_shadow::Stage::Assertion,
-            rejection.denial_class(),
-        )
-    })
+    .map_err(crate::nip_fi_shadow::WouldDeny::assertion)
 }
 
 /// Paths the assertion guard never checks.
