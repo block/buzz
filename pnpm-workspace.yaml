@@ -5,6 +5,74 @@ packages:
 allowBuilds:
   esbuild: true
 overrides:
+  # Security bumps 2026-10-27 (one PR, acute first). Each selector matches the
+  # exact vulnerable resolved version so nothing else in the tree moves.
+  # Removable once the lockfile resolves the fixed versions on its own.
+  "@babel/core@7.29.0": 7.29.6 # GHSA-4x5r-pxfx-6jf8
+  # Tiptap ships one lockstep release train; mixing core 3.32.0 with 3.22.5
+  # siblings breaks at import time (e.g. @tiptap/react imports
+  # cancelPositionCheck, gone from core 3.32.0). All 29 family members move
+  # together; the advisory fixes ride on core.
+  "@tiptap/core@3.22.5": 3.32.0 # GHSA-cp6q-959q-f8rh, GHSA-j95f-988m-3j2f
+  "@tiptap/extension-blockquote@3.22.5": 3.32.0
+  "@tiptap/extension-bold@3.22.5": 3.32.0
+  "@tiptap/extension-bubble-menu@3.22.5": 3.32.0
+  "@tiptap/extension-bullet-list@3.22.5": 3.32.0
+  "@tiptap/extension-code@3.22.5": 3.32.0
+  "@tiptap/extension-code-block@3.22.5": 3.32.0
+  "@tiptap/extension-document@3.22.5": 3.32.0
+  "@tiptap/extension-dropcursor@3.22.5": 3.32.0
+  "@tiptap/extension-floating-menu@3.22.5": 3.32.0
+  "@tiptap/extension-gapcursor@3.22.5": 3.32.0
+  "@tiptap/extension-hard-break@3.22.5": 3.32.0
+  "@tiptap/extension-heading@3.22.5": 3.32.0
+  "@tiptap/extension-horizontal-rule@3.22.5": 3.32.0
+  "@tiptap/extension-italic@3.22.5": 3.32.0
+  "@tiptap/extension-link@3.22.5": 3.32.0
+  "@tiptap/extension-list@3.22.5": 3.32.0
+  "@tiptap/extension-list-item@3.22.5": 3.32.0
+  "@tiptap/extension-list-keymap@3.22.5": 3.32.0
+  "@tiptap/extension-ordered-list@3.22.5": 3.32.0
+  "@tiptap/extension-paragraph@3.22.5": 3.32.0
+  "@tiptap/extension-placeholder@3.22.5": 3.32.0
+  "@tiptap/extension-strike@3.22.5": 3.32.0
+  "@tiptap/extension-text@3.22.5": 3.32.0
+  "@tiptap/extension-underline@3.22.5": 3.32.0
+  "@tiptap/extensions@3.22.5": 3.32.0
+  "@tiptap/pm@3.22.5": 3.32.0
+  "@tiptap/react@3.22.5": 3.32.0
+  "@tiptap/starter-kit@3.22.5": 3.32.0
+  "@vitest/mocker@4.1.11": 4.1.12 # GHSA-qxg6-89mg-rqv8, GHSA-xp26-3454-mjgp
+  # Package-wide pin: browserslist 4.28.7 asks for ^2.10.44, so pnpm would
+  # otherwise float to 2.11.33 (published under 48 hours ago). 2.11.32 fixes
+  # the advisory and clears the Karenz.
+  "baseline-browser-mapping": 2.11.32 # GHSA-w5vr-8v7q-w6rv
+  "browserslist@4.28.2": 4.28.7 # GHSA-73wf-gq98-2v4g, GHSA-c83g-rgw3-j3cx
+  "markdown-it@14.1.1": 14.3.3 # GHSA-253c-mchw-3w2r, GHSA-6v5v-wf23-fmfq, GHSA-gfr2-rv44-r23c, GHSA-r7fv-28h4-cvq7, GHSA-vfgh-jcmw-g37q
+  "nanoid@3.3.16": 3.3.18 # GHSA-2v37-7h3g-55p8
+  "nanoid@3.3.17": 3.3.18 # GHSA-2v37-7h3g-55p8
+  "postcss@8.5.19": 8.5.23 # GHSA-fxqj-rqcc-2cmp
+  # OSV fixes GHSA-rj75-hqrm-r3gf in 6.1.5 (6.x line) and 7.1.6+ (7.x line).
+  # The only consumer, @tailwindcss/typography 0.5.20 (latest), pins 6.0.10
+  # exactly, so we take the same-major fix instead of forcing a major on it.
+  "postcss-selector-parser@6.0.10": 6.1.5 # GHSA-rj75-hqrm-r3gf
+  # Package-wide pin: @tiptap/pm 3.32.0 asks for ^1.42.0, so pnpm would float a
+  # second copy (1.42.8) next to the overridden one — duplicate private classes
+  # break desktop tsc. 1.42.3 fixes the advisory and satisfies every range.
+  "prosemirror-view": 1.42.3 # GHSA-c8x8-7fp4-3x9w
+  # prosemirror-view 1.42.3 needs prosemirror-transform ^1.12.4 while the rest
+  # of the tiptap tree floated to 1.12.0 — two copies broke desktop tsc
+  # (duplicate private classes). One copy at 1.12.4 satisfies every range.
+  "prosemirror-transform": 1.12.4
+  "seroval@1.5.4": 1.6.3 # GHSA-jp82-f5mq-hwhp, GHSA-p6vx-979v-rg4c
+  "source-map-js@1.2.1": 1.2.2 # GHSA-68fv-2mgg-jv7q
+  "vite@8.0.16": 8.1.6 # GHSA-587h-7wmj-h5pm, GHSA-698v-4r3x-3vcv, GHSA-9jrq-w75r-8gcw, GHSA-r825-w8mm-5pxw, GHSA-rq7h-c2jc-7f22
+  "zod@4.4.3": 4.6.7 # GHSA-mrhx-c7xc-m3w5
+  # One linkifyjs instance everywhere: @tiptap/extension-link 3.32.0 asks for
+  # ^4.3.3 (resolves 4.4.0) while desktop floated 4.3.2. Link's onCreate
+  # registers the buzz protocol in ITS copy; the app's `find` reads another —
+  # autolink breaks. 4.4.0 satisfies desktop's ^4.3.2.
+  "linkifyjs": 4.4.0
   # Force a single copy of the dismissable-layer. Radix packages otherwise
   # resolve different versions (react-menu pulled 1.1.11, react-dialog 1.1.15),
   # and each copy keeps its own module-level saved <body> pointer-events style —
