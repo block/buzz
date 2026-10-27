@@ -493,7 +493,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     } else {
       let displaysSwatch = contentIcon == "colorSwatch"
       button.configuration?.title = displaysSwatch ? nil : buttonLabel
-      button.configuration?.image = displaysSwatch || buttonLabel != nil ? nil : buttonImage
+      let image = button.isSelected
+        ? buttonImage?.withTintColor(labelForegroundColor ?? .label, renderingMode: .alwaysOriginal)
+        : buttonImage
+      button.configuration?.image = displaysSwatch || buttonLabel != nil ? nil : image
       swatchView.isHidden = !displaysSwatch
       activityIndicator.stopAnimating()
     }

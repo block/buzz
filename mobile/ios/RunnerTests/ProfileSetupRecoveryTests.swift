@@ -6,6 +6,38 @@ import XCTest
 
 final class ProfileSetupRecoveryTests: XCTestCase {
   @MainActor
+  func testSelectedEditorIconsContrastInBothAppearances() throws {
+    for dark in [false, true] {
+      for icon in ["emoji", "palette"] {
+        let control = NavigationGlassButtonPlatformView(
+          frame: CGRect(x: 0, y: 0, width: 64, height: 64), viewIdentifier: 911,
+          arguments: ["icon": icon, "controlSize": 64, "selected": true,
+            "brightness": dark ? "dark" : "light", "foregroundColor": dark ? 0xFFFFFFFF : 0xFF000000],
+          messenger: ProfileSetupTestMessenger())
+        let button = try XCTUnwrap(descendants(control.view()).compactMap { $0 as? UIButton }.first)
+        let image = try XCTUnwrap(button.configuration?.image)
+        XCTAssertEqual(image.renderingMode, .alwaysOriginal)
+        let cgImage = try XCTUnwrap(image.cgImage)
+        let width = cgImage.width, height = cgImage.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        try pixels.withUnsafeMutableBytes { bytes in
+          let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+          context.draw(cgImage, in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        }
+        let opaque = stride(from: 0, to: pixels.count, by: 4).filter { pixels[$0 + 3] > 250 }
+        XCTAssertFalse(opaque.isEmpty)
+        XCTAssertTrue(opaque.allSatisfy { pixels[$0] == (dark ? 0 : 255) })
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Selected \(icon) dark=\(dark)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+      }
+    }
+  }
+
+  @MainActor
   func testCameraShutterHasAnOpaqueCenter() throws {
     let control = NavigationGlassButtonPlatformView(
       frame: CGRect(x: 0, y: 0, width: 100, height: 100), viewIdentifier: 910,
