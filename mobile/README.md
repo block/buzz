@@ -179,8 +179,11 @@ flutter build apk --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
 ```
 
 The iOS and Android build gates validate any supplied define, rejecting empty or
-malformed values. Release/profile builds require an HTTPS origin without an
-explicit port. An absent define disables permission requests, APNs registration,
+malformed values. Release/profile builds require an HTTPS origin; explicit ports
+from 1 through 65535 are supported, for example `https://push.example:8444` for a
+private gateway. Credentials, paths other than `/`, query strings, and fragments
+are rejected. The configured gateway must still present a valid TLS certificate
+for its hostname. An absent define disables permission requests, APNs registration,
 gateway enrollment, and lease publication; Settings shows push as unavailable.
 No production gateway is selected implicitly. Enrollment
 grants and crash-recovery journals are scoped to this origin. Push has not
