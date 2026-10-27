@@ -191,9 +191,10 @@ void main() {
         expect(paintedWidth(), closeTo(220, 0.01));
         expect(hideCompleted, isFalse);
         await tester.pump(const Duration(milliseconds: 100));
+        await tester.pump(const Duration(milliseconds: 16));
         await tester.pump();
-        await hiding;
         expect(hideCompleted, isTrue);
+        await hiding;
         await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
           'buzz/profile_avatar_sheet',
           const StandardMethodCodec().encodeMethodCall(
