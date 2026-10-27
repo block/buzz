@@ -151,6 +151,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
       finishing = true
       let draft = call.arguments as? [String: Any]
       func returnToProfile() {
+        controller.navigationItem.setRightBarButton(nil, animated: false)
         controller.setEditorVisible(false)
         self.avatarChannel?.invokeMethod("hide", arguments: nil)
         self.animateAvatarMotion { self.avatarController?.view.alpha = 0 } completion: {
