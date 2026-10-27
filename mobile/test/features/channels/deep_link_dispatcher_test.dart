@@ -262,6 +262,149 @@ void main() {
     expect(pending.consumeCalls, 1);
   });
 
+  testWidgets('parks an unlisted channel link until the session connects', (
+    tester,
+  ) async {
+    const link = ChannelDeepLink(channelId: 'unjoined-channel');
+    final pending = _RecordingPendingDeepLinkNotifier(link);
+    final session = _MetadataRelaySession([
+      _channelMeta('unjoined-channel', 'agents', 'open'),
+    ], initialStatus: SessionStatus.reconnecting);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pendingDeepLinkProvider.overrideWith(() => pending),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FakeChannelsNotifier(Future.value([_channel])),
+          ),
+        ],
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            destinationBuilder: (channel, link) =>
+                _CapturedDestination(channel: channel, link: link),
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Cached channels are loaded, but no lookup goes to an unauthenticated
+    // socket and the link stays parked.
+    expect(session.filters, isEmpty);
+    expect(pending.consumeCalls, 0);
+    expect(find.byType(_CapturedDestination), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
+
+    session.setStatus(SessionStatus.connected);
+    await tester.pumpAndSettle();
+
+    expect(session.filters, hasLength(1));
+    final destination = tester.widget<_CapturedDestination>(
+      find.byType(_CapturedDestination),
+    );
+    expect(destination.channel.id, 'unjoined-channel');
+    expect(destination.link, same(link));
+    expect(pending.consumeCalls, 1);
+  });
+
+  testWidgets('opens a listed channel link while the session reconnects', (
+    tester,
+  ) async {
+    const link = ChannelDeepLink(channelId: 'channel-1');
+    final pending = _RecordingPendingDeepLinkNotifier(link);
+    final session = _MetadataRelaySession(
+      const [],
+      initialStatus: SessionStatus.reconnecting,
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pendingDeepLinkProvider.overrideWith(() => pending),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FakeChannelsNotifier(Future.value([_channel])),
+          ),
+        ],
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            destinationBuilder: (channel, link) =>
+                _CapturedDestination(channel: channel, link: link),
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(session.filters, isEmpty);
+    final destination = tester.widget<_CapturedDestination>(
+      find.byType(_CapturedDestination),
+    );
+    expect(destination.channel.id, 'channel-1');
+    expect(pending.consumeCalls, 1);
+  });
+
+  for (final backBeforeLookupEnds in [false, true]) {
+    testWidgets('retries a lookup cancelled by a session drop '
+        '(back before it ends: $backBeforeLookupEnds)', (tester) async {
+      const link = ChannelDeepLink(channelId: 'unjoined-channel');
+      final pending = _RecordingPendingDeepLinkNotifier(link);
+      final gate = Completer<void>();
+      final session = _MetadataRelaySession([
+        _channelMeta('unjoined-channel', 'agents', 'open'),
+      ], gate: gate);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pendingDeepLinkProvider.overrideWith(() => pending),
+            relaySessionProvider.overrideWith(() => session),
+            channelsProvider.overrideWith(
+              () => _FakeChannelsNotifier(Future.value([_channel])),
+            ),
+          ],
+          child: MaterialApp(
+            home: DeepLinkDispatcher(
+              destinationBuilder: (channel, link) =>
+                  _CapturedDestination(channel: channel, link: link),
+              child: const Scaffold(body: SizedBox()),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(session.filters, hasLength(1));
+
+      session.drop();
+      if (backBeforeLookupEnds) {
+        session.setStatus(SessionStatus.connected);
+      } else {
+        await tester.pumpAndSettle();
+        expect(pending.consumeCalls, 0);
+        expect(find.byType(_CapturedDestination), findsNothing);
+        expect(find.byType(SnackBar), findsNothing);
+        session.setStatus(SessionStatus.connected);
+      }
+      await tester.pump();
+      gate.complete();
+      await tester.pumpAndSettle();
+
+      expect(session.filters, hasLength(2));
+      expect(find.byType(SnackBar), findsNothing);
+      final destination = tester.widget<_CapturedDestination>(
+        find.byType(_CapturedDestination),
+      );
+      expect(destination.channel.id, 'unjoined-channel');
+      expect(destination.link, same(link));
+      expect(pending.consumeCalls, 1);
+    });
+  }
+
   testWidgets('dispatches a queued link after a slow lookup finishes', (
     tester,
   ) async {
@@ -1142,31 +1285,60 @@ NostrEvent _channelMeta(
 
 /// Answers kind:39000 lookups with canned metadata and records each filter.
 class _MetadataRelaySession extends RelaySessionNotifier {
-  _MetadataRelaySession(this.metas, {this.fail = false, this.gate});
+  _MetadataRelaySession(
+    this.metas, {
+    this.fail = false,
+    this.gate,
+    this.initialStatus = SessionStatus.connected,
+  });
 
   final List<NostrEvent> metas;
   final bool fail;
 
   /// When set, each lookup waits for it, so tests can act mid-lookup.
   final Completer<void>? gate;
+  final SessionStatus initialStatus;
   final filters = <NostrFilter>[];
+  final _running = <Completer<List<NostrEvent>>>[];
 
   @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
+  SessionState build() => SessionState(status: initialStatus);
+
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
+
+  /// A socket drop cancels every running lookup, then starts reconnecting.
+  void drop() {
+    for (final lookup in _running) {
+      if (!lookup.isCompleted) lookup.completeError(Exception('Lost'));
+    }
+    _running.clear();
+    setStatus(SessionStatus.reconnecting);
+  }
 
   @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async {
+  }) {
     filters.add(filter);
-    if (gate case final gate?) await gate.future;
-    if (fail) throw StateError('relay unavailable');
-    final ids = filter.tags['#d'] ?? const <String>[];
-    return [
-      for (final event in metas)
-        if (ids.contains(event.getTagValue('d'))) event,
-    ];
+    final lookup = Completer<List<NostrEvent>>();
+    _running.add(lookup);
+    Future<void> answer() async {
+      if (gate case final gate?) await gate.future;
+      if (lookup.isCompleted) return;
+      if (fail) {
+        lookup.completeError(StateError('relay unavailable'));
+        return;
+      }
+      final ids = filter.tags['#d'] ?? const <String>[];
+      lookup.complete([
+        for (final event in metas)
+          if (ids.contains(event.getTagValue('d'))) event,
+      ]);
+    }
+
+    unawaited(answer());
+    return lookup.future;
   }
 }
 

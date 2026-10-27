@@ -1022,36 +1022,26 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
-  /// Finds [channelId] so a link can open it.
+  /// Reads [channelId]'s kind:39000 metadata so a link can open a channel
+  /// that is not in the loaded list.
   ///
   /// The loaded list holds member channels and, after Browse, the open
-  /// directory. A link can name an open channel outside both, so this then
-  /// reads that one channel's kind:39000 metadata. The relay filters the read
-  /// by the caller's access. Like directory discovery, a private channel or DM
+  /// directory. A link can name an open channel outside both. The relay
+  /// filters the read by the caller's access, so call this only on a
+  /// connected session. Like directory discovery, a private channel or DM
   /// opens only from the member list. Returns null when no channel qualifies.
-  Future<Channel?> resolveChannel(String channelId) async {
-    final listed = state.value
-        ?.where((channel) => channel.id == channelId)
-        .firstOrNull;
-    if (listed != null) return listed;
-
+  Future<Channel?> fetchOpenChannel(String channelId) async {
     final metas = await ref
         .read(relaySessionProvider.notifier)
         .fetchHistory(NostrFilters.channelMetadata([channelId]));
-    NostrEvent? latest;
-    for (final event in metas) {
-      if (event.kind != 39000 || event.getTagValue('d') != channelId) continue;
-      if (latest == null ||
-          event.createdAt > latest.createdAt ||
-          (event.createdAt == latest.createdAt &&
-              event.id.compareTo(latest.id) < 0)) {
-        latest = event;
-      }
-    }
+    final latest = _latestChannelEvents(
+      metas,
+      kind: 39000,
+    ).where((event) => event.getTagValue('d') == channelId).firstOrNull;
     if (latest == null) return null;
-    final channel = _channelFromMeta(latest, isMember: false);
-    if (channel.isPrivate || channel.isDm) return null;
-    return channel;
+    final data = ChannelData.fromEvent(latest);
+    if (data.visibility == 'private' || data.channelType == 'dm') return null;
+    return _channelFromMeta(latest, data, isMember: false);
   }
 
   /// Loads the directory when Browse channels opens after startup or an error.
