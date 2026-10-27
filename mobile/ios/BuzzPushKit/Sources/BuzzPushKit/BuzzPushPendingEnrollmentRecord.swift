@@ -28,6 +28,9 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
   public let attestation: String?
   /// Highest delegation generation reserved before a network request.
   public let delegationGeneration: Int64
+  /// Unix time the journaled installation request was prepared; nil when there
+  /// is none or the journal predates this field.
+  public let preparedAt: Int64?
 
   /// Creates a gateway-scoped durable record from authenticated enrollment state.
   public init(
@@ -43,7 +46,8 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     challenge: String? = nil,
     keyId: String? = nil,
     attestation: String? = nil,
-    delegationGeneration: Int64 = 0
+    delegationGeneration: Int64 = 0,
+    preparedAt: Int64? = nil
   ) {
     self.gatewayOrigin = gatewayOrigin
     self.relayOrigin = relayOrigin
@@ -58,6 +62,7 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     self.keyId = keyId
     self.attestation = attestation
     self.delegationGeneration = delegationGeneration
+    self.preparedAt = preparedAt
   }
 
 }

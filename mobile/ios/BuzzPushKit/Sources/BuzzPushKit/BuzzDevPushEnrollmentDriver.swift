@@ -326,6 +326,9 @@ struct BuzzDCAppAttestProvider: BuzzDevAppAttesting {
 /// Enrollment and delegation driver for real App Attest and the gated debug bypass.
 public final class BuzzDevPushEnrollmentDriver {
   public static let endpointEpoch: Int64 = 1
+  /// Minimum age before a journaled installation request the gateway rejected
+  /// is replaced, which bounds fresh App Attest keys while rejections persist.
+  static let rejectedEnrollmentReplacementSeconds: Int64 = 3_600
 
   private let gatewayBaseURL: URL
   private let gatewayOrigin: String
@@ -540,7 +543,8 @@ public final class BuzzDevPushEnrollmentDriver {
         challengeId: enrollmentChallenge.id.uuidString.lowercased(),
         challenge: enrollmentChallenge.value,
         keyId: attestation.keyId,
-        attestation: attestation.attestation
+        attestation: attestation.attestation,
+        preparedAt: nowSeconds
       )
       // The exact signed request is durable before the first network attempt.
       try store.savePendingEnrollment(pending)
@@ -575,16 +579,37 @@ public final class BuzzDevPushEnrollmentDriver {
         relayMetadataPubkey: relayMetadataPubkey
       )
     } catch BuzzDevPushEnrollmentError.unexpectedStatus(
-      route: "v1/installations", _, actual: 404, _
-    ) where pending.gatewayInstallationHandle == nil {
-      // Exact replay found no committed installation and its challenge expired.
-      // Only this terminal response permits replacing the old journal. A fresh
-      // request's failure propagates instead of recursively retrying forever.
+      route: "v1/installations", _, let actual, _
+    ) where pending.gatewayInstallationHandle == nil && replacesRejectedJournal(pending, actual) {
+      // Only a terminal response permits replacing the old journal with a fresh
+      // challenge and key. A fresh request's failure propagates instead of
+      // recursively retrying forever.
       try store.removePendingEnrollment(
         gatewayOrigin: gatewayOrigin,
         relayOrigin: pending.relayOrigin
       )
       return nil
+    }
+  }
+
+  /// 404 means the exact replay found no committed installation and its
+  /// challenge expired. The gateway returns 400 and 401 before looking up a
+  /// committed installation, so the same bytes can never recover one; those
+  /// journals are replaced only once old enough, because every replacement
+  /// generates and attests a new App Attest key.
+  private func replacesRejectedJournal(
+    _ pending: BuzzPushPendingEnrollmentRecord,
+    _ status: Int
+  ) -> Bool {
+    switch status {
+    case 404:
+      return true
+    case 400, 401:
+      guard let preparedAt = pending.preparedAt else { return true }
+      let nowSeconds = Int64(now().timeIntervalSince1970)
+      return nowSeconds - preparedAt >= Self.rejectedEnrollmentReplacementSeconds
+    default:
+      return false
     }
   }
 
@@ -638,7 +663,8 @@ public final class BuzzDevPushEnrollmentDriver {
         challenge: pending.challenge,
         keyId: pending.keyId,
         attestation: pending.attestation,
-        delegationGeneration: pending.delegationGeneration
+        delegationGeneration: pending.delegationGeneration,
+        preparedAt: pending.preparedAt
       )
       try store.savePendingEnrollment(pending)
     }
@@ -676,7 +702,8 @@ public final class BuzzDevPushEnrollmentDriver {
       challenge: pending.challenge,
       keyId: pending.keyId,
       attestation: pending.attestation,
-      delegationGeneration: generation
+      delegationGeneration: generation,
+      preparedAt: pending.preparedAt
     )
     // Reserve before delegation so a committed delegation followed by a local
     // save failure is retried at a strictly higher generation.
