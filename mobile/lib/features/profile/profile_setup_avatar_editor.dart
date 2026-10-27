@@ -106,6 +106,7 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
       if (anchoredPreview == null) return null;
       const channel = MethodChannel('buzz/profile_avatar_sheet');
       channel.setMethodCallHandler((call) async {
+        final reduceMotion = MediaQuery.disableAnimationsOf(context);
         if (call.method == 'done') doneRef.value?.call();
         if (call.method == 'back') {
           final navigator = Navigator.of(context);
@@ -127,7 +128,7 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
           }
         }
         if (call.method == 'hide') {
-          if (MediaQuery.disableAnimationsOf(context)) {
+          if (reduceMotion) {
             transition.value = 0;
           } else {
             await transition.reverse().orCancel;
@@ -138,7 +139,7 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
           await WidgetsBinding.instance.endOfFrame;
         }
         if (call.method == 'reveal') {
-          if (MediaQuery.disableAnimationsOf(context)) {
+          if (reduceMotion) {
             transition.value = 1;
           } else {
             transition.forward(from: 0);
