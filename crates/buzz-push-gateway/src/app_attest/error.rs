@@ -4,6 +4,8 @@ use std::{error::Error, fmt};
 pub enum AppAttestError {
     /// Certificate structure or trust validation failed.
     InvalidCertificate,
+    /// The proof is not valid standard base64.
+    InvalidBase64,
     /// CBOR is malformed, ambiguous, or does not match the operation schema.
     InvalidCbor,
     /// An operational parsing budget was exceeded.
@@ -23,6 +25,7 @@ impl fmt::Display for AppAttestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidCertificate => write!(f, "invalid certificate path or structure"),
+            Self::InvalidBase64 => write!(f, "invalid base64 encoding"),
             Self::InvalidCbor => write!(f, "invalid CBOR structure"),
             Self::ResourceLimit => write!(f, "verification resource limit"),
             AppAttestError::InvalidNonce => write!(f, "invalid nonce"),

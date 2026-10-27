@@ -92,7 +92,7 @@ impl AppAttestVerifier {
         }
         let cbor = STANDARD
             .decode(attestation_b64)
-            .map_err(|_| verification_error("attestation", error::AppAttestError::InvalidCbor))?;
+            .map_err(|_| verification_error("attestation", error::AppAttestError::InvalidBase64))?;
         if cbor.is_empty() || cbor.len() > crate::model::MAX_APP_ATTESTATION_BYTES {
             return Err(verification_error(
                 "attestation",
@@ -131,7 +131,7 @@ impl AppAttestVerifier {
         }
         let cbor = STANDARD
             .decode(assertion_b64)
-            .map_err(|_| verification_error("assertion", error::AppAttestError::InvalidCbor))?;
+            .map_err(|_| verification_error("assertion", error::AppAttestError::InvalidBase64))?;
         if cbor.is_empty() || cbor.len() > MAX_ASSERTION_BYTES {
             return Err(verification_error(
                 "assertion",
@@ -163,6 +163,7 @@ fn verification_error(operation: &'static str, error: error::AppAttestError) -> 
     use error::AppAttestError as E;
     let reason = match error {
         E::ResourceLimit => "capacity",
+        E::InvalidBase64 => "encoding",
         E::InvalidCbor | E::InvalidFormat | E::AuthenticatorDataTooShort => "structure",
         E::InvalidCertificate => "certificate",
         E::InvalidNonce | E::InvalidSignature => "signature",
