@@ -388,12 +388,16 @@ class RemoteAgentController extends ChangeNotifier {
     // Retain the completed registration if the listing refresh fails, so Retry
     // resumes the same identity instead of creating another agent.
     await refresh();
+    // Drop the record before its instructions, so an interrupted cleanup never
+    // leaves a pending setup whose instructions are gone.
     final prefs = await SharedPreferences.getInstance();
+    if (!await prefs.remove('$scope:pending')) {
+      throw StateError('Could not clear the finished setup. Retry.');
+    }
+    pending = null;
     await accountSecureStorage.delete(
       key: '$scope:instructions:${setup['request']}',
     );
-    await prefs.remove('$scope:pending');
-    pending = null;
     status = '${setup['name']} is ready. Mention it in a channel.';
   });
 
@@ -407,14 +411,14 @@ class RemoteAgentController extends ChangeNotifier {
       throw StateError('This setup already has an agent. Resume it.');
     }
     final scope = _storageScope;
-    await accountSecureStorage.delete(
-      key: '$scope:instructions:${setup['request']}',
-    );
     final prefs = await SharedPreferences.getInstance();
     if (!await prefs.remove('$scope:pending')) {
       throw StateError('Could not discard unfinished setup.');
     }
     pending = null;
+    await accountSecureStorage.delete(
+      key: '$scope:instructions:${setup['request']}',
+    );
     status = '';
   });
 
@@ -444,11 +448,11 @@ class RemoteAgentController extends ChangeNotifier {
       throw StateError('Agent deletion is pending. Retry Delete.');
     }
     await keys.withKeys((key) async {
+      // Saved communities may store an https relay URL; sockets need wss.
+      final config = RelayConfig(baseUrl: relay, nsec: key.nsec);
       await submitSignedEventOnce(
-        wsUrl: relay,
-        headers: await relayAuth.headers(
-          RelayConfig(baseUrl: relay, nsec: key.nsec),
-        ),
+        wsUrl: config.wsUrl,
+        headers: await relayAuth.headers(config),
         nsec: key.nsec,
         kind: 30177,
         content: jsonEncode({
@@ -467,11 +471,10 @@ class RemoteAgentController extends ChangeNotifier {
   /// Removes only this owner's registration in [relay].
   Future<void> removePolicy(String relay, String pubkey) =>
       keys.withKeys((key) async {
+        final config = RelayConfig(baseUrl: relay, nsec: key.nsec);
         await submitSignedEventOnce(
-          wsUrl: relay,
-          headers: await relayAuth.headers(
-            RelayConfig(baseUrl: relay, nsec: key.nsec),
-          ),
+          wsUrl: config.wsUrl,
+          headers: await relayAuth.headers(config),
           nsec: key.nsec,
           kind: 5,
           content: '',
