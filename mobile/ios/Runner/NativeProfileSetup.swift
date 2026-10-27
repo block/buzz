@@ -525,7 +525,7 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
       let badge = CGRect(x: center - diameter / 2, y: center - diameter / 2, width: diameter, height: diameter)
       color("primaryArgb", fallback: .label).setFill()
       UIBezierPath(ovalIn: badge).fill()
-      tablerImage(code: 0xeb04, size: diameter * 0.48)?
+      pencilImage(size: diameter * 0.48)
         .withTintColor(color("onPrimaryArgb", fallback: .systemBackground), renderingMode: .alwaysOriginal)
         .draw(in: badge.insetBy(dx: diameter * 0.26, dy: diameter * 0.26))
     }.withRenderingMode(.alwaysOriginal)
@@ -561,6 +561,25 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     path.addArc(withCenter: cutout, radius: cutoutRadius, startAngle: cl, endAngle: cu, clockwise: true)
     path.close()
     return path
+  }
+
+  // Tabler pencil's 24-point outline. Native-only font glyphs can be removed
+  // by Flutter's release font subsetting, so render this badge as a vector.
+  private func pencilImage(size: CGFloat) -> UIImage {
+    UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { renderer in
+      renderer.cgContext.scaleBy(x: size / 24, y: size / 24)
+      let path = UIBezierPath()
+      path.move(to: CGPoint(x: 4, y: 20))
+      path.addLine(to: CGPoint(x: 8, y: 20))
+      path.addLine(to: CGPoint(x: 18.5, y: 9.5))
+      path.addArc(withCenter: CGPoint(x: 16.5, y: 7.5), radius: sqrt(8), startAngle: .pi / 4, endAngle: -.pi * 3 / 4, clockwise: false)
+      path.addLine(to: CGPoint(x: 4, y: 16))
+      path.close()
+      path.move(to: CGPoint(x: 13.5, y: 6.5))
+      path.addLine(to: CGPoint(x: 17.5, y: 10.5))
+      path.lineWidth = 2; path.lineCapStyle = .round; path.lineJoinStyle = .round
+      UIColor.black.setStroke(); path.stroke()
+    }.withRenderingMode(.alwaysTemplate)
   }
 
   private func tablerPlusImage() -> UIImage? { tablerImage(code: 0xeb0b, size: 40) }
