@@ -19,9 +19,10 @@ use std::{
 use tracing_subscriber::EnvFilter;
 
 /// Without `RUST_LOG`, keep the gateway's own warnings, such as App Attest
-/// rejection reasons, instead of `EnvFilter`'s error-only default.
+/// rejection reasons, alongside `EnvFilter`'s error-level default for all
+/// other targets.
 fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
-    EnvFilter::new(rust_log.unwrap_or("buzz_push_gateway=warn"))
+    EnvFilter::new(rust_log.unwrap_or("error,buzz_push_gateway=warn"))
 }
 
 #[tokio::main]
@@ -158,17 +159,49 @@ async fn shutdown_signal() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::log_env_filter;
-    use tracing_subscriber::filter::LevelFilter;
+    use std::sync::{Arc, Mutex};
 
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn emitted(rust_log: Option<&str>) -> String {
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(log_env_filter(rust_log))
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "buzz_push_gateway", "gateway-info");
+            tracing::warn!(target: "buzz_push_gateway", "gateway-warn");
+            tracing::warn!(target: "sqlx", "dependency-warn");
+            tracing::error!(target: "sqlx", "dependency-error");
+        });
+        let bytes = capture.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    // The only test in this binary, so no other thread races tracing's
+    // global callsite-interest cache.
     #[test]
-    fn default_log_filter_keeps_gateway_warnings() {
-        assert_eq!(
-            log_env_filter(None).max_level_hint(),
-            Some(LevelFilter::WARN)
-        );
-        assert_eq!(
-            log_env_filter(Some("info")).max_level_hint(),
-            Some(LevelFilter::INFO)
-        );
+    fn default_log_filter_keeps_gateway_warnings_and_dependency_errors() {
+        let logs = emitted(None);
+        assert!(logs.contains("gateway-warn"), "{logs}");
+        assert!(logs.contains("dependency-error"), "{logs}");
+        assert!(!logs.contains("gateway-info"), "{logs}");
+        assert!(!logs.contains("dependency-warn"), "{logs}");
+
+        let logs = emitted(Some("info"));
+        assert!(logs.contains("gateway-info"), "{logs}");
+        assert!(logs.contains("dependency-warn"), "{logs}");
     }
 }
