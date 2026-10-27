@@ -577,19 +577,20 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                       ),
                     ),
                     builder: (context, child) {
-                      final progress = anchoredPreview == null
-                          ? curvedEntrance.value
-                          : 1.0;
+                      final progress = reduceMotion
+                          ? 1.0
+                          : curvedEntrance.value;
+                      final entranceOffset = anchoredPreview == null
+                          ? collapsedPreviewOffset
+                          : anchoredPreview!.top - displayedPreviewTop;
                       return Transform.translate(
                         key: const ValueKey('avatar-editor-entrance-transform'),
-                        offset: Offset(
-                          0,
-                          collapsedPreviewOffset * (1 - progress),
-                        ),
+                        offset: Offset(0, entranceOffset * (1 - progress)),
                         child: Transform.scale(
-                          scale:
-                              128 / _previewSize +
-                              (1 - 128 / _previewSize) * progress,
+                          scale: anchoredPreview != null
+                              ? 1
+                              : 128 / _previewSize +
+                                    (1 - 128 / _previewSize) * progress,
                           child: child,
                         ),
                       );

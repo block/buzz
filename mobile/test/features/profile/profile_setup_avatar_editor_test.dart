@@ -111,7 +111,7 @@ void main() {
       expect(previewRect!.width, greaterThan(0));
       expect(previewRect!.height, greaterThan(0));
       if (anchor != null) {
-        expect(previewRect, Rect.fromLTWH(anchor.left, 56, 220, 220));
+        expect(previewRect, anchor);
         final circle = tester.getRect(
           find.byKey(const ValueKey('avatar-preview-position')),
         );
@@ -135,13 +135,19 @@ void main() {
           (_) {},
         );
         await tester.pump();
-        await tester.pump(const Duration(milliseconds: 200));
-        expect(
-          tester
-              .getTopLeft(find.byKey(const ValueKey('avatar-preview-position')))
-              .dy,
-          66.0,
+        final visibleAvatar = find.byKey(
+          const ValueKey('avatar-editor-fixed-preview'),
         );
+        expect(tester.getTopLeft(visibleAvatar).dy, 220);
+        expect(tester.getSize(visibleAvatar), const Size.square(220));
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(
+          tester.getTopLeft(visibleAvatar).dy,
+          allOf(greaterThan(66), lessThan(220)),
+        );
+        expect(tester.getSize(visibleAvatar), const Size.square(220));
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(tester.getTopLeft(visibleAvatar).dy, closeTo(66, 0.01));
         await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
           'buzz/profile_avatar_sheet',
           const StandardMethodCodec().encodeMethodCall(

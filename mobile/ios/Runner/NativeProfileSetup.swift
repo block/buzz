@@ -203,9 +203,11 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     avatarController?.view.frame = frame
     let rect = controller.avatarFrame(in: controller.view).offsetBy(dx: -frame.minX, dy: -frame.minY)
     avatarChannel?.invokeMethod("reveal", arguments: ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height])
-    animateAvatarMotion { self.avatarController?.view.alpha = 1 } completion: {
-      UIAccessibility.post(notification: .screenChanged, argument: self.avatarController?.view)
-    }
+    // Flutter moves the same-size preview from this anchor into the editor.
+    // Show it immediately and hide the native copy to avoid a crossfade ghost.
+    controller.setAvatarHidden(true)
+    avatarController?.view.alpha = 1
+    UIAccessibility.post(notification: .screenChanged, argument: avatarController?.view)
   }
 
   // Use the same motion and timing in both directions.
