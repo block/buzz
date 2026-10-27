@@ -153,7 +153,9 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
       func returnToProfile() {
         controller.navigationItem.setRightBarButton(nil, animated: false)
         controller.setEditorVisible(false)
-        self.avatarChannel?.invokeMethod("hide", arguments: nil)
+        let frame = controller.editorFrame
+        let rect = controller.avatarFrame(in: controller.view).offsetBy(dx: -frame.minX, dy: -frame.minY)
+        self.avatarChannel?.invokeMethod("hide", arguments: ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height])
         self.animateAvatarMotion { self.avatarController?.view.alpha = 0 } completion: {
           self.restoreProfilePage(controller)
         }
@@ -203,7 +205,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     avatarController?.view.frame = frame
     let rect = controller.avatarFrame(in: controller.view).offsetBy(dx: -frame.minX, dy: -frame.minY)
     avatarChannel?.invokeMethod("reveal", arguments: ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height])
-    // Flutter moves the same-size preview from this anchor into the editor.
+    // Flutter moves and grows the preview from this anchor into the editor.
     // Show it immediately and hide the native copy to avoid a crossfade ghost.
     controller.setAvatarHidden(true)
     avatarController?.view.alpha = 1
@@ -464,6 +466,7 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     avatarArguments = args
     hasAvatar = false
     defer {
+      avatar.transform = hasAvatar ? .identity : CGAffineTransform(scaleX: 0.85, y: 0.85)
       avatar.accessibilityLabel = hasAvatar ? "Edit profile photo" : "Add profile photo"
       if submit != nil { updateName() }
     }

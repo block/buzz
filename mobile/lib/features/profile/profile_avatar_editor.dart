@@ -136,6 +136,17 @@ class ProfileAvatarEditor extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final sourcePreview = this.anchoredPreview;
+    final initialPreviewScale =
+        (sourcePreview?.width ?? _previewSize) / _previewSize;
+    // Keep the editor layout full-sized while the empty native preview grows.
+    final anchoredPreview = sourcePreview == null
+        ? null
+        : Rect.fromCenter(
+            center: sourcePreview.center,
+            width: _previewSize,
+            height: _previewSize,
+          );
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final previousAnchor = useRef(anchoredPreview);
     final anchorMoved = previousAnchor.value != anchoredPreview;
@@ -571,7 +582,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                         child: anchoredPreview == null
                             ? fixedPreview
                             : SizedBox.square(
-                                dimension: anchoredPreview!.width,
+                                dimension: anchoredPreview.width,
                                 child: FittedBox(child: fixedPreview),
                               ),
                       ),
@@ -582,13 +593,14 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                           : curvedEntrance.value;
                       final entranceOffset = anchoredPreview == null
                           ? collapsedPreviewOffset
-                          : anchoredPreview!.top - displayedPreviewTop;
+                          : anchoredPreview.top - displayedPreviewTop;
                       return Transform.translate(
                         key: const ValueKey('avatar-editor-entrance-transform'),
                         offset: Offset(0, entranceOffset * (1 - progress)),
                         child: Transform.scale(
                           scale: anchoredPreview != null
-                              ? 1
+                              ? initialPreviewScale +
+                                    (1 - initialPreviewScale) * progress
                               : 128 / _previewSize +
                                     (1 - 128 / _previewSize) * progress,
                           child: child,

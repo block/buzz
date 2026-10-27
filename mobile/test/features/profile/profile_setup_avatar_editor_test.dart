@@ -148,6 +148,46 @@ void main() {
         expect(tester.getSize(visibleAvatar), const Size.square(220));
         await tester.pump(const Duration(milliseconds: 100));
         expect(tester.getTopLeft(visibleAvatar).dy, closeTo(66, 0.01));
+        // Empty native previews start 15% smaller, then reach editor size.
+        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          'buzz/profile_avatar_sheet',
+          const StandardMethodCodec().encodeMethodCall(
+            const MethodCall('reveal', {
+              'x': 306.5,
+              'y': 236.5,
+              'width': 187.0,
+              'height': 187.0,
+            }),
+          ),
+          (_) {},
+        );
+        await tester.pump();
+        double paintedWidth() =>
+            tester.getBottomRight(visibleAvatar).dx -
+            tester.getTopLeft(visibleAvatar).dx;
+        expect(paintedWidth(), closeTo(187, 0.01));
+        expect(tester.getTopLeft(visibleAvatar).dy, closeTo(236.5, 0.01));
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(paintedWidth(), allOf(greaterThan(187), lessThan(220)));
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(paintedWidth(), closeTo(220, 0.01));
+        // Saving returns to the full-size native avatar, without shrinking.
+        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          'buzz/profile_avatar_sheet',
+          const StandardMethodCodec().encodeMethodCall(
+            const MethodCall('hide', {
+              'x': 290.0,
+              'y': 220.0,
+              'width': 220.0,
+              'height': 220.0,
+            }),
+          ),
+          (_) {},
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(paintedWidth(), closeTo(220, 0.01));
+        await tester.pump(const Duration(milliseconds: 100));
         await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
           'buzz/profile_avatar_sheet',
           const StandardMethodCodec().encodeMethodCall(

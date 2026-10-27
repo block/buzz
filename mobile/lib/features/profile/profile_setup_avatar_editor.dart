@@ -115,14 +115,7 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
             closeRef.value?.call();
           }
         }
-        if (call.method == 'hide') {
-          if (MediaQuery.disableAnimationsOf(context)) {
-            transition.value = 0;
-          } else {
-            transition.reverse();
-          }
-        }
-        if (call.method == 'reveal') {
+        if (call.method == 'hide' || call.method == 'reveal') {
           final bounds = call.arguments;
           if (bounds is Map) {
             previewBounds.value = Rect.fromLTWH(
@@ -132,6 +125,15 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
               (bounds['height'] as num).toDouble(),
             );
           }
+        }
+        if (call.method == 'hide') {
+          if (MediaQuery.disableAnimationsOf(context)) {
+            transition.value = 0;
+          } else {
+            transition.reverse();
+          }
+        }
+        if (call.method == 'reveal') {
           if (MediaQuery.disableAnimationsOf(context)) {
             transition.value = 1;
           } else {

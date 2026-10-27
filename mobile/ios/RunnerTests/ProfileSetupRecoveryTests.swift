@@ -113,6 +113,7 @@ final class ProfileSetupRecoveryTests: XCTestCase {
     XCTAssertFalse(avatar.superview!.isHidden)
     profile.view.layoutIfNeeded()
     XCTAssertEqual(avatar.bounds.width, 220, accuracy: 0.5)
+    XCTAssertEqual(avatar.transform.a, 0.85, accuracy: 0.001)
     XCTAssertTrue(descendants(profile.view).compactMap { $0 as? UILabel }
       .contains { $0.text == "Choose your avatar" && $0.accessibilityTraits.contains(.header) })
     XCTAssertTrue(avatar.point(inside: CGPoint(x: 4, y: 110), with: nil))
