@@ -1172,6 +1172,20 @@ impl BuzzClient {
         result
     }
 
+    /// WebSocket URL for this client's relay.
+    ///
+    /// Long-lived subscriptions (`buzz feed watch`) need to open their own
+    /// connection rather than going through the one-shot publish helper, so the
+    /// URL conversion is exposed instead of duplicated at the call site.
+    pub fn ws_url(&self) -> String {
+        to_ws_url(&self.relay_url)
+    }
+
+    /// The NIP-OA authorization tag to include in AUTH events, when configured.
+    pub fn auth_tag(&self) -> Option<&Tag> {
+        self.auth_tag.as_ref()
+    }
+
     /// Publish an ephemeral event via WebSocket with NIP-42 authentication.
     ///
     /// The relay accepts only typing (kind:20002) of the ephemeral kinds
