@@ -23,9 +23,12 @@ import {
   rustFilterset,
   rustGroups,
   rustImporters,
+  rustIncludedTests,
   rustIncludes,
   rustModulePath,
+  rustModules,
   rustTarget,
+  rustTargetRoot,
   rustTests,
   rustWorkspaces,
   selectRust,
@@ -44,8 +47,12 @@ const git = (args, env = {}) =>
   });
 // `select` over a synthetic head tree: HEAD's tree with a comment appended to
 // each given file, so only those files differ and no test body changes. The
-// outputs are keyed per runner as the workflow reads them.
-function selectAppending(...files) {
+// outputs are keyed per runner as the workflow reads them. The selector
+// writes its summary and outputs to $GITHUB_STEP_SUMMARY and $GITHUB_OUTPUT
+// when they are set (as under Actions, where this suite also runs) and to
+// stdout otherwise, so the child gets one contract or the other by `github`,
+// never whichever the parent happens to have.
+function selectAppending(files, { github = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "flake-select-"));
   try {
     const env = { GIT_INDEX_FILE: join(dir, "index") };
@@ -59,19 +66,34 @@ function selectAppending(...files) {
       git(["update-index", "--cacheinfo", `100644,${blob},${file}`], env);
     }
     const tree = git(["write-tree"], env).trim();
+    const { GITHUB_STEP_SUMMARY, GITHUB_OUTPUT, ...inherited } = process.env;
+    const routed = {
+      GITHUB_STEP_SUMMARY: join(dir, "summary.md"),
+      GITHUB_OUTPUT: join(dir, "output.txt"),
+    };
     const result = spawnSync(
       process.execPath,
       [join(root, "scripts/flake-check.mjs"), "select", "HEAD", tree],
-      { cwd: root, encoding: "utf8" },
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: github ? { ...inherited, ...routed } : inherited,
+      },
     );
     assert.equal(result.status, 0, result.stderr);
+    const summary = github
+      ? readFileSync(routed.GITHUB_STEP_SUMMARY, "utf8")
+      : result.stdout;
+    const output = github
+      ? readFileSync(routed.GITHUB_OUTPUT, "utf8")
+      : result.stdout;
     const outputs = Object.fromEntries(
-      [...result.stdout.matchAll(/^(\w+)=(.*)$/gm)].map(([, key, value]) => [
+      [...output.matchAll(/^(\w+)=(.*)$/gm)].map(([, key, value]) => [
         key,
         value.split(" ").filter(Boolean),
       ]),
     );
-    return { summary: result.stdout, outputs };
+    return { summary, outputs, stdout: result.stdout };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -484,14 +506,55 @@ test("a helper under tests/ selects the integration binaries that include it", (
     read("../crates/buzz-agent/tests/golden_transcripts.rs"),
     /^mod common;$/m,
   );
+  // A binary's root is tests/<stem>.rs or tests/<dir>/main.rs; anything else
+  // under tests/ is a module of one.
+  for (const file of ["crates/x/tests/a.rs", "crates/x/tests/suite/main.rs"])
+    assert.ok(rustTargetRoot(file), file);
+  for (const file of [
+    "crates/x/tests/common/mod.rs",
+    "crates/x/tests/suite/util.rs",
+    "crates/x/src/lib.rs",
+    "crates/x/src/main.rs",
+  ])
+    assert.ok(!rustTargetRoot(file), file);
+  // File modules resolve by cargo's conventions against the real tree: a
+  // root's `mod common;` is tests/common/mod.rs, a non-root's `mod launch;`
+  // is <stem>/launch.rs, a `#[path]` names its file, and a declaration in a
+  // comment or one no file backs is left out.
+  assert.deepEqual(
+    rustModules(
+      "crates/buzz-agent/tests/fake_llm.rs",
+      "mod common;\n// mod missing;\nmod nowhere;\n",
+    ),
+    [{ name: "common", file: "crates/buzz-agent/tests/common/mod.rs" }],
+  );
+  assert.deepEqual(rustModules("crates/buzz-acp/src/acp.rs", "mod launch;\n"), [
+    { name: "launch", file: "crates/buzz-acp/src/acp/launch.rs" },
+  ]);
+  const wrapper = "crates/buzz-acp/tests/pool_lifecycle_state.rs";
+  assert.deepEqual(rustModules(wrapper, read(`../${wrapper}`)), [
+    { name: "pool_lifecycle", file: "crates/buzz-acp/src/pool_lifecycle.rs" },
+  ]);
+  // The wrapper's tests are the included module's, under its module name:
+  // the names nextest lists for the pool_lifecycle_state binary.
+  const included = rustTests(read("../crates/buzz-acp/src/pool_lifecycle.rs"));
+  assert.ok(included.length > 0);
+  assert.deepEqual(
+    rustIncludedTests(wrapper, read(`../${wrapper}`)).map((test) => test.name),
+    included.map((test) => `pool_lifecycle::${test.name}`),
+  );
+  assert.deepEqual(
+    rustIncludedTests("crates/buzz-agent/tests/fake_llm.rs", "mod common;\n"),
+    [],
+  );
 });
 
 test("select, through its entry point, repeats a changed Tauri test and the binaries including a changed helper", () => {
   // Reviewer probes on #8613: before, both produced an empty selection and
   // every repeat lane skipped.
-  const tauri = selectAppending(
+  const tauri = selectAppending([
     "desktop/src-tauri/tests/rodio_mixer_diagnostic.rs",
-  );
+  ]);
   assert.match(
     tauri.summary,
     /\| desktop\/src-tauri\/tests\/rodio_mixer_diagnostic\.rs \| tauri \| whole file \(shared code changed\): 3 test\(s\) \|/,
@@ -505,8 +568,21 @@ test("select, through its entry point, repeats a changed Tauri test and the bina
     ),
   );
   assert.equal(tauri.outputs.tauri.length, 3);
+  // Under Actions, where the Desktop JS lane runs this suite, the selector
+  // routes the summary and outputs to $GITHUB_STEP_SUMMARY and
+  // $GITHUB_OUTPUT: the same selection arrives there, and nothing on stdout.
+  const routed = selectAppending(
+    ["desktop/src-tauri/tests/rodio_mixer_diagnostic.rs"],
+    { github: true },
+  );
+  assert.equal(routed.stdout, "");
+  assert.match(
+    routed.summary,
+    /\| desktop\/src-tauri\/tests\/rodio_mixer_diagnostic\.rs \| tauri \| whole file \(shared code changed\): 3 test\(s\) \|/,
+  );
+  assert.deepEqual(routed.outputs, tauri.outputs);
 
-  const helper = selectAppending("crates/buzz-agent/tests/common/mod.rs");
+  const helper = selectAppending(["crates/buzz-agent/tests/common/mod.rs"]);
   assert.match(
     helper.summary,
     /\| crates\/buzz-agent\/tests\/common\/mod\.rs \| rust \| helper for: anthropic_continuation, fake_llm, permission_boundary, regressions: \d+ test\(s\) \|/,
@@ -522,15 +598,45 @@ test("select, through its entry point, repeats a changed Tauri test and the bina
   ]);
   assert.ok(helper.outputs.rust.length > 0);
   // Changed together, the helper and an importer select each test once.
-  const both = selectAppending(
+  const both = selectAppending([
     "crates/buzz-agent/tests/common/mod.rs",
     "crates/buzz-agent/tests/fake_llm.rs",
-  );
+  ]);
   assert.deepEqual(both.outputs.rust, [...new Set(both.outputs.rust)]);
   assert.deepEqual(both.outputs.rust.length, helper.outputs.rust.length);
+  // A tests/<stem>.rs root with no test of its own is a binary, not a
+  // helper: buzz-acp's pool_lifecycle_state compiles src/pool_lifecycle.rs
+  // in by `#[path]`, and a change to it repeats that binary's tests, not its
+  // siblings' (before, the selection was git_bootstrap, run_task and
+  // stdio_contract, and pool_lifecycle_state was not repeated at all).
+  const wrapper = "crates/buzz-acp/tests/pool_lifecycle_state.rs";
+  assert.deepEqual(rustTests(read(`../${wrapper}`)), []);
+  const included = rustTests(read("../crates/buzz-acp/src/pool_lifecycle.rs"));
+  const wrapped = selectAppending([wrapper]);
+  assert.match(
+    wrapped.summary,
+    new RegExp(
+      `\\| crates/buzz-acp/tests/pool_lifecycle_state\\.rs \\| rust \\| whole file \\(shared code changed\\): ${included.length} test\\(s\\) \\|`,
+    ),
+  );
+  assert.deepEqual(
+    wrapped.outputs.rust,
+    included.map((test) => `${wrapper}::pool_lifecycle::${test.name}`),
+  );
+  const { groups } = rustGroups(wrapped.outputs.rust);
+  assert.deepEqual(groups.get("buzz-acp").args, [
+    "-p",
+    "buzz-acp",
+    "--test",
+    "pool_lifecycle_state",
+  ]);
+  assert.deepEqual(
+    groups.get("buzz-acp").tests.map(({ exact }) => exact),
+    included.map((test) => `pool_lifecycle::${test.name}`),
+  );
   // A src/** file without test functions still selects nothing: the regular
   // lanes run what depends on it.
-  const source = selectAppending("crates/buzz-core/src/lib.rs");
+  const source = selectAppending(["crates/buzz-core/src/lib.rs"]);
   assert.match(
     source.summary,
     /\| crates\/buzz-core\/src\/lib\.rs \| rust \| no test functions \|/,
@@ -564,7 +670,31 @@ test("Rust selection: a hunk inside a test selects it, elsewhere selects every r
     select(diff([21, 1, 21, 1]), { added: true, previous: "" }),
     whole("new file"),
   );
-  // A file without test functions is not a test file.
+  // Tests of the file modules an integration-test root declares ride along
+  // with a whole selection, not with a hunk inside one of the root's own
+  // tests; a root with no test of its own selects only them, and one with no
+  // tests at all is not a test file.
+  const included = [
+    { name: "m::a", ignored: false },
+    { name: "m::b", ignored: true },
+  ];
+  assert.deepEqual(select(diff([4, 0, 5, 1]), { included }), {
+    ...whole("shared code changed"),
+    names: [...whole().names, "m::a"],
+  });
+  assert.deepEqual(select(diff([21, 1, 21, 1]), { included }), {
+    lines: [19],
+    names: ["tests::plain"],
+  });
+  assert.deepEqual(selectRust(diff([1, 1, 1, 1]), "mod m;\n", { included }), {
+    whole: true,
+    reason: "shared code changed",
+    names: ["m::a"],
+  });
+  assert.deepEqual(
+    selectRust(diff([0, 0, 1, 1]), "mod m;\n", { added: true, included }),
+    { whole: true, reason: "new file", names: ["m::a"] },
+  );
   assert.equal(selectRust(diff([1, 1, 1, 1]), "fn main() {}\n"), undefined);
   assert.equal(cratePackage("crates/buzz-core/src/filter.rs"), "buzz-core");
 });

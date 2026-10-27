@@ -309,9 +309,11 @@ select` maps the diff against the base branch to the Rust tests (in the root
 and desktop Tauri workspaces), desktop `node --test` files, Playwright smoke
 journeys and Flutter test files it changed: a hunk inside a test body selects
 that test; a change anywhere else in a test file (imports, helpers, hooks,
-the code under test beside Rust tests) or a new file selects the whole file,
-and a change to a helper module under a crate's `tests/` selects every
-integration test binary that includes it. The `Flake check (…)` lanes then
+the code under test beside Rust tests) or a new file selects the whole file.
+An integration test binary's tests include those of the file modules its
+root declares (`mod x;`, `#[path = "…"] mod x;`), and a change to a helper
+module under a crate's `tests/` selects every integration test binary that
+includes it. The `Flake check (…)` lanes then
 run that selection ten times with retries off; a repetition that fails is
 usually a race in the test or the code under it, worth fixing before it
 lands, though a test that needs infrastructure or the regular lane's

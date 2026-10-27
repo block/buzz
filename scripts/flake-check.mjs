@@ -402,23 +402,28 @@ export function selectTests(
 
 // Rust tests a diff selects: hunks inside a test body select that test, any
 // other hunk selects every test in the file (the module's code under test
-// lives beside them), and `#[ignore]`d tests own their lines but never run.
-// A file without test functions selects nothing of its own; `select` decides
-// what that means by where the file lives.
+// lives beside them) and, for an integration-test root, every test of the
+// file modules it declares (`included`: they are compiled into the same
+// binary, so a root with no test of its own still selects them). `#[ignore]`d
+// tests own their lines but never run. A file with no tests at all selects
+// nothing of its own; `select` decides what that means by where it lives.
 export function selectRust(
   diff,
   source,
-  { added = false, previous = "" } = {},
+  { added = false, previous = "", included = [] } = {},
 ) {
   const tests = rustTests(source);
-  if (tests.length === 0) return undefined;
-  const selection = selectTests(
-    hunkRanges(diff),
-    tests.map((test) => ({ ...test, line: test.start })),
-    { added, previous: added ? [] : rustTests(previous) },
-  );
+  if (tests.length === 0 && included.length === 0) return undefined;
+  const selection =
+    tests.length === 0
+      ? { whole: true, reason: added ? "new file" : "shared code changed" }
+      : selectTests(
+          hunkRanges(diff),
+          tests.map((test) => ({ ...test, line: test.start })),
+          { added, previous: added ? [] : rustTests(previous) },
+        );
   const chosen = selection.whole
-    ? tests
+    ? [...tests, ...included]
     : tests.filter((test) => selection.lines.includes(test.start));
   return {
     ...selection,
@@ -545,6 +550,65 @@ export function rustImporters(helper) {
   };
 }
 
+// Whether a tests/** file is the root of an integration-test binary
+// (tests/<stem>.rs or tests/<dir>/main.rs) rather than a module of one.
+export function rustTargetRoot(file) {
+  const place = rustFile(file);
+  if (place?.kind !== "tests") return false;
+  const { parts } = place;
+  return parts.length === 1 || (parts.length === 2 && parts[1] === "main");
+}
+
+// The file modules a Rust file declares, as cargo compiles them into its
+// binary: `#[path = "…"] mod x;` names a file relative to the declaring
+// file's directory; a plain `mod x;` is x.rs or x/mod.rs under the module's
+// directory, the file's own for a root (lib.rs, main.rs, mod.rs, a
+// tests/<stem>.rs) and <dir>/<stem>/ otherwise. Declarations are read with
+// comments and strings blanked; `#[path]` strings raw, since blanking erases
+// them. A module no file backs is left out.
+export function rustModules(file, source) {
+  const dir = path.dirname(file);
+  const stem = path.basename(file, ".rs");
+  const owned =
+    ["lib", "main", "mod"].includes(stem) || rustTargetRoot(file)
+      ? dir
+      : path.join(dir, stem);
+  const pathed = new Map();
+  for (const [, named, name] of source.matchAll(
+    /#\[\s*path\s*=\s*"([^"]+)"\s*\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/g,
+  ))
+    pathed.set(name, path.normalize(path.join(dir, named)));
+  const modules = [];
+  for (const [, name] of blankRust(source).matchAll(
+    /\b(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/g,
+  )) {
+    const found = (
+      pathed.has(name)
+        ? [pathed.get(name)]
+        : [`${owned}/${name}.rs`, `${owned}/${name}/mod.rs`]
+    ).find((candidate) => existsSync(`${root}${candidate}`));
+    if (found) modules.push({ name, file: found });
+  }
+  return modules;
+}
+
+// The tests a file compiles in from the file modules it declares,
+// transitively, named by their module path from it
+// (`pool_lifecycle::tests::name` for `#[path = "../src/pool_lifecycle.rs"]
+// mod pool_lifecycle;`), which is how nextest lists them for the binary. An
+// integration-test root with no test function of its own (a wrapper around a
+// source module, as buzz-acp's pool_lifecycle_state) has only these.
+export function rustIncludedTests(file, source, seen = new Set([file])) {
+  return rustModules(file, source).flatMap(({ name, file: module }) => {
+    if (seen.has(module)) return [];
+    seen.add(module);
+    const text = readFileSync(`${root}${module}`, "utf8");
+    return [...rustTests(text), ...rustIncludedTests(module, text, seen)].map(
+      (test) => ({ ...test, name: `${name}::${test.name}` }),
+    );
+  });
+}
+
 // Smoke journeys per spec file as Playwright lists them, each line once (a
 // looped declaration is listed once per iteration). Integration-only specs
 // list nothing for the smoke project, which Playwright reports as its "No
@@ -611,24 +675,28 @@ function select(base = "HEAD^1", head = "HEAD") {
     added.has(file) ? "" : git("show", `${base}:${file}`);
   const diff = (file) =>
     git("diff", "-U0", "--no-color", base, head, "--", file);
+  // The tests an integration-test root compiles in from its file modules;
+  // any other file's tests are its own.
+  const includedRust = (file, source) =>
+    rustTargetRoot(file) ? rustIncludedTests(file, source) : [];
   // Every runnable test of a Rust file, as entries.
-  const wholeRust = (file) =>
-    rustTests(readFileSync(`${root}${file}`, "utf8"))
+  const wholeRust = (file) => {
+    const source = readFileSync(`${root}${file}`, "utf8");
+    return [...rustTests(source), ...includedRust(file, source)]
       .filter((test) => !test.ignored)
       .map((test) => `${file}::${test.name}`);
+  };
   for (const runner of runners) {
     for (const file of files[runner]) {
       let entries = [file];
       let note = "whole file";
       if (rustWorkspaces[runner]) {
-        const selection = selectRust(
-          diff(file),
-          readFileSync(`${root}${file}`, "utf8"),
-          {
-            added: added.has(file),
-            previous: previous(file),
-          },
-        );
+        const source = readFileSync(`${root}${file}`, "utf8");
+        const selection = selectRust(diff(file), source, {
+          added: added.has(file),
+          previous: previous(file),
+          included: includedRust(file, source),
+        });
         if (selection) {
           entries = selection.names.map((name) => `${file}::${name}`);
           note =
@@ -637,12 +705,20 @@ function select(base = "HEAD^1", head = "HEAD") {
               : selection.whole
                 ? `whole file (${selection.reason}): ${selection.names.length} test(s)`
                 : `${selection.names.length} changed test(s)`;
+        } else if (rustTargetRoot(file)) {
+          // An integration-test root with no test of its own and none in
+          // the modules it declares: a binary with nothing to repeat.
+          rows.push(
+            `| ${cell(file)} | ${runner} | integration test with no tests |`,
+          );
+          continue;
         } else if (rustFile(file).kind === "tests") {
-          // A tests/** file without test functions is a helper module that
-          // integration binaries compile in (`mod common;`), so a change to
-          // it can change every test of each binary that includes it: select
-          // those binaries whole. The ignored and infrastructure exclusions
-          // still apply downstream, as for any whole-file selection.
+          // A tests/** file that is not a binary's root and has no test
+          // functions is a helper module that integration binaries compile
+          // in (`mod common;`), so a change to it can change every test of
+          // each binary that includes it: select those binaries whole. The
+          // ignored and infrastructure exclusions still apply downstream, as
+          // for any whole-file selection.
           const { importers, scanned } = rustImporters(file);
           entries = importers.flatMap(wholeRust);
           const names = importers.map(
