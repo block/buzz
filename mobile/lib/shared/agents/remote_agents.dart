@@ -59,17 +59,18 @@ final availableRemoteAgentsProvider = FutureProvider<Set<String>>((ref) async {
   // Loading notifies listeners, which must not happen during this build.
   scheduleMicrotask(() => controller.load(community!.relayUrl));
   if (active.isEmpty) return const {};
-  // The registry is account-wide; only agents registered here belong here.
-  return registeredCommunityAgents(
+  // The registry is account-wide; only agents live on this relay count.
+  return liveCommunityAgents(
     active,
     controller.owner,
     ref.read(relaySessionProvider.notifier).fetchHistory,
   );
 });
 
-/// Only registry identities with verified owner profiles on this relay belong
-/// to its community. Account-wide registry entries alone are not membership.
-Future<Set<String>> registeredCommunityAgents(
+/// Registry identities with verified owner profiles on this relay. Account-wide
+/// registry entries alone are not membership. A deletion interrupted after its
+/// relay registration was removed still counts, so it can be retried.
+Future<Set<String>> ownedCommunityAgents(
   Set<String> keys,
   String? owner,
   Future<List<NostrEvent>> Function(NostrFilter) fetch,
@@ -81,6 +82,30 @@ Future<Set<String>> registeredCommunityAgents(
       if (keys.contains(event.pubkey) &&
           verifiedOaOwnerPubkey(event.tags, event.pubkey) == owner)
         event.pubkey,
+  };
+}
+
+/// Owned agents whose kind 30177 registration is live on this relay, so they
+/// can answer here. Only these are presented as available.
+Future<Set<String>> liveCommunityAgents(
+  Set<String> keys,
+  String? owner,
+  Future<List<NostrEvent>> Function(NostrFilter) fetch,
+) async {
+  final owned = await ownedCommunityAgents(keys, owner, fetch);
+  if (owned.isEmpty) return {};
+  final registrations = await fetch(
+    NostrFilter(
+      kinds: const [30177],
+      authors: [owner!],
+      tags: {'#d': owned.toList()},
+    ),
+  );
+  return {
+    for (final event in registrations)
+      if (event.kind == 30177 && event.pubkey == owner)
+        for (final tag in event.tags)
+          if (tag.length > 1 && tag[0] == 'd' && owned.contains(tag[1])) tag[1],
   };
 }
 
@@ -297,7 +322,7 @@ class RemoteAgentController extends ChangeNotifier {
     await ensureBinding();
     if (community.pubkey != owner) {
       throw StateError(
-        'Sign in with the Builderlab account for this community.',
+        'Sign in with the Builderlab account you use in this community.',
       );
     }
     final scope = _storageScope;
@@ -478,8 +503,9 @@ class RemoteAgentController extends ChangeNotifier {
     await ensureBinding();
     check();
     final scope = _storageScope;
-    final communityOwner = community.pubkey;
-    if (communityOwner == null || owner != communityOwner) {
+    // Agents belong to the member who owns them (NIP-OA), not the community.
+    final member = community.pubkey;
+    if (member == null || owner != member) {
       throw AccountIdentityFailure.mismatch;
     }
     final agent = agents
@@ -512,7 +538,7 @@ class RemoteAgentController extends ChangeNotifier {
     final remaining = await fetch(
       NostrFilter(
         kinds: const [30177],
-        authors: [communityOwner],
+        authors: [member],
         tags: {
           '#d': [pubkey],
         },

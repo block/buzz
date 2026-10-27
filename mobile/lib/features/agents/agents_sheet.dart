@@ -135,7 +135,7 @@ class AgentsSheet extends HookConsumerWidget {
     final directory = ref.watch(agentDirectoryProvider);
     final registryFuture = useMemoized(() async {
       final fetch = ref.read(relaySessionProvider.notifier).fetchHistory;
-      return registeredCommunityAgents(
+      return ownedCommunityAgents(
         {
           for (final agent in controller.agents)
             agent['agent_pubkey'] as String,

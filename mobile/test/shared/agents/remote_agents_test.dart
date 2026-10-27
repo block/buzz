@@ -1,6 +1,7 @@
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/crypto/nip_oa.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
@@ -312,53 +313,73 @@ void main() {
   });
 
   test(
-    'availability counts only agents registered in this community',
+    'availability requires an owned profile and a live registration',
     () async {
       final other = nostr.Keys('0' * 63 + '3').public;
-      final stranger = nostr.Keys('0' * 63 + '4');
       final elsewhere = nostr.Keys('0' * 63 + '5').public;
       final profiles = [
-        NostrEvent(
-          id: '1',
-          pubkey: fakeAgent,
-          createdAt: 1,
-          kind: 0,
-          tags: [signOwnerAuthorization(fakeOwner, fakeAgent)],
-          content: '{}',
-          sig: '',
-        ),
+        _profile(fakeAgent, fakeOwner),
         // Attested by someone else, so not this owner's agent.
-        NostrEvent(
-          id: '2',
-          pubkey: other,
-          createdAt: 1,
-          kind: 0,
-          tags: [signOwnerAuthorization(stranger, other)],
-          content: '{}',
-          sig: '',
-        ),
+        _profile(other, nostr.Keys('0' * 63 + '4')),
       ];
-      expect(
-        await registeredCommunityAgents(
-          {fakeAgent, other, elsewhere},
-          fakeOwner.public,
-          (filter) async {
-            expect(filter.kinds, [0]);
-            return profiles;
-          },
-        ),
-        {fakeAgent},
-      );
-      expect(
-        await registeredCommunityAgents(
-          {fakeAgent},
-          null,
-          (_) async => profiles,
-        ),
-        isEmpty,
-      );
+      var registrations = <NostrEvent>[];
+      Future<List<NostrEvent>> fetch(NostrFilter filter) async {
+        if (filter.kinds.single == 0) return profiles;
+        expect(filter.kinds, [30177]);
+        expect(filter.authors, [fakeOwner.public]);
+        expect(filter.tags, {
+          '#d': [fakeAgent],
+        });
+        return registrations;
+      }
+
+      final keys = {fakeAgent, other, elsewhere};
+      // The list keeps owned agents, so an interrupted delete stays retryable.
+      expect(await ownedCommunityAgents(keys, fakeOwner.public, fetch), {
+        fakeAgent,
+      });
+      expect(await liveCommunityAgents(keys, fakeOwner.public, fetch), isEmpty);
+      registrations = [_registration(fakeAgent)];
+      expect(await liveCommunityAgents(keys, fakeOwner.public, fetch), {
+        fakeAgent,
+      });
+      expect(await liveCommunityAgents(keys, null, fetch), isEmpty);
     },
   );
+
+  test('presence stays local until the agent registration is live', () async {
+    final registry = FakeRegistry(bound: fakeOwner.public)
+      ..listed = [
+        {
+          'agent_pubkey': fakeAgent,
+          'agent_id': 'remote-id',
+          'status': 'BEEKEEPER_AGENT_STATUS_ACTIVE',
+        },
+      ];
+    final controller = await _controller(registry);
+    final relay = _AgentRelay();
+    final container = ProviderContainer(
+      overrides: [
+        presenceCacheProvider.overrideWith(_AgentPresence.new),
+        activeCommunityProvider.overrideWith((ref) async => _community()),
+        remoteAgentControllerProvider.overrideWithValue(controller),
+        relaySessionProvider.overrideWith(() => relay),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(activeCommunityProvider.future);
+    await controller.run(controller.refresh);
+
+    expect(await container.read(availableRemoteAgentsProvider.future), isEmpty);
+    expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+
+    relay.live = true;
+    container.invalidate(availableRemoteAgentsProvider);
+    expect(await container.read(availableRemoteAgentsProvider.future), {
+      fakeAgent,
+    });
+    expect(container.read(presentedPresenceProvider)[fakeAgent], 'online');
+  }, skip: !HostedEnvironment.enabled);
 
   test('owner proof verifies for only the provisioned agent key', () {
     final other = nostr.Keys('0' * 63 + '3');
@@ -405,4 +426,49 @@ void main() {
 class _Presence extends PresenceCacheNotifier {
   @override
   Map<String, String> build() => {'remote': 'offline', 'local': 'away'};
+}
+
+class _AgentPresence extends PresenceCacheNotifier {
+  @override
+  Map<String, String> build() => {fakeAgent: 'offline'};
+}
+
+NostrEvent _profile(String pubkey, nostr.Keys owner) => NostrEvent(
+  id: 'profile-$pubkey',
+  pubkey: pubkey,
+  createdAt: 1,
+  kind: 0,
+  tags: [signOwnerAuthorization(owner, pubkey)],
+  content: '{}',
+  sig: '',
+);
+
+NostrEvent _registration(String agent) => NostrEvent(
+  id: 'registration-$agent',
+  pubkey: fakeOwner.public,
+  createdAt: 1,
+  kind: 30177,
+  tags: [
+    ['d', agent],
+  ],
+  content: '{}',
+  sig: '',
+);
+
+/// Serves the owner's agent profile, and its registration once [live].
+class _AgentRelay extends RelaySessionNotifier {
+  bool live = false;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => switch (filter.kinds.single) {
+    0 => [_profile(fakeAgent, fakeOwner)],
+    30177 when live => [_registration(fakeAgent)],
+    _ => [],
+  };
 }
