@@ -10,12 +10,15 @@ import 'package:uuid/uuid.dart';
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../crypto/nip_oa.dart';
 import '../hosted/account_identity_store.dart';
 import '../hosted/builderlab_account.dart';
 import '../hosted/hosted_environment.dart';
 import '../hosted/hosted_relay_auth.dart';
+import '../relay/nostr_filters.dart';
 import '../relay/nostr_models.dart';
 import '../relay/relay_provider.dart';
+import '../relay/relay_session.dart';
 import '../relay/signed_event_relay.dart';
 import '../storage/secure_storage.dart';
 
@@ -37,11 +40,14 @@ final remoteAgentControllerProvider = Provider<RemoteAgentController>((ref) {
   return controller;
 });
 
-/// Exact public keys the signed-in owner's registry reports ACTIVE.
-/// Remote workers wake on messages, so this means available, not socket presence.
-final availableRemoteAgentsProvider = Provider<Set<String>>((ref) {
+/// The active community's remote agents that the signed-in owner's registry
+/// reports ACTIVE. Remote workers wake on messages, so this means available,
+/// not socket presence.
+final availableRemoteAgentsProvider = FutureProvider<Set<String>>((ref) async {
   final community = ref.watch(activeCommunityProvider).asData?.value;
   if (!supportsRemoteAgents(community)) return const {};
+  // A reconnect retries a registry load that failed.
+  ref.watch(relaySessionProvider.select((session) => session.status));
   final controller = ref.watch(remoteAgentControllerProvider);
   final active = controller.activeAgents;
   void changed() {
@@ -52,8 +58,31 @@ final availableRemoteAgentsProvider = Provider<Set<String>>((ref) {
   ref.onDispose(() => controller.removeListener(changed));
   // Loading notifies listeners, which must not happen during this build.
   scheduleMicrotask(() => controller.load(community!.relayUrl));
-  return active;
+  if (active.isEmpty) return const {};
+  // The registry is account-wide; only agents registered here belong here.
+  return registeredCommunityAgents(
+    active,
+    controller.owner,
+    ref.read(relaySessionProvider.notifier).fetchHistory,
+  );
 });
+
+/// Only registry identities with verified owner profiles on this relay belong
+/// to its community. Account-wide registry entries alone are not membership.
+Future<Set<String>> registeredCommunityAgents(
+  Set<String> keys,
+  String? owner,
+  Future<List<NostrEvent>> Function(NostrFilter) fetch,
+) async {
+  if (keys.isEmpty || owner == null) return {};
+  final events = await fetch(NostrFilters.profilesBatch(keys.toList()));
+  return {
+    for (final event in events)
+      if (keys.contains(event.pubkey) &&
+          verifiedOaOwnerPubkey(event.tags, event.pubkey) == owner)
+        event.pubkey,
+  };
+}
 
 /// Owner-side registry client for Builderlab remote agents, using the same
 /// account and Beekeeper contracts as desktop.
@@ -62,7 +91,9 @@ class RemoteAgentController extends ChangeNotifier {
     required this.account,
     required AccountIdentityStore keys,
     required this.relayAuth,
-  }) : _keys = keys;
+  }) : _keys = keys {
+    account.subjectChanges.addListener(_accountChanged);
+  }
 
   final BuilderlabAccountClient account;
   final AccountIdentityStore _keys;
@@ -114,11 +145,20 @@ class RemoteAgentController extends ChangeNotifier {
     _scope = null;
   }
 
+  /// Drops another account's registry as soon as the account changes.
+  void _accountChanged() {
+    if (_scope == null || _scope == _currentScope) return;
+    _clearAccountState();
+    _loadedRelay = null;
+    _notify();
+  }
+
   /// Loads the registry once per community; opening Agents always refreshes.
+  /// A failed load is retried on the next call.
   Future<void> load(String relay) async {
     if (_disposed || busy || _loadedRelay == relay) return;
     _loadedRelay = relay;
-    await run(refresh);
+    if (!await run(refresh) && _loadedRelay == relay) _loadedRelay = null;
   }
 
   /// Runs one operation at a time and turns its failure into [status].
@@ -517,6 +557,7 @@ class RemoteAgentController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    account.subjectChanges.removeListener(_accountChanged);
     super.dispose();
   }
 }

@@ -247,7 +247,7 @@ final presenceCacheProvider =
 /// presence. Local presence is unchanged.
 final presentedPresenceProvider = Provider<Map<String, String>>((ref) {
   final presence = ref.watch(presenceCacheProvider);
-  final remote = ref.watch(availableRemoteAgentsProvider);
+  final remote = ref.watch(availableRemoteAgentsProvider).value ?? const {};
   if (remote.isEmpty) return presence;
   return {...presence, for (final pubkey in remote) pubkey: 'online'};
 });

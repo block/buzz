@@ -6,7 +6,6 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
-import '../../shared/crypto/nip_oa.dart';
 import '../../shared/hosted/hosted_flow.dart';
 import '../../shared/hosted/hosted_flow_provider.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
@@ -107,24 +106,6 @@ class _AgentsNavigation extends HookConsumerWidget {
   }
 }
 
-/// Only registry identities with verified owner profiles on this relay belong
-/// in its list. Account-wide registry entries alone are not community membership.
-Future<Set<String>> registeredCommunityAgents(
-  List<Map<String, dynamic>> agents,
-  String? owner,
-  Future<List<NostrEvent>> Function(NostrFilter) fetch,
-) async {
-  if (agents.isEmpty || owner == null) return {};
-  final keys = agents.map((agent) => agent['agent_pubkey'] as String).toSet();
-  final events = await fetch(NostrFilters.profilesBatch(keys.toList()));
-  return {
-    for (final event in events)
-      if (keys.contains(event.pubkey) &&
-          verifiedOaOwnerPubkey(event.tags, event.pubkey) == owner)
-        event.pubkey,
-  };
-}
-
 /// The active community's agents, with remote-agent creation for its owner.
 class AgentsSheet extends HookConsumerWidget {
   const AgentsSheet({
@@ -155,7 +136,10 @@ class AgentsSheet extends HookConsumerWidget {
     final registryFuture = useMemoized(() async {
       final fetch = ref.read(relaySessionProvider.notifier).fetchHistory;
       return registeredCommunityAgents(
-        controller.agents,
+        {
+          for (final agent in controller.agents)
+            agent['agent_pubkey'] as String,
+        },
         controller.owner,
         fetch,
       );

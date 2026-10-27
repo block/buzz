@@ -287,13 +287,78 @@ void main() {
     await controller.run(controller.refresh);
     expect(controller.activeAgents, {fakeAgent});
 
+    var notified = 0;
+    controller.addListener(() => notified++);
     registry.subject = 'other-owner';
+    expect(notified, 1);
     expect(controller.activeAgents, isEmpty);
     // The other account has no saved key, so its registry is never listed.
     expect(await controller.run(controller.refresh), isFalse);
     expect(controller.agents, isEmpty);
     expect(controller.owner, isNull);
   });
+
+  test('a failed registry load retries on the next load', () async {
+    final registry = FakeRegistry(bound: 'f' * 64);
+    final controller = await _controller(registry);
+    final relay = _community().relayUrl;
+    await controller.load(relay);
+    expect(controller.status, 'Buzz identity: mismatch.');
+    registry.bound = fakeOwner.public;
+    await controller.load(relay);
+    expect(registry.calls, ['list-agents']);
+    await controller.load(relay);
+    expect(registry.calls, ['list-agents']);
+  });
+
+  test(
+    'availability counts only agents registered in this community',
+    () async {
+      final other = nostr.Keys('0' * 63 + '3').public;
+      final stranger = nostr.Keys('0' * 63 + '4');
+      final elsewhere = nostr.Keys('0' * 63 + '5').public;
+      final profiles = [
+        NostrEvent(
+          id: '1',
+          pubkey: fakeAgent,
+          createdAt: 1,
+          kind: 0,
+          tags: [signOwnerAuthorization(fakeOwner, fakeAgent)],
+          content: '{}',
+          sig: '',
+        ),
+        // Attested by someone else, so not this owner's agent.
+        NostrEvent(
+          id: '2',
+          pubkey: other,
+          createdAt: 1,
+          kind: 0,
+          tags: [signOwnerAuthorization(stranger, other)],
+          content: '{}',
+          sig: '',
+        ),
+      ];
+      expect(
+        await registeredCommunityAgents(
+          {fakeAgent, other, elsewhere},
+          fakeOwner.public,
+          (filter) async {
+            expect(filter.kinds, [0]);
+            return profiles;
+          },
+        ),
+        {fakeAgent},
+      );
+      expect(
+        await registeredCommunityAgents(
+          {fakeAgent},
+          null,
+          (_) async => profiles,
+        ),
+        isEmpty,
+      );
+    },
+  );
 
   test('owner proof verifies for only the provisioned agent key', () {
     final other = nostr.Keys('0' * 63 + '3');
@@ -317,20 +382,24 @@ void main() {
     }
   });
 
-  test('remote availability shows Online without changing local presence', () {
-    final container = ProviderContainer(
-      overrides: [
-        presenceCacheProvider.overrideWith(_Presence.new),
-        availableRemoteAgentsProvider.overrideWithValue({'remote'}),
-      ],
-    );
-    addTearDown(container.dispose);
-    expect(container.read(presentedPresenceProvider), {
-      'remote': 'online',
-      'local': 'away',
-    });
-    expect(container.read(presenceCacheProvider)['remote'], 'offline');
-  });
+  test(
+    'remote availability shows Online without changing local presence',
+    () async {
+      final container = ProviderContainer(
+        overrides: [
+          presenceCacheProvider.overrideWith(_Presence.new),
+          availableRemoteAgentsProvider.overrideWith((ref) async => {'remote'}),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(availableRemoteAgentsProvider.future);
+      expect(container.read(presentedPresenceProvider), {
+        'remote': 'online',
+        'local': 'away',
+      });
+      expect(container.read(presenceCacheProvider)['remote'], 'offline');
+    },
+  );
 }
 
 class _Presence extends PresenceCacheNotifier {

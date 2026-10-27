@@ -87,6 +87,10 @@ class BuilderlabAccountClient {
 
   BuilderlabAccount? get account => _account;
 
+  /// The signed-in subject, notifying when an account signs in, out or changes.
+  ValueListenable<String?> get subjectChanges => _subject;
+  final _subject = ValueNotifier<String?>(null);
+
   /// Runs operations one at a time in call order, so a callback exchange that
   /// arrives during startup restore waits instead of failing.
   Future<T> _serial<T>(Future<T> Function() operation) {
@@ -194,6 +198,7 @@ class BuilderlabAccountClient {
   BuilderlabAccount _adopt(String credential, BuilderlabAccount verified) {
     if (_disposed) throw AccountFailure.unavailable;
     _credential = credential;
+    _subject.value = verified.subject;
     return _account = verified;
   }
 
@@ -296,6 +301,7 @@ class BuilderlabAccountClient {
   Future<void> _clear() async {
     _credential = null;
     _account = null;
+    if (!_disposed) _subject.value = null;
     try {
       await _storage.delete(key: _storageKey);
     } catch (_) {
@@ -363,6 +369,7 @@ class BuilderlabAccountClient {
     _disposed = true;
     _credential = null;
     _account = null;
+    _subject.dispose();
     _http.close();
   }
 }

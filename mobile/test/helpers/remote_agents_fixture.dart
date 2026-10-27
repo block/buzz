@@ -2,6 +2,7 @@ import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -11,10 +12,28 @@ const fakeSubject = 'remote-owner';
 
 /// Fakes only the Builderlab network boundary.
 class FakeRegistry extends BuilderlabAccountClient {
-  FakeRegistry({this.bound, this.signedIn = true});
+  FakeRegistry({this.bound, bool signedIn = true}) : _signedIn = signedIn {
+    _changes.value = signedIn ? fakeSubject : null;
+  }
   String? bound;
-  bool signedIn;
-  String subject = fakeSubject;
+  bool _signedIn;
+  String _subjectValue = fakeSubject;
+  final _changes = ValueNotifier<String?>(null);
+
+  bool get signedIn => _signedIn;
+  set signedIn(bool value) {
+    _signedIn = value;
+    _changes.value = value ? _subjectValue : null;
+  }
+
+  String get subject => _subjectValue;
+  set subject(String value) {
+    _subjectValue = value;
+    if (_signedIn) _changes.value = value;
+  }
+
+  @override
+  ValueListenable<String?> get subjectChanges => _changes;
   bool failInstructions = false;
   bool rejectRegistration = false;
   Object deleteStatus = 1;
