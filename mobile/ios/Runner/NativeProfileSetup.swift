@@ -138,6 +138,10 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
       if call.method == "controls", let state = call.arguments as? [String: Any] {
         self.editorCanDone = state["canDone"] as? Bool ?? false
         self.editorBusy = state["busy"] as? Bool ?? false
+        let fullScreen = state["fullScreen"] as? Bool == true
+        navigation.setNavigationBarHidden(fullScreen, animated: false)
+        navigation.view.layoutIfNeeded()
+        self.avatarController?.view.frame = fullScreen ? controller.view.bounds : controller.editorFrame
         controller.navigationItem.rightBarButtonItem?.isEnabled = self.editorCanDone && !self.editorBusy
         controller.navigationItem.leftBarButtonItem?.isEnabled = !self.editorBusy
         result(nil); return
@@ -216,6 +220,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
   /// Both failed startup and normal editor return must leave a retryable sheet.
   private func restoreProfilePage(_ controller: NativeProfileSetupController?) {
     editorRequested = false; editorReady = false; editorCanDone = false; editorBusy = false
+    navigation?.setNavigationBarHidden(false, animated: false)
     controller?.navigationItem.rightBarButtonItem = nil
     avatarChannel?.setMethodCallHandler(nil); avatarChannel = nil
     avatarController?.willMove(toParent: nil)
@@ -237,6 +242,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
   }
   private func complete(_ action: String) {
     editorRequested = false; editorReady = false; editorCanDone = false; editorBusy = false
+    navigation?.setNavigationBarHidden(false, animated: false)
     disabledSheetPans.forEach { $0.isEnabled = true }; disabledSheetPans.removeAll()
     let result = pending; pending = nil; navigation = nil; session = nil
     avatarController?.willMove(toParent: nil)

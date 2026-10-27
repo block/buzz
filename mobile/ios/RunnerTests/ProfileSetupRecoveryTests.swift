@@ -6,6 +6,25 @@ import XCTest
 
 final class ProfileSetupRecoveryTests: XCTestCase {
   @MainActor
+  func testCameraShutterHasAnOpaqueCenter() throws {
+    let control = NavigationGlassButtonPlatformView(
+      frame: CGRect(x: 0, y: 0, width: 100, height: 100), viewIdentifier: 910,
+      arguments: ["icon": "shutter", "controlSize": 100, "accessibilityLabel": "Take photo"],
+      messenger: ProfileSetupTestMessenger())
+    let button = try XCTUnwrap(descendants(control.view()).compactMap { $0 as? UIButton }.first)
+    let image = try XCTUnwrap(button.configuration?.image?.cgImage)
+    var pixel = [UInt8](repeating: 0, count: 4)
+    let context = try XCTUnwrap(CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8,
+      bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+    context.translateBy(x: -CGFloat(image.width / 2), y: -CGFloat(image.height / 2))
+    context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height)))
+    XCTAssertEqual(pixel[3], 255, "The shutter must be filled, not an outlined circle")
+    let attachment = XCTAttachment(image: UIImage(cgImage: image))
+    attachment.lifetime = .keepAlways
+    add(attachment)
+  }
+
+  @MainActor
   func testStartedEditorWithoutReadyRestoresProfileAndAllowsRetry() async throws {
     let messenger = ProfileSetupTestMessenger()
     let parent = UIViewController()

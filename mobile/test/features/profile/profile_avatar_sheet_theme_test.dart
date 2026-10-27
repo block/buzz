@@ -16,6 +16,7 @@ void main() {
     final messenger = tester.binding.defaultBinaryMessenger;
     final url = emojiAvatarDataUrl('🐝', 0xFFFFE75C);
     Map? finished;
+    final controls = <Map>[];
     messenger.setMockMethodCallHandler(sheet, (call) async {
       if (call.method == 'initial') {
         return {
@@ -29,6 +30,7 @@ void main() {
           },
         };
       }
+      if (call.method == 'controls') controls.add(call.arguments as Map);
       if (call.method == 'finish') finished = call.arguments as Map?;
       return null;
     });
@@ -55,6 +57,22 @@ void main() {
       );
       expect(find.text('🐝'), findsWidgets);
     }
+    final navigator = tester.state<NavigatorState>(
+      find.byType(Navigator).first,
+    );
+    navigator.push<void>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => const Scaffold(body: Text('Position Photo')),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(controls.last['fullScreen'], isTrue);
+    expect(controls.last['canDone'], isFalse);
+    navigator.pop();
+    await tester.pumpAndSettle();
+    expect(controls.last['fullScreen'], isFalse);
+    expect(controls.last['canDone'], isTrue);
     await messenger.handlePlatformMessage(
       sheet.name,
       const StandardMethodCodec().encodeMethodCall(const MethodCall('done')),

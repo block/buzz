@@ -149,11 +149,12 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
           channel.invokeMethod<void>('controls', {
             'canDone': done != null,
             'busy': busy.value,
+            'fullScreen': !routeIsCurrent,
           });
         }
       });
       return null;
-    }, [done != null, busy.value]);
+    }, [done != null, busy.value, routeIsCurrent]);
     if (anchoredPreview != null) {
       return Theme(
         data: utilitySurfaceThemeData(Theme.of(context)),

@@ -231,6 +231,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
         if (!context.mounted || !isCurrentOperation()) return;
         final cropped = await Navigator.of(context).push<Uint8List>(
           MaterialPageRoute(
+            fullscreenDialog: true,
             builder: (_) => ProfileAvatarCropPage(
               imageBytes: Future<Uint8List?>.value(preparedPhoto),
             ),
@@ -597,7 +598,9 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 ),
               ),
             AnimatedPositioned(
-              duration: isCapturingImage.value || reduceMotion
+              // Camera controls already morph into the source buttons before
+              // closing. Keep their bottom rail fixed during the handoff.
+              duration: mode == ProfileAvatarMode.image || reduceMotion
                   ? Duration.zero
                   : const Duration(milliseconds: 150),
               curve: Curves.easeOutCubic,
