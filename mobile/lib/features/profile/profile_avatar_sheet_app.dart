@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../shared/theme/app_theme.dart';
+import '../../shared/widgets/ios_navigation_metrics.dart';
 import '../../shared/theme/theme_provider.dart';
 import 'profile_avatar_draft.dart';
 import 'profile_setup_avatar_editor.dart';
@@ -20,10 +21,21 @@ Future<void> profileAvatarEditorMain() async {
     ProviderScope(
       overrides: [savedPrefsProvider.overrideWithValue(prefs)],
       child: MaterialApp(
+        debugShowCheckedModeBanner: false,
+        builder: (context, child) =>
+            IosNavigationMetricsHost(child: child ?? const SizedBox.shrink()),
         theme: AppTheme.light(),
         darkTheme: AppTheme.dark(),
         themeMode: initial['dark'] == true ? ThemeMode.dark : ThemeMode.light,
         home: ProfileSetupAvatarEditor(
+          anchoredPreview: initial['previewRect'] is Map
+              ? Rect.fromLTWH(
+                  (initial['previewRect']['x'] as num).toDouble(),
+                  (initial['previewRect']['y'] as num).toDouble(),
+                  (initial['previewRect']['width'] as num).toDouble(),
+                  (initial['previewRect']['height'] as num).toDouble(),
+                )
+              : null,
           initialDraft: decodeProfileAvatarDraft(initial['draft'] as Map?),
           onPreviewReady: (rect) => channel.invokeMethod<void>('ready', {
             'x': rect.left,

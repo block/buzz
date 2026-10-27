@@ -178,12 +178,8 @@ class _EmojiMode extends HookConsumerWidget {
                                       key: const ValueKey('emoji-avatar-grid'),
                                       padding: EdgeInsets.zero,
                                       gridDelegate:
-                                          SliverGridDelegateWithFixedCrossAxisCount(
-                                            crossAxisCount:
-                                                defaultTargetPlatform ==
-                                                    TargetPlatform.iOS
-                                                ? 8
-                                                : 7,
+                                          const SliverGridDelegateWithFixedCrossAxisCount(
+                                            crossAxisCount: 6,
                                           ),
                                       itemCount: visibleEmoji.length,
                                       itemBuilder: (context, index) {

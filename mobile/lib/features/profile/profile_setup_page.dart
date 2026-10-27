@@ -37,9 +37,9 @@ class ProfileSetupPage extends HookConsumerWidget {
       ModalRoute<dynamic>? editorRoute;
       bool current() =>
           active && context.mounted && flow.stage == HostedFlowStage.profile;
-      Future<void> save() async {
+      Future<void> save({bool skipAvatar = false}) async {
         if (!current()) return;
-        final draft = avatar.value;
+        final draft = skipAvatar ? null : avatar.value;
         final service = draft == null
             ? null
             : ref.read(mediaUploadServiceProvider);
@@ -91,7 +91,6 @@ class ProfileSetupPage extends HookConsumerWidget {
               onName: (value) => name = value,
               editAvatar: editAvatar,
               save: save,
-              skip: flow.finishProfile,
             );
           },
         );
@@ -134,7 +133,9 @@ class ProfileSetupPage extends HookConsumerWidget {
                 return {'saved': false};
               }
               try {
-                await save();
+                await save(
+                  skipAvatar: (call.arguments as Map)['skipAvatar'] == true,
+                );
                 return {'saved': true};
               } catch (_) {
                 return {'saved': false};
@@ -170,6 +171,8 @@ class ProfileSetupPage extends HookConsumerWidget {
               'containerCornerRadius': Radii.container,
 
               'primaryArgb': theme.colorScheme.primary.toARGB32(),
+              'onPrimaryArgb': theme.colorScheme.onPrimary.toARGB32(),
+              'subtitleArgb': theme.colorScheme.onSurfaceVariant.toARGB32(),
             });
             if (!current()) return;
             if (action != 'saved') flow.finishProfile();
@@ -218,13 +221,11 @@ class _ProfileSetupForm extends HookWidget {
     required this.onName,
     required this.editAvatar,
     required this.save,
-    required this.skip,
   });
   final ValueNotifier<ProfileAvatarDraft?> avatar;
   final ValueChanged<String> onName;
   final Future<void> Function() editAvatar;
   final Future<void> Function() save;
-  final VoidCallback skip;
   @override
   Widget build(BuildContext context) {
     final draft = useValueListenable(avatar);
@@ -233,7 +234,7 @@ class _ProfileSetupForm extends HookWidget {
     final busy = useState(false);
     final error = useState(false);
     return PopScope(
-      canPop: !busy.value,
+      canPop: false,
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           20,
@@ -294,14 +295,6 @@ class _ProfileSetupForm extends HookWidget {
                       }
                     },
               child: Text(busy.value ? 'Saving…' : 'Continue'),
-            ),
-            OutlinedButton(
-              style: OutlinedButton.styleFrom(
-                minimumSize: const Size.fromHeight(52),
-                shape: const StadiumBorder(),
-              ),
-              onPressed: busy.value ? null : skip,
-              child: const Text('Skip'),
             ),
           ],
         ),

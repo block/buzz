@@ -23,7 +23,7 @@ final class ProfileSetupRecoveryTests: XCTestCase {
         // Start the normal app entry point: it never sends avatar-editor ready.
         return $0.run()
       }, configureEditorEngine: { _ in })
-    messenger.invoke("present", arguments: ["session": 81])
+    messenger.invoke("present", arguments: ["session": 81, "dark": true, "primaryArgb": 0xFFFFFFFF, "onPrimaryArgb": 0xFF000000])
     let nav = try XCTUnwrap(parent.presentedViewController as? UINavigationController)
     if let transition = nav.transitionCoordinator {
       await withCheckedContinuation { continuation in
@@ -33,33 +33,64 @@ final class ProfileSetupRecoveryTests: XCTestCase {
     let profile = try XCTUnwrap(nav.viewControllers.first)
     let avatar = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
       .first { $0.accessibilityLabel == "Add profile photo" })
+    XCTAssertEqual(nav.modalPresentationStyle, .fullScreen)
+    XCTAssertNil(profile.navigationItem.rightBarButtonItem)
+    let name = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UITextField }.first)
+    let submit = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
+      .first { $0.configuration?.title == "Continue" })
+    let skip = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
+      .first { $0.configuration?.title == "Skip" })
+    let foreground = try XCTUnwrap(submit.configuration?.baseForegroundColor)
+    var red: CGFloat = 1, green: CGFloat = 1, blue: CGFloat = 1, alpha: CGFloat = 0
+    XCTAssertTrue(foreground.getRed(&red, green: &green, blue: &blue, alpha: &alpha))
+    XCTAssertEqual(red, 0); XCTAssertEqual(green, 0); XCTAssertEqual(blue, 0); XCTAssertEqual(alpha, 1)
+    XCTAssertTrue(skip.isHidden)
+    XCTAssertTrue(avatar.superview!.isHidden)
+    XCTAssertFalse(submit.isEnabled)
+    name.text = "Kenny"
+    name.sendActions(for: .editingChanged)
+    submit.sendActions(for: .touchUpInside)
+    XCTAssertNotNil(engine, "Prepare the editor before the avatar is tapped")
+    XCTAssertNil(profile.navigationItem.rightBarButtonItem)
+    XCTAssertEqual(submit.alpha, 1)
+    XCTAssertTrue(name.isHidden)
+    XCTAssertFalse(skip.isHidden)
+    XCTAssertFalse(submit.isEnabled, "Continue requires an avatar saved from the editor")
+    XCTAssertFalse(avatar.superview!.isHidden)
+    profile.view.layoutIfNeeded()
+    XCTAssertEqual(avatar.bounds.width, 220, accuracy: 0.5)
+    XCTAssertTrue(descendants(profile.view).compactMap { $0 as? UILabel }
+      .contains { $0.text == "Choose your avatar" && $0.accessibilityTraits.contains(.header) })
+    XCTAssertTrue(avatar.point(inside: CGPoint(x: 4, y: 110), with: nil))
+    XCTAssertTrue(avatar.point(inside: CGPoint(x: 110, y: 110), with: nil))
     let pan = UIPanGestureRecognizer()
     let disabledPan = UIPanGestureRecognizer()
     disabledPan.isEnabled = false
     nav.view.addGestureRecognizer(pan)
     nav.view.addGestureRecognizer(disabledPan)
     nav.interactivePopGestureRecognizer?.isEnabled = true
-    for detent in [UISheetPresentationController.Detent.Identifier("profile"), .large] {
+    for _ in 0..<2 {
       autoreleasepool {
-        nav.sheetPresentationController?.selectedDetentIdentifier = detent
         avatar.sendActions(for: .touchUpInside)
         XCTAssertNotNil(engine)
-        XCTAssertTrue(nav.topViewController is FlutterViewController)
+        XCTAssertEqual(profile.navigationItem.rightBarButtonItem?.title, "Done")
+        XCTAssertFalse(profile.navigationItem.rightBarButtonItem?.isEnabled ?? true)
+        XCTAssertTrue(profile.navigationItem.leftBarButtonItem?.isEnabled ?? false)
+        XCTAssertTrue(profile.children.contains { $0 is FlutterViewController })
         XCTAssertFalse(pan.isEnabled)
         XCTAssertFalse(nav.interactivePopGestureRecognizer?.isEnabled ?? true)
         XCTAssertTrue(nav.isModalInPresentation)
-        XCTAssertTrue(nav.isNavigationBarHidden)
+        XCTAssertFalse(nav.isNavigationBarHidden)
         if watchdogs.count > 1 {
           // An old attempt's watchdog cannot tear down the successful retry.
           watchdogs[0]()
-          XCTAssertTrue(nav.topViewController is FlutterViewController)
+          XCTAssertTrue(profile.children.contains { $0 is FlutterViewController })
           XCTAssertNotNil(engine)
         }
         watchdogs.last?()
         XCTAssertTrue(nav.topViewController === profile)
         XCTAssertFalse(nav.isNavigationBarHidden)
-        XCTAssertEqual(nav.sheetPresentationController?.detents.map(\.identifier), [.init("profile"), .large])
-        XCTAssertEqual(nav.sheetPresentationController?.selectedDetentIdentifier, detent)
+        XCTAssertEqual(nav.modalPresentationStyle, .fullScreen)
         XCTAssertTrue(pan.isEnabled)
         XCTAssertFalse(disabledPan.isEnabled)
         XCTAssertTrue(nav.interactivePopGestureRecognizer?.isEnabled ?? false)
@@ -72,6 +103,11 @@ final class ProfileSetupRecoveryTests: XCTestCase {
       await fulfillment(of: [released], timeout: 2)
     }
     XCTAssertEqual(watchdogs.count, 2)
+    skip.sendActions(for: .touchUpInside)
+    XCTAssertEqual(messenger.savedArguments?["name"] as? String, "Kenny")
+    XCTAssertEqual(messenger.savedArguments?["skipAvatar"] as? Bool, true)
+    XCTAssertTrue(skip.isEnabled, "Failed name-only save must remain retryable through Skip")
+    XCTAssertFalse(submit.isEnabled)
     withExtendedLifetime(coordinator) {}
     nav.dismiss(animated: false)
   }
@@ -84,8 +120,16 @@ final class ProfileSetupRecoveryTests: XCTestCase {
 
 private final class ProfileSetupTestMessenger: NSObject, FlutterBinaryMessenger {
   private var handler: FlutterBinaryMessageHandler?
+  var savedArguments: [String: Any]?
   func send(onChannel channel: String, message: Data?) {}
-  func send(onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply?) { callback?(nil) }
+  func send(onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply?) {
+    let codec = FlutterStandardMethodCodec.sharedInstance()
+    if let message {
+      let call = codec.decodeMethodCall(message)
+      if call.method == "save" { savedArguments = call.arguments as? [String: Any] }
+    }
+    callback?(codec.encodeSuccessEnvelope(["saved": false]))
+  }
   func setMessageHandlerOnChannel(_ channel: String, binaryMessageHandler handler: FlutterBinaryMessageHandler?) -> FlutterBinaryMessengerConnection {
     self.handler = handler
     return 1
