@@ -93,7 +93,13 @@ impl AppAttestVerifier {
         let cbor = STANDARD
             .decode(attestation_b64)
             .map_err(|_| verification_error("attestation", error::AppAttestError::InvalidBase64))?;
-        if cbor.is_empty() || cbor.len() > crate::model::MAX_APP_ATTESTATION_BYTES {
+        if cbor.is_empty() {
+            return Err(verification_error(
+                "attestation",
+                error::AppAttestError::InvalidCbor,
+            ));
+        }
+        if cbor.len() > crate::model::MAX_APP_ATTESTATION_BYTES {
             return Err(verification_error(
                 "attestation",
                 error::AppAttestError::ResourceLimit,
@@ -132,7 +138,13 @@ impl AppAttestVerifier {
         let cbor = STANDARD
             .decode(assertion_b64)
             .map_err(|_| verification_error("assertion", error::AppAttestError::InvalidBase64))?;
-        if cbor.is_empty() || cbor.len() > MAX_ASSERTION_BYTES {
+        if cbor.is_empty() {
+            return Err(verification_error(
+                "assertion",
+                error::AppAttestError::InvalidCbor,
+            ));
+        }
+        if cbor.len() > MAX_ASSERTION_BYTES {
             return Err(verification_error(
                 "assertion",
                 error::AppAttestError::ResourceLimit,

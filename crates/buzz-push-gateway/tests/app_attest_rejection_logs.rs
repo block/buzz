@@ -28,6 +28,7 @@ fn attestation_rejections_log_operation_reason_and_failed_check() {
     let key_id = STANDARD.encode([7; 32]);
     let cases = [
         ("not base64!", "encoding", "invalid base64 encoding"),
+        ("", "structure", "invalid CBOR structure"),
         (
             &*STANDARD.encode(b"not cbor"),
             "structure",
