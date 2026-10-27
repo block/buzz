@@ -28,8 +28,21 @@ class ProfileSetupPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = utilitySurfaceThemeData(Theme.of(context));
+    final appearance = <String, Object>{
+      'dark': theme.brightness == Brightness.dark,
+      'pageBackgroundArgb': theme.colorScheme.surface.toARGB32(),
+      'containerBackgroundArgb': theme.colorScheme.surfaceContainerHighest
+          .toARGB32(),
+      'containerCornerRadius': Radii.container,
+      'primaryArgb': theme.colorScheme.primary.toARGB32(),
+      'onPrimaryArgb': theme.colorScheme.onPrimary.toARGB32(),
+      'subtitleArgb': theme.colorScheme.onSurfaceVariant.toARGB32(),
+    };
+    final currentAppearance = useRef(appearance)..value = appearance;
+    final nativeSession = useRef<int?>(null);
     useEffect(() {
       final session = ++_nextSession;
+      nativeSession.value = session;
       var active = true;
       var name = '';
       final avatar = ValueNotifier<ProfileAvatarDraft?>(null);
@@ -163,17 +176,7 @@ class ProfileSetupPage extends HookConsumerWidget {
               'avatar': bytes,
               'emoji': emoji?.emoji,
               'emojiColor': emoji?.colorValue,
-              'dark': theme.brightness == Brightness.dark,
-              'pageBackgroundArgb': theme.colorScheme.surface.toARGB32(),
-              'containerBackgroundArgb': theme
-                  .colorScheme
-                  .surfaceContainerHighest
-                  .toARGB32(),
-              'containerCornerRadius': Radii.container,
-
-              'primaryArgb': theme.colorScheme.primary.toARGB32(),
-              'onPrimaryArgb': theme.colorScheme.onPrimary.toARGB32(),
-              'subtitleArgb': theme.colorScheme.onSurfaceVariant.toARGB32(),
+              ...currentAppearance.value,
             });
             if (!current()) return;
             if (action != 'saved') flow.finishProfile();
@@ -193,6 +196,7 @@ class ProfileSetupPage extends HookConsumerWidget {
       });
       return () {
         active = false;
+        if (nativeSession.value == session) nativeSession.value = null;
         if (defaultTargetPlatform == TargetPlatform.iOS) {
           _channel.setMethodCallHandler(null);
           unawaited(
@@ -212,6 +216,22 @@ class ProfileSetupPage extends HookConsumerWidget {
         });
       };
     }, [flow]);
+    useEffect(() {
+      if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final session = nativeSession.value;
+        if (!context.mounted || session == null) return;
+        unawaited(
+          _channel
+              .invokeMethod<void>('appearance', {
+                'session': session,
+                ...currentAppearance.value,
+              })
+              .catchError((Object _) {}),
+        );
+      });
+      return null;
+    }, [theme]);
     return const SizedBox.shrink();
   }
 }

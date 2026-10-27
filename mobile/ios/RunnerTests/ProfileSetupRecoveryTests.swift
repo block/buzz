@@ -144,6 +144,21 @@ final class ProfileSetupRecoveryTests: XCTestCase {
       .first { $0.configuration?.title == "Continue" })
     submit.sendActions(for: .touchUpInside)
     XCTAssertTrue(submit.isEnabled)
+    for dark in [true, false] {
+      let background: UInt32 = dark ? 0xFF000000 : 0xFFFFFFFF
+      messenger.invoke("appearance", arguments: ["session": 82, "dark": dark, "pageBackgroundArgb": background,
+        "primaryArgb": dark ? 0xFFFFFFFF : 0xFF000000, "onPrimaryArgb": background])
+      XCTAssertTrue(parent.presentedViewController === nav)
+      XCTAssertEqual(nav.overrideUserInterfaceStyle, dark ? .dark : .light)
+      XCTAssertTrue(submit.isEnabled)
+      XCTAssertEqual(avatar.accessibilityLabel, "Edit profile photo")
+      let expected = dark ? UIColor.black : UIColor.white
+      var actualWhite: CGFloat = -1, alpha: CGFloat = 0
+      XCTAssertTrue(profile.view.backgroundColor!.getWhite(&actualWhite, alpha: &alpha))
+      var expectedWhite: CGFloat = -1
+      expected.getWhite(&expectedWhite, alpha: &alpha)
+      XCTAssertEqual(actualWhite, expectedWhite, accuracy: 0.001)
+    }
     let image = try XCTUnwrap(avatar.image(for: .normal))
     XCTAssertEqual(image.size, CGSize(width: 220, height: 220))
     let attachment = XCTAttachment(image: image)

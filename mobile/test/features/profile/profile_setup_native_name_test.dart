@@ -2,7 +2,8 @@ import 'dart:async';
 
 import 'package:buzz/features/profile/profile_setup_page.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
+import 'package:buzz/shared/theme/app_theme.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -67,7 +68,13 @@ void main() {
       final messenger = tester.binding.defaultBinaryMessenger;
       final presented = Completer<Map<dynamic, dynamic>>();
       final dismissed = Completer<String>();
+      final appearanceUpdates = <Map>[];
+      final brightness = ValueNotifier(Brightness.light);
+      addTearDown(brightness.dispose);
       messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'appearance') {
+          appearanceUpdates.add(call.arguments as Map);
+        }
         if (call.method == 'present') {
           presented.complete(call.arguments as Map);
           return dismissed.future;
@@ -84,7 +91,18 @@ void main() {
         },
       );
       await tester.pumpWidget(
-        WidgetHelpers.testable(child: ProfileSetupPage(flow: fixture.flow)),
+        WidgetHelpers.testable(
+          child: ValueListenableBuilder<Brightness>(
+            valueListenable: brightness,
+            builder: (context, value, child) => Theme(
+              data: value == Brightness.dark
+                  ? AppTheme.dark()
+                  : AppTheme.light(),
+              child: child!,
+            ),
+            child: ProfileSetupPage(flow: fixture.flow),
+          ),
+        ),
       );
       await tester.pumpAndSettle();
       final configuration = await presented.future;
@@ -112,6 +130,13 @@ void main() {
       await invoke('avatarDraft', {
         'draft': {'type': 'url', 'url': 'https://example.com/avatar.png'},
       });
+      for (final value in [Brightness.dark, Brightness.light]) {
+        brightness.value = value;
+        await tester.pumpAndSettle();
+        expect(appearanceUpdates.last['dark'], value == Brightness.dark);
+        expect(appearanceUpdates.last['session'], configuration['session']);
+        expect(dismissed.isCompleted, isFalse);
+      }
       expect(await invoke('save', {'name': '   ', 'skipAvatar': true}), {
         'saved': false,
       });

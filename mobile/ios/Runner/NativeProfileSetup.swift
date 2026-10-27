@@ -35,6 +35,15 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     super.init()
     channel.setMethodCallHandler { [weak self] call, result in
       guard let self else { return }
+      if call.method == "appearance" {
+        guard let args = call.arguments as? [String: Any], args["session"] as? Int == self.session,
+              let controller = self.navigation?.viewControllers.first as? NativeProfileSetupController else { result(nil); return }
+        self.navigation?.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
+        controller.updateAppearance(args)
+        self.avatarController?.view.backgroundColor = controller.view.backgroundColor
+        self.updateEditorAppearance(controller)
+        result(nil); return
+      }
       if call.method == "dismiss" {
         guard let args = call.arguments as? [String: Any], args["session"] as? Int == self.session else { result(nil); return }
         self.finish("cancel"); result(nil); return
@@ -121,6 +130,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
       if call.method == "ready", self.avatarController != nil {
         ready = true
         self.editorReady = true
+        self.updateEditorAppearance(controller)
         if self.editorRequested { self.revealEditor(controller) }
         result(nil)
         return
@@ -132,7 +142,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
         controller.navigationItem.leftBarButtonItem?.isEnabled = !self.editorBusy
         result(nil); return
       }
-      if call.method == "initial" { result(["dark": args["dark"] ?? false, "draft": self.avatarDraft ?? [:], "previewRect": ["x": avatarFrame.minX, "y": avatarFrame.minY, "width": avatarFrame.width, "height": avatarFrame.height]]); return }
+      if call.method == "initial" { result(["dark": controller.appearance["dark"] ?? false, "draft": self.avatarDraft ?? [:], "previewRect": ["x": avatarFrame.minX, "y": avatarFrame.minY, "width": avatarFrame.width, "height": avatarFrame.height]]); return }
       guard call.method == "finish", !finishing else { result(FlutterMethodNotImplemented); return }
       finishing = true
       let draft = call.arguments as? [String: Any]
@@ -175,6 +185,12 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
       self.restoreProfilePage(controller)
     }
 
+  }
+
+  private func updateEditorAppearance(_ controller: NativeProfileSetupController) {
+    guard editorReady, let engine = avatarEngine else { return }
+    FlutterMethodChannel(name: "buzz/profile_avatar_theme", binaryMessenger: engine.binaryMessenger)
+      .invokeMethod("appearance", arguments: ["dark": controller.appearance["dark"] ?? false])
   }
 
   private func revealEditor(_ controller: NativeProfileSetupController) {
@@ -239,7 +255,9 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
   var prepareAvatar: (() -> Void)?
   var closeAvatar: (() -> Void)?
   private var editingAvatar = false
-  private let args: [String: Any]
+  private var args: [String: Any]
+  var appearance: [String: Any] { args }
+  private var avatarArguments: [String: Any] = [:]
   private let name = UITextField()
   private let avatar = UIButton(type: .system)
   private let status = UILabel()
@@ -250,6 +268,7 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
   private let spacer = UIView()
   private var skip: UIButton!
   private var notNow: UIButton!
+  private var saving = false
   private var choosingAvatar = false
   private var hasAvatar = false
   private let avatarSize: CGFloat = 220
@@ -433,6 +452,7 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
   }
   func avatarReady() { avatar.isEnabled = true }
   func updateAvatar(_ args: [String: Any]) {
+    avatarArguments = args
     hasAvatar = false
     defer {
       avatar.accessibilityLabel = hasAvatar ? "Edit profile photo" : "Add profile photo"
@@ -457,6 +477,17 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
       ring.strokeColor = UIColor.tertiaryLabel.cgColor; ring.fillColor = UIColor.clear.cgColor; ring.lineWidth = 3; let step = CGFloat.pi * (avatarSize - 4) / 32; ring.lineDashPattern = [NSNumber(value: Double(step * 4 / 9)), NSNumber(value: Double(step * 5 / 9))]; avatar.layer.addSublayer(ring)
     }
   }
+  func updateAppearance(_ appearance: [String: Any]) {
+    args.merge(appearance) { _, new in new }
+    view.backgroundColor = color("pageBackgroundArgb", fallback: .systemBackground)
+    view.tintColor = color("primaryArgb", fallback: .label)
+    name.backgroundColor = color("containerBackgroundArgb", fallback: .secondarySystemBackground)
+    explanation.textColor = color("subtitleArgb", fallback: .secondaryLabel)
+    submit.configuration?.baseBackgroundColor = view.tintColor
+    submit.configuration?.baseForegroundColor = color("onPrimaryArgb", fallback: .systemBackground)
+    updateAvatar(avatarArguments)
+  }
+
   /// Mirrors Flutter's 220-point preview and AvatarBadgeMaskGeometry.badge.
   private func avatarPreview(image: UIImage? = nil, emoji: String? = nil, background: UIColor = .clear) -> UIImage {
     UIGraphicsImageRenderer(size: CGSize(width: avatarSize, height: avatarSize)).image { renderer in
@@ -542,14 +573,16 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     guard let value = (args[key] as? NSNumber)?.uint32Value else { return fallback }
     return UIColor(red: CGFloat((value >> 16) & 255) / 255, green: CGFloat((value >> 8) & 255) / 255, blue: CGFloat(value & 255) / 255, alpha: CGFloat((value >> 24) & 255) / 255)
   }
-  private func updateName() { submit.isEnabled = !draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (!choosingAvatar || hasAvatar) }
+  private func updateName() { submit.isEnabled = !saving && !draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (!choosingAvatar || hasAvatar) }
   private func save(skipAvatar: Bool = false) {
     guard choosingAvatar, skipAvatar || hasAvatar, !draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    saving = true
     name.isEnabled = false; controls.forEach { $0.isEnabled = false }; navigationController?.isModalInPresentation = true; navigationItem.rightBarButtonItem?.isEnabled = false; navigationItem.leftBarButtonItem?.isEnabled = false
     submit.configuration?.showsActivityIndicator = true
     action?("save", ["name": draftName, "skipAvatar": skipAvatar]) { [weak self] response in
       guard let self else { return }
       if response["saved"] as? Bool == true { self.finish?("saved"); return }
+      self.saving = false
       self.notNow.isHidden = false
       self.status.text = "Could not save your profile. Try again or choose Not now to continue without saving."; self.status.isHidden = false
       UIAccessibility.post(notification: .announcement, argument: self.status.text)
