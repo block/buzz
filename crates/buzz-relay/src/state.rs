@@ -139,19 +139,27 @@ impl CommunityConnectionControl {
         }
     }
 
-    /// Lets the socket's AUTH attribute its shadow upgrade would-deny line,
-    /// which the connection task owns and writes when it ends.
+    /// Lets the socket's AUTH write its shadow upgrade would-deny line, which
+    /// the connection task owns.
     pub(crate) fn attach_nip_fi_line(&self, line: Option<&Arc<crate::nip_fi_shadow::PendingLine>>) {
         if let Some(line) = line {
             let _ = self.nip_fi_line.set(Arc::downgrade(line));
         }
     }
 
-    /// Attributes the socket's shadow upgrade would-deny line, if any, to
+    /// Writes the socket's shadow upgrade would-deny line, if any, for
     /// `pubkey`, which a NIP-42 AUTH just verified.
     pub(crate) fn prove_nip_fi_line(&self, pubkey: nostr::PublicKey) {
         if let Some(line) = self.nip_fi_line.get().and_then(std::sync::Weak::upgrade) {
             line.prove(pubkey);
+        }
+    }
+
+    /// Writes the socket's still-unproven shadow upgrade would-deny line as
+    /// `absent`; called as the socket's read loop ends, before cleanup.
+    pub(crate) fn finish_nip_fi_line(&self) {
+        if let Some(line) = self.nip_fi_line.get().and_then(std::sync::Weak::upgrade) {
+            line.finish();
         }
     }
 

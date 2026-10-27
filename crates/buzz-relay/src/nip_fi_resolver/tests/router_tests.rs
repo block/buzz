@@ -761,8 +761,8 @@ mod postgres_tests {
         assert_eq!(p.every_site(Some(crossing)).await, vec![unavailable(); 3]);
     }
 
-    /// Each `buzz_nip_fi_shadow_total` series recorded while `run` ran, as
-    /// sorted `route/stage/outcome` labels.
+    /// Each `buzz_nip_fi_shadow_total` increment recorded while `run` ran, as
+    /// sorted `route/stage/outcome` labels, one entry per count.
     async fn shadow_records<F: std::future::Future>(run: F) -> (F::Output, Vec<String>) {
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let output = {
@@ -775,13 +775,17 @@ mod postgres_tests {
             .into_vec()
             .into_iter()
             .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_total")
-            .map(|(key, ..)| {
+            .flat_map(|(key, _, _, value)| {
                 crate::nip_fi_shadow::tests::assert_shadow_schema(key.key());
                 let label = |name: &str| {
                     let label = key.key().labels().find(|l| l.key() == name);
                     label.map(|l| l.value().to_owned()).unwrap_or_default()
                 };
-                format!("{}/{}/{}", label("route"), label("stage"), label("outcome"))
+                let metrics_util::debugging::DebugValue::Counter(count) = value else {
+                    panic!("{key:?} is not a counter");
+                };
+                let record = format!("{}/{}/{}", label("route"), label("stage"), label("outcome"));
+                std::iter::repeat_n(record, usize::try_from(count).expect("count"))
             })
             .collect();
         records.sort();

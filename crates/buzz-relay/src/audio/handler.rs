@@ -267,7 +267,7 @@ pub(crate) async fn handle_audio_connection(
         tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
     let control = CommunityConnectionControl::new(cancel);
     control.attach_nip_fi_shadow(nip_fi_shadow);
-    // Held for the connection's life; its first verified AUTH attributes it.
+    // Its first verified AUTH writes it; else the read loop's end does.
     let shadow_line = shadow_line.map(Arc::new);
     control.attach_nip_fi_line(shadow_line.as_ref());
     let drain_reason = control.disconnect_reason();
@@ -10820,7 +10820,8 @@ mod tests {
         /// teardown that follows writes to Postgres and Redis, which can stall
         /// with no deadline. The socket must still end within the bounded wait
         /// for the client's Close reply. This client never replies and the
-        /// teardown never finishes.
+        /// teardown never finishes. The shadow line its AUTH wrote stays a
+        /// single line throughout.
         ///
         /// Mutation: move `hand_off_socket(ws_recv, None)` to after the
         /// teardown → the socket stays open while the teardown is held →
@@ -10834,6 +10835,7 @@ mod tests {
             use chrono::{Duration, Utc};
             use std::sync::Arc;
 
+            let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
             let state = audio_test_state_real_db().await.expect(
                 "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
             );
@@ -10845,7 +10847,10 @@ mod tests {
                 vec![Utc::now() + Duration::hours(1)],
             );
             let relay_url = format!("ws://{}", tenant.host());
-            let conn_cancel = CancellationToken::new();
+            let line = crate::nip_fi_shadow::tests::upgrade_line("audio");
+            let line = Arc::new(std::sync::Mutex::new(Arc::into_inner(line)));
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+            let registry = Arc::clone(&state.community_connections);
 
             let (fanout_rx, fanout_release) =
                 crate::nip_fi_test_hooks::audio_participant_fanout_hook::arm(community);
@@ -10855,23 +10860,26 @@ mod tests {
             let app = axum::Router::new().route(
                 "/",
                 axum::routing::get({
-                    let conn_cancel = conn_cancel.clone();
+                    let (line, semaphore) = (Arc::clone(&line), Arc::clone(&semaphore));
                     move |ws: axum::extract::ws::WebSocketUpgrade| {
                         let (state, tenant, assertion) =
                             (Arc::clone(&state), tenant.clone(), assertion.clone());
-                        let control =
-                            crate::state::CommunityConnectionControl::new(conn_cancel.clone());
+                        let line = line.lock().expect("line").take();
+                        let permit = Arc::clone(&semaphore)
+                            .try_acquire_owned()
+                            .expect("one connection permit");
                         async move {
                             ws.on_upgrade(move |socket| {
-                                handle_active_audio_connection(
+                                handle_audio_connection(
                                     socket,
                                     state,
                                     tenant,
                                     channel_id,
-                                    control,
+                                    permit,
                                     Some(assertion),
-                                    Utc::now(),
                                     None,
+                                    line,
+                                    Utc::now(),
                                 )
                             })
                         }
@@ -10895,6 +10903,13 @@ mod tests {
                 .expect("fanout channel closed");
             fanout_release.notify_one();
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // The upgrade's shadow line is written at AUTH, while the socket
+            // is open. Mutation: deleting the outer `attach_nip_fi_line`, or
+            // audio's `prove_nip_fi_line`, leaves no line here.
+            let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].contains(&proven), "{lines:?}");
 
             // From here the client only reads raw bytes, so it never answers
             // the server's Close.
@@ -10902,11 +10917,12 @@ mod tests {
                 panic!("plain TCP client");
             };
             let started = std::time::Instant::now();
-            conn_cancel.cancel();
+            assert_eq!(registry.disconnect_archived_community(community), 1);
             tokio::time::timeout(std::time::Duration::from_secs(5), teardown_rx)
                 .await
                 .expect("teardown must reach the stall point")
                 .expect("teardown hook dropped");
+            assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
             // The hook runs just after the hand-off, so the socket must end
             // within the bounded wait measured from here.
             let handed_off = std::time::Instant::now();
@@ -10922,7 +10938,9 @@ mod tests {
             );
 
             teardown_release.notify_one();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             server.abort();
+            assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
         }
 
         /// The archived-channel exit sends its error and Close, then releases

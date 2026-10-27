@@ -173,45 +173,47 @@ pub(crate) fn record_pending(
     .increment(1);
     // The counter is the record; only a would-deny earns a line.
     let deny = verdict.err()?;
-    let pubkey = std::sync::OnceLock::new();
-    if let Some(key) = deny.pubkey {
-        let _ = pubkey.set(key);
-    }
-    Some(PendingLine {
+    let line = PendingLine {
         route,
         stage,
         outcome,
         reason: deny.reason,
         community,
-        pubkey,
-    })
+        written: std::sync::atomic::AtomicBool::new(false),
+    };
+    if let Some(key) = deny.pubkey {
+        line.prove(key);
+    }
+    Some(line)
 }
 
-/// A counted would-deny's info line, written when dropped, naming the first
-/// key proven for it, else `absent`.
+/// A counted would-deny's info line, written exactly once: by the first key
+/// proven for it, else as `absent` when finished or dropped.
 pub(crate) struct PendingLine {
     route: &'static str,
     stage: &'static str,
     outcome: &'static str,
     reason: &'static str,
     community: SharedString,
-    pubkey: std::sync::OnceLock<PublicKey>,
+    written: std::sync::atomic::AtomicBool,
 }
 
 impl PendingLine {
-    /// Attribute the line to `pubkey`, a key the client proved, unless an
-    /// earlier proof already did.
+    /// Write the line for `pubkey`, a key the client proved, unless it is
+    /// already written.
     pub(crate) fn prove(&self, pubkey: PublicKey) {
-        let _ = self.pubkey.set(pubkey);
+        self.write(&pubkey.to_hex());
     }
-}
 
-impl Drop for PendingLine {
-    fn drop(&mut self) {
-        let pubkey = self
-            .pubkey
-            .get()
-            .map_or_else(|| "absent".to_owned(), PublicKey::to_hex);
+    /// Write the line as `absent` unless a proof already wrote it.
+    pub(crate) fn finish(&self) {
+        self.write("absent");
+    }
+
+    fn write(&self, pubkey: &str) {
+        if self.written.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
         tracing::info!(
             route = self.route,
             stage = self.stage,
@@ -221,6 +223,12 @@ impl Drop for PendingLine {
             community = %self.community,
             "nip-fi shadow would-deny"
         );
+    }
+}
+
+impl Drop for PendingLine {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -523,27 +531,52 @@ pub(crate) mod tests {
     /// Run `body` under an info-level subscriber; return its result and the
     /// `nip-fi shadow would-deny` lines it logged.
     pub(crate) fn would_deny_lines<R>(body: impl FnOnce() -> R) -> (R, Vec<String>) {
-        let _tracing = crate::test_support::tracing_dispatch_lock();
-        let out = Captured::default();
-        let writer = out.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_writer(move || writer.clone())
-            .with_ansi(false)
-            .finish();
-        // With one live dispatcher, tracing-core caches a callsite's
-        // interest from whichever thread first hits it, so a parallel test
-        // without a subscriber can disable this one's would-deny line. A
-        // second live dispatcher makes registration consult every one.
-        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        let result = tracing::subscriber::with_default(subscriber, body);
-        let log = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
-        let lines = log
-            .lines()
-            .filter(|l| l.contains("nip-fi shadow would-deny"))
-            .map(str::to_owned)
-            .collect();
-        (result, lines)
+        let log = WouldDenyLog::capture();
+        let result = body();
+        (result, log.lines())
+    }
+
+    /// An info-level subscriber, default on this thread while held, whose
+    /// `nip-fi shadow would-deny` lines can be read at any point.
+    pub(crate) struct WouldDenyLog {
+        out: Captured,
+        _default: tracing::subscriber::DefaultGuard,
+        _second: tracing::Dispatch,
+        _tracing: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl WouldDenyLog {
+        pub(crate) fn capture() -> Self {
+            let _tracing = crate::test_support::tracing_dispatch_lock();
+            let out = Captured::default();
+            let writer = out.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish();
+            // With one live dispatcher, tracing-core caches a callsite's
+            // interest from whichever thread first hits it, so a parallel test
+            // without a subscriber can disable this one's would-deny line. A
+            // second live dispatcher makes registration consult every one.
+            let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            let _default = tracing::subscriber::set_default(subscriber);
+            Self {
+                out,
+                _default,
+                _second,
+                _tracing,
+            }
+        }
+
+        /// The would-deny lines logged so far.
+        pub(crate) fn lines(&self) -> Vec<String> {
+            let log = String::from_utf8(self.out.0.lock().unwrap().clone()).unwrap();
+            log.lines()
+                .filter(|l| l.contains("nip-fi shadow would-deny"))
+                .map(str::to_owned)
+                .collect()
+        }
     }
 
     /// The counted line of a `route` upgrade would-deny for a missing
