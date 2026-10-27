@@ -14,8 +14,9 @@
 //! knows one, else `absent`. A router-guard or upgrade would-deny precedes
 //! any proof, so its line waits for the key the client later proves: the
 //! request's verified NIP-98 key, or the connection's first verified NIP-42
-//! AUTH key. It is written when the request or connection ends, with
-//! `absent` if no key was proven; its counter increments at once. An admit writes no line. No token, assertion,
+//! AUTH key. It is written once, as soon as that key is proven, or with
+//! `absent` when the request ends or the connection stops reading without
+//! one; its counter increments at once. An admit writes no line. No token, assertion,
 //! claim other than the public Nostr key, or issuer is logged.
 //! [FI-TRACE-PRIVACY-NONPUBLIC]
 //!
@@ -152,8 +153,8 @@ pub(crate) fn record_for(
     drop(record_pending(route, community, verdict));
 }
 
-/// Count `verdict`, returning a would-deny's line unwritten, for the key the
-/// client later proves.
+/// Count `verdict`, returning a would-deny's line: already written when the
+/// verdict carries a key, else unwritten until the client proves one.
 pub(crate) fn record_pending(
     route: &'static str,
     community: SharedString,
@@ -240,14 +241,16 @@ async fn resolution(state: &crate::state::AppState, headers: &HeaderMap) -> Reso
 
 tokio::task_local! {
     /// Set by the router guard in shadow: the line of enforce's guard
-    /// would-deny, if any, written when the request ends.
+    /// would-deny, if any, written when its handler proves a key, else as
+    /// `absent` when the request ends.
     static GUARD_DENIED: Option<PendingLine>;
 }
 
 /// Count the router guard's would-deny, then run the request inside its
 /// verdict.  Enforce never lets a guard-denied request reach a handler, so
 /// none of that request's handler-side records are emitted; the guard's line
-/// is written as the request ends, naming the key its handler proved.
+/// is written when its handler proves a key, else as `absent` when the
+/// request ends.
 pub(crate) async fn observe_guard<F: std::future::Future>(
     community: SharedString,
     verdict: Result<(), WouldDeny>,

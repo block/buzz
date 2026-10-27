@@ -10851,6 +10851,7 @@ mod tests {
             let line = Arc::new(std::sync::Mutex::new(Arc::into_inner(line)));
             let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
             let registry = Arc::clone(&state.community_connections);
+            let ended = Arc::new(tokio::sync::Notify::new());
 
             let (fanout_rx, fanout_release) =
                 crate::nip_fi_test_hooks::audio_participant_fanout_hook::arm(community);
@@ -10860,16 +10861,24 @@ mod tests {
             let app = axum::Router::new().route(
                 "/",
                 axum::routing::get({
-                    let (line, semaphore) = (Arc::clone(&line), Arc::clone(&semaphore));
+                    let (line, semaphore, ended) = (
+                        Arc::clone(&line),
+                        Arc::clone(&semaphore),
+                        Arc::clone(&ended),
+                    );
                     move |ws: axum::extract::ws::WebSocketUpgrade| {
-                        let (state, tenant, assertion) =
-                            (Arc::clone(&state), tenant.clone(), assertion.clone());
+                        let (state, tenant, assertion, ended) = (
+                            Arc::clone(&state),
+                            tenant.clone(),
+                            assertion.clone(),
+                            Arc::clone(&ended),
+                        );
                         let line = line.lock().expect("line").take();
                         let permit = Arc::clone(&semaphore)
                             .try_acquire_owned()
                             .expect("one connection permit");
                         async move {
-                            ws.on_upgrade(move |socket| {
+                            ws.on_upgrade(move |socket| async move {
                                 handle_audio_connection(
                                     socket,
                                     state,
@@ -10881,6 +10890,8 @@ mod tests {
                                     line,
                                     Utc::now(),
                                 )
+                                .await;
+                                ended.notify_one();
                             })
                         }
                     }
@@ -10938,7 +10949,10 @@ mod tests {
             );
 
             teardown_release.notify_one();
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // The outer handler owns the line; once it ends, nothing does.
+            tokio::time::timeout(std::time::Duration::from_secs(10), ended.notified())
+                .await
+                .expect("the handler finishes once teardown resumes");
             server.abort();
             assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
         }
