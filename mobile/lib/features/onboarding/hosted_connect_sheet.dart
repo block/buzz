@@ -22,11 +22,24 @@ class HostedConnectSheet extends HookConsumerWidget {
     useListenable(flow);
     final showLinkedIdentity = useState(false);
     Future<void> importIdentity() async {
-      final imported = await showNsecImportSheet(
+      Future<void>? pendingImport;
+      await showNsecImportSheet(
         context,
-        onImport: flow.importIdentity,
+        mismatchMessage:
+            'This key doesn’t match the identity linked to your Builderlab account.',
+        onImport: (nsec) => pendingImport = flow.importIdentity(nsec),
       );
-      if (imported && context.mounted) await flow.retry();
+      // Dismissing the sheet does not cancel a secure-store write in flight.
+      // Finish that operation before resuming, even when the modal returned null.
+      if (pendingImport == null) return;
+      try {
+        await pendingImport;
+      } catch (_) {
+        return; // The sheet already presented the import failure.
+      }
+      if (context.mounted && flow.stage == HostedFlowStage.setupIdentity) {
+        await flow.retry();
+      }
     }
 
     final actionStyle = FilledButton.styleFrom(

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
@@ -13,7 +14,6 @@ import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
-import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
@@ -57,55 +57,88 @@ void main() {
     );
   }
 
-  journey('new account chooses creation and keeps its identity on retry', (
+  for (final importing in [false, true]) {
+    journey(
+      'new account ${importing ? 'imports' : 'creates'} and keeps its identity on retry',
+      (tester, f) async {
+        await f.initialize(localIdentity: false);
+        f.bound = null;
+        f.offerProfile = false;
+        await f.mount(tester);
+        await f.tap(tester, 'Continue with Builderlab');
+        expect(find.text('Create my Buzz identity'), findsOneWidget);
+        expect(find.text('Import existing identity'), findsOneWidget);
+        expect(await f.store.read(), isNull);
+        if (importing) {
+          await f.tap(tester, 'Import existing identity');
+          await tester.enterText(
+            find.byType(TextField).hitTestable(),
+            f.keys.nsec,
+          );
+          await f.tap(tester, 'Preview identity');
+          final started = Completer<void>();
+          final release = Completer<void>();
+          f.beforeStatusReturn = () async {
+            if (!started.isCompleted) started.complete();
+            await release.future;
+          };
+          await f.tap(tester, 'Import this identity');
+          await started.future;
+          // Dismiss while the real import is awaiting its external status response.
+          Navigator.of(
+            tester.element(find.byType(TextField).hitTestable()),
+          ).pop();
+          await f.settle(tester);
+          release.complete();
+          f.beforeStatusReturn = null;
+          await f.settle(tester);
+          expect(f.bound, f.keys.public);
+        } else {
+          await f.tap(tester, 'Create my Buzz identity');
+        }
+        final saved = await f.store.read();
+        expect(saved, isNotNull);
+        expect(f.bound, saved!.pubkey);
+        expect(saved.backup, isNotNull);
+        await f.flow.retry();
+        await f.settle(tester);
+        expect((await f.store.read())!.pubkey, saved.pubkey);
+      },
+    );
+  }
+
+  journey('linked account without backup imports its key without replacing it', (
     tester,
     f,
   ) async {
     await f.initialize(localIdentity: false);
-    f.bound = null;
     f.offerProfile = false;
     await f.mount(tester);
     await f.tap(tester, 'Continue with Builderlab');
-    expect(find.text('Create my Buzz identity'), findsOneWidget);
+    expect(find.text('Create my Buzz identity'), findsNothing);
     expect(find.text('Import existing identity'), findsOneWidget);
+    await f.tap(tester, 'Import existing identity');
+    await tester.enterText(
+      find.byType(TextField).hitTestable(),
+      f.secondKeys.nsec,
+    );
+    await f.tap(tester, 'Preview identity');
+    await f.tap(tester, 'Import this identity');
+    expect(
+      find.text(
+        'This key doesn’t match the identity linked to your Builderlab account.',
+      ),
+      findsOneWidget,
+    );
     expect(await f.store.read(), isNull);
-    await f.tap(tester, 'Create my Buzz identity');
-    final saved = await f.store.read();
-    expect(saved, isNotNull);
-    expect(f.bound, saved!.pubkey);
-    expect(saved.backup, isNotNull);
-    await f.flow.retry();
-    await f.settle(tester);
-    expect((await f.store.read())!.pubkey, saved.pubkey);
+    expect(f.bound, f.keys.public);
+    await tester.enterText(find.byType(TextField).hitTestable(), f.keys.nsec);
+    await f.tap(tester, 'Preview identity');
+    await f.tap(tester, 'Import this identity');
+    expect((await f.store.read())!.pubkey, f.keys.public);
+    expect((await f.store.read())!.backup, isNotNull);
+    expect(f.requests.where((r) => r.url.path.endsWith('/recovery')), isEmpty);
   });
-
-  journey(
-    'linked account without backup imports its key without replacing it',
-    (tester, f) async {
-      await f.initialize(localIdentity: false);
-      f.offerProfile = false;
-      await f.mount(tester);
-      await f.tap(tester, 'Continue with Builderlab');
-      expect(find.text('Create my Buzz identity'), findsNothing);
-      expect(find.text('Import existing identity'), findsOneWidget);
-      await expectLater(
-        f.flow.importIdentity(f.secondKeys.nsec),
-        throwsA(AccountIdentityFailure.mismatch),
-      );
-      expect(await f.store.read(), isNull);
-      expect(f.bound, f.keys.public);
-      await f.tap(tester, 'Import existing identity');
-      await tester.enterText(find.byType(TextField).hitTestable(), f.keys.nsec);
-      await f.tap(tester, 'Preview identity');
-      await f.tap(tester, 'Import this identity');
-      expect((await f.store.read())!.pubkey, f.keys.public);
-      expect((await f.store.read())!.backup, isNotNull);
-      expect(
-        f.requests.where((r) => r.url.path.endsWith('/recovery')),
-        isEmpty,
-      );
-    },
-  );
 
   journey('system Back leaves community creation', (tester, f) async {
     await f.initialize();

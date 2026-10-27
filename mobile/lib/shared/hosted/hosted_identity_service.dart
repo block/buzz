@@ -96,10 +96,12 @@ class HostedIdentityService {
     if (statusBound != bound) throw AccountFailure.invalidResponse;
     if (importNsec != null) {
       final pubkey = AccountIdentityStore.publicKeyForNsec(importNsec);
-      if ((bound != null && bound != pubkey) ||
-          (bound == null &&
-              statusKeys.isNotEmpty &&
-              !statusKeys.contains(pubkey))) {
+      // A backup arriving while setup is open must use normal recovery, which
+      // records the selected backup receipt before adopting its identity.
+      if (bound == null && statusKeys.isNotEmpty) {
+        throw AccountFailure.unavailable;
+      }
+      if (bound != null && bound != pubkey) {
         throw AccountIdentityFailure.mismatch;
       }
       final imported = await store.create(

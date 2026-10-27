@@ -14,12 +14,14 @@ import 'nsec_transfer.dart';
 Future<bool> showNsecImportSheet(
   BuildContext context, {
   required Future<void> Function(String nsec) onImport,
+  String? mismatchMessage,
 }) async =>
     await showBuzzModalBottomSheet<bool>(
       context: context,
       title: 'Import identity',
       isScrollControlled: true,
-      builder: (_) => NsecImportSheet(onImport: onImport),
+      builder: (_) =>
+          NsecImportSheet(onImport: onImport, mismatchMessage: mismatchMessage),
     ) ??
     false;
 
@@ -29,11 +31,13 @@ class NsecImportSheet extends HookWidget {
     super.key,
     required this.onImport,
     this.pickFile,
+    this.mismatchMessage,
     this.autofocus = true,
   });
 
   final Future<void> Function(String nsec) onImport;
   final Future<String?> Function()? pickFile;
+  final String? mismatchMessage;
 
   /// Allows a containing sheet to finish expanding before opening the keyboard.
   final bool autofocus;
@@ -89,7 +93,10 @@ class NsecImportSheet extends HookWidget {
       } catch (failure) {
         if (!context.mounted) return;
         error.value = switch (failure) {
-          AccountIdentityFailure.occupied || AccountIdentityFailure.mismatch =>
+          AccountIdentityFailure.mismatch =>
+            mismatchMessage ??
+                'This device already has a different identity. It has not been replaced.',
+          AccountIdentityFailure.occupied =>
             'This device already has a different identity. It has not been replaced.',
           AccountIdentityFailure.invalidKey =>
             'Enter a valid nsec private key.',

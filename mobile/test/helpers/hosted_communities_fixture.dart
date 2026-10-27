@@ -48,6 +48,15 @@ class WidgetDiscoveryAccount extends BuilderlabAccountClient {
   @override
   Future<BuilderlabAccount?> restore() async => account;
   @override
+  Future<void> rememberCommunity(
+    String relay, {
+    required String expectedSubject,
+  }) async {
+    if (account?.subject != expectedSubject) throw AccountFailure.denied;
+    fixture.remembered.add(relay);
+  }
+
+  @override
   Future<Map<String, dynamic>> post(
     String path,
     Map<String, dynamic> body,
@@ -72,6 +81,7 @@ class HostedCommunitiesFixture {
   late BuilderlabAccountClient account;
   late final HostedFlow flow;
   final admitted = <String>[];
+  final remembered = <String>[];
   final requests = <String>[];
   List<Map<String, dynamic>> rows = [];
   String? bound;

@@ -43,6 +43,7 @@ class HostedJourneyFixture {
   final identityStorage = JourneyIdentityStorage();
   final requests = <http.Request>[];
   Future<void> Function()? beforeBrowserReturn;
+  Future<void> Function()? beforeStatusReturn;
   Future<void> Function()? beforeEnrollmentReturn;
   Future<void> Function()? beforeUploadReturn;
   final probes = <Community>[];
@@ -169,6 +170,7 @@ class HostedJourneyFixture {
         'identity': bound == null ? null : {'pubkey_hex': bound},
       };
     } else if (path.endsWith('/status')) {
+      await beforeStatusReturn?.call();
       result = {
         'current_nostr_pubkey': bound,
         'backup_nostr_pubkeys': cloudKeys.map((k) => k.public).toList(),
