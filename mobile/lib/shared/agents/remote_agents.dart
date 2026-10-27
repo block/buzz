@@ -50,8 +50,12 @@ final availableRemoteAgentsProvider = FutureProvider<Set<String>>((ref) async {
   ref.watch(relaySessionProvider.select((session) => session.status));
   final controller = ref.watch(remoteAgentControllerProvider);
   final active = controller.activeAgents;
+  final revision = controller.registrationRevision;
   void changed() {
-    if (!setEquals(controller.activeAgents, active)) ref.invalidateSelf();
+    if (!setEquals(controller.activeAgents, active) ||
+        controller.registrationRevision != revision) {
+      ref.invalidateSelf();
+    }
   }
 
   controller.addListener(changed);
@@ -217,6 +221,15 @@ class RemoteAgentController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  /// Bumped when this device publishes or removes a kind 30177 registration,
+  /// which changes availability even when the registry's ACTIVE set does not.
+  int registrationRevision = 0;
+
+  void _registrationsChanged() {
+    registrationRevision++;
+    _notify();
+  }
+
   Future<void> refresh() async {
     final session = account.account ?? await account.restore();
     if (session == null) {
@@ -353,7 +366,13 @@ class RemoteAgentController extends ChangeNotifier {
       });
     }
     var setup = Map<String, dynamic>.from(pending!);
-    if (setup['owner'] != owner || setup['community'] != community.relayUrl) {
+    // A registration whose response was lost may be replayed from any
+    // community, so the account learns its identity even if the original
+    // community is unavailable. Everything after it needs that community.
+    final elsewhere = setup['community'] != community.relayUrl;
+    final unknownIdentity =
+        setup['pubkey'] == null && setup['registering'] == true;
+    if (setup['owner'] != owner || (elsewhere && !unknownIdentity)) {
       throw StateError('Finish the pending setup in its original community.');
     }
     if (setup['instructionsMissing'] == true) {
@@ -371,16 +390,26 @@ class RemoteAgentController extends ChangeNotifier {
       // lost. Only Resume, with the same idempotency key, can recover it.
       setup = {...setup, 'registering': true};
       await _savePending(setup);
-      final result = await account.post('/v3/beekeeper/register-agent', {
-        'agent_name': setup['name'],
-        'idempotency_key': setup['request'],
-      });
+      // An explicit rejection allocated nothing, so it can be discarded.
+      Future<void> refused() async {
+        setup = {...setup}..remove('registering');
+        await _savePending(setup);
+      }
+
+      final Map<String, dynamic> result;
+      try {
+        result = await account.post('/v3/beekeeper/register-agent', {
+          'agent_name': setup['name'],
+          'idempotency_key': setup['request'],
+        });
+      } on AccountFailure catch (failure) {
+        if (failure == AccountFailure.rejected) await refused();
+        rethrow;
+      }
       if (!hasStatus(result, 'UNATTESTED', 1) &&
           result['status'] != null &&
           result['agent_pubkey'] == null) {
-        // An explicit rejection allocated nothing, so it can be discarded.
-        setup = {...setup}..remove('registering');
-        await _savePending(setup);
+        await refused();
       }
       requireStatus(result, 'UNATTESTED', 1);
       final pubkey = result['agent_pubkey'];
@@ -391,6 +420,11 @@ class RemoteAgentController extends ChangeNotifier {
       }
       setup = {...setup, 'pubkey': pubkey, 'id': result['agent_id']};
       await _savePending(setup);
+    }
+    if (elsewhere) {
+      throw StateError(
+        'Agent identity recovered. Finish the setup in its original community.',
+      );
     }
     final pubkey = setup['pubkey'] as String;
     status = 'Authorizing and activating agent…';
@@ -412,6 +446,7 @@ class RemoteAgentController extends ChangeNotifier {
     }
     await subscribe(setup['id'] as String, community.relayUrl);
     await publishPolicy(community.relayUrl, setup);
+    _registrationsChanged();
     // Retain the completed registration if the listing refresh fails, so Retry
     // resumes the same identity instead of creating another agent.
     await refresh();
@@ -577,6 +612,7 @@ class RemoteAgentController extends ChangeNotifier {
     }
     check();
     await removePolicy(community.relayUrl, pubkey);
+    _registrationsChanged();
     check();
     final remaining = await fetch(
       NostrFilter(

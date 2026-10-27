@@ -42,6 +42,7 @@ class FakeRegistry extends BuilderlabAccountClient {
   bool failInstructions = false;
   bool rejectRegistration = false;
   bool loseRegistration = false;
+  bool refuseRegistration = false;
   Object deleteStatus = 1;
   final calls = <String>[];
   final bodies = <String, Map<String, dynamic>>{};
@@ -68,6 +69,7 @@ class FakeRegistry extends BuilderlabAccountClient {
       case '/v3/beekeeper/list-agents':
         return {'status': 1, 'agents': listed};
       case '/v3/beekeeper/register-agent':
+        if (refuseRegistration) throw AccountFailure.rejected;
         if (rejectRegistration) {
           return {'status': 'REGISTER_AGENT_STATUS_NAME_TAKEN'};
         }

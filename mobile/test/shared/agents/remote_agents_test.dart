@@ -338,6 +338,13 @@ void main() {
     );
     expect(controller.status, contains('NAME_TAKEN'));
     expect(controller.canDiscardPending, isTrue);
+    // An HTTP rejection is just as definite.
+    registry
+      ..rejectRegistration = false
+      ..refuseRegistration = true;
+    expect(await controller.create(community, 'Scout'), isFalse);
+    expect(controller.status, contains('rejected'));
+    expect(controller.canDiscardPending, isTrue);
     final request = controller.pending!['request'];
     expect(prefs.getString('$_scope:pending'), isNotNull);
 
@@ -351,7 +358,7 @@ void main() {
 
     // A lost response may hide a committed identity, so it can only resume.
     registry
-      ..rejectRegistration = false
+      ..refuseRegistration = false
       ..loseRegistration = true;
     expect(
       await controller.create(community, 'Scout', instructions: 'Private.'),
@@ -385,16 +392,21 @@ void main() {
     expect(await remove(other), isFalse);
     expect(controller.status, contains('Resume the unfinished setup'));
 
-    // Resume reuses the idempotency key and recovers the same identity.
+    // Resume from another community reuses the idempotency key and recovers
+    // the same identity; finishing it still needs the original community.
     registry
       ..loseRegistration = false
-      ..failInstructions = true
       ..bodies.clear();
-    expect(await controller.create(community, 'Scout'), isFalse);
+    expect(await controller.create(elsewhere, 'Scout'), isFalse);
+    expect(controller.status, contains('Agent identity recovered'));
     expect(
       registry.bodies['/v3/beekeeper/register-agent']?['idempotency_key'],
       lost,
     );
+    registry.bodies.clear();
+    expect(await controller.create(elsewhere, 'Scout'), isFalse);
+    expect(controller.status, contains('original community'));
+    expect(registry.bodies, isEmpty);
     expect(controller.pending?['pubkey'], fakeAgent);
     expect(await controller.discardPending(), isFalse);
     expect(controller.pending?['pubkey'], fakeAgent);
@@ -515,6 +527,31 @@ void main() {
 
     relay.live = true;
     container.invalidate(availableRemoteAgentsProvider);
+    expect(await container.read(availableRemoteAgentsProvider.future), {
+      fakeAgent,
+    });
+    expect(container.read(presentedPresenceProvider)[fakeAgent], 'online');
+
+    // Removing the registration hides it even when the runtime stays ACTIVE.
+    registry.deleteStatus = 2;
+    relay.live = false;
+    expect(
+      await controller.deleteAgent(
+        pubkey: fakeAgent,
+        community: _community(),
+        isCurrent: () => true,
+        fetch: (_) async => [],
+      ),
+      isFalse,
+    );
+    expect(controller.activeAgents, {fakeAgent});
+    expect(await container.read(availableRemoteAgentsProvider.future), isEmpty);
+    expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+
+    // Publishing a registration for the still-ACTIVE agent shows it again.
+    relay.live = true;
+    expect(await controller.create(_community(), 'Scout'), isTrue);
+    expect(controller.activeAgents, {fakeAgent});
     expect(await container.read(availableRemoteAgentsProvider.future), {
       fakeAgent,
     });
