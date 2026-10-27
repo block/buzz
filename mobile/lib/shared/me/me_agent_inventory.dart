@@ -72,18 +72,48 @@ Map<String, String> _inventoryNames(List<NostrEvent> events, String owner) {
     final previous = heads[id];
     if (previous == null || meEventIsNewer(event, previous)) heads[id] = event;
   }
-  final names = <String, String>{};
-  for (final entry in heads.entries) {
-    try {
-      final body = jsonDecode(entry.value.content);
-      if (body is! Map<String, dynamic>) continue;
-      final name = body['name'];
-      if (name is String && name.trim().isNotEmpty) {
-        names[entry.key] = name.trim();
-      }
-    } on FormatException {
-      // Empty/deleted and malformed heads never resurrect an earlier listing.
-    }
-  }
-  return names;
+  // Empty/deleted, malformed and unsupported heads never resurrect an earlier
+  // listing.
+  return {
+    for (final MapEntry(key: id, value: head) in heads.entries)
+      id: ?_supportedPolicyName(head),
+  };
 }
+
+/// Desktop's `ManagedAgentEventContent` contract: a head desktop cannot parse
+/// fails closed instead of offering an agent whose policy is unknown.
+String? _supportedPolicyName(NostrEvent event) {
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(event.content);
+  } on FormatException {
+    return null;
+  }
+  if (decoded is! Map<String, dynamic>) return null;
+  final body = decoded;
+  final name = body['name'];
+  if (name is! String || name.trim().isEmpty) return null;
+  final parallelism = body['parallelism'];
+  final allowlist = body['respond_to_allowlist'];
+  final supported =
+      parallelism is int &&
+      parallelism >= 0 &&
+      parallelism <= 0xFFFFFFFF &&
+      _respondTo.contains(body['respond_to']) &&
+      (!body.containsKey('respond_to_allowlist') ||
+          (allowlist is List && allowlist.every((entry) => entry is String))) &&
+      _optionalPolicyText.every((field) {
+        final value = body[field];
+        return value == null || value is String;
+      });
+  return supported ? name.trim() : null;
+}
+
+const _respondTo = {'owner-only', 'allowlist', 'anyone'};
+const _optionalPolicyText = [
+  'persona_id',
+  'system_prompt',
+  'model',
+  'provider',
+  'persona_source_version',
+];

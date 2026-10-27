@@ -87,7 +87,13 @@ void main() {
   }) => NostrEvent.fromJson(
     nostr.Event.from(
       kind: 30177,
-      content: content ?? jsonEncode({'name': name}),
+      content:
+          content ??
+          jsonEncode({
+            'name': name,
+            'parallelism': 1,
+            'respond_to': 'owner-only',
+          }),
       secretKey: owner.secret,
       createdAt: time,
       tags: [
@@ -277,6 +283,74 @@ void main() {
       expect(relay.requestedAuthors, isEmpty);
     },
   );
+  const policy = {
+    'name': 'Saved agent',
+    'parallelism': 1,
+    'respond_to': 'owner-only',
+  };
+  for (final (label, content) in [
+    ('unsupported respond_to', {...policy, 'respond_to': 'nobody'}),
+    ('missing respond_to', {'name': 'Agent', 'parallelism': 1}),
+    ('missing parallelism', {'name': 'Agent', 'respond_to': 'anyone'}),
+    ('negative parallelism', {...policy, 'parallelism': -1}),
+    ('fractional parallelism', {...policy, 'parallelism': 1.5}),
+    ('oversized parallelism', {...policy, 'parallelism': 0x100000000}),
+    ('non-list allowlist', {...policy, 'respond_to_allowlist': 'x'}),
+    (
+      'non-string allowlist entry',
+      {
+        ...policy,
+        'respond_to': 'allowlist',
+        'respond_to_allowlist': [7],
+      },
+    ),
+    ('null allowlist', {...policy, 'respond_to_allowlist': null}),
+    ('non-string model', {...policy, 'model': 7}),
+    ('non-object content', ['Agent']),
+  ]) {
+    test('an unsupported latest policy fails closed: $label', () async {
+      final relay = _Relay(
+        [
+          [profile(agent, ownedBy: owner)],
+        ],
+        inventory: [
+          listing(agent.public, time: 2, content: jsonEncode(content)),
+          listing(agent.public),
+        ],
+      );
+      expect(await setup(relay).read(meAssistantsProvider.future), isEmpty);
+    });
+  }
+  test('accepts every supported policy shape', () async {
+    final shapes = [
+      policy,
+      {...policy, 'respond_to': 'anyone', 'parallelism': 0},
+      {
+        ...policy,
+        'respond_to': 'allowlist',
+        'respond_to_allowlist': [other.public],
+        'persona_id': 'scout',
+        'model': null,
+        'future_field': true,
+      },
+    ];
+    final agents = [for (final _ in shapes) nostr.Keys.generate()];
+    final relay = _Relay(
+      [
+        [for (final key in agents) profile(key, ownedBy: owner)],
+      ],
+      inventory: [
+        for (var i = 0; i < shapes.length; i++)
+          listing(agents[i].public, content: jsonEncode(shapes[i])),
+      ],
+    );
+    expect(
+      (await setup(
+        relay,
+      ).read(meAssistantsProvider.future)).map((a) => a.pubkey),
+      unorderedEquals(agents.map((key) => key.public)),
+    );
+  });
   test('inventory rejects records outside owner scope', () async {
     final foreign = NostrEvent.fromJson(
       nostr.Event.from(
