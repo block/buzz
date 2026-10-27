@@ -80,11 +80,11 @@ Future<(Channel, String)?> _showNewMeChat(
                 'savedAssistant': {
                   'id': assistant,
                   'name':
-                      ref.read(userCacheProvider)[assistant]?.label ??
                       directory
                           ?.where((a) => a.pubkey == assistant)
                           .firstOrNull
                           ?.displayName ??
+                      ref.read(userCacheProvider)[assistant]?.label ??
                       assistant,
                   'avatarUrl':
                       ref.read(userCacheProvider)[assistant]?.avatarUrl ?? '',

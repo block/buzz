@@ -96,6 +96,9 @@ useMeChatAssistant(
           .firstOrNull
           ?.displayName ??
       profile?.displayName;
+  final avatarInitial = name?.trim().isNotEmpty == true
+      ? name!.trim()[0].toUpperCase()
+      : profile?.initial ?? '?';
   String agentName(String pubkey) {
     final names = [
       agents.where((a) => a.pubkey == pubkey).firstOrNull?.displayName,
@@ -227,8 +230,7 @@ useMeChatAssistant(
       avatarIdentity: selected,
       avatarIsAgent: selected != null,
       imageUrl: profile?.avatarUrl,
-      avatarInitial:
-          profile?.initial ?? (name?.isNotEmpty == true ? name![0] : '?'),
+      avatarInitial: avatarInitial,
       onPressed: busy.value ? null : choose,
     ),
     action: IconButton(
@@ -242,9 +244,7 @@ useMeChatAssistant(
         backgroundColor: context.controlSurface,
         fallback: selected == null
             ? const Icon(BuzzIcons.plus, size: 20)
-            : Text(
-                profile?.initial ?? (name?.isNotEmpty == true ? name![0] : '?'),
-              ),
+            : Text(avatarInitial),
       ),
     ),
   );

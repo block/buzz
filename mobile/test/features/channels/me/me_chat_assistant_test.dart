@@ -384,6 +384,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byTooltip('Change agent: Alpha'), findsOneWidget);
       expect(find.byType(AvatarImage), findsOneWidget);
+      // Without artwork, the fallback initial follows the owner's label.
+      expect(
+        find.descendant(of: find.byType(AvatarImage), matching: find.text('A')),
+        findsOneWidget,
+      );
       expect(find.text('Choose follow-up assistant'), findsNothing);
       final readsBeforeSend = directoryReads;
       await tester.tap(find.text('Send'));

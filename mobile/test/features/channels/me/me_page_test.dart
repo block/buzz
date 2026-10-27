@@ -237,7 +237,12 @@ void main() {
             ),
             meSyncProvider.overrideWithValue(sync),
             channelsProvider.overrideWith(FakeChannels.new),
-            meAssistantsProvider.overrideWith((ref) async => []),
+            meAssistantsProvider.overrideWith(
+              (ref) async => const [
+                AgentDirectoryEntry(pubkey: 'agent', displayName: 'Owner Name'),
+              ],
+            ),
+            userCacheProvider.overrideWith(_ConfusableProfiles.new),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -277,6 +282,21 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Enter a name and choose an agent.'), findsOneWidget);
       expect(find.text('Design session'), findsOneWidget);
+      // The owner's label and its initial outrank the agent's own profile.
+      await tester.tap(find.byKey(const ValueKey('new-session-assistant')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Owner Name').last);
+      await tester.pumpAndSettle();
+      final row = find.byKey(const ValueKey('new-session-assistant'));
+      expect(
+        find.descendant(of: row, matching: find.text('Owner Name')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: row, matching: find.text('O')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Confusable'), findsNothing);
     },
   );
 
