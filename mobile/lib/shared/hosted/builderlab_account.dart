@@ -65,6 +65,16 @@ class BuilderlabAccountClient {
   static final origin = HostedEnvironment.origin;
   static const _prefix = '/api/goose';
 
+  /// Remote-agent registry routes, shared with desktop.
+  static const _beekeeperRoutes = {
+    '/v3/beekeeper/register-agent',
+    '/v3/beekeeper/update-agent',
+    '/v3/beekeeper/delete-agent',
+    '/v3/beekeeper/attest-agent',
+    '/v3/beekeeper/list-agents',
+    '/v3/beekeeper/add-buzz-subscription',
+  };
+
   /// Sessions are scoped per origin so staging never reads production state.
   static final _storageKey =
       'buzz_hosted_session_${origin.host.replaceAll('.', '_')}_v1';
@@ -226,8 +236,13 @@ class BuilderlabAccountClient {
     String? signingKey,
     String? expectedSubject,
   }) {
-    if (!RegExp(r'^/v1/buzz(/[a-z0-9_-]+)+$').hasMatch(path)) {
-      throw ArgumentError.value(path, 'path', 'not a /v1/buzz/ route');
+    if (!RegExp(r'^/v1/buzz(/[a-z0-9_-]+)+$').hasMatch(path) &&
+        !_beekeeperRoutes.contains(path)) {
+      throw ArgumentError.value(
+        path,
+        'path',
+        'not an allowed Builderlab route',
+      );
     }
     return _serial(() async {
       final credential = _credential;

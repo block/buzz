@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/agents/remote_agents.dart';
 import '../../shared/relay/relay.dart';
 
 /// Community-scoped presence: absent means unknown. Polls recover expired leases.
@@ -240,3 +241,13 @@ final presenceCacheProvider =
     NotifierProvider<PresenceCacheNotifier, Map<String, String>>(
       PresenceCacheNotifier.new,
     );
+
+/// Presentation shared by profiles, DMs and mentions. Remote agents wake on
+/// messages, so an ACTIVE registration shows Online whatever their socket
+/// presence. Local presence is unchanged.
+final presentedPresenceProvider = Provider<Map<String, String>>((ref) {
+  final presence = ref.watch(presenceCacheProvider);
+  final remote = ref.watch(availableRemoteAgentsProvider);
+  if (remote.isEmpty) return presence;
+  return {...presence, for (final pubkey in remote) pubkey: 'online'};
+});

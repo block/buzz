@@ -218,7 +218,7 @@ final mentionCandidatesProvider = Provider.family
         candidates,
       );
       loadIdentityNameOwners(ref, names);
-      final presence = ref.watch(presenceCacheProvider);
+      final presence = ref.watch(presentedPresenceProvider);
       return rankMentionCandidates(
         [
           for (final candidate in candidates)
