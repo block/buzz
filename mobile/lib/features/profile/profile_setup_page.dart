@@ -18,7 +18,7 @@ import 'profile_avatar_draft.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'profile_setup_avatar_editor.dart';
 
-/// One optional profile sheet for onboarding and existing-community entry.
+/// Profile setup for onboarding and existing-community entry, with a failure exit.
 class ProfileSetupPage extends HookConsumerWidget {
   const ProfileSetupPage({super.key, required this.flow});
   final HostedFlow flow;
@@ -91,6 +91,7 @@ class ProfileSetupPage extends HookConsumerWidget {
               onName: (value) => name = value,
               editAvatar: editAvatar,
               save: save,
+              notNow: flow.finishProfile,
             );
           },
         );
@@ -221,11 +222,13 @@ class _ProfileSetupForm extends HookWidget {
     required this.onName,
     required this.editAvatar,
     required this.save,
+    required this.notNow,
   });
   final ValueNotifier<ProfileAvatarDraft?> avatar;
   final ValueChanged<String> onName;
   final Future<void> Function() editAvatar;
   final Future<void> Function() save;
+  final VoidCallback notNow;
   @override
   Widget build(BuildContext context) {
     final draft = useValueListenable(avatar);
@@ -275,7 +278,9 @@ class _ProfileSetupForm extends HookWidget {
               decoration: const InputDecoration(labelText: 'Display name'),
             ),
             if (error.value)
-              const Text('Could not save your profile. Try again or skip.'),
+              const Text(
+                'Could not save your profile. Try again or choose Not now to continue without saving.',
+              ),
             FilledButton(
               style: FilledButton.styleFrom(
                 minimumSize: const Size.fromHeight(52),
@@ -296,6 +301,11 @@ class _ProfileSetupForm extends HookWidget {
                     },
               child: Text(busy.value ? 'Saving…' : 'Continue'),
             ),
+            if (error.value)
+              TextButton(
+                onPressed: busy.value ? null : notNow,
+                child: const Text('Not now'),
+              ),
           ],
         ),
       ),

@@ -24,7 +24,7 @@ class RunnerTests: XCTestCase {
     alreadyDisabled.isEnabled = false
     let coordinator = NativeProfileSetupCoordinator(messenger: messenger, startEditorEngine: { _ in
       starts += 1
-      XCTAssertEqual(navigation?.modalPresentationStyle, .fullScreen)
+      XCTAssertEqual(navigation?.modalPresentationStyle, .overFullScreen)
       XCTAssertEqual(navigation?.isModalInPresentation, starts > 1)
       XCTAssertEqual(pan.isEnabled, starts == 1)
       return false
@@ -52,7 +52,7 @@ class RunnerTests: XCTestCase {
     submit.sendActions(for: .touchUpInside)
     for _ in 0..<2 {
       avatar.sendActions(for: .touchUpInside)
-      XCTAssertEqual(nav.modalPresentationStyle, .fullScreen)
+      XCTAssertEqual(nav.modalPresentationStyle, .overFullScreen)
       XCTAssertTrue(pan.isEnabled)
       XCTAssertFalse(alreadyDisabled.isEnabled)
       XCTAssertFalse(nav.isModalInPresentation)

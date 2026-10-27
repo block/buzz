@@ -72,7 +72,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
         }
       }
       let nav = UINavigationController(rootViewController: controller)
-      nav.modalPresentationStyle = .fullScreen
+      nav.modalPresentationStyle = .overFullScreen
       nav.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
       self.pending = result; self.session = session; self.navigation = nav
       controller.loadViewIfNeeded()
@@ -83,6 +83,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
   private func openAvatar(from controller: NativeProfileSetupController, args: [String: Any], session: Int, preparing: Bool = false) {
     guard self.session == session, let navigation else { return }
     if !preparing {
+      UIImpactFeedbackGenerator(style: .light).impactOccurred()
       previousInteractivePopEnabled = navigation.interactivePopGestureRecognizer?.isEnabled
       navigation.isModalInPresentation = true
       var sheetView: UIView? = navigation.view
@@ -181,7 +182,9 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     avatarController?.view.frame = frame
     let rect = controller.avatarFrame(in: controller.view).offsetBy(dx: -frame.minX, dy: -frame.minY)
     avatarChannel?.invokeMethod("reveal", arguments: ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height])
-    animateAvatarMotion { self.avatarController?.view.alpha = 1 } completion: {}
+    animateAvatarMotion { self.avatarController?.view.alpha = 1 } completion: {
+      UIAccessibility.post(notification: .screenChanged, argument: self.avatarController?.view)
+    }
   }
 
   // Use the same motion and timing in both directions.
@@ -246,6 +249,7 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
   private let avatarRow = UIView()
   private let spacer = UIView()
   private var skip: UIButton!
+  private var notNow: UIButton!
   private var choosingAvatar = false
   private var hasAvatar = false
   private let avatarSize: CGFloat = 220
@@ -321,7 +325,9 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     skipConfiguration.background.strokeWidth = 0
     skipConfiguration.background.strokeColor = .clear
     skip = UIButton(configuration: skipConfiguration, primaryAction: UIAction { [weak self] _ in self?.save(skipAvatar: true) })
-    for button in [submit!, skip!] {
+    notNow = UIButton(configuration: onboardingButtonConfiguration("Not now", primary: false), primaryAction: UIAction { [weak self] _ in self?.finish?("skip") })
+    notNow.isHidden = true
+    for button in [submit!, skip!, notNow!] {
       let minimumHeight = button.heightAnchor.constraint(greaterThanOrEqualToConstant: 52)
       minimumHeight.priority = .defaultHigh
       minimumHeight.isActive = true
@@ -358,6 +364,7 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     spacer.isHidden = avatar
     skip.isHidden = !avatar
     status.isHidden = true
+    notNow.isHidden = true
     navigationItem.leftBarButtonItem = avatar
       ? UIBarButtonItem(title: "Back", image: UIImage(systemName: "chevron.backward"), primaryAction: UIAction { [weak self] _ in self?.goBack() })
       : nil
@@ -396,6 +403,10 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     editingAvatar = visible
     heading.accessibilityElementsHidden = visible
     explanationRow.accessibilityElementsHidden = visible
+    avatarRow.accessibilityElementsHidden = visible
+    submit.accessibilityElementsHidden = visible
+    skip.accessibilityElementsHidden = visible
+    notNow.accessibilityElementsHidden = visible
     let motion = visible && !UIAccessibility.isReduceMotionEnabled
     // Clear the heading quickly before the segmented control replaces it.
     UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : (visible ? 0.06 : 0.2), delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
@@ -407,8 +418,10 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
       self.explanationRow.transform = self.heading.transform
       self.submit.alpha = visible ? 0 : 1
       self.skip.alpha = visible ? 0 : 1
+      self.notNow.alpha = visible ? 0 : 1
       self.submit.transform = motion ? CGAffineTransform(translationX: 0, y: 40).scaledBy(x: 0.96, y: 0.96) : .identity
       self.skip.transform = self.submit.transform
+      self.notNow.transform = self.submit.transform
     }
   }
 
@@ -421,34 +434,108 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
   func avatarReady() { avatar.isEnabled = true }
   func updateAvatar(_ args: [String: Any]) {
     hasAvatar = false
-    defer { if submit != nil { updateName() } }
+    defer {
+      avatar.accessibilityLabel = hasAvatar ? "Edit profile photo" : "Add profile photo"
+      if submit != nil { updateName() }
+    }
     avatar.layer.sublayers?.filter { $0 is CAShapeLayer }.forEach { $0.removeFromSuperlayer() }
     avatar.setImage(nil, for: .normal); avatar.setTitle(nil, for: .normal); avatar.backgroundColor = .clear
     if let bytes = args["avatar"] as? FlutterStandardTypedData, let image = UIImage(data: bytes.data) {
       hasAvatar = true
-      avatar.setImage(image.withRenderingMode(.alwaysOriginal), for: .normal); avatar.imageView?.contentMode = .scaleAspectFill
-      avatar.clipsToBounds = true; avatar.layer.cornerRadius = avatarSize / 2
+      avatar.setImage(avatarPreview(image: image), for: .normal); avatar.imageView?.contentMode = .scaleAspectFit
+      avatar.clipsToBounds = false; avatar.layer.cornerRadius = 0
     } else if let emoji = args["emoji"] as? String {
       hasAvatar = true
-      avatar.setTitle(emoji, for: .normal); avatar.titleLabel?.font = .systemFont(ofSize: 56)
-      let color = (args["emojiColor"] as? NSNumber)?.uint32Value ?? 0xFFFFFFFF
-      avatar.backgroundColor = UIColor(red: CGFloat((color >> 16) & 255) / 255, green: CGFloat((color >> 8) & 255) / 255, blue: CGFloat(color & 255) / 255, alpha: 1); avatar.layer.cornerRadius = avatarSize / 2
+      let argb = (args["emojiColor"] as? NSNumber)?.uint32Value ?? 0xFFFFFFFF
+      let background = UIColor(red: CGFloat((argb >> 16) & 255) / 255, green: CGFloat((argb >> 8) & 255) / 255, blue: CGFloat(argb & 255) / 255, alpha: 1)
+      avatar.setImage(avatarPreview(emoji: emoji, background: background), for: .normal)
+      avatar.imageView?.contentMode = .scaleAspectFit
+      avatar.clipsToBounds = false; avatar.layer.cornerRadius = 0
     } else {
       avatar.setImage(tablerPlusImage(), for: .normal)
       let ring = CAShapeLayer(); ring.path = UIBezierPath(ovalIn: CGRect(x: 2, y: 2, width: avatarSize - 4, height: avatarSize - 4)).cgPath
       ring.strokeColor = UIColor.tertiaryLabel.cgColor; ring.fillColor = UIColor.clear.cgColor; ring.lineWidth = 3; let step = CGFloat.pi * (avatarSize - 4) / 32; ring.lineDashPattern = [NSNumber(value: Double(step * 4 / 9)), NSNumber(value: Double(step * 5 / 9))]; avatar.layer.addSublayer(ring)
     }
   }
-  private func tablerPlusImage() -> UIImage? {
+  /// Mirrors Flutter's 220-point preview and AvatarBadgeMaskGeometry.badge.
+  private func avatarPreview(image: UIImage? = nil, emoji: String? = nil, background: UIColor = .clear) -> UIImage {
+    UIGraphicsImageRenderer(size: CGSize(width: avatarSize, height: avatarSize)).image { renderer in
+      let bounds = CGRect(x: 0, y: 0, width: avatarSize, height: avatarSize)
+      renderer.cgContext.saveGState()
+      avatarBadgePath().addClip()
+      background.setFill(); UIRectFill(bounds)
+      if let image {
+        let scale = max(avatarSize / image.size.width, avatarSize / image.size.height)
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        image.draw(in: CGRect(x: (avatarSize - size.width) / 2, y: (avatarSize - size.height) / 2, width: size.width, height: size.height))
+      }
+      if let emoji {
+        // Same font/optical box ratio as _EmojiAvatarPreview, including wide sequences.
+        let box = avatarSize * 258 / 512
+        let text = NSAttributedString(string: emoji, attributes: [.font: UIFont.systemFont(ofSize: box)])
+        let size = text.size()
+        let scale = min(1, box / size.width)
+        renderer.cgContext.saveGState()
+        renderer.cgContext.translateBy(x: (avatarSize - size.width * scale) / 2, y: (avatarSize - size.height * scale) / 2 - 1)
+        renderer.cgContext.scaleBy(x: scale, y: scale)
+        text.draw(at: .zero)
+        renderer.cgContext.restoreGState()
+      }
+      renderer.cgContext.restoreGState()
+      let diameter = avatarSize * 54 / 192
+      let center = avatarSize * 165 / 192
+      let badge = CGRect(x: center - diameter / 2, y: center - diameter / 2, width: diameter, height: diameter)
+      color("primaryArgb", fallback: .label).setFill()
+      UIBezierPath(ovalIn: badge).fill()
+      tablerImage(code: 0xeb04, size: diameter * 0.48)?
+        .withTintColor(color("onPrimaryArgb", fallback: .systemBackground), renderingMode: .alwaysOriginal)
+        .draw(in: badge.insetBy(dx: diameter * 0.26, dy: diameter * 0.26))
+    }.withRenderingMode(.alwaysOriginal)
+  }
+
+  /// Port of shared/widgets/masked_avatar_badge.dart, including its rounded joiners.
+  private func avatarBadgePath() -> UIBezierPath {
+    let radius = avatarSize / 2, cutoutRadius = avatarSize * 30 / 192
+    let center = CGPoint(x: radius, y: radius)
+    let cutout = CGPoint(x: avatarSize * 165 / 192, y: avatarSize * 165 / 192)
+    let distance = hypot(cutout.x - center.x, cutout.y - center.y)
+    let midpointDistance = (radius * radius - cutoutRadius * cutoutRadius + distance * distance) / (2 * distance)
+    let halfChord = sqrt(max(0, radius * radius - midpointDistance * midpointDistance))
+    let unit = (cutout.x - center.x) / distance
+    let upper = CGPoint(x: center.x + unit * (midpointDistance + halfChord), y: center.y + unit * (midpointDistance - halfChord))
+    let lower = CGPoint(x: upper.y, y: upper.x)
+    let rounding = min(0.38, max(0.22, 5.5 / cutoutRadius))
+    let au = atan2(upper.y - center.y, upper.x - center.x) - 0.075
+    let al = atan2(lower.y - center.y, lower.x - center.x) + 0.075
+    let cu = atan2(upper.y - cutout.y, upper.x - cutout.x) - rounding
+    let cl = atan2(lower.y - cutout.y, lower.x - cutout.x) + rounding
+    func point(_ c: CGPoint, _ r: CGFloat, _ a: CGFloat) -> CGPoint { CGPoint(x: c.x + r * cos(a), y: c.y + r * sin(a)) }
+    func tangent(_ p: CGPoint, _ a: CGFloat, _ length: CGFloat) -> CGPoint { CGPoint(x: p.x - sin(a) * length, y: p.y + cos(a) * length) }
+    let aUpper = point(center, radius, au), aLower = point(center, radius, al)
+    let cUpper = point(cutout, cutoutRadius, cu), cLower = point(cutout, cutoutRadius, cl)
+    let uh = min(cutoutRadius * 0.14, hypot(cUpper.x - aUpper.x, cUpper.y - aUpper.y) * 0.42)
+    let lh = min(cutoutRadius * 0.14, hypot(cLower.x - aLower.x, cLower.y - aLower.y) * 0.42)
+    let path = UIBezierPath()
+    path.move(to: cUpper)
+    path.addCurve(to: aUpper, controlPoint1: tangent(cUpper, cu, uh), controlPoint2: tangent(aUpper, au, uh))
+    path.addArc(withCenter: center, radius: radius, startAngle: au, endAngle: al, clockwise: false)
+    path.addCurve(to: cLower, controlPoint1: tangent(aLower, al, -lh), controlPoint2: tangent(cLower, cl, -lh))
+    path.addArc(withCenter: cutout, radius: cutoutRadius, startAngle: cl, endAngle: cu, clockwise: true)
+    path.close()
+    return path
+  }
+
+  private func tablerPlusImage() -> UIImage? { tablerImage(code: 0xeb0b, size: 40) }
+  private func tablerImage(code: UInt32, size: CGFloat) -> UIImage? {
     guard let frameworks = Bundle.main.privateFrameworksURL,
       let provider = CGDataProvider(url: frameworks.appendingPathComponent("App.framework/flutter_assets/assets/fonts/TablerIcons.ttf") as CFURL),
       let font = CGFont(provider), let fontName = font.postScriptName else { return nil }
     CTFontManagerRegisterGraphicsFont(font, nil)
-    guard let uiFont = UIFont(name: fontName as String, size: 40), let scalar = UnicodeScalar(0xeb0b) else { return nil }
+    guard let uiFont = UIFont(name: fontName as String, size: size), let scalar = UnicodeScalar(code) else { return nil }
     let glyph = NSAttributedString(string: String(scalar), attributes: [.font: uiFont])
-    let size = glyph.size()
-    return UIGraphicsImageRenderer(size: CGSize(width: 44, height: 44)).image { _ in
-      glyph.draw(at: CGPoint(x: (44 - size.width) / 2, y: (44 - size.height) / 2))
+    let measured = glyph.size()
+    return UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { _ in
+      glyph.draw(at: CGPoint(x: (size - measured.width) / 2, y: (size - measured.height) / 2))
     }.withRenderingMode(.alwaysTemplate)
   }
   private func color(_ key: String, fallback: UIColor) -> UIColor {
@@ -463,7 +550,8 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     action?("save", ["name": draftName, "skipAvatar": skipAvatar]) { [weak self] response in
       guard let self else { return }
       if response["saved"] as? Bool == true { self.finish?("saved"); return }
-      self.status.text = "Could not save your profile. Try again."; self.status.isHidden = false
+      self.notNow.isHidden = false
+      self.status.text = "Could not save your profile. Try again or choose Not now to continue without saving."; self.status.isHidden = false
       UIAccessibility.post(notification: .announcement, argument: self.status.text)
       self.name.isEnabled = true; self.controls.forEach { $0.isEnabled = true }; self.updateName(); self.navigationController?.isModalInPresentation = false; self.navigationItem.rightBarButtonItem?.isEnabled = true; self.navigationItem.leftBarButtonItem?.isEnabled = true; self.submit.configuration?.showsActivityIndicator = false
     }

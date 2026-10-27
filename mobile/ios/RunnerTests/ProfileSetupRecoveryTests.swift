@@ -33,7 +33,7 @@ final class ProfileSetupRecoveryTests: XCTestCase {
     let profile = try XCTUnwrap(nav.viewControllers.first)
     let avatar = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
       .first { $0.accessibilityLabel == "Add profile photo" })
-    XCTAssertEqual(nav.modalPresentationStyle, .fullScreen)
+    XCTAssertEqual(nav.modalPresentationStyle, .overFullScreen)
     XCTAssertNil(profile.navigationItem.rightBarButtonItem)
     let name = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UITextField }.first)
     let submit = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
@@ -90,7 +90,7 @@ final class ProfileSetupRecoveryTests: XCTestCase {
         watchdogs.last?()
         XCTAssertTrue(nav.topViewController === profile)
         XCTAssertFalse(nav.isNavigationBarHidden)
-        XCTAssertEqual(nav.modalPresentationStyle, .fullScreen)
+        XCTAssertEqual(nav.modalPresentationStyle, .overFullScreen)
         XCTAssertTrue(pan.isEnabled)
         XCTAssertFalse(disabledPan.isEnabled)
         XCTAssertTrue(nav.interactivePopGestureRecognizer?.isEnabled ?? false)
@@ -108,6 +108,48 @@ final class ProfileSetupRecoveryTests: XCTestCase {
     XCTAssertEqual(messenger.savedArguments?["skipAvatar"] as? Bool, true)
     XCTAssertTrue(skip.isEnabled, "Failed name-only save must remain retryable through Skip")
     XCTAssertFalse(submit.isEnabled)
+    let notNow = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
+      .first { $0.configuration?.title == "Not now" })
+    XCTAssertFalse(notNow.isHidden)
+    XCTAssertTrue(notNow.isEnabled)
+    notNow.sendActions(for: .touchUpInside)
+    let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in parent.presentedViewController == nil }, object: nil)
+    await fulfillment(of: [dismissed], timeout: 2)
+    XCTAssertEqual(messenger.completionAction, "skip")
+    withExtendedLifetime(coordinator) {}
+    nav.dismiss(animated: false)
+  }
+
+  @MainActor
+  func testSelectedEmojiShowsEditablePreview() async throws {
+    let messenger = ProfileSetupTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.windowScene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let coordinator = NativeProfileSetupCoordinator(messenger: messenger, startEditorEngine: { _ in false }, configureEditorEngine: { _ in })
+    messenger.invoke("present", arguments: ["session": 82, "name": "Kenny", "emoji": "😊", "emojiColor": 0xFFFFCC00, "primaryArgb": 0xFF000000, "onPrimaryArgb": 0xFFFFFFFF])
+    let nav = try XCTUnwrap(parent.presentedViewController as? UINavigationController)
+    if let transition = nav.transitionCoordinator {
+      await withCheckedContinuation { continuation in
+        transition.animate(alongsideTransition: nil) { _ in continuation.resume() }
+      }
+    }
+    let profile = try XCTUnwrap(nav.viewControllers.first)
+    let avatar = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
+      .first { $0.accessibilityLabel == "Edit profile photo" })
+    let submit = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
+      .first { $0.configuration?.title == "Continue" })
+    submit.sendActions(for: .touchUpInside)
+    XCTAssertTrue(submit.isEnabled)
+    let image = try XCTUnwrap(avatar.image(for: .normal))
+    XCTAssertEqual(image.size, CGSize(width: 220, height: 220))
+    let attachment = XCTAttachment(image: image)
+    attachment.name = "Selected emoji with edit badge"
+    attachment.lifetime = .keepAlways
+    add(attachment)
     withExtendedLifetime(coordinator) {}
     nav.dismiss(animated: false)
   }
@@ -121,6 +163,7 @@ final class ProfileSetupRecoveryTests: XCTestCase {
 private final class ProfileSetupTestMessenger: NSObject, FlutterBinaryMessenger {
   private var handler: FlutterBinaryMessageHandler?
   var savedArguments: [String: Any]?
+  var completionAction: String?
   func send(onChannel channel: String, message: Data?) {}
   func send(onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply?) {
     let codec = FlutterStandardMethodCodec.sharedInstance()
@@ -137,6 +180,8 @@ private final class ProfileSetupTestMessenger: NSObject, FlutterBinaryMessenger 
   func cleanUpConnection(_ connection: FlutterBinaryMessengerConnection) { handler = nil }
   func invoke(_ method: String, arguments: [String: Any]) {
     let codec = FlutterStandardMethodCodec.sharedInstance()
-    handler?(codec.encode(FlutterMethodCall(methodName: method, arguments: arguments))) { _ in }
+    handler?(codec.encode(FlutterMethodCall(methodName: method, arguments: arguments))) { data in
+      if let data { self.completionAction = try? codec.decodeEnvelope(data) as? String }
+    }
   }
 }
