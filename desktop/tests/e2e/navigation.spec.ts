@@ -1099,3 +1099,26 @@ test("cold-start message deep link preserves its thread target", async ({
   await expect(page).toHaveURL(/messageId=mock-forum-release-reply/);
   await expect(page).toHaveURL(/threadRootId=mock-forum-release-thread/);
 });
+
+test("native message links open the supplied thread without the target reply", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    pendingNavigationDeepLinks: [
+      {
+        id: "missing-reply-link",
+        kind: "message",
+        channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+        messageId: "unavailable-reply",
+        threadRootId: "mock-general-welcome",
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("message-thread-head")).toContainText(
+    "Welcome to general",
+  );
+  await expect(page).toHaveURL(/thread=mock-general-welcome/);
+});
