@@ -85,13 +85,19 @@ impl AppAttestVerifier {
         client_data: &[u8],
     ) -> Result<VerifiedAttestation, AppAttestError> {
         if attestation_b64.len() > crate::model::MAX_APP_ATTESTATION_BYTES.div_ceil(3) * 4 {
-            return Err(AppAttestError::Invalid);
+            return Err(verification_error(
+                "attestation",
+                error::AppAttestError::ResourceLimit,
+            ));
         }
         let cbor = STANDARD
             .decode(attestation_b64)
-            .map_err(|_| AppAttestError::Invalid)?;
+            .map_err(|_| verification_error("attestation", error::AppAttestError::InvalidCbor))?;
         if cbor.is_empty() || cbor.len() > crate::model::MAX_APP_ATTESTATION_BYTES {
-            return Err(AppAttestError::Invalid);
+            return Err(verification_error(
+                "attestation",
+                error::AppAttestError::ResourceLimit,
+            ));
         }
         let verified = proof::enroll(
             &cbor,
@@ -101,7 +107,7 @@ impl AppAttestVerifier {
             &self.apple_root_cert_pem,
             matches_development(self.environment),
         )
-        .map_err(verification_error)?;
+        .map_err(|error| verification_error("attestation", error))?;
         observe_properties("attestation", verified.flags, &verified.properties);
         Ok(VerifiedAttestation {
             key_id: verified.key_id,
@@ -118,16 +124,25 @@ impl AppAttestVerifier {
         stored_challenge: &str,
     ) -> Result<VerifiedAssertion, AppAttestError> {
         if assertion_b64.len() > MAX_ASSERTION_BYTES.div_ceil(3) * 4 {
-            return Err(AppAttestError::Invalid);
+            return Err(verification_error(
+                "assertion",
+                error::AppAttestError::ResourceLimit,
+            ));
         }
         let cbor = STANDARD
             .decode(assertion_b64)
-            .map_err(|_| AppAttestError::Invalid)?;
+            .map_err(|_| verification_error("assertion", error::AppAttestError::InvalidCbor))?;
         if cbor.is_empty() || cbor.len() > MAX_ASSERTION_BYTES {
-            return Err(AppAttestError::Invalid);
+            return Err(verification_error(
+                "assertion",
+                error::AppAttestError::ResourceLimit,
+            ));
         }
         if challenge != stored_challenge {
-            return Err(AppAttestError::Invalid);
+            return Err(verification_error(
+                "assertion",
+                error::AppAttestError::InvalidNonce,
+            ));
         }
         let verified = proof::assert(
             &cbor,
@@ -136,7 +151,7 @@ impl AppAttestVerifier {
             public_key,
             previous_counter,
         )
-        .map_err(verification_error)?;
+        .map_err(|error| verification_error("assertion", error))?;
         observe_properties("assertion", verified.flags, &verified.properties);
         Ok(VerifiedAssertion {
             counter: verified.counter,
@@ -144,7 +159,7 @@ impl AppAttestVerifier {
     }
 }
 
-fn verification_error(error: error::AppAttestError) -> AppAttestError {
+fn verification_error(operation: &'static str, error: error::AppAttestError) -> AppAttestError {
     use error::AppAttestError as E;
     let reason = match error {
         E::ResourceLimit => "capacity",
@@ -156,7 +171,9 @@ fn verification_error(error: error::AppAttestError) -> AppAttestError {
             "identity"
         }
     };
-    tracing::debug!(reason, "App Attest verification rejected");
+    // Warn-level so operators can tell which check rejected a device; the
+    // HTTP response deliberately stays a uniform `invalid_attestation`.
+    tracing::warn!(operation, reason, detail = %error, "App Attest verification rejected");
     AppAttestError::Invalid
 }
 
