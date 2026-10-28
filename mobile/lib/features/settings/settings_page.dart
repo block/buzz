@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';

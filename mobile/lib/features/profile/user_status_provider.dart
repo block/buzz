@@ -38,8 +38,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     String pubkey;
     try {
       final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-      final keyPair = nostr.Keys(privkeyHex);
-      pubkey = keyPair.public.toLowerCase();
+      pubkey = derivePublicKeyHex(privkeyHex);
     } catch (_) {
       return null;
     }
@@ -120,8 +119,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     _scheduleExpiration(newStatus);
 
     // Also update the shared cache so other UI reads stay consistent.
-    final keyPair = nostr.Keys(privkeyHex);
-    final pubkey = keyPair.public.toLowerCase();
+    final pubkey = derivePublicKeyHex(privkeyHex);
     ref.read(userStatusCacheProvider.notifier).updateStatus(pubkey, newStatus);
   }
 
@@ -165,7 +163,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     if (nsec == null || nsec.isEmpty) return null;
     try {
       final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-      return nostr.Keys(privkeyHex).public.toLowerCase();
+      return derivePublicKeyHex(privkeyHex);
     } catch (_) {
       return null;
     }

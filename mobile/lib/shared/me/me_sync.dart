@@ -195,7 +195,7 @@ class MeSync {
   final RelayConfig config;
   late final String community = Uri.parse(config.baseUrl).origin;
   late final String privateHex = nostr.Nip19.decode(payload: config.nsec!).data;
-  late final String pubkey = nostr.Keys(privateHex).public;
+  late final String pubkey = derivePublicKeyHex(privateHex);
   late final key = getConversationKey(privateHex, pubkey);
   final bool _connected;
 

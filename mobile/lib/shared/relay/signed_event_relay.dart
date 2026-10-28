@@ -24,7 +24,7 @@ class SignedEventRelay {
     if (nsec == null || nsec.isEmpty) return null;
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) return null;
-    return nostr.Keys(privkeyHex).public;
+    return derivePublicKeyHex(privkeyHex);
   }
 
   /// Sign and submit an event. Returns the relay's OK response as a [NostrEvent]

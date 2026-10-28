@@ -117,7 +117,7 @@ class _IdentityRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final privHex = nostr.Nip19.decode(payload: nsec).data;
     final npub = privHex.isNotEmpty
-        ? fullNpub(nostr.Keys(privHex).public)
+        ? fullNpub(derivePublicKeyHex(privHex))
         : null;
 
     // The full npub is the canonical copy/share form (never raw hex); an
