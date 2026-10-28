@@ -38,17 +38,32 @@ async function submitEmptyEdit(
   const input = page.getByTestId("message-input");
   await expect(input).not.toBeEmpty({ timeout: 5_000 });
   await input.click();
-  await page.keyboard.press("ControlOrMeta+A");
-  await page.keyboard.press("Backspace");
+  await expect(
+    page.getByRole("button", { name: "#general stream", exact: true }),
+  ).toBeVisible();
+  // Keep clear -> Enter inside the channel picker's dismissal debounce,
+  // regardless of the runner's speed. Drive the real editor, not its hooks.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  try {
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.press("Backspace");
+    await expect(input).toBeEmpty();
+    await page.keyboard.press("Enter");
+  } finally {
+    await page.clock.resume();
+  }
+  await expect(page.getByRole("alertdialog")).toHaveCount(1);
   await expect(input).toBeEmpty();
-  await page.keyboard.press("Enter");
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.clock.install();
   await installMockBridge(page);
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  // Let the composer's initial autofocus settle before opening a row menu.
+  await expect(page.getByTestId("message-input")).toBeFocused();
   await expect
     .poll(() =>
       page.evaluate(

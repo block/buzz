@@ -124,6 +124,16 @@ export function useChannelLinks() {
         clearTimeout(debounceTimerRef.current);
       }
 
+      // A cleared edit must release Enter immediately for delete confirmation.
+      // Keep nonempty queries debounced: Enter can split a valid query's block
+      // before the composer's autocomplete handler accepts the suggestion.
+      if (value.length === 0) {
+        debounceTimerRef.current = null;
+        setChannelQuery(null);
+        setChannelSelectedIndex(0);
+        return;
+      }
+
       debounceTimerRef.current = setTimeout(() => {
         debounceTimerRef.current = null;
         const channel = detectPrefixQuery(
