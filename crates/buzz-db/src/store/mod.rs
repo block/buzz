@@ -30,6 +30,10 @@ pub mod nip_fi_binding;
 pub mod user_deletion;
 /// Operator-global user restrictions and identity-lock primitives.
 pub mod user_deletion_fences;
+pub(crate) mod user_deletion_write_guard;
+
+#[cfg(test)]
+mod user_deletion_write_guard_postgres_tests;
 
 #[cfg(test)]
 mod event_follow_up_postgres_tests;

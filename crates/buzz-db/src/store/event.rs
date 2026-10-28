@@ -477,6 +477,7 @@ async fn insert_event_on(
         return Err(DbError::EphemeralEventRejected(kind_u16));
     }
 
+    tx.guard_message_author(event).await?;
     let id_bytes = event.id.as_bytes();
     let pubkey_bytes = event.pubkey.to_bytes();
     let sig_bytes = event.sig.serialize();
@@ -1865,6 +1866,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
         return Err(DbError::EphemeralEventRejected(kind_u16));
     }
 
+    tx.guard_message_author(event).await?;
     let id_bytes = event.id.as_bytes();
     let pubkey_bytes = event.pubkey.to_bytes();
     let sig_bytes = event.sig.serialize();

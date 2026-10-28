@@ -3703,6 +3703,12 @@ async fn ingest_event_inner(
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
                     }
+                    buzz_db::DbError::UserDeletionRestricted => IngestError::Rejected(
+                        "restricted: identity is restricted for user deletion".into(),
+                    ),
+                    buzz_db::DbError::AccessDenied(reason) => {
+                        IngestError::Rejected(format!("restricted: {reason}"))
+                    }
                     other => IngestError::Internal(format!("error: database error: {other}")),
                 });
             }

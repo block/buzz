@@ -1,5 +1,6 @@
-//! Operator-global restriction storage and identity locks; no serving or worker
-//! path calls these helpers yet. Installing fences does not itself enforce them.
+//! Operator-global restriction storage and identity locks. New stream/forum
+//! messages and agent-owner assignment consult these through the write guard.
+//! Other serving paths and the real fencing worker are not integrated yet.
 //!
 //! Callers use a writer-pool READ COMMITTED transaction. Acquire existing
 //! community guards first, then `lock_request` for the worker, then all human
@@ -150,19 +151,20 @@ async fn lock(
 /// For multiple identities, acquire the full shared set first. The caller must
 /// refuse a restricted operation and retain this transaction through any write.
 /// An agent lookup is scoped; it does not resolve or check the human owner.
-/// The planned agent-write path locks the verified owner and agent together,
-/// then reads the agent restriction only. This requires the gate to install the
+/// The message-write path locks the verified owner and agent together, then
+/// reads the signer's restrictions, not the owner's. This requires the gate to install the
 /// human and all owned-agent restrictions atomically, and creation/assignment
-/// paths to reject restricted owners. These callers are not wired in yet.
+/// paths to reject restricted owners. The real gate is not wired in yet.
 pub async fn find(
     tx: &mut Transaction<'_, Postgres>,
     identity: FenceIdentity,
 ) -> Result<Option<UserDeletionFence>> {
     lock_shared(tx, &[identity]).await?;
-    read(tx, identity).await
+    read_locked(tx, identity).await
 }
 
-async fn read(
+/// Read one exact restriction after the caller has locked its identity.
+pub(super) async fn read_locked(
     tx: &mut Transaction<'_, Postgres>,
     identity: FenceIdentity,
 ) -> Result<Option<UserDeletionFence>> {
@@ -226,7 +228,7 @@ pub async fn insert(
     )
     .bind(identity.pubkey.to_hex()).bind(identity.scope_id()).bind(request_id).bind(&owner)
     .execute(&mut **tx).await?;
-    let saved = read(tx, identity)
+    let saved = read_locked(tx, identity)
         .await?
         .ok_or_else(|| DbError::DeletionSafety("fence insertion returned no row".into()))?;
     if saved.request_id != request_id || saved.source_owner_pubkey != owner {

@@ -354,6 +354,8 @@ async fn set_agent_owner_with_operation(
     operation: crate::observability::WriterOperation,
 ) -> Result<bool> {
     let mut tx = crate::begin_community_write_transaction(pool, community_id, operation).await?;
+    tx.guard_agent_owner_assignment(agent_pubkey, owner_pubkey)
+        .await?;
     // Conditional UPDATE: only set owner if currently NULL. This makes
     // "first mint wins" atomic — no TOCTOU race between concurrent mints.
     let result = sqlx::query(
