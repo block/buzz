@@ -165,7 +165,7 @@ fn live_floor_is_the_relay_drift_bound_plus_margin_on_the_wire() {
 fn backdated_event_stored_after_close_is_inside_the_replay_window() {
     // The relay accepts created_at up to 900s from server time, so an event
     // stored right after the disconnect can be dated up to 900s before it.
-    let close = 100_000;
+    let close = 10_000_000;
     let wire_since = resume_since(Some(1_000), None, None, Some(close)).unwrap() - SINCE_SKEW_SECS;
     assert!(close - RELAY_CREATED_AT_DRIFT_SECS >= wire_since);
     // A 60s window would have started after it.
