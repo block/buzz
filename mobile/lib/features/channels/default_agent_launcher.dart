@@ -61,8 +61,9 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
       unawaited(HapticFeedback.lightImpact());
       if (preference.hasError) {
-        if (recording != null)
+        if (recording != null) {
           throw StateError('Default agent is unavailable.');
+        }
         ref.invalidate(defaultAgentProvider);
         return;
       }
@@ -144,8 +145,9 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         }
         if (!context.mounted ||
             ref.read(meSyncProvider) != scope ||
-            ref.read(defaultAgentProvider).value != pubkey)
+            ref.read(defaultAgentProvider).value != pubkey) {
           return;
+        }
         unawaited(
           Navigator.of(context).push<void>(
             MaterialPageRoute(
