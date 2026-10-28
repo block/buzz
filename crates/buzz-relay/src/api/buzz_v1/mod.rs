@@ -2,6 +2,7 @@
 
 mod auth;
 mod handlers;
+mod ping;
 
 use crate::state::AppState;
 use axum::{
@@ -17,7 +18,9 @@ pub const BASE_PATH: &str = "/buzz/v1";
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/me/sidebar", get(handlers::sidebar))
+        .route("/me/threads", get(handlers::threads))
         .route("/me/read-state", post(handlers::write))
+        .route("/me/coverage", post(handlers::coverage))
         .fallback(|| async { auth::Error::new(axum::http::StatusCode::NOT_FOUND, "not_found") })
         .with_state(state)
 }

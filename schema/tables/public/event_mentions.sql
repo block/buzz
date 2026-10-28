@@ -18,5 +18,7 @@ CREATE INDEX idx_event_mentions_pubkey_created
     ON event_mentions (community_id, pubkey_hex, event_created_at DESC);
 CREATE INDEX idx_event_mentions_pubkey_kind_created
     ON event_mentions (community_id, pubkey_hex, event_kind, event_created_at DESC);
+CREATE INDEX idx_event_mentions_pubkey_channel_created
+    ON event_mentions (community_id, pubkey_hex, channel_id, event_created_at DESC);
 CREATE INDEX idx_event_mentions_community_event
     ON event_mentions (community_id, event_id);

@@ -37,6 +37,8 @@ CREATE TABLE events (
     d_tag       TEXT,
     not_before  BIGINT,
     delivered_at BIGINT,
+    -- An eligible message that counts on its channel's read-state timeline.
+    read_timeline BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (community_id, created_at, id)
 ) PARTITION BY RANGE (created_at);
 
@@ -52,6 +54,10 @@ CREATE INDEX idx_events_community_pubkey_kind_created
 CREATE INDEX idx_events_community_kind_created
     ON events (community_id, kind, created_at DESC, id);
 CREATE INDEX idx_events_community_deleted ON events (community_id, deleted_at);
+-- Read state: newest timeline message, and what arrived after a position.
+CREATE INDEX idx_events_read_timeline
+    ON events (community_id, channel_id, received_at DESC, id)
+    WHERE read_timeline AND deleted_at IS NULL;
 -- Addressable (replaceable) and NIP-33 parameterized lookups.
 CREATE INDEX idx_events_addressable
     ON events (community_id, kind, pubkey, channel_id, deleted_at);

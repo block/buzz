@@ -51,7 +51,8 @@ pub(super) async fn start_before_everything(
 ) {
     sqlx::query(
         "INSERT INTO personal_read_accounts (community_id,actor,started_at)
-         VALUES ($1,$2,'1900-01-01T00:00:00Z')",
+         VALUES ($1,$2,'1900-01-01T00:00:00Z')
+         ON CONFLICT (community_id,actor) DO UPDATE SET started_at=excluded.started_at",
     )
     .bind(community.as_uuid())
     .bind(actor.to_bytes().as_slice())
@@ -60,14 +61,69 @@ pub(super) async fn start_before_everything(
     .unwrap();
 }
 
-/// Move every community message past the default horizon by author time, the
-/// only clock the unread window reads.
-async fn expire(pool: &PgPool, community: CommunityId) {
-    sqlx::query("UPDATE events SET created_at=created_at-interval '31 days' WHERE community_id=$1")
+/// Store `event` as a canonical reply in `root`'s thread, through ingest.
+/// Copy rewritten event arrivals onto their replies' thread rows, as ingest
+/// stores them.
+pub(super) async fn sync_reply_arrivals(pool: &PgPool) {
+    sqlx::query(
+        "UPDATE thread_metadata tm SET received_at=e.received_at FROM events e
+         WHERE e.community_id=tm.community_id AND e.created_at=tm.event_created_at
+             AND e.id=tm.event_id AND tm.received_at IS NOT NULL
+             AND tm.received_at<>e.received_at",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+pub(super) async fn insert_reply(
+    db: &Db,
+    community: CommunityId,
+    channel: Uuid,
+    root: &nostr::Event,
+    event: &nostr::Event,
+) {
+    let at = |e: &nostr::Event| {
+        chrono::DateTime::from_timestamp(e.created_at.as_secs() as i64, 0).unwrap()
+    };
+    db.insert_event_with_thread_metadata(
+        community,
+        event,
+        Some(channel),
+        Some(crate::event::ThreadMetadataParams {
+            event_id: event.id.as_bytes(),
+            event_created_at: at(event),
+            channel_id: channel,
+            parent_event_id: Some(root.id.as_bytes()),
+            parent_event_created_at: Some(at(root)),
+            root_event_id: Some(root.id.as_bytes()),
+            root_event_created_at: Some(at(root)),
+            depth: 1,
+            broadcast: event.tags.iter().any(|t| {
+                let t = t.as_slice();
+                t.len() >= 2 && t[0] == "broadcast" && t[1] == "1"
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+/// Move every community message's author time back past the default window.
+/// Unread reads arrival, so nothing it counts may change.
+async fn age_author_time(pool: &PgPool, community: CommunityId) {
+    for table in [
+        "events SET created_at=created_at",
+        "event_mentions SET event_created_at=event_created_at",
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {table}-interval '31 days' WHERE community_id=$1"
+        )))
         .bind(community.as_uuid())
         .execute(pool)
         .await
         .unwrap();
+    }
 }
 
 async fn sidebar(db: &Db, community: CommunityId, actor: &Keys) -> SidebarPage {
@@ -105,12 +161,17 @@ fn mark_thread(channel: Uuid, root: &nostr::Event, message: &nostr::Event) -> Re
 /// Address every stored community message to `actor`, so the channel's
 /// mention count is exactly its unread top-level count.
 async fn mention_everywhere(pool: &PgPool, community: CommunityId, actor: &Keys) {
-    sqlx::query("UPDATE events SET tags=$2 WHERE community_id=$1")
-        .bind(community.as_uuid())
-        .bind(serde_json::json!([["p", actor.public_key().to_hex()]]))
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO event_mentions
+            (community_id,pubkey_hex,event_id,event_created_at,channel_id,event_kind)
+         SELECT community_id,$2,id,created_at,channel_id,kind FROM events WHERE community_id=$1
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(actor.public_key().to_hex())
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn add_history(db: &Db, community: CommunityId, channel: Uuid, count: usize) -> nostr::Event {
@@ -132,9 +193,9 @@ async fn add_history(db: &Db, community: CommunityId, channel: Uuid, count: usiz
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn personal_read_sidebar_marked_history_past_the_scan_cap_is_read_and_keeps_latest() {
+async fn personal_read_sidebar_marked_history_is_read_and_keeps_latest() {
     let (db, _pool, community, channel, actor, _) = fixture().await;
-    let last = add_history(&db, community, channel, MAX_UNREAD_SCAN + 44).await;
+    let last = add_history(&db, community, channel, 300).await;
     let outcome = db
         .apply_personal_read_intent(
             community,
@@ -144,7 +205,6 @@ async fn personal_read_sidebar_marked_history_past_the_scan_cap_is_read_and_keep
         .await
         .unwrap();
     assert_eq!(outcome, IntentOutcome::Applied);
-    // The scan never reaches the oldest 45 messages; nothing is unread.
     let row = &sidebar(&db, community, &actor).await.channels[0];
     assert!(!row.unread);
     assert_eq!(row.mentions, 0);
@@ -154,20 +214,16 @@ async fn personal_read_sidebar_marked_history_past_the_scan_cap_is_read_and_keep
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn personal_read_sidebar_author_window_excludes_expired_and_late_old_messages() {
+async fn personal_read_author_time_never_hides_unread() {
     let (db, pool, community, channel, actor, _) = fixture().await;
-    let latest = add_history(&db, community, channel, MAX_UNREAD_SCAN + 44).await;
-    expire(&pool, community).await;
+    let latest = add_history(&db, community, channel, 300).await;
+    age_author_time(&pool, community).await;
     let row = &sidebar(&db, community, &actor).await.channels[0];
-    assert!(
-        !row.unread,
-        "an empty author-time window has nothing unread"
-    );
+    assert!(row.unread, "old author time is still an unread arrival");
     assert_eq!(row.latest_id.as_deref(), Some(latest.id.to_hex().as_str()));
-    // Acceptance time is irrelevant: a message accepted now with an author
-    // time beyond the horizon stays out; one authored now is counted.
+    // A message accepted now counts whatever its author time.
     let now = nostr::Timestamp::now().as_secs();
-    for (age, unread, mentions) in [(40 * 86400, false, 0), (0, true, 1)] {
+    for (age, mentions) in [(40 * 86400, 1), (0, 2)] {
         let event = EventBuilder::new(Kind::Custom(9), "accepted now")
             .tags([Tag::public_key(actor.public_key())])
             .custom_created_at(nostr::Timestamp::from(now - age))
@@ -177,40 +233,34 @@ async fn personal_read_sidebar_author_window_excludes_expired_and_late_old_messa
             .await
             .unwrap();
         let row = &sidebar(&db, community, &actor).await.channels[0];
-        assert_eq!((row.unread, row.mentions), (unread, mentions), "age={age}");
+        assert_eq!((row.unread, row.mentions), (true, mentions), "age={age}");
     }
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn personal_read_sidebar_window_budget_counts_boundary_and_ineligible_tail() {
+async fn personal_read_counts_stop_at_the_cap_after_eligibility() {
     let (db, pool, community, channel, actor, _) = fixture().await;
-    // The fixture contributes one event, so this is exactly the evidence budget.
-    add_history(&db, community, channel, MAX_UNREAD_SCAN - 1).await;
+    // The fixture contributes one message, so the count reaches the cap.
+    add_history(&db, community, channel, MAX_UNREAD_COUNT - 1).await;
     mention_everywhere(&pool, community, &actor).await;
     let mentions = |page: SidebarPage| page.channels[0].mentions;
     assert_eq!(
         mentions(sidebar(&db, community, &actor).await),
-        MAX_UNREAD_SCAN as u32
+        MAX_UNREAD_COUNT as u32
     );
-    let overflow = EventBuilder::new(Kind::Custom(9), "one beyond the budget")
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
-    db.insert_event(community, &overflow, Some(channel))
-        .await
-        .unwrap();
+    add_history(&db, community, channel, 50).await;
     mention_everywhere(&pool, community, &actor).await;
-    // The budget bounds the count; the unexamined message is left out.
     assert_eq!(
         mentions(sidebar(&db, community, &actor).await),
-        MAX_UNREAD_SCAN as u32
+        MAX_UNREAD_COUNT as u32,
+        "a count of the cap means at least that many"
     );
-    // Expire all but 601 messages. Of these, 300 are own and 300 deleted.
-    // Eligibility is downstream of the bounded unread window, not the old 256 cap.
-    sqlx::query("WITH ranked AS (SELECT created_at,id,row_number() OVER (ORDER BY created_at DESC,id) AS n FROM events WHERE community_id=$1 AND channel_id=$2)
-        UPDATE events e SET created_at=CASE WHEN r.n>601 THEN e.created_at-interval '31 days' ELSE e.created_at END,
-          pubkey=CASE WHEN r.n<=300 THEN $3 ELSE e.pubkey END,
-          deleted_at=CASE WHEN r.n>300 AND r.n<=600 THEN now() ELSE NULL END
+    // The last to arrive stays; of the others, 50 become own and the rest
+    // are deleted. The cap applies after eligibility, so one remains.
+    sqlx::query("WITH ranked AS (SELECT created_at,id,row_number() OVER (ORDER BY received_at DESC,id) AS n FROM events WHERE community_id=$1 AND channel_id=$2)
+        UPDATE events e SET pubkey=CASE WHEN r.n BETWEEN 2 AND 51 THEN $3 ELSE e.pubkey END,
+          deleted_at=CASE WHEN r.n>51 THEN now() ELSE NULL END
         FROM ranked r WHERE e.community_id=$1 AND e.created_at=r.created_at AND e.id=r.id")
         .bind(community.as_uuid()).bind(channel).bind(actor.public_key().to_bytes().as_slice()).execute(&pool).await.unwrap();
     let page = sidebar(&db, community, &actor).await;
@@ -374,7 +424,7 @@ async fn personal_read_latest_includes_own_and_excludes_deleted_auxiliary() {
         latest(sidebar(&db, community, &actor).await),
         Some(own.id.to_hex())
     );
-    expire(&pool, community).await;
+    age_author_time(&pool, community).await;
     assert_eq!(
         latest(sidebar(&db, community, &actor).await),
         Some(own.id.to_hex())
@@ -400,8 +450,8 @@ async fn personal_read_latest_skips_a_reply_without_ancestry() {
         latest(sidebar(&db, community, &actor).await),
         Some(first.id.to_hex())
     );
-    // The shallow probe applies the same rule once the horizon is empty.
-    expire(&pool, community).await;
+    // Author time plays no part in the rule.
+    age_author_time(&pool, community).await;
     assert_eq!(
         latest(sidebar(&db, community, &actor).await),
         Some(first.id.to_hex())
@@ -421,7 +471,7 @@ async fn personal_read_latest_skips_a_reply_without_ancestry() {
 #[ignore = "requires Postgres"]
 async fn personal_read_latest_old_message_is_not_an_empty_channel() {
     let (db, pool, community, channel, actor, event) = fixture().await;
-    expire(&pool, community).await;
+    age_author_time(&pool, community).await;
     let empty = db
         .create_channel(
             community,
@@ -442,7 +492,7 @@ async fn personal_read_latest_old_message_is_not_an_empty_channel() {
         .find(|c| c.channel_id == channel)
         .unwrap();
     assert_eq!(old.latest_id.as_deref(), Some(event.id.to_hex().as_str()));
-    assert!(!old.unread);
+    assert!(old.unread);
     let empty = page
         .channels
         .iter()
@@ -697,13 +747,13 @@ async fn personal_read_counts_only_arrivals_after_the_account_starts() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn personal_read_unstarted_account_is_caught_up_past_the_scan_cap() {
+async fn personal_read_unstarted_account_is_caught_up() {
     let (db, pool, community, channel, actor, _) = fixture().await;
     unstart(&pool, community).await;
-    let last = add_history(&db, community, channel, MAX_UNREAD_SCAN + 44).await;
+    let last = add_history(&db, community, channel, 300).await;
     let page = sidebar(&db, community, &actor).await;
     let row = &page.channels[0];
-    // The start floor covers every arrival, examined by the scan or not.
+    // The start floor covers every arrival.
     assert!(!row.unread);
     assert_eq!(row.mentions, 0);
     assert!(row.threads.is_empty());
@@ -716,24 +766,18 @@ async fn personal_read_unstarted_account_is_caught_up_past_the_scan_cap() {
 async fn personal_read_channel_and_thread_never_inherit_each_other() {
     let (db, pool, community, channel, actor, root) = fixture().await;
     let base = root.created_at.as_secs();
-    // Directed, so they count outside the actor's conversations.
+    // Mentioning the actor, who therefore follows the thread.
     let reply_at = |at: u64| {
-        let (db, pool) = (db.clone(), pool.clone());
+        let db = db.clone();
         let mention = Tag::public_key(actor.public_key());
-        let root = root.id;
+        let root = root.clone();
         async move {
             let reply = EventBuilder::new(Kind::Custom(9), "unseen thread reply")
                 .tags([mention])
                 .custom_created_at(nostr::Timestamp::from(at))
                 .sign_with_keys(&Keys::generate())
                 .unwrap();
-            db.insert_event(community, &reply, Some(channel))
-                .await
-                .unwrap();
-            sqlx::query("INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,root_event_id,parent_event_id,depth)
-                VALUES ($1,$2,to_timestamp($3),$4,$5,$5,1)")
-                .bind(community.as_uuid()).bind(reply.id.as_bytes().as_slice()).bind(at as f64)
-                .bind(channel).bind(root.as_bytes().as_slice()).execute(&pool).await.unwrap();
+            insert_reply(&db, community, channel, &root, &reply).await;
             reply
         }
     };
@@ -770,7 +814,8 @@ async fn personal_read_channel_and_thread_never_inherit_each_other() {
         |read_through: Option<&nostr::Event>, unread: bool, threads: serde_json::Value| {
             serde_json::json!({"channel_id":channel,"unread":unread,"mentions":0,
             "read_through_id":read_through.map(|e| e.id.to_hex()),
-            "latest_id":top.id.to_hex(),"threads":threads})
+            "latest_id":top.id.to_hex(),"threads":threads,"threads_truncated":false,
+            "followed_threads":[root.id.to_hex()],"followed_threads_truncated":false})
         };
     // Unread replies show only on their thread row, never the channel's.
     assert_eq!(
@@ -818,19 +863,18 @@ async fn personal_read_channel_and_thread_never_inherit_each_other() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        roots,
-        vec![root.id.as_bytes().to_vec()],
-        "thread reading never creates a channel frontier"
+    assert!(
+        roots.is_empty(),
+        "reading a thread never follows it or creates a channel frontier"
     );
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn personal_read_author_horizon_unresolved_ancestry_and_deletion() {
+async fn personal_read_unresolved_ancestry_and_deletion_not_author_age() {
     let (db, pool, community, channel, actor, root) = fixture().await;
     let mention = Tag::public_key(actor.public_key());
-    let old = EventBuilder::new(Kind::Custom(9), "directed, about to expire")
+    let old = EventBuilder::new(Kind::Custom(9), "directed, about to age")
         .tags([mention.clone()])
         .sign_with_keys(&Keys::generate())
         .unwrap();
@@ -851,20 +895,32 @@ async fn personal_read_author_horizon_unresolved_ancestry_and_deletion() {
     let row = &sidebar(&db, community, &actor).await.channels[0];
     assert_eq!((row.unread, row.mentions), (true, 1));
     assert!(row.threads.is_empty());
-    sqlx::query(
-        "UPDATE events SET created_at=created_at-interval '31 days' WHERE community_id=$1 AND id=$2",
-    )
-    .bind(community.as_uuid())
-    .bind(old.id.as_bytes().as_slice())
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
-        .bind(community.as_uuid())
-        .bind(root.id.as_bytes().as_slice())
-        .execute(&pool)
-        .await
-        .unwrap();
+    for table in [
+        "events SET created_at=created_at-interval '31 days' WHERE community_id=$1 AND id=$2",
+        "event_mentions SET event_created_at=event_created_at-interval '31 days'
+            WHERE community_id=$1 AND event_id=$2",
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table}")))
+            .bind(community.as_uuid())
+            .bind(old.id.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let row = &sidebar(&db, community, &actor).await.channels[0];
+    assert_eq!(
+        (row.unread, row.mentions),
+        (true, 1),
+        "author age hides nothing"
+    );
+    for gone in [&root, &old] {
+        sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
+            .bind(community.as_uuid())
+            .bind(gone.id.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     let row = &sidebar(&db, community, &actor).await.channels[0];
     assert_eq!((row.unread, row.mentions), (false, 0));
 }

@@ -2562,6 +2562,11 @@ async fn ingest_event_inner(
             "invalid: membership notifications are relay-signed only".into(),
         ));
     }
+    if kind_u32 == buzz_core::kind::KIND_READ_STATE_CHANGED {
+        return Err(IngestError::Rejected(
+            "invalid: read-state pings are relay-signed only".into(),
+        ));
+    }
 
     // Typing indicators (kind:20002) never reach this gate: the HTTP bridge
     // routes them to `publish_http_typing` before ingest.

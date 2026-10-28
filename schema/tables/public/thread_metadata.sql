@@ -15,6 +15,8 @@ CREATE TABLE thread_metadata (
     descendant_count        INT NOT NULL DEFAULT 0,
     last_reply_at           TIMESTAMPTZ,
     broadcast               BOOLEAN NOT NULL DEFAULT FALSE,
+    -- A reply's relay arrival; NULL on root stubs and rows before 0074.
+    received_at             TIMESTAMPTZ,
     PRIMARY KEY (community_id, event_created_at, event_id),
     FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
 );
@@ -26,3 +28,6 @@ CREATE INDEX idx_thread_metadata_window
 CREATE INDEX idx_thread_metadata_channel_depth
     ON thread_metadata (community_id, channel_id, depth, event_created_at);
 CREATE INDEX idx_thread_metadata_event_id ON thread_metadata (community_id, event_id);
+CREATE INDEX idx_thread_metadata_read_arrival
+    ON thread_metadata (community_id, root_event_id, received_at DESC, event_id)
+    WHERE received_at IS NOT NULL;

@@ -456,6 +456,10 @@ pub async fn insert_event_in_transaction(
 ) -> Result<(StoredEvent, bool)> {
     let result = insert_event_on(tx, event, channel_id).await?;
     if result.1 {
+        if let Some((channel, place)) = crate::personal_read::place(event, channel_id, None) {
+            crate::personal_read::record_message(tx, event, channel, place, result.0.received_at)
+                .await?;
+        }
         crate::operator_listener::enqueue_mentions_in_transaction(tx, event).await?;
     }
     Ok(result)
@@ -493,8 +497,8 @@ async fn insert_event_on(
         .await?;
     let result = sqlx::query(
         r#"
-        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before, read_timeline)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         ON CONFLICT DO NOTHING
         "#,
     )
@@ -510,6 +514,7 @@ async fn insert_event_on(
     .bind(channel_id)
     .bind(d_tag.as_deref())
     .bind(not_before)
+    .bind(crate::personal_read::place(event, channel_id, None).is_some_and(|(_, p)| p.on_timeline()))
     .execute(tx.conn())
     .await?;
 
@@ -1876,14 +1881,25 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     let received_at = Utc::now();
     let d_tag = extract_d_tag(event);
     let not_before = extract_not_before(event);
+    let place = match &thread_meta {
+        Some(meta) => crate::personal_read::place(
+            event,
+            Some(meta.channel_id),
+            meta.parent_event_id.map(|parent| match meta.root_event_id {
+                Some(root) => (root, meta.root_event_created_at, meta.broadcast),
+                None => (parent, meta.parent_event_created_at, meta.broadcast),
+            }),
+        ),
+        None => crate::personal_read::place(event, channel_id, None),
+    };
 
     crate::channel_members::guard_channel_roster_event(tx, kind_i32, channel_id, &tags_json)
         .await?;
 
     let result = sqlx::query(
         r#"
-        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before, read_timeline)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         ON CONFLICT DO NOTHING
         "#,
     )
@@ -1899,6 +1915,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     .bind(channel_id)
     .bind(d_tag.as_deref())
     .bind(not_before)
+    .bind(place.is_some_and(|(_, p)| p.on_timeline()))
     .execute(tx.conn())
     .await?;
 
@@ -1913,6 +1930,12 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
         )
         .await?;
 
+        // Before the thread counters below: their root row is shared by every
+        // reply, so its lock must not be held across these writes.
+        if let Some((channel, place)) = place {
+            crate::personal_read::record_message(tx, event, channel, place, received_at).await?;
+        }
+
         if let Some(ref meta) = thread_meta {
             let broadcast_val: bool = meta.broadcast;
 
@@ -1922,8 +1945,8 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
                     (community_id, event_created_at, event_id, channel_id,
                      parent_event_id, parent_event_created_at,
                      root_event_id, root_event_created_at,
-                     depth, broadcast)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                     depth, broadcast, received_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 ON CONFLICT DO NOTHING
                 "#,
             )
@@ -1937,6 +1960,8 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
             .bind(meta.root_event_created_at)
             .bind(meta.depth)
             .bind(broadcast_val)
+            // An eligible reply's arrival, for the read-state thread index.
+            .bind(place.and(meta.parent_event_id).map(|_| received_at))
             .execute(tx.conn())
             .await?;
 

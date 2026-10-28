@@ -187,7 +187,8 @@ pub struct Config {
     pub require_auth_token: bool,
     /// Opt-in private accessory API; disabled until explicitly deployed.
     pub buzz_v1_enabled: bool,
-    /// Author-time unread tracking duration, independent of NIP-RS retention.
+    /// How long an automatic thread follow stays live without the actor's
+    /// involvement; independent of NIP-RS retention.
     pub buzz_v1_retention_seconds: u32,
     /// Comma-separated list of allowed CORS origins.
     /// If empty, permissive CORS is used (dev mode).

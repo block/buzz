@@ -465,6 +465,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             anyhow::anyhow!("Configuration error: {error}")
         })?;
     boot = next_boot;
+    buzz_db::personal_read::set_follow_window_seconds(config.buzz_v1_retention_seconds);
 
     let key_failure = if config.relay_private_key.is_some() {
         LifecycleReason::RequiredInvalid

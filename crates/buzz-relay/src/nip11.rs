@@ -97,6 +97,15 @@ pub struct BuzzV1Descriptor {
     /// Message kinds that count as unread and as latest activity. Clients
     /// classify live arrivals with this set instead of keeping a copy.
     pub eligible_kinds: [i32; 4],
+    /// Additions beyond the first v1 contract: `follow` (follow and unfollow
+    /// intents) and `threads` (`GET /me/threads`). Send one only when listed.
+    pub capabilities: Vec<String>,
+    /// Maximum followed threads per threads page.
+    pub max_threads: usize,
+    /// Ephemeral relay-signed kind announcing the signer's own read-state
+    /// changes (`ping` capability). Subscribe with `{"kinds":[ping_kind],
+    /// "#p":[<self>]}` and accept only events signed by the relay's `self`.
+    pub ping_kind: u32,
 }
 
 /// Public capability descriptor for relay-proxied GIF search.
@@ -393,7 +402,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     );
     if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
         if state.config.buzz_v1_enabled {
-            use buzz_db::personal_read::{ELIGIBLE_KINDS, MAX_CHANNELS, MAX_INTENTS};
+            use buzz_db::personal_read::{ELIGIBLE_KINDS, MAX_CHANNELS, MAX_INTENTS, MAX_THREADS};
             info.buzz_v1 = Some(BuzzV1Descriptor {
                 version: 1,
                 base_path: crate::api::buzz_v1::BASE_PATH.to_owned(),
@@ -401,6 +410,14 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
                 max_channels: MAX_CHANNELS,
                 max_intents: MAX_INTENTS,
                 eligible_kinds: ELIGIBLE_KINDS,
+                capabilities: vec![
+                    "follow".to_owned(),
+                    "threads".to_owned(),
+                    "ping".to_owned(),
+                    "coverage".to_owned(),
+                ],
+                max_threads: MAX_THREADS,
+                ping_kind: buzz_core::kind::KIND_READ_STATE_CHANGED,
             });
         }
         info.read_state_snapshot = Some(serde_json::json!({

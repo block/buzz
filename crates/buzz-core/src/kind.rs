@@ -182,6 +182,7 @@ pub const RESULT_GATED_KINDS: &[u32] = &[
     KIND_AGENT_TURN_METRIC,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_READ_STATE_CHANGED,
 ];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
@@ -201,6 +202,7 @@ pub const RESULT_GATED_KINDS: &[u32] = &[
 /// storage-layer search defense does not apply to them.
 pub const P_GATED_KINDS: &[u32] = &[
     KIND_AGENT_OBSERVER_FRAME,
+    KIND_READ_STATE_CHANGED,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_GIFT_WRAP,
@@ -515,6 +517,11 @@ pub const KIND_TYPING_INDICATOR: u32 = 20002;
 pub const KIND_AGENT_PRESENCE: u32 = 20003;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
+/// Ephemeral, relay-signed: the signer's `/buzz/v1` read state changed. Its
+/// `p` tag names the actor, and only that actor's connections receive it; a
+/// `nonce` tag keeps every ping's ID distinct. Content is
+/// `{"read_revision_from":n|null,"read_revision":n|null,"channels":[uuid],"threads":[{"channel_id","root_id"}]}`.
+pub const KIND_READ_STATE_CHANGED: u32 = 24300;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
 pub const KIND_HUDDLE_REACTION: u32 = 24810;

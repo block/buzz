@@ -137,6 +137,16 @@ pub(super) async fn authorize(
         token_owner,
     };
     recheck(state, headers, &principal).await?;
+    // Read state is for people: an agent account has none to read or write.
+    let agent = state
+        .db
+        .get_agent_channel_policy(principal.tenant.community(), &actor.to_bytes())
+        .await
+        .map_err(|_| Error::unavailable())?
+        .is_some_and(|(_, owner)| owner.is_some());
+    if agent {
+        return Err(Error::new(StatusCode::FORBIDDEN, "forbidden"));
+    }
     Ok(principal)
 }
 

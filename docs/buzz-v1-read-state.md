@@ -12,8 +12,14 @@ application/nostr+json`, or `GET /info`) includes `buzz_v1` only when enabled:
 
 ```json
 {"buzz_v1":{"version":1,"base_path":"/buzz/v1","retention_seconds":2592000,
-"max_channels":20,"max_intents":100,"eligible_kinds":[9,40002,45001,45003]}}
+"max_channels":20,"max_intents":100,"eligible_kinds":[9,40002,45001,45003],
+"capabilities":["follow","threads"],"max_threads":50}}
 ```
+
+`capabilities` lists additions to the first v1 contract: `follow` for the
+`follow` and `unfollow` intents, `threads` for `GET /me/threads`. Use one only
+when it is listed. `retention_seconds` is how long an automatic thread follow
+stays live without your involvement (see [Following](#following)).
 
 Use the requesting origin plus this relative prefix. Discovery is a configured
 capability, not a promise that the next request cannot fail. Unknown hosts and
@@ -31,6 +37,8 @@ NIP-FI admission is enforced and its asserted key must match the request signer.
 The host chooses the community; the signer chooses `/me`. NIP-OA admission does
 not grant access to the owner's personal state. Relay membership, bans and
 resource access are enforced; moderation timeouts do not prohibit reading.
+Read state is for people: an agent account (one with an owner) gets 403 from
+every endpoint, and the relay keeps no positions or follows for it.
 
 Responses produced by the v1 handlers are `Cache-Control: private, no-store`.
 Application errors (including NIP-98 failures with NIP-FI Off or Shadow) use
@@ -74,61 +82,97 @@ marking one never moves another.
 
 | Field | Channel row | Thread row |
 |---|---|---|
-| `unread` | an unread top-level message counts | an unread reply counts |
-| `mentions` | unread top-level messages directed at you | unread replies that count |
+| `unread` | an unread timeline message counts | an unread reply counts |
+| `mentions` | unread timeline messages that tag you with `p`, or every unread one in a DM (at most 100) | unread replies that tag you with `p`, or every unread one in a DM (at most 100) |
 | `read_through_id` | the anchor of the timeline's frontier, or null | the anchor of the thread's frontier, or null |
-| `latest_id` | the last eligible top-level message to arrive, or null | the last counted unread reply to arrive |
+| `latest_id` | the last eligible timeline message to arrive, or null | the last reply to arrive |
 
-A thread reply never makes the channel row unread and never becomes its
-`latest_id`, including a reply carrying `broadcast=1`: it shows on its thread
-row. `latest_id` is the anchor that reads its scope: "mark channel read" sends a
-channel `mark_through` at the channel's `latest_id`, plus one thread
-`mark_through` at each listed thread's `latest_id` to clear those too. The
-channel `latest_id` counts any author and ignores read progress. Null means the
-bounded scans found no top-level message, not that the channel is empty.
-`read_through_id` may name a message that has since been deleted.
+The timeline holds top-level messages and replies carrying `broadcast=1`; a
+broadcast reply also counts on its thread row. No other reply makes the channel
+row unread or becomes its `latest_id`. `latest_id` is the anchor that reads its
+scope: "mark channel read" sends a channel `mark_through` at the channel's
+`latest_id`, plus one thread `mark_through` at each listed thread's `latest_id`
+to clear those too. The channel `latest_id` counts any author and ignores read
+progress. Null means no timeline message was recorded since 0074, not that the
+channel is empty. `read_through_id` may name a message that has since been
+deleted.
 
-`threads` lists threads with unread replies that count, newest unread reply
-first by author time (then `root_id`), at most 25. Threads past the 25th are
-omitted with their mentions, and nothing signals the omission: after marking
-the listed threads read, a refresh can list the next ones. A thread row's
-`unread` is always true in this version. No message bytes are included.
+`threads` lists the threads you follow that have unread replies, newest
+arrival first (then `root_id`), at most 25. Threads past
+the 25th are omitted with their mentions, and nothing signals the omission:
+after marking the listed threads read, a refresh can list the next ones. A
+thread row's `unread` is always true in this version. No message bytes are
+included.
 
 A message is eligible when it is non-own, nondeleted, of the advertised
-`eligible_kinds` and inside the horizon. The same kinds alone define latest
+`eligible_kinds`; its author time plays no part. The same kinds alone define latest
 activity, so an edit, reaction or diff (40008) neither makes a channel unread
 nor moves it. Classify live arrivals with the advertised set, not a client copy.
 
-A top-level message is directed at you when its channel is a DM, it tags you
-with `p`, or it carries `broadcast=1`. A reply counts only when it is directed
-in the same way, or it is in one of your conversations: you wrote its direct
-parent or have a reply to that same parent, in that channel. Conversation
-membership uses only your live eligible messages (a deleted parent proves
-nothing; a surviving reply to it still does), looks at the direct parent only
-(owning the root or replying elsewhere in the thread proves nothing), and is
-independent of read progress and retention. This is not Desktop notification
-policy: follows and mutes do not affect these counts.
+### Following
 
-Counts are what the bounded scans could establish, and may undercount. A message
-whose tags are unusable, whose ancestry is unresolved, or whose conversation
-membership is undecided is left out, as are messages beyond the scan bounds
-(see [Bounds](#bounds-and-deployment)).
+Every top-level message counts on its channel row. A reply counts only in a
+thread you follow. The relay records follows when it stores an eligible message,
+in the same transaction:
 
-The unread horizon defaults to 30 days (`BUZZ_V1_RETENTION_SECONDS`) and is
-measured in author time (`created_at`). It filters unread and mentions, not
-latest activity, event storage or frontier state. Frontiers use a different
-clock, relay arrival (see [Order](#order)). Three consequences:
+- Its author has read through it: the timeline for a top-level message,
+  otherwise the thread, which the author now follows. A broadcast reply reads
+  only its thread.
+- Each channel member it tags with `p` follows its thread (for a top-level
+  message, the thread rooted at it).
+- A reply also makes the root's author follow, and in a DM every member.
 
-- A message accepted late with an author time beyond the horizon (an import, a
-  backfill, a long-offline sender) is excluded under the current horizon,
-  however recently the relay accepted it. It can still be latest when the
-  horizon holds no message.
-- Unread expires at author time plus the horizon, so a future-dated author
-  time extends how long a message counts.
-- A context's unread set is two tests, not one range: arrived after the
-  frontier, and author time at or after the cutoff.
+None of this applies to an agent account: it neither reads through its posts
+nor follows, though its messages still make people follow.
 
-A later configuration expansion can change counts without having lost progress.
+A new follower starts just before the message that made them follow, so it is
+unread; one who already follows keeps their position. Reading never follows:
+a thread `mark_through` moves an existing follow and otherwise changes nothing.
+`broadcast=1` does not make anyone follow. Follows start when the relay that
+records them is deployed; there is no backfill. Desktop notification follows
+and mutes do not affect these counts.
+
+The `follow` intent follows a thread explicitly, from now: replies that arrived
+before it are read. Following a thread you already follow keeps its position
+and only makes the follow explicit.
+`unfollow` stops counting it, and the stored message rules above no longer
+follow you again, with two exceptions: posting in the thread follows you through
+your post, and a mention follows you from just before it.
+
+Counts are what the bounded walks could establish, and may undercount. A
+message whose ancestry is unresolved is left out, as are messages beyond the
+bounds (see [Bounds](#bounds-and-deployment)).
+
+An automatic follow goes dormant after 30 days (`BUZZ_V1_RETENTION_SECONDS`)
+without your involvement in the thread: posting there, being mentioned there,
+a reply to your root or in your DM, marking it read, or following it. A dormant
+thread is neither counted nor listed, but keeps its row and position, and any
+of those involvements makes it live again at that position. Replies that do not
+involve you never revive it. A follow made by the `follow` intent never goes
+dormant; an unfollow ends that. Being mentioned, a reply to your root and DM
+replies refresh a live follow at most once a day, or once a quarter of the
+window when that is shorter, so dormancy is measured to that interval.
+
+## Threads view
+
+`GET /buzz/v1/me/threads?limit=50&cursor=<opaque>` lists the threads you follow
+in joined, nondeleted channels, newest last reply first by arrival (then
+`root_id`), read or not, at most 50 per page. Omit the cursor on the first
+request and pass `next_cursor` back unchanged; null means the scan is done. A
+thread with no reply yet is not listed.
+
+```json
+{"threads":[{"channel_id":"<uuid>","root_id":"<64-hex>","unread":false,
+  "mentions":0,"read_through_id":"<64-hex>","latest_id":"<64-hex>"}],
+ "next_cursor":"<opaque>"}
+```
+
+Each row has the sidebar thread row's fields and meanings plus its
+`channel_id`, except that `unread` may be false and `mentions` is then 0. Pages
+are separate snapshots: a thread that gets a new reply while you page moves
+ahead of the cursor, so refresh from the first page after a change. Every
+page probes each of your live follows, so its cost grows with how many threads
+you are involved in, not with community size or your whole history.
 
 ## Fixed-operand writes
 
@@ -137,7 +181,9 @@ A later configuration expansion can change counts without having lost progress.
 ```json
 {"intents":[
  {"type":"mark_through","target":{"channel_id":"<uuid>"},"message_id":"<64-hex-event>"},
- {"type":"mark_through","target":{"channel_id":"<uuid>","root_id":"<64-hex-root>"},"message_id":"<64-hex-event>"}
+ {"type":"mark_through","target":{"channel_id":"<uuid>","root_id":"<64-hex-root>"},"message_id":"<64-hex-event>"},
+ {"type":"follow","target":{"channel_id":"<uuid>","root_id":"<64-hex-root>"}},
+ {"type":"unfollow","target":{"channel_id":"<uuid>","root_id":"<64-hex-root>"}}
 ]}
 ```
 
@@ -155,8 +201,9 @@ until its outcome is resolved.
 
 A mark-through validates a fixed message and advances its context's monotone
 frontier to that message's relay arrival (see [Order](#order)). A channel
-anchor must be a top-level message; a thread anchor must be the thread's root
-or one of its replies. The frontier records the anchor as `read_through_id`
+anchor must be a top-level message or a broadcast reply; a thread anchor must
+be the thread's root or one of its replies. `follow` and `unfollow` need a
+thread target; a channel-only one is `invalid`. The frontier records the anchor as `read_through_id`
 when it advances; an anchor that arrived at or before the current frontier
 changes nothing. Opening a view is not itself a reading action; client
 dwell/focus policy determines when to send an actual observed anchor. Old or
@@ -185,12 +232,22 @@ microsecond resolution. Three limits follow, none of which strands a badge:
 - Relay processes with different clocks can stamp out of true order by their
   skew.
 - Messages with the identical stamp are read together.
+- A `follow` and the account's start use the database clock, so they can be
+  off from relay arrivals by the skew between the two.
 
-A channel's `latest_id` is the last top-level message to arrive among those the
-unread count examined: the 4,096 most recent events by author time inside the
-horizon. So marking through it reads every top-level message counted. When
-that scan holds no top-level message, it is the last top-level message to
-arrive among the channel's 256 most recent events.
+Counting walks forward from a position over indexes in arrival order: the
+timeline's messages per channel and each thread's replies. A channel's
+`latest_id` is exactly its last timeline arrival and a thread's its last reply
+arrival, so marking through it reads everything counted. Mentions are indexed
+by author time, which the relay accepts within 15 minutes of arrival, so a
+mention walk starts 15 minutes of author time before the position: a mention
+backdated further than that is unread but not counted as a mention.
+
+A channel row is unread exactly when its `latest_id` is someone else's and
+arrived after the timeline's position. Nothing earlier needs
+checking: posting reads the timeline through the post, so an own `latest_id`
+means everything before it is read, and an unread one is the anchor that clears
+the row. A row is never unread without an anchor to mark.
 
 There is no import of earlier client read state. The relay records the
 account's `started_at` at its first applied read intent and never moves it.
@@ -204,27 +261,71 @@ device-local.
 - 20 sidebar rows and 100 intents per request; 25 thread rows per channel, so
   a POST's rows for 100 channels fit the response limit.
 - 64 KiB write body; 1 MiB serialized API response.
-- 4096 raw events per channel inside the horizon, before eligibility.
-- The latest fallback probes 256 events; a long ineligible or reply-only tail
-  can leave `latest_id` null.
-- Tag documents over 8192 bytes or malformed relevant tags leave the message
-  out. Compact boolean facts cross the database boundary, never raw tag
-  payloads.
-- Conversation membership: at most 1024 unique parents per request, with a
-  500 ms savepoint budget. The lookup is exact, so its work grows with the
-  replies under each parent. Past either bound a reply is undecided and left
-  out.
+- Counts stop at 100 per channel and per thread.
+- A caught-up reader costs one index probe per channel and per followed
+  thread; a reader who is behind walks only what arrived after their position.
+- 50 rows per threads page; each page probes every live follow of the reader.
 - DB statement/lock deadlines and HTTP read deadlines bound work; a write's intents
   and its row refresh share one eight-second deadline after admission. Limits are
   containment, not a production capacity claim.
 
-Apply migrations 0056 through 0058 (or the equivalent desired schema). 0056
-creates two empty private tables and no index on `events`, 0057 adds the
-nullable `personal_read_accounts.started_at` column, and 0058 adds the nullable
-`personal_read_frontiers.through_message_id` column and drops
-`threads_through_timestamp`. Both sidebar scans are
-served by the existing `idx_events_community_channel_created`. No new
-per-message ingest write path or stored unread counters are introduced.
+Apply migrations 0056 through 0058 and 0074 (or the equivalent desired
+schema). 0056 creates two empty private tables and no index on `events`, 0057
+adds the nullable `personal_read_accounts.started_at` column, and 0058 adds the
+nullable `personal_read_frontiers.through_message_id` column and drops
+`threads_through_timestamp`. 0074 adds `events.read_timeline` (set at insert
+for timeline messages), `thread_metadata.received_at` (set at insert for
+eligible replies) and `personal_read_frontiers.unfollowed`, `explicit` and
+`active_at` (existing rows start at migration time), plus four indexes:
+`idx_events_read_timeline` for timeline walks, `idx_thread_metadata_read_arrival`
+for thread walks, `idx_event_mentions_pubkey_channel_created` for mention
+counts and `idx_personal_read_frontiers_active` for an actor's threads by
+involvement. There is no backfill: messages stored before the new relay serves,
+including by older relay processes still running after 0074, are on neither
+arrival index, so they never count as unread or become `latest_id`. Ingest
+writes a few frontier rows per eligible channel message (the author, and anyone
+it makes follow), whether or not the API is enabled, so follows exist once it
+is; there are no stored unread counters.
+
+The column additions are catalog-only but briefly take an exclusive lock on
+`events`, `thread_metadata` and `personal_read_frontiers`, bounded by the
+migration's one-second `lock_timeout`; a busy writer fails the deployment,
+which retries, rather than stalling ingestion. Building the indexes inside the
+migration is bounded the same way, so on a database with data, add the columns
+and prebuild the indexes before deploying, as for
+[0049](thread-window-deployment.md). 0074 then skips both and only validates
+the indexes. Run each statement on its own, retrying any that times out;
+`CREATE INDEX CONCURRENTLY` cannot run in a transaction block:
+
+```sql
+SET lock_timeout = '1s';
+ALTER TABLE events ADD COLUMN IF NOT EXISTS read_timeline BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE thread_metadata ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ;
+ALTER TABLE personal_read_frontiers ADD COLUMN IF NOT EXISTS unfollowed BOOLEAN NOT NULL
+    DEFAULT false CHECK (NOT unfollowed OR root_id <> ''::bytea);
+ALTER TABLE personal_read_frontiers ADD COLUMN IF NOT EXISTS explicit BOOLEAN NOT NULL
+    DEFAULT false;
+ALTER TABLE personal_read_frontiers ADD COLUMN IF NOT EXISTS active_at TIMESTAMPTZ NOT NULL
+    DEFAULT now();
+CREATE INDEX CONCURRENTLY idx_personal_read_frontiers_active ON public.personal_read_frontiers
+    (community_id, actor, active_at DESC) WHERE root_id <> ''::bytea;
+CREATE INDEX CONCURRENTLY idx_thread_metadata_read_arrival ON public.thread_metadata
+    (community_id, root_event_id, received_at DESC, event_id) WHERE received_at IS NOT NULL;
+CREATE INDEX CONCURRENTLY idx_event_mentions_pubkey_channel_created ON public.event_mentions
+    (community_id, pubkey_hex, channel_id, event_created_at DESC);
+-- events is partitioned: an invalid parent, then each partition concurrently.
+CREATE INDEX idx_events_read_timeline ON ONLY public.events
+    (community_id, channel_id, received_at DESC, id) WHERE read_timeline AND deleted_at IS NULL;
+-- For each partition p in
+--   SELECT inhrelid::regclass FROM pg_inherits WHERE inhparent = 'public.events'::regclass:
+CREATE INDEX CONCURRENTLY p_read_timeline ON p
+    (community_id, channel_id, received_at DESC, id) WHERE read_timeline AND deleted_at IS NULL;
+ALTER INDEX idx_events_read_timeline ATTACH PARTITION p_read_timeline;
+```
+
+The parent becomes valid once every partition's index is attached. Verify the
+four like 0049's, against the definitions the migration expects; recover a
+failed build the same way.
 
 Use existing HTTP route/status/latency metrics for `/buzz/v1/me/sidebar` and
 `/buzz/v1/me/read-state`, plus database pool/statement metrics. No payload,
@@ -236,7 +337,7 @@ local seed is not a DAU/concurrency or p95/p99 production acceptance result.
 Within `/buzz/v1`, clients must ignore unknown response object fields. The
 shape is stable: existing fields, their types, status variants and what a
 `mark_through` does remain. What the counts include is not yet: which messages
-are unread or directed, which threads are listed, and the bounds may change
+are unread or mentions, which threads are listed, and the bounds may change
 while v1 is pre-release. A client therefore replaces its rows with each
 response rather than reconciling them with its own counts. Breaking shape
 changes require an explicitly negotiated contract or a new API version.
@@ -253,8 +354,8 @@ additional capabilities.
 These typed relational frontiers are signer-private application state, **not
 self-encrypted**. Database operators can see reading progress; ordinary Nostr
 queries, search and moderator interfaces do not expose it. No public receipts
-are emitted. Storage grows by touched contexts, not observed messages, and has
-no fixed context-count ceiling.
+are emitted. Storage grows by followed threads and posted-in channels, not
+observed messages, and has no fixed context-count ceiling.
 
 Leaving/rejoining does not erase progress; revoked access hides it. Soft-deleted
 channels are inaccessible, while hard channel deletion cascades their frontiers.
@@ -262,7 +363,7 @@ Deleting an account row cascades that actor's frontiers in the same community;
 community erasure inventories both tables under the existing write fence. There
 is no new public account export/reset endpoint. Operator-assisted erasure/export
 must use the established authenticated operational process and explicitly scope
-both community and actor; never equate the read-time horizon with data erasure.
+both community and actor; never equate follow dormancy with data erasure.
 
 There is no down migration, and disabling the API is not a rollback. A relay
 built before 0056 that restarts with `BUZZ_AUTO_MIGRATE=true` (the Helm default)

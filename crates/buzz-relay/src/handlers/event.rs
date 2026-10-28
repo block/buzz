@@ -934,6 +934,12 @@ async fn handle_ephemeral_event(
         Err(_) => return Err(IngestError::Internal("error: internal error".to_string())),
     }
 
+    if event_kind_u32(&event) == buzz_core::kind::KIND_READ_STATE_CHANGED {
+        return Err(IngestError::Rejected(
+            "invalid: read-state pings are relay-signed only".into(),
+        ));
+    }
+
     if event_kind_u32(&event) == KIND_AGENT_PRESENCE {
         return set_agent_presence(&state, &conn.tenant, &event, &auth_pubkey).await;
     }

@@ -775,7 +775,17 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 73);
+        assert_eq!(migrations.len(), 75);
+        assert_eq!(migrations[74].version, 75);
+        assert!(migrations[74]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN revision BIGINT NOT NULL DEFAULT 0"));
+        assert_eq!(migrations[73].version, 74);
+        assert!(migrations[73]
+            .sql
+            .as_str()
+            .contains("idx_events_read_timeline"));
         assert_eq!(migrations[72].version, 73);
         assert_eq!(migrations[71].version, 72);
         assert_eq!(migrations[70].version, 71);
@@ -2424,16 +2434,41 @@ mod postgres_tests {
             .sql
             .as_str();
         assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
+        // 0074 adds the sticky thread unfollow and follow liveness.
+        let unfollowed_column = "unfollowed boolean not null default false \
+            check (not unfollowed or root_id <> ''::bytea), \
+            explicit boolean not null default false, \
+            active_at timestamptz not null default now(), ";
+        let access_paths = MIGRATOR
+            .iter()
+            .find(|m| m.version == 74)
+            .expect("read-state access path migration")
+            .sql
+            .as_str();
+        assert!(access_paths.contains(
+            "$d$BOOLEAN NOT NULL DEFAULT false CHECK (NOT unfollowed OR root_id <> ''::bytea)$d$"
+        ));
+        assert!(access_paths
+            .contains("('personal_read_frontiers', 'explicit', 'BOOLEAN NOT NULL DEFAULT false')"));
+        assert!(access_paths.contains(
+            "('personal_read_frontiers', 'active_at', 'TIMESTAMPTZ NOT NULL DEFAULT now()')"
+        ));
         for (table, definition) in personal.tables {
             let in_schema = schema.tables.get(&table).map(|schema_definition| {
                 if table == "personal_read_accounts" {
-                    schema_definition.replacen(started_at_column, "", 1)
+                    schema_definition
+                        .replacen(started_at_column, "", 1)
+                        .replacen("revision bigint not null default 0, ", "", 1)
                 } else {
                     schema_definition.clone()
                 }
             });
             let definition = if table == "personal_read_frontiers" {
-                definition.replacen(threads_through_column, through_message_column, 1)
+                definition.replacen(
+                    threads_through_column,
+                    &format!("{through_message_column}{unfollowed_column}"),
+                    1,
+                )
             } else {
                 definition
             };

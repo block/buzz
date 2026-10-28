@@ -6676,13 +6676,21 @@ pub(crate) mod postgres_tests {
             for (path, status, headers, body) in outcomes {
                 let (expected_status, expected_body) = match case {
                     "admitted" => {
-                        // Admitted past auth: git finds no such repository.
+                        // Admitted past auth: git finds no such repository,
+                        // and read state refuses agents, which have none.
                         let expected = if path.starts_with("/git/") {
                             StatusCode::NOT_FOUND
+                        } else if path.starts_with("/buzz/v1/") {
+                            StatusCode::FORBIDDEN
                         } else {
                             StatusCode::OK
                         };
                         assert_eq!(status, expected, "{case} {path}: {body:?}");
+                        if path.starts_with("/buzz/v1/") {
+                            let error: serde_json::Value =
+                                serde_json::from_slice(&body).expect("read-state error JSON");
+                            assert_eq!(error["error"]["code"], "forbidden", "{body:?}");
+                        }
                         continue;
                     }
                     "link_failure" => (
@@ -7287,7 +7295,10 @@ pub(crate) mod postgres_tests {
                 br#"{"channels":[],"outcomes":[{"status":"blocked"}]}"#
             );
         } else {
-            assert_eq!(value, serde_json::json!({"channels":[],"next_cursor":null}));
+            assert_eq!(
+                value,
+                serde_json::json!({"channels":[],"next_cursor":null,"read_revision":0})
+            );
         }
 
         for case in [

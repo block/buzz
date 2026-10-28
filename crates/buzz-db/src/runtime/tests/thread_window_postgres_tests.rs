@@ -289,18 +289,16 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
         .await
         .unwrap();
 
-    // Also bind the public migrator: the advisory schema/destruction lock,
-    // ledger write and post-migration catalog checks must work with ingestion.
-    let production_result = migration::run_migrations(&pool).await;
+    // Also bind the migrator: the advisory schema/destruction lock, ledger
+    // write and post-migration catalog checks must work with ingestion. 0074
+    // adds a column to thread_metadata, which takes a brief exclusive lock
+    // bounded by its lock_timeout, so it runs after the writer below.
+    let production_result = migration::run_migrations_through(&pool, 73).await;
     sqlx::query(insert)
         .bind(community)
         .bind(channel)
         .bind(vec![4_u8; 32])
         .execute(&mut *witness)
-        .await
-        .unwrap();
-    let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
-        .fetch_one(&mut *witness)
         .await
         .unwrap();
     let final_oid: i64 =
@@ -316,6 +314,11 @@ async fn migration_schema_thread_window_prebuild_does_not_queue_behind_writer() 
             .unwrap();
     drop(witness);
     writer.rollback().await.unwrap();
+    migration::run_migrations(&pool).await.unwrap();
+    let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     drop_scratch_db(&admin, pool, &name).await;
 
     assert!(

@@ -24,7 +24,8 @@ pub(super) async fn deadlines(conn: &mut PgConnection) -> Result<()> {
 }
 
 /// Start the account if this is the actor's first read intent, then serialize
-/// private frontier writes, never shared conversation rows.
+/// private frontier writes, never shared conversation rows. NO KEY UPDATE
+/// leaves ingest's foreign-key checks (which create thread rows) unblocked.
 pub(super) async fn lock_account(
     tx: &mut AdmittedTx,
     community: CommunityId,
@@ -40,7 +41,8 @@ pub(super) async fn lock_account(
     .execute(tx.conn())
     .await?;
     sqlx::query(
-        "SELECT actor FROM personal_read_accounts WHERE community_id=$1 AND actor=$2 FOR UPDATE",
+        "SELECT actor FROM personal_read_accounts WHERE community_id=$1 AND actor=$2
+         FOR NO KEY UPDATE",
     )
     .bind(community.as_uuid())
     .bind(actor)
@@ -86,6 +88,8 @@ struct Message {
     id: Vec<u8>,
     received_at: DateTime<Utc>,
     root: Option<Vec<u8>>,
+    /// A reply that is also on the channel timeline.
+    broadcast: bool,
 }
 
 /// A channel event and its canonical ancestry. `kinds` bounds the lookup: an
@@ -98,7 +102,7 @@ async fn message(
     kinds: Option<&[i32]>,
 ) -> Result<Option<Message>> {
     let row = sqlx::query(
-        "SELECT e.id, e.received_at, e.tags, tm.root_event_id
+        "SELECT e.id, e.received_at, e.tags, tm.root_event_id, COALESCE(tm.broadcast, false) AS broadcast
          FROM events e LEFT JOIN thread_metadata tm ON tm.community_id=e.community_id
              AND tm.event_created_at=e.created_at AND tm.event_id=e.id AND tm.channel_id=e.channel_id
          WHERE e.community_id=$1 AND e.channel_id=$2 AND e.id=$3
@@ -123,6 +127,7 @@ async fn message(
             id,
             received_at,
             root,
+            broadcast: row.try_get("broadcast")?,
         })
     })
     .transpose()
@@ -159,7 +164,9 @@ pub(super) async fn valid_target(
 }
 
 /// Advance a monotone frontier. The anchor ID follows the greatest arrival;
-/// an equal arrival keeps the existing anchor.
+/// an equal arrival keeps the existing anchor. Reading a thread never follows
+/// it: only a followed thread has a row to advance, and reading involves the
+/// actor, which keeps the follow live.
 async fn frontier(
     tx: &mut AdmittedTx,
     community: CommunityId,
@@ -168,7 +175,7 @@ async fn frontier(
     root: &[u8],
     msg: &Message,
 ) -> Result<()> {
-    sqlx::query(
+    let sql = if root.is_empty() {
         "INSERT INTO personal_read_frontiers
          (community_id, actor, channel_id, root_id, through_timestamp, through_message_id)
          VALUES ($1,$2,$3,$4,$5,$6)
@@ -176,10 +183,61 @@ async fn frontier(
          SET through_timestamp=GREATEST(personal_read_frontiers.through_timestamp, EXCLUDED.through_timestamp),
             through_message_id=CASE
                 WHEN EXCLUDED.through_timestamp > personal_read_frontiers.through_timestamp
-                THEN EXCLUDED.through_message_id ELSE personal_read_frontiers.through_message_id END",
-    ).bind(community.as_uuid()).bind(actor).bind(target.channel_id).bind(root)
-        .bind(msg.received_at).bind(&msg.id)
-        .execute(tx.conn()).await?;
+                THEN EXCLUDED.through_message_id ELSE personal_read_frontiers.through_message_id END"
+    } else {
+        "UPDATE personal_read_frontiers
+         SET through_timestamp=GREATEST(through_timestamp, $5),
+            through_message_id=CASE WHEN $5 > through_timestamp
+                THEN $6 ELSE through_message_id END,
+            active_at=now()
+         WHERE community_id=$1 AND actor=$2 AND channel_id=$3 AND root_id=$4"
+    };
+    sqlx::query(sql)
+        .bind(community.as_uuid())
+        .bind(actor)
+        .bind(target.channel_id)
+        .bind(root)
+        .bind(msg.received_at)
+        .bind(&msg.id)
+        .execute(tx.conn())
+        .await?;
+    Ok(())
+}
+
+/// Follow or unfollow a thread. A follow that changes state starts now, so
+/// earlier replies are read; an unfollowed row keeps ingest from following
+/// again, except as `record_message` allows. An explicit follow, including of
+/// a thread already followed implicitly, never goes dormant.
+async fn follow(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    actor: &[u8],
+    channel: Uuid,
+    root: &[u8],
+    unfollow: bool,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO personal_read_frontiers
+         (community_id, actor, channel_id, root_id, through_timestamp, unfollowed, explicit)
+         VALUES ($1,$2,$3,$4,now(),$5,NOT $5)
+         ON CONFLICT (community_id, actor, channel_id, root_id) DO UPDATE
+         SET unfollowed=$5, explicit=NOT $5, active_at=now(),
+            through_timestamp=CASE WHEN personal_read_frontiers.unfollowed <> $5
+                THEN GREATEST(personal_read_frontiers.through_timestamp, now())
+                ELSE personal_read_frontiers.through_timestamp END,
+            through_message_id=CASE WHEN personal_read_frontiers.unfollowed <> $5
+                AND now() > personal_read_frontiers.through_timestamp
+                THEN NULL ELSE personal_read_frontiers.through_message_id END
+         WHERE personal_read_frontiers.unfollowed <> $5
+            OR personal_read_frontiers.explicit = $5",
+    )
+    .bind(community.as_uuid())
+    .bind(actor)
+    .bind(channel)
+    .bind(root)
+    .bind(unfollow)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
@@ -209,12 +267,29 @@ pub(super) async fn apply(
                 return Ok(IntentOutcome::Blocked);
             };
             let is_reply = msg.root.as_ref().is_some_and(|r| r != &msg.id);
-            if (root.is_empty() && is_reply)
+            if (root.is_empty() && is_reply && !msg.broadcast)
                 || (!root.is_empty() && msg.id != root && msg.root.as_ref() != Some(&root))
             {
                 return Ok(IntentOutcome::Blocked);
             }
             frontier(tx, community, actor, target, &root, &msg).await?;
+        }
+        ReadIntent::Follow { target } | ReadIntent::Unfollow { target } => {
+            if target.root_id.is_none() {
+                return Ok(IntentOutcome::Invalid);
+            }
+            let Some(root) = valid_target(tx.conn(), community, actor, target).await? else {
+                return Ok(IntentOutcome::Blocked);
+            };
+            follow(
+                tx.conn(),
+                community,
+                actor,
+                target.channel_id,
+                &root,
+                matches!(intent, ReadIntent::Unfollow { .. }),
+            )
+            .await?;
         }
     }
     Ok(IntentOutcome::Applied)
@@ -230,6 +305,20 @@ impl Db {
         actor: &nostr::PublicKey,
         intent: &ReadIntent,
     ) -> Result<IntentOutcome> {
+        Ok(self
+            .apply_personal_read_intent_with_revision(community, actor, intent)
+            .await?
+            .0)
+    }
+
+    /// As [`Self::apply_personal_read_intent`], plus the actor's
+    /// `read_revision` after this intent when it applied.
+    pub async fn apply_personal_read_intent_with_revision(
+        &self,
+        community: CommunityId,
+        actor: &nostr::PublicKey,
+        intent: &ReadIntent,
+    ) -> Result<(IntentOutcome, Option<i64>)> {
         let mut tx = crate::begin_community_write_transaction(
             &self.pool,
             community,
@@ -240,10 +329,23 @@ impl Db {
         let actor = actor.to_bytes();
         lock_account(&mut tx, community, &actor).await?;
         let outcome = apply(&mut tx, community, &actor, intent).await?;
+        let mut revision = None;
         match outcome {
-            IntentOutcome::Applied => tx.commit().await?,
+            IntentOutcome::Applied => {
+                revision = Some(
+                    sqlx::query_scalar::<_, i64>(
+                        "UPDATE personal_read_accounts SET revision=revision+1
+                         WHERE community_id=$1 AND actor=$2 RETURNING revision",
+                    )
+                    .bind(community.as_uuid())
+                    .bind(actor)
+                    .fetch_one(tx.conn())
+                    .await?,
+                );
+                tx.commit().await?
+            }
             IntentOutcome::Blocked | IntentOutcome::Invalid => tx.rollback().await?,
         }
-        Ok(outcome)
+        Ok((outcome, revision))
     }
 }
