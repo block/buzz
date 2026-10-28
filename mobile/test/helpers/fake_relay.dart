@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -50,6 +51,7 @@ class FakeRelay {
     socketFactory: _openSocket,
     httpClient: MockClient(_handleHttp),
     now: _now,
+    random: _MidpointRandom(),
   );
 
   List<Override> get overrides => [
@@ -433,6 +435,19 @@ const _windowKeys = {
 int _newestFirst(NostrEvent a, NostrEvent b) => a.createdAt != b.createdAt
     ? b.createdAt.compareTo(a.createdAt)
     : a.id.compareTo(b.id);
+
+/// Always draws the midpoint, so reconnect jitter is exactly the backoff and
+/// tests can elapse a known delay.
+class _MidpointRandom implements Random {
+  @override
+  double nextDouble() => 0.5;
+
+  @override
+  bool nextBool() => false;
+
+  @override
+  int nextInt(int max) => max ~/ 2;
+}
 
 class _FixedRelayConfig extends RelayConfigNotifier {
   _FixedRelayConfig(this._nsec);
