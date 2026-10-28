@@ -425,7 +425,9 @@ async fn execute_relay_admin_command(
                     if let Some((_, Some(owner))) = policy {
                         if state
                             .db
-                            .is_relay_member(tenant.community(), &hex::encode(owner))
+                            // Revocation must use current authority: a stale reader
+                            // can miss a newly admitted owner and close a valid agent.
+                            .is_relay_member_writer(tenant.community(), &hex::encode(owner))
                             .await
                             .map_err(|e| format!("database error: {e}"))?
                         {
