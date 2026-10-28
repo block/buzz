@@ -1,3 +1,5 @@
+import 'features/channels/default_agent_launcher.dart';
+import 'features/agents/agents_sheet.dart';
 import 'dart:async';
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';
@@ -415,6 +417,10 @@ class App extends HookConsumerWidget {
           AuthStatus.authenticated => HostedAppGate(
             authenticated: true,
             child: HomePage(
+              onAgents: showAgents,
+              defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                onChooseAgent: () => showAgents(context),
+              ),
               mePageBuilder: (_, chat, workspace) => MePage(
                 sliver: true,
                 newChatAction: chat,

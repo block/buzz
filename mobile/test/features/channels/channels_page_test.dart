@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/agents/agents_sheet.dart';
 import 'dart:convert';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
@@ -131,6 +133,10 @@ void main() {
         ),
         home: realHome
             ? HomePage(
+                onAgents: showAgents,
+                defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                  onChooseAgent: () => showAgents(context),
+                ),
                 settingsPageBuilder: _buildSettingsPage,
                 hasUnreadInbox: false,
               )

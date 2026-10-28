@@ -15,9 +15,7 @@ import '../../shared/widgets/ios_message_create_button.dart';
 import '../../shared/widgets/bottom_up_page_route.dart';
 import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../activity/activity_page.dart';
-import '../agents/agents_sheet.dart';
 import '../channels/channels_page.dart';
-import '../channels/default_agent_launcher.dart';
 import '../search/search_page.dart';
 import 'messages_filters.dart';
 import 'messages_navigation_bar.dart';
@@ -25,6 +23,8 @@ import 'messages_navigation_bar.dart';
 class HomePage extends HookConsumerWidget {
   const HomePage({
     required this.settingsPageBuilder,
+    required this.onAgents,
+    required this.defaultAgentBuilder,
     this.communityInvitePageBuilder,
     this.mePageBuilder,
     this.profilePageBuilder,
@@ -35,6 +35,8 @@ class HomePage extends HookConsumerWidget {
   });
 
   final WidgetBuilder settingsPageBuilder;
+  final ValueChanged<BuildContext> onAgents;
+  final WidgetBuilder defaultAgentBuilder;
   final WidgetBuilder? profilePageBuilder;
 
   /// Builds a sliver inventory and publishes its two creation actions.
@@ -120,7 +122,7 @@ class HomePage extends HookConsumerWidget {
           (
             label: 'Agents',
             symbol: 'person.2',
-            onPressed: () => showAgents(context),
+            onPressed: () => onAgents(context),
           ),
           (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
         ];
@@ -235,7 +237,7 @@ class HomePage extends HookConsumerWidget {
               child: Center(
                 child: MessagesNavigationBar(
                   onSearch: openSearch,
-                  agent: const DefaultAgentLauncher(),
+                  agent: defaultAgentBuilder(context),
                   creationActions: [
                     (
                       label: 'New chat',

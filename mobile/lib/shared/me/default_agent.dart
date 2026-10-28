@@ -12,7 +12,7 @@ const defaultAgentTag = 'buzz-default-agent-v1';
 String defaultAgentCoordinate(String community) =>
     '$defaultAgentTag:${Uri.encodeComponent(community)}:default-agent:me';
 
-/// Reads the same signed, self-encrypted preference as desktop.
+/// Reads the owner's signed, self-encrypted default-agent preference.
 String? decodeDefaultAgent(NostrEvent event, MeSync sync) {
   if (event.kind != 30078 ||
       event.pubkey != sync.pubkey ||

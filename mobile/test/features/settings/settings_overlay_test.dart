@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/agents/agents_sheet.dart';
 import 'dart:io';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'dart:ui' as ui;
@@ -119,6 +121,10 @@ void main() {
                 child: child!,
               ),
               home: HomePage(
+                onAgents: showAgents,
+                defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                  onChooseAgent: () => showAgents(context),
+                ),
                 hasUnreadInbox: false,
                 settingsPageBuilder: (_) => SettingsPage(
                   embedded: true,

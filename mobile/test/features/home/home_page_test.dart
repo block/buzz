@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/agents/agents_sheet.dart';
 import 'package:buzz/features/channels/me/me_section.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/channels/channel.dart';
@@ -41,6 +43,9 @@ void main() {
           child: child!,
         ),
         home: HomePage(
+          onAgents: showAgents,
+          defaultAgentBuilder: (context) =>
+              DefaultAgentLauncher(onChooseAgent: () => showAgents(context)),
           mePageBuilder: (_, action, workspace) {
             onNewChatAction?.call(action);
             return SliverToBoxAdapter(

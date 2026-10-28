@@ -81,8 +81,8 @@ enum _QuickAction { createChannel, newDm }
 const double _kChannelSectionInset = Grid.gutter;
 const double _kChannelLeadingWidth = 24.0;
 const double _kChannelIconSize = 20.0;
-const double _kChannelLabelGap = 10.0;
-const double _kChannelRowVerticalPadding = 11.0;
+const double _kChannelLabelGap = Grid.inventoryLabelGap;
+const double _kChannelRowVerticalPadding = Grid.inventoryRowInset;
 // Keep section controls at a full touch target without adding a second row
 // of vertical padding around their quiet desktop-style label.
 const double _kSectionHeaderVerticalPadding = 0;

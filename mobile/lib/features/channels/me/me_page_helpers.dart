@@ -110,7 +110,7 @@ class _MeChatRow extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(
             horizontal: Grid.xxs,
-            vertical: 11,
+            vertical: Grid.inventoryRowInset,
           ),
           child: Row(
             children: [
@@ -121,7 +121,7 @@ class _MeChatRow extends StatelessWidget {
                   child: Icon(BuzzIcons.messageCircle, size: 20, color: color),
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: Grid.inventoryLabelGap),
               Expanded(
                 child: Text(
                   name,

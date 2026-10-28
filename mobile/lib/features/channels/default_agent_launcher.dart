@@ -20,9 +20,10 @@ import 'channel_detail_page.dart';
 import 'channels_provider.dart';
 import 'channel_management_provider.dart';
 
-/// Persistent shortcut to the agent chosen on desktop.
+/// Persistent shortcut to the agent chosen in Agents.
 class DefaultAgentLauncher extends HookConsumerWidget {
-  const DefaultAgentLauncher({super.key});
+  const DefaultAgentLauncher({required this.onChooseAgent, super.key});
+  final VoidCallback onChooseAgent;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final preference = ref.watch(defaultAgentProvider);
@@ -50,11 +51,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         return;
       }
       if (pubkey == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Choose your default agent in Agents on desktop.'),
-          ),
-        );
+        onChooseAgent();
         return;
       }
       final scope = ref.read(meSyncProvider);
@@ -115,8 +112,8 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       usesGlass: true,
       providesSheetSurface: false,
       padding: EdgeInsets.zero,
-      minimumRadius: 28,
-      contentClipRadius: 28,
+      minimumRadius: Radii.navigationCapsule,
+      contentClipRadius: Radii.navigationCapsule,
       child: SizedBox.square(
         dimension: 56,
         child: IconButton(

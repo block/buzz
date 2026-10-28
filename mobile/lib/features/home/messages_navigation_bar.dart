@@ -31,8 +31,8 @@ class MessagesNavigationBar extends StatelessWidget {
         usesGlass: true,
         providesSheetSurface: false,
         padding: EdgeInsets.zero,
-        minimumRadius: 28,
-        contentClipRadius: 28,
+        minimumRadius: Radii.navigationCapsule,
+        contentClipRadius: Radii.navigationCapsule,
         child: SizedBox.square(
           dimension: 56,
           child: IconButton(
@@ -63,8 +63,8 @@ class MessagesNavigationBar extends StatelessWidget {
           usesGlass: true,
           providesSheetSurface: false,
           padding: EdgeInsets.zero,
-          minimumRadius: 28,
-          contentClipRadius: 28,
+          minimumRadius: Radii.navigationCapsule,
+          contentClipRadius: Radii.navigationCapsule,
           child: PopupMenuButton<int>(
             tooltip: 'New',
             onOpened: () => unawaited(HapticFeedback.lightImpact()),

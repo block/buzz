@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/me/default_agent.dart';
+import '../../shared/me/default_agent_writer.dart';
+import '../../shared/me/me_sync.dart';
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/hosted/hosted_flow.dart';
@@ -44,13 +47,7 @@ Future<void> showAgents(BuildContext context) async {
 }
 
 class _AgentsNavigation extends HookConsumerWidget {
-  const _AgentsNavigation({
-    required this.controller,
-    this.embedded = false,
-    this.active = true,
-  });
-  final bool active;
-  final bool embedded;
+  const _AgentsNavigation({required this.controller});
 
   final RemoteAgentController controller;
 
@@ -61,11 +58,10 @@ class _AgentsNavigation extends HookConsumerWidget {
       communityId,
     ]);
     return SizedBox(
-      height: embedded ? null : MediaQuery.sizeOf(context).height * .72,
+      height: MediaQuery.sizeOf(context).height * .72,
       child: NavigatorPopHandler<Channel>(
-        enabled: active,
         onPopWithResult: (result) {
-          if (active && (navigator.currentState?.canPop() ?? false)) {
+          if (navigator.currentState?.canPop() ?? false) {
             navigator.currentState!.pop(result);
           }
         },
@@ -76,8 +72,7 @@ class _AgentsNavigation extends HookConsumerWidget {
               color: context.colors.surface,
               child: AgentsSheet(
                 controller: controller,
-                onClose: embedded ? null : () => Navigator.of(context).pop(),
-                embedded: embedded,
+                onClose: () => Navigator.of(context).pop(),
                 onSelect: (pubkey) async {
                   final channel = await Navigator.of(listContext).push<Channel>(
                     MaterialPageRoute(
@@ -85,8 +80,8 @@ class _AgentsNavigation extends HookConsumerWidget {
                         key: const ValueKey('agent-detail-surface'),
                         color: context.colors.surface,
                         child: SafeArea(
-                          top: embedded,
-                          bottom: embedded,
+                          top: false,
+                          bottom: false,
                           child: BuzzTitledSheetLayout(
                             title: '',
                             leading: IconButton(
@@ -111,15 +106,7 @@ class _AgentsNavigation extends HookConsumerWidget {
                     ),
                   );
                   if (channel != null && context.mounted) {
-                    if (embedded) {
-                      Navigator.of(context, rootNavigator: true).push<void>(
-                        MaterialPageRoute(
-                          builder: (_) => ChannelDetailPage(channel: channel),
-                        ),
-                      );
-                    } else {
-                      Navigator.of(context).pop(channel);
-                    }
+                    Navigator.of(context).pop(channel);
                   }
                 },
               ),
@@ -189,6 +176,30 @@ class AgentsSheet extends HookConsumerWidget {
     keys.sort((a, b) => names.labelFor(a).compareTo(names.labelFor(b)));
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
+    final savingDefault = useState(false);
+    final defaultAgent = ref.watch(defaultAgentProvider).value;
+    Future<void> chooseDefault(String key) async {
+      if (savingDefault.value) return;
+      savingDefault.value = true;
+      final sync = ref.read(meSyncProvider);
+      try {
+        await saveDefaultAgent(sync, key);
+        if (!context.mounted || ref.read(meSyncProvider) != sync) return;
+        ref.invalidate(defaultAgentProvider);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Default agent saved.')));
+      } catch (error) {
+        if (context.mounted && ref.read(meSyncProvider) == sync) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not save the default agent. $error')),
+          );
+        }
+      } finally {
+        if (context.mounted) savingDefault.value = false;
+      }
+    }
+
     final failed = directory.hasError || registered.hasError;
     final loading =
         !creating.value &&
@@ -297,6 +308,17 @@ class AgentsSheet extends HookConsumerWidget {
                   ),
                 ),
                 title: Text(names.labelFor(key)),
+                trailing: IconButton(
+                  tooltip: defaultAgent == key
+                      ? 'Default agent'
+                      : 'Use ${names.labelFor(key)} as default agent',
+                  onPressed: savingDefault.value || defaultAgent == key
+                      ? null
+                      : () => chooseDefault(key),
+                  icon: Icon(
+                    defaultAgent == key ? Icons.star : Icons.star_border,
+                  ),
+                ),
                 onTap: () => onSelect(key),
               ),
           ],
@@ -352,25 +374,6 @@ class AgentsSheet extends HookConsumerWidget {
         ),
         child: content,
       ),
-    );
-  }
-}
-
-/// Agent management as a persistent main-navigation destination.
-class AgentsPage extends HookConsumerWidget {
-  const AgentsPage({this.active = true, super.key});
-  final bool active;
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final controller = ref.watch(remoteAgentControllerProvider);
-    useEffect(() {
-      unawaited(controller.run(controller.refresh));
-      return null;
-    }, [controller]);
-    return _AgentsNavigation(
-      controller: controller,
-      embedded: true,
-      active: active,
     );
   }
 }
