@@ -544,6 +544,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<void> _connect(RelayConfig config, {bool renewed = false}) async {
     if (_disposed || _ageRestricted) return;
 
+    // Whatever connection came before ends here, capped at its last frame.
     _markLiveSubscriptionsClosed();
     _connectedAt = null;
     final generation = ++_connectionGeneration;
@@ -611,7 +612,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleDisconnected(int generation, Object? error, {int? closeCode}) {
     if (_disposed || generation != _connectionGeneration) return;
     _socketConnected = false;
-    _markLiveSubscriptionsClosed();
     final connectedAt = _connectedAt;
     _connectedAt = null;
     if (connectedAt != null &&
