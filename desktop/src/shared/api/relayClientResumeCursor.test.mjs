@@ -10,6 +10,7 @@ const originalWindow = globalThis.window;
 let now = 0;
 let nextTimerId = 1;
 const timers = new Map();
+const intervals = new Map();
 const writes = [];
 const clients = [];
 globalThis.window = {
@@ -21,9 +22,15 @@ globalThis.window = {
   clearTimeout(id) {
     timers.delete(id);
   },
-  // The stall watchdog's idle check; never fired here.
-  setInterval: () => nextTimerId++,
-  clearInterval() {},
+  // The stall watchdog's idle check; fired explicitly by the stall test.
+  setInterval(fn) {
+    const id = nextTimerId++;
+    intervals.set(id, fn);
+    return id;
+  },
+  clearInterval(id) {
+    intervals.delete(id);
+  },
   __TAURI_INTERNALS__: {
     async invoke(command, args) {
       if (command === "plugin:websocket|send") {
@@ -43,6 +50,7 @@ beforeEach(() => {
   resetRateLimitGate();
   now = 0;
   timers.clear();
+  intervals.clear();
   writes.length = 0;
   Math.random = originalRandom;
 });
@@ -179,6 +187,39 @@ test("a stalled socket stamps liveUntil at its last inbound frame, not at detect
   now = 2_100_000;
   client.resetConnection(new Error("Relay socket stalled"));
   assert.equal(client.subscriptions.get(ids[0]).liveUntil, 2_030);
+});
+
+test("the real stall path stamps liveUntil at the pre-sleep inbound frame", async () => {
+  now = 2_000_000;
+  const { client, ids } = await liveClient([quiet]);
+  client.stallWatchdog.start();
+  now = 2_030_000;
+  await deliver(client, ["NOTICE", "hello"]); // last inbound frame
+  // The machine sleeps for an hour; the first overdue idle tick is the wake.
+  now = 2_030_000 + 3_600_000;
+  assert.equal(intervals.size, 1, "the production watchdog interval is armed");
+  const [tick] = intervals.values();
+  tick(); // checkIdle -> stop() -> production onStall -> resetConnection
+  const subscription = client.subscriptions.get(ids[0]);
+  assert.equal(client.connectionStateEmitter.get(), "stalled");
+  assert.equal(
+    subscription.liveUntil,
+    2_030,
+    "stamped at the last inbound frame, not at wake time",
+  );
+  window.clearTimeout(client.reconnectTimeout);
+  client.reconnectTimeout = null;
+
+  // A message stored early in the gap must be inside the reconnect REQ.
+  const earlyInGap = 2_030 + 120;
+  client.wsId = 8;
+  writes.length = 0;
+  await client.replayLiveSubscriptions();
+  const { since } = writes[0].frame[2];
+  assert.ok(
+    earlyInGap >= since,
+    `message at ${earlyInGap} must satisfy REQ since ${since}`,
+  );
 });
 
 for (const code of [1012, 1001]) {

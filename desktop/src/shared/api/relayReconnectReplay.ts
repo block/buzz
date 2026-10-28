@@ -300,6 +300,15 @@ export async function replayLiveSubscriptions({
       const willRepair = shouldPageReplay && replaySince !== undefined;
       let replay: typeof subscription.reconnectReplay;
       if (willRepair) {
+        // Pin the window's lower bound NOW, before any live-only REQ is sent
+        // or any await: every live REQ goes out before the (concurrency
+        // limited) repair workers start, so a queued channel can reach EOSE
+        // and have its socket close stamp `liveUntil` while its history was
+        // never fetched. The pin keeps the next replay's floor at or below
+        // this one until a repair pass actually completes. Events on the
+        // live REQ advance `lastSeenCreatedAt` independently of backfill
+        // success, so the cursor alone could skip the window permanently.
+        subscription.pendingReplaySince = replaySince;
         // A superseded replay's worker is parked on its own state object.
         subscription.reconnectReplay?.liveEoseWaiter?.();
         // Install before the restored live REQ: a live frame may beat page one.
@@ -420,12 +429,8 @@ export async function replayLiveSubscriptions({
       // is the connect→drop flap loop. Retry behind the gate a bounded number
       // of times, then degrade to live-only for this connection.
       //
-      // Pin the window's lower bound before the first attempt: events on the
-      // already-restored live REQ advance `lastSeenCreatedAt` independently
-      // of backfill success, so without the pin an exhausted backfill
-      // followed by one live event would make the next reconnect skip the
-      // unresolved window permanently. Cleared only on a completed pass.
-      subscription.pendingReplaySince = replaySince;
+      // The window's lower bound was pinned when the replay state was built;
+      // it is cleared only on a completed pass below.
       for (let attempt = 1; attempt <= PAGE_REPLAY_MAX_ATTEMPTS; attempt++) {
         try {
           // Take the repair's upper bound only after the relay acknowledged

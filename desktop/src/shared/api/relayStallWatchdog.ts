@@ -10,8 +10,11 @@
 export type RelayStallWatchdogConfig = {
   intervalMs: number;
   idleTimeoutMs: number;
-  /** Called once when a stall is detected. The watchdog stops itself first. */
-  onStall: (error: Error) => void;
+  /**
+   * Called once when a stall is detected. The watchdog stops itself first, so
+   * the time of the last inbound frame (which `stop()` clears) is passed in.
+   */
+  onStall: (error: Error, lastInboundAtMs: number) => void;
   /** Optional override for tests. */
   now?: () => number;
 };
@@ -19,7 +22,7 @@ export type RelayStallWatchdogConfig = {
 export class RelayStallWatchdog {
   private readonly intervalMs: number;
   private readonly idleTimeoutMs: number;
-  private readonly onStall: (error: Error) => void;
+  private readonly onStall: (error: Error, lastInboundAtMs: number) => void;
   private readonly now: () => number;
 
   private intervalHandle: number | null = null;
@@ -76,7 +79,11 @@ export class RelayStallWatchdog {
       return;
     }
 
+    const lastInboundAt = this.lastInboundAt;
     this.stop();
-    this.onStall(new Error("Relay socket stalled — no inbound frames."));
+    this.onStall(
+      new Error("Relay socket stalled — no inbound frames."),
+      lastInboundAt,
+    );
   }
 }

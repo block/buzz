@@ -107,9 +107,9 @@ export class RelayClient {
   private stallWatchdog = new RelayStallWatchdog({
     intervalMs: STALL_CHECK_INTERVAL_MS,
     idleTimeoutMs: STALL_IDLE_TIMEOUT_MS,
-    onStall: (error) => {
+    onStall: (error, lastInboundMs) => {
       this.connectionStateEmitter.set("stalled");
-      this.resetConnection(error);
+      this.resetConnection(error, { lastInboundMs });
     },
   });
   setVisibleChannelId(id: string | null) {
@@ -1119,13 +1119,14 @@ export class RelayClient {
     options?: {
       reconnect?: boolean;
       serviceRestart?: boolean;
+      lastInboundMs?: number;
     },
   ) {
     this.onMessageChannel = null;
     stampLiveUntilOnClose(
       this.subscriptions,
       this.connectionGeneration,
-      this.stallWatchdog.lastInboundAtMs(),
+      options?.lastInboundMs ?? this.stallWatchdog.lastInboundAtMs(),
     );
     this.stallWatchdog.stop();
     this.connectionGeneration++;

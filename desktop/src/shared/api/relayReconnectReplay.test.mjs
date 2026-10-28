@@ -16,6 +16,7 @@ import {
   shouldPageReconnectReplay,
 } from "./relayReconnectReplay.ts";
 import { buildChannelFilter } from "./relayChannelFilters.ts";
+import { stampLiveUntilOnClose } from "./relayResumeCursor.ts";
 import {
   flushEvents,
   markReconnectLiveEose,
@@ -1548,6 +1549,71 @@ test("an unacknowledged live REQ degrades to a pinned floor instead of repairing
     "the window stays pinned for the next reconnect",
   );
   assert.equal(pendingTimers.size, 0, "no ack timer is left armed");
+});
+
+test("every paged repair floor is pinned before any live-only REQ, so a queued channel survives a second disconnect", async () => {
+  resetGate();
+  const lastSeen = 5_000;
+  const originalFloor = lastSeen - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS;
+  const subscriptions = new Map(
+    Array.from({ length: 5 }, (_, i) => [
+      `live-${i + 1}`,
+      liveSub(buildChannelFilter(`channel-${i + 1}`, 1000), {
+        lastSeenCreatedAt: lastSeen,
+      }),
+    ]),
+  );
+  // Only the first PAGE_CONCURRENCY (4) repairs start; the 5th stays queued.
+  const blocked = [];
+  let firstConnectionActive = true;
+  const first = replayLiveSubscriptions({
+    subscriptions,
+    generation: 0,
+    isActive: () => firstConnectionActive,
+    sendRaw: ackingSendRaw(subscriptions, 0),
+    requestRepair: (request) =>
+      new Promise((resolve) => blocked.push({ request, resolve })),
+  });
+  await drainMicrotasks();
+  assert.equal(blocked.length, 4, "precondition: the 5th repair is queued");
+  const queued = subscriptions.get("live-5");
+  assert.equal(queued.reconnectReplay.liveEose, true, "5th live REQ was acked");
+  assert.equal(
+    queued.pendingReplaySince,
+    originalFloor,
+    "the queued channel's floor is pinned although its worker never ran",
+  );
+
+  // The session's EOSE handler records the generation, and the socket drops
+  // again before the queued repair ever ran.
+  for (const subscription of subscriptions.values()) {
+    subscription.eoseGeneration = 0;
+  }
+  stampLiveUntilOnClose(subscriptions, 0, 0, 200_000_000);
+  assert.equal(queued.liveUntil, 200_000);
+  firstConnectionActive = false;
+
+  // A message older than the (advanced) lookback that was never fetched.
+  const missed = event("missed-old", 4_000);
+  const repairs = [];
+  await replayLiveSubscriptions({
+    subscriptions,
+    generation: 1,
+    sendRaw: ackingSendRaw(subscriptions, 1),
+    requestRepair: async (request) => {
+      repairs.push(request);
+      return request.channelId === "channel-5" && missed.created_at >= request.since
+        ? [missed]
+        : [];
+    },
+  });
+  const fifth = repairs.find((request) => request.channelId === "channel-5");
+  assert.equal(fifth.since, originalFloor, "never advance past an unrepaired floor");
+  assert.ok(missed.created_at < 200_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS);
+  assert.equal(queued.pendingReplaySince, undefined, "cleared by the completed repair");
+
+  for (const { resolve } of blocked) resolve([]);
+  await first;
 });
 
 test("a superseding replay releases the stale worker without a repair", async () => {
