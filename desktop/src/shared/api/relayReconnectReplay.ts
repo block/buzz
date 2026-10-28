@@ -13,13 +13,17 @@ import {
   isRateLimited,
   waitForRateLimit,
 } from "@/shared/api/relayRateLimitGate";
-import { computeResumeSince } from "@/shared/api/relayResumeCursor";
+import {
+  computeResumeSince,
+  RELAY_INGEST_FUTURE_TOLERANCE_SECS,
+} from "@/shared/api/relayResumeCursor";
+
+export { RELAY_INGEST_FUTURE_TOLERANCE_SECS };
 
 /**
  * Legacy cursors are event-time maxima, so cover relay future tolerance (900s)
  * plus the channel-row storage fence and margin (960s + 5s).
  */
-export const RELAY_INGEST_FUTURE_TOLERANCE_SECS = 900;
 export const DB_CREATED_AT_FLOOR_SECS = 960;
 export const FENCE_CLOCK_MARGIN_SECS = 5;
 export const RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS =

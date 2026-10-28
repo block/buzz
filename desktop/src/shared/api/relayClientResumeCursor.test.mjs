@@ -138,7 +138,7 @@ test("a close after EOSE stamps liveUntil and the replay resumes from it", async
   await client.replayLiveSubscriptions();
   assert.deepEqual(
     writes.map(({ frame }) => frame),
-    [["REQ", ids[0], { ...quiet, since: 2_050 - 60, limit: 1000 }]],
+    [["REQ", ids[0], { ...quiet, since: 2_050 - 960, limit: 1000 }]],
   );
 });
 
@@ -157,7 +157,7 @@ test("a subscription that never reached EOSE keeps replaying its original filter
   writes.length = 0;
   await client.replayLiveSubscriptions();
   const byId = new Map(writes.map(({ frame }) => [frame[1], frame[2]]));
-  assert.equal(byId.get(ids[0]).since, 2_050 - 60);
+  assert.equal(byId.get(ids[0]).since, 2_050 - 960);
   assert.deepEqual(byId.get(ids[1]), second);
 });
 

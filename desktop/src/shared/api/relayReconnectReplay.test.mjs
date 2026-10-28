@@ -1393,20 +1393,45 @@ async function replayOne(subscription, { generation = 0, repairs = [] } = {}) {
   return { sent, repairs };
 }
 
-test("quiet non-paged subscription resumes from liveUntil - 60s with its full limit", async () => {
+test("quiet non-paged subscription resumes from liveUntil - 960s with its full limit", async () => {
   resetGate();
   const filter = { kinds: [9], "#h": ["a", "b"], limit: 1000, since: 100 };
   const { sent, repairs } = await replayOne(
     liveSub(filter, { liveUntil: 10_000 }),
   );
   assert.deepEqual(sent, [
-    ["REQ", "live-1", { ...filter, since: 9_940, limit: 1000 }],
+    ["REQ", "live-1", { ...filter, since: 9_040, limit: 1000 }],
   ]);
   assert.deepEqual(
     repairs,
     [],
     "non-paged subscriptions never use HTTP repair",
   );
+});
+
+test("a backdated event stored after the close is inside the resume window", async () => {
+  resetGate();
+  const filter = { kinds: [9], "#h": ["a", "b"], limit: 1000 };
+  const liveUntil = 100_000;
+  const { sent } = await replayOne(liveSub(filter, { liveUntil }));
+  const { since } = sent[0][2];
+  // The relay accepts created_at up to 900s behind its clock, so a row stored
+  // just after the close can be backdated by the full drift window. Add the
+  // client clock margin: a client clock 60s ahead must not lose it either.
+  const stored = [
+    event("backdated-max", liveUntil - RELAY_INGEST_FUTURE_TOLERANCE_SECS),
+    event(
+      "backdated-skewed-clock",
+      liveUntil - RELAY_INGEST_FUTURE_TOLERANCE_SECS - 59,
+    ),
+    event("backdated-1s", liveUntil - 1),
+  ];
+  for (const row of stored) {
+    assert.ok(
+      row.created_at >= since,
+      `${row.id} (created_at ${row.created_at}) must satisfy REQ since ${since}`,
+    );
+  }
 });
 
 test("resume since never drops below the original filter since", async () => {
@@ -1416,12 +1441,12 @@ test("resume since never drops below the original filter since", async () => {
   assert.equal(sent[0][2].since, 9_990);
 });
 
-test("resume uses the newer of lastSeen - 5s and liveUntil - 60s and caps limit as before", async () => {
+test("resume uses the newer of lastSeen - 5s and liveUntil - 960s and caps limit as before", async () => {
   resetGate();
   const filter = { kinds: [9], "#h": ["a", "b"], limit: 1000 };
   for (const [lastSeen, liveUntil, since] of [
     [10_000, 9_000, 9_995],
-    [9_000, 10_000, 9_940],
+    [9_000, 10_000, 9_040],
   ]) {
     const { sent } = await replayOne(
       liveSub(filter, { lastSeenCreatedAt: lastSeen, liveUntil }),

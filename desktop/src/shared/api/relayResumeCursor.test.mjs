@@ -10,17 +10,19 @@ import {
 
 test("resume skews match the shared reconnect contract", () => {
   assert.equal(RESUME_LAST_SEEN_SKEW_SECS, 5);
-  assert.equal(RESUME_LIVE_UNTIL_SKEW_SECS, 60);
+  // Relay created_at drift window (900s, pinned to ingest.rs in the replay
+  // test) plus a 60s client clock margin.
+  assert.equal(RESUME_LIVE_UNTIL_SKEW_SECS, 960);
 });
 
-// since = max(lastSeen - 5, liveUntil - 60); the original filter's own `since`
+// since = max(lastSeen - 5, liveUntil - 960); the original filter's own `since`
 // is applied by the replay path and covered in relayReconnectReplay.test.mjs.
 for (const [name, input, expected] of [
   ["no cursor replays the original filter", {}, undefined],
   ["lastSeen only", { lastSeenCreatedAt: 1_000 }, 995],
-  ["liveUntil only", { liveUntil: 1_000 }, 940],
+  ["liveUntil only", { liveUntil: 1_000 }, 40],
   ["newer lastSeen wins", { lastSeenCreatedAt: 1_000, liveUntil: 900 }, 995],
-  ["newer liveUntil wins", { lastSeenCreatedAt: 900, liveUntil: 1_000 }, 940],
+  ["newer liveUntil wins", { lastSeenCreatedAt: 900, liveUntil: 2_000 }, 1_040],
   [
     "a future-dated lastSeen is still the lower bound",
     { lastSeenCreatedAt: 2_000, liveUntil: 1_000 },

@@ -15,10 +15,26 @@ import type { RelaySubscription } from "@/shared/api/relayClientShared";
 export const RESUME_LAST_SEEN_SKEW_SECS = 5;
 
 /**
- * Skew below the recorded live-until time. Absorbs client/relay clock skew and
- * `created_at` jitter between the last delivered frame and the close.
+ * The relay rejects events whose `created_at` is more than this far from its
+ * clock in either direction (`MAX_TIMESTAMP_DRIFT_SECS` in
+ * `crates/buzz-relay/src/handlers/ingest.rs`; the replay test pins the
+ * coupling). A row stored after a close can therefore carry a `created_at`
+ * this far in the past.
  */
-export const RESUME_LIVE_UNTIL_SKEW_SECS = 60;
+export const RELAY_INGEST_FUTURE_TOLERANCE_SECS = 900;
+
+/** Client-vs-relay clock skew margin on top of the relay's drift window. */
+export const RESUME_CLIENT_CLOCK_MARGIN_SECS = 60;
+
+/**
+ * Skew below the recorded live-until time: the relay's `created_at` drift
+ * window plus a client clock margin. Anything stored after the close has
+ * `created_at >= closeTime - 900s` on the relay clock, so a narrower window
+ * would skip a backdated event that was stored after the subscription went
+ * quiet. Paged channels use the wider channel lookback instead.
+ */
+export const RESUME_LIVE_UNTIL_SKEW_SECS =
+  RELAY_INGEST_FUTURE_TOLERANCE_SECS + RESUME_CLIENT_CLOCK_MARGIN_SECS;
 
 /**
  * Lower bound for a reconnect replay, or `undefined` when the subscription has
