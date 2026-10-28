@@ -177,8 +177,9 @@ void main() {
   });
 
   group('resume cursor through RelaySessionNotifier', () {
-    test('replays from the end of live delivery, not the original filter, '
-        'only for subscriptions that were live', () async {
+    test('replays from the last frame received before the loss, not the '
+        'original filter or the moment the loss is noticed, and only for '
+        'subscriptions that were live', () async {
       final h = await _Harness.start();
       final start = h.nowSeconds;
       h.sockets.last.connectSuccessfully();
@@ -187,39 +188,39 @@ void main() {
       h.subscribeWithoutEose(_filter('no-eose'));
       final busy = await h.subscribeLive(_filter('busy'));
       final closed = await h.subscribeLive(_filter('closed'));
-      h.session.debugHandleMessage(['CLOSED', closed, 'error: transient']);
-      h.session.debugHandleMessage([
-        'EVENT',
-        busy,
-        _eventJson('e1', start + 100, 'busy'),
-      ]);
-
+      h.receive(['CLOSED', closed, 'error: transient']);
       h.now = h.now.add(const Duration(seconds: 120));
+      h.receive(['EVENT', busy, _eventJson('e1', start + 100, 'busy')]);
+
+      // The device sleeps for 2000s; the loss is only noticed on wake.
+      h.now = h.now.add(const Duration(seconds: 2000));
       h.sockets.last.disconnectWith(null);
       h.timers.last.fire();
       await h.settle();
       h.sockets.last.connectSuccessfully();
       await h.settle();
 
-      // A backdated event stored just after the close (up to 900s behind the
-      // relay clock) is still inside the window.
+      // A backdated event stored just after the last frame (up to 900s behind
+      // the relay clock) is still inside the window.
       expect(h.replayedSince()['quiet']!, lessThanOrEqualTo(start + 120 - 900));
       expect(h.replayedSince(), {
-        'quiet': start - 840, // live until (start + 120) - 960s
+        'quiet': start - 840, // last frame (start + 120) - 960s
         'no-eose': null, // never live: today's behaviour
-        'busy': start + 95, // last seen - 5s beats live until - 960s
+        'busy': start + 95, // last seen - 5s beats last frame - 960s
         'closed': null, // relay closed it: not live at the disconnect
       });
     });
 
-    test('a background disconnect ends live delivery at pause time', () async {
+    test('a background disconnect resumes from the last frame before it', () async {
       final h = await _Harness.start();
       final start = h.nowSeconds;
       h.sockets.last.connectSuccessfully();
       await h.subscribeLive(_filter('quiet'));
 
       h.session.onAppPaused();
-      h.now = h.now.add(const Duration(seconds: 30));
+      h.now = h.now.add(const Duration(seconds: 20));
+      h.receive(['NOTICE', 'still here']);
+      h.now = h.now.add(const Duration(seconds: 10));
       h.session.debugPauseNow();
       h.now = h.now.add(const Duration(minutes: 10));
       h.session.onAppResumed();
@@ -227,7 +228,7 @@ void main() {
       h.sockets.last.connectSuccessfully();
       await h.settle();
 
-      expect(h.replayedSince(), {'quiet': start + 30 - 960});
+      expect(h.replayedSince(), {'quiet': start + 20 - 960});
     });
 
     test('a later connection that never reaches EOSE keeps the older cursor, '
@@ -237,31 +238,38 @@ void main() {
       h.sockets.last.connectSuccessfully();
       await h.subscribeLive(_filter('quiet'));
 
-      h.now = h.now.add(const Duration(seconds: 100));
-      h.sockets.last.disconnectWith(null);
-      h.timers.last.fire();
-      await h.settle();
-      h.sockets.last.connectSuccessfully();
-      await h.settle();
+      await h.dropAfter(const Duration(seconds: 100));
       expect(h.replayedSince(), {'quiet': start + 100 - 960});
 
       // The second connection dies before EOSE: the cursor must not move.
-      h.now = h.now.add(const Duration(seconds: 100));
-      h.sockets.last.disconnectWith(null);
-      h.timers.last.fire();
-      await h.settle();
-      h.sockets.last.connectSuccessfully();
-      await h.settle();
+      await h.dropAfter(const Duration(seconds: 100));
       expect(h.replayedSince(), {'quiet': start + 100 - 960});
 
-      h.session.debugHandleMessage(['EOSE', 'l-1']);
-      h.now = h.now.add(const Duration(seconds: 100));
-      h.sockets.last.disconnectWith(null);
-      h.timers.last.fire();
-      await h.settle();
-      h.sockets.last.connectSuccessfully();
-      await h.settle();
+      h.receive(['EOSE', 'l-1']);
+      await h.dropAfter(const Duration(seconds: 100));
       expect(h.replayedSince(), {'quiet': start + 300 - 960});
+    });
+
+    test('a second REQ on one socket cannot advance the cursor: its EOSE may '
+        'belong to the REQ it replaced', () async {
+      final h = await _Harness.start();
+      final start = h.nowSeconds;
+      h.sockets.last.connectSuccessfully();
+      await h.subscribeLive(_filter('quiet'));
+      await h.dropAfter(const Duration(seconds: 100));
+      expect(h.replayedSince(), {'quiet': start + 100 - 960});
+
+      // On the new socket: EOSE, then CLOSED, then a same-socket retry REQ
+      // whose EOSE arrives. The retry's history has not been confirmed.
+      h.receive(['EOSE', 'l-1']);
+      h.receive(['CLOSED', 'l-1', 'error: transient']);
+      h.retryTimers.last.fire();
+      await h.settle();
+      expect(h.replayedSince(), {'quiet': start + 100 - 960});
+      h.receive(['EOSE', 'l-1']);
+
+      await h.dropAfter(const Duration(seconds: 500));
+      expect(h.replayedSince(), {'quiet': start + 100 - 960});
     });
   });
 }
@@ -294,6 +302,7 @@ class _Harness {
   DateTime now;
   final sockets = <_FakeSocket>[];
   final timers = <_ManualTimer>[];
+  final retryTimers = <_ManualTimer>[];
   final reconnectDelays = <Duration>[];
   final subscriptionNames = <String, String>{};
 
@@ -305,6 +314,11 @@ class _Harness {
     final session = RelaySessionNotifier(
       now: () => h.now,
       random: random,
+      retryTimerFactory: (duration, callback) {
+        final timer = _ManualTimer(callback);
+        h.retryTimers.add(timer);
+        return timer;
+      },
       reconnectTimerFactory: (duration, callback) {
         final timer = _ManualTimer(callback);
         h.timers.add(timer);
@@ -351,12 +365,27 @@ class _Harness {
 
   Future<void> settle() => Future<void>.delayed(Duration.zero);
 
+  /// Delivers [frame] from the relay over the latest socket.
+  void receive(List<dynamic> frame) => sockets.last.receive(frame);
+
+  /// Lets [elapsed] pass with a last frame at its end, then drops the socket
+  /// and reconnects, as a reconnect timer firing and AUTH completing would.
+  Future<void> dropAfter(Duration elapsed) async {
+    now = now.add(elapsed);
+    receive(['NOTICE', 'ping']);
+    sockets.last.disconnectWith(null);
+    timers.last.fire();
+    await settle();
+    sockets.last.connectSuccessfully();
+    await settle();
+  }
+
   /// Subscribes and delivers EOSE, returning the subscription id.
   Future<String> subscribeLive(NostrFilter filter) async {
     final subId = 'l-${subscriptionNames.length + 1}';
     subscriptionNames[subId] = filter.tags['#h']!.single;
     final future = session.subscribe(filter, (_) {});
-    session.debugHandleMessage(['EOSE', subId]);
+    receive(['EOSE', subId]);
     await future;
     return subId;
   }
@@ -385,10 +414,12 @@ class _FakeSocket extends RelaySocket {
     required super.onConnected,
     required super.onDisconnected,
   }) : _connected = onConnected,
-       _disconnected = onDisconnected;
+       _disconnected = onDisconnected,
+       _message = onMessage;
 
   final void Function() _connected;
   final void Function(Object? error) _disconnected;
+  final void Function(List<dynamic> message) _message;
   final sent = <List<dynamic>>[];
   int? _fakeCloseCode;
 
@@ -405,6 +436,8 @@ class _FakeSocket extends RelaySocket {
   void dispose() {}
 
   void connectSuccessfully() => _connected();
+
+  void receive(List<dynamic> frame) => _message(frame);
 
   void disconnectWith(Object? error, {int? closeCode}) {
     _fakeCloseCode = closeCode;

@@ -28,64 +28,7 @@ import 'relay_socket.dart';
 export 'relay_session_types.dart';
 
 part 'relay_session_auth.dart';
-
-class _HistorySubscription {
-  final List<NostrEvent> events = [];
-  final Completer<List<NostrEvent>> completer;
-  final Timer timeout;
-
-  /// The filter of a request held until the socket authenticates.
-  NostrFilter? heldFilter;
-
-  _HistorySubscription({required this.completer, required this.timeout});
-}
-
-class _LiveSubscription {
-  final NostrFilter filter;
-  final void Function(NostrEvent) onEvent;
-  final void Function(String message)? onClosed;
-  final void Function(RelaySubscriptionStatus status)? onStatusChanged;
-  Completer<void>? readyCompleter;
-  int? lastSeenCreatedAt;
-
-  /// Whether EOSE arrived on the current connection and no CLOSED has
-  /// interrupted the stream since.
-  bool liveOnConnection = false;
-
-  /// Client clock (seconds) when the last connection this subscription was
-  /// live on closed. Kept across later connections that never reach EOSE.
-  int? liveUntil;
-  int closedRetryAttempt = 0;
-  Timer? closedRetryTimer;
-
-  _LiveSubscription({
-    required this.filter,
-    required this.onEvent,
-    this.onClosed,
-    this.onStatusChanged,
-    this.readyCompleter,
-  });
-}
-
-class _ClosedRetry {
-  final _LiveSubscription subscription;
-  final int generation;
-  _ClosedRetry({required this.subscription, required this.generation});
-}
-
-class _PendingEvent {
-  final Completer<NostrEvent> completer;
-  final Timer timeout;
-
-  _PendingEvent({required this.completer, required this.timeout});
-}
-
-class _BufferedEvent {
-  final String subId;
-  final NostrEvent event;
-
-  _BufferedEvent(this.subId, this.event);
-}
+part 'relay_session_subscriptions.dart';
 
 class RelaySessionNotifier extends Notifier<SessionState> {
   RelaySessionNotifier({
@@ -139,6 +82,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Timer? _backgroundGraceTimer;
   DateTime? _backgroundedAt;
   DateTime? _connectedAt;
+  DateTime? _lastInboundAt;
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
@@ -402,17 +346,18 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final subId = _nextSubId('l');
     final readyCompleter = Completer<void>();
 
-    _liveSubscriptions[subId] = _LiveSubscription(
+    final subscription = _LiveSubscription(
       filter: filter,
       onEvent: onEvent,
       onClosed: onClosed,
       onStatusChanged: onStatusChanged,
       readyCompleter: readyCompleter,
     );
+    _liveSubscriptions[subId] = subscription;
 
     // Before AUTH the relay closes it as auth-required, which is terminal.
     // The replay on connect sends it instead.
-    if (_socketConnected) _sendReq(subId, filter);
+    if (_socketConnected) _sendLiveReq(subId, subscription);
 
     try {
       await readyCompleter.future.timeout(
@@ -565,7 +510,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _pauseNow() {
     _paused = true;
     _socketConnected = false;
-    _markLiveSubscriptionsClosed();
     _reconnectTimer?.cancel();
     _cancelAllHistory(Exception('App moved to background'));
     _rejectAllPending(Exception('App moved to background'));
@@ -659,6 +603,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // The backoff is not reset here: a client bounced repeatedly must keep
     // backing off. [_handleDisconnected] resets it after a stable connection.
     _connectedAt = _now();
+    _lastInboundAt = _connectedAt;
     state = const SessionState(status: SessionStatus.connected);
     await _replayLiveSubscriptions(generation);
   }
@@ -712,8 +657,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Records when each subscription that was live on the closing connection
   /// stopped being live, so the next replay can resume from there.
+  ///
+  /// Liveness ends at the last frame received, not at the close: after a
+  /// device sleep the loss is only noticed on wake, and nothing arrived in
+  /// between.
   void _markLiveSubscriptionsClosed() {
-    final closedAt = _now().millisecondsSinceEpoch ~/ 1000;
+    final now = _now();
+    final inbound = _lastInboundAt;
+    final end = inbound == null || inbound.isAfter(now) ? now : inbound;
+    final closedAt = end.millisecondsSinceEpoch ~/ 1000;
     for (final subscription in _liveSubscriptions.values) {
       if (!subscription.liveOnConnection) continue;
       subscription.liveOnConnection = false;
@@ -782,7 +734,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           }
           _pendingClosedRetries.remove(entry.key);
         }
-        _sendReq(entry.key, _replayFilter(entry.value));
+        _sendLiveReq(entry.key, entry.value);
       }
       if (i + _replayBatchSize < entries.length) {
         await _replayDelay(_replayInterBatchDelay);
@@ -807,6 +759,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   }
 
   void _handleMessage(List<dynamic> data) {
+    _lastInboundAt = _now();
     if (data.isEmpty) return;
     final type = data[0] as String;
 
@@ -870,7 +823,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // already been released.
     final liveSub = _liveSubscriptions[subId];
     if (liveSub != null) {
-      liveSub.liveOnConnection = true;
+      // A second REQ on this socket makes its EOSE ambiguous: it may belong
+      // to the REQ it replaced, so it cannot vouch for the replacement.
+      liveSub.liveOnConnection =
+          liveSub.ambiguousGeneration != _connectionGeneration;
       _resetClosedRetry(liveSub);
       _flushBufferedEventsNow();
       liveSub.onStatusChanged?.call(RelaySubscriptionStatus.ready);
@@ -1082,6 +1038,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   String _nextSubId(String prefix) {
     _subIdCounter++;
     return '$prefix-$_subIdCounter';
+  }
+
+  void _sendLiveReq(String subId, _LiveSubscription subscription) {
+    if (subscription.reqGeneration == _connectionGeneration) {
+      subscription.ambiguousGeneration = _connectionGeneration;
+    }
+    subscription.reqGeneration = _connectionGeneration;
+    _sendReq(subId, _replayFilter(subscription));
   }
 
   void _sendReq(String subId, NostrFilter filter) {
