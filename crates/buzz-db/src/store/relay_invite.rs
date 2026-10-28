@@ -423,27 +423,29 @@ pub async fn claim_relay_invite_with_owner(
     verified_owner: Option<&str>,
     relay_keypair: &nostr::Keys,
 ) -> Result<MembershipWrite<InviteClaimResult>> {
-    // Unknown codes are free to forge, so reject them before taking the
-    // community-wide admission lock; the locked read below stays authoritative.
-    let known: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM relay_invites \
-         WHERE community_id = $1 AND token_hash = $2)",
-    )
-    .bind(community.as_uuid())
-    .bind(token_hash)
-    .fetch_one(pool)
-    .await?;
-    if !known {
-        log_claim_outcome(community, None, "invalid", None, None);
-        return Ok(MembershipWrite::unchanged(ClaimOutcome::Invalid.into()));
-    }
-
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+
+    // Unknown codes are free to forge, so reject them after the tenant fence
+    // but before the community-wide admission lock; the locked read below
+    // stays authoritative.
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM relay_invites \
+         WHERE community_id = $1 AND token_hash = $2)",
+    )
+    .bind(community.as_uuid())
+    .bind(token_hash)
+    .fetch_one(tx.conn())
+    .await?;
+    if !known {
+        tx.rollback().await?;
+        log_claim_outcome(community, None, "invalid", None, None);
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Invalid.into()));
+    }
 
     lock_admission(tx.conn(), community).await?;
     if claim_owner::claimant_restricted(tx.conn(), community, claimer_pubkey, verified_owner)
