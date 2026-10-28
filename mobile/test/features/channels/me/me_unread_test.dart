@@ -8,6 +8,7 @@ import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/features/channels/me/me_unread_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
@@ -215,7 +216,11 @@ void main() {
               home: Consumer(
                 builder: (context, ref, _) => HomePage(
                   settingsPageBuilder: (_) => const SizedBox(),
-                  mePageBuilder: (_, action) => MePage(newChatAction: action),
+                  mePageBuilder: (_, action, workspace) => MePage(
+                    sliver: true,
+                    newChatAction: action,
+                    newWorkspaceAction: workspace,
+                  ),
                   hasUnreadInbox: false,
                   hasUnreadSolo: ref
                       .watch(meUnreadChannelIdsProvider)
@@ -229,6 +234,13 @@ void main() {
         final container = ProviderScope.containerOf(
           tester.element(find.byType(HomePage)),
         );
+        await tester.tap(
+          find.descendant(
+            of: find.byType(MessagesFilters),
+            matching: find.text('Team'),
+          ),
+        );
+        await tester.pumpAndSettle();
         if (loading) {
           expect(container.read(meUnreadChannelIdsProvider), isEmpty);
           expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
@@ -252,8 +264,8 @@ void main() {
         }
         expect(container.read(meUnreadChannelIdsProvider), {'solo'});
         expect(find.bySemanticsLabel('Solo, unread'), findsOneWidget);
-        expect(find.text('solo'), findsNothing);
-        await tester.tap(find.byTooltip('Solo'));
+        expect(find.text('solo').hitTestable(), findsNothing);
+        await tester.tap(find.text('Solo'));
         await tester.pumpAndSettle();
         expect(
           tester.widget<Text>(find.text('solo')).style?.fontWeight,
@@ -262,7 +274,7 @@ void main() {
         expect(find.bySemanticsLabel('solo, unread'), findsOneWidget);
         await tester.tap(find.text('Project'));
         await tester.pumpAndSettle();
-        expect(find.text('solo'), findsNothing);
+        expect(find.text('solo').hitTestable(), findsNothing);
         expect(
           find.byKey(const ValueKey('solo-section-unread-Project')),
           findsOneWidget,
@@ -273,7 +285,12 @@ void main() {
           find.byKey(const ValueKey('solo-section-unread-Project')),
           findsNothing,
         );
-        await tester.tap(find.byTooltip('Home'));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(MessagesFilters),
+            matching: find.text('Team'),
+          ),
+        );
         await tester.pumpAndSettle();
         expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
         channels.reply();

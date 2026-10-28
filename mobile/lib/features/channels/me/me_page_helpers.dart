@@ -98,9 +98,7 @@ class _MeChatRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = navigationPrimaryForeground(
-      context,
-    ).withValues(alpha: isUnread ? 1 : 0.8);
+    final color = navigationPrimaryForeground(context);
     return Semantics(
       label: isUnread ? '$name, unread' : name,
       onTap: onTap,
@@ -112,28 +110,26 @@ class _MeChatRow extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(
             horizontal: Grid.xxs,
-            vertical: Grid.twelve,
+            vertical: 11,
           ),
           child: Row(
             children: [
               SizedBox(
-                width: 22,
+                width: 24,
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Icon(BuzzIcons.messageCircle, size: 18, color: color),
+                  child: Icon(BuzzIcons.messageCircle, size: 20, color: color),
                 ),
               ),
-              const SizedBox(width: Grid.xxs),
+              const SizedBox(width: 10),
               Expanded(
                 child: Text(
                   name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: contentListTitleTextStyle.copyWith(
+                  style: navigationChatTitleTextStyle.copyWith(
                     color: color,
-                    fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
-                    fontSize: 17,
-                    height: 22 / 17,
+                    fontWeight: isUnread ? FontWeight.w700 : FontWeight.w500,
                   ),
                 ),
               ),

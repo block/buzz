@@ -18,11 +18,15 @@ class FilterChipItem<T> {
   /// Optional count appended to the label as " (n)".
   final int? count;
 
+  /// Keeps unread activity visible when its inventory is filtered out.
+  final bool hasUnread;
+
   const FilterChipItem({
     required this.id,
     required this.label,
     this.icon,
     this.count,
+    this.hasUnread = false,
   });
 }
 
@@ -51,6 +55,9 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Vertical spacing around the chip row.
   final double barVerticalPadding;
 
+  /// Horizontal spacing around the chip row.
+  final double horizontalPadding;
+
   const FilterChipBar({
     super.key,
     required this.items,
@@ -61,6 +68,7 @@ class FilterChipBar<T> extends StatelessWidget {
     this.visualDensity = VisualDensity.compact,
     this.chipVerticalPadding = Grid.quarter,
     this.barVerticalPadding = Grid.xxs,
+    this.horizontalPadding = Grid.gutter,
   });
 
   @override
@@ -82,7 +90,7 @@ class FilterChipBar<T> extends StatelessWidget {
       ];
       return LayoutBuilder(
         builder: (context, constraints) {
-          final available = constraints.maxWidth - Grid.gutter * 2;
+          final available = constraints.maxWidth - horizontalPadding * 2;
           final required =
               widths.fold(0.0, (sum, width) => sum + width) +
               Grid.xxs * (items.length - 1);
@@ -93,24 +101,31 @@ class FilterChipBar<T> extends StatelessWidget {
             scrollDirection: Axis.horizontal,
             clipBehavior: Clip.none,
             padding: EdgeInsets.symmetric(
-              horizontal: Grid.gutter,
+              horizontal: horizontalPadding,
               vertical: barVerticalPadding,
             ),
             child: Row(
               children: [
                 for (var index = 0; index < items.length; index++) ...[
                   if (index > 0) const SizedBox(width: Grid.xxs),
-                  IosGlassNavigationButton(
-                    icon: IosGlassNavigationIcon.more,
-                    label: items[index].label,
-                    semanticLabel: items[index].label,
-                    onPressed: () => onSelected(items[index].id),
-                    isSelected: selected == items[index].id,
-                    width: widths[index] + extra,
-                    height: height,
-                    controlSize: height - 8,
-                    fillWidth: true,
-                    foregroundColor: context.colors.primary,
+                  Badge(
+                    isLabelVisible: items[index].hasUnread,
+                    alignment: Alignment.topRight,
+                    offset: const Offset(-6, 6),
+                    child: IosGlassNavigationButton(
+                      icon: IosGlassNavigationIcon.more,
+                      label: items[index].label,
+                      semanticLabel: items[index].hasUnread
+                          ? '${items[index].label}, unread'
+                          : items[index].label,
+                      onPressed: () => onSelected(items[index].id),
+                      isSelected: selected == items[index].id,
+                      width: widths[index] + extra,
+                      height: height,
+                      controlSize: height - 8,
+                      fillWidth: true,
+                      foregroundColor: context.colors.primary,
+                    ),
                   ),
                 ],
               ],
@@ -132,7 +147,7 @@ class FilterChipBar<T> extends StatelessWidget {
     if (expandItems) {
       return Padding(
         padding: EdgeInsets.symmetric(
-          horizontal: Grid.gutter,
+          horizontal: horizontalPadding,
           vertical: barVerticalPadding,
         ),
         child: Row(children: chips),
@@ -142,7 +157,7 @@ class FilterChipBar<T> extends StatelessWidget {
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       padding: EdgeInsets.symmetric(
-        horizontal: Grid.gutter,
+        horizontal: horizontalPadding,
         vertical: barVerticalPadding,
       ),
       child: Row(children: chips),
@@ -215,6 +230,17 @@ class FilterChipBar<T> extends StatelessWidget {
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );
 
-    return fillWidth ? SizedBox(width: double.infinity, child: chip) : chip;
+    final control = fillWidth
+        ? SizedBox(width: double.infinity, child: chip)
+        : chip;
+    if (!item.hasUnread) return control;
+    return Semantics(
+      label: '$text, unread',
+      button: true,
+      selected: isSelected,
+      onTap: () => onSelected(item.id),
+      excludeSemantics: true,
+      child: Badge(child: control),
+    );
   }
 }

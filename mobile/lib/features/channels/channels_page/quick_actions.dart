@@ -299,7 +299,7 @@ class _QuickActionsMenu extends StatelessWidget {
         children: [
           _QuickActionItem(
             icon: BuzzIcons.hash,
-            title: 'Create channel',
+            title: 'New channel',
             borderRadius: const BorderRadius.vertical(
               top: Radius.circular(_kQuickActionCardRadius),
               bottom: Radius.circular(8),
@@ -310,7 +310,7 @@ class _QuickActionsMenu extends StatelessWidget {
           const SizedBox(height: Grid.xxs - 2),
           _QuickActionItem(
             icon: BuzzIcons.messagesSquare,
-            title: 'New direct message',
+            title: 'New DM',
             borderRadius: const BorderRadius.vertical(
               top: Radius.circular(8),
               bottom: Radius.circular(_kQuickActionCardRadius),

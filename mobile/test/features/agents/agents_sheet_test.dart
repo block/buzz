@@ -1,6 +1,7 @@
 import 'package:buzz/features/agents/agents_sheet.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:flutter/material.dart';
+import 'package:buzz/features/home/home_page.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'agents_harness.dart';
@@ -34,5 +35,28 @@ void main() {
     await tester.tap(find.byTooltip('Close'));
     await tester.pumpAndSettle();
     expect(find.byType(BottomSheet), findsNothing);
+    await h.open(
+      tester,
+      directory: [existing],
+      home: HomePage(
+        hasUnreadInbox: false,
+        settingsPageBuilder: (_) => const SizedBox.shrink(),
+        mePageBuilder: (_, _, _) =>
+            const SliverToBoxAdapter(child: Text('Solo workspace')),
+      ),
+    );
+    await tester.tap(find.byTooltip('Community menu'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Agents'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(ValueKey(existing)));
+    await tester.pumpAndSettle();
+    expect(find.byType(UserProfileSheet), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(UserProfileSheet), findsNothing);
+    await tester.tap(find.byTooltip('Close'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Search'), findsOneWidget);
   });
 }

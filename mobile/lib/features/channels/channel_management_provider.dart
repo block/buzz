@@ -53,6 +53,25 @@ Iterable<String> dmParticipantPubkeys(
     ? members.map((member) => member.pubkey)
     : channel.participantPubkeys;
 
+/// Whether a joined, unarchived DM contains exactly this account and peer.
+bool isActiveDirectConversation(
+  Channel channel,
+  List<ChannelMember>? members,
+  String? currentPubkey,
+  String peerPubkey,
+) {
+  if (currentPubkey == null ||
+      !channel.isDm ||
+      !channel.isMember ||
+      channel.isArchived) {
+    return false;
+  }
+  final expected = {currentPubkey, peerPubkey};
+  final participants = dmParticipantPubkeys(channel, members).toSet();
+  return participants.length == expected.length &&
+      participants.containsAll(expected);
+}
+
 @immutable
 class ChannelMember {
   final String pubkey;

@@ -11,7 +11,6 @@ class _CustomChannelSection extends StatelessWidget {
   final bool expanded;
   final bool isFirst;
   final bool isLast;
-  final bool showTopDivider;
   final VoidCallback onToggle;
   final VoidCallback onRename;
   final VoidCallback onDelete;
@@ -31,7 +30,6 @@ class _CustomChannelSection extends StatelessWidget {
     required this.expanded,
     required this.isFirst,
     required this.isLast,
-    required this.showTopDivider,
     required this.onToggle,
     required this.onRename,
     required this.onDelete,
@@ -48,7 +46,6 @@ class _CustomChannelSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (showTopDivider) const _SectionDivider(),
         _CustomSectionHeader(
           section: section,
           expanded: expanded,
@@ -77,7 +74,6 @@ class _CustomChannelSection extends StatelessWidget {
                   onMarkRead: () => onMarkChannelRead(channel),
                   sectionId: section.id,
                 ),
-              const SizedBox(height: _kExpandedSectionTrailingPadding),
             ],
           ),
         ),
@@ -140,9 +136,9 @@ class _CustomSectionHeader extends StatelessWidget {
                 key: ValueKey('section-menu-${section.id}'),
                 tooltip: '${section.name} options',
                 icon: Icon(
-                  BuzzIcons.ellipsisVertical,
-                  size: _kChannelIconSize,
-                  color: navigationSecondaryForeground(context),
+                  BuzzIcons.ellipsis,
+                  size: 14,
+                  color: navigationAccessoryForeground(context),
                 ),
                 onPressed: () async {
                   final value = await showAnchoredPopover<String>(
@@ -324,7 +320,6 @@ class _ChannelSection extends StatelessWidget {
   final bool expanded;
   final VoidCallback onToggle;
   final List<Channel> channels;
-  final bool showTopDivider;
   final Set<String> unreadChannelIds;
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
@@ -338,7 +333,6 @@ class _ChannelSection extends StatelessWidget {
     required this.expanded,
     required this.onToggle,
     required this.channels,
-    required this.showTopDivider,
     required this.unreadChannelIds,
     required this.mutedChannelIds,
     required this.currentPubkey,
@@ -353,7 +347,6 @@ class _ChannelSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (showTopDivider) const _SectionDivider(),
         _SectionHeader(
           label: title,
           expanded: expanded,
@@ -392,7 +385,6 @@ class _ChannelSection extends StatelessWidget {
                     onMarkRead: null,
                     sectionId: null,
                   ),
-              const SizedBox(height: _kExpandedSectionTrailingPadding),
             ],
           ),
         ),
@@ -426,24 +418,6 @@ class _EmptyState extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _SectionDivider extends StatelessWidget {
-  const _SectionDivider();
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-      child: Divider(
-        height: 1,
-        thickness: 1,
-        indent: _kChannelSectionInset,
-        endIndent: _kChannelSectionInset,
-        color: context.colors.onSurface.withValues(alpha: 0.07),
       ),
     );
   }
@@ -493,9 +467,9 @@ class _SectionHeader extends StatelessWidget {
                   key: ValueKey('sort-menu-$label'),
                   tooltip: '$label options',
                   icon: Icon(
-                    BuzzIcons.ellipsisVertical,
-                    size: _kChannelIconSize,
-                    color: navigationSecondaryForeground(context),
+                    BuzzIcons.ellipsis,
+                    size: 14,
+                    color: navigationAccessoryForeground(context),
                   ),
                   onPressed: () async {
                     final value = await showAnchoredPopover<String>(
@@ -540,16 +514,16 @@ class _SectionLabel extends StatelessWidget {
           label,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: contentListTitleTextStyle.copyWith(
+          style: navigationSectionTextStyle.copyWith(
             color: color,
-            fontWeight: FontWeight.w400,
+            fontWeight: FontWeight.w500,
           ),
         ),
       ),
       const SizedBox(width: Grid.quarter),
       _SectionChevron(
         expanded: expanded,
-        color: navigationSecondaryForeground(context),
+        color: navigationAccessoryForeground(context),
       ),
     ],
   );
@@ -569,7 +543,7 @@ class _SectionChevron extends StatelessWidget {
       turns: expanded ? 0 : -0.25,
       duration: reducedMotion ? Duration.zero : sectionExpandDuration,
       curve: sectionExpandCurve,
-      child: Icon(BuzzIcons.chevronDown, size: _kChannelIconSize, color: color),
+      child: Icon(BuzzIcons.chevronDown, size: 14, color: color),
     );
   }
 }
@@ -595,11 +569,17 @@ class _SectionOptionsButton extends StatelessWidget {
     child: Tooltip(
       message: tooltip,
       child: SizedBox.square(
-        dimension: 40,
+        dimension: 44,
         child: InkWell(
           onTap: onPressed,
           borderRadius: BorderRadius.circular(Radii.full),
-          child: Align(alignment: Alignment.centerRight, child: icon),
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: SizedBox(
+              width: _kChannelIconSize,
+              child: Center(child: icon),
+            ),
+          ),
         ),
       ),
     ),

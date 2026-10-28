@@ -99,6 +99,7 @@ class AgentsHarness {
   Future<void> open(
     WidgetTester tester, {
     required List<String> directory,
+    Widget? home,
   }) async {
     await tester.pumpWidget(
       ProviderScope(
@@ -116,19 +117,23 @@ class AgentsHarness {
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: TextButton(
-                onPressed: () => showAgents(context),
-                child: const Text('Open Agents'),
+          home:
+              home ??
+              Builder(
+                builder: (context) => Scaffold(
+                  body: TextButton(
+                    onPressed: () => showAgents(context),
+                    child: const Text('Open Agents'),
+                  ),
+                ),
               ),
-            ),
-          ),
         ),
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Open Agents'));
-    await tester.pumpAndSettle();
+    if (home == null) {
+      await tester.tap(find.text('Open Agents'));
+      await tester.pumpAndSettle();
+    }
   }
 }

@@ -26,9 +26,25 @@ void main() {
       expect(Navigator.of(list), isNot(Navigator.of(createContext)));
 
       controller.gate = Completer<void>();
-      await tester.enterText(find.widgetWithText(TextField, 'Name'), 'Scout');
       await tester.enterText(
-        find.widgetWithText(TextField, 'Instructions'),
+        find.descendant(
+          of: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.label == 'Name',
+          ),
+          matching: find.byType(TextField),
+        ),
+        'Scout',
+      );
+      await tester.enterText(
+        find.descendant(
+          of: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label == 'Instructions',
+          ),
+          matching: find.byType(TextField),
+        ),
         'Reply concisely.',
       );
       await tester.pump();
