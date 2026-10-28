@@ -1,0 +1,41 @@
+# Two-minute smoke run against a local relay (`just relay`).
+#   cargo run -p buzz-test-client --bin buzz-loadgen -- seed perf/scenarios/local-smoke.toml
+#   cargo run -p buzz-test-client --bin buzz-loadgen -- run perf/scenarios/local-smoke.toml
+run_id = "local-smoke"
+
+[target]
+ws_url = "ws://localhost:3000"
+http_url = "http://localhost:3000"
+
+[shape]
+communities = 1
+channels_per_community = 10
+history_messages_per_channel = 20
+thread_roots_per_channel = 1
+thread_depth = 50
+
+[population]
+humans = 50
+agents = 5
+channels_per_member = 3
+connect_rate_per_sec = 50.0
+
+# Rates far above the defaults so a short run exercises every operation.
+[human]
+presence_interval_secs = 10.0
+typing_per_hour = 360.0
+messages_per_hour = 120.0
+reactions_per_hour = 60.0
+
+[agent]
+query_interval_secs = 2.0
+events_per_hour = 360.0
+observer_frames_per_hour = 360.0
+
+[[ramp]]
+users = 1.0
+hold_secs = 30
+
+[[ramp]]
+users = 2.0
+hold_secs = 30
