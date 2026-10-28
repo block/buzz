@@ -262,21 +262,24 @@ void main() {
       ('socket error', null, Exception('connection reset')),
     ];
     for (final (label, closeCode, error) in losses) {
-      test('a $label noticed after an hour asleep does not extend liveness', () async {
-        final h = await _Harness.start();
-        final start = h.nowSeconds;
-        h.sockets.last.connectSuccessfully();
-        await h.subscribeLive(_filter('quiet'));
+      test(
+        'a $label noticed after an hour asleep does not extend liveness',
+        () async {
+          final h = await _Harness.start();
+          final start = h.nowSeconds;
+          h.sockets.last.connectSuccessfully();
+          await h.subscribeLive(_filter('quiet'));
 
-        h.now = h.now.add(const Duration(hours: 1));
-        h.sockets.last.disconnectWith(error, closeCode: closeCode);
-        h.timers.last.fire();
-        await h.settle();
-        h.sockets.last.connectSuccessfully();
-        await h.settle();
+          h.now = h.now.add(const Duration(hours: 1));
+          h.sockets.last.disconnectWith(error, closeCode: closeCode);
+          h.timers.last.fire();
+          await h.settle();
+          h.sockets.last.connectSuccessfully();
+          await h.settle();
 
-        expect(h.replayedSince(), {'quiet': start - 960});
-      });
+          expect(h.replayedSince(), {'quiet': start - 960});
+        },
+      );
     }
 
     test('a second REQ on one socket cannot advance the cursor: its EOSE may '
