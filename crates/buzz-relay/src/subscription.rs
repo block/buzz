@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use dashmap::DashMap;
-use nostr::{Alphabet, Filter, Kind, SingleLetterTag};
+use nostr::{Alphabet, Filter, Kind, PublicKey, SingleLetterTag};
 use uuid::Uuid;
 
 use buzz_core::{filter::filters_match, CommunityId, StoredEvent};
@@ -56,11 +56,21 @@ pub struct IndexKey {
     pub kind: Kind,
 }
 
+/// A value that every filter of a global subscription is constrained to, so
+/// fan-out only visits subscriptions naming the event's own value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct GlobalPKindIndexKey {
+enum GlobalSelector {
+    /// A `#p` recipient.
+    P(String),
+    /// An event author.
+    Author(PublicKey),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GlobalSelectorIndexKey {
     community_id: CommunityId,
     kind: Kind,
-    p: String,
+    selector: GlobalSelector,
 }
 
 /// A removed subscription's server-resolved routing scope.
@@ -93,8 +103,8 @@ pub struct SubscriptionRegistry {
     channel_wildcard_index: DashMap<(CommunityId, Uuid), Vec<(ConnId, SubId)>>,
     /// Global subscriptions indexed by kind — avoids O(all_subs) scan for global events.
     global_kind_index: DashMap<(CommunityId, Kind), Vec<(ConnId, SubId)>>,
-    /// Global subscriptions indexed by both kind and `#p` recipient.
-    global_p_kind_index: DashMap<GlobalPKindIndexKey, Vec<(ConnId, SubId)>>,
+    /// Global subscriptions indexed by kind and a `#p` recipient or author.
+    global_selector_index: DashMap<GlobalSelectorIndexKey, Vec<(ConnId, SubId)>>,
     /// Global subscriptions with no kind filter — wildcard, receives all global events.
     global_wildcard_index: DashMap<CommunityId, Vec<(ConnId, SubId)>>,
 }
@@ -188,12 +198,12 @@ impl SubscriptionRegistry {
                 }
             }
         } else {
-            // Global subscription. Fully p-constrained filters can use the
-            // narrower (kind, #p) index; broader filters stay on the generic
-            // kind/wildcard indexes.
-            if let Some(keys) = extract_global_p_kind_index_keys(community_id, &filters) {
+            // Global subscription. Fully p- or author-constrained filters can
+            // use the narrower selector index; broader filters stay on the
+            // generic kind/wildcard indexes.
+            if let Some(keys) = extract_global_selector_index_keys(community_id, &filters) {
                 for key in keys {
-                    self.global_p_kind_index
+                    self.global_selector_index
                         .entry(key)
                         .or_default()
                         .push((conn_id, sub_id.clone()));
@@ -426,14 +436,14 @@ impl SubscriptionRegistry {
             // Global event (channel_id = None) — use global indexes for sub-linear fan-out.
             // Channel-scoped subscriptions are never in these indexes, preserving the
             // scoping invariant without an explicit skip check.
-            for p in event_p_tag_values(event) {
-                let key = GlobalPKindIndexKey {
+            for selector in event_global_selectors(event) {
+                let key = GlobalSelectorIndexKey {
                     community_id,
                     kind: event.event.kind,
-                    p,
+                    selector,
                 };
                 if let Some(candidates) = self
-                    .global_p_kind_index
+                    .global_selector_index
                     .get(&key)
                     .map(|entry| entry.value().clone())
                 {
@@ -613,13 +623,13 @@ impl SubscriptionRegistry {
             }
         } else {
             // Global subscription — remove from the same global index chosen at registration.
-            if let Some(keys) = extract_global_p_kind_index_keys(community_id, filters) {
+            if let Some(keys) = extract_global_selector_index_keys(community_id, filters) {
                 for key in keys {
-                    if let Some(mut entries) = self.global_p_kind_index.get_mut(&key) {
+                    if let Some(mut entries) = self.global_selector_index.get_mut(&key) {
                         entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
                         if entries.is_empty() {
                             drop(entries);
-                            self.global_p_kind_index.remove(&key);
+                            self.global_selector_index.remove(&key);
                         }
                     }
                 }
@@ -659,13 +669,39 @@ fn p_tag() -> SingleLetterTag {
     SingleLetterTag::lowercase(Alphabet::P)
 }
 
-fn extract_global_p_kind_index_keys(
+/// Index keys for a global subscription whose every filter is constrained to
+/// `#p` recipients, or else to authors. `None` means it needs the broader
+/// kind/wildcard indexes. `#p` wins when a filter names both.
+fn extract_global_selector_index_keys(
     community_id: CommunityId,
     filters: &[Filter],
-) -> Option<Vec<GlobalPKindIndexKey>> {
+) -> Option<Vec<GlobalSelectorIndexKey>> {
+    let p_tag = p_tag();
+    extract_selector_keys(community_id, filters, |filter| {
+        let values = filter.generic_tags.get(&p_tag)?;
+        Some(values.iter().cloned().map(GlobalSelector::P).collect())
+    })
+    .or_else(|| {
+        extract_selector_keys(community_id, filters, |filter| {
+            let authors = filter.authors.as_ref()?;
+            Some(
+                authors
+                    .iter()
+                    .copied()
+                    .map(GlobalSelector::Author)
+                    .collect(),
+            )
+        })
+    })
+}
+
+fn extract_selector_keys(
+    community_id: CommunityId,
+    filters: &[Filter],
+    selectors_of: impl Fn(&Filter) -> Option<Vec<GlobalSelector>>,
+) -> Option<Vec<GlobalSelectorIndexKey>> {
     let mut seen = HashSet::new();
     let mut keys = Vec::new();
-    let p_tag = p_tag();
 
     for filter in filters {
         let kinds = filter.kinds.as_ref()?;
@@ -673,17 +709,17 @@ fn extract_global_p_kind_index_keys(
             continue;
         }
 
-        let p_values = filter.generic_tags.get(&p_tag)?;
-        if p_values.is_empty() {
+        let selectors = selectors_of(filter)?;
+        if selectors.is_empty() {
             return None;
         }
 
         for kind in kinds {
-            for p in p_values {
-                let key = GlobalPKindIndexKey {
+            for selector in &selectors {
+                let key = GlobalSelectorIndexKey {
                     community_id,
                     kind: *kind,
-                    p: p.clone(),
+                    selector: selector.clone(),
                 };
                 if seen.insert(key.clone()) {
                     keys.push(key);
@@ -695,9 +731,11 @@ fn extract_global_p_kind_index_keys(
     Some(keys)
 }
 
-fn event_p_tag_values(event: &StoredEvent) -> Vec<String> {
+/// The selectors a global event can be routed by: each distinct `#p` value
+/// and its author.
+fn event_global_selectors(event: &StoredEvent) -> Vec<GlobalSelector> {
     let mut seen = HashSet::new();
-    let mut values = Vec::new();
+    let mut selectors = Vec::new();
     for tag in event.event.tags.iter() {
         if tag.kind().to_string() != "p" {
             continue;
@@ -705,11 +743,12 @@ fn event_p_tag_values(event: &StoredEvent) -> Vec<String> {
         if let Some(value) = tag.content() {
             let value = value.to_string();
             if seen.insert(value.clone()) {
-                values.push(value);
+                selectors.push(GlobalSelector::P(value));
             }
         }
     }
-    values
+    selectors.push(GlobalSelector::Author(event.event.pubkey));
+    selectors
 }
 
 /// Returns the union of all `kinds` across filters, or `None` if any filter
@@ -1571,7 +1610,7 @@ mod tests {
     }
 
     #[test]
-    fn test_global_p_kind_index_fan_out_targets_matching_p() {
+    fn test_global_selector_index_fan_out_targets_matching_p() {
         let registry = SubscriptionRegistry::new();
         let conn_a = Uuid::new_v4();
         let conn_b = Uuid::new_v4();
@@ -1597,7 +1636,7 @@ mod tests {
                 .global_kind_index
                 .get(&(test_community(), kind))
                 .is_none(),
-            "fully p-constrained global subscriptions should use the p-kind index"
+            "fully p-constrained global subscriptions should use the selector index"
         );
 
         let event = make_stored_event_with_p(kind, p_a, None);
@@ -1606,26 +1645,200 @@ mod tests {
     }
 
     #[test]
-    fn test_global_p_kind_index_removal_cleanup() {
+    fn test_global_selector_index_p_removal_cleanup() {
         let registry = SubscriptionRegistry::new();
         let conn_id = Uuid::new_v4();
         let kind = Kind::Custom(buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16);
         let p = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let filter = Filter::new().kind(kind).custom_tags(p_tag(), [p]);
-        let key = GlobalPKindIndexKey {
+        let key = GlobalSelectorIndexKey {
             community_id: test_community(),
             kind,
-            p: p.to_string(),
+            selector: GlobalSelector::P(p.to_string()),
         };
 
         registry.register(conn_id, "observer".to_string(), vec![filter], None);
-        assert!(registry.global_p_kind_index.get(&key).is_some());
+        assert!(registry.global_selector_index.get(&key).is_some());
 
         registry.remove_subscription(conn_id, "observer");
-        assert!(registry.global_p_kind_index.get(&key).is_none());
+        assert!(registry.global_selector_index.get(&key).is_none());
 
         let event = make_stored_event_with_p(kind, p, None);
         assert!(registry.fan_out(&event).is_empty());
+    }
+
+    fn make_stored_event_by(keys: &Keys, kind: Kind) -> StoredEvent {
+        let event = EventBuilder::new(kind, "online")
+            .sign_with_keys(keys)
+            .expect("sign");
+        StoredEvent::with_received_at(event, Utc::now(), None, true)
+    }
+
+    fn author_key(kind: Kind, author: &Keys) -> GlobalSelectorIndexKey {
+        GlobalSelectorIndexKey {
+            community_id: test_community(),
+            kind,
+            selector: GlobalSelector::Author(author.public_key()),
+        }
+    }
+
+    #[test]
+    fn test_global_selector_index_fan_out_targets_matching_author() {
+        let registry = SubscriptionRegistry::new();
+        let presence = Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16);
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        let carol = Keys::generate();
+        let watches_alice = Uuid::new_v4();
+        let watches_bob = Uuid::new_v4();
+
+        registry.register(
+            watches_alice,
+            "presence".to_string(),
+            vec![Filter::new()
+                .kind(presence)
+                .authors([alice.public_key(), carol.public_key()])],
+            None,
+        );
+        registry.register(
+            watches_bob,
+            "presence".to_string(),
+            vec![Filter::new().kind(presence).author(bob.public_key())],
+            None,
+        );
+
+        assert!(
+            registry
+                .global_kind_index
+                .get(&(test_community(), presence))
+                .is_none(),
+            "fully author-constrained global subscriptions should use the selector index"
+        );
+        assert_eq!(
+            registry.fan_out(&make_stored_event_by(&alice, presence)),
+            vec![(watches_alice, "presence".to_string())]
+        );
+        assert_eq!(
+            registry.fan_out(&make_stored_event_by(&bob, presence)),
+            vec![(watches_bob, "presence".to_string())]
+        );
+        assert!(registry
+            .fan_out(&make_stored_event_by(&Keys::generate(), presence))
+            .is_empty());
+        assert!(registry
+            .fan_out(&make_stored_event_by(&alice, Kind::TextNote))
+            .is_empty());
+    }
+
+    #[test]
+    fn test_global_selector_index_author_removal_paths() {
+        let registry = SubscriptionRegistry::new();
+        let presence = Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16);
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        let conn_id = Uuid::new_v4();
+        let alice_filter = vec![Filter::new().kind(presence).author(alice.public_key())];
+
+        // CLOSE.
+        registry.register(conn_id, "presence".to_string(), alice_filter.clone(), None);
+        assert!(registry
+            .global_selector_index
+            .get(&author_key(presence, &alice))
+            .is_some());
+        registry.remove_subscription(conn_id, "presence");
+        assert!(registry
+            .global_selector_index
+            .get(&author_key(presence, &alice))
+            .is_none());
+
+        // Same-ID replacement moves the subscription to the new author.
+        registry.register(conn_id, "presence".to_string(), alice_filter, None);
+        registry.register(
+            conn_id,
+            "presence".to_string(),
+            vec![Filter::new().kind(presence).author(bob.public_key())],
+            None,
+        );
+        assert!(registry
+            .global_selector_index
+            .get(&author_key(presence, &alice))
+            .is_none());
+        assert!(registry
+            .fan_out(&make_stored_event_by(&alice, presence))
+            .is_empty());
+        assert_eq!(
+            registry.fan_out(&make_stored_event_by(&bob, presence)),
+            vec![(conn_id, "presence".to_string())]
+        );
+
+        // Disconnect.
+        registry.remove_connection(conn_id);
+        assert!(registry.global_selector_index.is_empty());
+        assert!(registry
+            .fan_out(&make_stored_event_by(&bob, presence))
+            .is_empty());
+    }
+
+    #[test]
+    fn test_global_selector_index_falls_back_unless_every_filter_is_constrained() {
+        let registry = SubscriptionRegistry::new();
+        let presence = Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16);
+        let alice = Keys::generate();
+        let conn_id = Uuid::new_v4();
+
+        // One author-constrained filter plus one kind-only filter: the
+        // kind-only filter must still see every author's events.
+        registry.register(
+            conn_id,
+            "mixed".to_string(),
+            vec![
+                Filter::new().kind(presence).author(alice.public_key()),
+                Filter::new().kind(presence),
+            ],
+            None,
+        );
+        assert!(registry.global_selector_index.is_empty());
+        assert_eq!(
+            registry.fan_out(&make_stored_event_by(&Keys::generate(), presence)),
+            vec![(conn_id, "mixed".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_global_selector_index_prefers_p_when_filter_names_both() {
+        let registry = SubscriptionRegistry::new();
+        let kind = Kind::Custom(buzz_core::kind::KIND_AGENT_OBSERVER_FRAME as u16);
+        let author = Keys::generate();
+        let p = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let conn_id = Uuid::new_v4();
+
+        registry.register(
+            conn_id,
+            "both".to_string(),
+            vec![Filter::new()
+                .kind(kind)
+                .author(author.public_key())
+                .custom_tags(p_tag(), [p])],
+            None,
+        );
+        assert!(registry
+            .global_selector_index
+            .get(&author_key(kind, &author))
+            .is_none());
+
+        let event = EventBuilder::new(kind, "frame")
+            .tags([Tag::parse(["p", p]).expect("valid p tag")])
+            .sign_with_keys(&author)
+            .expect("sign");
+        let event = StoredEvent::with_received_at(event, Utc::now(), None, true);
+        assert_eq!(
+            registry.fan_out(&event),
+            vec![(conn_id, "both".to_string())]
+        );
+        // The author alone is not enough: the filter also requires the `#p`.
+        assert!(registry
+            .fan_out(&make_stored_event_by(&author, kind))
+            .is_empty());
     }
 
     #[test]
