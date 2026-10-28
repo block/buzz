@@ -683,11 +683,14 @@ function VirtualizedTimelineRows({
         settleAtBottom();
       },
       settleAtBottom,
-      scrollToMessage(messageId) {
+      scrollToMessage(messageId, options) {
         cancelBottomSettle();
         const index = messageItemIndexByIdRef.current.get(messageId);
         if (index === undefined) return false;
-        listRef.current?.scrollToIndex(index, { align: "center" });
+        listRef.current?.scrollToIndex(index, {
+          align: "center",
+          smooth: options?.behavior === "smooth",
+        });
         return true;
       },
     };

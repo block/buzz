@@ -439,45 +439,26 @@ export function useAnchoredScroll({
         `[data-message-id="${messageId}"]`,
       );
       if (virtualizerOwnsPrependAnchoring && virtualScrollToMessage) {
-        // Target navigation owns the viewport before any movement strategy is
-        // chosen. The already-mounted fast path centers the DOM node directly
-        // and would otherwise leave durable bottom intent armed.
+        // Virtua owns the viewport, so every target goes through its index
+        // scroll. A direct DOM scroll would not supersede a bottom pin Virtua
+        // still has in flight from opening the channel, and that pin would
+        // carry the target back off screen.
         virtualCancelBottomIntent?.();
-        if (el) {
-          const rect = el.getBoundingClientRect();
-          const containerRect = container.getBoundingClientRect();
-          const isInViewport =
-            rect.top >= containerRect.top &&
-            rect.bottom <= containerRect.bottom;
-          if (!isInViewport) {
-            if (!virtualScrollToMessage(messageId, { behavior: "auto" })) {
-              return false;
-            }
-            anchorRef.current = { kind: "message", messageId, topOffset: 0 };
-            setIsAtBottom(false);
-            return false;
-          }
-          const centeredTop = (container.clientHeight - rect.height) / 2;
-          container.scrollTo({
-            top: Math.max(
-              0,
-              container.scrollTop +
-                (rect.top - containerRect.top) -
-                centeredTop,
-            ),
-            behavior: options.behavior ?? "auto",
-          });
-        } else if (
+        if (
           !virtualScrollToMessage(messageId, {
-            behavior: options.behavior ?? "auto",
+            // Smooth scrolling across unmounted rows defeats virtualization.
+            behavior: el ? (options.behavior ?? "auto") : "auto",
           })
         ) {
           return false;
         }
         anchorRef.current = { kind: "message", messageId, topOffset: 0 };
+        virtualizerAtBottomRef.current = false;
         setIsAtBottom(false);
-        if (el && options.highlight) highlightMessage(messageId);
-        return el !== null;
+        // The highlight is keyed by id, so a row Virtua mounts after this
+        // scroll still renders it.
+        if (options.highlight) highlightMessage(messageId);
+        return true;
       }
 
       if (!el) return false;
@@ -893,32 +874,17 @@ export function useAnchoredScroll({
     if (!hasInitializedRef.current) return; // initial-mount path will handle.
 
     void virtualizerRenderVersion;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const el = container.querySelector<HTMLElement>(
-      `[data-message-id="${targetMessageId}"]`,
-    );
-    if (!el && virtualizerOwnsPrependAnchoring) {
-      if (
-        scrollToMessageImperative(targetMessageId, {
-          highlight: highlightTargetMessage,
-        })
-      ) {
-        handledTargetIdRef.current = targetMessageId;
-        onTargetReached?.(targetMessageId);
-      }
-      return;
-    }
-    if (!el) {
-      // Row not in the DOM yet. A cold deep-link target is fetched by id and
-      // spliced into `messages` a render or two later; this effect re-runs on
-      // each `messages` commit and retries until the row exists.
+    if (
+      !scrollToMessageImperative(targetMessageId, {
+        highlight: highlightTargetMessage,
+      })
+    ) {
+      // Not loaded yet. A cold deep-link target is fetched by id and spliced
+      // into `messages` a render or two later; this effect re-runs on each
+      // `messages` commit and retries until the row can be reached.
       return;
     }
     handledTargetIdRef.current = targetMessageId;
-    scrollToMessageImperative(targetMessageId, {
-      highlight: highlightTargetMessage,
-    });
     onTargetReached?.(targetMessageId);
   }, [
     highlightTargetMessage,
@@ -926,10 +892,8 @@ export function useAnchoredScroll({
     messages,
     onTargetReached,
     releasePinnedCenter,
-    scrollContainerRef,
     scrollToMessageImperative,
     targetMessageId,
-    virtualizerOwnsPrependAnchoring,
     virtualizerRenderVersion,
   ]);
 

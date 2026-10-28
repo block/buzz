@@ -281,7 +281,10 @@ function VirtualTargetHarness({ refs }) {
     scrollContainerRef: refs.scroller,
     virtualCancelBottomIntent: bottomApi.cancel,
     virtualizerOwnsPrependAnchoring: true,
-    virtualScrollToMessage: () => true,
+    virtualScrollToMessage: (messageId, options) => {
+      refs.targetScrolls.push({ messageId, options });
+      return true;
+    },
   });
   React.useLayoutEffect(() => {
     if (didRun.current) return;
@@ -522,7 +525,7 @@ test("user interaction releases and retires a pending pinned target", async () =
   await act(async () => root.unmount());
 });
 
-test("mounted virtual target retires bottom intent before direct centering", async () => {
+test("mounted virtual target retires bottom intent and scrolls through the virtualizer", async () => {
   const resizeObservers = [];
   globalThis.ResizeObserver = class {
     constructor(callback) {
@@ -572,6 +575,7 @@ test("mounted virtual target retires bottom intent before direct centering", asy
     },
     scroller: { current: scroller },
     targetResult: { current: null },
+    targetScrolls: [],
   };
   const root = createRoot(document.createElement("div"));
   await act(async () => {
@@ -580,7 +584,12 @@ test("mounted virtual target retires bottom intent before direct centering", asy
 
   assert.deepEqual(bottomWrites, [{ index: 4, options: { align: "end" } }]);
   assert.equal(refs.targetResult.current, true);
-  assert.equal(row.getBoundingClientRect().top, 180);
+  // Even an on-screen row goes through the virtualizer: a direct DOM scroll
+  // would not supersede a bottom pin the virtualizer still has in flight.
+  assert.deepEqual(refs.targetScrolls, [
+    { messageId: "selected", options: { behavior: "auto" } },
+  ]);
+  assert.equal(scroller.scrollTop, 0, "no direct DOM centering write");
   const bottomGeometryObserver = resizeObservers.find(
     (observer) =>
       observer.targets.includes(content) && observer.targets.includes(scroller),
@@ -589,11 +598,6 @@ test("mounted virtual target retires bottom intent before direct centering", asy
   bottomGeometryObserver.callback();
   await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
-  assert.equal(
-    row.getBoundingClientRect().top,
-    180,
-    "target remains centered after later virtual geometry activity",
-  );
   assert.equal(bottomWrites.length, 1, "geometry cannot re-pin to bottom");
   await act(async () => root.unmount());
 });
