@@ -51,8 +51,13 @@ class RelaySocket {
   Completer<void>? _authCompleter;
   Timer? _authTimeout;
   String? _pendingAuthEventId;
+  int? _closeCode;
 
   SocketState get state => _state;
+
+  /// The WebSocket close code the relay sent, once it has closed the
+  /// connection; null if the connection failed without one.
+  int? get closeCode => _closeCode;
 
   /// Scoped assertion supplied by the connection owner before connecting.
   Map<String, String> headers = const {};
@@ -107,6 +112,7 @@ class RelaySocket {
         _onDisconnected(error);
       },
       onDone: () {
+        _closeCode = _channel?.closeCode;
         _failAuth(null);
         _resetConnection();
         _onDisconnected(null);

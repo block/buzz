@@ -21,6 +21,7 @@ import 'relay_closed_policy.dart';
 import 'relay_http_query_client.dart';
 import 'relay_provider.dart';
 import 'relay_rate_limit_gate.dart';
+import 'relay_reconnect_policy.dart';
 import 'relay_session_types.dart';
 import 'relay_socket.dart';
 
@@ -46,6 +47,14 @@ class _LiveSubscription {
   final void Function(RelaySubscriptionStatus status)? onStatusChanged;
   Completer<void>? readyCompleter;
   int? lastSeenCreatedAt;
+
+  /// Whether EOSE arrived on the current connection and no CLOSED has
+  /// interrupted the stream since.
+  bool liveOnConnection = false;
+
+  /// Client clock (seconds) when the last connection this subscription was
+  /// live on closed. Kept across later connections that never reach EOSE.
+  int? liveUntil;
   int closedRetryAttempt = 0;
   Timer? closedRetryTimer;
 
@@ -87,6 +96,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     RelayRateLimitGate? rateLimitGate,
     RelayTimerFactory retryTimerFactory = Timer.new,
     Future<void> Function(Duration) replayDelay = Future.delayed,
+    RelayTimerFactory reconnectTimerFactory = Timer.new,
+    Random? random,
   }) : _httpQueryClient = RelayHttpQueryClient(
          client: httpClient,
          clientFactory: httpClientFactory,
@@ -95,7 +106,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
        _now = now ?? DateTime.now,
        _rateLimitGate = rateLimitGate ?? RelayRateLimitGate(),
        _retryTimerFactory = retryTimerFactory,
-       _replayDelay = replayDelay;
+       _replayDelay = replayDelay,
+       _reconnectTimerFactory = reconnectTimerFactory,
+       _random = random ?? Random();
 
   final RelayHttpQueryClient _httpQueryClient;
   final RelaySocketFactory _socketFactory;
@@ -103,11 +116,12 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final RelayRateLimitGate _rateLimitGate;
   final RelayTimerFactory _retryTimerFactory;
   final Future<void> Function(Duration) _replayDelay;
+  final RelayTimerFactory _reconnectTimerFactory;
+  final Random _random;
 
-  static const _baseReconnectDelayMs = 1000;
-  static const _maxReconnectDelayMs = 30000;
+  static const _baseReconnectDelayMs = relayReconnectBaseDelayMs;
+  static const _maxReconnectDelayMs = relayReconnectMaxDelayMs;
   static const _eventBatchMs = 16;
-  static const _reconnectReplaySkewSeconds = 5;
   static const _replayBatchSize = 8;
   static const _replayInterBatchDelay = Duration(milliseconds: 50);
   static const _maxRecentDeliveryKeys = 5000;
@@ -124,6 +138,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Timer? _flushTimer;
   Timer? _backgroundGraceTimer;
   DateTime? _backgroundedAt;
+  DateTime? _connectedAt;
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
@@ -550,6 +565,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _pauseNow() {
     _paused = true;
     _socketConnected = false;
+    _markLiveSubscriptionsClosed();
     _reconnectTimer?.cancel();
     _cancelAllHistory(Exception('App moved to background'));
     _rejectAllPending(Exception('App moved to background'));
@@ -584,6 +600,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<void> _connect(RelayConfig config, {bool renewed = false}) async {
     if (_disposed || _ageRestricted) return;
 
+    _markLiveSubscriptionsClosed();
+    _connectedAt = null;
     final generation = ++_connectionGeneration;
     // A replacement socket is unauthenticated until its AUTH completes.
     _socketConnected = false;
@@ -618,7 +636,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           }
           error = AccountFailure.denied;
         }
-        _handleDisconnected(generation, error);
+        _handleDisconnected(generation, error, closeCode: socket.closeCode);
       },
     );
     _socket = socket;
@@ -638,14 +656,23 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _socketConnected = true;
     ref.read(hostedRelayAuthProvider).connected(ref.read(relayConfigProvider));
     _hasConnectedOnce = true;
-    _reconnectDelayMs = _baseReconnectDelayMs;
+    // The backoff is not reset here: a client bounced repeatedly must keep
+    // backing off. [_handleDisconnected] resets it after a stable connection.
+    _connectedAt = _now();
     state = const SessionState(status: SessionStatus.connected);
     await _replayLiveSubscriptions(generation);
   }
 
-  void _handleDisconnected(int generation, Object? error) {
+  void _handleDisconnected(int generation, Object? error, {int? closeCode}) {
     if (_disposed || generation != _connectionGeneration) return;
     _socketConnected = false;
+    _markLiveSubscriptionsClosed();
+    final connectedAt = _connectedAt;
+    _connectedAt = null;
+    if (connectedAt != null &&
+        isRelayConnectionStable(_now().difference(connectedAt))) {
+      _reconnectDelayMs = _baseReconnectDelayMs;
+    }
     _cancelAllHistory(error);
     _rejectAllPending(error);
     _resetAllClosedRetries();
@@ -658,10 +685,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       state = const SessionState(status: SessionStatus.disconnected);
       return;
     }
-    _scheduleReconnect();
+    _scheduleReconnect(closeCode);
   }
 
-  void _scheduleReconnect() {
+  void _scheduleReconnect(int? closeCode) {
     if (_disposed || _paused) return;
     final attempt = state.reconnectAttempt + 1;
     state = SessionState(
@@ -670,11 +697,28 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     );
 
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(Duration(milliseconds: _reconnectDelayMs), () {
+    final delay = relayReconnectDelay(
+      backoffMs: _reconnectDelayMs,
+      closeCode: closeCode,
+      jitterUnit: _random.nextDouble(),
+      spreadUnit: _random.nextDouble(),
+    );
+    _reconnectTimer = _reconnectTimerFactory(delay, () {
       _reconnectDelayMs = min(_reconnectDelayMs * 2, _maxReconnectDelayMs);
       final config = ref.read(relayConfigProvider);
       _connect(config);
     });
+  }
+
+  /// Records when each subscription that was live on the closing connection
+  /// stopped being live, so the next replay can resume from there.
+  void _markLiveSubscriptionsClosed() {
+    final closedAt = _now().millisecondsSinceEpoch ~/ 1000;
+    for (final subscription in _liveSubscriptions.values) {
+      if (!subscription.liveOnConnection) continue;
+      subscription.liveOnConnection = false;
+      subscription.liveUntil = closedAt;
+    }
   }
 
   /// Replay all live subscriptions after a reconnect, with a time skew to
@@ -750,12 +794,16 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       !_disposed && generation == _connectionGeneration;
 
   NostrFilter _replayFilter(_LiveSubscription subscription) {
-    final since = subscription.lastSeenCreatedAt;
-    return since == null
-        ? subscription.filter
-        : subscription.filter.copyWithSince(
-            max(0, since - _reconnectReplaySkewSeconds),
-          );
+    final filter = subscription.filter;
+    final since = relayResumeSince(
+      originalSince: filter.since,
+      until: filter.until,
+      lastSeenCreatedAt: subscription.lastSeenCreatedAt,
+      liveUntil: subscription.liveUntil,
+    );
+    return since == null || since == filter.since
+        ? filter
+        : filter.copyWithSince(since);
   }
 
   void _handleMessage(List<dynamic> data) {
@@ -822,6 +870,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // already been released.
     final liveSub = _liveSubscriptions[subId];
     if (liveSub != null) {
+      liveSub.liveOnConnection = true;
       _resetClosedRetry(liveSub);
       _flushBufferedEventsNow();
       liveSub.onStatusChanged?.call(RelaySubscriptionStatus.ready);
@@ -857,6 +906,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final liveSub = _liveSubscriptions[subId];
     if (liveSub == null) return;
     final readyCompleter = liveSub.readyCompleter;
+    // The stream is interrupted until the retry's EOSE.
+    liveSub.liveOnConnection = false;
     // A deadline is terminal for one-shot history, but a live subscription
     // retries it: same filter under backoff, which can keep retrying at the
     // cap. `since` is not advanced, so events missed while closed aren't
