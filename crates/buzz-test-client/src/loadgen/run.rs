@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use buzz_core::kind::{
-    KIND_AGENT_OBSERVER_FRAME, KIND_PRESENCE_UPDATE, KIND_REACTION, KIND_STREAM_MESSAGE,
-    KIND_TYPING_INDICATOR,
+    KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_PRESENCE_UPDATE, KIND_REACTION, KIND_STREAM_MESSAGE, KIND_TYPING_INDICATOR,
 };
 use buzz_core::observer::{
     encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY,
@@ -465,10 +465,7 @@ async fn human(shared: Arc<Shared>, global: usize) {
                     )
                     .since(since),
             ),
-            (
-                HUMAN_SUBS[1],
-                Filter::new().pubkey(keys.public_key()).since(since),
-            ),
+            (HUMAN_SUBS[1], mentions_filter(keys.public_key(), since)),
             (
                 HUMAN_SUBS[2],
                 Filter::new().kind(kind(KIND_TYPING_INDICATOR)).custom_tags(
@@ -720,6 +717,18 @@ async fn history(
     Ok(conn.send_raw(&json!(["CLOSE", id])).await?)
 }
 
+/// Global `#p` events addressed to `me`. Real clients name kinds here; a
+/// kindless global filter would be matched against every global event.
+fn mentions_filter(me: PublicKey, since: Timestamp) -> Filter {
+    Filter::new()
+        .kinds([
+            kind(KIND_MEMBER_ADDED_NOTIFICATION),
+            kind(KIND_MEMBER_REMOVED_NOTIFICATION),
+        ])
+        .pubkey(me)
+        .since(since)
+}
+
 fn subscription_of(message: &RelayMessage) -> Option<&str> {
     match message {
         RelayMessage::Event {
@@ -767,7 +776,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
         let mut ok = match send_req(
             &mut conn,
             "mentions",
-            Filter::new().pubkey(keys.public_key()).since(since),
+            mentions_filter(keys.public_key(), since),
         )
         .await
         {
