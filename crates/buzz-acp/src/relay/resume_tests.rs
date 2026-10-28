@@ -1025,14 +1025,18 @@ async fn resubscribing_after_unsubscribe_on_one_socket_ignores_the_old_reqs_eose
 
     // REQ #1 (recent floor), then the channel is removed and re-added with an
     // older floor, e.g. membership flapped. The wire ID is the same.
-    assert!(execute_connected_command(&mut client, &mut state, "agent", subscribe(5_000_000)).await);
+    assert!(
+        execute_connected_command(&mut client, &mut state, "agent", subscribe(5_000_000)).await
+    );
     assert_eq!(next_test_frame(&mut server).await[0], "REQ");
     assert!(
         execute_connected_command(
             &mut client,
             &mut state,
             "agent",
-            RelayCommand::Unsubscribe { channel_id: channel },
+            RelayCommand::Unsubscribe {
+                channel_id: channel
+            },
         )
         .await
     );
