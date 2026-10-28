@@ -187,6 +187,8 @@ Widget _buildComposeBar({
   Future<List<ChannelMember>> Function()? loadMembers,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
+  bool stallChannels = false,
+  Channel? channel,
   List<ChannelMember> cachedMembers = const <ChannelMember>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
@@ -240,7 +242,11 @@ Widget _buildComposeBar({
       if (appLifecycle != null) appLifecycleProvider.overrideWith(appLifecycle),
       savedPrefsProvider.overrideWithValue(_testPrefs),
       channelsProvider.overrideWith(
-        () => _FakeChannelsNotifier(channels, cachedMembers: cachedMembers),
+        () => _FakeChannelsNotifier(
+          channels,
+          cachedMembers: cachedMembers,
+          stall: stallChannels,
+        ),
       ),
     ],
     child: MaterialApp(
@@ -272,6 +278,7 @@ Widget _buildComposeBar({
                 final composeBar = ComposeBar(
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
+                  channel: channel,
                   threadHeadId: threadHeadId,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
@@ -638,17 +645,23 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   final List<Channel> _channels;
   final List<ChannelMember> _cachedMembers;
 
+  /// Keeps the channel list loading, like a slow full reload.
+  final bool _stall;
+
   _FakeChannelsNotifier(
     this._channels, {
     List<ChannelMember> cachedMembers = const [],
-  }) : _cachedMembers = cachedMembers;
+    bool stall = false,
+  }) : _cachedMembers = cachedMembers,
+       _stall = stall;
 
   @override
   List<ChannelMember> cachedMembersForChannel(String channelId) =>
       channelId == 'channel-1' ? _cachedMembers : const [];
 
   @override
-  Future<List<Channel>> build() async => _channels;
+  Future<List<Channel>> build() =>
+      _stall ? Completer<List<Channel>>().future : Future.value(_channels);
 
   @override
   Future<void> refresh({bool fetchDirectory = false}) async {
@@ -4696,6 +4709,57 @@ void main() {
         expect(sentRecipients, isNotNull);
         expect(sentRecipients, isNot(contains(maryJane.pubkey)));
         expect(sentTags, contains(orderedEquals(['mention', maryJane.pubkey])));
+      });
+
+      testWidgets('a DM opened before the channel list loads sends mentions', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        final pat = '1' * 64;
+        List<String>? sentRecipients;
+        List<List<String>>? sentTags;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            members: [
+              member(signer.public),
+              ChannelMember(
+                pubkey: pat,
+                role: 'member',
+                joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+                displayName: 'Pat Peer',
+              ),
+            ],
+            // The route opened the DM from its own metadata and roster while
+            // the full channel list is still loading.
+            stallChannels: true,
+            channel: _makeCurrentChannel(
+              channelType: 'dm',
+              participantPubkeys: [signer.public, pat],
+            ),
+            onSend:
+                (_, recipients, {mediaTags = const <List<String>>[]}) async {
+                  sentRecipients = recipients;
+                  sentTags = mediaTags;
+                },
+          ),
+        );
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), '@Pat');
+        await tester.pump();
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Pat Peer'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('Message not sent: could not check who is in this channel'),
+          findsNothing,
+        );
+        expect(sentRecipients, contains(pat));
+        expect(sentTags, isNot(contains(orderedEquals(['mention', pat]))));
       });
 
       testWidgets('a failed member check keeps the draft and Retry sends', (

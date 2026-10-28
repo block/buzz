@@ -888,6 +888,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                       ?assistant.pendingNotice,
                       ComposeBar(
                         channelId: channel.id,
+                        channel: resolvedChannel,
                         focusNode: composerFocusNode,
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,
