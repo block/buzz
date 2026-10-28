@@ -151,5 +151,31 @@ for (const targetCase of CASES) {
     );
 
     expect(flashedOnScreen).toBe(true);
+
+    // The target must still be on screen after the flash ends. Late layout
+    // passes (the thread panel opening, history loads, bottom settles) must not
+    // carry it away.
+    const stillOnScreen = await page.evaluate(
+      (targetId) =>
+        new Promise<boolean>((resolve) => {
+          setTimeout(() => {
+            const timelineEl = document.querySelector(
+              '[data-testid="message-timeline"]',
+            );
+            const row = timelineEl?.querySelector<HTMLElement>(
+              `[data-message-id="${CSS.escape(targetId)}"]`,
+            );
+            if (!timelineEl || !row) {
+              resolve(false);
+              return;
+            }
+            const viewport = timelineEl.getBoundingClientRect();
+            const rect = row.getBoundingClientRect();
+            resolve(rect.bottom > viewport.top && rect.top < viewport.bottom);
+          }, 2_200);
+        }),
+      targetId,
+    );
+    expect(stillOnScreen).toBe(true);
   });
 }

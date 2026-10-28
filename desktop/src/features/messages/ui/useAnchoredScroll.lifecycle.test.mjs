@@ -283,7 +283,7 @@ function VirtualTargetHarness({ refs }) {
     virtualizerOwnsPrependAnchoring: true,
     virtualScrollToMessage: (messageId, options) => {
       refs.targetScrolls.push({ messageId, options });
-      return true;
+      return refs.targetResolves;
     },
   });
   React.useLayoutEffect(() => {
@@ -525,7 +525,7 @@ test("user interaction releases and retires a pending pinned target", async () =
   await act(async () => root.unmount());
 });
 
-test("mounted virtual target retires bottom intent and scrolls through the virtualizer", async () => {
+async function renderVirtualTarget({ targetResolves }) {
   const resizeObservers = [];
   globalThis.ResizeObserver = class {
     constructor(callback) {
@@ -574,6 +574,7 @@ test("mounted virtual target retires bottom intent and scrolls through the virtu
       },
     },
     scroller: { current: scroller },
+    targetResolves,
     targetResult: { current: null },
     targetScrolls: [],
   };
@@ -583,6 +584,23 @@ test("mounted virtual target retires bottom intent and scrolls through the virtu
   });
 
   assert.deepEqual(bottomWrites, [{ index: 4, options: { align: "end" } }]);
+  const settleBottomGeometry = async () => {
+    const bottomGeometryObserver = resizeObservers.find(
+      (observer) =>
+        observer.targets.includes(content) &&
+        observer.targets.includes(scroller),
+    );
+    assert.ok(bottomGeometryObserver);
+    bottomGeometryObserver.callback();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  };
+  return { bottomWrites, refs, root, scroller, settleBottomGeometry };
+}
+
+test("mounted virtual target retires bottom intent and scrolls through the virtualizer", async () => {
+  const { bottomWrites, refs, root, scroller, settleBottomGeometry } =
+    await renderVirtualTarget({ targetResolves: true });
+
   assert.equal(refs.targetResult.current, true);
   // Even an on-screen row goes through the virtualizer: a direct DOM scroll
   // would not supersede a bottom pin the virtualizer still has in flight.
@@ -590,14 +608,21 @@ test("mounted virtual target retires bottom intent and scrolls through the virtu
     { messageId: "selected", options: { behavior: "auto" } },
   ]);
   assert.equal(scroller.scrollTop, 0, "no direct DOM centering write");
-  const bottomGeometryObserver = resizeObservers.find(
-    (observer) =>
-      observer.targets.includes(content) && observer.targets.includes(scroller),
-  );
-  assert.ok(bottomGeometryObserver);
-  bottomGeometryObserver.callback();
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  await settleBottomGeometry();
 
   assert.equal(bottomWrites.length, 1, "geometry cannot re-pin to bottom");
+  await act(async () => root.unmount());
+});
+
+test("unresolved virtual target keeps the bottom pin", async () => {
+  const { bottomWrites, refs, root, settleBottomGeometry } =
+    await renderVirtualTarget({ targetResolves: false });
+
+  // A target that is not loaded yet retries on later commits. Until it
+  // resolves, the channel must keep following its floor.
+  assert.equal(refs.targetResult.current, false);
+  await settleBottomGeometry();
+
+  assert.equal(bottomWrites.length, 2, "geometry still re-pins to bottom");
   await act(async () => root.unmount());
 });

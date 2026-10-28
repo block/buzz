@@ -118,6 +118,12 @@ function isAtBottomNow(
  * choice is what keeps the row the reader is *reading* fixed under
  * in-viewport reflow (image-load, embed expansion).
  */
+function isInViewport(el: HTMLElement, container: HTMLElement): boolean {
+  const rect = el.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  return rect.top >= containerRect.top && rect.bottom <= containerRect.bottom;
+}
+
 function computeAnchor(
   container: HTMLDivElement,
   treatNearBottomAsBottom = true,
@@ -209,6 +215,12 @@ export function useAnchoredScroll({
   const isWritingScrollRef = React.useRef(false);
   const programmaticScrollRafRef = React.useRef<number | null>(null);
   const targetSettleRafRef = React.useRef<number | null>(null);
+
+  const cancelMountBottomPin = React.useCallback(() => {
+    if (mountPinRafIdRef.current === null) return;
+    cancelAnimationFrame(mountPinRafIdRef.current);
+    mountPinRafIdRef.current = null;
+  }, []);
 
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
@@ -443,15 +455,22 @@ export function useAnchoredScroll({
         // scroll. A direct DOM scroll would not supersede a bottom pin Virtua
         // still has in flight from opening the channel, and that pin would
         // carry the target back off screen.
-        virtualCancelBottomIntent?.();
         if (
           !virtualScrollToMessage(messageId, {
-            // Smooth scrolling across unmounted rows defeats virtualization.
-            behavior: el ? (options.behavior ?? "auto") : "auto",
+            // Smooth scrolling across unmeasured rows lands short of the
+            // target, so only an already-visible row animates.
+            behavior:
+              el && isInViewport(el, container)
+                ? (options.behavior ?? "auto")
+                : "auto",
           })
         ) {
+          // A target that is not loaded yet leaves the bottom pin alone.
           return false;
         }
+        // An accepted target supersedes every pending bottom pin.
+        virtualCancelBottomIntent?.();
+        cancelMountBottomPin();
         anchorRef.current = { kind: "message", messageId, topOffset: 0 };
         virtualizerAtBottomRef.current = false;
         setIsAtBottom(false);
@@ -462,6 +481,7 @@ export function useAnchoredScroll({
       }
 
       if (!el) return false;
+      cancelMountBottomPin();
 
       const rect = el.getBoundingClientRect();
       const containerRect = container.getBoundingClientRect();
@@ -516,6 +536,7 @@ export function useAnchoredScroll({
       return true;
     },
     [
+      cancelMountBottomPin,
       highlightMessage,
       pinTargetCentered,
       scrollContainerRef,

@@ -684,10 +684,10 @@ function VirtualizedTimelineRows({
       },
       settleAtBottom,
       scrollToMessage(messageId, options) {
-        cancelBottomSettle();
+        const list = listRef.current;
         const index = messageItemIndexByIdRef.current.get(messageId);
-        if (index === undefined) return false;
-        listRef.current?.scrollToIndex(index, {
+        if (!list || index === undefined) return false;
+        list.scrollToIndex(index, {
           align: "center",
           smooth: options?.behavior === "smooth",
         });
