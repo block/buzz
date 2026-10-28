@@ -6,6 +6,8 @@ pub mod auth;
 pub mod channel_authz;
 /// Subscription close (CLOSE) handler.
 pub mod close;
+/// Per-key single-flight refresh with a minimum interval.
+pub mod coalesced_refresh;
 /// Command executor — transactional processing for command kinds.
 pub mod command_executor;
 /// Relay-operator community provisioning HTTP support.

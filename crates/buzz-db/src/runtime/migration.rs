@@ -776,17 +776,14 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 77);
-        assert_eq!(migrations[73].version, 74);
-        assert_eq!(migrations[72].version, 73);
-        assert_eq!(migrations[71].version, 72);
-        assert_eq!(migrations[70].version, 71);
+        assert_eq!(migrations.len(), 78);
+        for (index, migration) in migrations.iter().enumerate() {
+            assert_eq!(migration.version, (index + 1) as i64);
+        }
         assert!(migrations[70]
             .sql
             .as_str()
             .contains("ADD COLUMN unlisted BOOLEAN NOT NULL DEFAULT FALSE"));
-        assert_eq!(migrations[69].version, 70);
-        assert_eq!(migrations[68].version, 69);
         assert_eq!(migrations[67].version, 68);
         assert!(migrations[67]
             .sql
@@ -804,6 +801,26 @@ mod postgres_tests {
         let desired_schema = crate::test_support::desired_state_schema_sql();
         assert!(!desired_schema.contains("events_refresh_channel_ttl"));
         assert!(!desired_schema.contains("refresh_channel_ttl_after_event_insert"));
+        assert!(desired_schema.contains("legacy_admission BOOLEAN NOT NULL DEFAULT true"));
+        assert_eq!(migrations[65].version, 66);
+        assert!(migrations[65]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE community_nip_fi_issuers"));
+        assert_eq!(migrations[74].version, 75);
+        let invite_migration = strip_sql_comments(migrations[74].sql.as_str());
+        assert!(invite_migration.contains("SET LOCAL lock_timeout = '5s'"));
+        assert!(invite_migration.contains("SET LOCAL statement_timeout = '30s'"));
+        assert!(
+            invite_migration.contains("ADD COLUMN legacy_admission BOOLEAN NOT NULL DEFAULT true")
+        );
+        assert!(invite_migration.contains("ADD COLUMN revoked_at TIMESTAMPTZ"));
+        assert!(!invite_migration.to_ascii_uppercase().contains("UPDATE "));
+        assert!(!invite_migration
+            .to_ascii_uppercase()
+            .contains("CREATE FUNCTION"));
+        assert!(!desired_schema.contains("invite_admission_lock"));
+
         assert_eq!(migrations[58].version, 59);
         assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
         assert_eq!(migrations[59].version, 60);
@@ -823,11 +840,6 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE FUNCTION profile_name_fields"));
-        assert_eq!(migrations[65].version, 66);
-        assert!(migrations[65]
-            .sql
-            .as_str()
-            .contains("CREATE TABLE community_nip_fi_issuers"));
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql

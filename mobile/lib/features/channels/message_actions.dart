@@ -457,8 +457,7 @@ bool messageActionShowsUnread(
   required TimelineMessage message,
 }) {
   final readerPubkey = ref.read(myPubkeyProvider);
-  final channels = ref.read(channelsProvider).asData?.value;
-  final channel = channels?.where((c) => c.id == channelId).firstOrNull;
+  final channel = ref.read(channelsProvider.notifier).channelById(channelId);
   final channelCatchUp =
       readerPubkey != null &&
       channel != null &&

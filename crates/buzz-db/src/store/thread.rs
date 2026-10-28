@@ -18,6 +18,60 @@ use crate::{
     ReadSessionInner, RouteDecision, RoutePredicate,
 };
 
+/// [`THREAD_PARTICIPANT_SCAN_LIMIT`] as a literal, so SQL can `concat!` it.
+macro_rules! thread_participant_scan_limit {
+    () => {
+        1000
+    };
+}
+
+/// How many of a thread's newest replies a participant summary reads.
+///
+/// Participants are the thread's most recently active distinct authors, so
+/// the newest replies decide them. Aggregating the whole thread instead made
+/// every summary cost O(thread), recomputed after every reply, so one very
+/// large thread could saturate the writer. An author silent for this many
+/// replies drops out of the facepile, which shows at most 10.
+pub const THREAD_PARTICIPANT_SCAN_LIMIT: i64 = thread_participant_scan_limit!();
+
+/// Correlated `ARRAY(...)` of up to 10 participant pubkeys, most recent
+/// first, for the thread rooted at `root.event_id` in community `$1`.
+///
+/// Walks `idx_thread_metadata_window` newest-first and stops after
+/// [`THREAD_PARTICIPANT_SCAN_LIMIT`] rows, so cost is bounded by the window,
+/// not the thread. The one argument is an extra (possibly empty) predicate on
+/// the window's `tm` rows. A macro so callers stay `&'static str` via
+/// `concat!`.
+macro_rules! recent_thread_participants_sql {
+    ($extra:literal) => {
+        concat!(
+            r#"ARRAY(
+                SELECT e.pubkey
+                FROM (
+                    SELECT tm.event_created_at, tm.event_id
+                    FROM thread_metadata tm
+                    WHERE tm.community_id = $1
+                      AND tm.root_event_id = root.event_id "#,
+            $extra,
+            r#"
+                    ORDER BY tm.event_created_at DESC, tm.event_id ASC
+                    LIMIT "#,
+            thread_participant_scan_limit!(),
+            r#"
+                ) recent
+                JOIN events e
+                    ON e.community_id = $1
+                   AND e.created_at   = recent.event_created_at
+                   AND e.id           = recent.event_id
+                WHERE e.deleted_at IS NULL
+                GROUP BY e.pubkey
+                ORDER BY MAX(e.created_at) DESC, e.pubkey ASC
+                LIMIT 10
+            )"#
+        )
+    };
+}
+
 // -- Structs ------------------------------------------------------------------
 
 /// A single reply within a thread, joined with event content.
@@ -56,7 +110,9 @@ pub struct ThreadSummary {
     pub descendant_count: i32,
     /// Timestamp of the most recent reply in the thread.
     pub last_reply_at: Option<DateTime<Utc>>,
-    /// Compressed public keys of all participants who have replied.
+    /// Up to 10 distinct reply authors, most recently active first, drawn
+    /// from the newest [`THREAD_PARTICIPANT_SCAN_LIMIT`] replies. Deleted
+    /// replies count toward that window but contribute no author.
     pub participants: Vec<Vec<u8>>,
 }
 
@@ -467,63 +523,29 @@ pub async fn get_thread_summary(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let row = sqlx::query(
-        r#"
-        SELECT reply_count, descendant_count, last_reply_at
-        FROM thread_metadata
-        WHERE community_id = $1 AND event_id = $2
+    let row = sqlx::query(concat!(
+        "SELECT root.reply_count, root.descendant_count, root.last_reply_at, ",
+        recent_thread_participants_sql!(""),
+        r#" AS participants
+        FROM thread_metadata root
+        WHERE root.community_id = $1 AND root.event_id = $2
         LIMIT 1
         "#,
-    )
+    ))
     .bind(community_id.as_uuid())
     .bind(event_id)
     .fetch_optional(&mut *connection)
     .await?;
 
-    let row = match row {
-        Some(r) => r,
-        None => return Ok(None),
-    };
-
-    let reply_count: i32 = row.try_get("reply_count")?;
-    let descendant_count: i32 = row.try_get("descendant_count")?;
-    let last_reply_at: Option<DateTime<Utc>> = row.try_get("last_reply_at")?;
-
-    // Collect distinct participant pubkeys from the thread, most recent first.
-    let participant_rows = sqlx::query(
-        r#"
-        SELECT pubkey FROM (
-            SELECT DISTINCT e.pubkey, MAX(e.created_at) AS last_seen
-            FROM thread_metadata tm
-            JOIN events e
-                ON e.community_id = tm.community_id
-               AND e.created_at = tm.event_created_at
-               AND e.id         = tm.event_id
-            WHERE tm.community_id = $1
-              AND tm.root_event_id = $2
-              AND e.deleted_at IS NULL
-            GROUP BY e.pubkey
-        ) sub
-        ORDER BY last_seen DESC
-        LIMIT 10
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(event_id)
-    .fetch_all(&mut *connection)
-    .await?;
-
-    let participants: Vec<Vec<u8>> = participant_rows
-        .into_iter()
-        .map(|r| r.try_get::<Vec<u8>, _>("pubkey"))
-        .collect::<std::result::Result<_, _>>()?;
-
-    Ok(Some(ThreadSummary {
-        reply_count,
-        descendant_count,
-        last_reply_at,
-        participants,
-    }))
+    row.map(|row| {
+        Ok(ThreadSummary {
+            reply_count: row.try_get("reply_count")?,
+            descendant_count: row.try_get("descendant_count")?,
+            last_reply_at: row.try_get("last_reply_at")?,
+            participants: row.try_get("participants")?,
+        })
+    })
+    .transpose()
 }
 
 /// Fetch one channel window: top-level rows (depth = 0, missing metadata, or
@@ -692,39 +714,21 @@ pub(crate) async fn get_channel_window_on(
     }
 
     // Batch participants for every row with thread activity — one query for
-    // the whole window instead of a per-root fan-out. Same shape and 10-cap
-    // as get_thread_summary.
+    // the whole window instead of a per-root fan-out, each root bounded the
+    // same way as get_thread_summary.
     let roots: Vec<Vec<u8>> = rows
         .iter()
         .filter(|r| r.thread_summary.is_some())
         .map(|r| r.stored_event.event.id.as_bytes().to_vec())
         .collect();
     if !roots.is_empty() {
-        let participant_rows = sqlx::query(
-            r#"
-            SELECT root_event_id, pubkey FROM (
-                SELECT
-                    tm.root_event_id,
-                    e.pubkey,
-                    MAX(e.created_at) AS last_seen,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY tm.root_event_id
-                        ORDER BY MAX(e.created_at) DESC
-                    ) AS rn
-                FROM thread_metadata tm
-                JOIN events e
-                    ON e.community_id = tm.community_id
-                   AND e.created_at = tm.event_created_at
-                   AND e.id         = tm.event_id
-                WHERE tm.community_id = $1
-                  AND tm.root_event_id = ANY($2)
-                  AND e.deleted_at IS NULL
-                GROUP BY tm.root_event_id, e.pubkey
-            ) sub
-            WHERE rn <= 10
-            ORDER BY root_event_id, rn
+        let participant_rows = sqlx::query(concat!(
+            "SELECT root.event_id, ",
+            recent_thread_participants_sql!(""),
+            r#" AS participants
+            FROM unnest($2::bytea[]) AS root(event_id)
             "#,
-        )
+        ))
         .bind(community_id.as_uuid())
         .bind(&roots)
         .fetch_all(&mut *conn)
@@ -733,9 +737,7 @@ pub(crate) async fn get_channel_window_on(
         let mut by_root: std::collections::HashMap<Vec<u8>, Vec<Vec<u8>>> =
             std::collections::HashMap::new();
         for row in participant_rows {
-            let root: Vec<u8> = row.try_get("root_event_id")?;
-            let pubkey: Vec<u8> = row.try_get("pubkey")?;
-            by_root.entry(root).or_default().push(pubkey);
+            by_root.insert(row.try_get("event_id")?, row.try_get("participants")?);
         }
         for row in &mut rows {
             if let Some(summary) = &mut row.thread_summary {
@@ -982,18 +984,10 @@ impl Db {
             crate::observability::WriterOperation::SubscriptionHistory,
         )
         .await?;
-        let rows = sqlx::query(
-            r#"
-            SELECT root.event_id, root.reply_count, root.descendant_count, root.last_reply_at,
-                ARRAY(
-                    SELECT e.pubkey
-                    FROM thread_metadata tm
-                    JOIN events e ON e.community_id = tm.community_id
-                        AND e.created_at = tm.event_created_at AND e.id = tm.event_id
-                    WHERE tm.community_id = root.community_id AND tm.root_event_id = root.event_id
-                        AND tm.channel_id = root.channel_id AND e.deleted_at IS NULL
-                    GROUP BY e.pubkey ORDER BY MAX(e.created_at) DESC LIMIT 10
-                ) AS participants
+        let rows = sqlx::query(concat!(
+            "SELECT root.event_id, root.reply_count, root.descendant_count, root.last_reply_at, ",
+            recent_thread_participants_sql!("AND tm.channel_id = root.channel_id"),
+            r#" AS participants
             FROM thread_metadata root
             WHERE root.community_id = $1 AND root.channel_id = $2
                 AND root.event_id IN (
@@ -1003,7 +997,7 @@ impl Db {
                         AND target.event_id = ANY($3) AND target.parent_event_id IS NOT NULL
                 )
         "#,
-        )
+        ))
         .bind(community_id.as_uuid())
         .bind(channel_id)
         .bind(target_ids)
@@ -2319,5 +2313,102 @@ mod postgres_tests {
             quiet_row.thread_summary.is_none(),
             "reply-less row carries no summary"
         );
+    }
+
+    /// Every participant reader (live summary, channel window, deleted-reply
+    /// root resolution) aggregates only the newest
+    /// [`THREAD_PARTICIPANT_SCAN_LIMIT`] replies, most recent author first,
+    /// skipping deleted replies. An author who last posted before that window
+    /// drops out; a whole-thread aggregate would still return them.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn participant_summaries_read_only_the_newest_replies() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let early = Keys::generate();
+        let steady = Keys::generate();
+        let deleted_author = Keys::generate();
+        let latest = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("participant-window-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            steady.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let root = make_stream_event(&steady, "root");
+        insert_root(&pool, community, channel.id, &root).await;
+        let base = root.created_at.as_secs();
+        let reply_at = |keys: &Keys, offset: u64| {
+            EventBuilder::new(Kind::Custom(9), format!("reply-{offset}"))
+                .custom_created_at(nostr::Timestamp::from(base + offset))
+                .sign_with_keys(keys)
+                .expect("sign reply")
+        };
+
+        // `early` posts first, then `steady` fills the whole window after it.
+        let early_reply = reply_at(&early, 1);
+        insert_reply(&pool, community, channel.id, &root, &early_reply, false).await;
+        let window = THREAD_PARTICIPANT_SCAN_LIMIT as u64;
+        for offset in 2..window {
+            let reply = reply_at(&steady, offset);
+            insert_reply(&pool, community, channel.id, &root, &reply, false).await;
+        }
+        let deleted_reply = reply_at(&deleted_author, window);
+        insert_reply(&pool, community, channel.id, &root, &deleted_reply, false).await;
+        let latest_reply = reply_at(&latest, window + 1);
+        insert_reply(&pool, community, channel.id, &root, &latest_reply, false).await;
+        db.soft_delete_event_and_update_thread(
+            community,
+            deleted_reply.id.as_bytes(),
+            Some(root.id.as_bytes()),
+            Some(root.id.as_bytes()),
+        )
+        .await
+        .expect("delete reply");
+
+        let expected = vec![
+            latest.public_key().to_bytes().to_vec(),
+            steady.public_key().to_bytes().to_vec(),
+        ];
+
+        let summary = get_thread_summary(&pool, community, root.id.as_bytes())
+            .await
+            .expect("thread summary")
+            .expect("root has thread metadata");
+        assert_eq!(summary.participants, expected, "live summary");
+
+        let window = get_channel_window(&pool, community, channel.id, 50, None, None)
+            .await
+            .expect("fetch window");
+        let row = window
+            .rows
+            .iter()
+            .find(|r| r.stored_event.event.id == root.id)
+            .expect("root row present");
+        assert_eq!(
+            row.thread_summary
+                .as_ref()
+                .expect("root has a summary")
+                .participants,
+            expected,
+            "channel window"
+        );
+
+        let resolved = db
+            .resolve_thread_root_summaries(
+                community,
+                channel.id,
+                &[deleted_reply.id.as_bytes().to_vec()],
+            )
+            .await
+            .expect("resolve root");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].1.participants, expected, "resolved root");
     }
 }

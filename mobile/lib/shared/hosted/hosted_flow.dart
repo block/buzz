@@ -53,6 +53,8 @@ enum HostedFlowProblem {
   inviteExpired,
   inviteExhausted,
   inviteInvalid,
+  inviteRestricted,
+  inviteOwnerMismatch,
   communityCreationRejected,
 }
 
@@ -87,7 +89,8 @@ class HostedFlow extends ChangeNotifier {
   bool get canRetry =>
       problem == null ||
       problem == HostedFlowProblem.retry ||
-      problem == HostedFlowProblem.invitePolicyRequired;
+      problem == HostedFlowProblem.invitePolicyRequired ||
+      problem == HostedFlowProblem.inviteRestricted;
   final Future<bool> Function(Uri) _openWeb;
   HostedFlowStage stage = HostedFlowStage.idle;
   HostedFlowProblem? problem;
@@ -796,6 +799,8 @@ class HostedFlow extends ChangeNotifier {
     HostedInviteFailure.expired => HostedFlowProblem.inviteExpired,
     HostedInviteFailure.exhausted => HostedFlowProblem.inviteExhausted,
     HostedInviteFailure.invalid => HostedFlowProblem.inviteInvalid,
+    HostedInviteFailure.restricted => HostedFlowProblem.inviteRestricted,
+    HostedInviteFailure.ownerMismatch => HostedFlowProblem.inviteOwnerMismatch,
     AccountFailure.denied => HostedFlowProblem.denied,
     AccountFailure.accountSetupRequired =>
       HostedFlowProblem.accountSetupRequired,

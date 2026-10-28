@@ -1,4 +1,4 @@
--- Populated databases prebuild these indexes concurrently after migration 0076.
+-- Populated databases prebuild these indexes concurrently after migration 0077.
 -- See docs/artifact-sync-deployment.md.
 SET LOCAL lock_timeout = '1s';
 SET LOCAL statement_timeout = '5s';

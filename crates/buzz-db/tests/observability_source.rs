@@ -409,7 +409,6 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .0;
     assert!(thread_summary.contains("WriterOperation::EventWrite"));
     assert!(thread_summary.contains("fetch_optional(&mut *connection)"));
-    assert!(thread_summary.contains("fetch_all(&mut *connection)"));
     assert!(!thread_summary.contains("fetch_optional(pool)"));
     assert!(!thread_summary.contains("fetch_all(pool)"));
 

@@ -473,8 +473,9 @@ pub async fn execute_ban_with_marker(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    crate::relay_invite::lock_admission(tx.conn(), community_id).await?;
 
-    // Verify lease ownership first — abort without touching domain rows if the
+    // Verify lease ownership before domain writes — abort if the
     // lease is already gone. This prevents the commit entirely on a stale worker.
     let owned: bool = sqlx::query_scalar(
         r#"
@@ -523,6 +524,9 @@ pub async fn execute_ban_with_marker(
     .execute(tx.conn())
     .await?;
 
+    crate::relay_invite::revoke_banned_issuer_invites(tx.conn(), community_id, target_pubkey)
+        .await?;
+
     let marker = sqlx::query(
         r#"
         UPDATE relay_admin_actions
@@ -569,6 +573,7 @@ pub async fn execute_timeout_with_marker(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    crate::relay_invite::lock_admission(tx.conn(), community_id).await?;
 
     let owned: bool = sqlx::query_scalar(
         r#"
@@ -615,6 +620,9 @@ pub async fn execute_timeout_with_marker(
     .bind(reason)
     .execute(tx.conn())
     .await?;
+
+    crate::relay_invite::revoke_banned_issuer_invites(tx.conn(), community_id, target_pubkey)
+        .await?;
 
     let marker = sqlx::query(
         r#"

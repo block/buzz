@@ -4724,6 +4724,7 @@ void main() {
         final pat = '1' * 64;
         List<String>? sentRecipients;
         List<List<String>>? sentTags;
+        var searches = 0;
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(signer.nsec),
@@ -4744,6 +4745,11 @@ void main() {
               channelType: 'dm',
               participantPubkeys: [signer.public, pat],
             ),
+            searchPeople: (query) async {
+              if (query != 'Mary J') return const [];
+              if (++searches == 1) throw StateError('relay down');
+              return [maryJane];
+            },
             onSend:
                 (_, recipients, {mediaTags = const <List<String>>[]}) async {
                   sentRecipients = recipients;
@@ -4752,6 +4758,21 @@ void main() {
           ),
         );
         await _expandComposer(tester);
+        // The picker searches the directory for people outside the DM, as it
+        // does once the list has the DM, and keeps a failed search's retry.
+        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.pump();
+        await tester.pump(mentionSearchDebounce * 2);
+        expect(
+          find.byKey(const ValueKey('mention-search-error')),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('Retry'));
+        await tester.pump();
+        await tester.pump(mentionSearchDebounce * 2);
+        expect(find.text('Mary Jane'), findsOneWidget);
+        expect(find.text('not in DM'), findsOneWidget);
+
         await tester.enterText(find.byType(TextField), '@Pat');
         await tester.pump();
         await tester.pumpAndSettle();

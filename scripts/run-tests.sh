@@ -206,6 +206,9 @@ run_unit_tests() {
   run_test_step "buzz-relay side-effects helper tests" \
     cargo test -p buzz-relay --lib handlers::side_effects::tests:: -- --nocapture
 
+  run_test_step "buzz-relay coalesced refresh tests" \
+    cargo test -p buzz-relay --lib handlers::coalesced_refresh::tests:: -- --nocapture
+
   run_test_step "buzz-relay system channel scope tests" \
     cargo test -p buzz-relay --lib handlers::system_channels::tests:: -- --nocapture
 
@@ -283,6 +286,12 @@ run_unit_tests() {
     cargo test -p buzz-relay --lib -- --exact --nocapture \
       api::bridge::postgres_tests::bridge_search_mode_extension_accepts_prefix_snake_or_camel_case \
       api::bridge::postgres_tests::bridge_search_sort_extension_selects_newest_only_when_named
+
+  # Infra-free guard for the destructive invite fixture's database ownership
+  # check, by exact name: the rest of api::invites::postgres_tests needs a database.
+  run_test_step "buzz-relay invite fixture guard test" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      api::invites::postgres_tests::restriction_tests::postgres_tests::destructive_fixture_rejects_shared_database_urls
 
   run_test_step "buzz-relay readiness tests" \
     cargo test -p buzz-relay --lib readiness::tests:: -- --nocapture
@@ -402,6 +411,14 @@ run_unit_tests() {
 
   run_test_step "buzz-relay binary tests" \
     cargo test -p buzz-relay --bin buzz-relay -- --nocapture
+
+  run_test_step "buzz-relay invitation token and cutoff contracts" \
+    cargo test -p buzz-relay --lib invite_token:: -- --nocapture
+  run_test_step "buzz-relay invitation cutoff configuration" \
+    cargo test -p buzz-relay --lib config::invite_cutoff_tests:: -- --nocapture
+
+  run_test_step "buzz-relay mesh receive lifetime regression" \
+    cargo test -p buzz-relay --lib mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks -- --exact --nocapture
 
   run_test_step "buzz-relay boot lifecycle tests" \
     cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
