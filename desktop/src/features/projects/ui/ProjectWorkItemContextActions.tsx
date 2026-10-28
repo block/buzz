@@ -6,6 +6,7 @@ import type {
 } from "@/features/projects/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { isRepositoryMaintainer } from "@/features/projects/projectModels";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { IssueAssigneesRow } from "./IssueAssigneesRow";
 import { PullRequestReviewersRow } from "./PullRequestReviewersRow";
@@ -25,13 +26,15 @@ export function ProjectWorkItemContextActions({
   const viewerPubkey = identityQuery.data?.pubkey;
   const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
   const isOwner = viewer === normalizePubkey(repository.owner);
+  const isMaintainer = isRepositoryMaintainer(repository, viewer);
   const isManagedAgentOwner = useIsManagedAgent(repository.owner) === true;
 
   if (issue) {
     if (!viewer) return null;
     const isAuthor = viewer === normalizePubkey(issue.author);
     const canAssignOthers =
-      viewer !== null && (isAuthor || isOwner || isManagedAgentOwner);
+      viewer !== null &&
+      (isAuthor || isOwner || isMaintainer || isManagedAgentOwner);
     return (
       <div data-testid="project-context-task-assignment">
         <IssueAssigneesRow
@@ -55,7 +58,7 @@ export function ProjectWorkItemContextActions({
     const canRequestReview =
       viewer !== null &&
       (pullRequest.status === "Open" || pullRequest.status === "Draft") &&
-      (isAuthor || isOwner || isManagedAgentOwner);
+      (isAuthor || isOwner || isMaintainer || isManagedAgentOwner);
     if (!canRequestReview) return null;
     return (
       <div data-testid="project-context-reviewers">

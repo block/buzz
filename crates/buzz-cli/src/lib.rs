@@ -1333,6 +1333,11 @@ pub enum ReposCmd {
         /// the author runs `buzz repos bind` (issue #3527).
         #[arg(long)]
         channel: Option<String>,
+        /// Maintainer pubkey (64-char hex) — can be specified multiple times.
+        /// Maintainers may change status and assignments on this repo's
+        /// issues and pull requests like the owner (NIP-34 `maintainers` tag).
+        #[arg(long = "maintainer")]
+        maintainers: Vec<String>,
     },
     /// Get a repository announcement
     Get {
@@ -1372,6 +1377,43 @@ pub enum ReposCmd {
     /// Inspect or change the relay-hosted repository's default branch.
     #[command(subcommand)]
     DefaultBranch(ReposDefaultBranchCmd),
+    /// Manage the maintainers of one of your repositories. Maintainers may
+    /// change status and assignments on its issues and pull requests like
+    /// the owner (NIP-34 `maintainers` tag).
+    #[command(subcommand)]
+    Maintainers(ReposMaintainersCmd),
+}
+
+/// Commands for the repository's NIP-34 `maintainers` list.
+#[derive(Subcommand)]
+pub enum ReposMaintainersCmd {
+    /// List the repository's maintainers.
+    List {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+    },
+    /// Add one or more maintainers. Already-listed pubkeys are kept.
+    #[command(
+        after_help = "Examples:\n  buzz repos maintainers add --id my-repo --pubkey <hex> --pubkey <hex>"
+    )]
+    Add {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Maintainer pubkey (64-char hex) — can be specified multiple times.
+        #[arg(long = "pubkey", required = true)]
+        pubkeys: Vec<String>,
+    },
+    /// Remove one or more maintainers. NotFound when none of them is listed.
+    Remove {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Maintainer pubkey (64-char hex) — can be specified multiple times.
+        #[arg(long = "pubkey", required = true)]
+        pubkeys: Vec<String>,
+    },
 }
 
 /// Commands for the authoritative Git default branch, not announcement metadata.
@@ -1924,8 +1966,9 @@ pub enum IssuesCmd {
         to: Vec<String>,
     },
     /// Assign an issue to one or more people or agents. Only assignments
-    /// signed by the issue author or repo owner are trusted by clients;
-    /// anyone may assign themselves (sole assignee = your own pubkey).
+    /// signed by the issue author, the repo owner, or a repo maintainer
+    /// (`buzz repos maintainers`) are trusted by clients; anyone may assign
+    /// themselves (sole assignee = your own pubkey).
     Assign {
         /// Issue event id (64-char hex)
         #[arg(long)]
@@ -1944,8 +1987,9 @@ pub enum IssuesCmd {
         #[arg(long)]
         label: Option<String>,
     },
-    /// Remove one or more assignees from an issue. Issue authors and repo
-    /// owners may remove anyone; other users may remove only themselves.
+    /// Remove one or more assignees from an issue. Issue authors, repo
+    /// owners and repo maintainers may remove anyone; other users may remove
+    /// only themselves.
     Unassign {
         /// Issue event id (64-char hex)
         #[arg(long)]
@@ -2607,13 +2651,22 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["bind", "create", "default-branch", "get", "list", "protect"]
+            vec![
+                "bind",
+                "create",
+                "default-branch",
+                "get",
+                "list",
+                "maintainers",
+                "protect"
+            ]
         );
         let repos = cmd
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "repos")
             .expect("repos command");
         assert_eq!(names(repos, "default-branch"), vec!["get", "set"]);
+        assert_eq!(names(repos, "maintainers"), vec!["add", "list", "remove"]);
         let protect = repos
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "protect")
@@ -2685,7 +2738,7 @@ mod tests {
             ("pr", 5),
             ("projects", 8),
             ("reactions", 3),
-            ("repos", 6),
+            ("repos", 7),
             ("social", 7),
             ("upload", 1),
             ("users", 5),

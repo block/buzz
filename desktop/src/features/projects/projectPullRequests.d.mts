@@ -107,6 +107,7 @@ export function eventToProjectPullRequest(
   updateEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
   statusEvents?: RelayEvent[],
+  maintainers?: string[],
 ): ProjectPullRequest;
 export function nextProjectPullRequestStatusCreatedAt(
   pullRequest: Pick<ProjectPullRequest, "statusCreatedAt">,
@@ -146,4 +147,5 @@ export function projectPullRequestEventsToPullRequests(
   updateEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
   statusEvents?: RelayEvent[],
+  maintainers?: string[],
 ): ProjectPullRequest[];

@@ -44,19 +44,26 @@ function repoOwnerFromAddress(repoAddress) {
 
 /**
  * Pubkeys allowed to change a root event's lifecycle (status, updates):
- * the root author and the owner of the repo the root event targets.
- * Anyone else's status/update events are ignored (NIP-34 scopes these
- * to the root author or a maintainer).
+ * the root author, the owner of the repo the root event targets, and the
+ * repo's maintainers (the `maintainers` tag on its live kind:30617, passed
+ * in by the caller that resolved the repository). Anyone else's
+ * status/update events are ignored (NIP-34 scopes these to the root author
+ * or a maintainer).
  */
-export function allowedActorsForRoot(rootEvent) {
+export function allowedActorsForRoot(rootEvent, maintainers = []) {
   const allowed = new Set([rootEvent.pubkey.toLowerCase()]);
   const owner = repoOwnerFromAddress(getTag(rootEvent, "a"));
   if (owner) allowed.add(owner);
+  for (const maintainer of maintainers) {
+    if (/^[a-fA-F0-9]{64}$/.test(maintainer)) {
+      allowed.add(maintainer.toLowerCase());
+    }
+  }
   return allowed;
 }
 
-function latestStatusForIssue(issue, statusEvents) {
-  const allowedActors = allowedActorsForRoot(issue);
+function latestStatusForIssue(issue, statusEvents, maintainers) {
+  const allowedActors = allowedActorsForRoot(issue, maintainers);
   return statusEvents
     .filter(
       (event) =>
@@ -89,16 +96,16 @@ function statusFromEvent(issue, statusEvent) {
  * adds each `p` tag and `t: unassignment` removes it. The issue root's `p`
  * tags are notification routing only.
  *
- * Trusted signers are the issue author and repo owner (who may change anyone),
- * plus any community member whose operation names only themselves. Uncaused
- * self-service operations are applied first, authoritative operations second,
- * and self-service operations that causally reference the current per-assignee
- * operation head last. This prevents signer-controlled timestamps from
+ * Trusted signers are the issue author, repo owner and repo maintainers (who
+ * may change anyone), plus any community member whose operation names only
+ * themselves. Uncaused self-service operations are applied first,
+ * authoritative operations second, and self-service operations that causally
+ * reference the current per-assignee operation head last. This prevents signer-controlled timestamps from
  * overriding authority while allowing a later observed owner/author decision
  * to be superseded by the affected assignee.
  */
-function assignmentStateForIssue(issue, issueCommentEvents) {
-  const allowedActors = allowedActorsForRoot(issue);
+function assignmentStateForIssue(issue, issueCommentEvents, maintainers) {
+  const allowedActors = allowedActorsForRoot(issue, maintainers);
   const assignees = new Set();
   const operationHeads = new Map();
   const uncausedSelfServiceOperations = [];
@@ -178,19 +185,28 @@ function commentsForIssue(issueCommentEvents) {
   }));
 }
 
+/**
+ * `maintainers` are the repository's maintainer pubkeys (Repository.maintainers);
+ * their status and assignment events count like the owner's.
+ */
 export function eventToProjectIssue(
   issue,
   statusEvents = [],
   commentEvents = [],
+  maintainers = [],
 ) {
-  const latestStatus = latestStatusForIssue(issue, statusEvents);
+  const latestStatus = latestStatusForIssue(issue, statusEvents, maintainers);
   const issueCommentEvents = commentEvents.filter((event) =>
     event.tags.some(
       (tag) => (tag[0] === "e" || tag[0] === "E") && tag[1] === issue.id,
     ),
   );
   const comments = commentsForIssue(issueCommentEvents);
-  const assignmentState = assignmentStateForIssue(issue, issueCommentEvents);
+  const assignmentState = assignmentStateForIssue(
+    issue,
+    issueCommentEvents,
+    maintainers,
+  );
   const labels = getAllTags(issue, "t");
   const title =
     getTag(issue, "subject") || issue.content.split("\n")[0] || "Untitled task";
@@ -226,9 +242,12 @@ export function projectIssueEventsToIssues(
   issueEvents,
   statusEvents = [],
   commentEvents = [],
+  maintainers = [],
 ) {
   return [...issueEvents]
-    .map((issue) => eventToProjectIssue(issue, statusEvents, commentEvents))
+    .map((issue) =>
+      eventToProjectIssue(issue, statusEvents, commentEvents, maintainers),
+    )
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
