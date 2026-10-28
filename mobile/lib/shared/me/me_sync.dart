@@ -12,6 +12,7 @@ import '../relay/relay.dart';
 import 'me_groups.dart';
 import 'me_recovery.dart';
 import 'me_journal.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// A live, account/community-scoped reader for desktop's encrypted Solo record.
 final meGroupsProvider = StreamProvider<MeGroups>((ref) {
@@ -470,11 +471,10 @@ class MeSync {
       }
       check();
       final signed = NostrEvent.fromJson(
-        nostr.Event.from(
+        signNostrEvent(
           kind: 30078,
           content: content,
           secretKey: privateHex,
-          verify: false,
           tags: [
             ['d', MeGroups.coordinate(community)],
             ['t', MeGroups.tag],

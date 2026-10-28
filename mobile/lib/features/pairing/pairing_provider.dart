@@ -17,6 +17,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/security/sensitive_action_authorizer.dart';
 import 'pairing_crypto.dart';
 import 'pairing_socket.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'pairing_provider_helpers.dart';
 part 'pairing_state.dart';
@@ -839,7 +840,7 @@ class PairingNotifier extends Notifier<PairingState> {
     final jitter = math.Random.secure().nextInt(31);
     final createdAt = (DateTime.now().millisecondsSinceEpoch ~/ 1000) - jitter;
 
-    final event = nostr.Event.from(
+    final event = signNostrEvent(
       kind: kind,
       content: content,
       tags: tags,

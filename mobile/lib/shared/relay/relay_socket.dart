@@ -9,6 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
 import 'relay_websocket.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// Low-level websocket connection with NIP-42 authentication.
 ///
@@ -224,7 +225,7 @@ class RelaySocket {
       ];
 
       // Create and sign the kind:22242 AUTH event.
-      final event = nostr.Event.from(
+      final event = signNostrEvent(
         kind: EventKind.auth,
         content: '',
         tags: tags,
