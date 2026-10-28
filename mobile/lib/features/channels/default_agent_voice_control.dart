@@ -92,15 +92,35 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
         if (context.mounted) pending.value = null;
       } catch (_) {
         if (context.mounted) {
-          error.value = 'Voice note not sent. Tap to retry.';
+          error.value = 'Retry voice note';
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Voice note not sent. Tap the agent to retry.'),
+              content: Text(
+                'Could not confirm delivery. Your voice note is saved.',
+              ),
             ),
           );
         }
       } finally {
         if (context.mounted) sending.value = false;
+      }
+    }
+
+    Future<void> discardPending() async {
+      try {
+        await draft.clear();
+        if (!context.mounted) return;
+        pending.value = null;
+        restoreFailed.value = false;
+        error.value = null;
+      } catch (_) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Could not discard the saved voice note.'),
+            ),
+          );
+        }
       }
     }
 
@@ -304,10 +324,15 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                         maxWidth: 224 + Grid.xs * 2 - Grid.xxs * 2,
                         child: Row(
                           children: [
-                            if (recording.value)
+                            if (recording.value ||
+                                (!sending.value &&
+                                    (pending.value != null ||
+                                        restoreFailed.value)))
                               IconButton(
                                 tooltip: 'Discard voice note',
-                                onPressed: () => unawaited(cancel()),
+                                onPressed: () => unawaited(
+                                  recording.value ? cancel() : discardPending(),
+                                ),
                                 icon: const Icon(Icons.close),
                               ),
                             Expanded(

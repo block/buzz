@@ -189,9 +189,24 @@ void main() {
     expect(draft.note, isNotNull);
     expect(sent, 0);
     fail = false;
-    await tester.tap(find.text('Voice note not sent. Tap to retry.'));
+    await tester.tap(find.text('Retry voice note'));
     await tester.pumpAndSettle();
     expect(sent, 1);
     expect(draft.note, isNull);
+  });
+  testWidgets('discarding a failed send restores the navigation shortcuts', (
+    tester,
+  ) async {
+    fail = true;
+    await mount(tester);
+    final gesture = await hold(tester);
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(draft.note, isNotNull);
+    await tester.tap(find.byTooltip('Discard voice note'));
+    await tester.pumpAndSettle();
+    expect(draft.note, isNull);
+    expect(sent, 0);
+    expect(find.byTooltip('Agent'), findsOneWidget);
   });
 }
