@@ -126,6 +126,57 @@ async fn reader_boot_ping_warms_pool_to_min_connections() {
     drop_scratch_db(&admin, db.pool.clone(), &wname).await;
 }
 
+/// After the boot ping the background warm pass opens the reader pool to its
+/// ceiling and releases every connection idle. The caller must not wait for
+/// it: `spawn_read_pool_boot_ping` returns with the pool still empty. Without
+/// the warm pass the pool stops at the floor; if the pass closed its
+/// connections instead of releasing them, `size` and `idle` never reach the
+/// ceiling together.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn reader_boot_ping_warms_pool_to_max_in_background() {
+    let max = 15;
+    let (admin, mut db, wname, scratch_url) = same_db_reader("warm_max", max).await;
+    // The production reader acquire budget (150ms) lets a dial on a loaded
+    // test host miss; this test is about the warm pass reaching the ceiling,
+    // so give each dial room.
+    db.read_pool = Some(
+        Db::read_pool_options(max)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_lazy_with(Db::reader_connect_options(
+                scratch_url.parse().expect("parse scratch url"),
+            )),
+    );
+    let read_pool = db.read_pool.clone().expect("reader pool configured");
+    assert!(
+        Db::reader_min_connections(max) < max,
+        "fixture needs a floor below the ceiling"
+    );
+
+    db.spawn_read_pool_boot_ping();
+    assert_eq!(
+        read_pool.size(),
+        0,
+        "spawning the ping and warm pass must not wait on them"
+    );
+
+    await_idle_floor(&read_pool, max).await;
+    // Settled at the ceiling and no further.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        read_pool.size(),
+        max,
+        "warm pass must stay within the ceiling"
+    );
+    assert_eq!(
+        read_pool.num_idle(),
+        max as usize,
+        "warmed connections stay idle"
+    );
+
+    drop_scratch_db(&admin, db.pool.clone(), &wname).await;
+}
+
 /// A warm reader connection whose server stops answering (here: the
 /// heartbeat observation blocks behind an exclusive lock) must fail the
 /// routed read closed to the writer within the proof budget, not hang the

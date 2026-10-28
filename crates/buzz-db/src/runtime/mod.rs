@@ -569,6 +569,17 @@ fn read_budget_from_ms(ms: u64) -> Option<Duration> {
     }
 }
 
+/// Outcome of one reader-pool warm pass (see [`Db::warm_read_pool`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReaderWarmReport {
+    /// Connections the pass aimed to hold: the pool's ceiling.
+    target: u32,
+    /// Connections opened (or reused idle) and then released back to idle.
+    held: u32,
+    /// Acquires that errored or timed out.
+    failed: u32,
+}
+
 /// Snapshot of Postgres connection pool utilisation.
 #[derive(Debug, Clone, Copy)]
 pub struct DbPoolStats {
@@ -1135,6 +1146,9 @@ impl Db {
     /// pool up to [`Db::reader_min_connections`] in the background, so a
     /// freshly started pod does not meet its first traffic with an empty
     /// reader pool and pay every dial inside the 150ms request budget.
+    /// It then warms the pool toward its ceiling ([`Db::warm_read_pool`]),
+    /// still in the spawned task: a failed or partial warm only logs and
+    /// never affects startup or readiness.
     /// Probe acquires that overrun that budget are retried with
     /// [`Db::READER_BOOT_PROBE_BACKOFF`].
     ///
@@ -1150,7 +1164,147 @@ impl Db {
             return;
         };
         let aurora_identity = self.reader_aurora_identity.clone();
-        tokio::spawn(Self::read_pool_boot_ping_once(read_pool, aurora_identity));
+        tokio::spawn(Self::read_pool_boot_ping_then_warm(
+            read_pool,
+            aurora_identity,
+        ));
+    }
+
+    /// Connections each warm wave dials at once. Small enough that a pod
+    /// starting alongside its peers does not stampede the reader with
+    /// simultaneous TCP+TLS+SCRAM handshakes (a stampede is what pushes a
+    /// dial past [`Db::READER_ACQUIRE_TIMEOUT`]), large enough that a full
+    /// pool is warm within a handful of dial times.
+    const READER_WARM_CONCURRENCY: u32 = 5;
+
+    /// Bound on one warm acquire. The pool's own acquire timeout
+    /// ([`Db::READER_ACQUIRE_TIMEOUT`]) already caps a dial; this is the
+    /// explicit backstop so a warm acquire can never outlive a wave.
+    const READER_WARM_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(1);
+
+    /// Connections the next warm wave should open: the remaining shortfall,
+    /// at most [`Db::READER_WARM_CONCURRENCY`].
+    fn reader_warm_wave_size(target: u32, held: u32) -> u32 {
+        target
+            .saturating_sub(held)
+            .min(Self::READER_WARM_CONCURRENCY)
+    }
+
+    /// The boot ping, then (only if the reader answered) a warm pass.
+    ///
+    /// Returns `None` when the ping found the reader unreachable: warming a
+    /// pool whose reader is down would only add abandoned dials.
+    async fn read_pool_boot_ping_then_warm(
+        read_pool: PgPool,
+        aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
+    ) -> Option<ReaderWarmReport> {
+        if !Self::read_pool_boot_ping_once(read_pool.clone(), aurora_identity).await {
+            return None;
+        }
+        let report = Self::warm_read_pool(&read_pool).await;
+        if report.held < report.target {
+            tracing::warn!(
+                target = report.target,
+                opened = report.held,
+                failed = report.failed,
+                "read pool warm-up opened fewer connections than its ceiling; \
+                 the rest dial on demand (warm-up is best effort)"
+            );
+        } else {
+            tracing::info!(
+                target = report.target,
+                opened = report.held,
+                failed = report.failed,
+                "read pool warmed to its ceiling"
+            );
+        }
+        Some(report)
+    }
+
+    /// Open the reader pool toward its ceiling, once, then release every
+    /// connection back to the pool idle.
+    ///
+    /// Why: the boot ping leaves only the warm floor
+    /// ([`Db::reader_min_connections`]). A pod that meets a reconnect burst
+    /// with that floor dials the rest inside [`Db::READER_ACQUIRE_TIMEOUT`],
+    /// overruns it, and serves the read from the writer. Warming moves those
+    /// dials off the request path. sqlx's idle reaper closes the surplus
+    /// after `idle_timeout`, back down to the floor, so no reaping logic
+    /// lives here.
+    ///
+    /// Connections are held until the pass ends (an acquire from a pool
+    /// with an idle connection reuses it instead of dialing) and dropped
+    /// rather than `close_on_drop`ped, so they return idle. Bounded: a
+    /// single pass of bounded waves of [`Db::READER_WARM_CONCURRENCY`]
+    /// dials (see [`Db::warm_toward`]), each acquire bounded by
+    /// [`Db::READER_WARM_ACQUIRE_TIMEOUT`]; a wave that opens nothing (the
+    /// reader is down or saturated) ends the pass. There is no backoff and
+    /// no second pass.
+    ///
+    /// Uses plain `acquire`, not the instrumented reader acquire: warm
+    /// misses must not inflate the `buzz_db_reader_*` acquire-timeout
+    /// signal that the fallback alerts watch. The pool gauges
+    /// (`buzz_db_read_pool_*`) show the result.
+    ///
+    /// Holding connections briefly lowers the capacity left for routed
+    /// reads. The window is a few dial times at boot, before the pod takes
+    /// traffic; a read that misses in it falls back to the writer as it
+    /// would on any exhausted pool.
+    async fn warm_read_pool(read_pool: &PgPool) -> ReaderWarmReport {
+        let target = read_pool.options().get_max_connections();
+        let (held, failed) = Self::warm_toward(target, || async {
+            tokio::time::timeout(Self::READER_WARM_ACQUIRE_TIMEOUT, read_pool.acquire())
+                .await
+                .ok()
+                .and_then(std::result::Result::ok)
+        })
+        .await;
+        let report = ReaderWarmReport {
+            target,
+            held: held.len() as u32,
+            failed,
+        };
+        // Dropping returns each connection to the pool idle (after the
+        // reader release check); it does not close it.
+        drop(held);
+        report
+    }
+
+    /// The warm pass's loop, apart from the pool: runs `acquire` in waves of
+    /// at most [`Db::READER_WARM_CONCURRENCY`] until `target` connections are
+    /// held, and returns them with the number of failed acquires (`None`).
+    ///
+    /// Each wave tops up the remaining shortfall, so an acquire that missed
+    /// its deadline in one wave is covered by the next. Bounded three ways:
+    /// at most twice the waves a failure-free pass needs, so a reader that
+    /// admits only some dials cannot keep the pass running; a wave that
+    /// holds nothing new ends it; and no wave dials more than the shortfall.
+    /// There is no sleep or backoff between waves.
+    async fn warm_toward<C, F, Fut>(target: u32, mut acquire: F) -> (Vec<C>, u32)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Option<C>>,
+    {
+        let mut held = Vec::new();
+        let mut failed = 0_u32;
+        let max_waves = target.div_ceil(Self::READER_WARM_CONCURRENCY) * 2;
+        for _ in 0..max_waves {
+            let wave = Self::reader_warm_wave_size(target, held.len() as u32);
+            if wave == 0 {
+                break;
+            }
+            let held_before = held.len();
+            for result in futures_util::future::join_all((0..wave).map(|_| acquire())).await {
+                match result {
+                    Some(conn) => held.push(conn),
+                    None => failed += 1,
+                }
+            }
+            if held.len() == held_before {
+                break;
+            }
+        }
+        (held, failed)
     }
 
     /// Backoff before each boot-probe retry after an acquire that overran
@@ -1165,10 +1319,11 @@ impl Db {
         Duration::from_secs(2),
     ];
 
+    /// Returns whether the reader answered.
     async fn read_pool_boot_ping_once(
         read_pool: PgPool,
         aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
-    ) {
+    ) -> bool {
         let mut backoff = Self::READER_BOOT_PROBE_BACKOFF.into_iter();
         let mut conn = loop {
             let error = match observability::acquire_reader_with_legacy_metrics(
@@ -1186,7 +1341,7 @@ impl Db {
                     tracing::warn!(
                         "read replica unreachable at boot; serving all-writer until it recovers: {e}"
                     );
-                    return;
+                    return false;
                 }
             }
         };
@@ -1205,6 +1360,7 @@ impl Db {
         // in the background under its own 300s deadline, outside the 150ms
         // request budget, releasing each connection idle as it lands.
         conn.close_on_drop();
+        true
     }
 
     #[cfg(test)]
@@ -1822,6 +1978,119 @@ impl Db {
                 RouteDecision::Writer
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod reader_warm_tests {
+    use super::{Db, ReaderWarmReport};
+    use std::sync::{Arc, OnceLock};
+
+    /// A lazy reader pool whose server accepts TCP and immediately closes
+    /// it, so every dial fails fast without Postgres.
+    async fn dead_reader_pool(max_connections: u32) -> sqlx::PgPool {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let port = listener.local_addr().expect("listener address").port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+        let url = format!("postgres://u@127.0.0.1:{port}/db?sslmode=disable");
+        let options: sqlx::postgres::PgConnectOptions = url.parse().expect("parse url");
+        Db::read_pool_options(max_connections).connect_lazy_with(options)
+    }
+
+    /// Table test for the wave sizing: the remaining shortfall, capped at the
+    /// concurrency bound, never underflowing once the target is met.
+    #[test]
+    fn warm_wave_size_is_the_shortfall_capped_at_the_concurrency_bound() {
+        let c = Db::READER_WARM_CONCURRENCY;
+        for (target, held, expected) in [
+            (25, 0, c),
+            (25, 20, c),
+            (25, 22, 3),
+            (25, 24, 1),
+            (25, 25, 0),
+            (25, 30, 0),
+            (1, 0, 1),
+            (0, 0, 0),
+        ] {
+            assert_eq!(
+                Db::reader_warm_wave_size(target, held),
+                expected,
+                "target={target} held={held}"
+            );
+        }
+    }
+
+    /// A fake acquire that succeeds when `ok(call_index)` says so, counting
+    /// every call.
+    fn counting_acquire(
+        calls: &std::sync::atomic::AtomicU32,
+        ok: impl Fn(u32) -> bool,
+    ) -> impl std::future::Future<Output = Option<u32>> {
+        let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(ok(n).then_some(n))
+    }
+
+    /// With every dial succeeding the pass opens exactly the target, no more.
+    #[tokio::test]
+    async fn warm_toward_opens_exactly_the_target() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let (held, failed) = Db::warm_toward(25, || counting_acquire(&calls, |_| true)).await;
+        assert_eq!((held.len(), failed), (25, 0));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 25);
+    }
+
+    /// A reader that admits one dial per wave cannot keep the pass running:
+    /// attempts stop at twice the waves a clean pass needs (target 25, wave
+    /// 5: 10 waves of 5), well short of the shortfall-driven 25 waves.
+    #[tokio::test]
+    async fn warm_toward_is_bounded_when_dials_keep_missing() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let w = Db::READER_WARM_CONCURRENCY;
+        let (held, failed) = Db::warm_toward(25, || counting_acquire(&calls, |n| n % w == 0)).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 50);
+        assert_eq!((held.len(), failed), (10, 40));
+    }
+
+    /// A wave that misses some dials is topped up by the next, so a slow
+    /// first wave does not leave the pool short.
+    #[tokio::test]
+    async fn warm_toward_tops_up_a_partially_failed_wave() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let (held, failed) = Db::warm_toward(10, || counting_acquire(&calls, |n| n != 1)).await;
+        assert_eq!((held.len(), failed), (10, 1));
+    }
+
+    /// A reader that refuses every dial ends the pass after one wave: warming
+    /// is a single bounded attempt, not a loop that hammers a dead reader
+    /// `target` times.
+    #[tokio::test]
+    async fn warm_pass_stops_after_one_wave_that_opens_nothing() {
+        let pool = dead_reader_pool(25).await;
+        let report = Db::warm_read_pool(&pool).await;
+        assert_eq!(
+            report,
+            ReaderWarmReport {
+                target: 25,
+                held: 0,
+                failed: Db::READER_WARM_CONCURRENCY,
+            }
+        );
+    }
+
+    /// An unreachable reader at boot is not warmed: the ping's failure ends
+    /// the task before any warm dial, and nothing panics or errors.
+    #[tokio::test]
+    async fn unreachable_reader_skips_the_warm_pass() {
+        let pool = dead_reader_pool(25).await;
+        let report =
+            Db::read_pool_boot_ping_then_warm(pool.clone(), Arc::new(OnceLock::new())).await;
+        assert_eq!(report, None);
     }
 }
 
