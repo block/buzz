@@ -282,6 +282,27 @@ void main() {
       );
     }
 
+    test('a delayed EOSE for an unsubscribed id cannot mark its replacement '
+        'live', () async {
+      final h = await _Harness.start();
+      final start = h.nowSeconds;
+      h.sockets.last.connectSuccessfully();
+      final old = await h.subscribeLive(_filter('quiet', since: start - 3600));
+      h.unsubscribers[old]!();
+
+      // The channel is subscribed again with an older floor. The old REQ's
+      // EOSE was still in flight when its CLOSE went out and now arrives.
+      final replacement = h.subscribeWithoutEose(
+        _filter('quiet', since: start - 7200),
+      );
+      expect(replacement, isNot(old));
+      h.receive(['EOSE', old]);
+
+      // The socket drops before the replacement's history arrives.
+      await h.dropAfter(const Duration(seconds: 100));
+      expect(h.replayedSince(), {'quiet': start - 7200});
+    });
+
     test('a second REQ on one socket cannot advance the cursor: its EOSE may '
         'belong to the REQ it replaced', () async {
       final h = await _Harness.start();
@@ -337,6 +358,7 @@ class _Harness {
   final retryTimers = <_ManualTimer>[];
   final reconnectDelays = <Duration>[];
   final subscriptionNames = <String, String>{};
+  final unsubscribers = <String, void Function()>{};
 
   int get nowSeconds => now.millisecondsSinceEpoch ~/ 1000;
 
@@ -418,7 +440,7 @@ class _Harness {
     subscriptionNames[subId] = filter.tags['#h']!.single;
     final future = session.subscribe(filter, (_) {});
     receive(['EOSE', subId]);
-    await future;
+    unsubscribers[subId] = await future;
     return subId;
   }
 
