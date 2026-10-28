@@ -1554,12 +1554,14 @@ test("an unacknowledged live REQ degrades to a pinned floor instead of repairing
 test("every paged repair floor is pinned before any live-only REQ, so a queued channel survives a second disconnect", async () => {
   resetGate();
   const lastSeen = 5_000;
+  const delivered = [];
   const originalFloor = lastSeen - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS;
   const subscriptions = new Map(
     Array.from({ length: 5 }, (_, i) => [
       `live-${i + 1}`,
       liveSub(buildChannelFilter(`channel-${i + 1}`, 1000), {
         lastSeenCreatedAt: lastSeen,
+        onEvent: (value) => delivered.push(value.id),
       }),
     ]),
   );
@@ -1602,15 +1604,27 @@ test("every paged repair floor is pinned before any live-only REQ, so a queued c
     sendRaw: ackingSendRaw(subscriptions, 1),
     requestRepair: async (request) => {
       repairs.push(request);
-      return request.channelId === "channel-5" && missed.created_at >= request.since
+      return request.channelId === "channel-5" &&
+        missed.created_at >= request.since
         ? [missed]
         : [];
     },
   });
   const fifth = repairs.find((request) => request.channelId === "channel-5");
-  assert.equal(fifth.since, originalFloor, "never advance past an unrepaired floor");
-  assert.ok(missed.created_at < 200_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS);
-  assert.equal(queued.pendingReplaySince, undefined, "cleared by the completed repair");
+  assert.equal(
+    fifth.since,
+    originalFloor,
+    "never advance past an unrepaired floor",
+  );
+  assert.ok(
+    missed.created_at < 200_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+  );
+  assert.deepEqual(delivered, ["missed-old"], "the old message is recovered");
+  assert.equal(
+    queued.pendingReplaySince,
+    undefined,
+    "cleared by the completed repair",
+  );
 
   for (const { resolve } of blocked) resolve([]);
   await first;
