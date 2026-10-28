@@ -46,7 +46,7 @@ class _Relay extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => filter.kinds.contains(39000) ? existing : [];
+  }) async => existing.where((e) => filter.kinds.contains(e.kind)).toList();
 
   @override
   Future<NostrEvent> publish(

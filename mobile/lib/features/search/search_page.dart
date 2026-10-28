@@ -587,11 +587,14 @@ class _PeopleSection extends ConsumerWidget {
             onResultSelected();
             final channel = await ref
                 .read(channelActionsProvider)
-                .openDm(pubkeys: [user.pubkey]);
+                .openDm(pubkeys: [user.pubkey], waitForChannelList: false);
             if (!context.mounted) return;
             await Navigator.of(context).push(
               MaterialPageRoute<void>(
-                builder: (_) => ChannelDetailPage(channel: channel),
+                builder: (_) => ChannelDetailPage(
+                  channel: channel,
+                  placement: ChannelRoutePlacement.ordinary,
+                ),
               ),
             );
           },

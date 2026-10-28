@@ -25,6 +25,7 @@ mod leases;
 pub(crate) mod requests;
 mod stages;
 pub use approvals::EntityApproval;
+pub(super) use leases::{lock_owned, validate_approved_inventory};
 pub use leases::{EntityExecution, EntityLease};
 pub use requests::{inventory_digest, EntityInspection, EntityRequest};
 use requests::{validate_operator, validated_inventory_digest};

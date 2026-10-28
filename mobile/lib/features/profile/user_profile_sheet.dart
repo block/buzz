@@ -49,7 +49,10 @@ void showUserProfileSheet(
     if (channel == null || !context.mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ChannelDetailPage(channel: channel),
+        builder: (_) => ChannelDetailPage(
+          channel: channel,
+          placement: ChannelRoutePlacement.ordinary,
+        ),
       ),
     );
   });
@@ -154,7 +157,7 @@ class UserProfileSheet extends HookConsumerWidget {
       try {
         final channel = await ref
             .read(channelActionsProvider)
-            .openDm(pubkeys: [pk]);
+            .openDm(pubkeys: [pk], waitForChannelList: false);
         if (!context.mounted) return;
         Navigator.of(context).pop(channel);
       } catch (_) {

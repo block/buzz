@@ -2960,6 +2960,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
+    final waits = <bool>[];
     const directoryUsers = [
       DirectoryUser(
         pubkey: 'alice',
@@ -2985,6 +2986,9 @@ void main() {
                 )
                 .toList();
           }),
+          channelActionsProvider.overrideWith(
+            (ref) => _PendingDmActions(waits),
+          ),
         ],
       ),
     );
@@ -3118,6 +3122,11 @@ void main() {
     );
     expect(searchField.textInputAction, TextInputAction.done);
     expect(searchField.onSubmitted, isNotNull);
+
+    // Done opens the DM at once instead of waiting on the full channel list.
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(waits, [false]);
   });
 
   testWidgets('wraps many recipients without overflowing above the keyboard', (
@@ -3881,4 +3890,22 @@ class _SwitchingUserCache extends UserCacheNotifier {
 class _CompletedPairingNotifier extends PairingNotifier {
   @override
   PairingState build() => const PairingState(status: PairingStatus.success);
+}
+
+class _PendingDmActions implements ChannelActions {
+  _PendingDmActions(this.waits);
+
+  final List<bool> waits;
+
+  @override
+  Future<Channel> openDm({
+    required List<String> pubkeys,
+    bool waitForChannelList = true,
+  }) {
+    waits.add(waitForChannelList);
+    return Completer<Channel>().future;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

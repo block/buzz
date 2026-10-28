@@ -10780,6 +10780,51 @@ void main() {
     },
   );
 
+  testWidgets('a thread reply in a DM opened ahead of the list addresses it', (
+    tester,
+  ) async {
+    final sender = _RecordingOrdinarySender();
+    final dm = Channel(
+      id: _channelId,
+      name: 'Pat',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'self',
+      createdAt: DateTime(2026),
+      memberCount: 2,
+      isMember: true,
+      participantPubkeys: const ['self', 'pat'],
+    );
+    final head = formatTimeline([
+      _textMsg(id: threadIdThreadDashRoot, pubkey: 'pat', content: 'Hi'),
+    ]).single;
+    final channels = _FakeChannelsNotifier(const []);
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [],
+        sender: sender,
+        channelsNotifier: channels,
+        home: ThreadDetailPage(
+          threadHead: head,
+          allMessages: [head],
+          channelId: _channelId,
+          currentPubkey: 'self',
+          isMember: true,
+          isArchived: false,
+        ),
+      ),
+    );
+    // The DM was just opened, so the reloading list does not have it yet.
+    channels.rememberOpened(dm);
+    await tester.pumpAndSettle();
+    await tester
+        .widget<ComposeBar>(find.byType(ComposeBar))
+        .onSend('Reply', []);
+    expect(sender.sent, ['Reply']);
+    expect(sender.channels.single?.isDm, isTrue);
+  });
+
   testWidgets('affirmative Solo route never falls back to ordinary sending', (
     tester,
   ) async {
@@ -18060,6 +18105,7 @@ class _MutableColorProfileNotifier extends ProfileNotifier {
 
 class _RecordingOrdinarySender implements SendMessage {
   final sent = <String>[];
+  final channels = <Channel?>[];
   @override
   Future<void> call({
     required String channelId,
@@ -18071,6 +18117,7 @@ class _RecordingOrdinarySender implements SendMessage {
     List<List<String>> mediaTags = const [],
   }) async {
     sent.add(content);
+    channels.add(channel);
   }
 }
 
