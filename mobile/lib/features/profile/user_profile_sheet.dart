@@ -49,7 +49,10 @@ void showUserProfileSheet(
     if (channel == null || !context.mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ChannelDetailPage(channel: channel),
+        builder: (_) => ChannelDetailPage(
+          channel: channel,
+          placement: ChannelRoutePlacement.ordinary,
+        ),
       ),
     );
   });
