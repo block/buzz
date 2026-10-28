@@ -52,6 +52,12 @@ void main() {
       expect(session.published.single.tags, [
         ['p', _peer],
       ]);
+      // Composers find it before the list has it, so sends there can check
+      // mentions and address the DM.
+      expect(
+        container.read(channelsProvider.notifier).channelById(_dmId)?.id,
+        _dmId,
+      );
 
       // The sidebar still reconciles, in the background, once the stalled
       // initial load settles.

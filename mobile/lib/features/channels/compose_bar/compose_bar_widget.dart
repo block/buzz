@@ -18,14 +18,9 @@ class ComposeBar extends HookConsumerWidget {
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
   final String? rootId;
-
-  /// The destination as the route resolved it. Sends check mentions against
-  /// it, so a DM opened before the channel list reloads can still send them.
-  final Channel? channel;
   const ComposeBar({
     super.key,
     required this.channelId,
-    this.channel,
     this.channelName = '',
     this.hintText,
     this.threadHeadId,
@@ -580,7 +575,6 @@ class ComposeBar extends HookConsumerWidget {
         scan = await _scanNonMemberMentions(
           ref,
           channelId: channelId,
-          routeChannel: channel,
           selectedMentions: selectedMentions,
           currentPubkey: currentPubkey,
         );

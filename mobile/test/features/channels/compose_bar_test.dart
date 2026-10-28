@@ -188,7 +188,7 @@ Widget _buildComposeBar({
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
   bool stallChannels = false,
-  Channel? channel,
+  Channel? openedAhead,
   List<ChannelMember> cachedMembers = const <ChannelMember>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
@@ -246,6 +246,7 @@ Widget _buildComposeBar({
           channels,
           cachedMembers: cachedMembers,
           stall: stallChannels,
+          openedAhead: openedAhead,
         ),
       ),
     ],
@@ -278,7 +279,6 @@ Widget _buildComposeBar({
                 final composeBar = ComposeBar(
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
-                  channel: channel,
                   threadHeadId: threadHeadId,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
@@ -652,16 +652,22 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
     this._channels, {
     List<ChannelMember> cachedMembers = const [],
     bool stall = false,
+    Channel? openedAhead,
   }) : _cachedMembers = cachedMembers,
-       _stall = stall;
+       _stall = stall,
+       _openedAheadChannel = openedAhead;
+
+  final Channel? _openedAheadChannel;
 
   @override
   List<ChannelMember> cachedMembersForChannel(String channelId) =>
       channelId == 'channel-1' ? _cachedMembers : const [];
 
   @override
-  Future<List<Channel>> build() =>
-      _stall ? Completer<List<Channel>>().future : Future.value(_channels);
+  Future<List<Channel>> build() {
+    if (_openedAheadChannel case final channel?) rememberOpened(channel);
+    return _stall ? Completer<List<Channel>>().future : Future.value(_channels);
+  }
 
   @override
   Future<void> refresh({bool fetchDirectory = false}) async {
@@ -4731,10 +4737,10 @@ void main() {
                 displayName: 'Pat Peer',
               ),
             ],
-            // The route opened the DM from its own metadata and roster while
-            // the full channel list is still loading.
+            // The DM was opened from its own metadata and roster while the
+            // full channel list is still loading.
             stallChannels: true,
-            channel: _makeCurrentChannel(
+            openedAhead: _makeCurrentChannel(
               channelType: 'dm',
               participantPubkeys: [signer.public, pat],
             ),

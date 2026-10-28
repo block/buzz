@@ -159,8 +159,11 @@ class ChannelActions {
     if (hiddenDmIdsFromEvents(await hiddenRequest).contains(channelId)) {
       throw StateError('DM was opened but is still hidden');
     }
-    return await channelRequest ??
+    final channel =
+        await channelRequest ??
         (throw StateError('DM was opened but is not visible yet'));
+    _ref.read(channelsProvider.notifier).rememberOpened(channel);
+    return channel;
   }
 
   Future<void> addMembers({

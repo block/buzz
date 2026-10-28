@@ -510,13 +510,10 @@ class _NonMemberMentionScan {
 
 /// Resolves which mentioned identities are non-members, and whether this
 /// identity may add them (see [Channel.canAddMembers]). A DM's participant set
-/// is fixed at creation, so nobody outside it can be added. [routeChannel],
-/// when given, stands in for the channel list, which may not have a just
-/// opened DM yet.
+/// is fixed at creation, so nobody outside it can be added.
 Future<_NonMemberMentionScan> _scanNonMemberMentions(
   WidgetRef ref, {
   required String channelId,
-  Channel? routeChannel,
   required List<MentionCandidate> selectedMentions,
   required String? currentPubkey,
 }) async {
@@ -528,8 +525,9 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
   );
   if (selectedMentions.isEmpty) return none;
 
+  // A DM opened ahead of a reloading list is found without waiting for it.
   final channel =
-      routeChannel ??
+      ref.read(channelsProvider.notifier).channelById(channelId) ??
       (await ref.read(
         channelsProvider.future,
       )).firstWhere((candidate) => candidate.id == channelId);
