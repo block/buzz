@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
 import 'package:native_toolchain_c/native_toolchain_c.dart';
@@ -31,5 +33,14 @@ void main(List<String> args) async {
         'COMB_TEETH': '6',
       },
     ).run(input: input, output: output);
+    // CBuilder tracks only the listed sources, so a header-only vendor update
+    // would otherwise reuse a stale library in incremental builds.
+    output.dependencies.addAll(
+      Directory.fromUri(input.packageRoot.resolve('$_vendor/'))
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((file) => file.path.endsWith('.h'))
+          .map((file) => file.uri),
+    );
   });
 }
