@@ -1,0 +1,452 @@
+//! Resume cursor (EOSE-derived `live_until`) and reconnect spreading.
+//!
+//! Pure decisions are table-tested; the wiring (EOSE handling, close-code
+//! capture, the reconnect entry, REQ `since` on the wire) is driven through the
+//! production functions the reconnect path actually calls. No relay service.
+use super::tests::{next_test_frame, seed_test_subscription, test_channel_filter, test_ws_pair};
+use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+
+const SUB_FLOOR_OFFSET: u64 = RESUME_LIVE_SKEW_SECS - SINCE_SKEW_SECS;
+
+#[test]
+fn resume_since_table_over_input_combinations() {
+    // (name, base, last_seen, dropped, live_until, expected)
+    #[allow(clippy::type_complexity)]
+    let cases: &[(&str, Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<u64>)] = &[
+        // No EOSE on the closed connection: today's behavior.
+        ("no eose, nothing", Some(1000), None, None, None, Some(1000)),
+        ("no eose, no baseline", None, None, None, None, None),
+        ("no eose, events", Some(1000), Some(2000), None, None, Some(2000)),
+        ("no eose, dropped only", Some(1000), None, Some(1500), None, Some(1500)),
+        ("no eose, dropped below last_seen", Some(1000), Some(2000), Some(1500), None, Some(1500)),
+        ("no eose, dropped above last_seen", Some(1000), Some(2000), Some(2500), None, Some(2000)),
+        // EOSE and no events: a quiet sub resumes from live_until, not the baseline.
+        ("eose, quiet", Some(1000), None, None, Some(5000), Some(5000 - SUB_FLOOR_OFFSET)),
+        ("eose, quiet, no baseline", None, None, None, Some(5000), Some(5000 - SUB_FLOOR_OFFSET)),
+        // EOSE and events: newest of last_seen and the live floor wins.
+        ("eose, last_seen newer than floor", Some(1000), Some(4990), None, Some(5000), Some(4990)),
+        ("eose, floor newer than last_seen", Some(1000), Some(4000), None, Some(5000), Some(5000 - SUB_FLOOR_OFFSET)),
+        // Dropped / gap floor keeps precedence over the live cursor.
+        ("eose, dropped below cursor", Some(1000), Some(4990), Some(3000), Some(5000), Some(3000)),
+        ("eose, dropped only", Some(1000), None, Some(3000), Some(5000), Some(3000)),
+        ("eose, dropped above cursor", Some(1000), None, Some(4990), Some(5000), Some(5000 - SUB_FLOOR_OFFSET)),
+        // Clock-skew edges: never below the original floor, never underflow.
+        ("eose, live_until before baseline", Some(1000), None, None, Some(30), Some(1000)),
+        ("eose, live_until barely above baseline", Some(1000), None, None, Some(1100), Some(1100 - SUB_FLOOR_OFFSET).max(Some(1000))),
+        ("eose, live_until underflow, no baseline", None, None, None, Some(0), Some(0)),
+    ];
+    for (name, base, last_seen, dropped, live_until, expected) in cases {
+        assert_eq!(
+            resume_since(*base, *last_seen, *dropped, *live_until),
+            *expected,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn live_floor_is_sixty_seconds_on_the_wire() {
+    // `send_subscribe` subtracts SINCE_SKEW_SECS, so the cursor handed to it
+    // must land exactly RESUME_LIVE_SKEW_SECS before live_until on the wire.
+    let cursor = resume_since(Some(1), None, None, Some(10_000)).unwrap();
+    assert_eq!(cursor - SINCE_SKEW_SECS, 10_000 - RESUME_LIVE_SKEW_SECS);
+}
+
+#[test]
+fn jitter_maps_sample_onto_symmetric_twenty_percent_band() {
+    let base = Duration::from_secs(100);
+    for (sample, expected_ms) in [
+        (0.0, 80_000),
+        (0.25, 90_000),
+        (0.5, 100_000),
+        (0.75, 110_000),
+        (1.0, 120_000),
+        (-3.0, 80_000),
+        (7.0, 120_000),
+        (f64::NAN, 100_000),
+    ] {
+        assert_eq!(
+            jittered_duration_with(base, sample).as_millis(),
+            expected_ms,
+            "sample {sample}"
+        );
+    }
+}
+
+#[test]
+fn production_jitter_spans_the_whole_band() {
+    let base = Duration::from_secs(100);
+    let draws: Vec<_> = (0..400).map(|_| jittered_duration(base)).collect();
+    assert!(draws
+        .iter()
+        .all(|d| *d >= Duration::from_secs(80) && *d <= Duration::from_secs(120)));
+    // The old formula only produced 0.80x-0.89x.
+    assert!(draws.iter().any(|d| *d > Duration::from_secs(110)));
+    assert!(draws.iter().any(|d| *d < Duration::from_secs(90)));
+}
+
+#[test]
+fn first_reconnect_delay_table() {
+    let secs = Duration::from_secs;
+    let cases: &[(Option<u16>, f64, Duration)] = &[
+        (Some(1012), 0.0, Duration::ZERO),
+        (Some(1012), 0.5, secs(5)),
+        (Some(1012), 1.0, secs(10)),
+        (Some(1012), 7.0, secs(10)),
+        (Some(1012), f64::NAN, secs(5)),
+        (Some(1001), 0.25, Duration::from_millis(2_500)),
+        // Other closes keep today's immediate first attempt.
+        (Some(1000), 0.5, Duration::ZERO),
+        (Some(1006), 0.5, Duration::ZERO),
+        (Some(1011), 0.5, Duration::ZERO),
+        (None, 0.5, Duration::ZERO),
+    ];
+    for (code, sample, expected) in cases {
+        assert_eq!(
+            first_reconnect_delay(*code, *sample),
+            *expected,
+            "{code:?} sample {sample}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn close_frame_code_is_captured_by_the_message_handler() {
+    let (mut client, _server) = test_ws_pair().await;
+    let (event_tx, _event_rx) = mpsc::channel(1);
+    let (control_tx, _control_rx) = mpsc::channel(1);
+    let mut state = BgState::new();
+    for (frame, expected) in [
+        (
+            Some(CloseFrame {
+                code: CloseCode::Restart,
+                reason: "".into(),
+            }),
+            Some(1012),
+        ),
+        (
+            Some(CloseFrame {
+                code: CloseCode::Away,
+                reason: "".into(),
+            }),
+            Some(1001),
+        ),
+        (None, None),
+    ] {
+        let alive = handle_ws_message(
+            Message::Close(frame),
+            &mut client,
+            &event_tx,
+            &control_tx,
+            &mut state,
+            &Keys::generate(),
+            "ws://127.0.0.1:1",
+            "agent",
+            None,
+        )
+        .await;
+        assert!(!alive, "a Close frame ends the connection");
+        assert_eq!(state.last_close_code, expected);
+    }
+}
+
+#[test]
+fn begin_reconnect_consumes_the_close_code() {
+    let mut state = BgState::new();
+    state.last_close_code = Some(1012);
+    assert_eq!(
+        begin_reconnect(&mut state, 5_000, 0.5),
+        Duration::from_secs(5)
+    );
+    // A later reconnect for an unrelated reason must not inherit the delay.
+    assert_eq!(begin_reconnect(&mut state, 5_001, 0.5), Duration::ZERO);
+}
+
+async fn deliver_eose(client: &mut WsStream, state: &mut BgState, sub_id: &str) {
+    let (event_tx, _event_rx) = mpsc::channel(1);
+    let (control_tx, _control_rx) = mpsc::channel(1);
+    let alive = handle_ws_message(
+        Message::Text(json!(["EOSE", sub_id]).to_string().into()),
+        client,
+        &event_tx,
+        &control_tx,
+        state,
+        &Keys::generate(),
+        "ws://127.0.0.1:1",
+        "agent",
+        None,
+    )
+    .await;
+    assert!(alive);
+}
+
+#[tokio::test]
+async fn eose_tracking_only_covers_owned_subscriptions() {
+    let (mut client, _server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel);
+    for sub in [
+        channel_sub_id(channel),
+        MEMBERSHIP_NOTIF_SUB_ID.to_owned(),
+        channel_sub_id(Uuid::new_v4()),
+        OBSERVER_CONTROL_SUB_ID.to_owned(),
+        "attacker-chosen".to_owned(),
+    ] {
+        deliver_eose(&mut client, &mut state, &sub).await;
+    }
+    state.note_connection_closed(5_000);
+    let mut stamped: Vec<_> = state.live_until.keys().cloned().collect();
+    stamped.sort();
+    let mut expected = vec![channel_sub_id(channel), MEMBERSHIP_NOTIF_SUB_ID.to_owned()];
+    expected.sort();
+    assert_eq!(stamped, expected);
+    assert!(state.eose_this_conn.is_empty());
+}
+
+#[tokio::test]
+async fn quiet_channel_and_membership_resume_from_live_until() {
+    let (mut client, _server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel); // subscribe_since = 1_000
+    state.startup_watermark = Some(1_000);
+    state.membership_last_seen = Some(1_000);
+    state.membership_sub_active = true;
+    assert_eq!(state.channel_since(&channel), Some(1_000));
+
+    deliver_eose(&mut client, &mut state, &channel_sub_id(channel)).await;
+    deliver_eose(&mut client, &mut state, MEMBERSHIP_NOTIF_SUB_ID).await;
+    begin_reconnect(&mut state, 5_000, 0.0);
+
+    assert_eq!(state.channel_since(&channel), Some(5_000 - SUB_FLOOR_OFFSET));
+    assert_eq!(state.membership_since(), Some(5_000 - SUB_FLOOR_OFFSET));
+
+    // A recorded gap still wins for both.
+    state.channel_dropped_since.insert(channel, 2_000);
+    state.membership_dropped_since = Some(2_000);
+    assert_eq!(state.channel_since(&channel), Some(2_000));
+    assert_eq!(state.membership_since(), Some(2_000));
+}
+
+#[tokio::test]
+async fn closed_connection_without_eose_keeps_the_previous_cursor() {
+    let (mut client, _server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel);
+    deliver_eose(&mut client, &mut state, &channel_sub_id(channel)).await;
+    begin_reconnect(&mut state, 5_000, 0.0);
+    // The next connection never reaches EOSE before it closes too.
+    begin_reconnect(&mut state, 9_000, 0.0);
+    assert_eq!(state.channel_since(&channel), Some(5_000 - SUB_FLOOR_OFFSET));
+    // Once a connection does reach EOSE, the cursor moves on.
+    deliver_eose(&mut client, &mut state, &channel_sub_id(channel)).await;
+    begin_reconnect(&mut state, 9_500, 0.0);
+    assert_eq!(state.channel_since(&channel), Some(9_500 - SUB_FLOOR_OFFSET));
+}
+
+#[tokio::test]
+async fn resending_a_req_withdraws_its_eose() {
+    let (mut client, _server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel);
+    state.membership_sub_active = true;
+    deliver_eose(&mut client, &mut state, &channel_sub_id(channel)).await;
+    deliver_eose(&mut client, &mut state, MEMBERSHIP_NOTIF_SUB_ID).await;
+
+    let since = state.channel_since(&channel);
+    assert!(
+        send_subscribe(
+            &mut client,
+            &mut state,
+            channel,
+            "agent",
+            since,
+            &test_channel_filter()
+        )
+        .await
+    );
+    assert!(send_membership_subscribe(&mut client, &mut state, "agent", Some(1_000)).await);
+
+    // Neither re-sent REQ has reached EOSE, so closing now proves nothing.
+    begin_reconnect(&mut state, 5_000, 0.0);
+    assert!(state.live_until.is_empty());
+    assert_eq!(state.channel_since(&channel), Some(1_000));
+}
+
+#[tokio::test]
+async fn removing_a_channel_clears_its_resume_state() {
+    let (mut client, _server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let (stamped, pending) = (Uuid::new_v4(), Uuid::new_v4());
+    seed_test_subscription(&mut state, stamped);
+    seed_test_subscription(&mut state, pending);
+    deliver_eose(&mut client, &mut state, &channel_sub_id(stamped)).await;
+    begin_reconnect(&mut state, 5_000, 0.0);
+    deliver_eose(&mut client, &mut state, &channel_sub_id(pending)).await;
+
+    for channel in [stamped, pending] {
+        apply_command_to_state(&mut state, RelayCommand::Unsubscribe { channel_id: channel });
+    }
+    assert!(state.live_until.is_empty());
+    assert!(state.eose_this_conn.is_empty());
+}
+
+// -- Reconnect entry points, driven through the production functions --------
+
+struct ReconnectHarness {
+    cmd_rx: mpsc::Receiver<RelayCommand>,
+    event_tx: mpsc::Sender<Option<BuzzEvent>>,
+    control_tx: mpsc::Sender<Event>,
+    keys: Keys,
+}
+
+impl ReconnectHarness {
+    /// A harness whose command queue already holds `Shutdown`, so any wait
+    /// inside the reconnect path ends the call immediately.
+    async fn with_queued_shutdown() -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel(4);
+        let (event_tx, _) = mpsc::channel(1);
+        let (control_tx, _) = mpsc::channel(1);
+        cmd_tx.send(RelayCommand::Shutdown).await.unwrap();
+        Self {
+            cmd_rx,
+            event_tx,
+            control_tx,
+            keys: Keys::generate(),
+        }
+    }
+
+    async fn autonomous(&mut self, ws: &mut WsStream, state: &mut BgState, url: &str) {
+        let outcome = try_autonomous_reconnect(
+            ws,
+            &mut self.cmd_rx,
+            state,
+            &self.keys,
+            url,
+            "agent",
+            &self.event_tx,
+            &self.control_tx,
+            None,
+        )
+        .await;
+        assert!(matches!(outcome, ReconnectOutcome::Shutdown));
+    }
+}
+
+/// A relay URL nothing listens on: connects are refused immediately.
+async fn refused_relay_url() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    format!("ws://{addr}")
+}
+
+/// A TCP server that counts connections and hangs up immediately, so the
+/// WebSocket handshake fails fast.
+async fn counting_relay() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = accepted.clone();
+    let task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    (url, accepted, task)
+}
+
+async fn resubscribe_since(state: &mut BgState, channel: Uuid) -> u64 {
+    let (mut client, mut server) = test_ws_pair().await;
+    let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
+    let result = resubscribe_after_reconnect(&mut client, &mut cmd_rx, state, "agent", true).await;
+    assert!(matches!(result, ResubscribeResult::Ok));
+    let req = next_test_frame(&mut server).await;
+    assert_eq!(req[1], channel_sub_id(channel));
+    req[2]["since"].as_u64().unwrap()
+}
+
+#[tokio::test]
+async fn autonomous_reconnect_stamps_live_until_and_replay_req_resumes_from_it() {
+    let (mut live, _live_server) = test_ws_pair().await;
+    let (mut dead, _dead_server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel); // original since = 1_000
+    deliver_eose(&mut live, &mut state, &channel_sub_id(channel)).await;
+
+    let before = unix_now_secs();
+    let url = refused_relay_url().await;
+    ReconnectHarness::with_queued_shutdown()
+        .await
+        .autonomous(&mut dead, &mut state, &url)
+        .await;
+    let after = unix_now_secs();
+
+    let live_until = state.live_until[&channel_sub_id(channel)];
+    assert!((before..=after).contains(&live_until));
+    let since = resubscribe_since(&mut state, channel).await;
+    assert_eq!(since, live_until - RESUME_LIVE_SKEW_SECS);
+    assert!(since > 1_000, "must not replay from the original floor");
+}
+
+#[tokio::test]
+async fn wait_for_reconnect_stamps_live_until_too() {
+    let (mut live, _live_server) = test_ws_pair().await;
+    let (mut dead, _dead_server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel);
+    deliver_eose(&mut live, &mut state, &channel_sub_id(channel)).await;
+
+    let url = refused_relay_url().await;
+    let mut harness = ReconnectHarness::with_queued_shutdown().await;
+    let outcome = wait_for_reconnect(
+        &mut dead,
+        &mut harness.cmd_rx,
+        &mut state,
+        &harness.keys,
+        &url,
+        "agent",
+        &harness.event_tx,
+        &harness.control_tx,
+        true,
+        None,
+    )
+    .await;
+    assert!(matches!(outcome, ReconnectOutcome::Shutdown));
+    assert!(state.live_until.contains_key(&channel_sub_id(channel)));
+}
+
+#[tokio::test]
+async fn restart_closes_delay_the_first_attempt_and_other_closes_do_not() {
+    for (close_code, expected_attempts) in [
+        (Some(1012), 0),
+        (Some(1001), 0),
+        (Some(1000), 1),
+        (Some(1006), 1),
+        (None, 1),
+    ] {
+        let (mut dead, _server) = test_ws_pair().await;
+        let (url, accepted, relay) = counting_relay().await;
+        let mut state = BgState::new();
+        state.last_close_code = close_code;
+        ReconnectHarness::with_queued_shutdown()
+            .await
+            .autonomous(&mut dead, &mut state, &url)
+            .await;
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            expected_attempts,
+            "close code {close_code:?}"
+        );
+        relay.abort();
+    }
+}

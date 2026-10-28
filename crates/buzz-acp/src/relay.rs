@@ -57,6 +57,18 @@ const WS_SEND_TIMEOUT_SECS: u64 = 10;
 const STABLE_CONNECTION_SECS: u64 = 60;
 /// Seconds subtracted from `since` on resubscribe to tolerate clock skew.
 const SINCE_SKEW_SECS: u64 = 5;
+/// Margin subtracted from a connection's `live_until` when resuming a
+/// subscription that reached EOSE on it. Absorbs client/relay clock skew and
+/// `created_at` jitter; the replay still overlaps everything after the margin.
+const RESUME_LIVE_SKEW_SECS: u64 = 60;
+/// WebSocket close code 1001 (Going Away): the peer is shutting down.
+const CLOSE_CODE_GOING_AWAY: u16 = 1001;
+/// WebSocket close code 1012 (Service Restart): the relay pod is rolling.
+const CLOSE_CODE_SERVICE_RESTART: u16 = 1012;
+/// Upper bound of the uniform random wait before the first reconnect attempt
+/// after a 1001/1012 close. The relay already spreads its own closes over ~10s
+/// during a rolling deploy; this spreads the clients' arrival the same way.
+const RESTART_RECONNECT_SPREAD: Duration = Duration::from_secs(10);
 /// Timeout for the NIP-42 auth handshake steps.
 ///
 /// Raised from 5s to 20s (≈2 RTTs at the observed 10s max round-trip on degraded
@@ -1233,6 +1245,19 @@ struct BgState {
     /// the elevated rung it earned. Reset to 0 by the stability block once the
     /// connection has been up for `STABLE_CONNECTION_SECS`.
     backoff_step: usize,
+    /// Subscription IDs (channel subs and the membership sub) that reached
+    /// EOSE on the CURRENT connection. Moved into `live_until` when that
+    /// connection closes; cleared when a REQ is re-sent for the subscription
+    /// because the new REQ has not reached EOSE yet.
+    eose_this_conn: HashSet<String>,
+    /// Wall-clock unix seconds at which a subscription that had reached EOSE
+    /// was last known to be live (the close time of its connection). Everything
+    /// stored before EOSE was replayed and everything after was delivered live,
+    /// so a reconnect only needs to replay from here minus `RESUME_LIVE_SKEW_SECS`.
+    live_until: HashMap<String, u64>,
+    /// Close code of the last WebSocket Close frame received, consumed by the
+    /// next reconnect to choose the first-attempt delay.
+    last_close_code: Option<u16>,
 }
 
 impl BgState {
@@ -1260,6 +1285,9 @@ impl BgState {
             resubscribe_retry: HashSet::new(),
             connection_generation: 0,
             backoff_step: 0,
+            eose_this_conn: HashSet::new(),
+            live_until: HashMap::new(),
+            last_close_code: None,
         }
     }
 
@@ -1285,22 +1313,57 @@ impl BgState {
 
     /// Compute the `since` timestamp for a channel (re)subscribe.
     ///
-    /// Picks the earliest of `last_seen` and `channel_dropped_since` so
-    /// the replay window covers both successfully processed events and any
-    /// that were dropped due to queue pressure. Falls back to the per-channel
-    /// `subscribe_since` (set at first subscribe) or `startup_watermark`.
+    /// See [`resume_since`] for how `last_seen`, `channel_dropped_since`, the
+    /// per-channel `subscribe_since` / `startup_watermark` baseline, and the
+    /// EOSE-derived `live_until` combine.
     fn channel_since(&self, channel_id: &Uuid) -> Option<u64> {
-        let last_seen = self.last_seen.get(channel_id).copied();
-        let dropped = self.channel_dropped_since.get(channel_id).copied();
-        match (last_seen, dropped) {
-            (Some(l), Some(d)) => Some(l.min(d)),
-            (Some(l), None) => Some(l),
-            (None, Some(d)) => Some(d),
-            (None, None) => self
-                .subscribe_since
+        resume_since(
+            self.subscribe_since
                 .get(channel_id)
                 .copied()
                 .or(self.startup_watermark),
+            self.last_seen.get(channel_id).copied(),
+            self.channel_dropped_since.get(channel_id).copied(),
+            self.live_until.get(&channel_sub_id(*channel_id)).copied(),
+        )
+    }
+
+    /// Compute the `since` timestamp for a membership notification (re)subscribe.
+    fn membership_since(&self) -> Option<u64> {
+        resume_since(
+            self.startup_watermark,
+            self.membership_last_seen,
+            self.membership_dropped_since,
+            self.live_until.get(MEMBERSHIP_NOTIF_SUB_ID).copied(),
+        )
+    }
+
+    /// Record that `sub_id` reached EOSE on the current connection. Only
+    /// subscriptions this task owns are tracked, so an untrusted relay cannot
+    /// grow the set with arbitrary IDs.
+    fn note_eose(&mut self, sub_id: &str) {
+        let known = sub_id == MEMBERSHIP_NOTIF_SUB_ID
+            || channel_id_from_sub_id(sub_id)
+                .is_some_and(|channel_id| self.active_subscriptions.contains_key(&channel_id));
+        if known {
+            self.eose_this_conn.insert(sub_id.to_owned());
+        }
+    }
+
+    /// A REQ was (re)sent for `sub_id`: it has not reached EOSE yet.
+    fn forget_eose(&mut self, sub_id: &str) {
+        self.eose_this_conn.remove(sub_id);
+    }
+
+    /// The current connection closed at `now_secs`: every subscription that
+    /// reached EOSE on it was live until now. Subscriptions that never reached
+    /// EOSE keep whatever cursor they already had.
+    fn note_connection_closed(&mut self, now_secs: u64) {
+        for sub_id in self.eose_this_conn.drain() {
+            self.live_until
+                .entry(sub_id)
+                .and_modify(|t| *t = (*t).max(now_secs))
+                .or_insert(now_secs);
         }
     }
 
@@ -1314,6 +1377,9 @@ impl BgState {
         self.last_seen.remove(channel_id);
         self.subscribe_since.remove(channel_id);
         self.channel_dropped_since.remove(channel_id);
+        let sub_id = channel_sub_id(*channel_id);
+        self.eose_this_conn.remove(&sub_id);
+        self.live_until.remove(&sub_id);
         self.active_filters.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);
         self.resubscribe_retry.remove(channel_id);
@@ -1648,7 +1714,7 @@ async fn execute_connected_command(
                 return true;
             }
             let since = state.membership_last_seen.or(state.startup_watermark);
-            let sent = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
+            let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
             if sent {
                 state.membership_resub_needed = false;
                 if state.membership_last_seen.is_none() {
@@ -1851,13 +1917,8 @@ async fn run_background_task(
             if state.check_rate_gate().is_none() {
                 if state.membership_resub_needed && budget > 0 {
                     let replay_since =
-                        match (state.membership_dropped_since, state.membership_last_seen) {
-                            (Some(d), Some(l)) => Some(d.min(l)),
-                            (Some(d), None) => Some(d),
-                            (None, Some(l)) => Some(l),
-                            (None, None) => state.startup_watermark,
-                        };
-                    if send_membership_subscribe(&mut ws, &agent_pubkey_hex, replay_since).await {
+                        state.membership_since();
+                    if send_membership_subscribe(&mut ws, &mut state, &agent_pubkey_hex, replay_since).await {
                         state.membership_resub_needed = false;
                         state.membership_dropped_since = None;
                         budget = budget.saturating_sub(1);
@@ -2359,6 +2420,7 @@ async fn handle_ws_message(
                 }
                 RelayMessage::Eose { subscription_id } => {
                     debug!("EOSE for subscription {subscription_id}");
+                    state.note_eose(&subscription_id);
                 }
                 RelayMessage::Notice { message } => {
                     // Fix 4: NOTICE at warn level.
@@ -2451,13 +2513,8 @@ async fn handle_ws_message(
                         }
                     } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
                         let since =
-                            match (state.membership_dropped_since, state.membership_last_seen) {
-                                (Some(d), Some(l)) => Some(d.min(l)),
-                                (Some(d), None) => Some(d),
-                                (None, Some(l)) => Some(l),
-                                (None, None) => state.startup_watermark,
-                            };
-                        let sent = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
+                            state.membership_since();
+                        let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
                         if sent {
                             // Success — subscription is live again.
                             state.membership_dropped_since = None;
@@ -2566,8 +2623,9 @@ async fn handle_ws_message(
             }
             true
         }
-        Message::Close(_) => {
-            debug!("relay sent Close frame");
+        Message::Close(frame) => {
+            state.last_close_code = frame.as_ref().map(|f| u16::from(f.code));
+            debug!(close_code = ?state.last_close_code, "relay sent Close frame");
             false
         }
         // Binary, Pong, Frame — ignore
@@ -2754,13 +2812,8 @@ async fn resubscribe_after_reconnect(
             {
                 return ResubscribeResult::Shutdown;
             }
-            let replay_since = match (state.membership_dropped_since, state.membership_last_seen) {
-                (Some(d), Some(l)) => Some(d.min(l)),
-                (Some(d), None) => Some(d),
-                (None, Some(l)) => Some(l),
-                (None, None) => state.startup_watermark,
-            };
-            let sent = send_membership_subscribe(ws, agent_pubkey_hex, replay_since).await;
+            let replay_since = state.membership_since();
+            let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, replay_since).await;
             if sent {
                 state.membership_dropped_since = None;
                 state.membership_resub_needed = false;
@@ -3094,6 +3147,9 @@ async fn try_autonomous_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    if !prepare_reconnect(cmd_rx, state).await {
+        return ReconnectOutcome::Shutdown;
+    }
     // 5 attempts, up to 16s base backoff. Shares delay values with the
     // initial-connect retry in `HarnessRelay::connect()` (STARTUP_CONNECT_BACKOFFS) —
     // see its doc comment for how the two loops consume the array differently.
@@ -3225,6 +3281,9 @@ async fn wait_for_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    if !prepare_reconnect(cmd_rx, state).await {
+        return ReconnectOutcome::Shutdown;
+    }
     if !skip_drain {
         // Drain commands until we get Reconnect (or Shutdown).
         // Other commands update state so reconnect reflects latest intent.
@@ -3353,7 +3412,7 @@ async fn wait_for_reconnect(
 /// Returns `true` if the REQ was successfully written to the WebSocket.
 async fn send_subscribe(
     ws: &mut WsStream,
-    _state: &BgState,
+    state: &mut BgState,
     channel_id: Uuid,
     agent_pubkey_hex: &str,
     since: Option<u64>,
@@ -3393,6 +3452,8 @@ async fn send_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
+                    // The new REQ has not reached EOSE yet.
+                    state.forget_eose(&sub_id);
                     debug!(
                         "subscribed to channel {channel_id}{}",
                         if since.is_some() {
@@ -3420,6 +3481,7 @@ async fn send_subscribe(
 /// Returns `true` if the REQ was successfully written to the WebSocket.
 async fn send_membership_subscribe(
     ws: &mut WsStream,
+    state: &mut BgState,
     agent_pubkey_hex: &str,
     since: Option<u64>,
 ) -> bool {
@@ -3447,6 +3509,7 @@ async fn send_membership_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
+                    state.forget_eose(MEMBERSHIP_NOTIF_SUB_ID);
                     debug!("subscribed to membership notifications (since={since_ts})");
                     true
                 }
@@ -3526,16 +3589,93 @@ pub(crate) fn parse_rate_limit_retry_secs(msg: &str) -> Option<u64> {
     after[..len].parse::<u64>().ok()
 }
 
-/// Add ±20% jitter to a backoff duration using the nanosecond sub-second
-/// component of the system clock as a cheap entropy source (no `rand` dep).
+/// Uniform random sample in `[0, 1)` from the OS CSPRNG (via a v4 UUID, so no
+/// extra dependency). Used for reconnect jitter so concurrent agents spread out.
+fn random_unit_sample() -> f64 {
+    const MANTISSA_BITS: u32 = 53;
+    let (_, low) = Uuid::new_v4().as_u64_pair();
+    (low & ((1u64 << MANTISSA_BITS) - 1)) as f64 / (1u64 << MANTISSA_BITS) as f64
+}
+
+/// Clamp an externally supplied sample into `[0, 1]`; non-finite values fall
+/// back to the midpoint so `Duration::mul_f64` can never panic.
+fn clamp_unit_sample(sample: f64) -> f64 {
+    if sample.is_finite() {
+        sample.clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
+}
+
+/// Add symmetric ±20% jitter to a backoff duration.
 fn jittered_duration(base: Duration) -> Duration {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    // factor ∈ [0.8, 1.2)
-    let factor = 0.8 + (nanos as f64 / u32::MAX as f64) * 0.4;
-    base.mul_f64(factor)
+    jittered_duration_with(base, random_unit_sample())
+}
+
+/// Deterministic core of [`jittered_duration`]: `sample` in `[0, 1]` maps
+/// linearly onto a factor in `[0.8, 1.2]`.
+fn jittered_duration_with(base: Duration, sample: f64) -> Duration {
+    base.mul_f64(0.8 + clamp_unit_sample(sample) * 0.4)
+}
+
+/// Delay before the first reconnect attempt after a close.
+///
+/// A 1012 (Service Restart) or 1001 (Going Away) close means the relay pod is
+/// rolling; every client of that pod is being closed within the same ~10s
+/// window, so each waits a uniform random `sample * 10s` ("full jitter") to
+/// spread its arrival. Any other close (or none) reconnects immediately, as
+/// before. `sample` is in `[0, 1]` and is injected so callers can test this
+/// without sleeping.
+fn first_reconnect_delay(close_code: Option<u16>, sample: f64) -> Duration {
+    match close_code {
+        Some(CLOSE_CODE_SERVICE_RESTART | CLOSE_CODE_GOING_AWAY) => {
+            RESTART_RECONNECT_SPREAD.mul_f64(clamp_unit_sample(sample))
+        }
+        _ => Duration::ZERO,
+    }
+}
+
+/// Combine the replay inputs for one subscription into the `since` cursor
+/// handed to `send_subscribe` (which subtracts [`SINCE_SKEW_SECS`] on the wire).
+///
+/// - `base`: original replay floor (`subscribe_since` / startup watermark).
+/// - `last_seen`: newest delivered event `created_at`.
+/// - `dropped`: oldest event lost to backpressure; a recorded gap, so the
+///   result never advances past it.
+/// - `live_until`: client wall clock when a connection on which the
+///   subscription had reached EOSE closed.
+///
+/// Without `live_until` this is the pre-existing `min(last_seen, dropped)`
+/// else `base`. With `live_until`, the delivered-progress cursor becomes
+/// `max(base, last_seen, live_until - RESUME_LIVE_SKEW_SECS)` (expressed here
+/// before the wire skew), then the dropped floor is applied on top.
+fn resume_since(
+    base: Option<u64>,
+    last_seen: Option<u64>,
+    dropped: Option<u64>,
+    live_until: Option<u64>,
+) -> Option<u64> {
+    let cursor = match live_until {
+        Some(live_until) => {
+            let floor = live_until.saturating_sub(RESUME_LIVE_SKEW_SECS - SINCE_SKEW_SECS);
+            Some([base, last_seen, Some(floor)].into_iter().flatten().max()?)
+        }
+        None => last_seen,
+    };
+    match (cursor, dropped) {
+        (Some(c), Some(d)) => Some(c.min(d)),
+        (Some(c), None) => Some(c),
+        (None, Some(d)) => Some(d),
+        (None, None) => base,
+    }
+}
+
+/// Bookkeeping at the top of every reconnect, returning the delay to wait
+/// before the first attempt: stamps `live_until` for subscriptions that
+/// reached EOSE on the connection that just closed, and consumes its close code.
+fn begin_reconnect(state: &mut BgState, now_secs: u64, sample: f64) -> Duration {
+    state.note_connection_closed(now_secs);
+    first_reconnect_delay(state.last_close_code.take(), sample)
 }
 
 /// Classify a `RelayError` as a DNS resolution failure.
@@ -3591,8 +3731,18 @@ async fn dns_flat_sleep(
     state: &mut BgState,
     duration: Duration,
 ) -> bool {
-    let jittered = jittered_duration(duration);
-    let deadline = tokio::time::Instant::now() + jittered;
+    shutdown_aware_sleep(cmd_rx, state, jittered_duration(duration)).await
+}
+
+/// Shutdown-aware sleep for exactly `duration`. Non-Shutdown commands received
+/// meanwhile are applied to state without resetting the deadline. Returns
+/// `false` if the task should shut down.
+async fn shutdown_aware_sleep(
+    cmd_rx: &mut mpsc::Receiver<RelayCommand>,
+    state: &mut BgState,
+    duration: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + duration;
     let sleep = tokio::time::sleep_until(deadline);
     tokio::pin!(sleep);
     loop {
@@ -3606,6 +3756,21 @@ async fn dns_flat_sleep(
             }
         }
     }
+}
+
+/// Reconnect entry shared by `try_autonomous_reconnect` and
+/// `wait_for_reconnect`: runs [`begin_reconnect`] with the real clock and RNG,
+/// then waits out the first-attempt delay. Returns `false` on shutdown.
+async fn prepare_reconnect(cmd_rx: &mut mpsc::Receiver<RelayCommand>, state: &mut BgState) -> bool {
+    let delay = begin_reconnect(state, unix_now_secs(), random_unit_sample());
+    if delay.is_zero() {
+        return true;
+    }
+    info!(
+        "relay closed the connection for restart — waiting {:.1}s before reconnecting",
+        delay.as_secs_f64()
+    );
+    shutdown_aware_sleep(cmd_rx, state, delay).await
 }
 
 /// Extract a channel UUID from the h tag of a Nostr event.
@@ -4189,6 +4354,9 @@ mod recovery;
 
 #[cfg(test)]
 mod recovery_tests;
+
+#[cfg(test)]
+mod resume_tests;
 
 #[cfg(test)]
 mod tests {
