@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:buzz_secp256k1/buzz_secp256k1.dart';
@@ -53,6 +54,23 @@ void main() {
       );
     });
   }
+
+  test(
+    'the first signature in a fresh isolate uses the given auxRand',
+    () async {
+      // Vector 1 has nonzero auxRand, so a signature made with clobbered aux
+      // input would differ. Run it as the isolate's first native call.
+      final [_, secret, _, aux, msg, sig, ...] = rows[1];
+      final first = await Isolate.run(
+        () => schnorrSign(
+          message: _hex(msg),
+          secretKey: _hex(secret),
+          auxRand: _hex(aux),
+        ),
+      );
+      expect(first, _hex(sig));
+    },
+  );
 
   test('covers every 32-byte-message vector', () {
     expect(rows.where((r) => r[4].length == 64).length, 15);

@@ -117,15 +117,18 @@ Uint8List schnorrSign({
   required Uint8List secretKey,
   Uint8List? auxRand,
 }) {
+  // Create the signing context first: its one-time randomization uses the
+  // aux scratch slot, which would otherwise clobber [auxRand].
+  final ctx = _state.signing;
   _load(_msg, message, 32, 'message');
   _load(_aux, auxRand ?? _secureRandom(32), 32, 'auxRand');
   _load(_seckey, secretKey, 32, 'secretKey');
   try {
-    if (c.keypairCreate(_state.signing, _at(_keypair), _at(_seckey)) != 1) {
+    if (c.keypairCreate(ctx, _at(_keypair), _at(_seckey)) != 1) {
       throw ArgumentError('Invalid secp256k1 secret key');
     }
     if (c.schnorrsigSign32(
-          _state.signing,
+          ctx,
           _at(_sig),
           _at(_msg),
           _at(_keypair),
@@ -147,20 +150,15 @@ Uint8List schnorrSign({
 /// Throws [ArgumentError] when [secretKey] is zero or not below the curve
 /// order.
 Uint8List xOnlyPublicKey(Uint8List secretKey) {
+  final ctx = _state.signing;
   _load(_seckey, secretKey, 32, 'secretKey');
   try {
-    if (c.keypairCreate(_state.signing, _at(_keypair), _at(_seckey)) != 1) {
+    if (c.keypairCreate(ctx, _at(_keypair), _at(_seckey)) != 1) {
       throw ArgumentError('Invalid secp256k1 secret key');
     }
     final parity = _at(_parity).cast<Int>();
-    if (c.keypairXonlyPub(
-              _state.signing,
-              _at(_pubkey),
-              parity,
-              _at(_keypair),
-            ) !=
-            1 ||
-        c.xonlyPubkeySerialize(_state.signing, _at(_msg), _at(_pubkey)) != 1) {
+    if (c.keypairXonlyPub(ctx, _at(_pubkey), parity, _at(_keypair)) != 1 ||
+        c.xonlyPubkeySerialize(ctx, _at(_msg), _at(_pubkey)) != 1) {
       throw StateError('secp256k1 x-only public key derivation failed');
     }
     return _read(_msg, 32);
