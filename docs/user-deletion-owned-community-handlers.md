@@ -3,26 +3,37 @@
 This slice adds callable Rust components and PostgreSQL-backed tests. It does
 **not** enable owned communities in user intake, add a CLI command, dispatch the
 new stage from the worker, or change transition rules. Existing user execution
-still rejects owned-community inventories. Community deletion's existing CLI,
-approval and worker remain unchanged.
+still rejects owned-community inventories. The existing community CLI now calls
+the shared submission function with the same operator behavior; approval and
+worker execution remain unchanged.
 
 ## Components
 
 | Component | Entry point | Responsibility |
 | --- | --- | --- |
-| Community API | `buzz_deletion::community::CommunityDeletionApi::{lookup, submit}` | Read an existing child by community ID; create and prepare one if missing |
+| Community submission | `buzz_deletion::community::submit_and_prepare` | Share the existing submit, inventory and freeze sequence between CLI and parent workflows |
 | Owned-community handler | `buzz_deletion::user::owned_community::handle` | Check/submit the child and save its last observed state on the user stage |
 | Summary handler | `buzz_deletion::user::summary::summarize_request` | Explain the request using a consistent snapshot of user workflow tables |
-| Community persistence | `buzz-db/src/store/deletion/submission.rs` | Community-ID lookup and race-safe request admission |
+| Community persistence | Existing `DeletionStore::submit`; `deletion/lookup.rs` | One request-admission implementation, plus lookup by community ID |
 | Waiting persistence | `buzz-db/src/store/entity_deletion/observations.rs` | Save an external observation under the parent lease/generation check |
 
-The community API is an **in-process privileged operator API**, not a new HTTP
-endpoint. Its constructor needs the writer `DeletionStore` and the deployment's
-`MediaStorage`. It reuses existing catalog inventory, tenant-prefix enumeration,
-inventory freezing, and community tables. It needs no Redis connection.
-Calling it requires the same operator authority as the existing community CLI.
-An approved inventory describes the intended scope; it is not a new mechanism
-for authenticating operators or proving current community ownership.
+`submit_and_prepare` is a regular Rust function, not an API object or network
+endpoint. The community CLI and user handler both call it with the existing
+`DeletionStore` and `MediaStorage`. It calls the existing `submit`, shared
+`build_inventory`, and `freeze_inventory` operations. There is one request
+insertion query; no separate user-specific community submission implementation.
+It needs no Redis connection and requires the same operator authority as the CLI.
+An approved inventory describes scope, not operator authentication or proof of
+current community ownership.
+
+The CLI supplies a host and no expected ID, retaining same-submitter preparation
+retries and explicit replacement of aborted requests. The parent supplies its
+approved community ID and no host. If both are provided, they must resolve to
+the same community before insertion. The existing submission operation locks the
+community row while checking and inserting. ID-pinned admission is create-only:
+if a concurrent caller already submitted, the shared function reads and returns
+that request unchanged, including aborted requests. SQL/transport errors still
+propagate; they are not treated as submission conflicts.
 
 ## One owned-community handler invocation
 
@@ -31,10 +42,11 @@ It supplies the full `delete_owned_community` stage row. The handler reloads the
 row through `start_stage`, validates its target/community against the approved
 parent inventory, and requires `relationship: "owner"`.
 
-1. **Lookup by community ID.** If a request exists, read it without modifying
+1. **Lookup by community ID.** Call `DeletionStore::find_for_community`. If a request exists, read it without modifying
    its inventory, approval, provenance, or execution state.
-2. **Submit only when missing.** Create an operator-origin community request,
-   prepare/freeze its inventory, and return its ID and current stage. Concurrent
+2. **Submit only when missing.** Call the same `submit_and_prepare` function as
+   the community CLI, pinning the approved community ID. Create an operator-origin
+   request, prepare/freeze its inventory, and return its ID and current stage. Concurrent
    submissions converge on the existing community request. A child is never
    approved or executed by this handler.
 3. **Persist the observation on the existing user stage.** If child logical
@@ -65,8 +77,8 @@ The error is recorded on the user stage with a retry deadline and propagated.
 On the next due invocation, lookup finds that same child and records a wait
 with preparation instructions. An operator can resume preparation using the
 existing `buzz-admin deletions submit --host ... --requested-by ...` command.
-This initial implementation deliberately does not retry preparation through
-the lookup API. A crash between creating the child and saving its ID is also
+This initial implementation deliberately does not retry preparation during
+lookup. A crash between creating the child and saving its ID is also
 recoverable by community-ID lookup. No derived UUID or new linking table is needed.
 
 Once an ID has been observed, a missing or replaced child is an error requiring
@@ -77,7 +89,7 @@ observation or result. Failures to record a retry also propagate.
 
 `summarize_request(store, request_id)` reads `entity_deletion_requests`,
 `entity_deletion_approvals`, and `entity_deletion_stage_history` through the
-existing repeatable-read inspection. It accepts no community API dependency.
+existing repeatable-read inspection. It accepts no community-store or media dependency.
 It never calls lookup/submit, checks a child table, or changes workflow state.
 
 The report includes:
@@ -127,10 +139,12 @@ in `crates/buzz-db/TESTING.md` (`BUZZ_POSTGRES_ADMIN_URL`, `PGHOST`, `PGPORT`,
   -E 'test(user::owned_community::postgres_tests)'
 ```
 
-The runner makes isolated databases per test. Tests use the real stores, API,
+The runner makes isolated databases per test. Tests use the real stores, shared submission function,
 handler and summary. A loopback S3 fixture serves empty tenant-prefix listings;
 no real object storage is accessed. Tests fixture child terminal state instead
 of running destructive community deletion. They cover separate approval,
 repeat lookup, stale summaries, child completion, preparation failure recovery,
-concurrent admission, aborted requests, stale generations and input mismatch.
+concurrent parent/CLI admission, aborted requests, stale generations, input
+mismatch, host/ID mismatch before insertion, CLI preparation retry, and propagation
+of database failures even when a child already exists.
 Owned inventory is fixture-seeded because real user intake still rejects it.

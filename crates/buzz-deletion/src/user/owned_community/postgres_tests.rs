@@ -90,12 +90,12 @@ fn media(endpoint: String) -> Arc<MediaStorage> {
     )
 }
 
-fn lookup_only_api(f: &Fixture) -> CommunityDeletionApi {
+fn lookup_only_media() -> Arc<MediaStorage> {
     // Any accidental attempt to inventory an existing child fails immediately.
-    CommunityDeletionApi::new(f.db.deletion_store(), media("http://127.0.0.1:1".into()))
+    media("http://127.0.0.1:1".into())
 }
 
-async fn submission_api(f: &Fixture) -> (CommunityDeletionApi, tokio::task::JoinHandle<()>) {
+async fn submission_media() -> (Arc<MediaStorage>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -119,10 +119,7 @@ async fn submission_api(f: &Fixture) -> (CommunityDeletionApi, tokio::task::Join
             socket.write_all(response.as_bytes()).await.unwrap();
         }
     });
-    (
-        CommunityDeletionApi::new(f.db.deletion_store(), media(endpoint)),
-        server,
-    )
+    (media(endpoint), server)
 }
 
 async fn child(f: &Fixture) -> DeletionRequest {
@@ -137,9 +134,11 @@ async fn child(f: &Fixture) -> DeletionRequest {
 #[ignore = "requires Postgres"]
 async fn submit_wait_approve_observe_and_complete_without_advancing_parent() {
     let f = fixture().await;
-    let (api, server) = submission_api(&f).await;
+    let (media, server) = submission_media().await;
     assert_eq!(
-        handle(&f.store, &f.lease, &f.row, &api).await.unwrap(),
+        handle(&f.store, &f.lease, &f.row, &f.db.deletion_store(), &media)
+            .await
+            .unwrap(),
         OwnedCommunityOutcome::Waiting
     );
     server.await.unwrap();
@@ -167,9 +166,11 @@ async fn submit_wait_approve_observe_and_complete_without_advancing_parent() {
         .unwrap()
         .approval
         .is_none());
-    let api = lookup_only_api(&f);
+    let media = lookup_only_media();
     assert_eq!(
-        handle(&f.store, &f.lease, &f.row, &api).await.unwrap(),
+        handle(&f.store, &f.lease, &f.row, &f.db.deletion_store(), &media)
+            .await
+            .unwrap(),
         OwnedCommunityOutcome::Waiting
     );
     assert_eq!(child(&f).await, c); // Read-only repeat: no child writes.
@@ -186,7 +187,9 @@ async fn submit_wait_approve_observe_and_complete_without_advancing_parent() {
             .unwrap()["child_stage"],
         "inventoried"
     );
-    handle(&f.store, &f.lease, &f.row, &api).await.unwrap();
+    handle(&f.store, &f.lease, &f.row, &f.db.deletion_store(), &media)
+        .await
+        .unwrap();
     let summary = summarize_request(&f.store, f.row.request_id).await.unwrap();
     assert_eq!(
         summary.unfinished_stages[0]
@@ -200,7 +203,9 @@ async fn submit_wait_approve_observe_and_complete_without_advancing_parent() {
     sqlx::query("UPDATE community_deletion_requests SET stage = 'retention_pending', completed_at = now() WHERE id = $1")
         .bind(c.id).execute(f.db.pool()).await.unwrap();
     assert_eq!(
-        handle(&f.store, &f.lease, &f.row, &api).await.unwrap(),
+        handle(&f.store, &f.lease, &f.row, &f.db.deletion_store(), &media)
+            .await
+            .unwrap(),
         OwnedCommunityOutcome::Completed
     );
     let summary = summarize_request(&f.store, f.row.request_id).await.unwrap();
@@ -217,8 +222,12 @@ async fn submit_wait_approve_observe_and_complete_without_advancing_parent() {
 #[ignore = "requires Postgres"]
 async fn preparation_failure_is_recoverable_and_does_not_duplicate_child() {
     let f = fixture().await;
-    let api = lookup_only_api(&f);
-    assert!(handle(&f.store, &f.lease, &f.row, &api).await.is_err());
+    let media = lookup_only_media();
+    assert!(
+        handle(&f.store, &f.lease, &f.row, &f.db.deletion_store(), &media)
+            .await
+            .is_err()
+    );
     let c = child(&f).await;
     assert_eq!(c.stage, DeletionStage::Submitted);
     let before = f.store.inspect(f.row.request_id).await.unwrap();
@@ -228,7 +237,9 @@ async fn preparation_failure_is_recoverable_and_does_not_duplicate_child() {
     sqlx::query("UPDATE entity_deletion_requests SET next_attempt_at = now() - interval '1 second' WHERE id = $1")
         .bind(f.row.request_id).execute(f.db.pool()).await.unwrap();
     assert_eq!(
-        handle(&f.store, &f.lease, &f.row, &api).await.unwrap(),
+        handle(&f.store, &f.lease, &f.row, &f.db.deletion_store(), &media)
+            .await
+            .unwrap(),
         OwnedCommunityOutcome::Waiting
     );
     assert_eq!(child(&f).await, c);
@@ -249,25 +260,51 @@ async fn preparation_failure_is_recoverable_and_does_not_duplicate_child() {
 async fn concurrent_submission_reuses_request_and_preserves_terminal_states() {
     let f = fixture().await;
     let store = f.db.deletion_store();
+    let (media, server) = submission_media().await;
     let (a, b) = tokio::join!(
-        store.submit_for_community(f.community, "operator-a", Some("a")),
-        store.submit_for_community(f.community, "operator-b", Some("b"))
+        submit_and_prepare(
+            &store,
+            &media,
+            None,
+            "operator-a",
+            Some("a"),
+            Some(f.community)
+        ),
+        submit_and_prepare(
+            &store,
+            &media,
+            None,
+            "operator-b",
+            Some("b"),
+            Some(f.community)
+        )
     );
-    let (a, created_a) = a.unwrap();
-    let (b, created_b) = b.unwrap();
-    assert_ne!(created_a, created_b);
-    assert_eq!(a, b);
-    let api = lookup_only_api(&f);
-    assert_eq!(api.submit(f.community, "another", None).await.unwrap(), a);
+    let a = a.unwrap();
+    let b = b.unwrap();
+    assert_eq!(a.id, b.id);
+    server.await.unwrap(); // Exactly one caller inventories the child.
+    let inventoried = child(&f).await;
+    assert_eq!(inventoried.stage, DeletionStage::Inventoried);
+    let media = lookup_only_media();
+    assert_eq!(
+        submit_and_prepare(&store, &media, None, "another", None, Some(f.community))
+            .await
+            .unwrap(),
+        inventoried
+    );
     store.abort(a.id, "operator", "cancelled").await.unwrap();
     let aborted = child(&f).await;
     assert_eq!(aborted.stage, DeletionStage::Aborted);
     assert_eq!(
-        api.submit(f.community, "another", None).await.unwrap(),
+        submit_and_prepare(&store, &media, None, "another", None, Some(f.community))
+            .await
+            .unwrap(),
         aborted
     );
     assert_eq!(
-        handle(&f.store, &f.lease, &f.row, &api).await.unwrap(),
+        handle(&f.store, &f.lease, &f.row, &f.db.deletion_store(), &media)
+            .await
+            .unwrap(),
         OwnedCommunityOutcome::Waiting
     );
     let summary = summarize_request(&f.store, f.row.request_id).await.unwrap();
@@ -301,9 +338,15 @@ async fn stale_generation_cannot_save_wait_or_execute_handler() {
         .await
         .unwrap_err();
     assert!(buzz_db::deletion::is_stale_deletion_lease(&error));
-    assert!(handle(&f.store, &f.lease, &f.row, &lookup_only_api(&f))
-        .await
-        .is_err());
+    assert!(handle(
+        &f.store,
+        &f.lease,
+        &f.row,
+        &f.db.deletion_store(),
+        &lookup_only_media()
+    )
+    .await
+    .is_err());
     assert!(f
         .db
         .deletion_store()
@@ -341,9 +384,15 @@ async fn wrong_community_or_inputs_cannot_submit_a_child() {
     sqlx::query("UPDATE entity_deletion_stage_history SET metadata_json = jsonb_set(metadata_json, '{inputs,target}', '\"different-user\"') WHERE id = $1")
         .bind(f.row.id).execute(f.db.pool()).await.unwrap();
     // The caller's original row is stale; validation must reload persisted inputs.
-    assert!(handle(&f.store, &f.lease, &f.row, &lookup_only_api(&f))
-        .await
-        .is_err());
+    assert!(handle(
+        &f.store,
+        &f.lease,
+        &f.row,
+        &f.db.deletion_store(),
+        &lookup_only_media()
+    )
+    .await
+    .is_err());
     assert!(f
         .db
         .deletion_store()
@@ -351,4 +400,230 @@ async fn wrong_community_or_inputs_cannot_submit_a_child() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn cli_submission_preparation_can_resume_but_cannot_reset_approved_request() {
+    let f = fixture().await;
+    let store = f.db.deletion_store();
+    // The same function used by the CLI leaves a submitted request when storage fails.
+    assert!(submit_and_prepare(
+        &store,
+        &lookup_only_media(),
+        Some("owned.example"),
+        "operator",
+        None,
+        None
+    )
+    .await
+    .is_err());
+    let submitted = child(&f).await;
+    assert_eq!(submitted.stage, DeletionStage::Submitted);
+    let (media, server) = submission_media().await;
+    let prepared = submit_and_prepare(
+        &store,
+        &media,
+        Some("owned.example"),
+        "operator",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    server.await.unwrap();
+    assert_eq!(prepared.id, submitted.id);
+    assert_eq!(prepared.stage, DeletionStage::Inventoried);
+    store.approve(prepared.id, "approver", None).await.unwrap();
+    let approved = child(&f).await;
+    assert!(submit_and_prepare(
+        &store,
+        &lookup_only_media(),
+        Some("owned.example"),
+        "operator",
+        None,
+        None
+    )
+    .await
+    .is_err());
+    assert_eq!(child(&f).await, approved);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn submission_checks_community_identity_before_inserting() {
+    let f = fixture().await;
+    let other =
+        f.db.ensure_configured_community("other.example")
+            .await
+            .unwrap()
+            .id;
+    let store = f.db.deletion_store();
+    assert!(submit_and_prepare(
+        &store,
+        &lookup_only_media(),
+        Some("owned.example"),
+        "operator",
+        None,
+        Some(other)
+    )
+    .await
+    .is_err());
+    assert!(store
+        .find_for_community(f.community)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store.find_for_community(other).await.unwrap().is_none());
+    assert!(store.submit(None, "operator", None, None).await.is_err());
+    // A request for the pinned ID must not hide a mismatched supplied host.
+    store
+        .submit(Some("other.example"), "operator", None, None)
+        .await
+        .unwrap();
+    assert!(submit_and_prepare(
+        &store,
+        &lookup_only_media(),
+        Some("owned.example"),
+        "operator",
+        None,
+        Some(other)
+    )
+    .await
+    .is_err());
+    assert!(store
+        .find_for_community(f.community)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn host_submission_and_parent_submission_share_one_admission_path() {
+    let f = fixture().await;
+    let store = f.db.deletion_store();
+    // The operator submits first; parent submission must return this exact
+    // unprepared row without accessing storage or changing its provenance.
+    let submitted = store
+        .submit(Some("owned.example"), "operator", Some("manual"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        submit_and_prepare(
+            &store,
+            &lookup_only_media(),
+            None,
+            "parent",
+            None,
+            Some(f.community)
+        )
+        .await
+        .unwrap(),
+        submitted
+    );
+    // Once aborted, only the explicit host-based operator path may replace it.
+    store
+        .abort(submitted.id, "operator", "cancel")
+        .await
+        .unwrap();
+    let aborted = child(&f).await;
+    assert_eq!(
+        submit_and_prepare(
+            &store,
+            &lookup_only_media(),
+            None,
+            "parent",
+            None,
+            Some(f.community)
+        )
+        .await
+        .unwrap(),
+        aborted
+    );
+    let replacement = store
+        .submit(Some("owned.example"), "operator", None, None)
+        .await
+        .unwrap();
+    assert_ne!(replacement.id, submitted.id);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn concurrent_cli_and_parent_submission_converge_without_repreparing() {
+    let f = fixture().await;
+    let store = f.db.deletion_store();
+    let (media, server) = submission_media().await;
+    let (cli, parent) = tokio::join!(
+        submit_and_prepare(&store, &media, Some("owned.example"), "cli", None, None),
+        submit_and_prepare(&store, &media, None, "parent", None, Some(f.community))
+    );
+    let parent = parent.unwrap();
+    match cli {
+        Ok(cli) => assert_eq!(cli.id, parent.id),
+        Err(error) => assert!(matches!(
+            error.downcast_ref::<buzz_db::DbError>(),
+            Some(buzz_db::DbError::DeletionSafety(_))
+        )),
+    }
+    server.await.unwrap(); // Only the creator prepares; three listings total.
+    let saved = child(&f).await;
+    assert_eq!(saved.id, parent.id);
+    assert_eq!(saved.stage, DeletionStage::Inventoried);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM community_deletion_requests WHERE community_id = $1",
+    )
+    .bind(f.community.as_uuid())
+    .fetch_one(f.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn database_failure_is_not_hidden_by_an_existing_child() {
+    let f = fixture().await;
+    f.db.deletion_store()
+        .submit(Some("owned.example"), "cli", None, None)
+        .await
+        .unwrap();
+    let mut lock = f.db.pool().begin().await.unwrap();
+    sqlx::query("SELECT id FROM communities WHERE id = $1 FOR UPDATE")
+        .bind(f.community.as_uuid())
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query("SET lock_timeout = '50ms'")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&url)
+        .await
+        .unwrap();
+    let store = Db::from_pool(pool).deletion_store();
+    let error = submit_and_prepare(
+        &store,
+        &lookup_only_media(),
+        None,
+        "parent",
+        None,
+        Some(f.community),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<buzz_db::DbError>(),
+        Some(buzz_db::DbError::Sqlx(_))
+    ));
+    lock.rollback().await.unwrap();
 }

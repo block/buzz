@@ -4100,9 +4100,10 @@ mod postgres_tests {
 
         let submitted = store
             .submit(
-                &host,
+                Some(&host),
                 "test-operator",
                 Some("lane3 ingest fence regression"),
+                None,
             )
             .await
             .expect("submit");

@@ -5,7 +5,7 @@
 /// Synthetic user-deletion request intake.
 pub mod user;
 
-/// In-process operator API for community deletion lookup and submission.
+/// Community submission and preparation shared by operator entry points.
 pub mod community;
 
 use std::future::Future;
@@ -464,15 +464,15 @@ async fn run_with_services(command: Command, services: Services) -> Result<i32> 
         } => {
             let relay_url = std::env::var("RELAY_URL").ok();
             let host = resolve_submit_host(host.as_deref(), relay_url.as_deref())?;
-            let request = services
-                .store
-                .submit(&host, &requested_by, reason.as_deref())
-                .await?;
-            let inventory = build_inventory(&services, &request, None).await?;
-            let request = services
-                .store
-                .freeze_inventory(request.id, &inventory)
-                .await?;
+            let request = community::submit_and_prepare(
+                &services.store,
+                &services.media,
+                Some(&host),
+                &requested_by,
+                reason.as_deref(),
+                None,
+            )
+            .await?;
             print_json(&request)?;
             Ok(0)
         }
@@ -706,22 +706,13 @@ fn validate_storage_ownership(request: &DeletionRequest, manifest: &StorageManif
 }
 
 async fn build_inventory(
-    services: &Services,
+    store: &DeletionStore,
+    media: &MediaStorage,
     request: &DeletionRequest,
     heartbeat_lost: Option<&CancellationToken>,
 ) -> Result<FrozenInventory> {
-    let schema = services
-        .store
-        .inventory_schema(request.community_id)
-        .await?;
-    let storage = enumerate_tenant_prefixes(
-        &services.store,
-        &services.media,
-        request,
-        heartbeat_lost,
-        None,
-    )
-    .await?;
+    let schema = store.inventory_schema(request.community_id).await?;
+    let storage = enumerate_tenant_prefixes(store, media, request, heartbeat_lost, None).await?;
     Ok(FrozenInventory { schema, storage })
 }
 
@@ -1043,7 +1034,8 @@ async fn run_loop(
                 HEARTBEAT_INTERVAL,
                 |heartbeat_lost| async move {
                     build_inventory(
-                        preparation_services,
+                        &preparation_services.store,
+                        &preparation_services.media,
                         &preparation_request,
                         Some(&heartbeat_lost),
                     )
@@ -1921,7 +1913,7 @@ mod postgres_tests {
             .await
             .expect("create deletion engine test community");
         let request = store
-            .submit(&host, "test", None)
+            .submit(Some(&host), "test", None, None)
             .await
             .expect("submit deletion request");
         let inventory = FrozenInventory {
@@ -2068,7 +2060,7 @@ mod postgres_tests {
             .expect("create approved community");
         let approved = services
             .store
-            .submit(&approved_host, "manual-operator", None)
+            .submit(Some(&approved_host), "manual-operator", None, None)
             .await
             .expect("submit approved request");
         let inventory = FrozenInventory {
@@ -2154,7 +2146,7 @@ mod postgres_tests {
             .expect("create manual community");
         let manual = services
             .store
-            .submit(&operator_host, "manual-operator", None)
+            .submit(Some(&operator_host), "manual-operator", None, None)
             .await
             .expect("submit manual request");
 

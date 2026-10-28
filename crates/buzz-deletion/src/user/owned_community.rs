@@ -1,12 +1,13 @@
 //! Standalone owned-community handler; deliberately absent from dispatch and
 //! transition rules. The caller owns claim, heartbeat, and release lifecycle.
 
-use crate::community::CommunityDeletionApi;
+use crate::community::submit_and_prepare;
 use crate::RETRY_DELAY;
 use anyhow::{bail, Context, Result};
 use buzz_core::CommunityId;
-use buzz_db::deletion::{DeletionRequest, DeletionStage};
+use buzz_db::deletion::{DeletionRequest, DeletionStage, DeletionStore};
 use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityStage};
+use buzz_media::MediaStorage;
 use serde_json::{json, Value};
 
 /// Durable outcome of one observation; waiting is not successful completion.
@@ -25,13 +26,14 @@ pub async fn handle(
     store: &EntityDeletionStore,
     lease: &EntityLease,
     row: &EntityStage,
-    api: &CommunityDeletionApi,
+    community_store: &DeletionStore,
+    media: &MediaStorage,
 ) -> Result<OwnedCommunityOutcome> {
     if row.request_id != lease.request_id || row.stage != "delete_owned_community" {
         bail!("expected this request's delete_owned_community stage");
     }
     let row = store.start_stage(lease, row.id).await?;
-    match observe(store, lease, &row, api).await {
+    match observe(store, lease, &row, community_store, media).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             if let Err(save_error) = store
@@ -49,7 +51,8 @@ async fn observe(
     store: &EntityDeletionStore,
     lease: &EntityLease,
     row: &EntityStage,
-    api: &CommunityDeletionApi,
+    community_store: &DeletionStore,
+    media: &MediaStorage,
 ) -> Result<OwnedCommunityOutcome> {
     let request = store.get(lease.request_id).await?;
     let community_id = row
@@ -76,17 +79,20 @@ async fn observe(
     }
     let community = CommunityId::from_uuid(community_id);
     let saved_child = row.metadata_json["waiting"]["child_request_id"].as_str();
-    let child = match api.lookup(community).await? {
+    let child = match community_store.find_for_community(community).await? {
         Some(child) => child,
         None if saved_child.is_some() => bail!("previously observed community request is missing"),
         None => {
-            api.submit(
-                community,
+            submit_and_prepare(
+                community_store,
+                media,
+                None,
                 &request.requested_by,
                 Some(&format!(
                     "User deletion request {}; stage {}",
                     request.id, row.id
                 )),
+                Some(community),
             )
             .await?
         }
