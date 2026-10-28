@@ -61,7 +61,12 @@ export class RelayStallWatchdog {
     return this.lastInboundAt;
   }
 
-  /** Record any inbound WS frame as proof the socket is still alive. */
+  /**
+   * Record an inbound WS frame as proof the socket is still alive. Callers
+   * pass only frames the peer sent (Text, Binary, Ping, Pong): the native
+   * layer's Close/Error notices say when it noticed the socket was gone, not
+   * when it last worked, and the timestamp bounds the resume cursor.
+   */
   recordInbound(): void {
     if (this.intervalHandle === null) {
       return;
