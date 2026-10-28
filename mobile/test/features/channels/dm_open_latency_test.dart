@@ -140,42 +140,45 @@ class _DmSession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    expect(filter.kinds, [39000, 39002]);
     expect(filter.tags, {
       '#d': [_dmId],
     });
     onRead?.call();
-    return [
-      NostrEvent(
-        id: 'metadata',
-        pubkey: 'relay',
-        createdAt: 1,
-        kind: 39000,
-        tags: [
-          ['d', _dmId],
-          ['name', 'DM'],
-          ['t', 'dm'],
-          ['private'],
-          ['hidden'],
-          ['p', self],
-          ['p', _peer],
-        ],
-        content: '',
-        sig: '',
-      ),
-      NostrEvent(
-        id: 'roster',
-        pubkey: 'relay',
-        createdAt: 1,
-        kind: 39002,
-        tags: [
-          ['d', _dmId],
-          if (member) ['p', self, '', 'member'],
-          ['p', _peer, '', 'member'],
-        ],
-        content: '',
-        sig: '',
-      ),
-    ];
+    // Serve like a relay: newest first, one limit across every kind. A stale
+    // metadata revision from before the d_tag backfill still lingers.
+    final events = [
+      _event(39000, 3, [
+        ['name', 'DM'],
+        ['t', 'dm'],
+        ['private'],
+        ['hidden'],
+        ['p', self],
+        ['p', _peer],
+      ]),
+      _event(39000, 2, [
+        ['name', 'DM'],
+        ['t', 'dm'],
+        ['private'],
+      ]),
+      _event(39002, 1, [
+        if (member) ['p', self, '', 'member'],
+        ['p', _peer, '', 'member'],
+      ]),
+    ].where((e) => filter.kinds.contains(e.kind)).toList();
+    return events.take(filter.limit).toList();
   }
 }
+
+NostrEvent _event(int kind, int createdAt, List<List<String>> tags) =>
+    NostrEvent(
+      id: '$kind-$createdAt',
+      pubkey: 'relay',
+      createdAt: createdAt,
+      kind: kind,
+      tags: [
+        ['d', _dmId],
+        ...tags,
+      ],
+      content: '',
+      sig: '',
+    );

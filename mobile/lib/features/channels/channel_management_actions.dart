@@ -70,22 +70,31 @@ class ChannelActions {
   /// and every channel's recent messages. Missing membership fails closed.
   Future<Channel?> findJoinedChannel(String channelId) async {
     _ensureCommunityValid();
-    final events = await _session.fetchHistory(
-      NostrFilter(
-        kinds: const [39000, 39002],
-        tags: {
-          '#d': [channelId],
-        },
-        limit: 2,
-      ),
-    );
+    // One query per kind: stale kind:39000 revisions from before the relay's
+    // d_tag backfill can linger and would crowd the roster out of a shared
+    // limit.
+    Future<NostrEvent?> latest(int kind) async {
+      final events = await _session.fetchHistory(
+        NostrFilter(
+          kinds: [kind],
+          tags: {
+            '#d': [channelId],
+          },
+          limit: 1,
+        ),
+      );
+      return events
+          .where((e) => e.kind == kind && e.getTagValue('d') == channelId)
+          .firstOrNull;
+    }
+
+    final metadataRequest = latest(39000);
+    final rosterRequest = latest(39002);
+    // Future.wait rethrows the first failure unchanged.
+    await Future.wait(eagerError: true, [metadataRequest, rosterRequest]);
+    final metadata = await metadataRequest;
+    final roster = await rosterRequest;
     _ensureCommunityValid();
-    final metadata = events
-        .where((e) => e.kind == 39000 && e.getTagValue('d') == channelId)
-        .firstOrNull;
-    final roster = events
-        .where((e) => e.kind == 39002 && e.getTagValue('d') == channelId)
-        .firstOrNull;
     if (metadata == null || roster == null) return null;
     final members = membersFromEvent(roster);
     if (!members.any((m) => m.pubkey == _currentPubkey)) return null;
