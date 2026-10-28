@@ -338,6 +338,9 @@ run_unit_tests() {
   local nip_fi_exact_tests=(
     audio::room::tests::roster_revisions_are_ordered_and_snapshot_is_authoritative
     connection::tests::auth_lifecycle_reconciles_every_terminal_and_never_leaks_gauge
+    connection::tests::startup_cancellation_writes_one_close_line
+    connection::tests::connection_limit_refusal_writes_one_close_line
+    connection::tests::dropped_authenticated_handler_writes_one_close_line
     audio::room::tests::b1_pending_peer_removed_before_commit_emits_no_delta
     audio::room::tests::b2_commit_peer_emits_exactly_one_joined_delta_and_marks_visible
     audio::room::tests::b3_commit_peer_revision_is_monotone_between_concurrent_events

@@ -1865,6 +1865,8 @@ mod env_filter_tests {
         let otel = tracing_subscriber::registry().with(otel_env_filter(None));
         tracing::subscriber::with_default(otel, || {
             assert!(tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
+            assert!(tracing::enabled!(target: "buzz_relay", tracing::Level::INFO));
+            assert!(!tracing::enabled!(target: "buzz_relay::access", tracing::Level::WARN));
         });
     }
 

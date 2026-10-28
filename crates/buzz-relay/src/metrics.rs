@@ -314,9 +314,11 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
     describe_community_admission_metrics();
     describe_db_pool_metrics();
     describe_auth_metrics();
+    describe_ws_read_metrics();
     crate::startup_steps::describe_metrics();
     buzz_relay_mesh::telemetry::describe_metrics();
     initialize_auth_metric_series();
+    initialize_ws_read_metric_series();
     initialize_partition_audit_metric_series();
     tokio::spawn(exporter);
     Ok(())
@@ -539,6 +541,29 @@ pub(crate) fn initialize_auth_metric_series() {
         .increment(0);
     }
     metrics::gauge!("buzz_ws_authenticated_connections_active").set(0.0);
+}
+
+/// The `type` label of each WebSocket read counted by [`record_ws_read`].
+const WS_READ_TYPES: [&str; 2] = ["req", "count"];
+
+/// Register the WebSocket read counter.
+fn describe_ws_read_metrics() {
+    metrics::describe_counter!(
+        "buzz_ws_reads_total",
+        "WebSocket REQ and COUNT frames received, by type, whatever the log level"
+    );
+}
+
+/// Export both WebSocket read series at zero.
+fn initialize_ws_read_metric_series() {
+    for kind in WS_READ_TYPES {
+        metrics::counter!("buzz_ws_reads_total", "type" => kind).increment(0);
+    }
+}
+
+/// Count one parsed WebSocket REQ or COUNT frame, before admission.
+pub(crate) fn record_ws_read(kind: &'static str) {
+    metrics::counter!("buzz_ws_reads_total", "type" => kind).increment(1);
 }
 
 /// Export the partition audit counters at zero before the first audit, so
@@ -1047,6 +1072,30 @@ mod contract_tests {
             assert!(!line.contains("reason="));
             assert!(!line.contains("connection_ordinal="));
         }
+    }
+
+    #[test]
+    fn ws_reads_count_by_type_from_zero() {
+        let (recorder, handle) = super::readiness_test_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            super::describe_ws_read_metrics();
+            super::initialize_ws_read_metric_series();
+            assert!(handle
+                .render()
+                .contains("buzz_ws_reads_total{type=\"count\"} 0"));
+            super::record_ws_read("req");
+            super::record_ws_read("req");
+            super::record_ws_read("count");
+        });
+        let scrape = handle.render();
+        assert!(
+            scrape.contains("buzz_ws_reads_total{type=\"req\"} 2"),
+            "{scrape}"
+        );
+        assert!(
+            scrape.contains("buzz_ws_reads_total{type=\"count\"} 1"),
+            "{scrape}"
+        );
     }
 
     #[test]

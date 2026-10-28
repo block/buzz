@@ -931,7 +931,7 @@ pub async fn emit_system_message(
         .db
         .insert_event(tenant.community(), &event, Some(channel_id))
         .await
-        .map_err(|e| anyhow::anyhow!("system message insert failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("system message insert failed: {}", e.kind()))?;
 
     fan_out_system_message(tenant, state, channel_id, &event).await;
     Ok(())
@@ -1160,7 +1160,8 @@ async fn emit_typed_membership_notification(
     let (stored, was_inserted) = state
         .db
         .insert_event(tenant.community(), &event, None)
-        .await?;
+        .await
+        .map_err(|e| anyhow::anyhow!("membership notification insert failed: {}", e.kind()))?;
     if !was_inserted {
         return Ok(());
     }
@@ -1246,7 +1247,8 @@ async fn emit_addressable_discovery_event(
     let (stored, was_inserted) = state
         .db
         .replace_addressable_event(tenant.community(), &event, Some(channel_id))
-        .await?;
+        .await
+        .map_err(|e| anyhow::anyhow!("channel state write failed: {}", e.kind()))?;
     if was_inserted {
         let kind_u32 = event_kind_u32(&stored.event);
         dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await;
@@ -2749,14 +2751,19 @@ pub(crate) async fn persist_workflow_deletion(
         .ok_or_else(|| anyhow::anyhow!("missing workflow coordinate"))?;
     let mut parts = coordinate.splitn(3, ':');
     let _kind = parts.next();
-    let owner = hex::decode(parts.next().unwrap_or_default())?;
+    let owner = hex::decode(parts.next().unwrap_or_default())
+        .map_err(|_| anyhow::anyhow!("invalid workflow coordinate"))?;
     let d_tag = parts
         .next()
         .ok_or_else(|| anyhow::anyhow!("invalid workflow coordinate"))?;
     let (stored, dispatch, channel_id) = state
         .db
         .insert_workflow_deletion(tenant.community(), event, &owner, d_tag)
-        .await?;
+        .await
+        .map_err(|e| {
+            // The write carries the whole event: log only a fixed kind.
+            anyhow::anyhow!("workflow deletion write failed: {}", e.kind())
+        })?;
     if let Some(channel_id) = channel_id {
         state
             .workflow_engine
@@ -3969,7 +3976,8 @@ pub async fn publish_nipia_archival_list(
         let (stored, was_inserted) = state
             .db
             .replace_addressable_event(tenant.community(), &event, None)
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("archive snapshot write failed: {}", e.kind()))?;
         if !was_inserted {
             continue;
         }
@@ -4074,7 +4082,8 @@ pub async fn publish_dm_visibility_snapshot(
     let (stored, was_inserted) = state
         .db
         .replace_parameterized_event(tenant.community(), &event, &viewer_hex, None)
-        .await?;
+        .await
+        .map_err(|e| anyhow::anyhow!("DM visibility write failed: {}", e.kind()))?;
     if was_inserted {
         dispatch_persistent_event(
             tenant,

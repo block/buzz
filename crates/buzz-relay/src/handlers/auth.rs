@@ -12,8 +12,9 @@
 use std::sync::Arc;
 
 use axum::extract::ws::Message as WsMessage;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
+use crate::access::{AuthAttempt, AuthResult};
 use crate::connection::{AuthState, ConnectionState};
 use crate::metrics::{AuthOutcome, AuthPostTerminalState};
 use crate::protocol::RelayMessage;
@@ -349,9 +350,14 @@ fn deny_nip_fi_auth(conn: &ConnectionState, class: buzz_auth::DenialClass) {
 /// Refuse a root AUTH that passed the early gates but failed admission: record
 /// the outcome, send the denial (the canonical NOTICE under NIP-FI, else an
 /// OK false on the control channel so it drains before the Close), and close.
-fn deny_admission(conn: &ConnectionState, event_id_hex: &str, denial: AdmissionDenial) {
+fn deny_admission(
+    conn: &ConnectionState,
+    attempt: &AuthAttempt<'_>,
+    event_id_hex: &str,
+    denial: AdmissionDenial,
+) {
     metrics::counter!("buzz_auth_failures_total", "reason" => denial.metric).increment(1);
-    if !conn.reject_auth(denial.outcome) {
+    if !attempt.reject(conn, denial.outcome) {
         return;
     }
     if conn.nip_fi_assertion.is_some() {
@@ -393,6 +399,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             AuthState::Pending { challenge, .. } => (challenge, conn.conn_id),
             AuthState::Authenticated(_) => {
                 debug!(conn_id = %conn.conn_id, "AUTH received but already authenticated");
+                AuthAttempt::nip42(&conn, event.pubkey, false).log_after_decision(
+                    &conn,
+                    AuthResult::Denied(crate::access::AuthReason::AlreadyAuthenticated),
+                );
                 crate::metrics::record_post_terminal_auth_frame(
                     AuthPostTerminalState::Authenticated,
                 );
@@ -405,6 +415,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
             AuthState::Failed => {
                 debug!(conn_id = %conn.conn_id, "AUTH received after failed auth");
+                AuthAttempt::nip42(&conn, event.pubkey, false).log_after_decision(
+                    &conn,
+                    AuthResult::Denied(crate::access::AuthReason::AlreadyFailed),
+                );
                 crate::metrics::record_post_terminal_auth_frame(AuthPostTerminalState::Failed);
                 conn.send(RelayMessage::ok(
                     &event_id_hex,
@@ -425,6 +439,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     // The tag is integrity-protected by the event's Schnorr signature — if
     // tampered, NIP-42 verification will fail before we ever inspect it.
     let auth_tag_json = extract_auth_tag_json(&event);
+    let claimed_pubkey = event.pubkey;
     let signed_auth_created_at = event.created_at.as_secs();
 
     let relay_url =
@@ -440,6 +455,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     {
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
+            let attempt = AuthAttempt::nip42(&conn, pubkey, true);
 
             conn.community_control.prove_nip_fi_line(pubkey);
             let shadow = conn.community_control.nip_fi_shadow();
@@ -503,10 +519,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 .await;
 
                 if let Some((metric_reason, deny_reason, auth_outcome)) = ban_denial(outcome) {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), reason = deny_reason, "principal denied at ban seam");
                     metrics::counter!("buzz_auth_failures_total", "reason" => metric_reason)
                         .increment(1);
-                    if !conn.reject_auth(auth_outcome) {
+                    if !attempt.reject(&conn, auth_outcome) {
                         return;
                     }
                     // Decision 4: banned ⇒ OK false + immediate WebSocket close.
@@ -549,10 +564,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 match classify_allowlist(allowlist) {
                     PolicyCheck::Allowed(()) => {}
                     PolicyCheck::Denied => {
-                        warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "pubkey not in allowlist");
                         metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_denied")
                             .increment(1);
-                        if !conn.reject_auth(AuthOutcome::AllowlistDenied) {
+                        if !attempt.reject(&conn, AuthOutcome::AllowlistDenied) {
                             return;
                         }
                         // Fix 4a: when an FI assertion is present, use the uniform
@@ -574,7 +588,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     PolicyCheck::DependencyError => {
                         metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_check_error")
                             .increment(1);
-                        if !conn.reject_auth(AuthOutcome::AllowlistCheckError) {
+                        if !attempt.reject(&conn, AuthOutcome::AllowlistCheckError) {
                             return;
                         }
                         if conn.nip_fi_assertion.is_some() {
@@ -611,10 +625,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             let nip_oa_owner = match classify_relay_membership(membership) {
                 PolicyCheck::Allowed(owner) => owner,
                 PolicyCheck::Denied => {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "not a relay member");
                     metrics::counter!("buzz_auth_failures_total", "reason" => "not_relay_member")
                         .increment(1);
-                    if !conn.reject_auth(AuthOutcome::NotRelayMember) {
+                    if !attempt.reject(&conn, AuthOutcome::NotRelayMember) {
                         return;
                     }
                     // With an FI assertion, membership status must not be
@@ -633,7 +646,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 PolicyCheck::DependencyError => {
                     metrics::counter!("buzz_auth_failures_total", "reason" => "relay_membership_check_error")
                         .increment(1);
-                    if !conn.reject_auth(AuthOutcome::RelayMembershipCheckError) {
+                    if !attempt.reject(&conn, AuthOutcome::RelayMembershipCheckError) {
                         return;
                     }
                     if conn.nip_fi_assertion.is_some() {
@@ -719,7 +732,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                         ?link,
                         "agent owner could not be linked, denying"
                     );
-                    deny_admission(&conn, &event_id_hex, denial);
+                    deny_admission(&conn, &attempt, &event_id_hex, denial);
                     return;
                 }
                 auth_ctx.agent_owner_pubkey = Some(owner);
@@ -754,7 +767,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 Ok(Some(owner)) => state.conn_manager.set_admitted_owner(conn_id, owner),
                 Ok(None) => {}
                 Err(denial) => {
-                    deny_admission(&conn, &event_id_hex, denial);
+                    deny_admission(&conn, &attempt, &event_id_hex, denial);
                     return;
                 }
             }
@@ -777,17 +790,17 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 denial => denial,
             };
             if let Some(denial) = denial {
-                warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), reason = denial.reason, "denied at final admission check");
-                deny_admission(&conn, &event_id_hex, denial);
+                deny_admission(&conn, &attempt, &event_id_hex, denial);
                 return;
             }
 
-            info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
             if !conn.authenticate(auth_ctx) {
                 return;
             }
-            // The permit is held through the deny-set check and the OK send so
-            // the auth commit is atomic with respect to expiry.
+            // The login commits only if the close-reason slot is still empty
+            // when read under its lock (`is_open` below): a disconnect that
+            // chose a reason first wins, one that comes later closes the
+            // admitted socket.
             //
             // The proven key was registered with its NIP-FI issuer before the
             // final admission check: a concurrent disconnect either finds this
@@ -799,11 +812,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
                     if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
                     {
-                        warn!(
-                            conn_id = %conn_id,
-                            pubkey = %pubkey.to_hex(),
-                            "NIP-FI deny-set hit at post-registration check — denying"
-                        );
+                        attempt.log(AuthResult::Denied(crate::access::AuthReason::DenySet));
                         metrics::counter!(
                             "buzz_nip_fi_admission_denied_total",
                             "reason" => "deny_set_post_registration"
@@ -823,16 +832,27 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             if conn.cancel.is_cancelled() {
                 return;
             }
+            #[cfg(test)]
+            crate::nip_fi_test_hooks::before_auth_decision(&conn);
+            // A disconnect that chose its reply before this point (expiry,
+            // ban, revoke) wins: its refusal is the only answer. One that
+            // lands after closes an admitted socket.
+            if !conn.community_control.is_open() {
+                return;
+            }
+            // Only the frame that won `authenticate` reaches here, once.
+            attempt.log(AuthResult::Success);
             state.conn_manager.mark_admitted(conn_id);
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
             // _auth_permit drops here — expiry's write guard may proceed.
         }
         Err(e) => {
-            warn!(conn_id = %conn_id, error = %e, "NIP-42 auth failed");
             metrics::counter!("buzz_auth_failures_total", "reason" => "nip42_invalid").increment(1);
             if !conn.reject_auth(AuthOutcome::Invalid) {
                 return;
             }
+            AuthAttempt::nip42(&conn, claimed_pubkey, false)
+                .log(AuthResult::Failed(crate::access::auth_error_code(&e)));
             if conn.nip_fi_assertion.is_some() {
                 deny_nip_fi_auth(&conn, nip42_denial_class(&e));
                 return;
@@ -1032,6 +1052,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
@@ -1161,6 +1182,7 @@ mod tests {
         cancel.cancel();
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
@@ -1250,6 +1272,7 @@ mod tests {
                 }
             });
             let conn = std::sync::Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: uuid::Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4()),
@@ -1909,6 +1932,7 @@ mod tests {
             let backpressure = Arc::new(std::sync::atomic::AtomicU8::new(0));
             let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: uuid::Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2593,6 +2617,7 @@ mod tests {
                 crate::state::CommunityConnectionControl::new(cancel.clone());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2799,6 +2824,7 @@ mod tests {
             let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2988,6 +3014,7 @@ mod tests {
             let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -3166,6 +3193,7 @@ mod tests {
             let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -3284,6 +3312,7 @@ mod tests {
             let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
             let cancel = CancellationToken::new();
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -3439,6 +3468,7 @@ mod tests {
             let cancel = CancellationToken::new();
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
@@ -3980,5 +4010,38 @@ mod tests {
             metric_counter(&snapshot, "buzz_auth_attempts_total", None),
             1
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repeat_auth_after_a_terminal_logs_one_denial() {
+        let state = auth_test_state().await;
+        for (auth, reason) in [
+            (
+                crate::connection::tests::authenticated_state(),
+                "already_authenticated",
+            ),
+            (AuthState::Failed, "already_failed"),
+        ] {
+            let (conn, _rx) = test_conn_with_auth(auth);
+            let event = EventBuilder::new(Kind::Authentication, "")
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            let (guard, out) = crate::access::tests::capture_scoped();
+            handle_auth(
+                event,
+                std::sync::Arc::clone(&conn),
+                std::sync::Arc::clone(&state),
+            )
+            .await;
+            drop(guard);
+            let lines: Vec<_> = out
+                .lines()
+                .into_iter()
+                .filter(|l| l["event"] == "auth")
+                .collect();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(lines[0]["outcome"], "denied");
+            assert_eq!(lines[0]["reason"], reason);
+        }
     }
 }

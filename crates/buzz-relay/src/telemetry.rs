@@ -52,7 +52,11 @@ impl TraceContextLookup {
     /// Build a JSON formatter backed by this subscriber dispatch lookup.
     pub fn json_formatter(&self, enabled: bool) -> TraceContextJson {
         TraceContextJson {
-            inner: tracing_subscriber::fmt::format().json().flatten_event(true),
+            inner: tracing_subscriber::fmt::format()
+                .json()
+                .flatten_event(true)
+                // `spans` already ends with the current span.
+                .with_current_span(false),
             enabled,
             context_lookup: self.clone(),
         }
@@ -179,9 +183,13 @@ where
 ///
 /// This is intentionally independent from `RUST_LOG`: changing stdout log
 /// verbosity must not remove parent spans from exported traces. Set
-/// `BUZZ_OTEL_FILTER` to override the default targets.
+/// `BUZZ_OTEL_FILTER` to override the default targets. Access lines
+/// (`buzz_relay::access`) are off by default: they already reach stdout, and
+/// exporting them again as span events would duplicate every pubkey.
 pub fn otel_env_filter(configured: Option<&str>) -> EnvFilter {
-    EnvFilter::new(configured.unwrap_or("buzz_relay=info,buzz_datastore=info"))
+    EnvFilter::new(
+        configured.unwrap_or("buzz_relay=info,buzz_relay::access=off,buzz_datastore=info"),
+    )
 }
 
 /// Build the OTEL [`Resource`] used by the trace provider.
@@ -391,6 +399,8 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(logs.len(), 11);
+        // The current span appears once, as the last entry of `spans`.
+        assert!(logs.iter().all(|log| log.get("span").is_none()), "{logs:?}");
 
         assert_eq!(logs[0]["message"], "root event");
         assert_eq!(logs[0]["answer"], 42);

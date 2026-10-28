@@ -44,22 +44,23 @@ pub(crate) fn request_rejection_message(target: RejectionTarget<'_>, reason: &st
     }
 }
 
-/// Applies the WebSocket admission quotas to `msg`, returning whether it may be
-/// handled. A rejection is addressed to the frame's own acknowledgement channel.
+/// Applies the WebSocket admission quotas to `msg`. A rejection is addressed
+/// to the frame's own acknowledgement channel, and its fixed access-log reason
+/// is returned.
 pub(crate) async fn enforce_ws_admission(
     msg: &ClientMessage,
     conn: &ConnectionState,
     state: &AppState,
-) -> bool {
+) -> Result<(), &'static str> {
     let is_event = matches!(msg, ClientMessage::Event(_));
     if !is_event && !matches!(msg, ClientMessage::Req { .. } | ClientMessage::Count { .. }) {
-        return true;
+        return Ok(());
     }
 
     let (pubkey, is_agent) = {
         match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.agent_owner_pubkey.is_some()),
-            _ => return true,
+            _ => return Ok(()),
         }
     };
 
@@ -75,9 +76,7 @@ pub(crate) async fn enforce_ws_admission(
         ws_limit,
     )
     .await;
-    if !send_admission_result(conn, ws_result, msg, "ws_operations") {
-        return false;
-    }
+    send_admission_result(conn, ws_result, msg, "ws_operations")?;
 
     if matches!(msg, ClientMessage::Event(event) if !buzz_core::kind::is_ephemeral(event.kind.as_u16() as u32))
     {
@@ -97,16 +96,14 @@ pub(crate) async fn enforce_ws_admission(
         .await;
         // Only persistable EVENT attempts consume the minute quota. Ephemeral activity
         // still passes the shared WS flood limit above and normal event auth.
-        if !send_admission_result(conn, message_result, msg, "messages") {
-            return false;
-        }
+        send_admission_result(conn, message_result, msg, "messages")?;
     }
 
-    true
+    Ok(())
 }
 
-/// Forwards an admission verdict to the client, returning whether the frame was
-/// admitted.
+/// Forwards an admission verdict to the client, returning the access-log
+/// reason when the frame was refused.
 ///
 /// The rejection target is derived from `msg` here rather than supplied by the
 /// caller: every quota check in this module must address its rejection to the
@@ -117,17 +114,17 @@ fn send_admission_result(
     result: Result<(), AdmissionError>,
     msg: &ClientMessage,
     bucket: &'static str,
-) -> bool {
+) -> Result<(), &'static str> {
     let target = rejection_target_for(msg);
     match result {
-        Ok(()) => true,
+        Ok(()) => Ok(()),
         Err(AdmissionError::Exceeded { reset_in_secs }) => {
             metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota", "bucket" => bucket).increment(1);
             conn.send(request_rejection_message(
                 target,
                 &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
             ));
-            false
+            Err("quota_exceeded")
         }
         Err(AdmissionError::Unavailable) => {
             metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable", "bucket" => bucket).increment(1);
@@ -135,7 +132,7 @@ fn send_admission_result(
                 target,
                 "rate-limited: shared admission unavailable",
             ));
-            false
+            Err("admission_unavailable")
         }
     }
 }
@@ -203,7 +200,7 @@ mod tests {
             "ws_operations",
         );
 
-        assert!(!admitted, "an over-quota frame is not admitted");
+        assert!(admitted.is_err(), "an over-quota frame is not admitted");
         let frame = sent_frame(&mut rx);
         assert_eq!(
             frame[0], "OK",
@@ -230,7 +227,7 @@ mod tests {
         let (conn, mut rx) = test_conn();
         let (msg, event_id) = parsed_event_message();
 
-        send_admission_result(
+        let _ = send_admission_result(
             &conn,
             Err(AdmissionError::Unavailable),
             &msg,
@@ -251,7 +248,7 @@ mod tests {
         let raw = serde_json::json!(["REQ", "history-abc", {"kinds": [1]}]).to_string();
         let msg = ClientMessage::parse(&raw).expect("parse REQ");
 
-        send_admission_result(
+        let _ = send_admission_result(
             &conn,
             Err(AdmissionError::Exceeded { reset_in_secs: 7 }),
             &msg,
@@ -274,7 +271,7 @@ mod tests {
         let raw = serde_json::json!(["COUNT", "count-abc", {"kinds": [1]}]).to_string();
         let msg = ClientMessage::parse(&raw).expect("parse COUNT");
 
-        send_admission_result(
+        let _ = send_admission_result(
             &conn,
             Err(AdmissionError::Exceeded { reset_in_secs: 7 }),
             &msg,
@@ -299,7 +296,7 @@ mod tests {
         let (conn, mut rx) = test_conn_with_auth(authenticated_state());
         let msg = ClientMessage::parse(raw).expect("parse client frame");
 
-        let admitted = enforce_ws_admission(&msg, &conn, &state).await;
+        let admitted = enforce_ws_admission(&msg, &conn, &state).await.is_ok();
         assert!(!admitted, "an unadmitted frame must not be handled");
         sent_frame(&mut rx)
     }

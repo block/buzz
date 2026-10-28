@@ -563,9 +563,12 @@ async fn key_disconnected_before_its_community_exists_is_denied_there() {
                     .parse()
                     .unwrap(),
             );
-            crate::nip_fi_http::admit_nip_fi_http_on_state(&state, &headers, || {
-                Ok(crate::nip_fi_http::Nip98Proof::new(key, ()))
-            })
+            crate::nip_fi_http::admit_nip_fi_http_on_state(
+                &state,
+                &headers,
+                &crate::access::AccessSlot::default(),
+                || Ok(crate::nip_fi_http::Nip98Proof::new(key, ())),
+            )
             .await
             .map(drop)
         }

@@ -522,6 +522,18 @@ jobs:
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay) and test(/api::git::settings::tests::external_infra::/)' \
             --run-ignored ignored-only
+      - name: Admin attachment access-log regression
+        env:
+          # This test builds its state from Config::for_test(), which reads the
+          # relay's own DATABASE_URL and BUZZ_S3_* variables.
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          BUZZ_S3_ENDPOINT: http://localhost:9000
+          BUZZ_S3_BUCKET: buzz-media
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/api::admin::postgres_tests::external_infra_minio_tests::/)' \
+            --run-ignored ignored-only
       - name: Relay quota accounting and rejection regressions
         env:
           BUZZ_TEST_REDIS_URL: redis://localhost:6379

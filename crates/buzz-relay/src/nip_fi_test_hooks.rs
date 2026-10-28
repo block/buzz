@@ -255,6 +255,39 @@ make_hook!(directory_acquire_hook, after_directory_acquire);
 // serialized against the join commit.
 make_hook!(audio_archive_recheck_hook, before_archive_recheck);
 
+// ── Login decision hook ────────────────────────────────────────────────────
+// `before_auth_decision`: fires synchronously in the root WS auth handler
+// after its last cancellation check and before the login decides it won.
+// The armed action runs inline, with no await, so a disconnect lands in the
+// window a concurrent thread would hit, without the handler being dropped.
+pub(crate) mod auth_decision_hook {
+    use super::*;
+
+    type Action = Box<dyn FnOnce(&crate::connection::ConnectionState) + Send>;
+
+    static ACTIONS: LazyLock<Mutex<HashMap<CommunityId, Action>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Run `action` once when a login in `community` reaches its decision.
+    pub(crate) fn arm(
+        community: CommunityId,
+        action: impl FnOnce(&crate::connection::ConnectionState) + Send + 'static,
+    ) {
+        ACTIONS.lock().unwrap().insert(community, Box::new(action));
+    }
+
+    pub(crate) fn trigger(conn: &crate::connection::ConnectionState) {
+        let action = ACTIONS.lock().unwrap().remove(&conn.tenant.community());
+        if let Some(action) = action {
+            action(conn);
+        }
+    }
+}
+
+pub(crate) fn before_auth_decision(conn: &crate::connection::ConnectionState) {
+    auth_decision_hook::trigger(conn);
+}
+
 // ── Deny-set admission hooks ───────────────────────────────────────────────
 // `before_deny_set_check`: fires in both the root WS auth handler and the audio
 // handler after the proven identity is registered and before `is_denied`, so a

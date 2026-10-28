@@ -85,6 +85,7 @@ pub(super) struct Principal {
 
 pub(super) async fn authorize(
     state: &Arc<AppState>,
+    slot: &crate::access::AccessSlot,
     headers: &HeaderMap,
     uri: &Uri,
     method: &'static str,
@@ -103,7 +104,9 @@ pub(super) async fn authorize(
     let admission = crate::nip_fi_http::admit_nip_fi_http_on_state(
         state,
         headers,
+        slot,
         bridge::make_nip98_closure_for_admission(
+            slot.clone(),
             headers.clone(),
             method,
             url,
@@ -121,30 +124,44 @@ pub(super) async fn authorize(
             bridge_error((response.status(), Json(Value::Null)))
         }
     })?;
-    let actor = *admission.proven_pubkey();
-    let token_owner = admission.token_owner();
-    let (event_id, signed_at) = admission.into_extra();
-    bridge::enforce_http_admission(state, &tenant, &actor)
-        .await
-        .map_err(bridge_error)?;
-    bridge::check_nip98_replay(state, &tenant, event_id)
+    let mut caller = bridge::ProvenCaller::new(admission, slot, &tenant);
+    caller
+        .rate_limit_and_replay(state, &tenant)
         .await
         .map_err(bridge_error)?;
     let principal = Principal {
         tenant,
-        actor,
-        signed_at,
-        token_owner,
+        actor: caller.pubkey,
+        signed_at: caller.signed_at,
+        token_owner: caller.token_owner,
     };
-    recheck(state, headers, &principal).await?;
+    caller
+        .admit(
+            admission_checks(state, headers, &principal).await,
+            |(_, refusal)| *refusal,
+        )
+        .map_err(|(error, _)| error)?;
     Ok(principal)
 }
 
+/// Re-run the per-request admission checks for an authorized principal.
 pub(super) async fn recheck(
     state: &AppState,
     headers: &HeaderMap,
     principal: &Principal,
 ) -> Result<(), Error> {
+    admission_checks(state, headers, principal)
+        .await
+        .map_err(|(error, _)| error)
+}
+
+/// Relay membership, then community ban. A refusal carries its access-log
+/// result alongside the response error.
+async fn admission_checks(
+    state: &AppState,
+    headers: &HeaderMap,
+    principal: &Principal,
+) -> Result<(), (Error, crate::access::AuthResult)> {
     relay_members::enforce_relay_membership(
         state,
         &principal.tenant,
@@ -154,16 +171,23 @@ pub(super) async fn recheck(
         principal.token_owner,
     )
     .await
-    .map_err(|refusal| match refusal {
-        relay_members::MembershipRefusal::Api(refusal) => bridge_error(refusal),
-        // Preserve the shared NIP-FI wire contract, as admission does.
-        refusal => Error::Admission(Box::new(refusal.into_response())),
+    .map_err(|refusal| {
+        let result = refusal.auth_result();
+        let error = match refusal {
+            relay_members::MembershipRefusal::Api(_, refusal) => bridge_error(refusal),
+            // Preserve the shared NIP-FI wire contract, as admission does.
+            refusal => Error::Admission(Box::new(refusal.into_response())),
+        };
+        (error, result)
     })?;
     // A verified agent token gets only NIP-FI's fixed denial here too, so a
     // ban or outage between the two reads never shows which step refused it.
-    let refuse = |class, legacy: Error| match principal.token_owner {
-        Some(_) => Error::Admission(Box::new(crate::nip_fi_core::http_denial(class))),
-        None => legacy,
+    let refuse = |class, legacy: Error, reason| {
+        let error = match principal.token_owner {
+            Some(_) => Error::Admission(Box::new(crate::nip_fi_core::http_denial(class))),
+            None => legacy,
+        };
+        (error, crate::access::AuthResult::Denied(reason))
     };
     #[cfg(test)]
     crate::nip_fi_test_hooks::before_http_ban_recheck(principal.tenant.community()).await;
@@ -171,11 +195,18 @@ pub(super) async fn recheck(
         .db
         .moderation_restriction_state(principal.tenant.community(), &principal.actor.to_bytes())
         .await
-        .map_err(|_| refuse(DenialClass::AuthorizationUnavailable, Error::unavailable()))?;
+        .map_err(|_| {
+            refuse(
+                DenialClass::AuthorizationUnavailable,
+                Error::unavailable(),
+                crate::access::AuthReason::BanCheckUnavailable,
+            )
+        })?;
     if restrictions.banned {
         return Err(refuse(
             DenialClass::AuthorizationDenied,
             Error::new(StatusCode::FORBIDDEN, "forbidden"),
+            crate::access::AuthReason::Banned,
         ));
     }
     // Timeouts block posting conversation content, not personal reading.
