@@ -515,6 +515,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             .read(channelActionsProvider)
             .openDm(
               pubkeys: selectedUsers.value.map((user) => user.pubkey).toList(),
+              waitForChannelList: false,
             );
         if (context.mounted) {
           Navigator.of(context).pop(channel);

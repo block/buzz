@@ -37,8 +37,8 @@ enum NativeTabler {
     "chevron.left": 0xea60, // chevron-left
     "chevron.right": 0xea61, // chevron-right
     "camera": 0xea54, // camera
-    "photo.on.rectangle": 0xeb0a, // photo
-    "photo.on.rectangle.angled": 0xeb0a, // photo
+    "photo.on.rectangle": 0xfd4a, // images — matches BuzzIcons.images
+    "photo.on.rectangle.angled": 0xfd4a, // images — matches BuzzIcons.images
     "paintpalette": 0xeb01, // palette
     "drop": 0xea97, // droplet
     "drop.fill": 0xea97, // droplet

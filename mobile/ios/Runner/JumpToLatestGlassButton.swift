@@ -453,7 +453,15 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       let pointSize: CGFloat = icon == "shutter"
         ? controlSize * Self.shutterIconRatio
         : 24
-      buttonImage = NativeTabler.image(buttonIconName, size: pointSize)
+      if icon == "shutter" {
+        // The shutter is a solid disc, not Tabler's outlined circle glyph.
+        buttonImage = UIGraphicsImageRenderer(size: CGSize(width: pointSize, height: pointSize)).image { _ in
+          UIColor.white.setFill()
+          UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: pointSize, height: pointSize)).fill()
+        }.withRenderingMode(.alwaysTemplate)
+      } else {
+        buttonImage = NativeTabler.image(buttonIconName, size: pointSize)
+      }
     }
     updateDisplayedContent()
     button.setNeedsUpdateConfiguration()
@@ -485,7 +493,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     } else {
       let displaysSwatch = contentIcon == "colorSwatch"
       button.configuration?.title = displaysSwatch ? nil : buttonLabel
-      button.configuration?.image = displaysSwatch || buttonLabel != nil ? nil : buttonImage
+      let image = button.isSelected
+        ? buttonImage?.withTintColor(labelForegroundColor ?? .label, renderingMode: .alwaysOriginal)
+        : buttonImage
+      button.configuration?.image = displaysSwatch || buttonLabel != nil ? nil : image
       swatchView.isHidden = !displaysSwatch
       activityIndicator.stopAnimating()
     }

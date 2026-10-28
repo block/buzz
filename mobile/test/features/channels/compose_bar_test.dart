@@ -187,6 +187,8 @@ Widget _buildComposeBar({
   Future<List<ChannelMember>> Function()? loadMembers,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
+  bool stallChannels = false,
+  Channel? openedAhead,
   List<ChannelMember> cachedMembers = const <ChannelMember>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
@@ -240,7 +242,12 @@ Widget _buildComposeBar({
       if (appLifecycle != null) appLifecycleProvider.overrideWith(appLifecycle),
       savedPrefsProvider.overrideWithValue(_testPrefs),
       channelsProvider.overrideWith(
-        () => _FakeChannelsNotifier(channels, cachedMembers: cachedMembers),
+        () => _FakeChannelsNotifier(
+          channels,
+          cachedMembers: cachedMembers,
+          stall: stallChannels,
+          openedAhead: openedAhead,
+        ),
       ),
     ],
     child: MaterialApp(
@@ -638,17 +645,29 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   final List<Channel> _channels;
   final List<ChannelMember> _cachedMembers;
 
+  /// Keeps the channel list loading, like a slow full reload.
+  final bool _stall;
+
   _FakeChannelsNotifier(
     this._channels, {
     List<ChannelMember> cachedMembers = const [],
-  }) : _cachedMembers = cachedMembers;
+    bool stall = false,
+    Channel? openedAhead,
+  }) : _cachedMembers = cachedMembers,
+       _stall = stall,
+       _openedAheadChannel = openedAhead;
+
+  final Channel? _openedAheadChannel;
 
   @override
   List<ChannelMember> cachedMembersForChannel(String channelId) =>
       channelId == 'channel-1' ? _cachedMembers : const [];
 
   @override
-  Future<List<Channel>> build() async => _channels;
+  Future<List<Channel>> build() {
+    if (_openedAheadChannel case final channel?) rememberOpened(channel);
+    return _stall ? Completer<List<Channel>>().future : Future.value(_channels);
+  }
 
   @override
   Future<void> refresh({bool fetchDirectory = false}) async {
@@ -4696,6 +4715,78 @@ void main() {
         expect(sentRecipients, isNotNull);
         expect(sentRecipients, isNot(contains(maryJane.pubkey)));
         expect(sentTags, contains(orderedEquals(['mention', maryJane.pubkey])));
+      });
+
+      testWidgets('a DM opened before the channel list loads sends mentions', (
+        tester,
+      ) async {
+        final signer = nostr.Keys.generate();
+        final pat = '1' * 64;
+        List<String>? sentRecipients;
+        List<List<String>>? sentTags;
+        var searches = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(signer.nsec),
+            currentPubkey: signer.public,
+            members: [
+              member(signer.public),
+              ChannelMember(
+                pubkey: pat,
+                role: 'member',
+                joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+                displayName: 'Pat Peer',
+              ),
+            ],
+            // The DM was opened from its own metadata and roster while the
+            // full channel list is still loading.
+            stallChannels: true,
+            openedAhead: _makeCurrentChannel(
+              channelType: 'dm',
+              participantPubkeys: [signer.public, pat],
+            ),
+            searchPeople: (query) async {
+              if (query != 'Mary J') return const [];
+              if (++searches == 1) throw StateError('relay down');
+              return [maryJane];
+            },
+            onSend:
+                (_, recipients, {mediaTags = const <List<String>>[]}) async {
+                  sentRecipients = recipients;
+                  sentTags = mediaTags;
+                },
+          ),
+        );
+        await _expandComposer(tester);
+        // The picker searches the directory for people outside the DM, as it
+        // does once the list has the DM, and keeps a failed search's retry.
+        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.pump();
+        await tester.pump(mentionSearchDebounce * 2);
+        expect(
+          find.byKey(const ValueKey('mention-search-error')),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('Retry'));
+        await tester.pump();
+        await tester.pump(mentionSearchDebounce * 2);
+        expect(find.text('Mary Jane'), findsOneWidget);
+        expect(find.text('not in DM'), findsOneWidget);
+
+        await tester.enterText(find.byType(TextField), '@Pat');
+        await tester.pump();
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Pat Peer'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('Message not sent: could not check who is in this channel'),
+          findsNothing,
+        );
+        expect(sentRecipients, contains(pat));
+        expect(sentTags, isNot(contains(orderedEquals(['mention', pat]))));
       });
 
       testWidgets('a failed member check keeps the draft and Retry sends', (

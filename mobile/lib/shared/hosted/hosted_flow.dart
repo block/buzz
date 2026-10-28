@@ -25,6 +25,7 @@ enum HostedFlowStage {
   working,
   signIn,
   chooseIdentity,
+  setupIdentity,
   chooseCommunities,
   communityConflict,
   acceptPolicy,
@@ -93,6 +94,8 @@ class HostedFlow extends ChangeNotifier {
   List<DeviceIdentityChoice> identityChoices = const [];
   BuzzDeepLink? _target;
   bool accountOnly = false;
+  bool canCreateIdentity = false;
+  String? requiredIdentityPubkey;
   String? _pairedPubkey;
   SensitiveActionPolicy? pairedSensitiveActionPolicy;
   List<AddCommunityDeepLink> communities = const [];
@@ -447,7 +450,39 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation, selectedPubkey: pubkey));
   }
 
-  Future<void> _continue(int generation, {String? selectedPubkey}) async {
+  /// A new identity is offered only after authoritative absence was established.
+  Future<void> createIdentity() {
+    if (stage != HostedFlowStage.setupIdentity || !canCreateIdentity) {
+      return Future.value();
+    }
+    final generation = _nextGeneration();
+    _set(HostedFlowStage.working);
+    return _enqueue(() => _continue(generation, createNew: true));
+  }
+
+  /// Import through the existing secure store, rechecking the account binding.
+  /// Errors propagate to the import sheet without discarding the setup choice.
+  Future<void> importIdentity(String nsec) {
+    final generation = _generation;
+    final subject = account.account?.subject;
+    if (stage != HostedFlowStage.setupIdentity || subject == null) {
+      throw AccountFailure.unavailable;
+    }
+    return _queue.run(() async {
+      bool current() =>
+          !_disposed &&
+          generation == _generation &&
+          account.account?.subject == subject;
+      if (!current()) throw AccountFailure.unavailable;
+      await identity.resolve(isCurrent: current, importNsec: nsec);
+    });
+  }
+
+  Future<void> _continue(
+    int generation, {
+    String? selectedPubkey,
+    bool createNew = false,
+  }) async {
     final target = _target;
     final session = account.account;
     if ((target == null && !accountOnly) || session == null) {
@@ -462,6 +497,7 @@ class HostedFlow extends ChangeNotifier {
     var resolved = await identity.resolve(
       isCurrent: _isCurrent(generation),
       selectedPubkey: selectedPubkey ?? _pairedPubkey,
+      createNew: createNew,
     );
     if (_pairedPubkey != null && resolved.pubkey != _pairedPubkey) {
       _set(HostedFlowStage.blocked, HostedFlowProblem.identityMismatch);
@@ -525,6 +561,12 @@ class HostedFlow extends ChangeNotifier {
       }
     }
     if (generation != _generation || _disposed) return;
+    if (resolved.state == HostedIdentityState.needsSetup) {
+      canCreateIdentity = resolved.canCreate;
+      requiredIdentityPubkey = resolved.pubkey;
+      _set(HostedFlowStage.setupIdentity);
+      return;
+    }
     if (resolved.state == HostedIdentityState.needsSelection) {
       identityChoices = List.unmodifiable(resolved.choices);
       _set(HostedFlowStage.chooseIdentity);
@@ -575,6 +617,13 @@ class HostedFlow extends ChangeNotifier {
       session.subject,
       pubkey,
       _isCurrent(generation),
+    );
+    if (generation != _generation || _disposed) return;
+    // Save only after admission/persistence succeeds. A failure keeps the
+    // existing intent for retry; add is idempotent after a lost response.
+    await account.rememberCommunity(
+      destination.relayUrl ?? (throw AccountFailure.invalidResponse),
+      expectedSubject: session.subject,
     );
     if (generation != _generation || _disposed) return;
     await browser.clearIntent();
@@ -642,7 +691,7 @@ class HostedFlow extends ChangeNotifier {
         generation == _generation &&
         account.account?.subject == subject;
     if (!_addingCommunities) {
-      final listed = await loadHostedCommunities(account);
+      final listed = await loadKnownHostedCommunities(account);
       if (!current()) return;
       communities = listed;
       selectedRelays = Set.unmodifiable(listed.map((item) => item.relayUrl));

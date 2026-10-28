@@ -9,7 +9,7 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
-  func testProfileAvatarStartupFailureRestoresSheetAndAllowsRetry() async throws {
+  func testProfileAvatarStartupFailureRestoresPageAndAllowsRetry() async throws {
     let messenger = NavigationTestMessenger()
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)
@@ -24,9 +24,9 @@ class RunnerTests: XCTestCase {
     alreadyDisabled.isEnabled = false
     let coordinator = NativeProfileSetupCoordinator(messenger: messenger, startEditorEngine: { _ in
       starts += 1
-      XCTAssertEqual(navigation?.sheetPresentationController?.selectedDetentIdentifier, .large)
-      XCTAssertTrue(navigation?.isModalInPresentation == true)
-      XCTAssertFalse(pan.isEnabled)
+      XCTAssertEqual(navigation?.modalPresentationStyle, .overFullScreen)
+      XCTAssertEqual(navigation?.isModalInPresentation, starts > 1)
+      XCTAssertEqual(pan.isEnabled, starts == 1)
       return false
     }, configureEditorEngine: { _ in
       XCTFail("Failed startup must not configure plugins")
@@ -44,11 +44,15 @@ class RunnerTests: XCTestCase {
     let profile = try XCTUnwrap(nav.viewControllers.first)
     let avatar = try XCTUnwrap(descendants(of: profile.view).compactMap { $0 as? UIButton }
       .first { $0.accessibilityLabel == "Add profile photo" })
-    for detent in [UISheetPresentationController.Detent.Identifier("profile"), .large] {
-      nav.sheetPresentationController?.selectedDetentIdentifier = detent
+    let name = try XCTUnwrap(descendants(of: profile.view).compactMap { $0 as? UITextField }.first)
+    let submit = try XCTUnwrap(descendants(of: profile.view).compactMap { $0 as? UIButton }
+      .first { $0.configuration?.title == "Continue" })
+    name.text = "Kenny"
+    name.sendActions(for: .editingChanged)
+    submit.sendActions(for: .touchUpInside)
+    for _ in 0..<2 {
       avatar.sendActions(for: .touchUpInside)
-      XCTAssertEqual(nav.sheetPresentationController?.detents.map(\.identifier), [.init("profile"), .large])
-      XCTAssertEqual(nav.sheetPresentationController?.selectedDetentIdentifier, detent)
+      XCTAssertEqual(nav.modalPresentationStyle, .overFullScreen)
       XCTAssertTrue(pan.isEnabled)
       XCTAssertFalse(alreadyDisabled.isEnabled)
       XCTAssertFalse(nav.isModalInPresentation)
@@ -56,7 +60,7 @@ class RunnerTests: XCTestCase {
       XCTAssertFalse(avatar.isHidden)
       XCTAssertTrue(nav.topViewController === profile)
     }
-    XCTAssertEqual(starts, 2)
+    XCTAssertEqual(starts, 3)
     withExtendedLifetime(coordinator) {}
     nav.dismiss(animated: false)
   }

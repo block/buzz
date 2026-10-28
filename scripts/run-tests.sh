@@ -206,6 +206,9 @@ run_unit_tests() {
   run_test_step "buzz-relay side-effects helper tests" \
     cargo test -p buzz-relay --lib handlers::side_effects::tests:: -- --nocapture
 
+  run_test_step "buzz-relay coalesced refresh tests" \
+    cargo test -p buzz-relay --lib handlers::coalesced_refresh::tests:: -- --nocapture
+
   run_test_step "buzz-relay system channel scope tests" \
     cargo test -p buzz-relay --lib handlers::system_channels::tests:: -- --nocapture
 

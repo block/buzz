@@ -100,7 +100,7 @@ writer of a fenced table already goes through admission. The remaining
 fence-retirement work drops the fence triggers and functions, and MUST also
 update ARCHITECTURE.md § *Dual enforcement*.
 
-**Today this blocks new tenant-owned tables.** Startup and deletion validation
+**New tenant-owned tables use application admission.** Startup and deletion validation
 no longer require a fence on any table; they pass with every universal fence
 object dropped (`migration_schema_fence_objects_are_optional_for_serving_and_deletion`
 in `crates/buzz-db/src/store/deletion.rs`). Two things still matter:
@@ -110,21 +110,19 @@ in `crates/buzz-db/src/store/deletion.rs`). Two things still matter:
   (`community deletion catalog drift (missing=…, unknown=…)`), and deletion
   fails closed for every community, not only the new table's. Listing the
   table is enough to pass.
-- Desired-state bootstraps run `schema/community_write_fence.sql`, which
-  attaches a fence trigger to every `community_id` table not excluded by
-  `community_write_fence_excluded_table`. A fresh desired-state database would
-  put a trigger on the new table and a migrated one would not, so the two
-  schema paths would diverge.
+- Desired-state bootstraps install only the legacy fences explicitly listed
+  under `schema/triggers/`. They do not discover and fence new tables.
+  Keep those existing backstops until their own retirement is verified;
+  new tables receive no fence in either schema path.
 
-So before a feature can add a tenant-owned `community_id` table, the
-desired-state bootstrap must stop attaching fence triggers. That change belongs
-to the fence-retirement work. Land it before the feature, or as the feature's
-first PR. Do not work around it with a trigger, or with an entry in
+The blanket desired-state fence attachment has been removed. A feature may
+add a tenant-owned `community_id` table when it follows the checklist below.
+Do not add a trigger, or an entry in
 `community_write_fence_excluded_table` for a table the community owns.
 
 #### Checklist: adding a tenant-owned `community_id` table
 
-After the desired-state change above has landed, all in the same PR:
+All in the same PR:
 
 - [ ] Every writer of the table goes through community admission
       (`begin_community_write_transaction` or another constructor that returns

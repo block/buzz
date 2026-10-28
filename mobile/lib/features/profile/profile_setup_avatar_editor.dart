@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
@@ -20,14 +21,19 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
     this.initialDraft,
     this.onFinished,
     this.onPreviewReady,
+    this.anchoredPreview,
   });
   final ProfileAvatarDraft? initialDraft;
+  final Rect? anchoredPreview;
   final ValueChanged<ProfileAvatarDraft?>? onFinished;
   final Future<void> Function(Rect)? onPreviewReady;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final previewVisible = useState(onPreviewReady == null);
+    final previewBounds = useState(anchoredPreview);
+    final previewVisible = useState(
+      onPreviewReady == null || anchoredPreview != null,
+    );
     final previewKey = useMemoized(() => GlobalKey());
     useEffect(() {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -53,7 +59,10 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
     final prepare = useState<Future<ProfileAvatarDraft?> Function()?>(null);
     final busy = useState(false);
     final error = useState(false);
-    final transition = useAnimationController(initialValue: 1);
+    final transition = useAnimationController(
+      initialValue: anchoredPreview == null ? 1 : 0,
+      duration: const Duration(milliseconds: 200),
+    );
     final VoidCallback? close = busy.value
         ? null
         : () {
@@ -63,8 +72,11 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
               Navigator.of(context).pop();
             }
           };
+    final routeIsCurrent = ModalRoute.isCurrentOf(context) ?? true;
     final VoidCallback? done =
-        busy.value || (draft.value == null && prepare.value == null)
+        busy.value ||
+            !routeIsCurrent ||
+            (draft.value == null && prepare.value == null)
         ? null
         : () async {
             busy.value = true;
@@ -88,6 +100,111 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
               if (context.mounted) busy.value = false;
             }
           };
+    final doneRef = useRef(done)..value = done;
+    final closeRef = useRef(close)..value = close;
+    useEffect(() {
+      if (anchoredPreview == null) return null;
+      const channel = MethodChannel('buzz/profile_avatar_sheet');
+      channel.setMethodCallHandler((call) async {
+        final reduceMotion = MediaQuery.disableAnimationsOf(context);
+        if (call.method == 'done') doneRef.value?.call();
+        if (call.method == 'back') {
+          final navigator = Navigator.of(context);
+          if (navigator.canPop()) {
+            navigator.pop();
+          } else {
+            closeRef.value?.call();
+          }
+        }
+        if (call.method == 'hide' || call.method == 'reveal') {
+          final bounds = call.arguments;
+          if (bounds is Map) {
+            previewBounds.value = Rect.fromLTWH(
+              (bounds['x'] as num).toDouble(),
+              (bounds['y'] as num).toDouble(),
+              (bounds['width'] as num).toDouble(),
+              (bounds['height'] as num).toDouble(),
+            );
+          }
+        }
+        if (call.method == 'hide') {
+          if (reduceMotion) {
+            transition.value = 0;
+          } else {
+            await transition.reverse().orCancel;
+          }
+        }
+        if (call.method == 'hide') {
+          // Let UIKit replace this view only after the final avatar is painted.
+          await WidgetsBinding.instance.endOfFrame;
+        }
+        if (call.method == 'reveal') {
+          if (reduceMotion) {
+            transition.value = 1;
+          } else {
+            transition.forward(from: 0);
+          }
+        }
+      });
+      return () => channel.setMethodCallHandler(null);
+    }, const []);
+    useEffect(() {
+      if (anchoredPreview == null) return null;
+      const channel = MethodChannel('buzz/profile_avatar_sheet');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) {
+          channel.invokeMethod<void>('controls', {
+            'canDone': done != null,
+            'busy': busy.value,
+            'fullScreen': !routeIsCurrent,
+          });
+        }
+      });
+      return null;
+    }, [done != null, busy.value, routeIsCurrent]);
+    if (anchoredPreview != null) {
+      return Theme(
+        data: utilitySurfaceThemeData(Theme.of(context)),
+        child: Scaffold(
+          backgroundColor: utilitySurfaceThemeData(
+            Theme.of(context),
+          ).colorScheme.surface,
+          resizeToAvoidBottomInset: false,
+          body: Column(
+            children: [
+              if (error.value)
+                const Text('Could not prepare this photo. Try again.'),
+              Expanded(
+                child: IgnorePointer(
+                  ignoring: busy.value,
+                  child: ProfileAvatarEditor(
+                    anchoredPreview: previewBounds.value,
+                    previewKey: previewKey,
+                    previewOpacity: previewVisible.value ? 1 : 0,
+                    currentAvatarUrl: initialDraft is ProfileUrlAvatarDraft
+                        ? (initialDraft as ProfileUrlAvatarDraft).url
+                        : null,
+                    fallbackInitial: '+',
+                    emptyPreview: const ProfileSetupEmptyAvatar(),
+                    draft: draft.value,
+                    mode: mode.value,
+                    transition: transition,
+                    onModeChanged: (value) {
+                      mode.value = value;
+                      draft.value = null;
+                      prepare.value = null;
+                    },
+                    onDraftChanged: (value) => draft.value = value,
+                    onAnimatedPrepareChanged: (value) => prepare.value = value,
+                    onImageCameraActiveChanged: (_) {},
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return PopScope(
       canPop: !busy.value,
       child: FrostedScaffold(

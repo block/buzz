@@ -75,8 +75,6 @@ pub enum StartupStep {
     MeshInitialReconcile,
     /// Run the git object-store conformance probe (when enabled).
     GitConformanceProbe,
-    /// Verify the channel roster fence.
-    ChannelRosterFence,
     /// Repair large NIP-29 channel roster snapshots.
     LargeRosterReconcile,
     /// Bind the private health listener.
@@ -104,7 +102,6 @@ impl StartupStep {
         Self::MeshPublish,
         Self::MeshInitialReconcile,
         Self::GitConformanceProbe,
-        Self::ChannelRosterFence,
         Self::LargeRosterReconcile,
         Self::HealthBind,
         Self::ListenerBind,
@@ -129,7 +126,6 @@ impl StartupStep {
             Self::MeshPublish => "mesh_publish",
             Self::MeshInitialReconcile => "mesh_initial_reconcile",
             Self::GitConformanceProbe => "git_conformance_probe",
-            Self::ChannelRosterFence => "channel_roster_fence",
             Self::LargeRosterReconcile => "large_roster_reconcile",
             Self::HealthBind => "health_bind",
             Self::ListenerBind => "listener_bind",

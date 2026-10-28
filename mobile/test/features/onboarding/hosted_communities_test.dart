@@ -268,11 +268,16 @@ void main() {
         await tester.tap(find.text('Continue with Builderlab'));
         await tester.pumpAndSettle();
         expect(find.byType(CheckboxListTile), findsNothing);
-        expect(f.admitted, ['one', 'two']);
+        expect(f.admitted, [
+          'one.communities.buzz.xyz',
+          'two.communities.buzz.xyz',
+        ]);
         expect(find.byType(HostedConnectPage), findsNothing);
         f.admitted.clear();
         f.beforeAdmission = (name) async {
-          if (name == 'two') throw const SavedCommunityIdentityConflict();
+          if (name == 'two.communities.buzz.xyz') {
+            throw const SavedCommunityIdentityConflict();
+          }
         };
         await tester.tap(find.text('Continue with Builderlab'));
         await tester.pumpAndSettle();
@@ -280,11 +285,11 @@ void main() {
         expect(find.text('1 community added and kept.'), findsOneWidget);
         await tester.tap(find.text('Keep saved identity and skip'));
         await tester.pumpAndSettle();
-        expect(f.admitted, ['one']);
+        expect(f.admitted, ['one.communities.buzz.xyz']);
         expect(find.byType(HostedConnectPage), findsNothing);
         f.admitted.clear();
         f.beforeAdmission = (name) async {
-          if (name == 'two') throw AccountFailure.rejected;
+          if (name == 'two.communities.buzz.xyz') throw AccountFailure.rejected;
         };
         await tester.tap(find.text('Continue with Builderlab'));
         await tester.pumpAndSettle();
@@ -293,7 +298,13 @@ void main() {
         await tester.tap(find.text('Back to choices'));
         await tester.pumpAndSettle();
         expect(find.byType(CheckboxListTile), findsOneWidget);
-        expect(find.text('two'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(CheckboxListTile),
+            matching: find.text('two.communities.buzz.xyz'),
+          ),
+          findsWidgets,
+        );
       }
     },
     skip: HostedEnvironment.authDomains.isEmpty,

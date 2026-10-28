@@ -95,7 +95,7 @@ pub async fn ws_audio_handler(
     // WebSocket handshake. Running pre-lookup means a denied request skips the tenant
     // lookup (a resolver miss costs one bounded binding lookup) and the gate is reachable in tests without a live community.
     // [FI-TRACE-TRANSPORT-CLOSED] [NIP-FI.md §Admission pairing sequence]
-    let (nip_fi_assertion, shadow_assertion, nip_fi_deadline) = {
+    let (nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
         use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
         let mode = state.config.nip_fi.mode;
         let verifier = state.nip_fi_verifier.as_deref();
@@ -187,6 +187,7 @@ pub async fn ws_audio_handler(
             permit,
             nip_fi_assertion,
             shadow,
+            shadow_line,
             connection_time,
         )
     })
@@ -236,6 +237,7 @@ pub(crate) async fn handle_audio_connection(
     _permit: OwnedSemaphorePermit,
     nip_fi_assertion: Option<VerifiedAssertion>,
     nip_fi_shadow: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
+    shadow_line: Option<crate::nip_fi_shadow::PendingLine>,
     connection_time: chrono::DateTime<chrono::Utc>,
 ) {
     let cancel = CancellationToken::new();
@@ -265,6 +267,9 @@ pub(crate) async fn handle_audio_connection(
         tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
     let control = CommunityConnectionControl::new(cancel);
     control.attach_nip_fi_shadow(nip_fi_shadow);
+    // Its first verified AUTH writes it; else the read loop's end does.
+    let shadow_line = shadow_line.map(Arc::new);
+    control.attach_nip_fi_line(shadow_line.as_ref());
     let drain_reason = control.disconnect_reason();
     let pre_expiry_task = audio_session_deadline.map(|deadline| {
         crate::nip_fi_session::spawn_nip_fi_expiry_task(
@@ -749,6 +754,7 @@ async fn run_active_audio_connection(
         crate::nip_fi_test_hooks::record_pairing_reached_after_cancel(tenant.community());
     }
 
+    control.prove_nip_fi_line(pubkey);
     if let Some(shadow) = control.nip_fi_shadow() {
         shadow.observe_pairing(pubkey);
         shadow
@@ -6270,6 +6276,7 @@ mod tests {
                                     permit,
                                     Some(assertion_i),
                                     None,
+                                    None,
                                     conn_time,
                                 )
                                 .await
@@ -6404,11 +6411,22 @@ mod tests {
         session: Arc<crate::nip_fi_shadow_session::ShadowSession>,
         community: buzz_core::tenant::CommunityId,
     ) -> Vec<String> {
+        let control = crate::state::CommunityConnectionControl::new(CancellationToken::new());
+        control.attach_nip_fi_shadow(Some(Arc::clone(&session)));
+        audio_auth_on(state, key, control, community).await
+    }
+
+    /// Serves one audio connection under `control` in `community`, sends
+    /// `key`'s AUTH and returns the text frames until the handler ends it.
+    async fn audio_auth_on(
+        state: Arc<crate::state::AppState>,
+        key: &nostr::Keys,
+        control: crate::state::CommunityConnectionControl,
+        community: buzz_core::tenant::CommunityId,
+    ) -> Vec<String> {
         use chrono::Utc;
         let tenant =
             buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string());
-        let control = crate::state::CommunityConnectionControl::new(CancellationToken::new());
-        control.attach_nip_fi_shadow(Some(Arc::clone(&session)));
         let slot = Arc::new(std::sync::Mutex::new(Some(control)));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -6535,6 +6553,50 @@ mod tests {
             });
             assert_eq!(records, expected);
         }
+    }
+
+    // The pairing would-deny names the key AUTH proved, not the one the
+    // token asserts. Mutation: attributing the asserted key, or none, fails.
+    #[test]
+    fn shadow_audio_pairing_denial_logs_the_proven_key() {
+        use crate::nip_fi_shadow_session::tests::{shadow_logged, shadow_state};
+        let key = nostr::Keys::generate();
+        let asserted = nostr::Keys::generate().public_key();
+        let (records, lines) = shadow_logged(async {
+            let state = Arc::new(shadow_state(None).await);
+            let (session, _) = shadow_audio_auth(state, &key, asserted).await;
+            session.expire();
+        });
+        assert_eq!(records, ["pairing/denied"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("reason=\"key_mismatch\""), "{lines:?}");
+        let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
+    }
+
+    // An upgrade would-deny's line names the key the audio AUTH verifies,
+    // and is counted once, at the upgrade. Mutation: deleting audio's
+    // `prove_nip_fi_line` logs `absent`.
+    #[test]
+    fn shadow_upgrade_would_deny_logs_the_audio_auth_key() {
+        use crate::nip_fi_shadow_session::tests::{shadow_logged, shadow_state};
+        let key = nostr::Keys::generate();
+        let (records, lines) = shadow_logged(async {
+            let state = Arc::new(shadow_state(None).await);
+            let line = crate::nip_fi_shadow::tests::upgrade_line("audio");
+            let control = crate::state::CommunityConnectionControl::new(CancellationToken::new());
+            control.attach_nip_fi_line(Some(&line));
+            let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+            audio_auth_on(state, &key, control, community).await;
+        });
+        assert_eq!(records, ["assertion/missing"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("reason=\"missing_assertion\""),
+            "{lines:?}"
+        );
+        let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
     }
 
     /// Consumes Ping/Pong until the socket terminates (Close, EOF or error)
@@ -10758,7 +10820,8 @@ mod tests {
         /// teardown that follows writes to Postgres and Redis, which can stall
         /// with no deadline. The socket must still end within the bounded wait
         /// for the client's Close reply. This client never replies and the
-        /// teardown never finishes.
+        /// teardown never finishes. The shadow line its AUTH wrote stays a
+        /// single line throughout.
         ///
         /// Mutation: move `hand_off_socket(ws_recv, None)` to after the
         /// teardown → the socket stays open while the teardown is held →
@@ -10772,6 +10835,7 @@ mod tests {
             use chrono::{Duration, Utc};
             use std::sync::Arc;
 
+            let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
             let state = audio_test_state_real_db().await.expect(
                 "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
             );
@@ -10783,7 +10847,11 @@ mod tests {
                 vec![Utc::now() + Duration::hours(1)],
             );
             let relay_url = format!("ws://{}", tenant.host());
-            let conn_cancel = CancellationToken::new();
+            let line = crate::nip_fi_shadow::tests::upgrade_line("audio");
+            let line = Arc::new(std::sync::Mutex::new(Arc::into_inner(line)));
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+            let registry = Arc::clone(&state.community_connections);
+            let ended = Arc::new(tokio::sync::Notify::new());
 
             let (fanout_rx, fanout_release) =
                 crate::nip_fi_test_hooks::audio_participant_fanout_hook::arm(community);
@@ -10793,24 +10861,37 @@ mod tests {
             let app = axum::Router::new().route(
                 "/",
                 axum::routing::get({
-                    let conn_cancel = conn_cancel.clone();
+                    let (line, semaphore, ended) = (
+                        Arc::clone(&line),
+                        Arc::clone(&semaphore),
+                        Arc::clone(&ended),
+                    );
                     move |ws: axum::extract::ws::WebSocketUpgrade| {
-                        let (state, tenant, assertion) =
-                            (Arc::clone(&state), tenant.clone(), assertion.clone());
-                        let control =
-                            crate::state::CommunityConnectionControl::new(conn_cancel.clone());
+                        let (state, tenant, assertion, ended) = (
+                            Arc::clone(&state),
+                            tenant.clone(),
+                            assertion.clone(),
+                            Arc::clone(&ended),
+                        );
+                        let line = line.lock().expect("line").take();
+                        let permit = Arc::clone(&semaphore)
+                            .try_acquire_owned()
+                            .expect("one connection permit");
                         async move {
-                            ws.on_upgrade(move |socket| {
-                                handle_active_audio_connection(
+                            ws.on_upgrade(move |socket| async move {
+                                handle_audio_connection(
                                     socket,
                                     state,
                                     tenant,
                                     channel_id,
-                                    control,
+                                    permit,
                                     Some(assertion),
-                                    Utc::now(),
                                     None,
+                                    line,
+                                    Utc::now(),
                                 )
+                                .await;
+                                ended.notify_one();
                             })
                         }
                     }
@@ -10833,6 +10914,13 @@ mod tests {
                 .expect("fanout channel closed");
             fanout_release.notify_one();
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // The upgrade's shadow line is written at AUTH, while the socket
+            // is open. Mutation: deleting the outer `attach_nip_fi_line`, or
+            // audio's `prove_nip_fi_line`, leaves no line here.
+            let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].contains(&proven), "{lines:?}");
 
             // From here the client only reads raw bytes, so it never answers
             // the server's Close.
@@ -10840,11 +10928,12 @@ mod tests {
                 panic!("plain TCP client");
             };
             let started = std::time::Instant::now();
-            conn_cancel.cancel();
+            assert_eq!(registry.disconnect_archived_community(community), 1);
             tokio::time::timeout(std::time::Duration::from_secs(5), teardown_rx)
                 .await
                 .expect("teardown must reach the stall point")
                 .expect("teardown hook dropped");
+            assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
             // The hook runs just after the hand-off, so the socket must end
             // within the bounded wait measured from here.
             let handed_off = std::time::Instant::now();
@@ -10860,6 +10949,71 @@ mod tests {
             );
 
             teardown_release.notify_one();
+            // The outer handler owns the line; once it ends, nothing does.
+            tokio::time::timeout(std::time::Duration::from_secs(10), ended.notified())
+                .await
+                .expect("the handler finishes once teardown resumes");
+            server.abort();
+            assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+        }
+
+        /// Through `build_router`, an audio upgrade without an assertion hands
+        /// its shadow line to the socket, which writes it at the verified AUTH
+        /// with that key while the socket stays open. Mutation: passing `None`
+        /// instead of `shadow_line` to `handle_audio_connection` writes the
+        /// line as `absent` at upgrade.
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        #[tokio::test]
+        async fn shadow_audio_router_writes_line_at_auth_while_open() {
+            use std::sync::Arc;
+            use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+            let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
+            let base = audio_test_state_real_db()
+                .await
+                .expect("postgres-ci provides a database");
+            let (tenant, channel_id, key) = seed_audio_fixture(base.db.pool()).await;
+            let mut state = (*base).clone();
+            let config = Arc::make_mut(&mut state.config);
+            config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
+            config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                &format!("https://{}", tenant.host()),
+                &["https://issuer.test"],
+            );
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test listener");
+            let addr = listener.local_addr().expect("test listener addr");
+            let app = crate::router::build_router(Arc::new(state))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let mut req = format!("ws://{addr}/huddle/{channel_id}/audio")
+                .into_client_request()
+                .expect("request");
+            req.headers_mut()
+                .insert("host", tenant.host().parse().unwrap());
+            let (mut client, _) = tokio_tungstenite::connect_async(req)
+                .await
+                .expect("shadow admits the upgrade");
+            send_audio_auth(&mut client, &key, &format!("ws://{}", tenant.host()), 1).await;
+
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(10), client.next())
+                    .await
+                    .expect("joined timeout")
+                {
+                    Some(Ok(Message::Text(t))) if t.contains("\"joined\"") => break,
+                    Some(Ok(_)) => {}
+                    other => panic!("expected joined, got {other:?}"),
+                }
+            }
+
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+            assert!(lines[0].contains(&proven), "{lines:?}");
+            drop(client);
             server.abort();
         }
 
@@ -11013,6 +11167,7 @@ mod tests {
                                     channel_id,
                                     permit,
                                     Some(assertion),
+                                    None,
                                     None,
                                     Utc::now(),
                                 )
@@ -16025,6 +16180,7 @@ mod tests {
                                 Uuid::new_v4(),
                                 permit,
                                 Some(expired_assertion()),
+                                None,
                                 None,
                                 chrono::Utc::now(),
                             )

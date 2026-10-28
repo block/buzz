@@ -80,6 +80,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
         flow.stage != HostedFlowStage.complete &&
         flow.stage != HostedFlowStage.profile &&
         flow.stage != HostedFlowStage.chooseIdentity &&
+        flow.stage != HostedFlowStage.setupIdentity &&
         flow.stage != HostedFlowStage.chooseCommunities &&
         flow.stage != HostedFlowStage.communityConflict &&
         !flow.canChangeCommunities;

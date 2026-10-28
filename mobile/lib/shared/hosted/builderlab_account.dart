@@ -229,6 +229,18 @@ class BuilderlabAccountClient {
   Future<Map<String, dynamic>> currentIdentity() =>
       post('/v1/buzz/nostr-identities/current', {});
 
+  /// Saves a successfully admitted destination to the same account, even if
+  /// another session operation was queued before this request runs.
+  Future<void> rememberCommunity(
+    String relay, {
+    required String expectedSubject,
+  }) async {
+    final result = await _post('/v1/buzz/known-communities/add', {
+      'community_url': relay,
+    }, expectedSubject: expectedSubject);
+    if (result['error'] != null) throw AccountFailure.rejected;
+  }
+
   /// Authenticated JSON POST to a Buzz account route on the fixed origin. The
   /// credential never leaves this client. A 401 clears the stored session only
   /// when the session check also rejects it; otherwise it is [AccountFailure.denied].
