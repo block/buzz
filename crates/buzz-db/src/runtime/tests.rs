@@ -1008,6 +1008,82 @@ async fn read_falls_back_to_writer_when_no_replica_configured() {
     assert!(db.read_pool_stats().is_none());
 }
 
+/// A match-nothing read is answered before any pool acquire, on every query
+/// entry point. Replica routing is on and the fence is open, so a routed read
+/// that reached `route_read` would try the reader first. Both pools point at a
+/// closed port, and the `limit: 1` controls prove that a real page does try
+/// to acquire, from the reader and then the writer.
+#[tokio::test]
+async fn match_nothing_reads_take_no_connection() {
+    use metrics_util::debugging::DebuggingRecorder;
+
+    let dead_pool = || {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused") // sadscan:disable np.postgres.1
+            .expect("lazy pool")
+    };
+    let mut db = Db::from_pools(dead_pool(), dead_pool());
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(3600)));
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    let community = CommunityId::from_uuid(Uuid::new_v4());
+    let page = |limit| {
+        let mut q = EventQuery::for_community(community);
+        q.limit = Some(limit);
+        q
+    };
+    let empty_kinds = {
+        let mut q = page(10);
+        q.kinds = Some(vec![]);
+        q
+    };
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let acquiring_roles = || {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| key.key().name() == "buzz_db_pool_acquire_attempts_total")
+            .filter_map(|(key, _, _, _)| {
+                key.key()
+                    .labels()
+                    .find(|label| label.key() == "pool_role")
+                    .map(|label| label.value().to_owned())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    for q in [page(0), empty_kinds] {
+        assert!(db.query_events(&q).await.expect("writer").is_empty());
+        assert!(db
+            .query_events_routed("test", &q)
+            .await
+            .expect("routed")
+            .is_empty());
+        assert!(db
+            .query_events_routed_bounded("test", &q)
+            .await
+            .expect("routed bounded")
+            .is_empty());
+    }
+    assert!(
+        acquiring_roles().is_empty(),
+        "a match-nothing read must not try to acquire: {:?}",
+        acquiring_roles()
+    );
+
+    db.query_events_routed("test", &page(1))
+        .await
+        .expect_err("a real page needs the (unreachable) pools");
+    assert_eq!(
+        acquiring_roles(),
+        ["reader", "writer"].map(str::to_owned).into(),
+        "the control must have tried the reader, then the writer"
+    );
+}
+
 #[test]
 fn read_budget_zero_disables_and_large_values_clamp_to_staleness() {
     assert_eq!(read_budget_from_ms(0), None, "0 = bounded routing off");
