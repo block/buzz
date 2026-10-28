@@ -975,7 +975,9 @@ async fn resume_after_an_hour_of_silence(loss: MockCtl) {
         conn0.ctl.send(MockCtl::Send(json!(["EOSE", sub]))).unwrap();
     }
     // The socket owner handles frames in order, so its Pong proves both EOSEs
-    // were processed (and timestamped) at T0.
+    // were processed (and timestamped) at T0. It does NOT prove the Ping itself
+    // was: the Pong is written while the Ping is being read, before the loop
+    // stamps it.
     conn0.ctl.send(MockCtl::Ping).unwrap();
     loop {
         let frame = timeout(Duration::from_secs(5), conn0.frames.recv())
@@ -986,6 +988,20 @@ async fn resume_after_an_hour_of_silence(loss: MockCtl) {
             break;
         }
     }
+    // The loop runs one `select!` arm to completion before the next, so a REQ
+    // written for a command sent now proves the Ping's arm (including its
+    // timestamp) is finished. Only then does the clock move.
+    let throwaway = Uuid::new_v4();
+    cmd_tx
+        .send(RelayCommand::Subscribe {
+            channel_id: throwaway,
+            filter: test_channel_filter(),
+            replay_since: Some(T0 - 5_000),
+        })
+        .await
+        .unwrap();
+    let barrier_req = next_req(&mut conn0).await;
+    assert_eq!(barrier_req[1], channel_sub_id(throwaway));
 
     // One hour passes with nothing from the relay; then the loss is noticed.
     FAKE_NOW.store(T0 + 3_600, Ordering::SeqCst);
@@ -997,8 +1013,16 @@ async fn resume_after_an_hour_of_silence(loss: MockCtl) {
         .unwrap();
 
     let mention_in_gap = T0 + 600;
-    for _ in 0..2 {
+    // The throwaway subscription is replayed too; only the two that reached
+    // EOSE are checked.
+    let mut pending: HashSet<String> = [channel_sub_id(channel), MEMBERSHIP_NOTIF_SUB_ID.to_owned()]
+        .into_iter()
+        .collect();
+    while !pending.is_empty() {
         let req = next_req(&mut conn1).await;
+        if !pending.remove(req[1].as_str().unwrap()) {
+            continue;
+        }
         let since = req[2]["since"].as_u64().unwrap();
         assert_eq!(
             since,
