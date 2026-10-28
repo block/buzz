@@ -5,7 +5,7 @@
 //! production functions the reconnect path actually calls. No relay service.
 use super::tests::{next_test_frame, seed_test_subscription, test_channel_filter, test_ws_pair};
 use super::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
 
@@ -586,4 +586,389 @@ async fn restart_closes_delay_the_first_attempt_and_other_closes_do_not() {
         );
         relay.abort();
     }
+}
+
+// -- Liveness cap and superseded-REQ EOSE -----------------------------------
+
+#[test]
+fn live_until_is_capped_at_the_last_inbound_frame() {
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel);
+    state.eose_this_conn.insert(channel_sub_id(channel));
+    state.last_inbound_secs = Some(5_000);
+
+    // The loss is only detected an hour later; the stamp is the last frame.
+    begin_reconnect(&mut state, 5_000 + 3_600, 0.0);
+    assert_eq!(state.live_until[&channel_sub_id(channel)], 5_000);
+    // Kept for a repeated reconnect call of the same outage.
+    assert_eq!(state.last_inbound_secs, Some(5_000));
+
+    // A clock that went backwards never produces a stamp after "now".
+    state.eose_this_conn.insert(channel_sub_id(channel));
+    state.live_until.clear();
+    state.last_inbound_secs = Some(9_000);
+    begin_reconnect(&mut state, 8_000, 0.0);
+    assert_eq!(state.live_until[&channel_sub_id(channel)], 8_000);
+}
+
+#[tokio::test]
+async fn second_req_on_a_connection_supersedes_the_first_for_eose() {
+    let (mut client, _server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel);
+    let sub = channel_sub_id(channel);
+    for expect_tracked in [true, false] {
+        let since = state.channel_since(&channel);
+        assert!(
+            send_subscribe(
+                &mut client,
+                &mut state,
+                channel,
+                "agent",
+                since,
+                &test_channel_filter()
+            )
+            .await
+        );
+        deliver_eose(&mut client, &mut state, &sub).await;
+        assert_eq!(state.eose_this_conn.contains(&sub), expect_tracked);
+    }
+    // A new connection starts clean: its first REQ counts again.
+    begin_reconnect(&mut state, 5_000, 0.0);
+    assert!(state.req_sent_this_conn.is_empty() && state.superseded_this_conn.is_empty());
+}
+
+fn tagged_event(channel: Uuid, created_at: u64) -> Event {
+    EventBuilder::new(Kind::Custom(9), format!("e{created_at}"))
+        .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
+        .custom_created_at(nostr::Timestamp::from(created_at))
+        .sign_with_keys(&Keys::generate())
+        .unwrap()
+}
+
+async fn deliver_event(
+    client: &mut WsStream,
+    state: &mut BgState,
+    tx: &mpsc::Sender<Option<BuzzEvent>>,
+    sub_id: &str,
+    event: &Event,
+) {
+    let (control_tx, _control_rx) = mpsc::channel(1);
+    let alive = handle_ws_message(
+        Message::Text(json!(["EVENT", sub_id, event]).to_string().into()),
+        client,
+        tx,
+        &control_tx,
+        state,
+        &Keys::generate(),
+        "ws://127.0.0.1:1",
+        "agent",
+        None,
+    )
+    .await;
+    assert!(alive);
+}
+
+/// Drop the live socket the way the production loop does: through the real
+/// autonomous reconnect entry (queued Shutdown, unreachable relay).
+async fn lose_connection(state: &mut BgState) {
+    let (mut dead, _dead_server) = test_ws_pair().await;
+    let url = refused_relay_url().await;
+    ReconnectHarness::with_queued_shutdown()
+        .await
+        .autonomous(&mut dead, state, &url)
+        .await;
+}
+
+/// Replay `state` on a fresh socket and return the `since` of the first REQ.
+async fn first_replay_req(state: &mut BgState, expected_sub: &str) -> u64 {
+    let (mut client, mut server) = test_ws_pair().await;
+    let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
+    let result = resubscribe_after_reconnect(&mut client, &mut cmd_rx, state, "agent", true).await;
+    assert!(matches!(result, ResubscribeResult::Ok));
+    let req = next_test_frame(&mut server).await;
+    assert_eq!(req[1], expected_sub);
+    req[2]["since"].as_u64().unwrap()
+}
+
+#[tokio::test]
+async fn delayed_eose_of_a_superseded_req_keeps_the_channel_overflow_floor() {
+    let (mut client, mut server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel); // base 1_000
+    let sub = channel_sub_id(channel);
+    let (tx, mut rx) = mpsc::channel(2);
+
+    // REQ #1 is on the wire; its EOSE is still in flight.
+    let since = state.channel_since(&channel);
+    assert!(
+        send_subscribe(
+            &mut client,
+            &mut state,
+            channel,
+            "agent",
+            since,
+            &test_channel_filter()
+        )
+        .await
+    );
+    assert_eq!(next_test_frame(&mut server).await[0], "REQ");
+
+    // History arrives faster than the consumer drains it: the third event
+    // overflows the queue and is recorded as lost.
+    for ts in [1_010, 1_020, 1_100] {
+        deliver_event(&mut client, &mut state, &tx, &sub, &tagged_event(channel, ts)).await;
+    }
+    assert_eq!(state.channel_dropped_since[&channel], 1_100);
+    while rx.try_recv().is_ok() {}
+
+    // Overflow recovery writes REQ #2 and retires the loss floor on the write.
+    recovery::recover_one(&mut client, &mut state, &tx, "agent").await;
+    assert_eq!(next_test_frame(&mut server).await[0], "REQ");
+    assert!(!state.channel_dropped_since.contains_key(&channel));
+
+    // The in-flight EOSE of REQ #1 lands, then the socket drops before REQ #2
+    // has replayed the lost event.
+    deliver_eose(&mut client, &mut state, &sub).await;
+    lose_connection(&mut state).await;
+
+    let since = first_replay_req(&mut state, &sub).await;
+    assert!(
+        since <= 1_100,
+        "replay must still cover the dropped event at 1100, got since={since}"
+    );
+}
+
+#[tokio::test]
+async fn delayed_eose_of_a_superseded_req_keeps_the_membership_overflow_floor() {
+    let (mut client, mut server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    state.membership_sub_active = true;
+    state.startup_watermark = Some(1_000);
+    state.membership_last_seen = Some(1_000);
+    let (tx, mut rx) = mpsc::channel(2);
+
+    let since = state.membership_since();
+    assert!(send_membership_subscribe(&mut client, &mut state, "agent", since).await);
+    assert_eq!(next_test_frame(&mut server).await[0], "REQ");
+
+    for ts in [1_010, 1_020, 1_100] {
+        deliver_event(
+            &mut client,
+            &mut state,
+            &tx,
+            MEMBERSHIP_NOTIF_SUB_ID,
+            &tagged_event(channel, ts),
+        )
+        .await;
+    }
+    assert_eq!(state.membership_dropped_since, Some(1_100));
+    while rx.try_recv().is_ok() {}
+
+    recovery::recover_one(&mut client, &mut state, &tx, "agent").await;
+    assert_eq!(next_test_frame(&mut server).await[0], "REQ");
+    assert_eq!(state.membership_dropped_since, None);
+
+    deliver_eose(&mut client, &mut state, MEMBERSHIP_NOTIF_SUB_ID).await;
+    lose_connection(&mut state).await;
+
+    let since = first_replay_req(&mut state, MEMBERSHIP_NOTIF_SUB_ID).await;
+    assert!(
+        since <= 1_100,
+        "replay must still cover the dropped notification at 1100, got since={since}"
+    );
+}
+
+// -- Silent socket death, through the real socket-owner loop ----------------
+
+enum MockFrame {
+    Text(Value),
+    Pong,
+}
+
+enum MockCtl {
+    Send(Value),
+    Ping,
+    Drop,
+}
+
+struct MockConn {
+    frames: mpsc::UnboundedReceiver<MockFrame>,
+    ctl: mpsc::UnboundedSender<MockCtl>,
+}
+
+/// A relay that completes NIP-42 auth on every connection, surfaces each
+/// authenticated connection to the test, and forwards its inbound frames.
+async fn mock_relay() -> (String, mpsc::UnboundedReceiver<MockConn>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let (conn_tx, conn_rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let conn_tx = conn_tx.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let _ = ws
+                    .send(Message::Text(json!(["AUTH", "challenge"]).to_string().into()))
+                    .await;
+                loop {
+                    let Some(Ok(Message::Text(text))) = ws.next().await else {
+                        return;
+                    };
+                    let frame: Value = serde_json::from_str(&text).unwrap();
+                    if frame[0] == "AUTH" {
+                        let ok = json!(["OK", frame[1]["id"], true, ""]);
+                        let _ = ws.send(Message::Text(ok.to_string().into())).await;
+                        break;
+                    }
+                }
+                let (frames_tx, frames_rx) = mpsc::unbounded_channel();
+                let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel();
+                let _ = conn_tx.send(MockConn {
+                    frames: frames_rx,
+                    ctl: ctl_tx,
+                });
+                loop {
+                    tokio::select! {
+                        msg = ws.next() => match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                let _ = frames_tx.send(MockFrame::Text(
+                                    serde_json::from_str(&text).unwrap(),
+                                ));
+                            }
+                            Some(Ok(Message::Pong(_))) => {
+                                let _ = frames_tx.send(MockFrame::Pong);
+                            }
+                            Some(Ok(_)) => {}
+                            _ => return,
+                        },
+                        ctl = ctl_rx.recv() => match ctl {
+                            Some(MockCtl::Send(v)) => {
+                                let _ = ws.send(Message::Text(v.to_string().into())).await;
+                            }
+                            Some(MockCtl::Ping) => {
+                                let _ = ws.send(Message::Ping(vec![1].into())).await;
+                            }
+                            Some(MockCtl::Drop) | None => return,
+                        },
+                    }
+                }
+            });
+        }
+    });
+    (url, conn_rx)
+}
+
+static FAKE_NOW: AtomicU64 = AtomicU64::new(0);
+
+fn fake_now() -> u64 {
+    FAKE_NOW.load(Ordering::SeqCst)
+}
+
+async fn next_req(conn: &mut MockConn) -> Value {
+    loop {
+        let frame = timeout(Duration::from_secs(5), conn.frames.recv())
+            .await
+            .expect("timed out waiting for a REQ")
+            .expect("mock connection closed");
+        if let MockFrame::Text(v) = frame {
+            if v[0] == "REQ" {
+                return v;
+            }
+        }
+    }
+}
+
+/// An agent reaches EOSE, the machine sleeps for an hour while the socket
+/// dies, and the loss is only noticed on wake. Replay must resume from the
+/// last frame the relay actually sent, not from the wake time.
+#[tokio::test]
+async fn silent_socket_death_resumes_from_last_inbound_frame_not_detection_time() {
+    const T0: u64 = 1_700_000_000;
+    FAKE_NOW.store(T0, Ordering::SeqCst);
+    let (url, mut conns) = mock_relay().await;
+    let keys = Keys::generate();
+    let (ws, handshake) = do_connect(&url, &keys, None).await.unwrap();
+    let mut conn0 = timeout(Duration::from_secs(5), conns.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut state = BgState::new();
+    state.now_secs = fake_now;
+    state.startup_watermark = Some(T0 - 5_000);
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let (control_tx, _control_rx) = mpsc::channel(1);
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let task = tokio::spawn(run_background_task_with_state(
+        state,
+        ws,
+        handshake,
+        event_tx,
+        control_tx,
+        cmd_rx,
+        keys.clone(),
+        url.clone(),
+        keys.public_key().to_hex(),
+        None,
+    ));
+
+    let channel = Uuid::new_v4();
+    cmd_tx
+        .send(RelayCommand::Subscribe {
+            channel_id: channel,
+            filter: test_channel_filter(),
+            replay_since: Some(T0 - 5_000),
+        })
+        .await
+        .unwrap();
+    cmd_tx.send(RelayCommand::SubscribeMembership).await.unwrap();
+    next_req(&mut conn0).await;
+    next_req(&mut conn0).await;
+
+    for sub in [channel_sub_id(channel), MEMBERSHIP_NOTIF_SUB_ID.to_owned()] {
+        conn0.ctl.send(MockCtl::Send(json!(["EOSE", sub]))).unwrap();
+    }
+    // The socket owner handles frames in order, so its Pong proves both EOSEs
+    // were processed (and timestamped) at T0.
+    conn0.ctl.send(MockCtl::Ping).unwrap();
+    loop {
+        let frame = timeout(Duration::from_secs(5), conn0.frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(frame, MockFrame::Pong) {
+            break;
+        }
+    }
+
+    // One hour passes with nothing from the relay; then the loss is noticed.
+    FAKE_NOW.store(T0 + 3_600, Ordering::SeqCst);
+    conn0.ctl.send(MockCtl::Drop).unwrap();
+    let mut conn1 = timeout(Duration::from_secs(10), conns.recv())
+        .await
+        .expect("socket owner reconnected")
+        .unwrap();
+
+    let mention_in_gap = T0 + 600;
+    for _ in 0..2 {
+        let req = next_req(&mut conn1).await;
+        let since = req[2]["since"].as_u64().unwrap();
+        assert_eq!(
+            since,
+            T0 - RESUME_LIVE_SKEW_SECS,
+            "{} must resume from the last inbound frame",
+            req[1]
+        );
+        assert!(since <= mention_in_gap, "{} would skip the mention", req[1]);
+    }
+
+    cmd_tx.send(RelayCommand::Shutdown).await.unwrap();
+    timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
 }

@@ -1265,6 +1265,22 @@ struct BgState {
     /// Close code of the last WebSocket Close frame received, consumed by the
     /// next reconnect to choose the first-attempt delay.
     last_close_code: Option<u16>,
+    /// Wall-clock unix seconds of the newest frame (including Pong) received
+    /// from the relay on the current or most recent connection. Caps the
+    /// `live_until` stamp: when a socket dies silently (laptop sleep, dead
+    /// link) the loss is only detected later, but the subscription was only
+    /// known to be live until its last inbound frame.
+    last_inbound_secs: Option<u64>,
+    /// Wall clock for inbound-frame and connection-close timestamps. Always
+    /// [`unix_now_secs`] in production; replaceable so tests can move time.
+    now_secs: fn() -> u64,
+    /// Subscription IDs a REQ was written for on the CURRENT connection.
+    req_sent_this_conn: HashSet<String>,
+    /// Subscription IDs whose REQ was written more than once on the CURRENT
+    /// connection. EOSE carries only the subscription ID, so an EOSE for the
+    /// superseded REQ cannot be told from one for its replacement; such a
+    /// subscription never counts as having reached EOSE on this connection.
+    superseded_this_conn: HashSet<String>,
 }
 
 impl BgState {
@@ -1295,6 +1311,10 @@ impl BgState {
             eose_this_conn: HashSet::new(),
             live_until: HashMap::new(),
             last_close_code: None,
+            last_inbound_secs: None,
+            now_secs: unix_now_secs,
+            req_sent_this_conn: HashSet::new(),
+            superseded_this_conn: HashSet::new(),
         }
     }
 
@@ -1347,8 +1367,14 @@ impl BgState {
 
     /// Record that `sub_id` reached EOSE on the current connection. Only
     /// subscriptions this task owns are tracked, so an untrusted relay cannot
-    /// grow the set with arbitrary IDs.
+    /// grow the set with arbitrary IDs. A subscription whose REQ was re-sent on
+    /// this connection is ignored: the EOSE may belong to the superseded REQ,
+    /// whose replacement (e.g. an overflow-recovery replay) has not delivered
+    /// its history yet.
     fn note_eose(&mut self, sub_id: &str) {
+        if self.superseded_this_conn.contains(sub_id) {
+            return;
+        }
         let known = sub_id == MEMBERSHIP_NOTIF_SUB_ID
             || channel_id_from_sub_id(sub_id)
                 .is_some_and(|channel_id| self.active_subscriptions.contains_key(&channel_id));
@@ -1357,21 +1383,33 @@ impl BgState {
         }
     }
 
-    /// A REQ was (re)sent for `sub_id`: it has not reached EOSE yet.
-    fn forget_eose(&mut self, sub_id: &str) {
+    /// A REQ was written for `sub_id`: it has not reached EOSE yet, and a
+    /// second REQ on the same connection supersedes the first for the rest of
+    /// that connection (see `superseded_this_conn`).
+    fn note_req_sent(&mut self, sub_id: &str) {
         self.eose_this_conn.remove(sub_id);
+        if !self.req_sent_this_conn.insert(sub_id.to_owned()) {
+            self.superseded_this_conn.insert(sub_id.to_owned());
+        }
     }
 
-    /// The current connection closed at `now_secs`: every subscription that
-    /// reached EOSE on it was live until now. Subscriptions that never reached
-    /// EOSE keep whatever cursor they already had.
+    /// The current connection closed (detected at `now_secs`): every
+    /// subscription that reached EOSE on it was live until its last inbound
+    /// frame, capped at `now_secs`. Subscriptions that never reached EOSE keep
+    /// whatever cursor they already had. `last_inbound_secs` is deliberately
+    /// kept so a repeated call for the same outage stamps the same time.
     fn note_connection_closed(&mut self, now_secs: u64) {
+        let live_until = self
+            .last_inbound_secs
+            .map_or(now_secs, |inbound| inbound.min(now_secs));
         for sub_id in self.eose_this_conn.drain() {
             self.live_until
                 .entry(sub_id)
-                .and_modify(|t| *t = (*t).max(now_secs))
-                .or_insert(now_secs);
+                .and_modify(|t| *t = (*t).max(live_until))
+                .or_insert(live_until);
         }
+        self.req_sent_this_conn.clear();
+        self.superseded_this_conn.clear();
     }
 
     /// Clear all per-channel state for a channel that is being unsubscribed.
@@ -1386,6 +1424,8 @@ impl BgState {
         self.channel_dropped_since.remove(channel_id);
         let sub_id = channel_sub_id(*channel_id);
         self.eose_this_conn.remove(&sub_id);
+        self.req_sent_this_conn.remove(&sub_id);
+        self.superseded_this_conn.remove(&sub_id);
         self.live_until.remove(&sub_id);
         self.active_filters.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);
@@ -1819,6 +1859,36 @@ async fn execute_connected_command(
 /// reconnection.
 #[allow(clippy::too_many_arguments)]
 async fn run_background_task(
+    ws: WsStream,
+    initial_handshake_buffer: std::collections::VecDeque<RelayMessage>,
+    event_tx: mpsc::Sender<Option<BuzzEvent>>,
+    observer_control_tx: mpsc::Sender<Event>,
+    cmd_rx: mpsc::Receiver<RelayCommand>,
+    keys: Keys,
+    relay_url: String,
+    agent_pubkey_hex: String,
+    auth_tag: Option<nostr::Tag>,
+) {
+    run_background_task_with_state(
+        BgState::new(),
+        ws,
+        initial_handshake_buffer,
+        event_tx,
+        observer_control_tx,
+        cmd_rx,
+        keys,
+        relay_url,
+        agent_pubkey_hex,
+        auth_tag,
+    )
+    .await
+}
+
+/// [`run_background_task`] with caller-provided initial state, so tests can
+/// supply a controllable clock.
+#[allow(clippy::too_many_arguments)]
+async fn run_background_task_with_state(
+    mut state: BgState,
     mut ws: WsStream,
     initial_handshake_buffer: std::collections::VecDeque<RelayMessage>,
     event_tx: mpsc::Sender<Option<BuzzEvent>>,
@@ -1829,8 +1899,6 @@ async fn run_background_task(
     agent_pubkey_hex: String,
     auth_tag: Option<nostr::Tag>,
 ) {
-    let mut state = BgState::new();
-
     let handshake_ok = process_handshake_buffer(
         &mut ws,
         initial_handshake_buffer,
@@ -2002,6 +2070,9 @@ async fn run_background_task(
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
                            Some(Ok(msg)) => {
+                               // Any frame, Pong included, proves the socket was
+                               // alive now; it bounds `live_until` on close.
+                               state.last_inbound_secs = Some((state.now_secs)());
                                if matches!(msg, Message::Pong(_)) {
                                    last_pong = Instant::now();
                                    ping_sent = false;
@@ -3465,8 +3536,7 @@ async fn send_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
-                    // The new REQ has not reached EOSE yet.
-                    state.forget_eose(&sub_id);
+                    state.note_req_sent(&sub_id);
                     debug!(
                         "subscribed to channel {channel_id}{}",
                         if since.is_some() {
@@ -3522,7 +3592,7 @@ async fn send_membership_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
-                    state.forget_eose(MEMBERSHIP_NOTIF_SUB_ID);
+                    state.note_req_sent(MEMBERSHIP_NOTIF_SUB_ID);
                     debug!("subscribed to membership notifications (since={since_ts})");
                     true
                 }
@@ -3775,7 +3845,7 @@ async fn shutdown_aware_sleep(
 /// `wait_for_reconnect`: runs [`begin_reconnect`] with the real clock and RNG,
 /// then waits out the first-attempt delay. Returns `false` on shutdown.
 async fn prepare_reconnect(cmd_rx: &mut mpsc::Receiver<RelayCommand>, state: &mut BgState) -> bool {
-    let delay = begin_reconnect(state, unix_now_secs(), random_unit_sample());
+    let delay = begin_reconnect(state, (state.now_secs)(), random_unit_sample());
     if delay.is_zero() {
         return true;
     }
