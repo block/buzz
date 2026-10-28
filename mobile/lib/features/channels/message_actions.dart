@@ -33,11 +33,13 @@ import '../../shared/read_state/message_read_state.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'thread_detail_page.dart';
+import 'read_aloud/read_aloud_controller.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
 import 'unread_badge/is_high_priority_event.dart';
 
 part 'message_actions/quick_reaction_row.dart';
+part 'message_actions/read_aloud_tile.dart';
 
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
@@ -150,6 +152,7 @@ Future<void> showMessageActions({
                     ),
                     SheetActionSection(
                       children: [
+                        _ReadAloudTile(message: message, pageContext: context),
                         // Export: take the content out of the conversation.
                         ListTile(
                           leading: const Icon(BuzzIcons.copy),
