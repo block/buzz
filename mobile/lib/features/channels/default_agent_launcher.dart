@@ -27,7 +27,8 @@ class DefaultAgentLauncher extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final preference = ref.watch(defaultAgentProvider);
-    final pubkey = preference.value;
+    final scope = ref.watch(meSyncProvider);
+    final pubkey = preference.isLoading ? null : preference.value;
     final profiles = ref.watch(userCacheProvider);
     final profile = profiles[pubkey];
     final opening = useState(false);
@@ -44,7 +45,13 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         ? 'Retry default agent'
         : 'Default agent';
     Future<void> open() async {
-      if (opening.value) return;
+      final currentPreference = ref.read(defaultAgentProvider);
+      if (opening.value ||
+          currentPreference.isLoading ||
+          ref.read(meSyncProvider) != scope ||
+          currentPreference.value != pubkey) {
+        return;
+      }
       unawaited(HapticFeedback.lightImpact());
       if (preference.hasError) {
         ref.invalidate(defaultAgentProvider);
@@ -54,7 +61,6 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         onChooseAgent();
         return;
       }
-      final scope = ref.read(meSyncProvider);
       opening.value = true;
       try {
         final channelState = ref.read(channelsProvider);
@@ -81,6 +87,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         if (!context.mounted) return;
         // A community switch invalidates an in-flight destination.
         if (ref.read(meSyncProvider) != scope ||
+            ref.read(defaultAgentProvider).isLoading ||
             ref.read(defaultAgentProvider).value != pubkey) {
           return;
         }
@@ -119,7 +126,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         child: IconButton(
           tooltip: label,
           padding: EdgeInsets.zero,
-          onPressed: opening.value ? null : open,
+          onPressed: opening.value || preference.isLoading ? null : open,
           icon: ExcludeSemantics(
             child: resolving.value
                 ? const SizedBox.square(
