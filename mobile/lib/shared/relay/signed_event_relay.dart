@@ -36,6 +36,7 @@ class SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    void Function()? validateDelivery,
   }) async {
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) {
@@ -57,6 +58,7 @@ class SignedEventRelay {
 
     final nostrEvent = NostrEvent.fromJson(event.toMap());
     await onSigned?.call(nostrEvent);
+    validateDelivery?.call();
     return _session.publish(nostrEvent);
   }
 }

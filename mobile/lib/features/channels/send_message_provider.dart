@@ -122,6 +122,7 @@ class SendMessage {
     try {
       await _signedEventRelay.submit(
         kind: EventKind.streamMessage,
+        validateDelivery: _ensureDeliveryValid,
         content: content,
         tags: tags,
         onSigned: (event) async {

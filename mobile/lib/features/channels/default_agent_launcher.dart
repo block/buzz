@@ -61,10 +61,13 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
       unawaited(HapticFeedback.lightImpact());
       if (preference.hasError) {
+        if (recording != null)
+          throw StateError('Default agent is unavailable.');
         ref.invalidate(defaultAgentProvider);
         return;
       }
       if (pubkey == null) {
+        if (recording != null) throw StateError('No default agent selected.');
         onChooseAgent();
         return;
       }
@@ -104,7 +107,10 @@ class DefaultAgentLauncher extends HookConsumerWidget {
           final session = ref.read(relaySessionProvider.notifier);
           final previousEvent = await draft.readEvent();
           if (previousEvent != null) {
-            if (!context.mounted || ref.read(meSyncProvider) != scope) {
+            if (!context.mounted ||
+                ref.read(meSyncProvider) != scope ||
+                ref.read(defaultAgentProvider).isLoading ||
+                ref.read(defaultAgentProvider).value != pubkey) {
               throw StateError('The community changed.');
             }
             await session.publish(previousEvent);
@@ -136,6 +142,10 @@ class DefaultAgentLauncher extends HookConsumerWidget {
           }
           if (!context.mounted) return;
         }
+        if (!context.mounted ||
+            ref.read(meSyncProvider) != scope ||
+            ref.read(defaultAgentProvider).value != pubkey)
+          return;
         unawaited(
           Navigator.of(context).push<void>(
             MaterialPageRoute(
