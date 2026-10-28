@@ -69,9 +69,10 @@ bool isRelayConnectionStable(Duration uptime) =>
 /// replay the original filter unchanged.
 ///
 /// [lastSeenCreatedAt] is the newest event delivered. [liveUntil] is the
-/// client clock, in seconds, when the subscription's last connection closed,
-/// set only if that subscription reached EOSE on it: everything stored was
-/// delivered by EOSE and everything after it arrived live until the close.
+/// client clock, in seconds, of the last relay frame received on the
+/// subscription's last connection (capped at the close), set only if that
+/// subscription reached EOSE on it: everything stored was delivered by EOSE
+/// and everything after it arrived live until that frame.
 /// The result is the latest of the original `since`,
 /// `lastSeenCreatedAt - 5s` and `liveUntil - 960s`, never past [until].
 int? relayResumeSince({
