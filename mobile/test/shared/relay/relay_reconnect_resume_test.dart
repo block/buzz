@@ -15,14 +15,31 @@ void main() {
       (null, null, null, null, null), // nothing known: original filter
       (500, null, null, null, 500), // original since kept
       (null, null, 1000, null, 995), // last seen - 5s
-      (null, null, null, 1000, 940), // live until - 60s
+      (null, null, null, 1000, 40), // live until - 960s
       (null, null, 1000, 1010, 995), // last seen newer than live window
-      (null, null, 1000, 1100, 1040), // live window newer than last seen
-      (2000, null, 1000, 1100, 2000), // original since is a floor
+      (null, null, 1000, 2100, 1140), // live window newer than last seen
+      (2000, null, 1000, 2100, 2000), // original since is a floor
       (null, null, 3, null, 0), // clamped at zero
       (null, null, null, 30, 0),
-      (null, 900, 1000, 1100, 900), // never past the filter's until
+      (null, 900, 1000, 2100, 900), // never past the filter's until
+      // An event stored right after the close can be backdated 900s (the
+      // relay's timestamp drift bound); the window must reach at least that
+      // far behind the close.
+      (null, null, null, 5000, 4040),
     ];
+    test('the live window covers the relay timestamp drift bound', () {
+      const driftBound = 900;
+      expect(
+        relayResumeSince(
+          originalSince: null,
+          until: null,
+          lastSeenCreatedAt: null,
+          liveUntil: 5000,
+        )!,
+        lessThanOrEqualTo(5000 - driftBound),
+      );
+    });
+
     for (final (original, until, lastSeen, liveUntil, expected) in cases) {
       test('since=$original until=$until seen=$lastSeen live=$liveUntil', () {
         expect(
@@ -143,7 +160,7 @@ void main() {
       final start = h.nowSeconds;
       h.sockets.last.connectSuccessfully();
 
-      final quiet = await h.subscribeLive(_filter('quiet', since: start - 900));
+      final quiet = await h.subscribeLive(_filter('quiet', since: start - 3600));
       h.subscribeWithoutEose(_filter('no-eose'));
       final busy = await h.subscribeLive(_filter('busy'));
       final closed = await h.subscribeLive(_filter('closed'));
@@ -161,10 +178,16 @@ void main() {
       h.sockets.last.connectSuccessfully();
       await h.settle();
 
+      // A backdated event stored just after the close (up to 900s behind the
+      // relay clock) is still inside the window.
+      expect(
+        h.replayedSince()['quiet']!,
+        lessThanOrEqualTo(start + 120 - 900),
+      );
       expect(h.replayedSince(), {
-        'quiet': start + 60, // live until (start + 120) - 60s
+        'quiet': start - 840, // live until (start + 120) - 960s
         'no-eose': null, // never live: today's behaviour
-        'busy': start + 95, // last seen - 5s beats live until - 60s
+        'busy': start + 95, // last seen - 5s beats live until - 960s
         'closed': null, // relay closed it: not live at the disconnect
       });
     });
@@ -184,7 +207,7 @@ void main() {
       h.sockets.last.connectSuccessfully();
       await h.settle();
 
-      expect(h.replayedSince(), {'quiet': start + 30 - 60});
+      expect(h.replayedSince(), {'quiet': start + 30 - 960});
     });
 
     test('a later connection that never reaches EOSE keeps the older cursor, '
@@ -200,7 +223,7 @@ void main() {
       await h.settle();
       h.sockets.last.connectSuccessfully();
       await h.settle();
-      expect(h.replayedSince(), {'quiet': start + 40});
+      expect(h.replayedSince(), {'quiet': start + 100 - 960});
 
       // The second connection dies before EOSE: the cursor must not move.
       h.now = h.now.add(const Duration(seconds: 100));
@@ -209,7 +232,7 @@ void main() {
       await h.settle();
       h.sockets.last.connectSuccessfully();
       await h.settle();
-      expect(h.replayedSince(), {'quiet': start + 40});
+      expect(h.replayedSince(), {'quiet': start + 100 - 960});
 
       h.session.debugHandleMessage(['EOSE', 'l-1']);
       h.now = h.now.add(const Duration(seconds: 100));
@@ -218,7 +241,7 @@ void main() {
       await h.settle();
       h.sockets.last.connectSuccessfully();
       await h.settle();
-      expect(h.replayedSince(), {'quiet': start + 300 - 60});
+      expect(h.replayedSince(), {'quiet': start + 300 - 960});
     });
   });
 }

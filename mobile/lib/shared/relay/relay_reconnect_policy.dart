@@ -20,8 +20,12 @@ const relayServiceRestartSpreadMs = 10000;
 const relayReplaySkewSeconds = 5;
 
 /// Seconds a replay reaches behind the moment a subscription's connection
-/// closed. Absorbs client/relay clock skew and `created_at` jitter.
-const relayLiveWindowSkewSeconds = 60;
+/// closed: 900s for the relay's `MAX_TIMESTAMP_DRIFT_SECS`
+/// (`crates/buzz-relay/src/handlers/ingest.rs`), plus 60s of client clock
+/// skew. The relay stores events with a `created_at` up to 900s behind its own
+/// clock, so one stored just after the close can be backdated that far; a
+/// narrower window would miss it for a quiet subscription.
+const relayLiveWindowSkewSeconds = 960;
 
 /// Whether [closeCode] says the relay is restarting or going away.
 bool isRelayServiceRestartClose(int? closeCode) =>
@@ -69,7 +73,7 @@ bool isRelayConnectionStable(Duration uptime) =>
 /// set only if that subscription reached EOSE on it: everything stored was
 /// delivered by EOSE and everything after it arrived live until the close.
 /// The result is the latest of the original `since`,
-/// `lastSeenCreatedAt - 5s` and `liveUntil - 60s`, never past [until].
+/// `lastSeenCreatedAt - 5s` and `liveUntil - 960s`, never past [until].
 int? relayResumeSince({
   required int? originalSince,
   required int? until,
