@@ -1,20 +1,25 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/concentric_sheet_surface.dart';
+import '../../shared/widgets/page_indicator.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
 import 'media_viewer_hero.dart';
 
 export 'media_viewer_hero.dart';
@@ -22,7 +27,9 @@ export 'media_viewer_hero.dart';
 part 'media_viewer_page/image_controls.dart';
 part 'media_viewer_page/route_transition.dart';
 part 'media_viewer_page/video_controls.dart';
+part 'media_viewer_page/video_controls_visibility.dart';
 part 'media_viewer_page/video_viewer.dart';
+part 'media_viewer_page/video_zoom_surface.dart';
 
 const _imageViewerPushDuration = Duration(milliseconds: 260);
 const _imageViewerPopDuration = Duration(milliseconds: 170);
@@ -190,7 +197,6 @@ class MediaImageViewerPage extends HookConsumerWidget {
   static const _dismissThreshold = 100.0;
   static const _dismissVelocity = 700.0;
   static const _backgroundFadeDivisor = 300.0;
-  static const _filmstripScrubExtent = 44.0;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -209,7 +215,6 @@ class MediaImageViewerPage extends HookConsumerWidget {
     final safeInitialIndex = initialIndex.clamp(0, images.length - 1).toInt();
     final currentIndex = useState(safeInitialIndex);
     final pageController = usePageController(initialPage: safeInitialIndex);
-    final pagePosition = useState(safeInitialIndex.toDouble());
     final transformationControllers = useMemoized(
       () => [
         for (var index = 0; index < images.length; index++)
@@ -230,16 +235,6 @@ class MediaImageViewerPage extends HookConsumerWidget {
     final dragOffset = useState(0.0);
     final isDragging = useState(false);
 
-    void handlePagePositionChanged() {
-      if (!pageController.hasClients) return;
-      final nextPosition = pageController.page;
-      if (nextPosition == null ||
-          (nextPosition - pagePosition.value).abs() < 0.0001) {
-        return;
-      }
-      pagePosition.value = nextPosition;
-    }
-
     void handleTransformChanged(int index) {
       if (index != currentIndex.value) return;
       final nextIsTransformed = _hasImageTransform(
@@ -255,11 +250,6 @@ class MediaImageViewerPage extends HookConsumerWidget {
         dragOffset.value = 0;
       }
     }
-
-    useEffect(() {
-      pageController.addListener(handlePagePositionChanged);
-      return () => pageController.removeListener(handlePagePositionChanged);
-    }, [pageController]);
 
     useEffect(() {
       final listeners = <VoidCallback>[];
@@ -298,6 +288,9 @@ class MediaImageViewerPage extends HookConsumerWidget {
     }, [zoomResetController]);
 
     void onPageChanged(int index) {
+      if (index != currentIndex.value) {
+        unawaited(HapticFeedback.selectionClick());
+      }
       _precacheViewerImages(context, images, index);
       currentIndex.value = index;
       isTransformed.value = _hasImageTransform(
@@ -306,34 +299,6 @@ class MediaImageViewerPage extends HookConsumerWidget {
       disableHeroOnDismiss.value = index != safeInitialIndex;
       dragOffset.value = 0;
       isDragging.value = false;
-    }
-
-    void onFilmstripScrubUpdate(double delta) {
-      if (isTransformed.value || !pageController.hasClients) return;
-      final position = pageController.position;
-      final viewport = position.viewportDimension;
-      if (viewport <= 0) return;
-      final target =
-          (pageController.offset - ((delta / _filmstripScrubExtent) * viewport))
-              .clamp(position.minScrollExtent, position.maxScrollExtent)
-              .toDouble();
-      pageController.jumpTo(target);
-    }
-
-    void onFilmstripScrubEnd() {
-      if (!pageController.hasClients) return;
-      final targetPage = (pageController.page ?? currentIndex.value.toDouble())
-          .round()
-          .clamp(0, images.length - 1);
-      if (MediaQuery.disableAnimationsOf(context)) {
-        pageController.jumpToPage(targetPage);
-        return;
-      }
-      pageController.animateToPage(
-        targetPage,
-        duration: const Duration(milliseconds: 180),
-        curve: Curves.easeOutCubic,
-      );
     }
 
     void upgradeToFullResolution(int index) {
@@ -527,12 +492,8 @@ class MediaImageViewerPage extends HookConsumerWidget {
                     onPageChanged: onPageChanged,
                     itemBuilder: (context, index) {
                       final image = images[index];
-                      final viewPadding = MediaQuery.viewPaddingOf(context);
                       return Padding(
-                        padding: EdgeInsets.only(
-                          top: viewPadding.top + 48 + Grid.xxs,
-                          bottom: viewPadding.bottom + 56 + (Grid.xxs * 2),
-                        ),
+                        padding: _mediaViewerPadding(context),
                         child: LayoutBuilder(
                           builder: (context, constraints) {
                             final viewerSize = _imageViewerSize(
@@ -593,7 +554,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
                                           errorBuilder: (_, _, _) =>
                                               const _MediaLoadFailure(
                                                 message: 'Failed to load image',
-                                                icon: LucideIcons.imageOff,
+                                                icon: BuzzIcons.imageOff,
                                               ),
                                         ),
                                       ),
@@ -620,9 +581,6 @@ class MediaImageViewerPage extends HookConsumerWidget {
                   child: _MediaViewerBottomControls(
                     images: images,
                     currentIndex: currentIndex.value,
-                    pagePosition: pagePosition,
-                    onScrubUpdate: onFilmstripScrubUpdate,
-                    onScrubEnd: onFilmstripScrubEnd,
                     onSelect: (index) {
                       if (index == currentIndex.value) return;
                       if (MediaQuery.disableAnimationsOf(context)) {
@@ -643,20 +601,46 @@ class MediaImageViewerPage extends HookConsumerWidget {
                 ),
               ),
             ),
-            PositionedDirectional(
-              top: 0,
-              end: Grid.sm,
-              child: Opacity(
-                opacity: chromeOpacity,
-                child: SafeArea(
-                  child: _MediaViewerCloseButton(
-                    key: const ValueKey('message-media-image-viewer-close'),
-                    tooltip: 'Close image viewer',
-                    onPressed: () => unawaited(dismiss()),
+            if (defaultTargetPlatform == TargetPlatform.iOS)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height:
+                    MediaQuery.paddingOf(context).top +
+                    IosNavigationMetrics.of(context).compactHeight,
+                child: Opacity(
+                  opacity: chromeOpacity,
+                  child: Theme(
+                    data: ThemeData.dark(),
+                    child: IosNavigationBar(
+                      title: 'Photo',
+                      actions: [
+                        IosNavigationAction(
+                          label: 'Close image viewer',
+                          symbol: 'xmark',
+                          onPressed: () => unawaited(dismiss()),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              )
+            else
+              PositionedDirectional(
+                top: 0,
+                end: Grid.sm,
+                child: Opacity(
+                  opacity: chromeOpacity,
+                  child: SafeArea(
+                    child: _MediaViewerCloseButton(
+                      key: const ValueKey('message-media-image-viewer-close'),
+                      tooltip: 'Close image viewer',
+                      onPressed: () => unawaited(dismiss()),
+                    ),
                   ),
                 ),
               ),
-            ),
           ],
         ),
       ),

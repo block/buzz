@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
@@ -166,25 +166,49 @@ test("opening edit during an immediate photo upload preserves the draft", async 
   page,
 }) => {
   await page.goto("/");
-  await page.evaluate(() => {
-    const e2e = (
-      window as Window & {
-        __BUZZ_E2E__?: { mock?: { uploadDelayMs?: number } };
-      }
-    ).__BUZZ_E2E__;
-    if (e2e?.mock) e2e.mock.uploadDelayMs = 1_000;
-  });
   await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  // Hold the upload at the IPC boundary until the edit assertion completes.
+  // A fixed delay races menu interaction and CI scheduling, so it can test
+  // an already-completed upload instead of the in-flight draft guard.
+  await page.evaluate(() => {
+    const w = window as Window & {
+      __RELEASE_PHOTO_UPLOAD__?: () => void;
+      __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          payload: unknown,
+          options: unknown,
+        ) => Promise<unknown>;
+      };
+    };
+    const original = w.__TAURI_INTERNALS__.invoke.bind(w.__TAURI_INTERNALS__);
+    const gate = new Promise<void>((resolve) => {
+      w.__RELEASE_PHOTO_UPLOAD__ = resolve;
+    });
+    w.__TAURI_INTERNALS__.invoke = async (command, payload, options) => {
+      if (command === "upload_media_bytes_raw") await gate;
+      return original(command, payload, options);
+    };
+  });
   await choosePhoto(page);
   await expect(page.getByTestId("upload-progress")).toBeVisible();
 
   await openMoreActionsMenu(page, "mock-general-welcome");
   await page.getByTestId("edit-message-mock-general-welcome").click();
+  // Edit is dispatched by onCloseAutoFocus after Radix unmounts the menu,
+  // not by the click itself. Keep the upload held through that handoff.
+  await expect(page.getByRole("menu")).toHaveCount(0);
 
   // Edit entry is rejected while the compacted draft cannot represent the
   // reserved upload slot. The upload remains current and lands in the draft.
   await expect(page.getByTestId("edit-target")).toHaveCount(0);
   await expect(page.getByTestId("upload-progress")).toBeVisible();
+  await page.evaluate(() => {
+    (
+      window as Window & { __RELEASE_PHOTO_UPLOAD__: () => void }
+    ).__RELEASE_PHOTO_UPLOAD__();
+  });
   await expect(page.getByTestId("upload-progress")).toHaveCount(0, {
     timeout: 5_000,
   });
@@ -700,4 +724,140 @@ test("a non-media attachment's remove button is named and keyboard-operable", as
   await expect(remove).toHaveCSS("opacity", "1");
   await page.keyboard.press("Enter");
   await expect(composer).not.toContainText("quarterly-report.pdf");
+});
+
+// Shared by the two FileCard width-cap tests below. FileCard is an inline-flex
+// (shrink-to-fit) box whose min-content width is set by its `truncate`
+// (nowrap) filename, so a long name is what drives the card to its cap.
+const LONG_ATTACHMENT_FILENAME =
+  "Running onboarding-flow first run with a temporary identity and wiped communities.txt";
+// 24rem at the default 16px root — the 24rem half of FileCard's
+// `max-w-[min(24rem,100%)]` cap.
+const FILE_CARD_CAP_PX = 384;
+
+async function seedLongNamedAttachment(page: Page) {
+  const sha256 = "b".repeat(64);
+  const url = `https://mock.relay/media/${sha256}.txt`;
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof (window as Window & { __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown })
+        .__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function",
+    null,
+    { timeout: 5_000 },
+  );
+  await page.evaluate(
+    async ({ content, mediaTags }) => {
+      const invoke = (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__: (
+            command: string,
+            payload: Record<string, unknown>,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      await invoke("send_channel_message", {
+        channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+        content,
+        mediaTags,
+      });
+    },
+    {
+      content: `[${LONG_ATTACHMENT_FILENAME}](${url})`,
+      mediaTags: [
+        [
+          "imeta",
+          `url ${url}`,
+          "m text/plain",
+          `x ${sha256}`,
+          "size 13312",
+          `filename ${LONG_ATTACHMENT_FILENAME}`,
+        ],
+      ],
+    },
+  );
+
+  await page.getByTestId("channel-general").click();
+  const timelineRow = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .filter({ has: page.getByTestId("file-card") })
+    .last();
+  await expect(timelineRow).toBeVisible();
+  return timelineRow;
+}
+
+async function expectFilenameEllipsised(card: Locator) {
+  await expect
+    .poll(() =>
+      card
+        .getByText(LONG_ATTACHMENT_FILENAME)
+        .evaluate((el) => el.scrollWidth > el.clientWidth),
+    )
+    .toBe(true);
+}
+
+test("a long filename stays inside the narrow thread pane row", async ({
+  page,
+}) => {
+  // Regression: with only the 24rem cap the card grew past a ~300px
+  // thread-pane row and clipped the download icon. The cap is
+  // min(24rem, 100%) so the card shrinks and the filename ellipsises instead.
+  const timelineRow = await seedLongNamedAttachment(page);
+  await timelineRow.hover();
+  await timelineRow.getByRole("button", { name: "Reply" }).click();
+
+  // The thread head renders the same message in the default 380px pane.
+  const threadRow = page
+    .getByTestId("message-thread-panel")
+    .getByTestId("message-thread-head")
+    .getByTestId("message-row");
+  const card = threadRow.getByTestId("file-card");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("13 KB");
+
+  const [rowBox, cardBox, iconBox] = await Promise.all([
+    threadRow.boundingBox(),
+    card.boundingBox(),
+    card.locator("svg").last().boundingBox(),
+  ]);
+  if (!rowBox || !cardBox || !iconBox) {
+    throw new Error("Expected the thread row, card, and icon to lay out.");
+  }
+  // The pane is narrower than the card's 24rem cap, so the filename must be
+  // ellipsised — otherwise this test would not be exercising the overflow.
+  expect(rowBox.width).toBeLessThan(FILE_CARD_CAP_PX);
+  await expectFilenameEllipsised(card);
+  expect(cardBox.x + cardBox.width).toBeLessThanOrEqual(
+    rowBox.x + rowBox.width + 0.5,
+  );
+  expect(iconBox.x + iconBox.width).toBeLessThanOrEqual(
+    rowBox.x + rowBox.width + 0.5,
+  );
+});
+
+test("a long filename keeps the 24rem cap in a wide timeline row", async ({
+  page,
+}) => {
+  // Regression: `max-w-full` alone (without the 24rem cap) let a long
+  // filename stretch the card across the whole main-timeline row. The cap
+  // must still bind where the row is wider than 24rem.
+  const timelineRow = await seedLongNamedAttachment(page);
+  const card = timelineRow.getByTestId("file-card");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("13 KB");
+
+  const [rowBox, cardBox] = await Promise.all([
+    timelineRow.boundingBox(),
+    card.boundingBox(),
+  ]);
+  if (!rowBox || !cardBox) {
+    throw new Error("Expected the timeline row and card to lay out.");
+  }
+  // The row must be comfortably wider than the cap, otherwise `100%` would
+  // bind first and this test would not be exercising the 24rem limit.
+  expect(rowBox.width).toBeGreaterThan(FILE_CARD_CAP_PX + 100);
+  expect(cardBox.width).toBeLessThanOrEqual(FILE_CARD_CAP_PX + 0.5);
+  await expectFilenameEllipsised(card);
 });

@@ -11,7 +11,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:google_mlkit_selfie_segmentation/google_mlkit_selfie_segmentation.dart';
 import 'package:image/image.dart' as image;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../shared/emoji/emoji_avatar.dart';
@@ -46,7 +46,15 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     required this.onPrepareChanged,
     this.initialFrames = const [],
     this.disposalBarrier,
+    this.previewKey,
+    this.previewSize,
   });
+
+  /// Identifies the visible avatar for the native sheet transition.
+  final GlobalKey? previewKey;
+
+  /// Fixed visible preview diameter when hosted in profile setup.
+  final double? previewSize;
 
   /// The vertical space available to the capture surface.
   final double height;
@@ -427,6 +435,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                           .toDouble();
                     },
                     child: SizedBox.square(
+                      key: previewKey,
                       dimension: _animatedAvatarPreviewSize,
                       child: Stack(
                         fit: StackFit.expand,
@@ -573,7 +582,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                   (errorStyle?.height ?? 1.2) *
                   textScale *
                   2;
-    final capturePreviewSize = compactCapture ? 180.0 : 228.0;
+    final capturePreviewSize = previewSize ?? (compactCapture ? 180.0 : 228.0);
     final recordGap = max(
       Grid.xs,
       height - capturePreviewSize - Grid.xs - statusHeight - errorHeight - 64,
@@ -585,10 +594,13 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
           key: const ValueKey('animated-avatar-capture-preview'),
           dimension: capturePreviewSize,
           child: Stack(
+            key: previewKey,
             fit: StackFit.expand,
             children: [
               Padding(
-                padding: const EdgeInsets.all(4),
+                padding: previewSize == null
+                    ? const EdgeInsets.all(4)
+                    : EdgeInsets.zero,
                 child: ClipOval(
                   child: ColoredBox(
                     color: Colors.black,
@@ -609,7 +621,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                                     semanticLabel: 'Starting camera',
                                   )
                                 : const Icon(
-                                    LucideIcons.cameraOff,
+                                    BuzzIcons.cameraOff,
                                     color: Colors.white,
                                     size: 32,
                                   ),

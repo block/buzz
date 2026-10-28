@@ -3,15 +3,15 @@ part of '../emoji_picker.dart';
 /// Rail icon for each emoji-mart category. Ids come from the dataset, so this
 /// map is keyed on emoji-mart's own category ids.
 IconData _categoryIcon(String categoryId) => switch (categoryId) {
-  'people' => LucideIcons.smile,
-  'nature' => LucideIcons.leaf,
-  'foods' => LucideIcons.coffee,
-  'activity' => LucideIcons.volleyball,
-  'places' => LucideIcons.plane,
-  'objects' => LucideIcons.lightbulb,
-  'symbols' => LucideIcons.heart,
-  'flags' => LucideIcons.flag,
-  _ => LucideIcons.layoutGrid,
+  'people' => BuzzIcons.smile,
+  'nature' => BuzzIcons.leaf,
+  'foods' => BuzzIcons.coffee,
+  'activity' => BuzzIcons.volleyball,
+  'places' => BuzzIcons.plane,
+  'objects' => BuzzIcons.lightbulb,
+  'symbols' => BuzzIcons.heart,
+  'flags' => BuzzIcons.flag,
+  _ => BuzzIcons.layoutGrid,
 };
 
 /// Height of the rail. Sized to a comfortable tap target rather than to the
@@ -113,7 +113,7 @@ class _SkinToneSelector extends StatelessWidget {
                 Expanded(child: Text(tone.label)),
                 if (index == value)
                   Icon(
-                    LucideIcons.check,
+                    BuzzIcons.check,
                     size: 18,
                     color: context.colors.primary,
                   ),

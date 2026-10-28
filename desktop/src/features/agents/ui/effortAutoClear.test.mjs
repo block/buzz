@@ -114,6 +114,8 @@ dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
 
 let act, render, screen, cleanup;
 let AgentConfigFields;
+let EffortSelectField;
+let getProviderEffortConfig;
 let fromRawAcpRuntimeCatalogEntry;
 let createElement, useState, useCallback;
 let setGlobalAgentConfig;
@@ -121,6 +123,8 @@ let setGlobalAgentConfig;
 before(async () => {
   ({ act, render, screen, cleanup } = await import("@testing-library/react"));
   ({ AgentConfigFields } = await import("./AgentConfigFields.tsx"));
+  ({ EffortSelectField } = await import("./buzzAgentModelTuningFields.tsx"));
+  ({ getProviderEffortConfig } = await import("./buzzAgentConfig.ts"));
   ({ fromRawAcpRuntimeCatalogEntry } = await import(
     "../../../shared/api/tauri.ts"
   ));
@@ -213,6 +217,33 @@ function SettingsParent({ runtime, initialConfig, saveRef }) {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+test("Claude FQN picker presents provider default with no selectable effort", async () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks_v2",
+    "catalog.schema.claude-sonnet-custom",
+  );
+  render(
+    createElement(EffortSelectField, {
+      currentEffort: "",
+      effortDefault: defaultValue,
+      effortValid: validValues,
+      htmlFor: "claude-fqn-effort",
+      label: "Effort",
+      onChange: () => {},
+      showUnavailableOptions: false,
+      testId: "claude-fqn-effort",
+    }),
+  );
+  await act(async () => {});
+
+  const select = screen.getByTestId("claude-fqn-effort");
+  assert.deepEqual(
+    [...select.options].map((option) => option.textContent),
+    ["Inherit (default)"],
+  );
+  assert.doesNotMatch(select.textContent ?? "", /none/i);
+});
 
 test("AgentConfigFields (useCustomSelect): Goose off renders 'Off' in custom trigger (mount)", async () => {
   // Regression: without the isHarnessNativeEffort branch, effortValidForRenderer

@@ -286,6 +286,21 @@ impl ActionSink for RelayActionSink {
                     "workflow owner does not have access to destination channel".into(),
                 ));
             }
+            if !crate::handlers::ingest::may_post(
+                &state,
+                tenant.community(),
+                channel_uuid,
+                &author_pubkey_bytes,
+                &channel,
+                is_member,
+            )
+            .await
+            .map_err(|e| ActionSinkError::Database(e.to_string()))?
+            {
+                return Err(ActionSinkError::InvalidInput(
+                    "workflow owner cannot post in destination channel".into(),
+                ));
+            }
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
@@ -320,6 +335,7 @@ impl ActionSink for RelayActionSink {
                         tenant.community(),
                         parent_hex,
                         channel_uuid,
+                        &author_pubkey_bytes,
                         &state,
                     )
                     .await
@@ -788,7 +804,7 @@ mod postgres_tests {
 
     /// Real-PG state mirroring `handlers::event::tests::test_state_with_redis_url`.
     async fn test_state() -> Arc<AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
@@ -908,8 +924,9 @@ mod postgres_tests {
         let host = format!("wf-ptag-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1059,8 +1076,9 @@ mod postgres_tests {
         let host = format!("wf-thread-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1176,8 +1194,9 @@ mod postgres_tests {
         let host = format!("wf-legacy-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1363,8 +1382,9 @@ mod postgres_tests {
         let host = format!("wf-missing-{}.example", uuid::Uuid::new_v4().simple());
         let community = match state
             .db
-            .create_community_with_owner(&host, &author_hex)
+            .create_community_with_owner(&host, &author_hex, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         {
             CreateCommunityWithOwnerResult::Created(rec) => rec.id,
@@ -1400,5 +1420,126 @@ mod postgres_tests {
             matches!(err, ActionSinkError::InvalidInput(_)),
             "expected InvalidInput, got {err:?}"
         );
+    }
+
+    /// A workflow reply to a parent the owner cannot use, in another channel
+    /// or unreadable to them, fails exactly like a reply to a missing parent.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_reply_to_unusable_parent_matches_missing() {
+        let state = test_state().await;
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let stranger = nostr::Keys::generate();
+        let host = format!("wf-unusable-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner_hex, &nostr::Keys::generate())
+            .await
+            .map(|write| write.outcome)
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        let open_channel = |name: &'static str| {
+            let state = Arc::clone(&state);
+            let owner = owner.public_key().to_bytes();
+            async move {
+                state
+                    .db
+                    .create_channel(
+                        community,
+                        name,
+                        ChannelType::Stream,
+                        ChannelVisibility::Open,
+                        None,
+                        &owner,
+                        None,
+                    )
+                    .await
+                    .expect("create channel")
+            }
+        };
+        let channel = open_channel("wf-unusable").await;
+        let elsewhere = open_channel("wf-elsewhere").await;
+        let insert = |keys: &nostr::Keys, kind: u32, channel_id: Uuid, extra: Vec<Tag>| {
+            let state = Arc::clone(&state);
+            let mut tags = vec![Tag::parse(["h", &channel_id.to_string()]).expect("h tag")];
+            tags.extend(extra);
+            let event = EventBuilder::new(Kind::from(kind as u16), "parent")
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign parent");
+            async move {
+                state
+                    .db
+                    .insert_event(community, &event, Some(channel_id))
+                    .await
+                    .expect("insert parent");
+                event.id.to_hex()
+            }
+        };
+        // A kind 5 whose `k` tag names an author-only kind is readable only by
+        // its author. Production ingest never stores one channel-scoped (its
+        // target is global), so this is the closest state that isolates the
+        // resolver's visibility check and the reader identity it is given.
+        let author_only_deletion = |keys: &nostr::Keys| {
+            let target = nostr::Keys::generate().public_key().to_hex();
+            insert(
+                keys,
+                buzz_core::kind::KIND_DELETION,
+                channel.id,
+                vec![
+                    Tag::parse(["e", &target]).expect("e tag"),
+                    Tag::parse(["k", "30300"]).expect("k tag"),
+                ],
+            )
+        };
+        let other_channel = insert(&owner, KIND_STREAM_MESSAGE, elsewhere.id, vec![]).await;
+        let unreadable = author_only_deletion(&stranger).await;
+        let owner_only = author_only_deletion(&owner).await;
+
+        let sink = RelayActionSink::new(&state);
+        let reply = |author_hex: String, parent: String| {
+            let sink = &sink;
+            let channel = channel.id.to_string();
+            async move {
+                sink.send_message(
+                    community,
+                    &channel,
+                    "reply",
+                    "reply",
+                    &author_hex,
+                    Some(&parent),
+                )
+                .await
+            }
+        };
+        let missing = nostr::Keys::generate().public_key().to_hex();
+        let other_owner_hex = nostr::Keys::generate().public_key().to_hex();
+        for (case, author, parent) in [
+            ("missing", &owner_hex, missing),
+            ("other channel", &owner_hex, other_channel),
+            ("unreadable", &owner_hex, unreadable),
+            (
+                "readable only by another owner",
+                &other_owner_hex,
+                owner_only.clone(),
+            ),
+        ] {
+            match reply(author.clone(), parent).await {
+                Err(ActionSinkError::InvalidInput(msg)) => {
+                    assert_eq!(msg, "reply parent not found", "{case}")
+                }
+                other => panic!("{case}: expected the missing-parent error, got {other:?}"),
+            }
+        }
+
+        // Positive control: the resolver reads as the workflow owner, who
+        // alone can see their author-only parent.
+        reply(owner_hex.clone(), owner_only)
+            .await
+            .expect("owner replies to a parent only they can read");
     }
 }

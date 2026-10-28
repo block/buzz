@@ -180,6 +180,11 @@ type MockBridgeOptions = {
     normalized_host?: string;
     archived_at?: string | null;
   }>;
+  builderlabQuota?: {
+    quota_used?: number;
+    quota_limit?: number;
+    can_create?: boolean;
+  };
   acpRuntimesCatalog?: Record<string, unknown>[];
   /** Catalog returned after a successful mocked install. */
   acpRuntimesCatalogAfterInstall?: Record<string, unknown>[];
@@ -288,6 +293,13 @@ type MockBridgeOptions = {
   deepHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
+  /** Seed canvas revisions (oldest first); see e2eBridge mock config. */
+  canvasRevisions?: Array<{
+    content: string;
+    createdAt?: number;
+    eventId?: string;
+    author?: string;
+  }>;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyCommunityDelayMs?: number;
   /** Reject `clear_pending_navigation_deep_links` with this message. */
@@ -329,6 +341,8 @@ type MockBridgeOptions = {
   /** Delay (ms) for newest-page fetches; see e2eBridge mock config. */
   channelHeadDelayMs?: number;
   profileReadDelayMs?: number;
+  /** Hold `get_profile` responses until `__BUZZ_E2E_RELEASE_PROFILE_READS__()`. */
+  deferProfileReads?: boolean;
   profileReadError?: string;
   /** Override whether get_profile reports a real kind:0 event. */
   profileHasEvent?: boolean;
@@ -473,6 +487,8 @@ type MockBridgeOptions = {
    * can exercise the "Thread deleted" label / disabled-send path.
    */
   deletedEventIds?: string[];
+  /** Reject one identity read after the configured number of successful reads. */
+  identityReadErrorAfter?: { message: string; successfulReads: number };
   /**
    * When true, `get_identity` returns `lost: true` until `persist_current_identity`
    * or `import_identity` is invoked. Drives the identity-lost recovery UX in tests.
@@ -600,6 +616,12 @@ type MockBridgeOptions = {
    * returning a catalog. Exercises the discovery-failure UI path.
    */
   discoverAgentModelsError?: string;
+  /** Delay (ms) before `discover_agent_models` settles. */
+  discoverAgentModelsDelayMs?: number;
+  /** Config surface returned for every agent instead of the per-runtime mocks. */
+  agentConfigSurface?: Record<string, unknown>;
+  /** ACP commands returned by `discover_acp_commands`. Defaults to `[]`. */
+  acpCommands?: Array<{ command: string; binaryPath: string }>;
   /**
    * Providers returned by `discover_backend_providers`. Defaults to `[]`
    * (the "Run on" section stays hidden). Setting this renders the remote

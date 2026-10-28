@@ -18,6 +18,13 @@ class _ChannelLinkMd extends InlineMd {
 
   _ChannelLinkMd({required this.channelNames, this.onChannelTap});
 
+  /// Excluded from link labels: this component renders a [WidgetSpan], and a
+  /// placeholder nested inside the link's own placeholder does not paint on
+  /// iOS — an authored `[#channel](url)` renders as nothing. Link resolution
+  /// wins over token detection inside a label.
+  @override
+  Set<MarkdownScope> get scopes => MarkdownComponent.allScopesExceptLinkLabel;
+
   @override
   RegExp get exp => _exp;
 
@@ -36,7 +43,7 @@ class _ChannelLinkMd extends InlineMd {
     final channelName = raw.substring(1);
     final opensChannel = channelId != null && onChannelTap != null;
     final child = _TokenPill(
-      icon: LucideIcons.hash,
+      icon: BuzzIcons.hash,
       interactive: opensChannel,
       semanticLabel: opensChannel
           ? 'Open channel $channelName'

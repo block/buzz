@@ -16,7 +16,10 @@ import {
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
-import { formatMemberName } from "@/features/channels/lib/memberUtils";
+import {
+  compareMemberNames,
+  formatMemberName,
+} from "@/features/channels/lib/memberUtils";
 import {
   canAddChannelMembers,
   PRIVATE_CHANNEL_ADD_DENIED_MESSAGE,
@@ -49,7 +52,7 @@ import {
 } from "@/shared/ui/dialog";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import {
   MODAL_SEARCH_INPUT_CLASS,
   MODAL_SEARCH_SHELL_CLASS,
@@ -120,7 +123,7 @@ function compareMembersForModal(
   if (currentPubkey && left.pubkey === currentPubkey) return -1;
   if (currentPubkey && right.pubkey === currentPubkey) return 1;
 
-  return formatMemberName(left).localeCompare(formatMemberName(right));
+  return compareMemberNames(left, right);
 }
 
 type MembersSidebarProps = {
@@ -641,7 +644,7 @@ export function MembersSidebar({
         managedAgentRuntime={managedAgentRuntime}
         member={member}
         memberIsBot={memberIsBot}
-        memberAvatarLabel={member.displayName ?? truncatePubkey(member.pubkey)}
+        memberAvatarLabel={member.displayName ?? truncateNpub(member.pubkey)}
         memberLabel={formatMemberName(member, currentPubkey)}
         moderationState={moderationStateByPubkey.get(
           normalizePubkey(member.pubkey),
@@ -886,7 +889,7 @@ export function MembersSidebar({
               <div className="mt-4 space-y-1 text-sm text-destructive">
                 {inviteSubmissionErrors.map((error) => (
                   <p key={`${error.pubkey}-${error.error}`}>
-                    {truncatePubkey(error.pubkey)}: {error.error}
+                    {truncateNpub(error.pubkey)}: {error.error}
                   </p>
                 ))}
               </div>

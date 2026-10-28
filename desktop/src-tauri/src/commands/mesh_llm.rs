@@ -37,7 +37,7 @@ fn one_shot_restart_checkpoint(config: &MeshSharingConfig) -> MeshSharingConfig 
     checkpoint
 }
 
-fn mesh_sharing_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn mesh_sharing_config_path<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     Ok(app
         .path()
         .app_data_dir()
@@ -45,7 +45,10 @@ fn mesh_sharing_config_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("mesh-sharing.json"))
 }
 
-fn save_mesh_sharing_config(app: &AppHandle, config: &MeshSharingConfig) -> Result<(), String> {
+fn save_mesh_sharing_config<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    config: &MeshSharingConfig,
+) -> Result<(), String> {
     let path = mesh_sharing_config_path(app)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -56,7 +59,9 @@ fn save_mesh_sharing_config(app: &AppHandle, config: &MeshSharingConfig) -> Resu
     crate::managed_agents::atomic_write_json(&path, &payload)
 }
 
-fn load_mesh_sharing_config(app: &AppHandle) -> Result<Option<MeshSharingConfig>, String> {
+fn load_mesh_sharing_config<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<MeshSharingConfig>, String> {
     let path = mesh_sharing_config_path(app)?;
     match std::fs::read(&path) {
         Ok(payload) => serde_json::from_slice(&payload)
@@ -337,7 +342,10 @@ async fn resolve_buzz_mesh_startup_at(
     }
 }
 
-pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> CmdResult<()> {
+pub(crate) async fn restore_mesh_sharing<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+) -> CmdResult<()> {
     let Some(mut config) = load_mesh_sharing_config(app)? else {
         return Ok(());
     };
@@ -678,8 +686,8 @@ fn pick_serve_target_for_model(
 /// a relay query failure ("could not refresh targets") is not the same as a
 /// relay that answered with no live target for this model ("peer offline").
 /// Non relay-mesh records are a no-op.
-pub(crate) async fn ensure_relay_mesh_for_record(
-    app: &AppHandle,
+pub(crate) async fn ensure_relay_mesh_for_record<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     model_id: Option<&str>,
     _allow_fresh_create_start: bool,
 ) -> Result<(), String> {

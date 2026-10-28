@@ -15,8 +15,8 @@
 //! Corrections applied to the mined #1476 verifier, per the settled spec:
 //!
 //! - **Token class + `typ` enforcement**: a policy selects exactly one class
-//!   before parsing claims; `at+jwt` and `nip-fi+jwt` `typ` values are enforced
-//!   exactly, and the long-form `application/at+jwt` is rejected.
+//!   before parsing claims; `at+jwt`, `nip-fi+jwt` and `nip-fi-agent+jwt`
+//!   `typ` values are enforced exactly, and the long-form `application/at+jwt` is rejected.
 //! - **ID-token denial**: OIDC ID tokens deny even when `iss`, `aud`, `sub`
 //!   match, via exact `typ` mismatch against every accepted class.
 //! - **Fixed `nostr_pubkey`**: accepted only as lowercase hex of exactly one
@@ -26,11 +26,12 @@
 //!   expiry is expired.
 
 use super::assertion::{CanonicalCapabilities, RevalidationDependencies, VerifiedAssertion};
+use super::community::CommunityBinding;
 use super::config::{
     is_asymmetric_algorithm, ClientSubjectPosture, FreshnessClass, IssuerPolicy, IssuerRegistry,
     SubjectClass, TokenClass, TransportContractId, MAX_CLIENT_ID_BYTES, MAX_JWKS_KEYS,
-    MAX_KID_BYTES, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
-    SUBJECT_CLAIM,
+    MAX_KID_BYTES, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES, NOSTR_OWNER_PUBKEY_CLAIM,
+    NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM, SUBJECT_CLAIM,
 };
 use super::denial::DenialClass;
 use chrono::{DateTime, TimeZone, Utc};
@@ -127,6 +128,20 @@ impl AssertionKeySet {
         })
     }
 
+    /// Test-utils / test-only constructor: same validation as the crate-private
+    /// `new`, exposed under the `test-utils` Cargo feature and `cfg(test)` so
+    /// integration tests in dependent crates (e.g., `buzz-relay`) can build
+    /// snapshots for `StaticIssuerKeySource` without requiring a live JWKS fetch.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_test(
+        issuer: String,
+        generation: u64,
+        jwks: JwkSet,
+        hard_deadline: DateTime<Utc>,
+    ) -> Option<Self> {
+        Self::new(issuer, generation, jwks, hard_deadline)
+    }
+
     /// The exact `iss` this snapshot authenticates.
     pub fn issuer(&self) -> &str {
         &self.issuer
@@ -142,6 +157,15 @@ impl AssertionKeySet {
     #[cfg(test)]
     pub(crate) fn hard_deadline(&self) -> chrono::DateTime<chrono::Utc> {
         self.hard_deadline
+    }
+
+    /// The authenticated JWKS for this issuer snapshot.
+    ///
+    /// `pub(super)` so the command verifier in the same `nip_fi` module can
+    /// look up keys by `kid` without duplicating the key-selection logic.
+    /// External consumers cannot access key material through this path.
+    pub(super) fn jwks(&self) -> &JwkSet {
+        &self.jwks
     }
 }
 
@@ -209,20 +233,20 @@ impl<S: IssuerKeySource> IssuerKeySource for std::sync::Arc<S> {
 /// reconstruct the authority. An honest source returns only the snapshot bound
 /// to the exact issuer requested, the invariant the real runtime source
 /// guarantees.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone, Default)]
-pub(crate) struct StaticIssuerKeySource {
+pub struct StaticIssuerKeySource {
     snapshots: std::collections::HashMap<String, AssertionKeySet>,
     /// When set, returned for every requested issuer regardless of its binding,
     /// to exercise the verifier's defensive issuer re-check.
     misbound: Option<AssertionKeySet>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl StaticIssuerKeySource {
     /// Build an honest source from a set of snapshots, keyed by each snapshot's
     /// issuer.
-    pub(crate) fn new(snapshots: impl IntoIterator<Item = AssertionKeySet>) -> Self {
+    pub fn new(snapshots: impl IntoIterator<Item = AssertionKeySet>) -> Self {
         Self {
             snapshots: snapshots
                 .into_iter()
@@ -235,7 +259,7 @@ impl StaticIssuerKeySource {
     /// A hostile/buggy source that returns the given snapshot — bound to a
     /// different issuer than requested — for every lookup, to exercise the
     /// verifier's defensive issuer re-check.
-    pub(crate) fn misbinding(snapshot: AssertionKeySet) -> Self {
+    pub fn misbinding(snapshot: AssertionKeySet) -> Self {
         Self {
             snapshots: std::collections::HashMap::new(),
             misbound: Some(snapshot),
@@ -243,15 +267,41 @@ impl StaticIssuerKeySource {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl sealed::Sealed for StaticIssuerKeySource {}
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl IssuerKeySource for StaticIssuerKeySource {
     fn key_set(&self, issuer: &str) -> Option<AssertionKeySet> {
         self.misbound
             .clone()
             .or_else(|| self.snapshots.get(issuer).cloned())
+    }
+}
+
+/// Object-safe wrapper for assertion verification, allowing type-erased storage
+/// in `AppState` and test injection of `StaticIssuerKeySource`-backed verifiers.
+///
+/// `FederatedAssertionVerifier<S>` implements this for any `S: IssuerKeySource`.
+/// The sealed `IssuerKeySource` trait still constrains who can build a real
+/// verifier — this trait only erases the `S` type parameter at the storage boundary.
+pub trait VerifyAssertion: Send + Sync {
+    /// Verify one compact JWS assertion presented to `community`.  Semantics
+    /// identical to [`FederatedAssertionVerifier::verify`].
+    fn verify_assertion(
+        &self,
+        token: &str,
+        community: &CommunityBinding,
+    ) -> Result<VerifiedAssertion, VerifierError>;
+}
+
+impl<S: IssuerKeySource + Send + Sync> VerifyAssertion for FederatedAssertionVerifier<S> {
+    fn verify_assertion(
+        &self,
+        token: &str,
+        community: &CommunityBinding,
+    ) -> Result<VerifiedAssertion, VerifierError> {
+        self.verify(token, community)
     }
 }
 
@@ -275,18 +325,39 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         }
     }
 
+    /// Test shorthand: verify for a community whose expected `aud` is `aud`
+    /// and which authorizes every registered issuer.
+    #[cfg(test)]
+    pub(crate) fn verify_for_aud(
+        &self,
+        token: &str,
+        aud: &str,
+    ) -> Result<VerifiedAssertion, VerifierError> {
+        let issuers = self.registry.all_policies().map(|p| p.issuer().to_owned());
+        let community =
+            CommunityBinding::new(aud.to_owned(), issuers).expect("non-empty test registry");
+        self.verify(token, &community)
+    }
+
     /// The registry this verifier selects policies from.
     pub const fn registry(&self) -> &IssuerRegistry {
         &self.registry
     }
 
-    /// Verify one compact JWS and mint a sealed [`VerifiedAssertion`].
+    /// Verify one compact JWS presented to `community` and mint a sealed
+    /// [`VerifiedAssertion`].
     ///
-    /// The caller supplies only the token. The key snapshot is resolved
+    /// The selected issuer must be on the community's allowlist before any
+    /// key-source lookup, and `aud` must equal the community's expected `aud`
+    /// (NIP-FI.md:227-248). The caller supplies only the token and community. The key snapshot is resolved
     /// internally from the trusted [`IssuerKeySource`] by the token's
     /// signature-authenticated `iss`, so no caller can inject or relabel key
     /// material for another issuer.
-    pub fn verify(&self, token: &str) -> Result<VerifiedAssertion, VerifierError> {
+    pub fn verify(
+        &self,
+        token: &str,
+        community: &CommunityBinding,
+    ) -> Result<VerifiedAssertion, VerifierError> {
         if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
             return Err(VerifierError::MalformedToken);
         }
@@ -311,11 +382,17 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
             .registry
             .policy_for_issuer(&signed_issuer)
             .ok_or(VerifierError::UnknownIssuer)?;
+        // AssertIssuerAuthorized: an issuer not authorized for this community
+        // is indistinguishable from an unknown one, and is rejected before
+        // the key-source (JWKS) dependency is touched (NIP-FI.md:123, :235).
+        if !community.authorizes(policy.issuer()) {
+            return Err(VerifierError::UnknownIssuer);
+        }
 
         if !policy.algorithms().contains(&header.algorithm) {
             return Err(VerifierError::UnsupportedAlgorithm);
         }
-        enforce_token_type(policy.token_class(), header.typ.as_deref())?;
+        let owner_rule = enforce_token_type(policy.token_class(), header.typ.as_deref())?;
 
         // Resolve the key snapshot internally from the trusted source, keyed by
         // the policy's exact `iss`. The snapshot is never a caller argument, so
@@ -351,7 +428,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         // parse, so the two parses can never disagree on an accepted token.
         let mut validation = Validation::new(header.algorithm);
         validation.set_issuer(&[policy.issuer()]);
-        validation.set_audience(policy.audiences());
+        validation.set_audience(&[community.expected_aud()]);
         validation.set_required_spec_claims(&["exp", "iat", "iss", "aud"]);
         validation.validate_exp = false;
         validation.validate_nbf = false;
@@ -363,6 +440,7 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
 
         let subject = claim_string(&claims, SUBJECT_CLAIM, MAX_SUBJECT_BYTES)?;
         let asserted_key = parse_nostr_pubkey_claim(&claims)?;
+        let owner = parse_owner_claim(owner_rule, &claims, asserted_key)?;
 
         let now = Utc::now();
         let deadlines = self.check_time_and_deadlines(policy, &key_set, &claims, now)?;
@@ -384,9 +462,10 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
             policy.issuer().to_owned(),
             subject,
             asserted_key,
+            owner,
             capabilities,
             deadlines,
-            policy.id(),
+            policy.id_for_community(community.expected_aud()),
             self.transport_contract_id,
             RevalidationDependencies::new(
                 header.kid,
@@ -566,10 +645,10 @@ impl VerifierError {
 }
 
 /// A minimally parsed JOSE header.
-struct ParsedHeader {
-    algorithm: Algorithm,
-    kid: String,
-    typ: Option<String>,
+pub(super) struct ParsedHeader {
+    pub(super) algorithm: Algorithm,
+    pub(super) kid: String,
+    pub(super) typ: Option<String>,
 }
 
 /// Reject any token that is not exactly three compact-JWS segments.
@@ -582,7 +661,7 @@ struct ParsedHeader {
 /// base64url — is validated separately by [`enforce_signature_shape`] after
 /// header parsing, so that no structurally malformed token can defer to the
 /// key-source lookup and masquerade as a 503 outage (NIP-FI.md:151-171).
-fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
+pub(super) fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
     if token.split('.').count() == 3 {
         Ok(())
     } else {
@@ -599,7 +678,7 @@ fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
 /// after [`parse_header`], so `alg=none`'s empty-signature token is already
 /// rejected at header parsing (unsupported algorithm) before this distinction
 /// matters (NIP-FI.md:151-171).
-fn enforce_signature_shape(token: &str) -> Result<(), VerifierError> {
+pub(super) fn enforce_signature_shape(token: &str) -> Result<(), VerifierError> {
     let signature = token
         .split('.')
         .nth(2)
@@ -608,7 +687,7 @@ fn enforce_signature_shape(token: &str) -> Result<(), VerifierError> {
     base64url_decode(signature).map(|_| ())
 }
 
-fn parse_header(token: &str) -> Result<ParsedHeader, VerifierError> {
+pub(super) fn parse_header(token: &str) -> Result<ParsedHeader, VerifierError> {
     let segment = token
         .split('.')
         .next()
@@ -669,17 +748,48 @@ fn parse_algorithm(alg: &str) -> Result<Algorithm, VerifierError> {
     }
 }
 
-/// Enforce the policy's single token class against the header `typ`.
-fn enforce_token_type(class: &TokenClass, typ: Option<&str>) -> Result<(), VerifierError> {
-    match class {
-        TokenClass::AccessTokenAtJwt { .. } => match typ {
-            Some("at+jwt") => Ok(()),
-            _ => Err(VerifierError::TokenTypeRejected),
-        },
-        TokenClass::DedicatedNipFi => match typ {
-            Some("nip-fi+jwt") => Ok(()),
-            _ => Err(VerifierError::TokenTypeRejected),
-        },
+/// Whether an accepted token type must carry `nostr_owner_pubkey`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerRule {
+    /// `nip-fi-agent+jwt`: the owner claim is mandatory.
+    Required,
+    /// Every other accepted type: the owner claim must be absent.
+    Forbidden,
+}
+
+/// Enforce the policy's single token class against the header `typ`. The
+/// dedicated class has a human (`nip-fi+jwt`) and an agent
+/// (`nip-fi-agent+jwt`) type; `at+jwt` policies accept only `at+jwt`.
+fn enforce_token_type(class: &TokenClass, typ: Option<&str>) -> Result<OwnerRule, VerifierError> {
+    match (class, typ) {
+        (TokenClass::AccessTokenAtJwt { .. }, Some("at+jwt"))
+        | (TokenClass::DedicatedNipFi, Some("nip-fi+jwt")) => Ok(OwnerRule::Forbidden),
+        (TokenClass::DedicatedNipFi, Some("nip-fi-agent+jwt")) => Ok(OwnerRule::Required),
+        _ => Err(VerifierError::TokenTypeRejected),
+    }
+}
+
+/// The `nostr_owner_pubkey` claim, bound to the token type (NIP-FI.md, "Agent
+/// keys"): an agent token must carry a canonical owner key distinct from the
+/// asserted key; any other type carrying the claim, with any value, denies.
+fn parse_owner_claim(
+    rule: OwnerRule,
+    claims: &Map<String, Value>,
+    asserted_key: Option<PublicKey>,
+) -> Result<Option<PublicKey>, VerifierError> {
+    let value = claims.get(NOSTR_OWNER_PUBKEY_CLAIM);
+    match (rule, value) {
+        (OwnerRule::Forbidden, None) => Ok(None),
+        (OwnerRule::Required, None) | (OwnerRule::Forbidden, Some(_)) => {
+            Err(VerifierError::ClaimRejected)
+        }
+        (OwnerRule::Required, Some(value)) => {
+            let owner = parse_lowercase_hex_key(value)?;
+            if Some(owner) == asserted_key {
+                return Err(VerifierError::ClaimRejected);
+            }
+            Ok(Some(owner))
+        }
     }
 }
 
@@ -725,21 +835,23 @@ fn enforce_claim_semantics(
 fn parse_nostr_pubkey_claim(
     claims: &Map<String, Value>,
 ) -> Result<Option<PublicKey>, VerifierError> {
-    match claims.get(NOSTR_PUBKEY_CLAIM) {
-        None => Err(VerifierError::ClaimRejected),
-        Some(value) => {
-            let raw = value.as_str().ok_or(VerifierError::ClaimRejected)?;
-            if raw.len() != 64
-                || !raw
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-            {
-                return Err(VerifierError::ClaimRejected);
-            }
-            let key = PublicKey::from_hex(raw).map_err(|_| VerifierError::ClaimRejected)?;
-            Ok(Some(key))
-        }
+    let value = claims
+        .get(NOSTR_PUBKEY_CLAIM)
+        .ok_or(VerifierError::ClaimRejected)?;
+    parse_lowercase_hex_key(value).map(Some)
+}
+
+/// Lowercase hex of exactly one 32-byte key; any other encoding denies.
+fn parse_lowercase_hex_key(value: &Value) -> Result<PublicKey, VerifierError> {
+    let raw = value.as_str().ok_or(VerifierError::ClaimRejected)?;
+    if raw.len() != 64
+        || !raw
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(VerifierError::ClaimRejected);
     }
+    PublicKey::from_hex(raw).map_err(|_| VerifierError::ClaimRejected)
 }
 
 /// Capture only the claim names the policy reads into a canonical set. The
@@ -758,7 +870,7 @@ fn capture_capabilities(
     CanonicalCapabilities::from_pairs(entries)
 }
 
-fn select_unique_jwk<'a>(jwks: &'a JwkSet, kid: &str) -> Result<&'a Jwk, VerifierError> {
+pub(super) fn select_unique_jwk<'a>(jwks: &'a JwkSet, kid: &str) -> Result<&'a Jwk, VerifierError> {
     let mut matching = jwks
         .keys
         .iter()
@@ -770,7 +882,7 @@ fn select_unique_jwk<'a>(jwks: &'a JwkSet, kid: &str) -> Result<&'a Jwk, Verifie
     Ok(jwk)
 }
 
-fn validate_jwk(jwk: &Jwk, token_algorithm: Algorithm) -> Result<(), VerifierError> {
+pub(super) fn validate_jwk(jwk: &Jwk, token_algorithm: Algorithm) -> Result<(), VerifierError> {
     let usage_ok = jwk
         .common
         .public_key_use
@@ -882,7 +994,7 @@ fn optional_numeric_date(
 /// them) is converted with subsecond nanosecond precision. NaN, infinity, a
 /// non-number, and any magnitude outside the representable `i64`-seconds range
 /// deny as invalid time bounds.
-fn parse_numeric_date(value: &Value) -> Result<DateTime<Utc>, VerifierError> {
+pub(super) fn parse_numeric_date(value: &Value) -> Result<DateTime<Utc>, VerifierError> {
     // Integer NumericDate: exact, no float round-trip.
     if let Some(secs) = value.as_i64() {
         return Utc
@@ -926,7 +1038,7 @@ fn checked_add(at: DateTime<Utc>, delta: chrono::Duration) -> Result<DateTime<Ut
 }
 
 /// Parse the claims segment as a JSON object, rejecting any duplicate member.
-fn parse_unique_claims(token: &str) -> Result<Map<String, Value>, VerifierError> {
+pub(super) fn parse_unique_claims(token: &str) -> Result<Map<String, Value>, VerifierError> {
     let segment = token
         .split('.')
         .nth(1)

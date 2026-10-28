@@ -1513,12 +1513,14 @@ test("right-click menus expose distinct selectors for links, relay video, and of
 
   // ── Relay video menu: Download video + Copy link, appearing only once the
   // relay origin resolves (the reactivity fix) ─────────────────────────────
-  await emitVideoMessage(page, {
+  const relayMessage = (await emitVideoMessage(page, {
     url: MENU_RELAY_VIDEO_URL,
     sha: MENU_RELAY_VIDEO_SHA,
     filename: "relay-clip.mp4",
-  });
-  const relayPlayer = page.getByTestId("video-player").last();
+  })) as { id: string };
+  const relayPlayer = page
+    .locator(`[data-message-id="${relayMessage.id}"]`)
+    .getByTestId("video-player");
   await expect(relayPlayer).toBeVisible();
   // Right-click the player surface. `force` skips the actionability guard: the
   // Play-button overlay sits above the video, but the contextmenu event still
@@ -1559,12 +1561,14 @@ test("right-click menus expose distinct selectors for links, relay video, and of
   await expect(page.locator("[data-video-context-menu]")).toHaveCount(0);
 
   // ── Off-relay video control: renders and offers Copy link, never Download ─
-  await emitVideoMessage(page, {
+  const offRelayMessage = (await emitVideoMessage(page, {
     url: MENU_OFF_RELAY_VIDEO_URL,
     sha: MENU_OFF_RELAY_VIDEO_SHA,
     filename: "external-clip.mp4",
-  });
-  const offRelayPlayer = page.getByTestId("video-player").last();
+  })) as { id: string };
+  const offRelayPlayer = page
+    .locator(`[data-message-id="${offRelayMessage.id}"]`)
+    .getByTestId("video-player");
   await expect(offRelayPlayer).toBeVisible();
   await offRelayPlayer.click({ button: "right", force: true });
 

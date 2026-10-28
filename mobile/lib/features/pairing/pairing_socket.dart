@@ -38,6 +38,7 @@ class PairingSocket {
   Timer? _authResponseTimer;
   String? _pendingAuthEventId;
   bool _connected = false;
+  final Completer<void> _closed = Completer<void>();
 
   PairingSocket({
     required String wsUrl,
@@ -60,8 +61,15 @@ class PairingSocket {
 
   /// Connect and answer a NIP-42 challenge when the relay requires one.
   Future<void> connect() async {
-    _channel = _channelFactory(Uri.parse(_wsUrl));
-    await _channel!.ready;
+    if (_closed.isCompleted) {
+      throw const PairingAuthException('Pairing connection cancelled');
+    }
+    final channel = _channelFactory(Uri.parse(_wsUrl));
+    _channel = channel;
+    await Future.any([channel.ready, _closed.future]);
+    if (_closed.isCompleted) {
+      throw const PairingAuthException('Pairing connection cancelled');
+    }
 
     _authCompleter = Completer<void>();
 
@@ -82,10 +90,14 @@ class PairingSocket {
 
     try {
       await _authCompleter!.future;
+      if (_closed.isCompleted) {
+        throw const PairingAuthException('Pairing connection cancelled');
+      }
       _connected = true;
     } catch (error) {
+      final deliberatelyClosed = _closed.isCompleted;
       await disconnect();
-      _onDisconnected(error);
+      if (!deliberatelyClosed) _onDisconnected(error);
       rethrow;
     } finally {
       _authChallengeTimer?.cancel();
@@ -116,6 +128,7 @@ class PairingSocket {
   }
 
   Future<void> disconnect() async {
+    _retireConnection();
     _connected = false;
     _subscription?.cancel();
     _subscription = null;
@@ -129,12 +142,19 @@ class PairingSocket {
   }
 
   void dispose() {
+    _retireConnection();
     _connected = false;
     _subscription?.cancel();
     _channel?.sink.close();
     _channel = null;
     _authChallengeTimer?.cancel();
     _authResponseTimer?.cancel();
+  }
+
+  void _retireConnection() {
+    if (!_closed.isCompleted) _closed.complete();
+    final auth = _authCompleter;
+    if (auth != null && !auth.isCompleted) auth.complete();
   }
 
   void _failAuth(Object? error) {

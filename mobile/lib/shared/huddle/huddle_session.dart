@@ -4,7 +4,10 @@ import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../features/age_gate/age_signal_provider.dart';
 import 'huddle_auth.dart';
+import '../hosted/hosted_relay_auth.dart';
+import '../relay/relay_provider.dart';
 import 'huddle_media.dart';
 import 'huddle_transport.dart';
 import 'huddle_wire.dart';
@@ -151,10 +154,15 @@ final huddleMediaFactoryProvider = Provider<HuddleMediaFactory>(
   (_) => MethodChannelHuddleMedia.new,
 );
 
-final huddleTransportFactoryProvider = Provider<HuddleTransportFactory>(
-  (_) =>
-      (parameters) => HuddleTransport(parameters: parameters),
-);
+final huddleTransportFactoryProvider = Provider<HuddleTransportFactory>((ref) {
+  final auth = ref.watch(hostedRelayAuthProvider);
+  return (parameters) => HuddleTransport(
+    parameters: parameters,
+    headers: () => auth.headers(
+      RelayConfig(baseUrl: parameters.relayWebSocketUrl, nsec: parameters.nsec),
+    ),
+  );
+});
 
 final huddleReconnectDelaysProvider = Provider<List<Duration>>(
   (_) => const [
@@ -184,6 +192,7 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
   StreamSubscription<HuddleTransportError>? _transportIssueSubscription;
   StreamSubscription<HuddlePeerEvent>? _peerEventSubscription;
   var _generation = 0;
+  bool _ageRestricted = false;
   var _receivedFrames = 0;
   var _sentFrames = 0;
   static const _playbackQueueCapacityPerPeer = 10;
@@ -201,6 +210,7 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
 
   @override
   HuddleSessionState build() {
+    _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
     ref.onDispose(() {
       _generation += 1;
       unawaited(_disposeResources());
@@ -214,6 +224,9 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
     bool isCreator = false,
     String? startedEventId,
   }) async {
+    if (_ageRestricted) {
+      throw StateError('Huddle unavailable while age-restricted');
+    }
     if (state.isInSession) {
       if (state.ephemeralChannelId == parameters.ephemeralChannelId) return;
       state = state.copyWith(

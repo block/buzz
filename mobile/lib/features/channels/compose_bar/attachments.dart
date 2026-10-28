@@ -503,10 +503,10 @@ class _AttachmentTrigger extends StatelessWidget {
               ),
               child: Icon(
                 switch (surface) {
-                  _AttachmentSurface.camera => LucideIcons.camera,
-                  _AttachmentSurface.photos => LucideIcons.images,
+                  _AttachmentSurface.camera => BuzzIcons.camera,
+                  _AttachmentSurface.photos => BuzzIcons.images,
                   _AttachmentSurface.closed ||
-                  _AttachmentSurface.menu => LucideIcons.plus,
+                  _AttachmentSurface.menu => BuzzIcons.plus,
                 },
                 key: ValueKey('attachment-trigger-${surface.name}'),
                 size: 20,
@@ -540,11 +540,11 @@ class _AttachmentMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final items = <(IconData, String, VoidCallback)>[
-      (LucideIcons.camera, 'Camera', onCamera),
-      (LucideIcons.images, 'Photos', onPhotos),
-      (LucideIcons.video, 'Video', onVideo),
-      (LucideIcons.mic, 'Voice note', onVoiceNote),
-      (LucideIcons.file, 'Files', onFiles),
+      (BuzzIcons.camera, 'Camera', onCamera),
+      (BuzzIcons.images, 'Photos', onPhotos),
+      (BuzzIcons.video, 'Video', onVideo),
+      (BuzzIcons.mic, 'Voice note', onVoiceNote),
+      (BuzzIcons.file, 'Files', onFiles),
     ];
     return SizedBox(
       key: const ValueKey('attachment-menu'),
@@ -693,7 +693,7 @@ class _AttachmentStrip extends StatelessWidget {
                             color: Colors.black,
                             child: Center(
                               child: Icon(
-                                LucideIcons.video,
+                                BuzzIcons.video,
                                 color: Colors.white,
                                 size: 24,
                               ),
@@ -707,7 +707,7 @@ class _AttachmentStrip extends StatelessWidget {
                             errorBuilder: (_, _, _) => ColoredBox(
                               color: context.colors.surface,
                               child: Icon(
-                                LucideIcons.image,
+                                BuzzIcons.image,
                                 color: context.colors.onSurfaceVariant,
                               ),
                             ),
@@ -722,7 +722,7 @@ class _AttachmentStrip extends StatelessWidget {
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
                                   Icon(
-                                    LucideIcons.file,
+                                    BuzzIcons.file,
                                     color: context.colors.onSurfaceVariant,
                                   ),
                                   const SizedBox(height: Grid.quarter),
@@ -765,7 +765,7 @@ class _AttachmentStrip extends StatelessWidget {
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
                         icon: Icon(
-                          LucideIcons.x,
+                          BuzzIcons.x,
                           size: 14,
                           color: context.colors.onSurface,
                         ),
@@ -795,7 +795,7 @@ class _MemoryAttachmentImage extends HookConsumerWidget {
     if (data == null || data.isEmpty) {
       return ColoredBox(
         color: context.colors.surface,
-        child: Icon(LucideIcons.image, color: context.colors.onSurfaceVariant),
+        child: Icon(BuzzIcons.image, color: context.colors.onSurfaceVariant),
       );
     }
 
@@ -804,7 +804,7 @@ class _MemoryAttachmentImage extends HookConsumerWidget {
       fit: BoxFit.cover,
       errorBuilder: (_, _, _) => ColoredBox(
         color: context.colors.surface,
-        child: Icon(LucideIcons.image, color: context.colors.onSurfaceVariant),
+        child: Icon(BuzzIcons.image, color: context.colors.onSurfaceVariant),
       ),
     );
   }

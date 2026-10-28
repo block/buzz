@@ -197,14 +197,13 @@ export function InboxMessageRow({
               botIdenticonValue={message.authorLabel}
               pubkey={message.authorPubkey}
               role={profileRole}
+              triggerClassName={cn(
+                "shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                isAuthorAgent ? "rounded-[30%]" : "rounded-full",
+              )}
               triggerElement="span"
             >
-              <span
-                className={cn(
-                  "inline-flex shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                  isAuthorAgent ? "rounded-[30%]" : "rounded-full",
-                )}
-              >
+              <span className="inline-flex shrink-0">
                 <UserAvatar
                   accent={isAuthorAgent}
                   avatarUrl={message.avatarUrl}

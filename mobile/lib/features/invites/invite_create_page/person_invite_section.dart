@@ -199,7 +199,7 @@ class _InviteeResolutionCard extends StatelessWidget {
               ),
             ),
             title: const Text('Resolving profile'),
-            subtitle: Text(shortCommunityInviteNpub(pubkey)),
+            subtitle: Text(shortPubkey(pubkey)),
           ),
         ],
       ),
@@ -208,7 +208,7 @@ class _InviteeResolutionCard extends StatelessWidget {
           AppListRow(
             key: Key('community-invite-resolution-error-$pubkey'),
             title: 'Could not resolve profile',
-            subtitle: shortCommunityInviteNpub(pubkey),
+            subtitle: shortPubkey(pubkey),
             trailing: TextButton(
               onPressed: onRetry,
               child: const Text('Retry'),
@@ -223,7 +223,7 @@ class _InviteeResolutionCard extends StatelessWidget {
               AppListRow(
                 key: Key('community-invite-unresolved-$pubkey'),
                 title: 'Invalid npub',
-                subtitle: shortCommunityInviteNpub(pubkey),
+                subtitle: shortPubkey(pubkey),
               ),
             ],
           );
@@ -234,7 +234,7 @@ class _InviteeResolutionCard extends StatelessWidget {
           children: [
             AppListRow(
               key: Key('community-invite-resolved-$pubkey'),
-              title: shortCommunityInviteNpub(invitee.pubkey),
+              title: shortPubkey(invitee.pubkey),
               trailing: FilledButton(
                 key: const Key('community-invite-submit'),
                 onPressed: isSubmitting ? null : () => onInvite(invitee),

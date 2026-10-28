@@ -375,6 +375,12 @@ test("entity tooltip uses project context while relay metadata is delayed", asyn
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("channel-general").click();
+  await page.waitForFunction(() =>
+    window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+      channelName: "general",
+      kind: 39005,
+    }),
+  );
   await page.evaluate(() =>
     window.__BUZZ_E2E_ACTIVATE_RELAY_RATE_LIMIT__?.(300),
   );

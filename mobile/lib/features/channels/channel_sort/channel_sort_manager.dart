@@ -113,6 +113,23 @@ class ChannelSortManager {
     }
   }
 
+  /// Re-reads the retained head once, e.g. on app foreground resume, to catch
+  /// an EVENT a healthy socket never delivered. Skipped while a local edit is
+  /// pending and discarded if a mutation lands before the read returns.
+  void refreshFromRelay() {
+    if (_disposed || !_remoteEnabled || _syncState.hasPendingLocalChanges) {
+      return;
+    }
+    final generation = _generation;
+    unawaited(
+      _fetchAndApply(
+        isCurrent: () => !_disposed && generation == _generation,
+      ).then((_) {
+        if (!_disposed && generation != _generation) _onChanged();
+      }),
+    );
+  }
+
   void _scheduleStartupRetry() {
     if (_disposed) return;
     _startupRetryTimer?.cancel();
@@ -169,10 +186,11 @@ class ChannelSortManager {
     });
   }
 
-  Future<bool?> _fetchAndApply() async {
+  Future<bool?> _fetchAndApply({bool Function()? isCurrent}) async {
     if (_relaySession == null) return null;
     try {
       final events = await _relaySession.fetchHistory(_filter());
+      if (isCurrent != null && !isCurrent()) return null;
       var found = false;
       for (final event in events) {
         if (event.pubkey != pubkey || event.getTagValue('d') != _dTag) continue;

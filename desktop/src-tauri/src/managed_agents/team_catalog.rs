@@ -132,6 +132,9 @@ pub struct TeamCatalogMember {
     pub avatar_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// Portable ACP transport alias, omitted for legacy machine-local commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +148,12 @@ pub struct TeamCatalogMember {
     /// Clamped to 1..=32 at projection time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// ACP conversation boundary for instances created from this member.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::managed_agents::AcpSessionPolicy::is_channel"
+    )]
+    pub session_policy: crate::managed_agents::AcpSessionPolicy,
     /// Reuse hint: the built-in slug this member was installed from.
     ///
     /// Present only for built-in members. A recipient may substitute its own
@@ -299,11 +308,16 @@ fn member_projection(record: &AgentDefinition) -> TeamCatalogMember {
         system_prompt: Some(record.system_prompt.clone()),
         avatar_url,
         runtime: record.runtime.clone(),
+        acp_command: record
+            .acp_command
+            .clone()
+            .filter(|command| super::is_portable_acp_command(command)),
         model: record.model.clone(),
         provider: record.provider.clone(),
         name_pool: record.name_pool.clone(),
         respond_to: sanitized_respond_to(record),
         parallelism: record.parallelism.map(|value| value.clamp(1, 32)),
+        session_policy: record.session_policy,
         builtin_slug: None,
         projection_hash: None,
     }
@@ -480,6 +494,7 @@ fn non_empty(value: &str, label: &str) -> Result<(), String> {
 /// rejected it out of 1..=32. Validating at the parse boundary makes an
 /// unusable team un-addable instead of add-then-broken.
 fn validate_member(member: &TeamCatalogMember) -> Result<(), String> {
+    super::validate_portable_acp_command(member.acp_command.as_deref())?;
     let who = &member.display_name;
     non_empty(&member.member_key, "a member key")?;
     bounded(&member.member_key, MAX_MEMBER_KEY_BYTES, "a member key")?;

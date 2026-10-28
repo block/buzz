@@ -5,15 +5,38 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base64::Engine as _;
 use buzz_core::filter::{filters_match, reader_authorized_for_event};
 use chrono::{TimeDelta, Utc};
-use nostr::{EventBuilder, Filter, Kind, Tag};
+use nostr::Filter;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
-use crate::{handlers::push_lease::Subscription, state::AppState};
+use crate::{
+    handlers::{
+        push_lease::Subscription,
+        system_channels::{filter_channel_scope, NamedOnlyChannels},
+    },
+    nip98::nip98_header,
+    state::AppState,
+};
+
+// Dropping a SQLx transaction rolls it back; committed claims remain leased
+// until expiry. Dropping HTTP cannot recall requests already accepted by the
+// gateway. Do not acknowledge, delete, or retry a job merely on cancellation.
+async fn run_push_task(
+    enabled: bool,
+    cancel: &tokio_util::sync::CancellationToken,
+    work: impl std::future::Future<Output = ()>,
+) {
+    if !enabled {
+        return;
+    }
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {},
+        _ = work => {},
+    }
+}
 
 const CLAIM_SECS: i64 = 30;
 const EVENT_USEFUL_SECS: i64 = 3600;
@@ -58,6 +81,15 @@ enum DeliveryResponse {
 /// transaction — plus one complete/retry statement each — regardless of
 /// batch size or how many (event, lease) pairs match.
 pub async fn run_matcher(state: Arc<AppState>) {
+    run_push_task(
+        state.config.push_enabled,
+        &state.push_cancel,
+        matcher_loop(&state),
+    )
+    .await;
+}
+
+async fn matcher_loop(state: &AppState) {
     let mut idle_delay = IDLE_POLL_FLOOR;
     let mut last_reap = tokio::time::Instant::now();
     loop {
@@ -77,7 +109,7 @@ pub async fn run_matcher(state: Arc<AppState>) {
         {
             Ok(Some(batch)) => {
                 idle_delay = IDLE_POLL_FLOOR;
-                process_match_batch(&state, batch).await;
+                process_match_batch(state, batch).await;
             }
             Ok(None) => {
                 tokio::time::sleep(idle_delay).await;
@@ -91,11 +123,13 @@ pub async fn run_matcher(state: Arc<AppState>) {
     }
 }
 
-/// Per-batch state shared by every job: the community's active leases and
-/// the exact (channel, lease author) membership pairs the jobs can consult.
+/// Per-batch state shared by every job: the community's active leases, the
+/// exact (channel, lease author) membership pairs the jobs can consult, and
+/// the batch's named-only channels (system channels and any type added later).
 struct MatchContext {
     leases: Vec<buzz_db::push::MatchLease>,
     memberships: std::collections::HashSet<(uuid::Uuid, Vec<u8>)>,
+    named_only: NamedOnlyChannels,
 }
 
 async fn load_match_context(
@@ -119,9 +153,16 @@ async fn load_match_context(
         .await?
         .into_iter()
         .collect();
+    let named_only = NamedOnlyChannels::from_typed(
+        state
+            .db
+            .named_only_channels_among(batch.community, &channels)
+            .await?,
+    );
     Ok(MatchContext {
         leases,
         memberships,
+        named_only,
     })
 }
 
@@ -269,6 +310,7 @@ fn match_job(
             let filter: Filter =
                 serde_json::from_value(serde_json::Value::Object(sub.filter.clone()))?;
             if !push_filter_authorized_for_event(&filter, &job.event.event, &author_hex)
+                || !push_filter_reads_channel(&filter, job.event.channel_id, &context.named_only)
                 || !filters_match(std::slice::from_ref(&filter), &job.event)
             {
                 continue;
@@ -314,6 +356,25 @@ fn match_job(
     Ok(wakes)
 }
 
+/// Whether a lease filter may push an event in `channel`, by the same rule as
+/// REQ: a legacy-type channel is in every filter's scope (membership is
+/// checked separately), and a named-only channel is in scope only when the
+/// filter names it (see [`crate::handlers::system_channels`]). Lease filters
+/// cannot carry `#t` or `#P`, so for push "names it" means `#h`.
+fn push_filter_reads_channel(
+    filter: &Filter,
+    channel: Option<uuid::Uuid>,
+    named_only: &NamedOnlyChannels,
+) -> bool {
+    let Some(channel) = channel else {
+        return true;
+    };
+    if !named_only.ids().contains(&channel) {
+        return true;
+    }
+    filter_channel_scope(filter, &[], named_only).contains(&channel)
+}
+
 /// Match-time counterpart of REQ's filter-level `#p` authorization gate.
 /// Kind 1059 is globally stored and leaks recipient activity through wake
 /// timing, so a lease may only match gift wraps addressed to its own author.
@@ -338,6 +399,15 @@ fn push_filter_authorized_for_event(
 
 /// Continuously claim due wakes and deliver them through the push gateway.
 pub async fn run_delivery_worker(state: Arc<AppState>) {
+    run_push_task(
+        state.config.push_enabled,
+        &state.push_cancel,
+        delivery_worker_loop(&state),
+    )
+    .await;
+}
+
+async fn delivery_worker_loop(state: &AppState) {
     let http = match reqwest::Client::builder()
         .timeout(state.config.push_gateway_timeout)
         .build()
@@ -352,29 +422,40 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
     let mut idle_delay = Duration::from_millis(500);
     loop {
         let mut found = false;
-        match state.db.usage_community_hosts().await {
-            Ok(communities) => {
-                for community in communities {
-                    let community = buzz_core::CommunityId::from_uuid(community.id);
-                    let until = Utc::now() + TimeDelta::seconds(CLAIM_SECS);
-                    match state.db.claim_due_push_wakes(community, 16, until).await {
-                        Ok(wakes) => {
-                            for wake in wakes {
-                                found = true;
-                                deliver_one(&state, &http, wake).await;
-                            }
+        let mut after = None;
+        loop {
+            let communities = match state.db.due_push_wake_communities(after).await {
+                Ok(communities) if communities.is_empty() => break,
+                Ok(communities) => communities,
+                Err(e) => {
+                    error!("push worker discovery failed: {e}");
+                    break;
+                }
+            };
+            // Advance even when a candidate loses its work or refuses admission.
+            // Busy early communities must not prevent later pages getting a turn.
+            after = communities.last().copied();
+            for community in communities {
+                let until = Utc::now() + TimeDelta::seconds(CLAIM_SECS);
+                match state.db.claim_due_push_wakes(community, 16, until).await {
+                    Ok(wakes) => {
+                        for wake in wakes {
+                            found = true;
+                            deliver_one(state, &http, wake).await;
                         }
-                        Err(e) => warn!(%community, "push wake claim failed: {e}"),
                     }
+                    // Discovery is advisory; admission still enforces lifecycle.
+                    Err(e @ buzz_db::DbError::AccessDenied(_)) => {
+                        debug!(%community, "push wake claim refused: {e}")
+                    }
+                    Err(e) => warn!(%community, "push wake claim failed: {e}"),
                 }
             }
-            Err(e) => error!("push worker community scan failed: {e}"),
         }
         if found {
             idle_delay = Duration::from_millis(500);
         } else {
-            // Empty sweeps back off so an idle worker stops paying a full
-            // per-community claim scan every 500ms forever.
+            // Preserve the existing idle cadence without per-community claims.
             tokio::time::sleep(idle_delay).await;
             idle_delay = (idle_delay * 2).min(IDLE_POLL_CEILING);
         }
@@ -666,22 +747,6 @@ async fn retry_or_fail(
     }
 }
 
-fn nip98_header(keys: &nostr::Keys, url: &str, body: &[u8]) -> anyhow::Result<String> {
-    let hash = hex::encode(Sha256::digest(body));
-    let event = EventBuilder::new(Kind::HttpAuth, "")
-        .tags([
-            Tag::parse(["u", url])?,
-            Tag::parse(["method", "POST"])?,
-            Tag::parse(["payload", &hash])?,
-            Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()])?,
-        ])
-        .sign_with_keys(keys)?;
-    Ok(format!(
-        "Nostr {}",
-        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&event)?)
-    ))
-}
-
 fn class_rank(_: &str) -> u8 {
     1
 }
@@ -689,7 +754,14 @@ fn class_rank(_: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::State, routing::post, Json, Router};
+    use axum::{
+        body::Bytes,
+        extract::{OriginalUri, State},
+        http::HeaderMap,
+        routing::post,
+        Json, Router,
+    };
+    use nostr::{EventBuilder, Kind, Tag};
     use serde_json::Value;
     use std::{future::IntoFuture, sync::Arc};
     use tokio::sync::Mutex;
@@ -727,11 +799,116 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn named_only_channel_pushes_only_to_a_filter_that_names_it() {
+        let member = nostr::Keys::generate();
+        let outsider = nostr::Keys::generate();
+        let sender = nostr::Keys::generate();
+        let legacy = uuid::Uuid::new_v4();
+        let system = uuid::Uuid::new_v4();
+        let future = uuid::Uuid::new_v4();
+        let author = |keys: &nostr::Keys| keys.public_key().to_bytes().to_vec();
+        let context = |keys: &nostr::Keys, filter: Value| MatchContext {
+            leases: vec![buzz_db::push::MatchLease {
+                author: author(keys),
+                installation_id: "phone".into(),
+                generation: 1,
+                subscriptions: serde_json::json!([{"filter": filter, "class": "default"}]),
+                expires_at: Utc::now().timestamp() + 3600,
+            }],
+            memberships: [legacy, system, future]
+                .into_iter()
+                .map(|channel| (channel, author(&member)))
+                .collect(),
+            named_only: NamedOnlyChannels::from_typed([
+                (system, "system".to_owned()),
+                (future, "later-type".to_owned()),
+            ]),
+        };
+        let job = |channel: Option<uuid::Uuid>| {
+            let mut event = EventBuilder::new(Kind::Custom(9), "hi");
+            if let Some(channel) = channel {
+                event = event.tag(Tag::parse(["h", &channel.to_string()]).unwrap());
+            }
+            buzz_db::push::BatchedMatch {
+                event: buzz_core::StoredEvent::new(event.sign_with_keys(&sender).unwrap(), channel),
+                attempt: 1,
+            }
+        };
+        let wakes = |keys: &nostr::Keys, filter: Value, channel| {
+            match_job(&job(channel), &context(keys, filter))
+                .unwrap()
+                .len()
+        };
+        let names =
+            |channel: uuid::Uuid| serde_json::json!({"kinds": [9], "#h": [channel.to_string()]});
+        let broad = serde_json::json!({"kinds": [9]});
+
+        // A filter that names no channel reads legacy-type channels and
+        // channel-less events, but no named-only channel.
+        assert_eq!(wakes(&member, broad.clone(), Some(legacy)), 1, "legacy");
+        assert_eq!(wakes(&member, broad.clone(), None), 1, "no channel");
+        assert_eq!(
+            wakes(&member, broad.clone(), Some(system)),
+            0,
+            "unnamed system"
+        );
+        assert_eq!(wakes(&member, broad, Some(future)), 0, "unnamed later type");
+
+        // Naming a named-only channel by #h reads it, as in REQ: a system
+        // channel and a later-type channel alike.
+        assert_eq!(
+            wakes(&member, names(future), Some(future)),
+            1,
+            "named later type"
+        );
+        assert_eq!(
+            wakes(&member, names(system), Some(system)),
+            1,
+            "named system"
+        );
+        assert_eq!(
+            wakes(&outsider, names(system), Some(system)),
+            0,
+            "non-member system"
+        );
+        // Naming one channel does not widen the filter to another.
+        let other = uuid::Uuid::new_v4();
+        assert_eq!(wakes(&member, names(other), Some(future)), 0, "other #h");
+        // Membership is still required.
+        assert_eq!(
+            wakes(&outsider, names(future), Some(future)),
+            0,
+            "non-member"
+        );
+        assert_eq!(
+            wakes(&outsider, names(legacy), Some(legacy)),
+            0,
+            "non-member legacy"
+        );
+    }
+
     async fn capture(
         State(seen): State<Arc<Mutex<Vec<Value>>>>,
-        Json(body): Json<Value>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        body: Bytes,
     ) -> Json<Value> {
-        seen.lock().await.push(body);
+        let url: url::Url = format!("http://{}{}", headers["host"].to_str().unwrap(), uri)
+            .parse()
+            .unwrap();
+        assert!(!headers.contains_key("x-forwarded-proto"));
+        nostr::nips::nip98::verify_auth_header(
+            headers["authorization"].to_str().unwrap(),
+            &url,
+            nostr::nips::nip98::HttpMethod::POST,
+            nostr::Timestamp::now(),
+            Some(&body),
+        )
+        .unwrap();
+        seen.lock()
+            .await
+            .push(serde_json::from_slice(&body).unwrap());
         Json(serde_json::json!({"status":"accepted"}))
     }
 
@@ -744,12 +921,14 @@ mod tests {
             axum::serve(
                 listener,
                 Router::new()
-                    .route("/deliver", post(capture))
+                    .route("/v1/deliveries/apns", post(capture))
                     .with_state(seen.clone()),
             )
             .into_future(),
         );
-        let url: url::Url = format!("http://{address}/deliver").parse().unwrap();
+        let url: url::Url = format!("http://{address}/v1/deliveries/apns")
+            .parse()
+            .unwrap();
         let http = reqwest::Client::new();
         let keys = nostr::Keys::generate();
         let request_id = uuid::Uuid::new_v4();
@@ -765,5 +944,202 @@ mod tests {
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[0]["request_id"], request_id.to_string());
         assert_eq!(bodies[1]["request_id"], request_id.to_string());
+    }
+}
+
+#[cfg(test)]
+#[path = "push_runtime/delivery_postgres_tests.rs"]
+mod delivery_postgres_tests;
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::run_push_task;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn relay_shutdown_stops_both_worker_entry_points() {
+        let mut state = crate::state::tests::test_state().await;
+        let config = &mut Arc::get_mut(&mut state).unwrap().config;
+        Arc::get_mut(config).unwrap().push_enabled = true;
+        state.begin_shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(
+                super::run_matcher(state.clone()),
+                super::run_delivery_worker(state.clone())
+            );
+        })
+        .await
+        .expect("both real workers must honor shutdown before touching dependencies");
+    }
+
+    #[tokio::test]
+    async fn disabled_or_cancelled_worker_never_polls_work() {
+        for enabled in [false, true] {
+            let cancel = CancellationToken::new();
+            if enabled {
+                cancel.cancel();
+            }
+            run_push_task(enabled, &cancel, async { panic!("worker must not start") }).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_drops_in_flight_work_without_waiting_for_it() {
+        struct OnDrop(Arc<AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = OnDrop(dropped.clone());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            run_push_task(true, &worker_cancel, async move {
+                let _guard = guard;
+                started.send(()).unwrap();
+                std::future::pending::<()>().await;
+            })
+            .await;
+        });
+        ready.await.unwrap();
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::{load_match_context, match_job};
+    use nostr::{EventBuilder, Kind, Tag};
+
+    /// The matcher on real channel rows: a member's lease that names no
+    /// channel wakes for an ordinary channel's message but not for a system
+    /// channel's. A member's lease that names the system channel by `#h`
+    /// wakes for that channel only. A non-member's lease wakes for neither.
+    /// Mutations: let system channel events reach a lease that does not name
+    /// them → RED (the outsider or the broad lease wakes); never push system
+    /// channels → RED (the named lease does not wake).
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn system_channel_messages_wake_only_named_member_leases() {
+        use crate::handlers::group_state_postgres_tests::{create_channel, http_auth};
+        use crate::handlers::ingest::ingest_event;
+
+        let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = format!("push-system-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        let member = nostr::Keys::generate();
+        let outsider = nostr::Keys::generate();
+
+        let ordinary = create_channel(&state, &tenant, &member, &[]).await;
+        let system = create_channel(&state, &tenant, &member, &[&["channel_type", "system"]]).await;
+
+        let unnamed = serde_json::json!([{"filter": {"kinds": [9]}, "class": "default"}]);
+        let named = serde_json::json!([{
+            "filter": {"kinds": [9], "#h": [system.to_string()]},
+            "class": "default"
+        }]);
+        let leases = [
+            (&member, "unnamed", &unnamed),
+            (&member, "named", &named),
+            (&outsider, "unnamed", &unnamed),
+        ];
+        for (n, (keys, install, subscriptions)) in leases.into_iter().enumerate() {
+            let source = [n as u8 + 1; 32];
+            assert_eq!(
+                buzz_db::push::replace_active_lease(
+                    state.db.pool(),
+                    community,
+                    &keys.public_key().to_bytes(),
+                    install,
+                    buzz_db::push::LeaseVersion {
+                        source_event_id: &source,
+                        source_created_at: 10,
+                        generation: 1,
+                        expires_at: i64::MAX / 2,
+                    },
+                    buzz_db::push::ActiveLease {
+                        endpoint_hash: &[n as u8 + 42; 32],
+                        endpoint_grant: "opaque-grant",
+                        max_class: "default",
+                        subscriptions,
+                    },
+                )
+                .await
+                .expect("activate lease"),
+                buzz_db::push::ReplaceLeaseOutcome::Accepted
+            );
+        }
+
+        let mut jobs = Vec::new();
+        for channel in [ordinary, system] {
+            let event = EventBuilder::new(Kind::Custom(9), "hello")
+                .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
+                .sign_with_keys(&member)
+                .unwrap();
+            let id = event.id;
+            ingest_event(&state, &tenant, event, http_auth(&member))
+                .await
+                .expect("ingest message");
+            let stored = state
+                .db
+                .get_event_by_id(community, id.as_bytes())
+                .await
+                .expect("load message")
+                .expect("stored message");
+            assert_eq!(stored.channel_id, Some(channel));
+            jobs.push(buzz_db::push::BatchedMatch {
+                event: stored,
+                attempt: 1,
+            });
+        }
+        let batch = buzz_db::push::ClaimedMatchBatch {
+            community,
+            claim_id: uuid::Uuid::new_v4(),
+            jobs,
+        };
+
+        let context = load_match_context(&state, &batch)
+            .await
+            .expect("match context");
+        let woken: Vec<Vec<(Vec<u8>, String)>> = batch
+            .jobs
+            .iter()
+            .map(|job| {
+                match_job(job, &context)
+                    .expect("match")
+                    .into_iter()
+                    .map(|wake| (wake.author, wake.installation_id))
+                    .collect()
+            })
+            .collect();
+        let member_key = member.public_key().to_bytes().to_vec();
+        assert_eq!(
+            woken,
+            vec![
+                vec![(member_key.clone(), "unnamed".to_owned())],
+                vec![(member_key, "named".to_owned())],
+            ],
+            "ordinary channel wakes its member's broad lease; system channel wakes only the lease that names it"
+        );
     }
 }

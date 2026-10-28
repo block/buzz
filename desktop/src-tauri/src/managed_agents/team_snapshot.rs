@@ -254,6 +254,7 @@ mod tests {
     /// Build a minimal `ManagedAgentRecord` for use as a team member.
     fn agent_record(name: &str) -> ManagedAgentRecord {
         ManagedAgentRecord {
+            session_policy: Default::default(),
             description: None,
             pubkey: format!("{name}-pubkey"),
             name: name.to_string(),

@@ -9,8 +9,10 @@ import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:buzz/features/activity/reminders_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -23,8 +25,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hooks_riverpod/misc.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../helpers/thread_ids.dart';
 
 void main() {
   final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -32,7 +37,7 @@ void main() {
   final testMention = FeedItem(
     id: 'm1',
     kind: 9,
-    pubkey: 'alice_pk',
+    pubkey: 'a11ce00000000000000000000000000000000000000000000000000000000000',
     content: 'Hey check this out',
     createdAt: now - 120,
     channelId: 'ch1',
@@ -50,8 +55,8 @@ void main() {
     channelId: 'ch2',
     channelName: 'engineering',
     tags: const [
-      ['e', 'root1', '', 'root'],
-      ['e', 'root1', '', 'reply'],
+      ['e', threadIdRoot1, '', 'root'],
+      ['e', threadIdRoot1, '', 'reply'],
     ],
     category: 'activity',
   );
@@ -101,11 +106,13 @@ void main() {
   ];
 
   final testUsers = <String, UserProfile>{
-    'alice_pk': const UserProfile(
-      pubkey: 'alice_pk',
-      displayName: 'Alice',
-      nip05Handle: 'alice@example.com',
-    ),
+    'a11ce00000000000000000000000000000000000000000000000000000000000':
+        const UserProfile(
+          pubkey:
+              'a11ce00000000000000000000000000000000000000000000000000000000000',
+          displayName: 'Alice',
+          nip05Handle: 'alice@example.com',
+        ),
     'bob_pk': const UserProfile(pubkey: 'bob_pk', displayName: 'Bob'),
     'agent_pk': const UserProfile(pubkey: 'agent_pk', displayName: 'Scout'),
   };
@@ -122,6 +129,7 @@ void main() {
     List<ComposeDraft> drafts = const [],
     List<Reminder> reminders = const [],
     Set<String> knownAgentPubkeys = const {},
+    List<Override> overrides = const [],
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -145,6 +153,7 @@ void main() {
           () => _FakeComposeDraftsNotifier(drafts),
         ),
         remindersProvider.overrideWith(() => _FakeRemindersNotifier(reminders)),
+        ...overrides,
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
@@ -186,7 +195,7 @@ void main() {
     expect(find.text('No activity yet'), findsOneWidget);
   });
 
-  testWidgets('does not imply a back button for the top-level Activity tab', (
+  testWidgets('Inbox exposes close navigation for its modal route', (
     tester,
   ) async {
     await tester.pumpWidget(await buildTestable());
@@ -196,6 +205,9 @@ void main() {
       find.byType(FrostedAppBar).last,
     );
     expect(appBar.automaticallyImplyLeading, isFalse);
+    expect(appBar.nativeLeading?.symbol, 'xmark');
+    expect(appBar.nativeLeading?.label, 'Close inbox');
+    expect(appBar.nativeTitle, 'Inbox');
     expect(appBar.gradient, isNull);
     expect(appBar.frosted, isTrue);
     expect(appBar.showBottomDivider, isTrue);
@@ -407,7 +419,8 @@ void main() {
         eventId: 'm1',
         channelId: 'ch1',
         preview: 'Follow up',
-        authorPubkey: 'alice_pk',
+        authorPubkey:
+            'a11ce00000000000000000000000000000000000000000000000000000000000',
       ),
       note: null,
       createdAt: now - 60,
@@ -536,6 +549,85 @@ void main() {
     );
   });
 
+  testWidgets('blank cached sender names fall back to the compact npub', (
+    tester,
+  ) async {
+    // Relay profiles can cache blank display names (empty and
+    // whitespace-only) unchanged, so the sender must resolve through the
+    // shared nonblank-name label contract: the row shows the compact npub
+    // of the a11ce key instead of a blank author label. Binds the production
+    // seam — the sender resolves through the user cache exactly as the live
+    // page does. Keyed remounts keep each ProviderScope (and its user-cache
+    // override) fresh between scenarios, so each iteration actually
+    // consumes its own blank-name fixture.
+    const sender =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    for (final blankName in const ['', '   ']) {
+      await tester.pumpWidget(
+        KeyedSubtree(
+          key: ValueKey('blank-sender-${blankName.length}'),
+          child: await buildTestable(
+            users: {
+              ...testUsers,
+              sender: UserProfile(pubkey: sender, displayName: blankName),
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(blankName), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('inbox-row-m1')),
+          matching: find.text('npub15yw…ccpw'),
+        ),
+        findsOneWidget,
+      );
+    }
+  });
+
+  testWidgets('same-name senders get their channel\'s contextual label', (
+    tester,
+  ) async {
+    // Another ch1 member shares the sender's name, so the row must use the
+    // channel's disambiguated label rather than the bare profile name.
+    const sender =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    const twin =
+        'b0b0000000000000000000000000000000000000000000000000000000000000';
+    final members = [
+      for (final pubkey in const [sender, twin])
+        ChannelMember(pubkey: pubkey, role: 'member', joinedAt: DateTime(2025)),
+    ];
+    final users = {
+      ...testUsers,
+      sender: const UserProfile(pubkey: sender, displayName: 'Scout'),
+      twin: const UserProfile(pubkey: twin, displayName: 'Scout'),
+    };
+    await tester.pumpWidget(
+      await buildTestable(
+        users: users,
+        overrides: [
+          channelMembersProvider('ch1').overrideWith((ref) async => members),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final expected = IdentityNameSources(
+      profiles: users,
+    ).scope(const [sender, twin]).labelFor(sender);
+    expect(expected, isNot('Scout'));
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('inbox-row-m1')),
+        matching: find.textContaining(expected),
+      ),
+      findsWidgets,
+    );
+  });
+
   testWidgets('directory-known Activity authors use agent avatars', (
     tester,
   ) async {
@@ -574,7 +666,8 @@ void main() {
     FeedItem dmMessage(String id, int age) => FeedItem(
       id: id,
       kind: 9,
-      pubkey: 'alice_pk',
+      pubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
       content: 'dm body $id',
       createdAt: now - age,
       channelId: 'dm1',
@@ -623,7 +716,7 @@ void main() {
     await tester.pumpWidget(
       await buildTestable(
         // Mention (2m ago) and agent (1m ago) unread; thread (1h ago) read.
-        readContexts: {'thread:root1': now, 'ch2': now},
+        readContexts: {'thread:$threadIdRoot1': now, 'ch2': now},
       ),
     );
     await tester.pumpAndSettle();
@@ -678,14 +771,15 @@ void main() {
     final threadMention = FeedItem(
       id: 'reply-event',
       kind: 9,
-      pubkey: 'alice_pk',
+      pubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
       content: 'Reply in a thread',
       createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       channelId: 'ch1',
       channelName: 'general',
       tags: const [
-        ['e', 'thread-root', '', 'root'],
-        ['e', 'parent-reply', '', 'reply'],
+        ['e', threadIdThreadDashRoot, '', 'root'],
+        ['e', threadIdParentDashReply, '', 'reply'],
       ],
       category: 'mention',
     );
@@ -706,7 +800,7 @@ void main() {
       find.byType(ChannelDetailPage),
     );
     expect(page.channel.id, 'ch1');
-    expect(page.initialThreadRootId, 'parent-reply');
+    expect(page.initialThreadRootId, threadIdParentDashReply);
     expect(page.initialMessageId, 'reply-event');
     expect(
       page.initialThreadRouteBehavior,
@@ -771,7 +865,7 @@ void main() {
   testWidgets('long-press mark unread reopens a read row', (tester) async {
     await tester.pumpWidget(
       await buildTestable(
-        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
       ),
     );
     await tester.pumpAndSettle();
@@ -796,7 +890,7 @@ void main() {
   ) async {
     await tester.pumpWidget(
       await buildTestable(
-        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
       ),
     );
     await tester.pumpAndSettle();
@@ -859,7 +953,7 @@ void main() {
 
     await tester.pumpWidget(
       await buildTestable(
-        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
       ),
     );
     await tester.pumpAndSettle();
@@ -877,7 +971,7 @@ void main() {
     final action = find.byKey(const ValueKey('inbox-swipe-read-m1'));
     expect(action, findsOneWidget);
     expect(
-      find.descendant(of: action, matching: find.byIcon(LucideIcons.mail)),
+      find.descendant(of: action, matching: find.byIcon(BuzzIcons.mail)),
       findsOneWidget,
     );
     expect(find.text('Mark unread'), findsNothing);
@@ -915,7 +1009,7 @@ void main() {
   ) async {
     await tester.pumpWidget(
       await buildTestable(
-        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
       ),
     );
     await tester.pumpAndSettle();
@@ -931,14 +1025,20 @@ void main() {
     );
   });
 
-  testWidgets('falls back to short pubkey when user not cached', (
+  testWidgets('falls back to a compact npub when user is not cached', (
     tester,
   ) async {
     await tester.pumpWidget(await buildTestable(users: const {}));
     await tester.pumpAndSettle();
 
-    // Sender label falls back to the (short) pubkey.
-    expect(find.text('alice_pk'), findsOneWidget);
+    // Sender label falls back to the compact npub of the author's key.
+    expect(
+      find.text(
+        'a11ce00000000000000000000000000000000000000000000000000000000000',
+      ),
+      findsNothing,
+    );
+    expect(find.text('npub15yw\u2026ccpw'), findsOneWidget);
     expect(find.text('Alice'), findsNothing);
   });
 }

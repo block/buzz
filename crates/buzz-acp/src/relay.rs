@@ -149,12 +149,17 @@ pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
             match arr.first().and_then(|v| v.as_str()) {
                 Some("hidden") => is_hidden = true,
                 Some("private") => is_private = true,
-                Some("t") => declared_type = arr.get(1).and_then(|v| v.as_str()),
+                // The first `t` is the channel type; later `t` tags are labels.
+                Some("t") if declared_type.is_none() => {
+                    declared_type = arr.get(1).and_then(|v| v.as_str())
+                }
                 _ => {}
             }
         }
     }
-    if declared_type == Some("dm") || is_hidden {
+    // `hidden` marks a DM only on metadata without a declared type; a private
+    // system channel is hidden too.
+    if declared_type == Some("dm") || (declared_type.is_none() && is_hidden) {
         "dm".to_string()
     } else if declared_type == Some("private") || is_private {
         "private".to_string()
@@ -433,6 +438,13 @@ impl RestClient {
                     )));
                 }
                 Ok(resp) => {
+                    // Surface non-retriable statuses (401/403/500/…): callers
+                    // often swallow the Err, and a silent auth failure here has
+                    // previously masqueraded as "the agent just went quiet".
+                    tracing::warn!(
+                        "{method} {path} returned non-retriable HTTP {}",
+                        resp.status()
+                    );
                     return Err(RelayError::Http(format!(
                         "{method} {} returned HTTP {}",
                         path,
@@ -1160,10 +1172,8 @@ struct BgState {
     /// On reconnect resubscribe, `since` = min(last_seen, channel_dropped_since).
     /// Cleared per-channel after a successful resubscribe.
     channel_dropped_since: HashMap<Uuid, u64>,
-    /// Set by the backpressure handler when the event channel is full.
-    /// The main loop checks this flag and triggers a proactive resubscribe
-    /// (without waiting for a disconnect) so dropped events are replayed.
-    proactive_resubscribe_needed: bool,
+    /// Rate/fairness bookkeeping only; replay cursors retain baseline semantics.
+    recovery: recovery::RecoverySchedule,
     /// Unix timestamp captured just before the relay connection was established.
     /// Used as the floor `since` for membership notification replay so events
     /// predating this session are never re-delivered.
@@ -1237,7 +1247,7 @@ impl BgState {
             membership_sub_active: false,
             observer_control_sub_active: false,
             channel_dropped_since: HashMap::new(),
-            proactive_resubscribe_needed: false,
+            recovery: recovery::RecoverySchedule::default(),
             startup_watermark: None,
             subscribe_since: HashMap::new(),
             rate_limit_gate: None,
@@ -1298,6 +1308,9 @@ impl BgState {
     /// Prevents stale replay on re-subscribe and avoids unbounded state growth
     /// for channels that are removed and never re-added.
     fn clear_channel_state(&mut self, channel_id: &Uuid) {
+        self.recovery
+            .last_attempt
+            .remove(&channel_sub_id(*channel_id));
         self.last_seen.remove(channel_id);
         self.subscribe_since.remove(channel_id);
         self.channel_dropped_since.remove(channel_id);
@@ -1826,82 +1839,6 @@ async fn run_background_task(
     let mut drain_pacing_next: Option<tokio::time::Instant> = None;
 
     loop {
-        if state.proactive_resubscribe_needed {
-            state.proactive_resubscribe_needed = false;
-            info!("proactive resubscribe triggered by backpressure event loss");
-            // Proactive resubscribe runs on the EXISTING socket — do NOT clear the
-            // rate-limit gate or pending queues.
-            match resubscribe_after_reconnect(
-                &mut ws,
-                &mut cmd_rx,
-                &mut state,
-                &agent_pubkey_hex,
-                false, // existing socket — preserve gate state
-            )
-            .await
-            {
-                ResubscribeResult::Ok => {}
-                ResubscribeResult::Shutdown => return,
-                ResubscribeResult::RetryConnection => {
-                    warn!("proactive resubscribe had failures — triggering reconnect");
-                    let _ = event_tx.try_send(None);
-                    match try_autonomous_reconnect(
-                        &mut ws,
-                        &mut cmd_rx,
-                        &mut state,
-                        &keys,
-                        &relay_url,
-                        &agent_pubkey_hex,
-                        &event_tx,
-                        &observer_control_tx,
-                        auth_tag.as_ref(),
-                    )
-                    .await
-                    {
-                        ReconnectOutcome::Ok => {
-                            if matches!(
-                                drain_post_reconnect(
-                                    &mut ws,
-                                    &mut cmd_rx,
-                                    &mut state,
-                                    &agent_pubkey_hex
-                                )
-                                .await,
-                                ReconnectOutcome::Shutdown
-                            ) {
-                                return;
-                            }
-                        }
-                        ReconnectOutcome::Shutdown => return,
-                        ReconnectOutcome::Failed => {
-                            if matches!(
-                                wait_for_reconnect(
-                                    &mut ws,
-                                    &mut cmd_rx,
-                                    &mut state,
-                                    &keys,
-                                    &relay_url,
-                                    &agent_pubkey_hex,
-                                    &event_tx,
-                                    &observer_control_tx,
-                                    true,
-                                    auth_tag.as_ref(),
-                                )
-                                .await,
-                                ReconnectOutcome::Shutdown
-                            ) {
-                                return;
-                            }
-                        }
-                    }
-                    ping_sent = false;
-                    last_pong = Instant::now();
-                    connected_since = Instant::now();
-                    stable_logged = false;
-                }
-            }
-        }
-
         // Drain pending subs, one REQ per pacing tick within the relay's
         // admission window.
         let drain_window_open = drain_pacing_next.is_none_or(|t| tokio::time::Instant::now() >= t);
@@ -1982,7 +1919,11 @@ async fn run_background_task(
             }
         }
 
+        let recovery_at = recovery::ready_at(&mut state);
         tokio::select! {
+                   _ = recovery::ready(&event_tx, recovery_at) => {
+                       recovery::recover_one(&mut ws, &mut state, &event_tx, &agent_pubkey_hex).await;
+                   }
                    raw = ws.next() => {
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
@@ -2358,12 +2299,10 @@ async fn handle_ws_message(
                                 // replay starts early enough to re-deliver it.
                                 state.membership_dropped_since =
                                     Some(state.membership_dropped_since.map_or(ts, |d| d.min(ts)));
-                                // Proactively trigger resubscribe without waiting for a disconnect.
-                                state.proactive_resubscribe_needed = true;
                                 warn!(
                                     channel_id = %channel_uuid,
                                     ts,
-                                    "membership notification dropped (backpressure) — proactive resubscribe queued"
+                                    "membership notification dropped (backpressure) — targeted recovery pending"
                                 );
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
@@ -2400,12 +2339,10 @@ async fn handle_ws_message(
                                         .entry(channel_id)
                                         .and_modify(|d| *d = (*d).min(ts))
                                         .or_insert(ts);
-                                    // Proactively trigger resubscribe without waiting for a disconnect.
-                                    state.proactive_resubscribe_needed = true;
                                     warn!(
                                         channel_id = %channel_id,
                                         ts,
-                                        "event channel full — dropping event for channel {channel_id} — proactive resubscribe queued"
+                                        "event channel full — dropping event for channel {channel_id} — targeted recovery pending"
                                     );
                                 }
                                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -4248,9 +4185,39 @@ async fn wait_for_any_ok(
     }
 }
 
+mod recovery;
+
+#[cfg(test)]
+mod recovery_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_type_comes_from_the_first_t_tag_not_a_label() {
+        let tags = vec![
+            serde_json::json!(["d", "c"]),
+            serde_json::json!(["t", "dm"]),
+            serde_json::json!(["t", "workspace"]),
+        ];
+        assert_eq!(channel_type_from_tags(&tags), "dm");
+    }
+
+    /// Mutation: treat any `hidden` metadata as a DM → RED.
+    #[test]
+    fn hidden_means_dm_only_without_a_declared_type() {
+        let system = vec![
+            serde_json::json!(["d", "c"]),
+            serde_json::json!(["t", "system"]),
+            serde_json::json!(["private"]),
+            serde_json::json!(["hidden"]),
+        ];
+        assert_eq!(channel_type_from_tags(&system), "private");
+
+        let legacy_dm = vec![serde_json::json!(["d", "c"]), serde_json::json!(["hidden"])];
+        assert_eq!(channel_type_from_tags(&legacy_dm), "dm");
+    }
 
     async fn nip11_test_client(
         responses: HashMap<String, (u16, String)>,
@@ -4775,7 +4742,7 @@ mod tests {
             .expect("signing should succeed")
     }
 
-    async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
+    pub(super) async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test websocket");
@@ -4792,7 +4759,7 @@ mod tests {
         (client, server.await.expect("join test websocket server"))
     }
 
-    async fn next_test_frame(
+    pub(super) async fn next_test_frame(
         server: &mut WebSocketStream<tokio::net::TcpStream>,
     ) -> serde_json::Value {
         let message = timeout(Duration::from_secs(1), server.next())
@@ -5035,14 +5002,14 @@ mod tests {
         ));
     }
 
-    fn test_channel_filter() -> ChannelFilter {
+    pub(super) fn test_channel_filter() -> ChannelFilter {
         ChannelFilter {
             kinds: Some(vec![9]),
             require_mention: false,
         }
     }
 
-    fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
+    pub(super) fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
         apply_command_to_state(
             state,
             RelayCommand::Subscribe {

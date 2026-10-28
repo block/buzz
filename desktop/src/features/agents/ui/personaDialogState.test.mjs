@@ -64,6 +64,7 @@ test("createPersonaDialogState returns a fresh empty draft", () => {
     displayName: "",
     avatarUrl: "",
     systemPrompt: "",
+    acpCommand: "buzz-acp",
     runtime: undefined,
     model: undefined,
   });
@@ -77,6 +78,7 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
     avatarUrl: "avatar://solo",
     description: "Reviews desktop changes.",
     systemPrompt: "Be direct.",
+    acpCommand: "buzz-acp",
     runtime: "provider-a",
     model: "model-a",
     provider: null,
@@ -91,6 +93,7 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
     avatarUrl: "avatar://solo",
     description: "Reviews desktop changes.",
     systemPrompt: "Be direct.",
+    acpCommand: "buzz-acp",
     runtime: "provider-a",
     model: "model-a",
     provider: undefined,
@@ -132,6 +135,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     avatarUrl: null,
     description: "Finds unusual solutions.",
     systemPrompt: "Keep it weird.",
+    acpCommand: "buzz-acp",
     runtime: null,
     model: null,
     provider: null,
@@ -150,6 +154,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     avatarUrl: "",
     description: "Finds unusual solutions.",
     systemPrompt: "Keep it weird.",
+    acpCommand: "buzz-acp",
     runtime: undefined,
     model: undefined,
     provider: undefined,
@@ -254,6 +259,7 @@ test("edit and duplicate seed the behavior group from a quad-bearing persona", (
     respondTo: "allowlist",
     respondToAllowlist: ["a".repeat(64)],
     parallelism: 4,
+    sessionPolicy: "thread",
     createdAt: "2025-01-01T00:00:00Z",
     updatedAt: "2025-01-02T00:00:00Z",
   };
@@ -262,6 +268,7 @@ test("edit and duplicate seed the behavior group from a quad-bearing persona", (
     respondTo: "allowlist",
     respondToAllowlist: ["a".repeat(64)],
     parallelism: 4,
+    sessionPolicy: "thread",
   };
   assert.deepEqual(
     editPersonaDialogState(persona).initialValues.behavior,
@@ -287,6 +294,7 @@ test("a linked instance overrides stale definition access in the edit dialog", (
     respondTo: "owner-only",
     respondToAllowlist: [],
     parallelism: 2,
+    sessionPolicy: "channel",
     createdAt: "2025-01-01T00:00:00Z",
     updatedAt: "2025-01-02T00:00:00Z",
   };
@@ -300,6 +308,7 @@ test("a linked instance overrides stale definition access in the edit dialog", (
     respondTo: "allowlist",
     respondToAllowlist: ["c".repeat(64)],
     parallelism: 2,
+    sessionPolicy: "channel",
   });
 });
 

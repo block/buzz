@@ -11,6 +11,7 @@ import 'package:buzz/shared/push/push_subscription.dart';
 /// in-memory logic.
 class FakeSecureStorage extends Fake implements FlutterSecureStorage {
   final Map<String, String> _data = {};
+  final Map<String, int> _writeCounts = {};
 
   @override
   Future<String?> read({
@@ -34,6 +35,7 @@ class FakeSecureStorage extends Fake implements FlutterSecureStorage {
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
   }) async {
+    _writeCounts[key] = (_writeCounts[key] ?? 0) + 1;
     if (value != null) {
       _data[key] = value;
     } else {
@@ -86,6 +88,7 @@ class FakeSecureStorage extends Fake implements FlutterSecureStorage {
   // Convenience for setting up test data.
   String? operator [](String key) => _data[key];
   void operator []=(String key, String value) => _data[key] = value;
+  int writeCount(String key) => _writeCounts[key] ?? 0;
 }
 
 void main() {
@@ -121,6 +124,33 @@ void main() {
       expect(
         loaded.first.pushSubscriptionState.authority,
         BuzzPushLeaseSubscriptionAuthority.desired,
+      );
+    });
+
+    test('push choices persist independently across storage reloads', () async {
+      final first = Community.create(
+        name: 'First',
+        relayUrl: 'https://first.example',
+        pubkey: 'a' * 64,
+      );
+      final second = Community.create(
+        name: 'Second',
+        relayUrl: 'https://second.example',
+        pubkey: 'b' * 64,
+      );
+      await storage.saveAll([first, second]);
+      await storage.save(first.copyWith(pushNotificationsEnabled: false));
+
+      final reloaded = CommunityStorage(secure: fakeSecure);
+      final communities = await reloaded.loadAll();
+      expect(communities.map((c) => c.pushNotificationsEnabled), [false, true]);
+      expect(communities.map((c) => c.pubkey), [first.pubkey, second.pubkey]);
+      await reloaded.save(communities.last.copyWith(name: 'Renamed'));
+      expect(
+        (await CommunityStorage(
+          secure: fakeSecure,
+        ).loadAll()).map((c) => c.pushNotificationsEnabled),
+        [false, true],
       );
     });
 

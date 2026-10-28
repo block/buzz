@@ -73,6 +73,7 @@ Future<NostrEvent> submitSignedEventOnce({
   required List<List<String>> tags,
   int? createdAt,
   Duration timeout = const Duration(seconds: 12),
+  Map<String, String> headers = const {},
 }) async {
   final privateKey = nostr.Nip19.decode(payload: nsec).data;
   if (privateKey.isEmpty) throw const FormatException('Invalid nsec');
@@ -122,6 +123,7 @@ Future<NostrEvent> submitSignedEventOnce({
       }
     },
   );
+  socket.headers = headers;
   final resultFuture = result.future.timeout(timeout);
   try {
     await socket.connect();

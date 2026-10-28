@@ -3,8 +3,70 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/widgets.dart';
 
 void main() {
+  testWidgets('first opt-in starts registration without switching community', (
+    tester,
+  ) async {
+    var registrations = 0;
+    Widget bootstrap(bool enabled) => BuzzPushRegistrationBootstrap(
+      shouldRegister: enabled,
+      attemptKey: 'same-community|same-relay',
+      startRegistration: () async {
+        registrations += 1;
+      },
+      child: const SizedBox(),
+    );
+    await tester.pumpWidget(bootstrap(false));
+    expect(registrations, 0);
+    await tester.pumpWidget(bootstrap(true));
+    expect(registrations, 1);
+    await tester.pumpWidget(bootstrap(true));
+    expect(registrations, 1);
+  });
+
+  testWidgets('new community starts registration once capability arrives', (
+    tester,
+  ) async {
+    final community = Community.create(
+      name: 'Team',
+      relayUrl: 'wss://relay.example',
+    );
+    var registrations = 0;
+    Widget bootstrap(BuzzPushLeaseDescriptor? descriptor) =>
+        BuzzPushRegistrationBootstrap(
+          shouldRegister: buzzPushLifecycleEnabled(
+            community: community,
+            descriptor: descriptor,
+          ),
+          attemptKey: '${community.id}|${community.relayUrl}',
+          startRegistration: () async => registrations += 1,
+          child: const SizedBox(),
+        );
+    await tester.pumpWidget(bootstrap(null));
+    expect(registrations, 0);
+    final descriptor = _descriptor(keyId: 'relay-v1', pubkey: _hex('b'));
+    await tester.pumpWidget(bootstrap(descriptor));
+    expect(registrations, 1);
+    await tester.pumpWidget(bootstrap(descriptor));
+    expect(registrations, 1);
+  });
+
+  test(
+    'superseded lease acceptance is a retryable publication failure',
+    () async {
+      await expectLater(
+        publishBuzzPushLeaseRecoverably(
+          reserveGeneration: () async => 1,
+          publish: (_) async {},
+          markAccepted: (_) async => false,
+        ),
+        throwsStateError,
+      );
+    },
+  );
+
   test('failed bootstrap attempt becomes retryable after the delay', () async {
     final gate = BuzzPushAttemptGate(retryDelay: Duration.zero);
     addTearDown(gate.dispose);
@@ -14,6 +76,23 @@ void main() {
     gate.failed('attempt', retry: () => retries += 1);
     await Future<void>.delayed(Duration.zero);
 
+    expect(retries, 1);
+    expect(gate.tryBegin('attempt'), isTrue);
+  });
+
+  testWidgets('a failed attempt stays blocked until the retry delay', (
+    tester,
+  ) async {
+    final gate = BuzzPushAttemptGate();
+    addTearDown(gate.dispose);
+    var retries = 0;
+    expect(gate.tryBegin('attempt'), isTrue);
+    gate.failed('attempt', retry: () => retries++);
+    expect(gate.tryBegin('attempt'), isFalse);
+    await tester.pump(const Duration(seconds: 4));
+    expect(gate.tryBegin('attempt'), isFalse);
+    expect(retries, 0);
+    await tester.pump(const Duration(seconds: 1));
     expect(retries, 1);
     expect(gate.tryBegin('attempt'), isTrue);
   });
@@ -89,12 +168,27 @@ void main() {
     );
   });
 
-  test('relay capability alone does not activate push without opt-in', () {
-    final disabled = Community.create(
+  test('relay grammar upgrade changes publication attempt identity', () {
+    String key(String grammar) => buzzPushPublicationAttemptKey(
+      communityId: 'community',
+      relayBaseUrl: 'https://relay.example',
+      token: 'token',
+      descriptor: _descriptor(
+        keyId: 'relay-v1',
+        pubkey: _hex('b'),
+        hGrammar: grammar,
+      ),
+      subscriptions: const [],
+    );
+    expect(key('uuid-lowercase'), isNot(key('uuid-v4-lowercase')));
+  });
+
+  test('default push requires relay capability and respects opt-out', () {
+    final enabled = Community.create(
       name: 'Team',
       relayUrl: 'wss://relay.example',
     );
-    final enabled = disabled.copyWith(pushNotificationsEnabled: true);
+    final disabled = enabled.copyWith(pushNotificationsEnabled: false);
 
     expect(
       buzzPushLifecycleEnabled(
@@ -156,12 +250,13 @@ void main() {
         relayGeneration = generation;
       }
 
-      Future<void> markAccepted(int generation) async {
+      Future<bool> markAccepted(int generation) async {
         if (failLocalSave) {
           failLocalSave = false;
           throw StateError('injected local persistence failure');
         }
         acceptedGeneration = generation;
+        return true;
       }
 
       await expectLater(
@@ -189,8 +284,10 @@ void main() {
 BuzzPushLeaseDescriptor _descriptor({
   required String keyId,
   required String pubkey,
+  String hGrammar = 'uuid-v4-lowercase',
 }) => BuzzPushLeaseDescriptor(
   origin: 'wss://relay.example',
+  hGrammar: hGrammar,
   executorKeyId: keyId,
   executorPubkey: pubkey,
   transport: 'apns',

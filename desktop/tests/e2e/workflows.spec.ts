@@ -96,7 +96,13 @@ async function createWorkflow(
 
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  // The inspector swaps from the trigger to the new step after the click; an
+  // unscoped fill can land in the trigger's message-text condition instead.
+  const stepInspector = dialog.getByTestId("workflow-node-inspector");
+  await expect(
+    stepInspector.getByRole("button", { name: "Action", exact: true }),
+  ).toBeVisible();
+  await stepInspector.getByLabel("Message text").fill("Workflow notification");
   if (options?.stepName) {
     await dialog.getByRole("button", { name: "Step details" }).click();
     await dialog.getByLabel("Name (optional)").fill(options.stepName);
@@ -642,8 +648,13 @@ test("deleting the open workflow closes its editor", async ({ page }) => {
   await expect(detailDialog).toBeVisible();
   await detailDialog.getByRole("button", { name: "Workflow actions" }).click();
   await page.getByRole("menuitem", { name: "Delete" }).click();
-  await expect(page.getByRole("alertdialog")).toContainText(workflowName);
-  await page.getByRole("button", { name: "Delete" }).click();
+  const confirmation = page.getByRole("alertdialog");
+  await expect(confirmation).toContainText(workflowName);
+  await expect(confirmation).toContainText(
+    "Publishing its definition again, even an older version, can recreate it.",
+  );
+  await expect(confirmation).not.toContainText("permanently");
+  await confirmation.getByRole("button", { name: "Delete" }).click();
 
   await expect(detailDialog).toHaveCount(0);
   await expect(page).toHaveURL(/#\/workflows(?:\?|$)/);

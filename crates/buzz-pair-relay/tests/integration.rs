@@ -439,16 +439,20 @@ async fn test_second_sub_same_id() {
 }
 
 /// 9. Connection closes after 120 s (virtual time).
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn test_120s_timeout() {
     let url = start_relay().await;
     let mut ws = connect(&url).await;
 
+    subscribe(&mut ws, "ready", P_A).await;
+    tokio::time::pause();
     // Advance virtual time past the connection timeout.
     tokio::time::advance(Duration::from_secs(121)).await;
     // Yield to let the relay task run its deadline branch.
     tokio::task::yield_now().await;
 
+    // Real network I/O must not race an auto-advancing assertion timeout.
+    tokio::time::resume();
     assert_closed(&mut ws).await;
 }
 
@@ -605,8 +609,8 @@ async fn test_global_conn_cap() {
     let _new = connect(&url).await;
 }
 
-/// 18. Session event cap: 6 EVENTs are accepted; 7th is rejected with
-///     "session event limit reached".  (The relay's hard cap is 6 per
+/// 18. Session event cap: 8 EVENTs are accepted; 9th is rejected with
+///     "session event limit reached".  (The relay's hard cap is 8 per
 ///     connection, which is tighter than the per-window rate limit of 10.)
 #[tokio::test]
 async fn test_event_rate_limit() {
@@ -619,8 +623,8 @@ async fn test_event_rate_limit() {
 
     let mut pub_ws = connect(&url).await;
 
-    // First 6 events must be accepted (session cap = 6).
-    for i in 0..6u64 {
+    // First 8 events must be accepted (session cap = 8).
+    for i in 0..8u64 {
         send(
             &mut pub_ws,
             &json!(["EVENT", make_signed_event(&sk, &pk, P_A, i)]),
@@ -637,10 +641,10 @@ async fn test_event_rate_limit() {
         let _ = recv(&mut sub_ws).await;
     }
 
-    // 7th must be rejected by the session cap.
+    // 9th must be rejected by the session cap.
     send(
         &mut pub_ws,
-        &json!(["EVENT", make_signed_event(&sk, &pk, P_A, 6)]),
+        &json!(["EVENT", make_signed_event(&sk, &pk, P_A, 8)]),
     )
     .await;
     let resp = recv(&mut pub_ws).await;
@@ -931,9 +935,9 @@ async fn test_write_timeout() {
     send(&mut sub_ws, &json!(["REQ", "s1", {"#p": [P_A]}])).await;
     // Don't call recv — leave the EOSE unread.
 
-    // Flood from a publisher — stay within the 6-event session cap.
+    // Flood from a publisher — stay within the 8-event session cap.
     let mut pub_ws = connect(&url).await;
-    for i in 0..6u64 {
+    for i in 0..8u64 {
         send(
             &mut pub_ws,
             &json!(["EVENT", make_signed_event(&sk, &pk, P_A, i)]),
@@ -1016,9 +1020,9 @@ async fn test_control_msg_backpressure() {
     send(&mut sub_ws, &json!(["REQ", "s1", {"#p": [P_A]}])).await;
     // Leave EOSE unread to fill the channel quickly.
 
-    // Flood within the 6-event session cap.
+    // Flood within the 8-event session cap.
     let mut pub_ws = connect(&url).await;
-    for i in 0..6u64 {
+    for i in 0..8u64 {
         send(
             &mut pub_ws,
             &json!(["EVENT", make_signed_event(&sk, &pk, P_A, i)]),
@@ -1132,9 +1136,9 @@ async fn test_fan_out_drop_doesnt_close() {
     let mut sub_ws = connect(&url).await;
     send(&mut sub_ws, &json!(["REQ", "s1", {"#p": [P_A]}])).await;
 
-    // Flood from a publisher — stay within the 6-event session cap.
+    // Flood from a publisher — stay within the 8-event session cap.
     let mut pub_ws = connect(&url).await;
-    for i in 0..6u64 {
+    for i in 0..8u64 {
         send(
             &mut pub_ws,
             &json!(["EVENT", make_signed_event(&sk, &pk, P_A, i)]),
@@ -1164,7 +1168,7 @@ async fn test_reader_backpressure_closes() {
 
     // Publisher floods events up to the session cap.
     let mut pub_ws = connect(&url).await;
-    for i in 0..6u64 {
+    for i in 0..8u64 {
         send(
             &mut pub_ws,
             &json!(["EVENT", make_signed_event(&sk, &pk, P_A, i)]),
@@ -1178,13 +1182,20 @@ async fn test_reader_backpressure_closes() {
 
 /// 42. Connection closes promptly after 120 s (virtual time).
 ///     Explicit duplicate of test 9 with a slightly different assertion style.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn test_cancellation_immediate() {
     let url = start_relay().await;
     let mut ws = connect(&url).await;
 
+    // Observe a relay response so the connection deadline is installed.
+    subscribe(&mut ws, "ready", P_A).await;
+    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(121)).await;
     tokio::task::yield_now().await;
+
+    // TCP closure is real I/O; do not auto-advance the assertion timeout
+    // while the OS is still delivering the close frame.
+    tokio::time::resume();
 
     // The connection must be closed — not just slow.
     assert_closed(&mut ws).await;

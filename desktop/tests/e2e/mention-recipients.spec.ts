@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { truncatePubkey } from "../../src/shared/lib/pubkey";
+import { truncateNpub } from "../../src/shared/lib/pubkey";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
@@ -566,7 +566,7 @@ for (const { kind, scale } of [
       .last();
     await assertFits(markdown, "sent");
     const qualifiedChip = row.locator("[data-mention]").last();
-    await expect(qualifiedChip).toHaveText(`Scout (${truncatePubkey(SECOND)})`);
+    await expect(qualifiedChip).toHaveText(`Scout (${truncateNpub(SECOND)})`);
     await expect(qualifiedChip).toHaveAttribute(
       "data-mention-label",
       `Scout (${SECOND})`,
@@ -873,7 +873,7 @@ for (const mismatchedKey of [false, true]) {
       .getByTestId("message-row")
       .filter({ hasText: "qualified clipboard roundtrip" })
       .locator(`[data-mention-pubkey="${SECOND}"]`);
-    await expect(chip).toHaveText(`Scout (${truncatePubkey(SECOND)})`);
+    await expect(chip).toHaveText(`Scout (${truncateNpub(SECOND)})`);
     const flavors = await chip.evaluate((element) => {
       const range = document.createRange();
       range.selectNode(element);
@@ -956,7 +956,7 @@ for (const partial of [false, true]) {
       .filter({ hasText: "compact collision" });
     for (const key of keys) {
       const chip = row.locator(`[data-mention-pubkey="${key}"]`);
-      await expect(chip).toHaveText(`Scout (${truncatePubkey(key)})`);
+      await expect(chip).toHaveText(`Scout (${truncateNpub(key)})`);
       await expect(chip).toHaveAttribute("title", `Scout (${key})`);
       const flavors = await chip.evaluate((element, partial) => {
         const range = document.createRange();

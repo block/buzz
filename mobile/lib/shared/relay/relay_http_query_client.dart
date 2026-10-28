@@ -20,14 +20,23 @@ class RelayHttpQueryClient {
     required Map<String, String> headers,
     required List<int> body,
     required Duration timeout,
+    http.Client Function(http.Client, bool Function())? decorate,
   }) async {
     final generation = _injectedClient == null
         ? (_currentGeneration ??= _createGeneration())
         : null;
     generation?.acquire();
+    var active = true;
     try {
-      return await (_injectedClient ?? generation!.client)
-          .post(url, headers: headers, body: body)
+      final request = http.Request('POST', url)
+        ..followRedirects = false
+        ..headers.addAll(headers)
+        ..bodyBytes = body;
+      final transport = _injectedClient ?? generation!.client;
+      final client = decorate?.call(transport, () => active) ?? transport;
+      return await client
+          .send(request)
+          .then(http.Response.fromStream)
           .timeout(timeout);
     } on TimeoutException {
       if (identical(_currentGeneration, generation)) {
@@ -36,6 +45,7 @@ class RelayHttpQueryClient {
       generation?.retire();
       rethrow;
     } finally {
+      active = false;
       generation?.release();
     }
   }

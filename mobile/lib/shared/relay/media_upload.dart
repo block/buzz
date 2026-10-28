@@ -16,6 +16,7 @@ import 'animated_image_sanitizer.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
+import '../hosted/hosted_relay_auth.dart';
 
 part 'media_upload/platform_bindings.dart';
 part 'media_upload/helpers.dart';
@@ -33,7 +34,7 @@ const _requiresLegacyMediaStoragePermissionMethod =
 const _readClipboardImageMethod = 'readClipboardImage';
 const _clipboardHasImageMethod = 'clipboardHasImage';
 const _uploadAuthKind = 24242;
-const _uploadAuthLifetimeSeconds = 300;
+const _uploadAuthLifetimeSeconds = 60;
 const _heicBrands = {
   'heic',
   'heix',
@@ -688,12 +689,17 @@ class MediaUploadService {
 
     final expiration =
         (_now().millisecondsSinceEpoch ~/ 1000) + _uploadAuthLifetimeSeconds;
+    final serverAuthority = extractServerAuthority(_baseUrl);
+    if (serverAuthority == null) {
+      throw Exception(
+        'Cannot mint upload auth: no server authority in relay URL: $_baseUrl',
+      );
+    }
     final tags = <List<String>>[
       ['t', 'upload'],
       ['x', sha256],
       ['expiration', '$expiration'],
-      if (extractServerAuthority(_baseUrl) case final authority?)
-        ['server', authority],
+      ['server', serverAuthority],
     ];
 
     return nostr.Event.from(

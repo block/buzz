@@ -6,14 +6,22 @@ pub mod auth;
 pub mod channel_authz;
 /// Subscription close (CLOSE) handler.
 pub mod close;
+/// Per-key single-flight refresh with a minimum interval.
+pub mod coalesced_refresh;
 /// Command executor — transactional processing for command kinds.
 pub mod command_executor;
 /// Relay-operator community provisioning HTTP support.
 pub mod community_provisioning;
 /// NIP-45 COUNT handler.
 pub mod count;
+#[cfg(test)]
+mod create_with_members_postgres_tests;
+#[cfg(test)]
+mod edit_metadata_postgres_tests;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;
+#[cfg(test)]
+pub(crate) mod group_state_postgres_tests;
 /// NIP-IA identity archive request handler (kinds 9035–9036).
 pub mod identity_archive;
 /// imeta tag validation helpers.
@@ -30,6 +38,8 @@ pub mod moderation_notices;
 pub mod product_feedback;
 #[allow(dead_code, missing_docs)]
 pub mod push_lease;
+#[cfg(test)]
+mod put_user_postgres_tests;
 /// NIP-43 relay membership admin command handler (kinds 9030–9032).
 pub mod relay_admin;
 /// NIP-56 report (kind:1984) validation + moderation queue persistence.
@@ -40,6 +50,10 @@ pub mod report_resolution;
 pub mod req;
 /// NIP-29 and NIP-25 side-effect handlers.
 pub mod side_effects;
+#[cfg(test)]
+mod system_channel_postgres_tests;
+/// Per-filter query scope for system channels.
+pub(crate) mod system_channels;
 
 /// Extract an optional TTL (in seconds) from a Nostr event's `ttl` tag,
 /// applying the server-side override when configured.
@@ -66,3 +80,6 @@ pub fn resolve_ttl(event: &nostr::Event, ephemeral_ttl_override: Option<i32>) ->
         (ttl, _) => ttl,
     }
 }
+
+/// NIP-AR artifact lifecycle.
+pub mod artifact;

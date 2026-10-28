@@ -19,7 +19,11 @@ import type {
   RelayMemberRole,
   UserProfileSummary,
 } from "@/shared/api/types";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import {
+  normalizePubkey,
+  truncateNpub,
+  UNAVAILABLE_KEY_LABEL,
+} from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -65,7 +69,7 @@ function HoverMemberIdentity({
   displayName: string;
   pubkey: string;
 }) {
-  const npub = npubFromPubkey(pubkey) ?? pubkey;
+  const npub = npubFromPubkey(pubkey) ?? UNAVAILABLE_KEY_LABEL;
   return (
     <span className="inline-grid min-w-0 max-w-full grid-cols-1" title={npub}>
       <span
@@ -78,7 +82,7 @@ function HoverMemberIdentity({
         className="col-start-1 row-start-1 max-w-0 truncate font-mono text-2xs opacity-0 blur-0 transition-[max-width,opacity,filter] duration-[250ms] ease-in-out group-hover/member:max-w-40 group-hover/member:opacity-100 group-hover/member:blur-0 group-focus-within/member:max-w-40 group-focus-within/member:opacity-100 group-focus-within/member:blur-0 motion-reduce:transition-none"
         data-testid={`relay-member-npub-${pubkey}`}
       >
-        {truncatePubkey(npub)}
+        {truncateNpub(npub)}
       </span>
     </span>
   );

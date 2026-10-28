@@ -650,9 +650,9 @@ function ProfileHero({
         }
         badgeBox={PROFILE_HERO_PRESENCE_BADGE.shell}
         className="h-20 w-20"
-        cornerRadius={isBot ? 24 : undefined}
         curve={STATUS_DOT_MASK_CURVE}
         cutout={PROFILE_HERO_PRESENCE_BADGE.cutout}
+        shape={isBot ? "squircle" : "circle"}
         size={80}
       >
         <ProfileAvatar

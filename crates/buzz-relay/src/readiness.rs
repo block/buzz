@@ -1,43 +1,108 @@
-//! Readiness dependency evaluation and ordered metrics publication.
+//! Readiness-probe telemetry and the dependency diagnostics behind `/_status`.
 //!
-//! [`ReadinessCoordinator`] is process-owned. Its mutex is the linearization
-//! point shared by health-probe commits and terminal shutdown, so an older
-//! evaluation can never overwrite newer gauges or publish ready after shutdown.
+//! Readiness is deliberately *not* a dependency question. A shared Postgres or
+//! Redis failure is shared by every replica, so evaluating it in the probe took
+//! the whole deployment out of the load balancer at once and left a reconnect
+//! burst with nowhere to land. The Kubernetes probe therefore answers from this
+//! process's own lifecycle (see [`crate::router`]), and the same dependency
+//! evaluation is reported on the diagnostic `/_status` endpoint, which is never
+//! wired to a probe.
+//!
+//! Dependency evaluation is also decoupled from requests. One per-pod loop
+//! ([`run_dependency_sampler`]) evaluates on a fixed cadence, publishes the
+//! dependency metrics, and caches the report; `/_status` only reads that cache.
+//! Evaluating per request made the load a pressured dependency sees depend on
+//! how often someone looked at the endpoint, with nothing bounding how many
+//! evaluations could be in flight at once.
 
 use std::future::Future;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use buzz_db::{Db, DbError, DbReadinessOutcome};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
-const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+use crate::state::AppState;
+
+const DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Fixed cadence of the per-pod dependency sampling loop.
+///
+/// Slow enough that a pod adds negligible load to a shared dependency, fast
+/// enough that an operator opening `/_status` during an incident reads
+/// something current. Documented in `deploy/charts/buzz/README.md`.
+pub const DEPENDENCY_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The completion-epoch publisher always refreshes at least this frequently.
+///
+/// Main computes a cadence from the configured gauge idle timeout and caps it
+/// at this value so the completion timestamp series survives idle eviction
+/// without adding high-frequency noise.
+const DEPENDENCY_SAMPLE_COMPLETION_REPUBLISH_MAX_INTERVAL: Duration = DEPENDENCY_SAMPLE_INTERVAL;
+
+/// Age past which a cached report is reported stale rather than current.
+///
+/// Two cadences: one full cycle can be missed by an evaluation that consumed
+/// its whole [`DEPENDENCY_TIMEOUT`] budget, so anything older than that means
+/// the sampler itself is not keeping up.
+const DEPENDENCY_SAMPLE_STALE_AFTER: Duration = DEPENDENCY_SAMPLE_INTERVAL.saturating_mul(2);
 
 /// Closed label set exported by `buzz_readiness_checks_total{reason}`.
-#[cfg(test)]
-pub(crate) const READINESS_REASON_LABELS: [&str; 12] = [
-    "ready",
-    "shutting_down",
-    "postgres_pool_timeout",
-    "postgres_pool_error",
-    "postgres_query_timeout",
-    "postgres_query_error",
-    "redis_pool_timeout",
-    "redis_pool_error",
-    "deletion_catalog_timeout",
-    "deletion_catalog_error",
-    "overall_timeout",
-    "multiple_dependencies_failed",
-];
-
-/// Maximum raw Prometheus series emitted by readiness for one pod.
 ///
-/// - 12 overall reasons
+/// Readiness answers a local lifecycle question, so this set cannot grow with
+/// the number of shared dependencies the relay talks to.
+#[cfg(test)]
+pub(crate) const READINESS_REASON_LABELS: [&str; 2] = ["ready", "shutting_down"];
+
+/// Maximum raw Prometheus series emitted by readiness and its dependency
+/// diagnostics for one pod.
+///
+/// - 2 probe reasons
 /// - 11 valid dependency/outcome pairs (Postgres 5, Redis 3, catalog 3)
 /// - 4 histograms x (15 configured buckets + `+Inf` + count + sum) = 72
-/// - 4 current-state gauges
+/// - 2 readiness gauges (overall lifecycle + completion epoch)
 #[cfg(test)]
-pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 12 + 11 + (4 * 18) + 4;
+pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 2 + 11 + (4 * 18) + 1 + 1;
+
+/// Terminal outcome of one readiness probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadinessReason {
+    Ready,
+    ShuttingDown,
+}
+
+impl ReadinessReason {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::ShuttingDown => "shutting_down",
+        }
+    }
+
+    pub(crate) fn is_ready(self) -> bool {
+        self == Self::Ready
+    }
+}
+
+/// Records one readiness probe served by the private health listener.
+///
+/// The counter and gauge describe the same immutable lifecycle observation.
+/// The gauge is therefore the latest private readiness-probe observation, not
+/// a transition-owned lifecycle mirror.
+pub(crate) fn record_readiness_probe(reason: ReadinessReason) {
+    metrics::counter!(
+        "buzz_readiness_checks_total",
+        "reason" => reason.label(),
+    )
+    .increment(1);
+    metrics::gauge!("buzz_readiness_state", "check" => "overall").set(if reason.is_ready() {
+        1.0
+    } else {
+        0.0
+    });
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PostgresOutcome {
@@ -130,10 +195,14 @@ impl DeletionCatalogOutcome {
     }
 }
 
+/// Aggregate dependency verdict reported in the `/_status` diagnostics body.
+///
+/// This is a diagnostic field, never a metric label: it exists so an operator
+/// reading `/_status` gets the same one-line summary the readiness body used to
+/// carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReadinessReason {
+pub(crate) enum DependencyReason {
     Ready,
-    ShuttingDown,
     PostgresPoolTimeout,
     PostgresPoolError,
     PostgresQueryTimeout,
@@ -146,11 +215,10 @@ pub(crate) enum ReadinessReason {
     MultipleDependenciesFailed,
 }
 
-impl ReadinessReason {
+impl DependencyReason {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Ready => "ready",
-            Self::ShuttingDown => "shutting_down",
             Self::PostgresPoolTimeout => "postgres_pool_timeout",
             Self::PostgresPoolError => "postgres_pool_error",
             Self::PostgresQueryTimeout => "postgres_query_timeout",
@@ -178,26 +246,18 @@ impl<O> TimedOutcome<O> {
     }
 }
 
+/// One completed dependency evaluation. Every dependency always runs, so the
+/// report carries three outcomes and never a partial shape.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ReadinessEvaluation {
-    postgres: Option<TimedOutcome<PostgresOutcome>>,
-    redis: Option<TimedOutcome<RedisOutcome>>,
-    deletion_catalog: Option<TimedOutcome<DeletionCatalogOutcome>>,
-    pub(crate) reason: ReadinessReason,
+pub(crate) struct DependencyReport {
+    postgres: TimedOutcome<PostgresOutcome>,
+    redis: TimedOutcome<RedisOutcome>,
+    deletion_catalog: TimedOutcome<DeletionCatalogOutcome>,
+    pub(crate) reason: DependencyReason,
     total_duration: Duration,
 }
 
-impl ReadinessEvaluation {
-    pub(crate) fn shutting_down() -> Self {
-        Self {
-            postgres: None,
-            redis: None,
-            deletion_catalog: None,
-            reason: ReadinessReason::ShuttingDown,
-            total_duration: Duration::ZERO,
-        }
-    }
-
+impl DependencyReport {
     #[cfg(test)]
     pub(crate) fn from_results(
         postgres: TimedOutcome<PostgresOutcome>,
@@ -216,34 +276,24 @@ impl ReadinessEvaluation {
     ) -> Self {
         let reason = final_reason(postgres.outcome, redis.outcome, deletion_catalog.outcome);
         Self {
-            postgres: Some(postgres),
-            redis: Some(redis),
-            deletion_catalog: Some(deletion_catalog),
+            postgres,
+            redis,
+            deletion_catalog,
             reason,
             total_duration,
         }
     }
 
-    pub(crate) fn is_ready(self) -> bool {
-        self.reason == ReadinessReason::Ready
-    }
-
     pub(crate) fn postgres_ready(self) -> bool {
-        self.postgres
-            .is_some_and(|result| result.outcome.is_success())
+        self.postgres.outcome.is_success()
     }
 
     pub(crate) fn redis_ready(self) -> bool {
-        self.redis.is_some_and(|result| result.outcome.is_success())
+        self.redis.outcome.is_success()
     }
 
     pub(crate) fn deletion_catalog_ready(self) -> bool {
-        self.deletion_catalog
-            .is_some_and(|result| result.outcome.is_success())
-    }
-
-    fn dependencies_ran(self) -> bool {
-        self.postgres.is_some() || self.redis.is_some() || self.deletion_catalog.is_some()
+        self.deletion_catalog.outcome.is_success()
     }
 }
 
@@ -251,37 +301,39 @@ fn final_reason(
     postgres: PostgresOutcome,
     redis: RedisOutcome,
     deletion_catalog: DeletionCatalogOutcome,
-) -> ReadinessReason {
+) -> DependencyReason {
     let failure_count = usize::from(!postgres.is_success())
         + usize::from(!redis.is_success())
         + usize::from(!deletion_catalog.is_success());
 
     if failure_count == 0 {
-        return ReadinessReason::Ready;
+        return DependencyReason::Ready;
     }
     if failure_count > 1 {
         let all_failures_are_timeouts = (postgres.is_success() || postgres.is_timeout())
             && (redis.is_success() || redis.is_timeout())
             && (deletion_catalog.is_success() || deletion_catalog.is_timeout());
         return if all_failures_are_timeouts {
-            ReadinessReason::OverallTimeout
+            DependencyReason::OverallTimeout
         } else {
-            ReadinessReason::MultipleDependenciesFailed
+            DependencyReason::MultipleDependenciesFailed
         };
     }
 
     match postgres {
-        PostgresOutcome::PoolTimeout => ReadinessReason::PostgresPoolTimeout,
-        PostgresOutcome::PoolError => ReadinessReason::PostgresPoolError,
-        PostgresOutcome::QueryTimeout => ReadinessReason::PostgresQueryTimeout,
-        PostgresOutcome::QueryError => ReadinessReason::PostgresQueryError,
+        PostgresOutcome::PoolTimeout => DependencyReason::PostgresPoolTimeout,
+        PostgresOutcome::PoolError => DependencyReason::PostgresPoolError,
+        PostgresOutcome::QueryTimeout => DependencyReason::PostgresQueryTimeout,
+        PostgresOutcome::QueryError => DependencyReason::PostgresQueryError,
         PostgresOutcome::Success => match redis {
-            RedisOutcome::PoolTimeout => ReadinessReason::RedisPoolTimeout,
-            RedisOutcome::PoolError => ReadinessReason::RedisPoolError,
+            RedisOutcome::PoolTimeout => DependencyReason::RedisPoolTimeout,
+            RedisOutcome::PoolError => DependencyReason::RedisPoolError,
             RedisOutcome::Success => match deletion_catalog {
-                DeletionCatalogOutcome::OperationTimeout => ReadinessReason::DeletionCatalogTimeout,
-                DeletionCatalogOutcome::OperationError => ReadinessReason::DeletionCatalogError,
-                DeletionCatalogOutcome::Success => ReadinessReason::Ready,
+                DeletionCatalogOutcome::OperationTimeout => {
+                    DependencyReason::DeletionCatalogTimeout
+                }
+                DeletionCatalogOutcome::OperationError => DependencyReason::DeletionCatalogError,
+                DeletionCatalogOutcome::Success => DependencyReason::Ready,
             },
         },
     }
@@ -303,7 +355,7 @@ async fn evaluate_dependencies<P, R, D>(
     postgres: P,
     redis: R,
     deletion_catalog: D,
-) -> ReadinessEvaluation
+) -> DependencyReport
 where
     P: Future<Output = PostgresOutcome>,
     R: Future<Output = RedisOutcome>,
@@ -312,7 +364,7 @@ where
     let started_at = Instant::now();
     let (postgres, redis, deletion_catalog) =
         tokio::join!(timed(postgres), timed(redis), timed(deletion_catalog),);
-    ReadinessEvaluation::for_dependencies(postgres, redis, deletion_catalog, started_at.elapsed())
+    DependencyReport::for_dependencies(postgres, redis, deletion_catalog, started_at.elapsed())
 }
 
 async fn redis_check(pool: &deadpool_redis::Pool, deadline: Instant) -> RedisOutcome {
@@ -345,16 +397,16 @@ fn classify_deletion_catalog_result(result: buzz_db::Result<()>) -> DeletionCata
 }
 
 #[async_trait::async_trait]
-pub(crate) trait ReadinessEvaluator: Send + Sync {
-    async fn evaluate(&self, db: &Db, redis_pool: &deadpool_redis::Pool) -> ReadinessEvaluation;
+pub(crate) trait DependencyEvaluator: Send + Sync {
+    async fn evaluate(&self, db: &Db, redis_pool: &deadpool_redis::Pool) -> DependencyReport;
 }
 
-struct ProductionReadinessEvaluator;
+struct ProductionDependencyEvaluator;
 
 #[async_trait::async_trait]
-impl ReadinessEvaluator for ProductionReadinessEvaluator {
-    async fn evaluate(&self, db: &Db, redis_pool: &deadpool_redis::Pool) -> ReadinessEvaluation {
-        let deadline = Instant::now() + READINESS_TIMEOUT;
+impl DependencyEvaluator for ProductionDependencyEvaluator {
+    async fn evaluate(&self, db: &Db, redis_pool: &deadpool_redis::Pool) -> DependencyReport {
+        let deadline = Instant::now() + DEPENDENCY_TIMEOUT;
         evaluate_dependencies(
             async { db.readiness_check(deadline).await.into() },
             redis_check(redis_pool, deadline),
@@ -364,150 +416,280 @@ impl ReadinessEvaluator for ProductionReadinessEvaluator {
     }
 }
 
+/// One completed evaluation and when it was observed.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ProbeTicket {
-    generation: u64,
+struct DependencySample {
+    report: DependencyReport,
+    observed_at: Instant,
 }
 
+/// What the cache can tell `/_status`.
+///
+/// "No report yet" is a distinct state, not a fabricated healthy one, and a
+/// report is always accompanied by its age: a cached verdict presented without
+/// one would read as authoritative however long ago it was taken.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ProbeStart {
-    Evaluate(ProbeTicket),
-    ShuttingDown,
+pub(crate) enum DependencySnapshot {
+    /// The sampler has not completed its first evaluation yet.
+    NotYetSampled,
+    Sampled {
+        report: DependencyReport,
+        age: Duration,
+        stale: bool,
+    },
 }
 
-#[derive(Debug, Default)]
-struct PublicationState {
-    next_generation: u64,
-    latest_published_generation: u64,
-    shutdown_generation: Option<u64>,
-}
-
-/// Serializes readiness result publication with terminal process shutdown.
-pub(crate) struct ReadinessCoordinator {
-    state: Mutex<PublicationState>,
-    evaluator: Arc<dyn ReadinessEvaluator>,
-}
-
-impl Default for ReadinessCoordinator {
-    fn default() -> Self {
-        Self {
-            state: Mutex::new(PublicationState::default()),
-            evaluator: Arc::new(ProductionReadinessEvaluator),
-        }
-    }
-}
-
-impl ReadinessCoordinator {
-    #[cfg(test)]
-    pub(crate) fn with_evaluator(evaluator: Arc<dyn ReadinessEvaluator>) -> Self {
-        Self {
-            state: Mutex::new(PublicationState::default()),
-            evaluator,
-        }
-    }
-
-    fn lock_state(&self) -> MutexGuard<'_, PublicationState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    pub(crate) async fn evaluate(
-        &self,
-        db: &Db,
-        redis_pool: &deadpool_redis::Pool,
-    ) -> ReadinessEvaluation {
-        self.evaluator.evaluate(db, redis_pool).await
-    }
-
-    /// Allocates a health-probe generation or records a truthful shutdown fast path.
-    pub(crate) fn begin_probe(&self) -> ProbeStart {
-        let mut state = self.lock_state();
-        if state.shutdown_generation.is_some() {
-            let evaluation = ReadinessEvaluation::shutting_down();
-            record_attempt_metrics(&evaluation, ReadinessReason::ShuttingDown);
-            record_overall_state(false);
-            return ProbeStart::ShuttingDown;
-        }
-
-        state.next_generation = state.next_generation.saturating_add(1);
-        ProbeStart::Evaluate(ProbeTicket {
-            generation: state.next_generation,
-        })
-    }
-
-    /// Commits one completed health probe through the shared publication fence.
-    pub(crate) fn finish_probe(
-        &self,
-        ticket: ProbeTicket,
-        evaluation: ReadinessEvaluation,
-    ) -> ReadinessEvaluation {
-        let mut state = self.lock_state();
-        if state.shutdown_generation.is_some() {
-            record_attempt_metrics(&evaluation, ReadinessReason::ShuttingDown);
-            return ReadinessEvaluation::shutting_down();
-        }
-
-        record_attempt_metrics(&evaluation, evaluation.reason);
-        if ticket.generation > state.latest_published_generation {
-            record_current_state(&evaluation);
-            state.latest_published_generation = ticket.generation;
-        }
-        evaluation
-    }
-
-    /// Returns whether a compatibility/public readiness evaluation may start.
-    pub(crate) fn public_evaluation_allowed(&self) -> bool {
-        self.lock_state().shutdown_generation.is_none()
-    }
-
-    /// Makes shutdown dominate a public request that was already in flight.
-    pub(crate) fn finish_public_evaluation(
-        &self,
-        evaluation: ReadinessEvaluation,
-    ) -> ReadinessEvaluation {
-        if self.lock_state().shutdown_generation.is_some() {
-            ReadinessEvaluation::shutting_down()
-        } else {
-            evaluation
-        }
-    }
-
-    /// Commits terminal shutdown and immediately publishes overall not-ready.
-    pub(crate) fn begin_shutdown(&self) {
-        let mut state = self.lock_state();
-        if state.shutdown_generation.is_none() {
-            let generation = state.next_generation.saturating_add(1);
-            state.shutdown_generation = Some(generation);
-            record_overall_state(false);
-        }
-    }
-}
-
-fn record_attempt_metrics(evaluation: &ReadinessEvaluation, reason: ReadinessReason) {
-    metrics::counter!(
-        "buzz_readiness_checks_total",
-        "reason" => reason.label(),
+/// Republish cadence for the completion-epoch gauge.
+///
+/// The configured gauge idle timeout comes from `main.rs`; this returns a
+/// bounded cadence that is strictly below that timeout and never slower than
+/// the dependency sampler itself.
+pub fn dependency_sample_completion_republish_interval(gauge_idle_timeout_secs: u64) -> Duration {
+    let idle_timeout_secs = gauge_idle_timeout_secs.max(1);
+    let refresh_secs = idle_timeout_secs.saturating_div(3).max(1);
+    let strict_upper_bound_secs = idle_timeout_secs.saturating_sub(1).max(1);
+    Duration::from_secs(
+        refresh_secs
+            .min(strict_upper_bound_secs)
+            .min(DEPENDENCY_SAMPLE_COMPLETION_REPUBLISH_MAX_INTERVAL.as_secs()),
     )
-    .increment(1);
+}
 
-    if !evaluation.dependencies_ran() {
-        return;
+/// The per-pod owner of shared-dependency evaluation.
+///
+/// The production [`run_dependency_sampler`] loop is the sole runtime owner of
+/// [`Self::sample`], so at most one evaluation exists at a time and no request
+/// path can start another. The companion completion publisher only reads the
+/// stored epoch, while `/_status` reads [`Self::snapshot`]; neither touches a
+/// dependency.
+pub(crate) struct DependencyDiagnostics {
+    evaluator: Arc<dyn DependencyEvaluator>,
+    latest: Mutex<Option<DependencySample>>,
+    sample_completion_epoch_seconds: AtomicU64,
+    sample_completion_written: AtomicBool,
+}
+
+impl Default for DependencyDiagnostics {
+    fn default() -> Self {
+        Self::with_evaluator(Arc::new(ProductionDependencyEvaluator))
+    }
+}
+
+impl DependencyDiagnostics {
+    pub(crate) fn with_evaluator(evaluator: Arc<dyn DependencyEvaluator>) -> Self {
+        Self {
+            evaluator,
+            latest: Mutex::new(None),
+            sample_completion_epoch_seconds: AtomicU64::new(0),
+            sample_completion_written: AtomicBool::new(false),
+        }
     }
 
+    /// Runs one bounded evaluation, publishes its telemetry, and replaces the
+    /// cached report.
+    ///
+    /// The completion timestamp is written last, once the cache already serves
+    /// this report, so the gauge can never describe a sample `/_status` is not
+    /// yet answering with.
+    pub(crate) async fn sample(&self, db: &Db, redis_pool: &deadpool_redis::Pool) {
+        let report = self.evaluator.evaluate(db, redis_pool).await;
+        record_dependency_report(&report);
+        let sample = DependencySample {
+            report,
+            observed_at: Instant::now(),
+        };
+        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = Some(sample);
+        self.record_dependency_sample_completion(SystemTime::now());
+    }
+
+    /// The latest completed evaluation with its age. Starts no dependency work.
+    pub(crate) fn snapshot(&self) -> DependencySnapshot {
+        let latest = *self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        match latest {
+            None => DependencySnapshot::NotYetSampled,
+            Some(sample) => {
+                let age = sample.observed_at.elapsed();
+                DependencySnapshot::Sampled {
+                    report: sample.report,
+                    age,
+                    stale: age > DEPENDENCY_SAMPLE_STALE_AFTER,
+                }
+            }
+        }
+    }
+
+    fn record_dependency_sample_completion(&self, completed_at: SystemTime) {
+        let epoch_seconds = dependency_sample_completion_epoch_seconds(completed_at);
+        self.sample_completion_epoch_seconds
+            .store(epoch_seconds, Ordering::Release);
+        self.sample_completion_written
+            .store(true, Ordering::Release);
+        publish_dependency_sample_completion_metric(epoch_seconds);
+    }
+
+    fn latest_sample_completion_epoch_seconds(&self) -> Option<u64> {
+        self.sample_completion_written
+            .load(Ordering::Acquire)
+            .then(|| self.sample_completion_epoch_seconds.load(Ordering::Acquire))
+    }
+
+    /// Re-emits the stored epoch, then checks it is still the stored one.
+    ///
+    /// A sample can complete and publish a newer epoch while this write is in
+    /// flight, and the metrics facade exposes only a bare `set`, so nothing
+    /// downstream rejects the older value once it lands last. Verifying after
+    /// the write — rather than before it — is what closes that window: a
+    /// republish that lost the race re-emits the newer epoch instead of
+    /// leaving the exported series moved backwards. Another pass costs another
+    /// completed sample, so this ends as soon as no completion is racing it.
+    fn republish_dependency_sample_completion(&self) {
+        let mut published = None;
+        while let Some(epoch_seconds) = self.latest_sample_completion_epoch_seconds() {
+            if published == Some(epoch_seconds) {
+                break;
+            }
+            publish_dependency_sample_completion_metric(epoch_seconds);
+            published = Some(epoch_seconds);
+        }
+    }
+}
+
+/// Runs the per-pod dependency sampling loop until `cancel` fires.
+///
+/// One loop, one fixed cadence, each evaluation awaited before the next tick is
+/// taken, so this pod never has two evaluations in flight. `Skip` matches the
+/// community revalidator: an evaluation that overruns its slot delays the next
+/// cycle instead of queueing a catch-up burst into the dependency that was
+/// already slow. The first tick fires immediately, so the not-yet-sampled
+/// window is one evaluation long.
+pub async fn run_dependency_sampler(state: Arc<AppState>, cancel: CancellationToken) {
+    run_dependency_sampler_for_diagnostics(
+        Arc::clone(&state.dependency_diagnostics),
+        state.db.clone(),
+        state.redis_pool.clone(),
+        DEPENDENCY_SAMPLE_INTERVAL,
+        cancel,
+    )
+    .await;
+}
+
+/// Starts the dependency sampler and completion republisher together.
+///
+/// Main calls this once at startup so sampler and publisher ownership lives at
+/// one seam instead of being wired independently.
+pub fn start_dependency_sampler_and_completion_publisher(
+    state: Arc<AppState>,
+    republish_interval: Duration,
+) {
+    let sampler_cancel = state.dependency_sampler_cancel.clone();
+    tokio::spawn(run_dependency_sampler(Arc::clone(&state), sampler_cancel));
+
+    let publisher_cancel = state.dependency_completion_publisher_cancel.clone();
+    tokio::spawn(run_dependency_sample_completion_publisher(
+        state,
+        republish_interval,
+        publisher_cancel,
+    ));
+}
+
+async fn run_dependency_sampler_for_diagnostics(
+    diagnostics: Arc<DependencyDiagnostics>,
+    db: Db,
+    redis_pool: deadpool_redis::Pool,
+    sample_interval: Duration,
+    cancel: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(sample_interval.max(Duration::from_millis(1)));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => {
+                diagnostics.sample(&db, &redis_pool).await;
+            }
+        }
+    }
+}
+
+/// Re-emits the latest completion epoch so the gauge survives recorder idle
+/// eviction even when no newer dependency sample completes.
+pub async fn run_dependency_sample_completion_publisher(
+    state: Arc<AppState>,
+    republish_interval: Duration,
+    cancel: CancellationToken,
+) {
+    run_dependency_sample_completion_publisher_for_diagnostics(
+        Arc::clone(&state.dependency_diagnostics),
+        republish_interval,
+        cancel,
+    )
+    .await;
+}
+
+async fn run_dependency_sample_completion_publisher_for_diagnostics(
+    diagnostics: Arc<DependencyDiagnostics>,
+    republish_interval: Duration,
+    cancel: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(republish_interval.max(Duration::from_millis(1)));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => diagnostics.republish_dependency_sample_completion(),
+        }
+    }
+}
+
+/// Records one dependency evaluation. Counters and durations only — dependency
+/// health has no publishable "current state" now that no probe consumes it; a
+/// per-dependency gauge would read as an authoritative verdict on infrastructure
+/// this pod only samples every [`DEPENDENCY_SAMPLE_INTERVAL`].
+fn record_dependency_report(report: &DependencyReport) {
     metrics::histogram!(
         "buzz_readiness_check_duration_seconds",
         "check" => "overall",
     )
-    .record(evaluation.total_duration.as_secs_f64());
+    .record(report.total_duration.as_secs_f64());
 
-    if let Some(result) = evaluation.postgres {
-        record_dependency_attempt("postgres", result.outcome.label(), result.duration);
-    }
-    if let Some(result) = evaluation.redis {
-        record_dependency_attempt("redis", result.outcome.label(), result.duration);
-    }
-    if let Some(result) = evaluation.deletion_catalog {
-        record_dependency_attempt("deletion_catalog", result.outcome.label(), result.duration);
-    }
+    record_dependency_attempt(
+        "postgres",
+        report.postgres.outcome.label(),
+        report.postgres.duration,
+    );
+    record_dependency_attempt("redis", report.redis.outcome.label(), report.redis.duration);
+    record_dependency_attempt(
+        "deletion_catalog",
+        report.deletion_catalog.outcome.label(),
+        report.deletion_catalog.duration,
+    );
+}
+
+/// Publishes the Unix time the cached report completed.
+///
+/// A completion timestamp rather than an age, because age then belongs to the
+/// query — `time() - buzz_readiness_dependency_sample_completed_timestamp_seconds`
+/// — and grows on its own while this pod is wedged. A gauge carrying the age
+/// needs a writer to advance it, so the one failure it most needs to expose, a
+/// sampler that stopped running, is the one that would freeze it at its last
+/// value and read as permanently fresh. A completed sample is the only thing
+/// that may advance this epoch; the independent publisher only re-emits the
+/// stored value so the series survives gauge idle-eviction. This keeps the
+/// `buzz_storage_sweep_age_seconds` convention that absence means
+/// "not yet sampled" rather than "fresh".
+///
+fn dependency_sample_completion_epoch_seconds(completed_at: SystemTime) -> u64 {
+    completed_at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn publish_dependency_sample_completion_metric(epoch_seconds: u64) {
+    metrics::gauge!("buzz_readiness_dependency_sample_completed_timestamp_seconds")
+        .set(epoch_seconds as f64);
 }
 
 fn record_dependency_attempt(dependency: &'static str, outcome: &'static str, duration: Duration) {
@@ -524,35 +706,6 @@ fn record_dependency_attempt(dependency: &'static str, outcome: &'static str, du
     .record(duration.as_secs_f64());
 }
 
-fn record_current_state(evaluation: &ReadinessEvaluation) {
-    record_overall_state(evaluation.is_ready());
-    if let Some(result) = evaluation.postgres {
-        record_dependency_state("postgres", result.outcome.is_success());
-    }
-    if let Some(result) = evaluation.redis {
-        record_dependency_state("redis", result.outcome.is_success());
-    }
-    if let Some(result) = evaluation.deletion_catalog {
-        record_dependency_state("deletion_catalog", result.outcome.is_success());
-    }
-}
-
-fn record_overall_state(ready: bool) {
-    metrics::gauge!("buzz_readiness_state", "check" => "overall").set(if ready {
-        1.0
-    } else {
-        0.0
-    });
-}
-
-fn record_dependency_state(dependency: &'static str, ready: bool) {
-    metrics::gauge!("buzz_readiness_state", "check" => dependency).set(if ready {
-        1.0
-    } else {
-        0.0
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
@@ -560,17 +713,15 @@ mod tests {
 
     use super::*;
 
-    fn ready_evaluation() -> ReadinessEvaluation {
-        ReadinessEvaluation::from_results(
-            TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(35)),
-            TimedOutcome::new(RedisOutcome::Success, Duration::from_millis(10)),
-            TimedOutcome::new(DeletionCatalogOutcome::Success, Duration::from_millis(20)),
-            Duration::from_millis(35),
-        )
-    }
+    type Snapshot = Vec<(
+        CompositeKey,
+        Option<metrics::Unit>,
+        Option<metrics::SharedString>,
+        DebugValue,
+    )>;
 
-    fn redis_failure_evaluation() -> ReadinessEvaluation {
-        ReadinessEvaluation::from_results(
+    fn redis_failure_report() -> DependencyReport {
+        DependencyReport::from_results(
             TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(35)),
             TimedOutcome::new(RedisOutcome::PoolTimeout, Duration::from_secs(2)),
             TimedOutcome::new(DeletionCatalogOutcome::Success, Duration::from_millis(20)),
@@ -579,12 +730,7 @@ mod tests {
     }
 
     fn exact_metric<'a>(
-        snapshot: &'a [(
-            CompositeKey,
-            Option<metrics::Unit>,
-            Option<metrics::SharedString>,
-            DebugValue,
-        )],
+        snapshot: &'a Snapshot,
         name: &str,
         labels: &[(&str, &str)],
     ) -> Option<&'a DebugValue> {
@@ -601,15 +747,7 @@ mod tests {
         })
     }
 
-    fn gauge_value(
-        snapshot: &[(
-            CompositeKey,
-            Option<metrics::Unit>,
-            Option<metrics::SharedString>,
-            DebugValue,
-        )],
-        check: &str,
-    ) -> f64 {
+    fn gauge_value(snapshot: &Snapshot, check: &str) -> f64 {
         let value = exact_metric(snapshot, "buzz_readiness_state", &[("check", check)])
             .expect("readiness gauge");
         let DebugValue::Gauge(value) = value else {
@@ -620,7 +758,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn evaluation_preserves_a_completed_check_when_another_times_out() {
-        let evaluation = evaluate_dependencies(
+        let report = evaluate_dependencies(
             async {
                 tokio::time::sleep(Duration::from_millis(35)).await;
                 PostgresOutcome::Success
@@ -636,15 +774,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(evaluation.reason, ReadinessReason::RedisPoolTimeout);
-        assert_eq!(
-            evaluation.postgres.map(|result| result.duration),
-            Some(Duration::from_millis(35))
-        );
-        assert_eq!(
-            evaluation.redis.map(|result| result.duration),
-            Some(Duration::from_secs(2))
-        );
+        assert_eq!(report.reason, DependencyReason::RedisPoolTimeout);
+        assert_eq!(report.postgres.duration, Duration::from_millis(35));
+        assert_eq!(report.redis.duration, Duration::from_secs(2));
     }
 
     #[test]
@@ -655,7 +787,7 @@ mod tests {
                 RedisOutcome::PoolTimeout,
                 DeletionCatalogOutcome::Success,
             ),
-            ReadinessReason::OverallTimeout
+            DependencyReason::OverallTimeout
         );
     }
 
@@ -696,7 +828,7 @@ mod tests {
             .map(DeletionCatalogOutcome::label),
             ["success", "operation_timeout", "operation_error"]
         );
-        assert_eq!(READINESS_RAW_SERIES_PER_POD, 99);
+        assert_eq!(READINESS_RAW_SERIES_PER_POD, 87);
     }
 
     #[test]
@@ -712,110 +844,76 @@ mod tests {
     }
 
     #[test]
-    fn slow_older_failure_cannot_overwrite_newer_success_gauges() {
-        let coordinator = ReadinessCoordinator::default();
-        let ProbeStart::Evaluate(slow_a) = coordinator.begin_probe() else {
-            panic!("serving probe A");
-        };
-        let ProbeStart::Evaluate(fast_b) = coordinator.begin_probe() else {
-            panic!("serving probe B");
-        };
+    fn completion_timestamp_republish_interval_stays_below_idle_timeout() {
+        assert_eq!(
+            dependency_sample_completion_republish_interval(900),
+            DEPENDENCY_SAMPLE_INTERVAL,
+            "default idle timeout should republish on the sampler cadence"
+        );
+        assert_eq!(
+            dependency_sample_completion_republish_interval(15),
+            Duration::from_secs(5),
+            "the minimum configured idle timeout must still get multiple republishes"
+        );
+        assert!(dependency_sample_completion_republish_interval(15) < Duration::from_secs(15));
+    }
+
+    /// The readiness gauge and counter use the same immutable reason sampled by
+    /// the private probe. A dependency evaluation — however bad — must never
+    /// move them, which is what let a shared outage deroute every replica at
+    /// once.
+    #[test]
+    fn readiness_telemetry_tracks_lifecycle_and_dependency_failure_never_moves_it() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 
         metrics::with_local_recorder(&recorder, || {
-            coordinator.finish_probe(fast_b, ready_evaluation());
-            coordinator.finish_probe(slow_a, redis_failure_evaluation());
+            record_readiness_probe(ReadinessReason::Ready);
+            record_dependency_report(&redis_failure_report());
         });
-        let snapshot = snapshotter.snapshot().into_vec();
+        let after_failure = snapshotter.snapshot().into_vec();
 
-        assert_eq!(gauge_value(&snapshot, "overall"), 1.0);
-        assert_eq!(gauge_value(&snapshot, "redis"), 1.0);
+        assert_eq!(gauge_value(&after_failure, "overall"), 1.0);
         assert!(matches!(
             exact_metric(
-                &snapshot,
+                &after_failure,
                 "buzz_readiness_checks_total",
                 &[("reason", "ready")]
             ),
             Some(DebugValue::Counter(1))
         ));
-        assert!(matches!(
-            exact_metric(
-                &snapshot,
-                "buzz_readiness_checks_total",
-                &[("reason", "redis_pool_timeout")]
-            ),
-            Some(DebugValue::Counter(1))
-        ));
-    }
-
-    #[test]
-    fn slow_older_success_cannot_overwrite_newer_failure_gauges() {
-        let coordinator = ReadinessCoordinator::default();
-        let ProbeStart::Evaluate(slow_a) = coordinator.begin_probe() else {
-            panic!("serving probe A");
-        };
-        let ProbeStart::Evaluate(fast_b) = coordinator.begin_probe() else {
-            panic!("serving probe B");
-        };
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        metrics::with_local_recorder(&recorder, || {
-            coordinator.finish_probe(fast_b, redis_failure_evaluation());
-            coordinator.finish_probe(slow_a, ready_evaluation());
-        });
-        let snapshot = snapshotter.snapshot().into_vec();
-
-        assert_eq!(gauge_value(&snapshot, "overall"), 0.0);
-        assert_eq!(gauge_value(&snapshot, "postgres"), 1.0);
-        assert_eq!(gauge_value(&snapshot, "redis"), 0.0);
-        assert_eq!(gauge_value(&snapshot, "deletion_catalog"), 1.0);
-    }
-
-    #[test]
-    fn shutdown_fast_path_preserves_dependency_state_and_histograms() {
-        let coordinator = ReadinessCoordinator::default();
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-
-        metrics::with_local_recorder(&recorder, || {
-            let ProbeStart::Evaluate(ticket) = coordinator.begin_probe() else {
-                panic!("initial serving probe");
-            };
-            coordinator.finish_probe(ticket, ready_evaluation());
-            coordinator.begin_shutdown();
-            assert!(matches!(
-                coordinator.begin_probe(),
-                ProbeStart::ShuttingDown
-            ));
-        });
-        let after = snapshotter.snapshot().into_vec();
-
-        for dependency in ["postgres", "redis", "deletion_catalog"] {
-            assert_eq!(
-                gauge_value(&after, dependency),
-                1.0,
-                "shutdown must not fabricate {dependency} state"
-            );
-        }
-        for check in ["overall", "postgres", "redis", "deletion_catalog"] {
-            assert!(
-                matches!(
-                    exact_metric(
-                        &after,
-                        "buzz_readiness_check_duration_seconds",
-                        &[("check", check)]
-                    ),
-                    Some(DebugValue::Histogram(values)) if values.len() == 1
+        assert!(
+            matches!(
+                exact_metric(
+                    &after_failure,
+                    "buzz_readiness_dependency_checks_total",
+                    &[("dependency", "redis"), ("outcome", "pool_timeout")]
                 ),
-                "shutdown fast path must not add a {check} duration"
+                Some(DebugValue::Counter(1))
+            ),
+            "dependency diagnostics must still be counted"
+        );
+        for dependency in ["postgres", "redis", "deletion_catalog"] {
+            assert!(
+                exact_metric(
+                    &after_failure,
+                    "buzz_readiness_state",
+                    &[("check", dependency)]
+                )
+                .is_none(),
+                "{dependency} must not publish a readiness gauge"
             );
         }
-        assert_eq!(gauge_value(&after, "overall"), 0.0);
+
+        metrics::with_local_recorder(&recorder, || {
+            record_readiness_probe(ReadinessReason::ShuttingDown);
+        });
+        let after_shutdown = snapshotter.snapshot().into_vec();
+
+        assert_eq!(gauge_value(&after_shutdown, "overall"), 0.0);
         assert!(matches!(
             exact_metric(
-                &after,
+                &after_shutdown,
                 "buzz_readiness_checks_total",
                 &[("reason", "shutting_down")]
             ),
@@ -823,33 +921,630 @@ mod tests {
         ));
     }
 
+    /// A shutdown probe records no dependency attempt or latency sample: it did
+    /// not evaluate anything, and fabricating a sample would misreport the
+    /// dependency's real health during a rollout.
     #[test]
-    fn shutdown_dominates_an_in_flight_success_without_resurrecting_gauges() {
-        let coordinator = ReadinessCoordinator::default();
-        let ProbeStart::Evaluate(ticket) = coordinator.begin_probe() else {
-            panic!("serving probe");
-        };
+    fn a_readiness_probe_never_records_dependency_attempts() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 
-        let response = metrics::with_local_recorder(&recorder, || {
-            coordinator.begin_shutdown();
-            coordinator.finish_probe(ticket, ready_evaluation())
+        metrics::with_local_recorder(&recorder, || {
+            record_readiness_probe(ReadinessReason::Ready);
+            record_readiness_probe(ReadinessReason::ShuttingDown);
         });
         let snapshot = snapshotter.snapshot().into_vec();
 
-        assert_eq!(response.reason, ReadinessReason::ShuttingDown);
-        assert_eq!(gauge_value(&snapshot, "overall"), 0.0);
+        assert!(snapshot.iter().all(|(key, _, _, _)| {
+            key.key().name() != "buzz_readiness_dependency_checks_total"
+                && key.key().name() != "buzz_readiness_check_duration_seconds"
+        }));
+    }
+
+    /// A `Db` and a Redis pool on a closed port. The scripted evaluators below
+    /// never touch either, so no connection is ever attempted; they exist only
+    /// to satisfy the production `sample` signature.
+    fn unreachable_dependencies() -> (Db, deadpool_redis::Pool) {
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/buzz").expect("lazy pg pool");
+        let redis_pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        (Db::from_pool(pool), redis_pool)
+    }
+
+    struct FixedEvaluator(DependencyReport);
+
+    #[async_trait::async_trait]
+    impl DependencyEvaluator for FixedEvaluator {
+        async fn evaluate(&self, _db: &Db, _redis_pool: &deadpool_redis::Pool) -> DependencyReport {
+            self.0
+        }
+    }
+
+    struct DelayedEvaluator {
+        report: DependencyReport,
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl DependencyEvaluator for DelayedEvaluator {
+        async fn evaluate(&self, _db: &Db, _redis_pool: &deadpool_redis::Pool) -> DependencyReport {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.report
+        }
+    }
+
+    fn ready_report() -> DependencyReport {
+        DependencyReport::from_results(
+            TimedOutcome::new(PostgresOutcome::Success, Duration::from_millis(3)),
+            TimedOutcome::new(RedisOutcome::Success, Duration::from_millis(2)),
+            TimedOutcome::new(DeletionCatalogOutcome::Success, Duration::from_millis(1)),
+            Duration::from_millis(3),
+        )
+    }
+
+    fn ready_diagnostics() -> DependencyDiagnostics {
+        DependencyDiagnostics::with_evaluator(Arc::new(FixedEvaluator(ready_report())))
+    }
+
+    fn sampled(snapshot: DependencySnapshot) -> (Duration, bool) {
+        let DependencySnapshot::Sampled { age, stale, .. } = snapshot else {
+            panic!("a completed sample must be reported as sampled");
+        };
+        (age, stale)
+    }
+
+    /// An operator reading `/_status` must be able to tell "nothing has been
+    /// sampled yet" from "this is current" from "this outlived the sampler".
+    /// A cached report presented without its age would read as authoritative
+    /// however old it is.
+    #[tokio::test(start_paused = true)]
+    async fn freshness_separates_not_yet_sampled_from_a_fresh_and_a_stale_report() {
+        let (db, redis_pool) = unreachable_dependencies();
+        let diagnostics = ready_diagnostics();
+
         assert!(
-            exact_metric(&snapshot, "buzz_readiness_state", &[("check", "postgres")]).is_none()
+            matches!(diagnostics.snapshot(), DependencySnapshot::NotYetSampled),
+            "no evaluation has completed, so there is nothing to report"
         );
-        assert!(matches!(
-            exact_metric(
-                &snapshot,
-                "buzz_readiness_dependency_checks_total",
-                &[("dependency", "postgres"), ("outcome", "success")]
+
+        diagnostics.sample(&db, &redis_pool).await;
+        assert_eq!(sampled(diagnostics.snapshot()), (Duration::ZERO, false));
+
+        tokio::time::advance(DEPENDENCY_SAMPLE_INTERVAL).await;
+        assert_eq!(
+            sampled(diagnostics.snapshot()),
+            (DEPENDENCY_SAMPLE_INTERVAL, false),
+            "one cadence of age is the steady state, not staleness"
+        );
+
+        tokio::time::advance(DEPENDENCY_SAMPLE_INTERVAL + Duration::from_secs(1)).await;
+        let (age, stale) = sampled(diagnostics.snapshot());
+        assert_eq!(age, DEPENDENCY_SAMPLE_INTERVAL * 2 + Duration::from_secs(1));
+        assert!(stale, "a report that outlived two cadences missed a cycle");
+    }
+
+    /// The completion timestamp written since the previous snapshot, if any.
+    ///
+    /// `Snapshotter::snapshot` drains, so a window in which nothing wrote this
+    /// metric either omits the key entirely or, once registered, replays as
+    /// `0`. Zero is not a time any sample could have completed at, so folding
+    /// it into `None` keeps "nobody wrote this in that window" expressible —
+    /// the property a completion timestamp must have and an age cannot.
+    fn sample_completion_metric_write(snapshot: &Snapshot) -> Option<u64> {
+        exact_metric(
+            snapshot,
+            "buzz_readiness_dependency_sample_completed_timestamp_seconds",
+            &[],
+        )
+        .map(|value| {
+            let DebugValue::Gauge(value) = value else {
+                panic!("the sample completion timestamp must be a gauge");
+            };
+            value.into_inner() as u64
+        })
+        .filter(|written| *written != 0)
+    }
+
+    fn epoch_seconds_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock is after the Unix epoch")
+            .as_secs()
+    }
+
+    fn sample_completion_metric_value_from_scrape(scrape: &str) -> Option<u64> {
+        scrape.lines().find_map(|line| {
+            line.strip_prefix("buzz_readiness_dependency_sample_completed_timestamp_seconds ")
+                .and_then(|value| value.parse::<f64>().ok())
+                .map(|value| value as u64)
+        })
+    }
+
+    fn sample_completion_metric_type_from_scrape(scrape: &str) -> Option<&str> {
+        scrape.lines().find_map(|line| {
+            line.strip_prefix(
+                "# TYPE buzz_readiness_dependency_sample_completed_timestamp_seconds ",
+            )
+        })
+    }
+
+    /// Minimal model of Datadog OpenMetrics v2 with `send_monotonic_counter:true`.
+    ///
+    /// Gauge values are forwarded as-is. Counter values become per-scrape deltas
+    /// (`monotonic_count` / `.count`), so the exported sample itself is no
+    /// longer available to monitor queries.
+    fn datadog_openmetrics_v2_completion_epoch(
+        scrape: &str,
+        previous_counter_raw: &mut Option<u64>,
+    ) -> Option<u64> {
+        let raw = sample_completion_metric_value_from_scrape(scrape)?;
+        match sample_completion_metric_type_from_scrape(scrape) {
+            Some("gauge") => Some(raw),
+            Some("counter") => {
+                let transformed = previous_counter_raw
+                    .map(|previous| raw.saturating_sub(previous))
+                    .unwrap_or(raw);
+                *previous_counter_raw = Some(raw);
+                Some(transformed)
+            }
+            Some(other) => panic!("unexpected metric type: {other}"),
+            None => panic!("missing sample completion metric type"),
+        }
+    }
+
+    /// The scrape-side half of the same question. Freshness is published as the
+    /// Unix time the cached report completed, written only by a completed
+    /// sample, so the age belongs to the query
+    /// (`time() - buzz_readiness_dependency_sample_completed_timestamp_seconds`)
+    /// and grows on its own while this pod is wedged. A gauge carrying the age
+    /// instead would need a writer to advance it, so the one failure it most
+    /// needs to expose — a sampler that stopped — is the one that would freeze
+    /// it at its last value and read as permanently fresh.
+    #[test]
+    fn the_completion_timestamp_gauge_tracks_completed_samples() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused current-thread runtime");
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let (db, redis_pool) = unreachable_dependencies();
+                let diagnostics = ready_diagnostics();
+
+                assert_eq!(
+                    sample_completion_metric_write(&snapshotter.snapshot().into_vec()),
+                    None,
+                    "absence is the not-yet-sampled signal, not a fresh zero"
+                );
+
+                let before_first = epoch_seconds_now();
+                diagnostics.sample(&db, &redis_pool).await;
+                let after_first = epoch_seconds_now();
+                let first = sample_completion_metric_write(&snapshotter.snapshot().into_vec())
+                    .expect("a completed sample must publish when it completed");
+                assert!(
+                    (before_first..=after_first).contains(&first),
+                    "{first} must be the wall time the sample completed, \
+                     not an age, and not a stale reading"
+                );
+
+                // Paused time: no task, timer, or aging loop can run here.
+                tokio::time::advance(DEPENDENCY_SAMPLE_STALE_AFTER + Duration::from_secs(1)).await;
+                assert_eq!(
+                    sample_completion_metric_write(&snapshotter.snapshot().into_vec()),
+                    None,
+                    "only a completed sample may write the gauge, so the age a \
+                     query derives from it grows with no server-side writer"
+                );
+                assert!(
+                    sampled(diagnostics.snapshot()).1,
+                    "the cached `/_status` age reports the same report as stale"
+                );
+
+                let before_second = epoch_seconds_now();
+                diagnostics.sample(&db, &redis_pool).await;
+                let after_second = epoch_seconds_now();
+                let second = sample_completion_metric_write(&snapshotter.snapshot().into_vec())
+                    .expect("the next completed sample republishes the timestamp");
+                assert!(
+                    (before_second..=after_second).contains(&second) && second >= first,
+                    "{second} must re-anchor to the second completion, after {first}"
+                );
+                assert!(
+                    !sampled(diagnostics.snapshot()).1,
+                    "a fresh completion clears staleness"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn openmetrics_v2_preserves_epoch_only_when_raw_prometheus_type_is_gauge() {
+        let (recorder, handle) = crate::metrics::readiness_test_recorder();
+        let mut previous_counter_raw = None;
+
+        assert_eq!(
+            datadog_openmetrics_v2_completion_epoch(&handle.render(), &mut previous_counter_raw),
+            None,
+            "absence before the first completion remains absence after transform"
+        );
+
+        let first = 4_750_000_001_u64;
+        metrics::with_local_recorder(&recorder, || {
+            publish_dependency_sample_completion_metric(first);
+        });
+        let after_first_completion = handle.render();
+        assert_eq!(
+            datadog_openmetrics_v2_completion_epoch(
+                &after_first_completion,
+                &mut previous_counter_raw,
             ),
-            Some(DebugValue::Counter(1))
-        ));
+            Some(first),
+            "after first completion the transformed value must be the completion epoch"
+        );
+
+        // Same raw scrape value after idle timeout: sampler produced no new completion.
+        assert_eq!(
+            datadog_openmetrics_v2_completion_epoch(
+                &after_first_completion,
+                &mut previous_counter_raw,
+            ),
+            Some(first),
+            "idle-timeout survival still must preserve the full epoch"
+        );
+
+        let second = 4_750_000_005_u64;
+        metrics::with_local_recorder(&recorder, || {
+            publish_dependency_sample_completion_metric(second);
+        });
+        let after_later_completion = handle.render();
+        assert_eq!(
+            datadog_openmetrics_v2_completion_epoch(
+                &after_later_completion,
+                &mut previous_counter_raw,
+            ),
+            Some(second),
+            "a later completion must transform to the new full epoch"
+        );
+
+        // Same raw value again while only the sampler is stopped.
+        assert_eq!(
+            datadog_openmetrics_v2_completion_epoch(
+                &after_later_completion,
+                &mut previous_counter_raw,
+            ),
+            Some(second),
+            "sampler stoppage must not collapse the epoch to a delta"
+        );
+    }
+
+    async fn wait_for_sample_completion_scrape_value(
+        handle: &metrics_exporter_prometheus::PrometheusHandle,
+        predicate: impl Fn(u64) -> bool,
+    ) -> u64 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(value) = sample_completion_metric_value_from_scrape(&handle.render()) {
+                if predicate(value) {
+                    return value;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for completion timestamp scrape value"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[test]
+    fn dependency_runtime_retains_the_completion_timestamp_when_only_sampler_stops() {
+        let timeout = Duration::from_secs(1);
+        let republish_interval = Duration::from_millis(100);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("current-thread runtime");
+        let (recorder, handle) =
+            crate::metrics::readiness_test_recorder_with_idle_timeout(timeout.as_secs());
+
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let mut state = crate::state::tests::test_state_with_database_url(
+                    "postgres://127.0.0.1:1/buzz",
+                )
+                .await;
+                let sample_started = Arc::new(tokio::sync::Notify::new());
+                let release_sample = Arc::new(tokio::sync::Notify::new());
+                Arc::get_mut(&mut state)
+                    .expect("sole readiness state")
+                    .set_dependency_evaluator(Arc::new(DelayedEvaluator {
+                        report: ready_report(),
+                        started: Arc::clone(&sample_started),
+                        release: Arc::clone(&release_sample),
+                    }));
+
+                start_dependency_sampler_and_completion_publisher(
+                    Arc::clone(&state),
+                    republish_interval,
+                );
+
+                tokio::time::timeout(Duration::from_secs(5), sample_started.notified())
+                    .await
+                    .expect("dependency sampler must start its first sample within 5 seconds");
+                for _ in 0..3 {
+                    tokio::time::advance(republish_interval).await;
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    sample_completion_metric_value_from_scrape(&handle.render()),
+                    None,
+                    "republisher ticks must not fabricate an epoch before the first completion"
+                );
+
+                release_sample.notify_one();
+
+                let first =
+                    wait_for_sample_completion_scrape_value(&handle, |value| value > 0).await;
+
+                state.dependency_sampler_cancel.cancel();
+                tokio::time::resume();
+
+                tokio::time::sleep(timeout + Duration::from_millis(200)).await;
+                assert_eq!(
+                    sample_completion_metric_value_from_scrape(&handle.render()),
+                    Some(first),
+                    "publisher must keep the completion epoch exported after idle timeout"
+                );
+
+                tokio::time::sleep(timeout + Duration::from_millis(200)).await;
+                assert_eq!(
+                    sample_completion_metric_value_from_scrape(&handle.render()),
+                    Some(first),
+                    "with no sampler activity, publisher must keep exporting the stored epoch"
+                );
+
+                state.dependency_completion_publisher_cancel.cancel();
+            });
+        });
+    }
+
+    /// How long a park step waits before it is a failure rather than a hang.
+    const PARK_SIGNAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// A completion-epoch gauge write that can be stopped at the recorder
+    /// boundary — the last instruction of a publish, after the writer has
+    /// already read the epoch it is publishing.
+    ///
+    /// Arming names one epoch value and fires once, so the sampler's own write
+    /// passes straight through and only the republish under test parks.
+    struct PublishPark {
+        armed_for: Mutex<Option<u64>>,
+        parked_tx: std::sync::mpsc::SyncSender<()>,
+        parked_rx: Mutex<std::sync::mpsc::Receiver<()>>,
+        release_tx: std::sync::mpsc::SyncSender<()>,
+        release_rx: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl PublishPark {
+        fn new() -> Self {
+            let (parked_tx, parked_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            Self {
+                armed_for: Mutex::new(None),
+                parked_tx,
+                parked_rx: Mutex::new(parked_rx),
+                release_tx,
+                release_rx: Mutex::new(release_rx),
+            }
+        }
+
+        fn arm(&self, epoch_seconds: u64) {
+            *self.armed_for.lock().expect("park state") = Some(epoch_seconds);
+        }
+
+        fn park_if_armed(&self, epoch_seconds: u64) {
+            {
+                let mut armed = self.armed_for.lock().expect("park state");
+                if *armed != Some(epoch_seconds) {
+                    return;
+                }
+                *armed = None;
+            }
+            self.parked_tx.send(()).expect("announce the parked write");
+            self.release_rx
+                .lock()
+                .expect("release channel")
+                .recv_timeout(PARK_SIGNAL_TIMEOUT)
+                .expect("the parked write must be released");
+        }
+
+        fn wait_until_parked(&self) {
+            self.parked_rx
+                .lock()
+                .expect("park channel")
+                .recv_timeout(PARK_SIGNAL_TIMEOUT)
+                .expect("the armed write must reach the recorder");
+        }
+
+        fn release(&self) {
+            self.release_tx.send(()).expect("release the parked write");
+        }
+    }
+
+    /// Delegates to the real Prometheus recorder, with the completion-epoch
+    /// gauge routed through [`PublishPark`].
+    struct ParkingRecorder {
+        inner: metrics_exporter_prometheus::PrometheusRecorder,
+        park: Arc<PublishPark>,
+    }
+
+    struct ParkingGauge {
+        inner: metrics::Gauge,
+        park: Arc<PublishPark>,
+    }
+
+    impl metrics::GaugeFn for ParkingGauge {
+        fn increment(&self, value: f64) {
+            self.inner.increment(value);
+        }
+
+        fn decrement(&self, value: f64) {
+            self.inner.decrement(value);
+        }
+
+        fn set(&self, value: f64) {
+            self.park.park_if_armed(value as u64);
+            self.inner.set(value);
+        }
+    }
+
+    impl metrics::Recorder for ParkingRecorder {
+        fn describe_counter(
+            &self,
+            key: metrics::KeyName,
+            unit: Option<metrics::Unit>,
+            description: metrics::SharedString,
+        ) {
+            self.inner.describe_counter(key, unit, description);
+        }
+
+        fn describe_gauge(
+            &self,
+            key: metrics::KeyName,
+            unit: Option<metrics::Unit>,
+            description: metrics::SharedString,
+        ) {
+            self.inner.describe_gauge(key, unit, description);
+        }
+
+        fn describe_histogram(
+            &self,
+            key: metrics::KeyName,
+            unit: Option<metrics::Unit>,
+            description: metrics::SharedString,
+        ) {
+            self.inner.describe_histogram(key, unit, description);
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            self.inner.register_counter(key, metadata)
+        }
+
+        fn register_gauge(
+            &self,
+            key: &metrics::Key,
+            metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Gauge {
+            let gauge = self.inner.register_gauge(key, metadata);
+            if key.name() == "buzz_readiness_dependency_sample_completed_timestamp_seconds" {
+                metrics::Gauge::from_arc(Arc::new(ParkingGauge {
+                    inner: gauge,
+                    park: Arc::clone(&self.park),
+                }))
+            } else {
+                gauge
+            }
+        }
+
+        fn register_histogram(
+            &self,
+            key: &metrics::Key,
+            metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            self.inner.register_histogram(key, metadata)
+        }
+    }
+
+    /// Two tasks write this gauge — the sampler, which owns the epoch, and the
+    /// idle-refresh publisher, which may only re-emit it — and the metrics
+    /// facade offers a bare `set` with no compare-and-set to lean on. So a
+    /// republish that read the stored epoch before a sample completed can still
+    /// be inside its own write when the newer epoch lands, and plain last-write
+    /// -wins would leave the exported series moved backwards until the next
+    /// republish tick.
+    ///
+    /// This parks the republish at the recorder, the last point in its write,
+    /// completes a newer sample behind it — which must not be blocked by the
+    /// parked republish — and only then releases it. The scrape must report the
+    /// newer completion. Times are injected so the two epochs are exact and the
+    /// interleaving does not depend on the wall clock.
+    #[test]
+    fn a_republish_racing_a_completion_cannot_move_the_exported_epoch_backwards() {
+        const EARLIER_EPOCH_SECONDS: u64 = 1_700_000_000;
+        const LATER_EPOCH_SECONDS: u64 = 1_700_000_030;
+
+        let (prometheus, handle) = crate::metrics::readiness_test_recorder();
+        let park = Arc::new(PublishPark::new());
+        let recorder = Arc::new(ParkingRecorder {
+            inner: prometheus,
+            park: Arc::clone(&park),
+        });
+        let diagnostics = Arc::new(ready_diagnostics());
+
+        metrics::with_local_recorder(recorder.as_ref(), || {
+            diagnostics.record_dependency_sample_completion(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(EARLIER_EPOCH_SECONDS),
+            );
+        });
+        assert_eq!(
+            sample_completion_metric_value_from_scrape(&handle.render()),
+            Some(EARLIER_EPOCH_SECONDS),
+            "the first completion owns the epoch"
+        );
+
+        park.arm(EARLIER_EPOCH_SECONDS);
+        let republisher = std::thread::spawn({
+            let recorder = Arc::clone(&recorder);
+            let diagnostics = Arc::clone(&diagnostics);
+            move || {
+                metrics::with_local_recorder(recorder.as_ref(), || {
+                    diagnostics.republish_dependency_sample_completion();
+                });
+            }
+        });
+
+        park.wait_until_parked();
+
+        metrics::with_local_recorder(recorder.as_ref(), || {
+            diagnostics.record_dependency_sample_completion(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(LATER_EPOCH_SECONDS),
+            );
+        });
+        assert_eq!(
+            sample_completion_metric_value_from_scrape(&handle.render()),
+            Some(LATER_EPOCH_SECONDS),
+            "a completed sample must publish its epoch while a republish is still in flight"
+        );
+
+        park.release();
+        republisher.join().expect("republish thread");
+
+        assert_eq!(
+            sample_completion_metric_value_from_scrape(&handle.render()),
+            Some(LATER_EPOCH_SECONDS),
+            "a republish that lost the race must not re-export the epoch it read \
+             before the newer sample completed"
+        );
+    }
+
+    #[test]
+    fn readiness_reason_labels_are_the_closed_lifecycle_set() {
+        assert_eq!(
+            [ReadinessReason::Ready, ReadinessReason::ShuttingDown].map(ReadinessReason::label),
+            READINESS_REASON_LABELS
+        );
     }
 }

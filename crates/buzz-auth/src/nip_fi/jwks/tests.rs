@@ -574,13 +574,15 @@ async fn http_fetcher_rejects_private_ip_uri_before_connection() {
 
 #[tokio::test]
 async fn resolve_ssrf_rejects_ipv6_loopback_fast_path() {
-    let err = super::resolve_and_check_ssrf("::1", 443).await.unwrap_err();
+    let err = super::resolve_for_transport("::1", 443, JwksTransport::PublicHttps)
+        .await
+        .unwrap_err();
     assert_eq!(err, JwksFetchError::InvalidUri);
 }
 
 #[tokio::test]
 async fn resolve_ssrf_accepts_public_ipv6_fast_path() {
-    let ip = super::resolve_and_check_ssrf("2606:4700::1", 443)
+    let ip = super::resolve_for_transport("2606:4700::1", 443, JwksTransport::PublicHttps)
         .await
         .unwrap();
     assert_eq!(ip, "2606:4700::1".parse::<std::net::IpAddr>().unwrap());
@@ -997,13 +999,13 @@ async fn two_issuer_keys_and_generations_are_isolated() {
 
     let v_pre = FederatedAssertionVerifier::new(registry.clone(), pre);
     v_pre
-        .verify(&sign(PKCS8_A1, KID_A1, issuer_a, audience))
+        .verify_for_aud(&sign(PKCS8_A1, KID_A1, issuer_a, audience), audience)
         .expect("A1 token must verify pre-rotation");
     v_pre
-        .verify(&sign(PKCS8_B1, KID_B1, issuer_b, audience))
+        .verify_for_aud(&sign(PKCS8_B1, KID_B1, issuer_b, audience), audience)
         .expect("B1 token must verify pre-rotation");
     v_pre
-        .verify(&sign(PKCS8_B1, KID_A1, issuer_a, audience))
+        .verify_for_aud(&sign(PKCS8_B1, KID_A1, issuer_a, audience), audience)
         .expect_err("B1 key must not forge issuer A");
 
     // Post-rotation: fresh source, A rotates A1→A2, B unchanged.
@@ -1041,16 +1043,16 @@ async fn two_issuer_keys_and_generations_are_isolated() {
 
     let v_post = FederatedAssertionVerifier::new(registry, post);
     v_post
-        .verify(&sign(PKCS8_A2, KID_A2, issuer_a, audience))
+        .verify_for_aud(&sign(PKCS8_A2, KID_A2, issuer_a, audience), audience)
         .expect("A2 token must verify post-rotation");
     v_post
-        .verify(&sign(PKCS8_A1, KID_A1, issuer_a, audience))
+        .verify_for_aud(&sign(PKCS8_A1, KID_A1, issuer_a, audience), audience)
         .expect_err("old A1 token must fail after A2 rotation");
     v_post
-        .verify(&sign(PKCS8_B1, KID_A1, issuer_a, audience))
+        .verify_for_aud(&sign(PKCS8_B1, KID_A1, issuer_a, audience), audience)
         .expect_err("B1 key must not forge issuer A post-rotation");
     v_post
-        .verify(&sign(PKCS8_B1, KID_B1, issuer_b, audience))
+        .verify_for_aud(&sign(PKCS8_B1, KID_B1, issuer_b, audience), audience)
         .expect("B1 token must still verify post-rotation");
 }
 
@@ -1185,7 +1187,7 @@ async fn shared_arc_source_verifier_observes_rotation() {
 
     // Pre-rotation: A1 token verifies.
     verifier
-        .verify(&sign_token(PKCS8_A1, KID_A1, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A1, KID_A1, issuer, audience), audience)
         .expect("A1 token must verify before rotation");
 
     // Advance past the refresh interval so the next get_snapshot triggers a
@@ -1201,10 +1203,10 @@ async fn shared_arc_source_verifier_observes_rotation() {
     // at construction), it would serve the pre-rotation A1 snapshot forever —
     // A2 would fail and A1 would still pass, turning both assertions red.
     verifier
-        .verify(&sign_token(PKCS8_A2, KID_A2, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A2, KID_A2, issuer, audience), audience)
         .expect("A2 token must verify through the shared Arc after rotation");
     verifier
-        .verify(&sign_token(PKCS8_A1, KID_A1, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A1, KID_A1, issuer, audience), audience)
         .expect_err("old A1 token must be rejected after rotation (kid no longer in JWKS)");
 }
 
@@ -1297,17 +1299,17 @@ fn jwks_contract_uri_canonicalization_convergence_and_divergence() {
 /// **Fix 2 — Public bracketed-IPv6 JWKS URI through the resolved-target and pin-input seam.**
 ///
 /// This seam test is network-free: both public `2606:4700::1` and site-local
-/// `fec0::1` are IP literals, so `resolve_and_check_ssrf` takes the fast path
-/// (`host.parse::<IpAddr>()` then `is_not_global_unicast`) without any DNS
-/// lookup.
+/// `fec0::1` are IP literals, so `resolve_for_transport` with `PublicHttps`
+/// takes the fast path (`host.parse::<IpAddr>()` then `is_not_global_unicast`)
+/// without any DNS lookup.
 ///
 /// The seam covers the three stages `fetch_jwks_inner` traverses in order:
 /// 1. `extract_url_host_and_port` — typed `Url::host()` yields bare
 ///    `"2606:4700::1"`, not the bracketed `"[2606:4700::1]"` that
 ///    `host_str()` returns.
-/// 2. `resolve_and_check_ssrf(host, port)` — fast path: `host.parse::<IpAddr>()`
-///    succeeds only for the bare form, passes `is_not_global_unicast`, and
-///    returns the `IpAddr`.
+/// 2. `resolve_for_transport(host, port, JwksTransport::PublicHttps)` — the
+///    `host.parse::<IpAddr>()` fast path succeeds only for the bare form, passes
+///    `is_not_global_unicast`, and returns the `IpAddr`.
 /// 3. Reqwest `.resolve(host, SocketAddr::new(ip, port))` uses the raw `host`
 ///    string as its pin key. The key must equal the URL authority form —
 ///    bare for IPv6, brackets forbidden.
@@ -1317,7 +1319,8 @@ fn jwks_contract_uri_canonicalization_convergence_and_divergence() {
 /// reqwest connector; connector-boundary behavior is a runtime concern.
 ///
 /// For `fec0::1`: `extract_url_host_and_port` still extracts the bare address;
-/// `resolve_and_check_ssrf` rejects it via `is_not_global_unicast`.
+/// `resolve_for_transport` rejects it under the `PublicHttps` policy via
+/// `is_not_global_unicast`.
 ///
 /// ## Mutation oracle
 /// Replace `Some(url::Host::Ipv6(addr)) => addr.to_string()` with
@@ -1326,7 +1329,7 @@ fn jwks_contract_uri_canonicalization_convergence_and_divergence() {
 /// - `"[2606:4700::1]".parse::<IpAddr>()` fails → SSRF fast path unreachable
 ///   → public acceptance assertion flips red.
 /// - `is_not_global_unicast` is never called on `fec0::1` (the parse also
-///   fails) → `resolve_and_check_ssrf` returns `NetworkError` not `InvalidUri`
+///   fails) → `resolve_for_transport` returns `NetworkError` not `InvalidUri`
 ///   → fec0 rejection-kind assertion flips red.
 /// - The pin-input equality assertion also flips red (bracket mismatch).
 #[tokio::test]
@@ -1345,7 +1348,7 @@ async fn resolved_target_and_pin_key_seam_public_ipv6_and_fec0_rejection() {
 
     // ── Stage 2: IpAddr resolution (SSRF fast path) ───────────────────────────
     // `host.parse::<IpAddr>()` succeeds only for the bare form. This is exactly
-    // the fast path in `resolve_and_check_ssrf` that bypasses DNS.
+    // the fast path in `resolve_for_transport` that bypasses DNS.
     let ip: std::net::IpAddr = host
         .parse()
         .expect("bracket-free host must parse as IpAddr; mutation: bracketed form fails here");
@@ -1357,8 +1360,8 @@ async fn resolved_target_and_pin_key_seam_public_ipv6_and_fec0_rejection() {
         "2606:4700::1 must pass as globally reachable; mutation: SSRF check would reject it"
     );
 
-    // Confirm resolve_and_check_ssrf accepts the public address (network-free fast path).
-    let resolved = super::resolve_and_check_ssrf(&host, port)
+    // Confirm the production resolver accepts the public address under PublicHttps.
+    let resolved = super::resolve_for_transport(&host, port, JwksTransport::PublicHttps)
         .await
         .expect("public IPv6 must be accepted by SSRF check");
     assert_eq!(
@@ -1404,8 +1407,8 @@ async fn resolved_target_and_pin_key_seam_public_ipv6_and_fec0_rejection() {
          bypasses this check (parse fails, NetworkError not InvalidUri)"
     );
 
-    // resolve_and_check_ssrf must return InvalidUri for fec0::1.
-    let fec0_err = super::resolve_and_check_ssrf(&fec0_host, fec0_port)
+    // The production resolver must return InvalidUri for fec0::1 under PublicHttps.
+    let fec0_err = super::resolve_for_transport(&fec0_host, fec0_port, JwksTransport::PublicHttps)
         .await
         .unwrap_err();
     assert_eq!(
@@ -1440,14 +1443,10 @@ async fn resolved_target_and_pin_key_seam_public_ipv6_and_fec0_rejection() {
 ///    cache rather than through shared-arc rotation. **A2 acceptance is the
 ///    reliable shared-source oracle here.**
 ///
-/// Note: the expiry-purge (`state.snapshot = None` in `get_snapshot`) is
-/// correctness-critical for concurrent callers: it clears the expired snapshot
-/// before permit acquisition, so a caller that loses the permit race and falls
-/// back to `state.snapshot` receives `None` rather than an expired snapshot.
-/// A1 rejection after the deadline is also enforced independently by the `key_set`
-/// read path (`filter(|c| now < c.hard_deadline)`), but the purge is what
-/// prevents the fallback path from serving a stale snapshot to concurrent
-/// refresh losers, so no separate purge mutation oracle is claimed here.
+/// Note: `get_snapshot` purges an expired published snapshot before permit
+/// acquisition, and every return path (including the refresh-loser fallback)
+/// re-applies the `now < hard_deadline` filter, as does the `key_set` read
+/// path, so no separate purge mutation oracle is claimed here.
 #[tokio::test]
 async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
     use crate::nip_fi::{
@@ -1586,7 +1585,7 @@ async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
 
     // Pre-advancement: A1 verifies.
     verifier
-        .verify(&sign_token(PKCS8_A1, KID_A1, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A1, KID_A1, issuer, audience), audience)
         .expect("A1 token must verify before clock advances past its deadline");
 
     // Step 3: advance clock past A1's original hard deadline (no sleep).
@@ -1610,12 +1609,122 @@ async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
 
     // Step 5: the SAME unchanged verifier reflects A2 keys.
     verifier
-        .verify(&sign_token(PKCS8_A2, KID_A2, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A2, KID_A2, issuer, audience), audience)
         .expect(
             "A2 token must verify through the unchanged verifier after A1 deadline expired; \
              mutation oracle: use independent Arc -> A2-accept flips red (reliable oracle)",
         );
     verifier
-        .verify(&sign_token(PKCS8_A1, KID_A1, issuer, audience))
+        .verify_for_aud(&sign_token(PKCS8_A1, KID_A1, issuer, audience), audience)
         .expect_err("A1 must be rejected after expiry + rotation");
+}
+
+/// Fetcher whose calls after the initial warm-up park until `release` is
+/// notified, so a test can hold a real `get_snapshot` refresh in flight
+/// deterministically.
+struct GatedJwksFetcher {
+    body: String,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    call_count: Arc<AtomicUsize>,
+}
+
+impl super::super::verifier::sealed::Sealed for GatedJwksFetcher {}
+
+impl JwksFetcher for GatedJwksFetcher {
+    fn fetch_jwks<'a>(
+        &'a self,
+        _uri: &'a str,
+    ) -> impl std::future::Future<Output = Result<String, JwksFetchError>> + Send + 'a {
+        let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+        async move {
+            if n > 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(self.body.clone())
+        }
+    }
+}
+
+/// Regression: `key_set` must serve the warm, unexpired snapshot while other
+/// readers or a refresh hold per-issuer locks, and still fail closed on
+/// expiry / unknown issuer.
+///
+/// ## Mutation oracle
+/// Reintroduce the old refresh-mutex `try_lock` in `key_set`
+/// (`let _g = self.states.get(issuer)?.refresh.try_lock().ok()?;`): the
+/// "reader overlapping refresh-mutex holder" assertion fails.
+#[tokio::test]
+async fn key_set_serves_live_snapshot_under_reader_and_refresh_overlap() {
+    use std::sync::atomic::AtomicI64;
+    let issuer = "https://overlap.example";
+    let t0 = Utc::now().timestamp();
+    let clock = Arc::new(AtomicI64::new(t0));
+    let clock_fn = Arc::clone(&clock);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let fetcher = GatedJwksFetcher {
+        body: minimal_jwks_json("k1"),
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+        call_count: Arc::new(AtomicUsize::new(0)),
+    };
+    let source = Arc::new(
+        ProductionJwksSource::new_with_clock(
+            vec![make_config(issuer)],
+            fetcher,
+            Arc::new(move || DateTime::from_timestamp(clock_fn.load(Ordering::SeqCst), 0).unwrap()),
+        )
+        .unwrap(),
+    );
+
+    // Control: fail closed before warm-up.
+    assert!(
+        source.key_set(issuer).is_none(),
+        "cold cache must fail closed"
+    );
+    source.get_snapshot(issuer).await.expect("warm-up fetch");
+    let slot = source.states.get(issuer).unwrap();
+
+    // Reader overlapping another reader.
+    {
+        let _other_reader = slot.read_published();
+        assert!(
+            source.key_set(issuer).is_some(),
+            "reader overlapping another reader must see the live snapshot"
+        );
+    }
+
+    // Reader overlapping a refresh-mutex holder (what get_snapshot holds).
+    {
+        let _refresh_holder = slot.refresh.lock().await;
+        assert!(
+            source.key_set(issuer).is_some(),
+            "reader overlapping refresh-mutex holder must see the live snapshot"
+        );
+    }
+
+    // Reader overlapping a real in-flight refresh: make the snapshot stale
+    // (past refresh interval, before hard deadline) and park the refetch.
+    clock.store(t0 + 301, Ordering::SeqCst);
+    let refresher = {
+        let source = Arc::clone(&source);
+        tokio::spawn(async move { source.get_snapshot(issuer).await })
+    };
+    entered.notified().await;
+    assert!(
+        source.key_set(issuer).is_some(),
+        "reader overlapping an in-flight refresh must see the live snapshot"
+    );
+    release.notify_one();
+    assert!(refresher.await.unwrap().is_some());
+
+    // Controls: unknown issuer and expiry still fail closed.
+    assert!(source.key_set("https://unknown.example").is_none());
+    clock.store(t0 + 301 + 3600, Ordering::SeqCst);
+    assert!(
+        source.key_set(issuer).is_none(),
+        "expired snapshot must fail closed"
+    );
 }

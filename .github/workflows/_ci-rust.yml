@@ -120,7 +120,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       # MSVC needs windows.h (aws-lc-sys et al.), so this runs on a real Windows
       # runner — hermit, used by the Linux jobs, does not provide MSVC. The
-      # toolchain (1.95.0 + clippy via profile = default) comes from the
+      # toolchain (1.98.1 + clippy via profile = default) comes from the
       # repo-root rust-toolchain.toml, which the runner's preinstalled rustup
       # honors on demand; the host triple already is x86_64-pc-windows-msvc.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
@@ -151,6 +151,9 @@ jobs:
         # Serial: windows_resolver_tests mutate process-global env
         # (BUZZ_SHELL/GIT_BASH/SystemRoot) that SharedState::new reads.
         run: cargo test -p buzz-dev-mcp --target $env:TARGET -- --test-threads=1
+      - name: Test (ACP launch-prefix platform contract)
+        # Execute the non-Unix refusal branch; a cross-compile cannot test it.
+        run: cargo test -p buzz-acp --target $env:TARGET --lib acp::launch::platform_tests
       - name: Test (buzz-agent auth coordinator)
         # The auth coordinator single-flights on an OS advisory lock, which is
         # LockFileEx on Windows; this integration suite drives real second

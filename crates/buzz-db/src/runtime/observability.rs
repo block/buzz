@@ -7,6 +7,8 @@ use std::future::Future;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use super::DbPoolRole;
+
 /// One valid pool/operation acquisition family.
 ///
 /// Keeping role and operation in one enum makes invalid combinations
@@ -26,6 +28,7 @@ enum PoolOperation {
     ReaderSubscriptionHistory,
     WriterEventWrite,
     WriterMaintenance,
+    ReaderMaintenance,
 }
 
 /// Writer-pool operations. Reader-only combinations cannot be constructed.
@@ -74,14 +77,17 @@ pub(crate) enum ReaderOperation {
     Bootstrap,
     Authorization,
     SubscriptionHistory,
+    /// Leader-only background reads such as fleet usage telemetry.
+    Maintenance,
 }
 
 impl ReaderOperation {
     #[cfg(test)]
-    const ALL: [Self; 3] = [
+    const ALL: [Self; 4] = [
         Self::Bootstrap,
         Self::Authorization,
         Self::SubscriptionHistory,
+        Self::Maintenance,
     ];
 
     const fn pair(self) -> PoolOperation {
@@ -89,12 +95,26 @@ impl ReaderOperation {
             Self::Bootstrap => PoolOperation::ReaderBootstrap,
             Self::Authorization => PoolOperation::ReaderAuthorization,
             Self::SubscriptionHistory => PoolOperation::ReaderSubscriptionHistory,
+            Self::Maintenance => PoolOperation::ReaderMaintenance,
         }
+    }
+
+    /// Whether a dropped checkout must close the connection under SQLx's
+    /// bounded `close_on_drop` instead of returning it to the pool.
+    ///
+    /// Maintenance reads run under relay-side deadlines that drop them
+    /// mid-query when a reader goes dark, and the reader pool is shared with
+    /// serving reads. The pool's release check is bounded, but SQLx's own
+    /// release ping after it is not, so a returned connection whose reader
+    /// goes silent in that window still strands its slot. Close-on-drop
+    /// bounds the whole release. Serving reads keep pooled reuse.
+    pub(crate) const fn bounded_release(self) -> bool {
+        matches!(self, Self::Maintenance)
     }
 }
 
 impl PoolOperation {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::WriterBootstrap,
         Self::ReaderBootstrap,
         Self::WriterReadiness,
@@ -106,14 +126,16 @@ impl PoolOperation {
         Self::ReaderSubscriptionHistory,
         Self::WriterEventWrite,
         Self::WriterMaintenance,
+        Self::ReaderMaintenance,
     ];
 
     pub(crate) const fn pool_role(self) -> &'static str {
         match self {
-            Self::ReaderBootstrap | Self::ReaderAuthorization | Self::ReaderSubscriptionHistory => {
-                "reader"
-            }
-            _ => "writer",
+            Self::ReaderBootstrap
+            | Self::ReaderAuthorization
+            | Self::ReaderSubscriptionHistory
+            | Self::ReaderMaintenance => DbPoolRole::Reader.as_str(),
+            _ => DbPoolRole::Writer.as_str(),
         }
     }
 
@@ -128,7 +150,7 @@ impl PoolOperation {
                 "subscription_history"
             }
             Self::WriterEventWrite => "event_write",
-            Self::WriterMaintenance => "maintenance",
+            Self::WriterMaintenance | Self::ReaderMaintenance => "maintenance",
         }
     }
 
@@ -137,22 +159,23 @@ impl PoolOperation {
     }
 }
 
-pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] = [
-    ("writer", "bootstrap"),
-    ("reader", "bootstrap"),
-    ("writer", "readiness"),
-    ("writer", "tenant_resolution"),
-    ("writer", "authentication"),
-    ("writer", "authorization"),
-    ("reader", "authorization"),
-    ("writer", "subscription_history"),
-    ("reader", "subscription_history"),
-    ("writer", "event_write"),
-    ("writer", "maintenance"),
+pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] = [
+    (DbPoolRole::Writer.as_str(), "bootstrap"),
+    (DbPoolRole::Reader.as_str(), "bootstrap"),
+    (DbPoolRole::Writer.as_str(), "readiness"),
+    (DbPoolRole::Writer.as_str(), "tenant_resolution"),
+    (DbPoolRole::Writer.as_str(), "authentication"),
+    (DbPoolRole::Writer.as_str(), "authorization"),
+    (DbPoolRole::Reader.as_str(), "authorization"),
+    (DbPoolRole::Writer.as_str(), "subscription_history"),
+    (DbPoolRole::Reader.as_str(), "subscription_history"),
+    (DbPoolRole::Writer.as_str(), "event_write"),
+    (DbPoolRole::Writer.as_str(), "maintenance"),
+    (DbPoolRole::Reader.as_str(), "maintenance"),
 ];
 
-/// Eleven valid pairs × (12 histogram series + 4 outcome counters + 1 gauge).
-pub(crate) const POOL_ACQUIRE_RAW_SERIES_PER_POD: usize = POOL_ACQUIRE_VALID_PAIRS.len() * 17;
+/// Twelve valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
+pub(crate) const POOL_ACQUIRE_RAW_SERIES_PER_POD: usize = POOL_ACQUIRE_VALID_PAIRS.len() * 18;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LockType {
@@ -161,16 +184,18 @@ pub(crate) enum LockType {
     PushGate,
     Deletion,
     MigrationSchemaSafety,
+    PartitionMaintenance,
 }
 
 impl LockType {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Replacement,
         Self::Membership,
         Self::PushGate,
         Self::Deletion,
         Self::MigrationSchemaSafety,
+        Self::PartitionMaintenance,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -180,6 +205,7 @@ impl LockType {
             Self::PushGate => "push_gate",
             Self::Deletion => "deletion",
             Self::MigrationSchemaSafety => "migration_schema_safety",
+            Self::PartitionMaintenance => "partition_maintenance",
         }
     }
 }
@@ -220,31 +246,49 @@ impl Outcome {
 pub(crate) enum TransactionOperation {
     ReplaceParameterizedEvent,
     ReplaceAddressableEvent,
-    PublishNip43MembershipLocked,
     AcceptPushLeaseEvent,
     BeginCommunityDeletionQuiescing,
     FenceCommunityDeletion,
+    CommunityArchiveFence,
+    InactiveCommunityFence,
 }
 
 impl TransactionOperation {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::ReplaceParameterizedEvent,
         Self::ReplaceAddressableEvent,
-        Self::PublishNip43MembershipLocked,
         Self::AcceptPushLeaseEvent,
         Self::BeginCommunityDeletionQuiescing,
         Self::FenceCommunityDeletion,
+        Self::CommunityArchiveFence,
+        Self::InactiveCommunityFence,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::ReplaceParameterizedEvent => "replace_parameterized_event",
             Self::ReplaceAddressableEvent => "replace_addressable_event",
-            Self::PublishNip43MembershipLocked => "publish_nip43_membership_locked",
             Self::AcceptPushLeaseEvent => "accept_push_lease_event",
             Self::BeginCommunityDeletionQuiescing => "begin_community_deletion_quiescing",
             Self::FenceCommunityDeletion => "fence_community_deletion",
+            Self::CommunityArchiveFence => "community_archive_fence",
+            Self::InactiveCommunityFence => "inactive_community_fence",
+        }
+    }
+
+    /// Whether this transaction's writer checkout also feeds the legacy
+    /// `buzz_db_pool_acquire_wait_seconds` / `buzz_db_pool_acquisitions_total`
+    /// families. Only seams that predate operation-labelled pool metrics do;
+    /// later seams must not change those families' observed population.
+    const fn emits_legacy_pool_metrics(self) -> bool {
+        match self {
+            Self::ReplaceParameterizedEvent
+            | Self::ReplaceAddressableEvent
+            | Self::AcceptPushLeaseEvent
+            | Self::BeginCommunityDeletionQuiescing
+            | Self::FenceCommunityDeletion => true,
+            Self::CommunityArchiveFence | Self::InactiveCommunityFence => false,
         }
     }
 
@@ -252,11 +296,11 @@ impl TransactionOperation {
         match self {
             Self::ReplaceParameterizedEvent
             | Self::ReplaceAddressableEvent
-            | Self::PublishNip43MembershipLocked
             | Self::AcceptPushLeaseEvent => WriterOperation::EventWrite,
-            Self::BeginCommunityDeletionQuiescing | Self::FenceCommunityDeletion => {
-                WriterOperation::Maintenance
-            }
+            Self::BeginCommunityDeletionQuiescing
+            | Self::FenceCommunityDeletion
+            | Self::CommunityArchiveFence
+            | Self::InactiveCommunityFence => WriterOperation::Maintenance,
         }
     }
 }
@@ -355,7 +399,7 @@ fn publish_waiters(pair: PoolOperation, value: u64) {
 /// idle eviction cannot turn an expected zero into ambiguous missing data.
 pub(crate) fn refresh_pool_waiters(include_reader: bool) {
     for pair in PoolOperation::ALL {
-        if pair.pool_role() == "reader" && !include_reader {
+        if pair.pool_role() == DbPoolRole::Reader.as_str() && !include_reader {
             continue;
         }
         let waiters = POOL_WAITERS[pair.index()]
@@ -380,6 +424,12 @@ struct PoolAcquireAttempt {
 
 impl PoolAcquireAttempt {
     fn start(pair: PoolOperation, emit_legacy: bool) -> Self {
+        metrics::counter!(
+            "buzz_db_pool_acquire_started_total",
+            "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
+        )
+        .increment(1);
         {
             let mut waiters = POOL_WAITERS[pair.index()]
                 .lock()
@@ -496,7 +546,12 @@ pub(crate) async fn begin_transaction(
     pool: &sqlx::PgPool,
     operation: TransactionOperation,
 ) -> sqlx::Result<(sqlx::Transaction<'static, sqlx::Postgres>, TransactionTimer)> {
-    let connection = acquire_writer_with_legacy_metrics(pool, operation.writer_operation()).await?;
+    let writer = operation.writer_operation();
+    let connection = if operation.emits_legacy_pool_metrics() {
+        acquire_writer_with_legacy_metrics(pool, writer).await?
+    } else {
+        acquire_writer(pool, writer).await?
+    };
     let transaction = sqlx::Transaction::begin(connection, None).await?;
     Ok((transaction, TransactionTimer::start(operation)))
 }
@@ -568,9 +623,9 @@ impl Drop for TransactionTimer {
 mod tests {
     use super::{
         acquire_reader_with_legacy_metrics, acquire_writer, acquire_writer_with_legacy_metrics,
-        observe_advisory_lock, record_pool_acquire, refresh_pool_waiters, LockType, Outcome,
-        PoolAcquireAttempt, PoolOperation, ReaderOperation, TransactionOperation, TransactionTimer,
-        WriterOperation,
+        begin_transaction, observe_advisory_lock, record_pool_acquire, refresh_pool_waiters,
+        LockType, Outcome, PoolAcquireAttempt, PoolOperation, ReaderOperation,
+        TransactionOperation, TransactionTimer, WriterOperation,
     };
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use std::collections::{BTreeMap, BTreeSet};
@@ -602,9 +657,10 @@ mod tests {
                 PoolOperation::ReaderBootstrap,
                 PoolOperation::ReaderAuthorization,
                 PoolOperation::ReaderSubscriptionHistory,
+                PoolOperation::ReaderMaintenance,
             ]
         );
-        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 187);
+        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 216);
         assert_eq!(
             LockType::ALL.map(LockType::as_str),
             [
@@ -613,6 +669,7 @@ mod tests {
                 "push_gate",
                 "deletion",
                 "migration_schema_safety",
+                "partition_maintenance",
             ]
         );
         assert_eq!(
@@ -624,10 +681,11 @@ mod tests {
             [
                 "replace_parameterized_event",
                 "replace_addressable_event",
-                "publish_nip43_membership_locked",
                 "accept_push_lease_event",
                 "begin_community_deletion_quiescing",
                 "fence_community_deletion",
+                "community_archive_fence",
+                "inactive_community_fence",
             ]
         );
     }
@@ -861,6 +919,24 @@ mod tests {
         let _guard = metrics::set_default_local_recorder(&recorder);
 
         let attempt = PoolAcquireAttempt::start(PoolOperation::WriterTenantResolution, false);
+        let in_flight = snapshotter.snapshot().into_vec();
+        assert!(in_flight.iter().any(|(key, _, _, value)| {
+            let labels = key
+                .key()
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect::<BTreeMap<_, _>>();
+            matches!(value, DebugValue::Counter(1))
+                && key.key().name() == "buzz_db_pool_acquire_started_total"
+                && labels.get("pool_role") == Some(&"writer")
+                && labels.get("operation") == Some(&"tenant_resolution")
+        }));
+        assert!(
+            in_flight.iter().all(|(key, _, _, _)| {
+                key.key().name() != "buzz_db_pool_acquire_attempts_total"
+            }),
+            "the request-start signal must be observable before its terminal"
+        );
         drop(attempt);
         refresh_pool_waiters(true);
 
@@ -959,6 +1035,21 @@ mod tests {
             0
         );
 
+        for operation in [
+            TransactionOperation::CommunityArchiveFence,
+            TransactionOperation::InactiveCommunityFence,
+        ] {
+            let Err(error) = begin_transaction(&pool, operation).await else {
+                panic!("closed newly instrumented transaction seam errors");
+            };
+            assert!(matches!(error, sqlx::Error::PoolClosed));
+        }
+        assert_eq!(
+            legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
+            0,
+            "community lifecycle fences must not expand the legacy pool families"
+        );
+
         let error = acquire_writer_with_legacy_metrics(&pool, WriterOperation::EventWrite)
             .await
             .expect_err("closed legacy seam errors");
@@ -966,6 +1057,20 @@ mod tests {
         assert_eq!(
             legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
             1
+        );
+
+        let Err(error) =
+            begin_transaction(&pool, TransactionOperation::FenceCommunityDeletion).await
+        else {
+            panic!("closed legacy transaction seam errors");
+        };
+        assert!(matches!(error, sqlx::Error::PoolClosed));
+        // `snapshot()` drains counters, so each assertion sees only the
+        // acquisitions recorded since the previous snapshot.
+        assert_eq!(
+            legacy_acquisition_count(&snapshotter.snapshot().into_vec()),
+            1,
+            "pre-existing deletion fences keep their legacy pool population"
         );
     }
 
@@ -1395,8 +1500,10 @@ mod tests {
             .create_community_with_owner(
                 &format!("pool-operation-matrix-{}.invalid", Uuid::new_v4().simple()),
                 &"b".repeat(64),
+                &nostr::Keys::generate(),
             )
-            .await;
+            .await
+            .map(|write| write.outcome);
         let _ = writer_db
             .archive_community_owned_by(
                 "pool-operation-matrix.invalid",
@@ -1453,16 +1560,11 @@ mod tests {
         let _ = writer_db
             .query_events_routed("pool_operation_matrix_writer", &query)
             .await;
-        let write_tx = writer_db
-            .begin_event_write_transaction()
-            .await
-            .expect("event-write semantic entry point begins a real transaction");
-        write_tx
-            .rollback()
-            .await
-            .expect("rollback operation-label fixture");
+        // The scope is not a live community, so admission rejects it after the
+        // writer acquisition has been attributed to `event_write`.
+        let _ = writer_db.begin_event_write_transaction(test_scope).await;
         let _ = writer_db
-            .is_community_active_for_maintenance(test_scope)
+            .with_inactive_community_fence(test_scope, |_| ())
             .await;
         let _ = writer_db.usage_community_count().await;
         let _ = writer_db.reap_expired_ephemeral_channels().await;
@@ -1473,6 +1575,7 @@ mod tests {
         let _ = routed_db
             .query_events_routed("pool_operation_matrix_reader", &query)
             .await;
+        let _ = routed_db.usage_fleet_stock_snapshot().await;
         routed_db.refresh_pool_waiter_metrics();
 
         let snapshot = snapshotter.snapshot().into_vec();

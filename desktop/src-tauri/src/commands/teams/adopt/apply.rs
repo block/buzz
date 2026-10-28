@@ -442,6 +442,7 @@ fn member_copy(
         description: None,
         avatar_url: member.avatar_url.clone(),
         system_prompt: member.system_prompt.clone().unwrap_or_default(),
+        acp_command: member.acp_command.clone(),
         runtime: member.runtime.clone(),
         model: member.model.clone(),
         provider: member.provider.clone(),
@@ -482,6 +483,7 @@ fn member_copy(
             .flatten(),
         respond_to_allowlist: Vec::new(),
         parallelism: member.parallelism,
+        session_policy: member.session_policy,
         created_at: now.to_string(),
         updated_at: now.to_string(),
     })

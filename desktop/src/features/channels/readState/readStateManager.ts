@@ -530,7 +530,8 @@ export class ReadStateManager {
 
   private async startLiveSubscription(): Promise<void> {
     try {
-      const unsub = await this.relayClient.subscribeLive(
+      // Unread UI readiness depends on this subscription, not the cold backlog.
+      const unsub = await this.relayClient.subscribeInteractive(
         {
           kinds: [KIND_READ_STATE],
           authors: [this.pubkey],

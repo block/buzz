@@ -4,8 +4,11 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+
+import '../storage/secure_storage.dart';
 
 import '../community/community.dart';
 import '../relay/signed_event_relay.dart';
@@ -166,7 +169,7 @@ class BuzzPushLeaseRevocationStorage {
   final FlutterSecureStorage _secure;
 
   BuzzPushLeaseRevocationStorage({FlutterSecureStorage? secure})
-    : _secure = secure ?? const FlutterSecureStorage();
+    : _secure = secure ?? communitySecureStorage;
 
   Future<List<BuzzPushLeaseRevocationRecord>> loadAll() async {
     final raw = await _secure.read(key: _key);
@@ -292,11 +295,7 @@ class BuzzPushLeaseRevocationOutbox {
     final relayOrigin = canonicalBuzzPushRelayOrigin(relayUrl);
     final grants = await (readGrants ?? readBuzzPushEndpointGrants)();
     final matching = grants
-        .where(
-          (grant) =>
-              grant.relayOrigin == relayOrigin &&
-              grant.appProfile == buzzDevPushAppProfile,
-        )
+        .where((grant) => grant.relayOrigin == relayOrigin)
         .toList();
     if (matching.length != 1) {
       throw StateError(

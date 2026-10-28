@@ -3,6 +3,12 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
+import 'package:buzz/shared/channels/channel_list_snapshot.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+import 'package:buzz/shared/relay/relay_provider.dart' show RelayConfig;
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
@@ -42,23 +48,30 @@ void main() {
 
   tearDown(() => container.dispose());
 
-  ProviderContainer createContainer() {
+  ProviderContainer createContainer({
+    List<Override> overrides = const [],
+    CommunityPushLeaseRevocationEnqueuer? enqueueRevocation,
+  }) {
+    Future<void> writeSnapshot(List<Community> communities) async {
+      snapshots.add(List.of(communities));
+    }
+
     return ProviderContainer(
       overrides: [
         communityStorageProvider.overrideWithValue(communityStorage),
-        communitySnapshotWriterProvider.overrideWithValue((communities) async {
-          snapshots.add(List.of(communities));
-        }),
+        communitySnapshotWriterProvider.overrideWithValue(writeSnapshot),
         communityPushLeaseDeactivatorProvider.overrideWithValue(deactivator),
-        communityPushLeaseRevocationEnqueuerProvider.overrideWithValue((
-          community,
-        ) async {
-          journaledCommunityIds.add(community.id);
-          return true;
-        }),
+        communityPushLeaseRevocationEnqueuerProvider.overrideWithValue(
+          enqueueRevocation ??
+              (community) async {
+                journaledCommunityIds.add(community.id);
+                return true;
+              },
+        ),
         communityPushLeaseRevocationTriggerProvider.overrideWithValue(
           revocationTrigger,
         ),
+        ...overrides,
       ],
     );
   }
@@ -120,7 +133,7 @@ void main() {
     });
 
     test(
-      'push notifications default off and opt-in survives restart',
+      'push notifications default on and opt-out survives restart',
       () async {
         container = createContainer();
         await container.read(communityListProvider.future);
@@ -135,12 +148,12 @@ void main() {
           (await container.read(
             communityListProvider.future,
           )).single.pushNotificationsEnabled,
-          isFalse,
+          isTrue,
         );
 
         await container
             .read(communityListProvider.notifier)
-            .setPushNotificationsEnabled(community.id, true);
+            .setPushNotificationsEnabled(community.id, false);
         container.dispose();
         container = createContainer();
 
@@ -148,7 +161,7 @@ void main() {
           (await container.read(
             communityListProvider.future,
           )).single.pushNotificationsEnabled,
-          isTrue,
+          isFalse,
         );
       },
     );
@@ -204,10 +217,13 @@ void main() {
       final notifier = container.read(communityListProvider.notifier);
       await notifier.addCommunity(community);
 
-      await notifier.markPushLeaseAccepted(
-        community.id,
-        subscriptions: const [],
-        generation: 5,
+      expect(
+        await notifier.markPushLeaseAccepted(
+          community.id,
+          subscriptions: const [],
+          generation: 5,
+        ),
+        isFalse,
       );
 
       final stored = (await communityStorage.loadAll()).single;
@@ -215,6 +231,54 @@ void main() {
       expect(
         stored.pushSubscriptionState.accepted!.single.toJson(),
         subscription.toJson(),
+      );
+    });
+
+    test('lease success cannot accept stale desired subscriptions', () async {
+      container = createContainer();
+      await container.read(communityListProvider.future);
+      final original = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+        notificationClass: 'default',
+      );
+      final replacement = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['b' * 64]),
+        notificationClass: 'default',
+      );
+      final community =
+          Community.create(
+            name: 'Test',
+            relayUrl: 'https://test.example.com',
+          ).copyWith(
+            pushNotificationsEnabled: true,
+            pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+              desired: [original],
+            ),
+          );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+
+      final generation = await notifier.reservePushLeaseGeneration(
+        community.id,
+      );
+      await notifier.updateDesiredPushSubscriptions(community.id, [
+        replacement,
+      ]);
+
+      expect(
+        await notifier.markPushLeaseAccepted(
+          community.id,
+          subscriptions: [original],
+          generation: generation,
+        ),
+        isFalse,
+      );
+
+      final stored = (await communityStorage.loadAll()).single;
+      expect(stored.pushSubscriptionState.accepted, isNull);
+      expect(
+        stored.pushSubscriptionState.desired.single.toJson(),
+        replacement.toJson(),
       );
     });
 
@@ -374,6 +438,187 @@ void main() {
       expect(deactivatedCommunityIds, isEmpty);
       expect(revocationTriggers, 1);
     });
+
+    test(
+      'removal deletes the channel list snapshot and retires writers',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final keys = nostr.Keys.generate();
+        final community = Community.create(
+          name: 'Cached',
+          relayUrl: 'wss://cached.example.com:443',
+          pubkey: 'incorrect-declared-key',
+          nsec: '  ${keys.nsec}  ',
+        );
+        final otherScope = Community.create(
+          name: 'Other',
+          relayUrl: 'https://other.example.com',
+          nsec: keys.nsec,
+        );
+        final snapshots = ChannelListSnapshotStorage(prefs);
+        const snapshot = ChannelListSnapshot(channels: [], hiddenDmIds: {});
+        await communityStorage.save(community);
+        await communityStorage.save(otherScope);
+        // Use the actual provider writer origin, not the raw persisted URL.
+        final writerRelay = RelayConfig(baseUrl: community.relayUrl).baseUrl;
+        // A refresh captured its token before removal and writes after it.
+        final inFlight = snapshots.capture(keys.public, writerRelay);
+        await snapshots.write(inFlight, snapshot);
+        await snapshots.write(
+          snapshots.capture(keys.public, otherScope.relayUrl),
+          snapshot,
+        );
+        container = createContainer(
+          overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+        );
+        final notifier = container.read(communityListProvider.notifier);
+        await container.read(communityListProvider.future);
+
+        await notifier.removeCommunity(community.id);
+
+        expect(snapshots.read(keys.public, writerRelay), isNull);
+        expect(await snapshots.write(inFlight, snapshot), isFalse);
+        expect(snapshots.read(keys.public, writerRelay), isNull);
+        expect(snapshots.read(keys.public, otherScope.relayUrl), isNotNull);
+      },
+    );
+
+    test('startup does not wait for orphan disk deletes', () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = _SnapshotStore();
+      SharedPreferencesStorePlatform.instance = store;
+      final prefs = await SharedPreferences.getInstance();
+      final cache = ChannelListSnapshotStorage(prefs);
+      const snapshot = ChannelListSnapshot(channels: [], hiddenDmIds: {});
+      for (final id in ['orphan-a', 'orphan-b']) {
+        await cache.write(
+          cache.capture(id, 'https://orphan.example'),
+          snapshot,
+        );
+      }
+      final gate = store.removeGate = Completer<void>();
+      container = createContainer(
+        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+      );
+      expect(await container.read(communityListProvider.future), isEmpty);
+      // All old deletions are submitted before new scopes can start writers.
+      expect(store.removeAttempts, 2);
+      final token = cache.capture('orphan-b', 'https://orphan.example');
+      expect(await cache.write(token, snapshot), isTrue);
+      gate.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(await cache.write(token, snapshot), isTrue);
+      expect((await store.getAll()).values, [
+        prefs.getString(
+          ChannelListSnapshotStorage.key('orphan-b', 'https://orphan.example'),
+        ),
+      ]);
+    });
+
+    test('startup and credential replacement discard orphan snapshots', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final cache = ChannelListSnapshotStorage(prefs);
+      const snapshot = ChannelListSnapshot(channels: [], hiddenDmIds: {});
+      final oldKeys = nostr.Keys.generate();
+      final newKeys = nostr.Keys.generate();
+      final community = Community.create(
+        name: 'Stored',
+        relayUrl: 'wss://cached.example.com:443',
+        nsec: oldKeys.nsec,
+      );
+      await communityStorage.save(community);
+      final oldToken = cache.capture(oldKeys.public, community.relayUrl);
+      final restoredToken = cache.capture('restored', 'https://orphan.example');
+      await cache.write(oldToken, snapshot);
+      await cache.write(restoredToken, snapshot);
+      await prefs.setString('unrelated', 'keep');
+      container = createContainer(
+        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+      );
+      await container.read(communityListProvider.future);
+      expect(cache.read(oldKeys.public, community.relayUrl), isNotNull);
+      expect(cache.read('restored', 'https://orphan.example'), isNull);
+      expect(await cache.write(restoredToken, snapshot), isFalse);
+
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+      expect(cache.read(oldKeys.public, community.relayUrl), isNotNull);
+      expect(await cache.write(oldToken, snapshot), isTrue);
+      await notifier.addCommunity(community.copyWith(nsec: newKeys.nsec));
+      expect(cache.read(oldKeys.public, community.relayUrl), isNull);
+      expect(await cache.write(oldToken, snapshot), isFalse);
+      final newToken = cache.capture(newKeys.public, community.relayUrl);
+      await cache.write(newToken, snapshot);
+      await communityStorage.saveActiveId(community.id);
+      await notifier.removeActiveCommunityForSignOut();
+      expect(await communityStorage.loadAll(), isEmpty);
+      expect(prefs.getKeys(), {'unrelated'});
+      expect(await cache.write(newToken, snapshot), isFalse);
+
+      // A backup restored without secure community records is swept at startup.
+      container.dispose();
+      await prefs.setString(
+        ChannelListSnapshotStorage.key('restored', 'https://orphan.example'),
+        '{"v":1,"channels":[],"hidden_dm_ids":[]}',
+      );
+      container = createContainer(
+        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+      );
+      await container.read(communityListProvider.future);
+      expect(prefs.getKeys(), {'unrelated'});
+    });
+
+    for (final failure in ['false', 'throw']) {
+      test(
+        'cache delete $failure cannot block sign-out; cleanup retries',
+        () async {
+          SharedPreferences.setMockInitialValues({});
+          final store = _SnapshotStore();
+          SharedPreferencesStorePlatform.instance = store;
+          final prefs = await SharedPreferences.getInstance();
+          final keys = nostr.Keys.generate();
+          final community = Community.create(
+            name: 'Cached',
+            relayUrl: 'https://cache.example',
+            nsec: keys.nsec,
+          );
+          await communityStorage.save(community);
+          await communityStorage.saveActiveId(community.id);
+          final cache = ChannelListSnapshotStorage(prefs);
+          final token = cache.capture(keys.public, community.relayUrl);
+          const snapshot = ChannelListSnapshot(channels: [], hiddenDmIds: {});
+          await cache.write(token, snapshot);
+          container = createContainer(
+            overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+            enqueueRevocation: (community) async {
+              expect(store.removeAttempts, greaterThan(0));
+              journaledCommunityIds.add(community.id);
+              return true;
+            },
+          );
+          await container.read(communityListProvider.future);
+          store.failure = failure;
+          await container
+              .read(communityListProvider.notifier)
+              .removeActiveCommunityForSignOut();
+          expect(await communityStorage.loadAll(), isEmpty);
+          expect(await communityStorage.loadActiveId(), isNull);
+          expect(journaledCommunityIds, [community.id]);
+          expect(revocationTriggers, 1);
+          expect(await cache.write(token, snapshot), isFalse);
+          expect(
+            (await store.getAll()).keys,
+            isNotEmpty,
+          ); // Disk deletion failed.
+          store.failure = null;
+          container.invalidate(communityListProvider);
+          await container.read(communityListProvider.future);
+          expect(await store.getAll(), isEmpty);
+        },
+      );
+    }
 
     test('remote tombstone attempt cannot block local removal', () async {
       final remoteAttempt = Completer<void>();
@@ -633,6 +878,19 @@ void main() {
       expect(active.name, 'Test');
     });
 
+    test('falls back without persisting when active ID is missing', () async {
+      final community = Community.create(
+        name: 'Fallback',
+        relayUrl: 'https://test.example.com',
+      );
+      await communityStorage.save(community);
+      container = createContainer();
+
+      final active = await container.read(activeCommunityProvider.future);
+      expect(active?.id, community.id);
+      expect(await communityStorage.loadActiveId(), isNull);
+    });
+
     test('falls back to first community if active ID is invalid', () async {
       container = createContainer();
       await container.read(communityListProvider.future);
@@ -652,6 +910,23 @@ void main() {
       final active = await container.read(activeCommunityProvider.future);
       expect(active, isNotNull);
       expect(active!.id, ws.id);
+      expect(await communityStorage.loadActiveId(), 'nonexistent-id');
     });
   });
+}
+
+class _SnapshotStore extends InMemorySharedPreferencesStore {
+  _SnapshotStore() : super.empty();
+  String? failure;
+  int removeAttempts = 0;
+  Completer<void>? removeGate;
+  @override
+  Future<bool> remove(String key) async {
+    removeAttempts++;
+    if (failure == 'false') return false;
+    if (failure == 'throw') throw StateError('disk failure');
+    final removed = super.remove(key);
+    await removeGate?.future;
+    return removed;
+  }
 }

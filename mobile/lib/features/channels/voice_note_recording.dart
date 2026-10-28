@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
 import '../../shared/relay/media_image.dart';
+import '../../shared/widgets/app_route_observer.dart';
 
 /// Maximum duration accepted for a recorded voice note.
 const voiceNoteMaxDuration = Duration(minutes: 5);
@@ -25,7 +26,7 @@ const voiceNoteMaxDownloadBytes = 32 * 1024 * 1024;
 const voiceNotePlaybackRates = <double>[1, 1.5, 2, 0.5];
 
 /// Route observer used to cancel recording when its composer is covered.
-final voiceNoteRouteObserver = RouteObserver<ModalRoute<void>>();
+final voiceNoteRouteObserver = appRouteObserver;
 
 /// Returns the playback rate following [current] in the supported rate cycle.
 double nextVoiceNotePlaybackRate(double current) {

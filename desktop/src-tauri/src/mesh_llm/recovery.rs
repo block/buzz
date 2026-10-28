@@ -443,7 +443,9 @@ mod tests {
             id: pubkey.to_string(),
             display_name: pubkey.to_string(),
             avatar_url: None,
+            description: None,
             system_prompt: String::new(),
+            acp_command: None,
             runtime: None,
             model: None,
             provider: None,
@@ -470,6 +472,7 @@ mod tests {
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  claudeCodeModelLabel,
   deriveModelDiscoveryPending,
   getDiscoveredPersonaModelOptions,
   isCacheableDiscoveryResponse,
@@ -438,4 +439,131 @@ test("discoveredRow_defaultCatalogSuffixedName_winsOverRegistry", () => {
   assert.deepEqual(options.slice(1), [
     { id: "databricks-gpt-5-5", label: "GPT-5.5 (default catalog)" },
   ]);
+});
+
+test("Claude Code options keep the adapter's name and description, and label the default row by name", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      agentDefaultModel: "opus[1m]",
+      models: [
+        {
+          id: "opus[1m]",
+          name: "Opus",
+          description:
+            "Opus with 1M context · Best for everyday, complex tasks",
+        },
+        { id: "haiku", name: "Haiku", description: "Haiku 4.5 · Fastest" },
+        { id: "claude-sonnet-4-6", name: "Sonnet 4.6", description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options, [
+    { id: "", label: "Default model (Opus)" },
+    {
+      id: "opus[1m]",
+      label: "Opus",
+      description: "Opus with 1M context · Best for everyday, complex tasks",
+    },
+    { id: "haiku", label: "Haiku", description: "Haiku 4.5 · Fastest" },
+    { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+  ]);
+});
+
+test('a harness "default" agent default reads plain Default model and keeps its description', () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      agentDefaultModel: "default",
+      models: [
+        {
+          id: "default",
+          name: "Default (recommended)",
+          description: "Opus 4.8 · Most capable",
+        },
+        { id: "haiku", name: "Haiku", description: null },
+      ],
+    }),
+    "",
+    "claude",
+  );
+
+  assert.deepEqual(options, [
+    { id: "", label: "Default model", description: "Opus 4.8 · Most capable" },
+    { id: "haiku", label: "Haiku" },
+  ]);
+});
+
+test("Claude Code runtime labels full model ids with the shared formatter", () => {
+  const models = [
+    ["opus[1m]", "Opus"],
+    ["claude-fable-5-1[1m]", "Fable"],
+    ["claude-sonnet-5", "Sonnet"],
+    ["claude-sonnet-4-6", "Sonnet 4.6"],
+    ["claude-sonnet-4-6[2m]", "Sonnet 4.6 (2M)"],
+    ["haiku", "Haiku"],
+  ].map(([id, name]) => ({ id, name, description: null }));
+  const claudeResponse = response({
+    agentName: "@agentclientprotocol/claude-agent-acp",
+    agentDefaultModel: "claude-sonnet-5",
+    models,
+  });
+
+  const labels = (runtimeId) =>
+    getDiscoveredPersonaModelOptions(claudeResponse, "", runtimeId).map(
+      (option) => option.label,
+    );
+
+  assert.deepEqual(labels("claude"), [
+    "Default model (Claude Sonnet 5)",
+    "Opus",
+    "Claude Fable 5.1 (1M context)",
+    "Claude Sonnet 5",
+    "Claude Sonnet 4.6",
+    "Sonnet 4.6 (2M)",
+    "Haiku",
+  ]);
+  // Other runtimes keep the adapter's names.
+  assert.deepEqual(
+    labels("codex").slice(1),
+    models.map((m) => m.name),
+  );
+});
+
+test("claudeCodeModelLabel rejects short names, unknown suffixes, and non-ASCII", () => {
+  assert.equal(claudeCodeModelLabel("claude-opus-5-5"), "Claude Opus 5.5");
+  assert.equal(
+    claudeCodeModelLabel(" CLAUDE-OPUS-5-5[1M] "),
+    "Claude Opus 5.5 (1M context)",
+  );
+  for (const id of [
+    "opus",
+    "opus[1m]",
+    "default",
+    "claude-opus-5-5[beta]",
+    "claude-öpus-5-5",
+    "\u00a0claude-opus-5-5\u00a0",
+    "\ufeffclaude-opus-5-5[1m]\u2003",
+  ]) {
+    assert.equal(claudeCodeModelLabel(id), null, id);
+  }
+});
+
+test("Claude Code rows with non-ASCII edge whitespace keep the adapter name", () => {
+  const id = "\ufeffclaude-opus-5-5[1m]\u2003";
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      agentDefaultModel: "\u00a0claude-opus-5-5\u00a0",
+      models: [
+        { id, name: "Opus 1M", description: null },
+        { id: "claude-opus-5-5", name: "Opus", description: null },
+      ],
+    }),
+    "",
+    "claude",
+  );
+  assert.deepEqual(
+    options.map((option) => option.label),
+    ["Default model (Opus)", "Opus 1M", "Claude Opus 5.5"],
+  );
 });
