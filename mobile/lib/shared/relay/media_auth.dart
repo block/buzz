@@ -126,7 +126,7 @@ class MediaGetAuthService {
       content: 'Get buzz-media',
       tags: tags,
       secretKey: privkeyHex,
-      // Deriving the pubkey costs about a third of a signature, per image.
+      // Reuse the cached pubkey rather than deriving it per image.
       pubkey: _pubkey,
     );
   }

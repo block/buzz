@@ -1025,6 +1025,7 @@ mobile-test:
     /bin/bash ./scripts/test-mobile-gateway-recipes.sh
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test test/shared/push/push_unconfigured_build_test.dart
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}}/packages/buzz_secp256k1 && dart pub get && dart test
 
 # Regenerate the emoji dataset asset from desktop's emoji-mart install.
 # Output is committed — rerun after bumping @emoji-mart/data.
