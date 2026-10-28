@@ -5,16 +5,31 @@ class _CommunityLinkForm extends HookConsumerWidget {
     required this.onOpen,
     required this.onBack,
     this.onCreate,
+    this.controller,
+    this.focusNode,
+    this.showBack = true,
+    this.fullPage = false,
+    this.autofocus = true,
+    this.showHeading = true,
+    this.layoutBuilder,
   });
 
   final ValueChanged<String>? onCreate;
+  final TextEditingController? controller;
+  final FocusNode? focusNode;
+  final bool showBack;
+  final bool fullPage;
+  final bool autofocus;
+  final bool showHeading;
+  final Widget Function(Widget fields, Widget action)? layoutBuilder;
 
   final ValueChanged<Uri> onOpen;
   final VoidCallback? onBack;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final controller = useTextEditingController();
+    final localController = useTextEditingController();
+    final controller = this.controller ?? localController;
     final error = useState<String?>(null);
 
     final flow = HostedEnvironment.enabled
@@ -56,9 +71,62 @@ class _CommunityLinkForm extends HookConsumerWidget {
       onOpen(link);
     }
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
+    void changed(String _) {
+      error.value = null;
+      if (failed) unawaited(flow.leave());
+    }
+
+    final problem =
+        error.value ?? (failed ? hostedFlowProblemMessage(flow.problem) : null);
+    final iosInput = fullPage && defaultTargetPlatform == TargetPlatform.iOS;
+
+    final fields = <Widget>[
+      if (fullPage && showHeading) ...[
+        Text(
+          'Enter a community link',
+          style: context.textTheme.headlineSmall?.copyWith(
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: Grid.xs),
+        Text(
+          'Paste an invite link or community address.',
+          style: context.textTheme.titleLarge?.copyWith(
+            color: context.colors.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: Grid.lg),
+      ],
+      if (iosInput) ...[
+        CupertinoTextField(
+          key: const Key('community-link-input'),
+          controller: controller,
+          focusNode: focusNode,
+          autofocus: fullPage && autofocus,
+          enabled: !busy,
+          placeholder: 'Community link or address',
+          placeholderStyle: context.textTheme.titleLarge?.copyWith(
+            color: CupertinoColors.placeholderText.resolveFrom(context),
+          ),
+          keyboardType: TextInputType.url,
+          textInputAction: TextInputAction.go,
+          autocorrect: false,
+          enableSuggestions: false,
+          padding: const EdgeInsets.symmetric(vertical: Grid.xs),
+          style: context.textTheme.titleLarge?.copyWith(
+            color: context.colors.onSurface,
+          ),
+          cursorColor: context.colors.primary,
+          decoration: null,
+          onChanged: changed,
+          onSubmitted: (_) => submit(),
+        ),
+        if (problem != null)
+          Padding(
+            padding: const EdgeInsets.only(top: Grid.xs),
+            child: Text(problem, style: TextStyle(color: context.colors.error)),
+          ),
+      ] else
         TextField(
           key: Key(
             onCreate != null
@@ -66,14 +134,18 @@ class _CommunityLinkForm extends HookConsumerWidget {
                 : 'community-link-input',
           ),
           controller: controller,
+          focusNode: focusNode,
+          autofocus: fullPage && autofocus,
           enabled: !busy,
           keyboardType: TextInputType.url,
           textInputAction: TextInputAction.go,
           autocorrect: false,
           enableSuggestions: false,
-          style: context.textTheme.bodyMedium?.copyWith(
-            color: context._onboardingInk,
-          ),
+          style:
+              (fullPage
+                      ? context.textTheme.titleLarge
+                      : context.textTheme.bodyMedium)
+                  ?.copyWith(color: context._onboardingInk),
           cursorColor: context._onboardingInk,
           decoration: InputDecoration(
             labelText: onCreate != null
@@ -98,27 +170,64 @@ class _CommunityLinkForm extends HookConsumerWidget {
               borderSide: BorderSide(color: context._onboardingInk),
             ),
           ),
-          onChanged: (_) {
-            error.value = null;
-            if (failed) unawaited(flow.leave());
-          },
+          onChanged: changed,
           onSubmitted: (_) => submit(),
         ),
+    ];
+    final action = FilledButton(
+      style: fullPage
+          ? FilledButton.styleFrom(
+              backgroundColor: layoutBuilder == null
+                  ? context.colors.primary
+                  : Colors.transparent,
+              shadowColor: Colors.transparent,
+              animationDuration: Duration.zero,
+              foregroundColor: context.colors.onPrimary,
+              minimumSize: const Size.fromHeight(52),
+              shape: const StadiumBorder(),
+            )
+          : context._onboardingGlassButtonStyle,
+      onPressed: busy || (failed && !flow.canRetry) ? null : submit,
+      child: Text(busy ? 'Connecting…' : 'Continue'),
+    );
+    if (layoutBuilder != null) {
+      return layoutBuilder!(
+        SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: fields,
+          ),
+        ),
+        action,
+      );
+    }
+    return Column(
+      mainAxisSize: fullPage ? MainAxisSize.max : MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (fullPage)
+          Expanded(
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: fields,
+              ),
+            ),
+          )
+        else
+          ...fields,
         const SizedBox(height: Grid.xs),
-        FilledButton(
-          style: context._onboardingGlassButtonStyle,
-          onPressed: busy || (failed && !flow.canRetry) ? null : submit,
-          child: Text(busy ? 'Connecting…' : 'Continue'),
-        ),
+        action,
         const SizedBox(height: Grid.xxs),
-        TextButton(
-          style: context._onboardingGhostButtonStyle,
-          onPressed: () {
-            unawaited(flow?.leave());
-            onBack?.call();
-          },
-          child: const Text('Back'),
-        ),
+        if (showBack)
+          TextButton(
+            style: context._onboardingGhostButtonStyle,
+            onPressed: () {
+              unawaited(flow?.leave());
+              onBack?.call();
+            },
+            child: const Text('Back'),
+          ),
       ],
     );
   }

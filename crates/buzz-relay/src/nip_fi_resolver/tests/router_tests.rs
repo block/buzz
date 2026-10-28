@@ -761,8 +761,8 @@ mod postgres_tests {
         assert_eq!(p.every_site(Some(crossing)).await, vec![unavailable(); 3]);
     }
 
-    /// Each `buzz_nip_fi_shadow_total` series recorded while `run` ran, as
-    /// sorted `route/stage/outcome` labels.
+    /// Each `buzz_nip_fi_shadow_total` increment recorded while `run` ran, as
+    /// sorted `route/stage/outcome` labels, one entry per count.
     async fn shadow_records<F: std::future::Future>(run: F) -> (F::Output, Vec<String>) {
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let output = {
@@ -775,12 +775,17 @@ mod postgres_tests {
             .into_vec()
             .into_iter()
             .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_shadow_total")
-            .map(|(key, ..)| {
+            .flat_map(|(key, _, _, value)| {
+                crate::nip_fi_shadow::tests::assert_shadow_schema(key.key());
                 let label = |name: &str| {
                     let label = key.key().labels().find(|l| l.key() == name);
                     label.map(|l| l.value().to_owned()).unwrap_or_default()
                 };
-                format!("{}/{}/{}", label("route"), label("stage"), label("outcome"))
+                let metrics_util::debugging::DebugValue::Counter(count) = value else {
+                    panic!("{key:?} is not a counter");
+                };
+                let record = format!("{}/{}/{}", label("route"), label("stage"), label("outcome"));
+                std::iter::repeat_n(record, usize::try_from(count).expect("count"))
             })
             .collect();
         records.sort();
@@ -813,5 +818,78 @@ mod postgres_tests {
                 "ws/deadline/unavailable"
             ]
         );
+    }
+
+    // A router-guard would-deny is counted at once, but its line names the
+    // NIP-98 key the handler later verifies, or `absent` without one.
+    // Mutation: dropping the handler's `prove_guard` logs `absent` for both
+    // signed requests.
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn shadow_guard_would_deny_logs_the_key_the_handler_proves() {
+        let keys = nostr::Keys::generate();
+        let proven = format!("pubkey=\"{}\"", keys.public_key().to_hex());
+        let absent = "pubkey=\"absent\"".to_owned();
+        // (signed, token, Host in the community map, record, reason, key)
+        let cases = [
+            (
+                true,
+                true,
+                false,
+                "http/community/unavailable",
+                "community_unresolved",
+                &proven,
+            ),
+            (
+                true,
+                false,
+                true,
+                "http/assertion/missing",
+                "missing_assertion",
+                &proven,
+            ),
+            (
+                false,
+                false,
+                true,
+                "http/assertion/missing",
+                "missing_assertion",
+                &absent,
+            ),
+        ];
+        for (signed, token, mapped, record, reason, pubkey) in cases {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let (records, lines) = crate::nip_fi_shadow::tests::would_deny_lines(|| {
+                rt.block_on(async {
+                    let (store, clock) = setup();
+                    let p = tenant_pod(&store, &clock, NipFiMode::Shadow).await;
+                    let raw_host = host(&p.label);
+                    if !mapped {
+                        store.unbind(&p.label);
+                        p.pod.resolver.refresh().await.expect("refresh");
+                    }
+                    let workflow = format!("/workflows/{}/runs", uuid::Uuid::new_v4());
+                    let tls = p.pod.state.config.relay_url.starts_with("wss://");
+                    let scheme = if tls { "https" } else { "http" };
+                    let url = format!("{scheme}://{raw_host}{workflow}");
+                    let token = token.then(|| mint_for(ISS, &raw_host, &keys.public_key()));
+                    let proof = signed.then(|| nip98(&keys, &url));
+                    let send = p
+                        .pod
+                        .send_signed(&workflow, &raw_host, token.as_deref(), proof);
+                    shadow_records(send).await.1
+                })
+            });
+            assert_eq!(records, [record], "{reason}");
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(
+                lines[0].contains(&format!("reason=\"{reason}\"")),
+                "{lines:?}"
+            );
+            assert!(lines[0].contains(pubkey.as_str()), "{lines:?}");
+        }
     }
 }

@@ -42,8 +42,6 @@ import 'features/settings/theme_picker_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
-import 'shared/push/push_subscription_provider.dart';
-import 'shared/push/push_relay_capability_provider.dart';
 import 'shared/relay/relay.dart';
 import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
@@ -247,9 +245,9 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
           .read(_inviteRelayConnectedProvider(scope.relayHttpOrigin).future)
           .timeout(const Duration(seconds: 15));
       ensureScopeCurrent();
-      await ref.read(channelsProvider.notifier).refresh(fetchDirectory: true);
-      ensureScopeCurrent();
-      final channels = await ref.read(channelsProvider.future);
+      final channels = await ref
+          .read(channelsProvider.notifier)
+          .fetchFresh(fetchDirectory: true);
       ensureScopeCurrent();
       return channels;
     },
@@ -336,11 +334,6 @@ class App extends HookConsumerWidget {
       ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
       ref.listen(userStatusCacheProvider, (_, _) {});
-      if (ref.watch(activeCommunityProvider).value?.pushNotificationsEnabled ==
-              true &&
-          ref.watch(currentRelayPushDescriptorProvider).value != null) {
-        ref.watch(pushSubscriptionSyncProvider);
-      }
       hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
       hasUnreadSolo = ref.watch(
         meUnreadChannelIdsProvider.select((ids) => ids.isNotEmpty),

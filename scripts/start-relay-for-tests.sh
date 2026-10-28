@@ -103,6 +103,10 @@ export PGSCHEMA_PLAN_DB=buzz
 export PGSCHEMA_PLAN_USER=buzz
 export PGSCHEMA_PLAN_PASSWORD=buzz_dev
 
+# This database persists across runs. One reconciled before the events_pkey
+# repair existed would fail apply, so repair it first (see the script).
+docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
+  psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 < scripts/repair-events-pkey.sql
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
 docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
   psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 < scripts/reconcile-schema-after-pgschema.sql
@@ -168,7 +172,7 @@ if [[ "${BUZZ_REQUIRE_RELAY_MEMBERSHIP:-}" == "true" ]]; then
 fi
 
 nohup env \
-  DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+  DATABASE_URL="postgres://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}" \
   REDIS_URL=redis://localhost:6379 \
   RELAY_URL=ws://localhost:3000 \
   BUZZ_BIND_ADDR=0.0.0.0:3000 \

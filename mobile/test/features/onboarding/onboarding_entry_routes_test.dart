@@ -10,6 +10,7 @@ import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/identity_transfer/nsec_import_sheet.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
@@ -46,6 +47,7 @@ void main() {
     });
     var probes = 0;
     final inventoryStorage = _EnumerationStorage();
+    Completer<void>? pendingProbe;
     await tester.pumpWidget(
       WidgetHelpers.testable(
         disableAnimations: true,
@@ -57,6 +59,7 @@ void main() {
               accountStore: AccountIdentityStore(storage: inventoryStorage),
               probe: (_) async {
                 probes++;
+                await pendingProbe?.future;
               },
             ),
           ),
@@ -92,7 +95,12 @@ void main() {
     }
 
     Future<void> pair() async {
-      await tester.tap(find.text('Use pairing code').hitTestable());
+      final trigger = find
+          .byKey(const Key('developer-pairing-trigger'))
+          .hitTestable();
+      await tester.tap(trigger);
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(trigger);
       await tester.pumpAndSettle();
       await tester.enterText(
         find.byType(TextField).hitTestable(),
@@ -115,12 +123,14 @@ void main() {
       // A root-navigator choice modal must remain actionable above pushed Add.
       f.rows = [f.row('one'), f.row('two')];
       f.beforeAdmission = (name) async {
-        if (name == 'two') throw const SavedCommunityIdentityConflict();
+        if (name == 'two.communities.buzz.xyz') {
+          throw const SavedCommunityIdentityConflict();
+        }
       };
       await openEntry();
       await tester.tap(find.text('Continue with Builderlab').hitTestable());
       await tester.pumpAndSettle();
-      expect(f.admitted, ['one']);
+      expect(f.admitted, ['one.communities.buzz.xyz']);
       expect(f.flow.stage, HostedFlowStage.communityConflict);
       expect(
         find.text('Keep saved identity and skip').hitTestable(),
@@ -130,11 +140,23 @@ void main() {
       await tester.tap(find.text('Back to choices').hitTestable());
       await tester.pumpAndSettle();
       expect(find.byType(CheckboxListTile).hitTestable(), findsOneWidget);
-      expect(find.text('two').hitTestable(), findsOneWidget);
+      expect(
+        (tester
+                    .widget<CheckboxListTile>(
+                      find.byType(CheckboxListTile).hitTestable(),
+                    )
+                    .title
+                as Text)
+            .data,
+        'two.communities.buzz.xyz',
+      );
       f.beforeAdmission = null;
       await tester.tap(find.text('Continue').hitTestable());
       await tester.pumpAndSettle();
-      expect(f.admitted, ['one', 'two']);
+      expect(f.admitted, [
+        'one.communities.buzz.xyz',
+        'two.communities.buzz.xyz',
+      ]);
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Add community').hitTestable(), findsOneWidget);
       f.admitted.clear();
@@ -171,6 +193,7 @@ void main() {
       await tester.tap(find.text('Try again').hitTestable());
       await tester.pumpAndSettle();
       expect(f.admitted, ['paired']);
+      expect(f.remembered, contains('wss://paired.communities.buzz.xyz'));
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Add community').hitTestable(), findsOneWidget);
 
@@ -225,9 +248,68 @@ void main() {
     await tester.tap(find.text('Continue').hitTestable());
     await tester.pumpAndSettle();
     expect(find.text('Import a Nostr key').hitTestable(), findsOneWidget);
-    await tester.tap(find.text('Previous device identity').hitTestable());
+    final joinRoute = ModalRoute.of(
+      tester.element(find.byType(SelfHostedEntrySheet)),
+    );
+    final joinHeight = tester.getSize(find.byType(SelfHostedEntrySheet)).height;
+    await tester.tap(find.text('Import a Nostr key').hitTestable());
+    await tester.pumpAndSettle();
+    expect(find.byType(BuzzSheetHeader), findsOneWidget);
+    expect(find.text('Import identity'), findsOneWidget);
+    expect(
+      ModalRoute.of(tester.element(find.byType(NsecImportSheet))),
+      same(joinRoute),
+    );
+    expect(
+      tester.getSize(find.byType(SelfHostedEntrySheet)).height,
+      greaterThan(joinHeight),
+    );
+    await tester.tap(find.byTooltip('Close sheet'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SelfHostedEntrySheet), findsOneWidget);
+    expect(find.byType(NsecImportSheet), findsNothing);
+    expect(find.text('Join community'), findsOneWidget);
+    expect(
+      tester.getSize(find.byType(SelfHostedEntrySheet)).height,
+      joinHeight,
+    );
+    await tester.tap(find.text('Import a Nostr key').hitTestable());
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(NsecImportSheet),
+        matching: find.byType(TextField),
+      ),
+      f.keys.nsec,
+    );
+    await tester.tap(find.text('Preview identity'));
+    await tester.pumpAndSettle();
+    expect(probes, 0);
+    pendingProbe = Completer<void>();
+    await tester.tap(find.text('Import this identity'));
     await tester.pumpAndSettle();
     expect(probes, 1);
+    await tester.tap(find.byTooltip('Close sheet'));
+    await tester.pumpAndSettle();
+    pendingProbe.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('Join community'), findsOneWidget);
+    expect(await container.read(communityStorageProvider).loadAll(), isEmpty);
+    pendingProbe = null;
+    await tester.tap(find.text('Import a Nostr key').hitTestable());
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(NsecImportSheet),
+        matching: find.byType(TextField),
+      ),
+      f.keys.nsec,
+    );
+    await tester.tap(find.text('Preview identity'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import this identity'));
+    await tester.pumpAndSettle();
+    expect(probes, 2);
     expect(find.byType(SelfHostedEntrySheet), findsNothing);
     expect(find.byType(OnboardingAppEntry), findsNothing);
     expect(find.text('Add community').hitTestable(), findsOneWidget);
@@ -251,7 +333,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(OnboardingAppEntry), findsNothing);
     expect(find.text('Add community').hitTestable(), findsOneWidget);
-    expect(probes, 1);
+    expect(probes, 2);
     expect(
       await container.read(communityStorageProvider).loadActiveId(),
       saved.single.id,

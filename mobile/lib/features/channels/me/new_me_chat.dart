@@ -8,6 +8,8 @@ class _NewMeChat extends HookConsumerWidget {
     final pending = useMemoized(() => MeChatCreation.pending(sync));
     final name = useTextEditingController(text: pending?.name ?? '');
     final selected = useState<String?>(pending?.agent);
+    final project = useState<String?>(pending?.project);
+    final groups = ref.watch(meGroupsProvider);
     final channelId = useMemoized(() => pending?.id ?? const Uuid().v4());
     final frozenName = useState<String?>(pending?.name);
     final frozenAgent = useState<String?>(pending?.agent);
@@ -26,10 +28,15 @@ class _NewMeChat extends HookConsumerWidget {
       );
     }
     final choices = directory.asData?.value ?? [];
-    final chosen = choices
-        .where((agent) => agent.pubkey == selected.value)
-        .firstOrNull;
     final profile = ref.watch(userCacheProvider)[selected.value];
+    final chosen =
+        choices.where((agent) => agent.pubkey == selected.value).firstOrNull ??
+        (frozenAgent.value == null
+            ? null
+            : AgentDirectoryEntry(
+                pubkey: frozenAgent.value!,
+                displayName: profile?.label ?? frozenAgent.value!,
+              ));
     return SingleChildScrollView(
       padding: EdgeInsets.fromLTRB(
         Grid.gutter,
@@ -52,6 +59,34 @@ class _NewMeChat extends HookConsumerWidget {
             onChanged: (_) => error.value = null,
           ),
           const SizedBox(height: Grid.xs),
+          DropdownButtonFormField<String>(
+            key: const ValueKey('new-session-project'),
+            initialValue: project.value ?? '',
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: 'Project'),
+            items: [
+              const DropdownMenuItem(value: '', child: Text('No project')),
+              for (final group
+                  in groups.asData?.value.groups ?? <Map<String, dynamic>>[])
+                DropdownMenuItem(
+                  value: group['id'] as String,
+                  child: Text(group['name'] as String),
+                ),
+              if (project.value != null &&
+                  !(groups.asData?.value.groups ?? []).any(
+                    (group) => group['id'] == project.value,
+                  ))
+                DropdownMenuItem(
+                  value: project.value,
+                  child: const Text('Unavailable project'),
+                ),
+            ],
+            onChanged:
+                busy.value || frozenName.value != null || !groups.hasValue
+                ? null
+                : (value) => project.value = value == '' ? null : value,
+          ),
+          const SizedBox(height: Grid.xs),
           AppListRowRaw(
             key: const ValueKey('new-session-assistant'),
             leading: chosen == null
@@ -62,10 +97,9 @@ class _NewMeChat extends HookConsumerWidget {
                     isAgent: true,
                     backgroundColor: context.controlSurface,
                     fallback: Text(
-                      profile?.initial ??
-                          (chosen.displayName?.isNotEmpty == true
-                              ? chosen.displayName![0]
-                              : 'A'),
+                      chosen.displayName?.trim().isNotEmpty == true
+                          ? chosen.displayName!.trim()[0].toUpperCase()
+                          : profile?.initial ?? 'A',
                     ),
                   ),
             title: Text(chosen?.displayName ?? 'Choose an agent'),
@@ -130,6 +164,7 @@ class _NewMeChat extends HookConsumerWidget {
                         channelId,
                         frozenName.value!,
                         frozenAgent.value!,
+                        project.value,
                       );
                       if (context.mounted) {
                         Navigator.of(

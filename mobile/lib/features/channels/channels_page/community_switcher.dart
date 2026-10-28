@@ -9,12 +9,15 @@ const _communityRevealDuration = Duration(milliseconds: 160);
 const _communityCenteredAvatarSize = _communityGridAvatarSize * 1.5;
 
 // Readiness follows the data that determines the landing page's layout. Live
-// messages continue to sync normally after this first usable snapshot.
+// messages continue to sync normally after this first usable snapshot. The
+// header's own profile avatar hydrates independently and never gates landing.
+// Cached destinations use local layout/read preferences immediately. Remote
+// changes may reorder the list or update badges after reveal; offline landing
+// must not wait for those relay reads.
 final _communityContentReadyProvider = Provider.autoDispose<AsyncValue<bool>>((
   ref,
 ) {
   final channels = ref.watch(channelsProvider);
-  final profile = ref.watch(profileProvider);
   final community = ref.watch(activeCommunityProvider).unwrapPrevious().value;
   final sections = ref.watch(channelSectionsProvider).isReady;
   final stars = ref.watch(channelStarsProvider).isReady;
@@ -22,6 +25,10 @@ final _communityContentReadyProvider = Provider.autoDispose<AsyncValue<bool>>((
   final mutes = ref.watch(channelMutesProvider).isReady;
   final readState = ref.watch(readStateProvider).isReady;
   final hasIdentity = ref.watch(myPubkeyProvider) != null;
+  // A restored snapshot lands with the local section/star/sort/mute/read state
+  // already applied; their remote catch-up continues after reveal. Watching
+  // channelsProvider above re-evaluates this when the snapshot is installed.
+  final cached = ref.read(channelsProvider.notifier).hasCachedSnapshot;
   if (!channels.isLoading && channels.hasError) {
     return AsyncError(channels.error!, channels.stackTrace!);
   }
@@ -29,8 +36,9 @@ final _communityContentReadyProvider = Provider.autoDispose<AsyncValue<bool>>((
     community != null &&
         channels.hasValue &&
         !channels.isLoading &&
-        !profile.isLoading &&
-        (!hasIdentity || (sections && stars && sort && mutes && readState)),
+        (!hasIdentity ||
+            cached ||
+            (sections && stars && sort && mutes && readState)),
   );
 });
 
@@ -168,21 +176,19 @@ class CommunitySwitcherPage extends HookConsumerWidget {
       if (!arriving) unawaited(HapticFeedback.selectionClick());
       final animate = !reducedMotion && (arriving || destination != null);
       try {
-        // Relay teardown, credential changes and provider hydration must not
-        // compete with the grid-to-center motion on the UI isolate.
-        if (animate && !arriving) {
-          await centering.forward(from: 0).orCancel;
-        } else {
-          centering.value = 1;
-        }
-        if (!context.mounted) return;
-        await WidgetsBinding.instance.endOfFrame;
-        if (!context.mounted) return;
-        if (!arriving) {
-          await ref
-              .read(communityListProvider.notifier)
-              .switchCommunity(community.id);
-        }
+        // Storage and relay teardown are asynchronous I/O, so they overlap the
+        // grid-to-center motion. Both settle before any failure is handled, so
+        // the picker never resets while one of them is still running.
+        await Future.wait<void>([
+          if (animate && !arriving)
+            centering.forward(from: 0).orCancel
+          else
+            Future.sync(() => centering.value = 1),
+          if (!arriving)
+            ref
+                .read(communityListProvider.notifier)
+                .switchCommunity(community.id),
+        ]);
         if (!context.mounted) return;
         await ref.read(activeCommunityProvider.future);
         if (!context.mounted) return;

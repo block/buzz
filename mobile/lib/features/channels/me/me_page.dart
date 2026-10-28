@@ -6,6 +6,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../shared/profile/user_cache_provider.dart';
+import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/animated_avatar.dart';
 import '../../../shared/widgets/app_list.dart';
 import '../../../shared/widgets/concentric_sheet_surface.dart';
@@ -18,6 +19,7 @@ import '../../../shared/me/me_groups.dart';
 import '../../../shared/me/me_chat_creation.dart';
 import '../../../shared/me/me_project_creation.dart';
 import '../../../shared/me/me_sync.dart';
+import '../../../shared/relay/relay.dart';
 import '../../../shared/me/me_recovery.dart';
 import '../../../shared/me/me_assistants.dart';
 import '../../../shared/theme/theme.dart';
@@ -68,6 +70,7 @@ class MePage extends HookConsumerWidget {
       return null;
     }, [assistants]);
     final groups = ref.watch(meGroupsProvider);
+    final viewer = ref.watch(myPubkeyProvider);
     final offlineSaveFailed =
         ref.watch(meOfflineSaveWarningProvider).value ?? false;
     final syncClosed = ref.watch(meSyncWarningProvider).value ?? false;
@@ -196,7 +199,7 @@ class MePage extends HookConsumerWidget {
                       (c) =>
                           c.isMember &&
                           !c.isArchived &&
-                          organization.channels.contains(c.id),
+                          c.isPersonalChat(viewer, organization.channels),
                     )
                     .toList()
                   ..sort(
@@ -229,8 +232,7 @@ class MePage extends HookConsumerWidget {
                       Grid.gutter - Grid.xxs,
                       topSectionHeight + Grid.xxs,
                       Grid.gutter - Grid.xxs,
-                      organization.channels.isEmpty &&
-                              organization.groups.isEmpty
+                      visible.isEmpty && organization.groups.isEmpty
                           ? 0
                           : MediaQuery.viewPaddingOf(context).bottom +
                                 Grid.gutter,
@@ -297,7 +299,7 @@ class MePage extends HookConsumerWidget {
                                 ),
                             ],
                           ),
-                        if (organization.channels.isNotEmpty ||
+                        if (visible.isNotEmpty ||
                             organization.groups.isNotEmpty)
                           MeSection(
                             key: const ValueKey('me-ungrouped-chats'),
@@ -324,8 +326,7 @@ class MePage extends HookConsumerWidget {
                       ],
                     ),
                   ),
-                  if (organization.channels.isEmpty &&
-                      organization.groups.isEmpty)
+                  if (visible.isEmpty && organization.groups.isEmpty)
                     SliverFillRemaining(
                       hasScrollBody: false,
                       child: Padding(

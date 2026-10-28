@@ -206,7 +206,9 @@ async fn nip_fi_assertion_guard(
         (Ok(()), Ok(community)) => {
             crate::nip_fi_http::with_resolved_community(Ok(community), next.run(request)).await
         }
-        (Err((_, class)), _) | (Ok(()), Err(class)) => http_denial(class),
+        (Err(crate::nip_fi_shadow::WouldDeny { class, .. }), _) | (Ok(()), Err(class)) => {
+            http_denial(class)
+        }
     }
 }
 
@@ -222,19 +224,20 @@ fn nip_fi_guard_steps(
     headers: &axum::http::HeaderMap,
     community: Result<&buzz_auth::CommunityBinding, &buzz_auth::DenialClass>,
 ) -> Result<(), crate::nip_fi_shadow::WouldDeny> {
-    let community = community.map_err(|class| (crate::nip_fi_shadow::Stage::Community, *class))?;
+    let community = community.map_err(|class| {
+        crate::nip_fi_shadow::WouldDeny::new(
+            crate::nip_fi_shadow::Stage::Community,
+            *class,
+            crate::nip_fi_shadow::UNRESOLVED,
+        )
+    })?;
     crate::nip_fi_core::evaluate_attached_assertion(
         headers,
         community,
         state.nip_fi_verifier.as_deref(),
     )
     .map(drop)
-    .map_err(|rejection| {
-        (
-            crate::nip_fi_shadow::Stage::Assertion,
-            rejection.denial_class(),
-        )
-    })
+    .map_err(crate::nip_fi_shadow::WouldDeny::assertion)
 }
 
 /// Paths the assertion guard never checks.
@@ -650,7 +653,7 @@ async fn nip11_or_ws_handler(
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    let (upgrade_checked, nip_fi_assertion, shadow_assertion, nip_fi_deadline) = {
+    let (upgrade_checked, nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
         let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
@@ -682,14 +685,16 @@ async fn nip11_or_ws_handler(
                 .await
                 .into_assertions()
             {
-                Ok((assertion, shadow, deadline)) => (true, assertion, shadow, deadline),
+                Ok((assertion, shadow, deadline, line)) => {
+                    (true, assertion, shadow, deadline, line)
+                }
                 Err(resp) => return (*resp).into_response(),
             }
         } else {
             // Not a WS upgrade shape — a NIP-11 request or a plain browser GET.
             // The `Ok(ws)` arm below backstops any extractor-accepted shape this
             // predicate misses. [F3-H2-GATE]
-            (false, None, None, Default::default())
+            (false, None, None, Default::default(), None)
         }
     };
 
@@ -710,12 +715,9 @@ async fn nip11_or_ws_handler(
     // `asserted_key` is `None` → no key to check → pass through.
     // [FI-TRACE-DENY-SET]
     if let Some(assertion) = &nip_fi_assertion {
-        if let Some(key) = assertion.asserted_key() {
-            if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-                if deny_map.is_denied(assertion.identity().issuer(), &key, chrono::Utc::now()) {
-                    return http_denial(buzz_auth::DenialClass::AuthorizationDenied)
-                        .into_response();
-                }
+        if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
+                return http_denial(buzz_auth::DenialClass::AuthorizationDenied).into_response();
             }
         }
     }
@@ -770,7 +772,7 @@ async fn nip11_or_ws_handler(
             // For HTTP/1.1 requests, `nip_fi_assertion` was already set above
             // and this block is unreachable (the h1 denial is returned before
             // we get here).
-            let (nip_fi_assertion, shadow_assertion) = if !upgrade_checked {
+            let (nip_fi_assertion, shadow_assertion, shadow_line) = if !upgrade_checked {
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
                 use crate::nip_fi_session::NipFiWsRoute::Root;
                 use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
@@ -782,13 +784,13 @@ async fn nip11_or_ws_handler(
                     .await
                     .into_assertions()
                 {
-                    Ok((assertion, shadow, _deadline)) => {
-                        (assertion, shadow.map(|(a, c)| (a, c.shadow_label())))
+                    Ok((assertion, shadow, _deadline, line)) => {
+                        (assertion, shadow.map(|(a, c)| (a, c.shadow_label())), line)
                     }
                     Err(resp) => return (*resp).into_response(),
                 }
             } else {
-                (nip_fi_assertion, shadow_assertion)
+                (nip_fi_assertion, shadow_assertion, shadow_line)
             };
 
             // Shutting down: refuse new sockets instead of accepting a
@@ -823,6 +825,7 @@ async fn nip11_or_ws_handler(
                         tenant,
                         nip_fi_assertion,
                         shadow,
+                        shadow_line,
                         connection_time,
                     )
                 })
@@ -3213,6 +3216,86 @@ mod tests {
                 body,
                 serde_json::json!({"error": "rate-limited: shared admission unavailable"})
             );
+        }
+
+        /// Through `build_router`, a root upgrade without an assertion hands
+        /// its shadow line to the socket, which writes it at the verified AUTH
+        /// with that key while the socket stays open. Mutation: passing `None`
+        /// instead of `shadow_line` to `handle_connection` writes the line as
+        /// `absent` at upgrade.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn shadow_root_router_writes_line_at_auth_while_open() {
+            use futures_util::{SinkExt as _, StreamExt as _};
+            use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+            let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
+            let base = real_db_state().await.expect("PostgreSQL must be available");
+            let community_id = uuid::Uuid::new_v4();
+            let host = format!("shadow-router-{}.example", community_id.simple());
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(&host)
+                .execute(base.db.pool())
+                .await
+                .expect("seed community");
+            let mut state = (*base).clone();
+            let config = Arc::make_mut(&mut state.config);
+            config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
+            config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                &format!("https://{host}"),
+                &["https://issuer.test"],
+            );
+            let tenant = buzz_core::tenant::TenantContext::resolved(
+                buzz_core::tenant::CommunityId::from_uuid(community_id),
+                host.clone(),
+            );
+            let relay_url: nostr::RelayUrl =
+                crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant)
+                    .parse()
+                    .expect("expected NIP-42 relay URL");
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let app = build_router(Arc::new(state))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let mut req = format!("ws://{addr}/")
+                .into_client_request()
+                .expect("request");
+            req.headers_mut().insert("host", host.parse().unwrap());
+            let (mut client, _) = connect_async(req).await.expect("shadow admits the upgrade");
+
+            let Some(Ok(Message::Text(challenge))) = client.next().await else {
+                panic!("expected AUTH challenge")
+            };
+            let challenge: serde_json::Value =
+                serde_json::from_str(&challenge).expect("challenge json");
+            let key = nostr::Keys::generate();
+            let auth =
+                nostr::EventBuilder::auth(challenge[1].as_str().expect("challenge"), relay_url)
+                    .sign_with_keys(&key)
+                    .expect("sign AUTH");
+            client
+                .send(Message::Text(
+                    serde_json::json!(["AUTH", auth]).to_string().into(),
+                ))
+                .await
+                .expect("send AUTH");
+            let ok = loop {
+                match client.next().await {
+                    Some(Ok(Message::Text(ok))) => break ok,
+                    Some(Ok(Message::Ping(_))) => {}
+                    other => panic!("expected AUTH OK, got {other:?}"),
+                }
+            };
+            assert!(ok.contains("true"), "AUTH must succeed: {ok}");
+
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+            assert!(lines[0].contains(&proven), "{lines:?}");
+            drop(client);
+            server.abort();
         }
     }
 

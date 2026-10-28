@@ -798,7 +798,8 @@ class _MessageList extends HookConsumerWidget {
       },
     );
 
-    if (entries.isEmpty && displayedTyping.isNotEmpty) {
+    if (entries.isEmpty &&
+        (displayedTyping.isNotEmpty || TypingMotionPreview.enabled)) {
       return Align(
         alignment: Alignment.bottomCenter,
         child: Padding(
@@ -808,10 +809,12 @@ class _MessageList extends HookConsumerWidget {
             Grid.gutter,
             composerBottomInset,
           ),
-          child: InlineAgentTyping(
-            channelId: channelId,
-            entries: displayedTyping,
-          ),
+          child: TypingMotionPreview.enabled
+              ? TypingMotionPreview(channelId: channelId)
+              : InlineAgentTyping(
+                  channelId: channelId,
+                  entries: displayedTyping,
+                ),
         ),
       );
     }
@@ -1024,11 +1027,16 @@ class _MessageList extends HookConsumerWidget {
                             restoreComposerFocus: restoreComposerFocus,
                           ),
                         ],
-                        if (index == 0 && displayedTyping.isNotEmpty)
-                          InlineAgentTyping(
-                            channelId: channelId,
-                            entries: displayedTyping,
-                          ),
+                        if (index == 0 &&
+                            (displayedTyping.isNotEmpty ||
+                                TypingMotionPreview.enabled))
+                          if (TypingMotionPreview.enabled)
+                            TypingMotionPreview(channelId: channelId)
+                          else
+                            InlineAgentTyping(
+                              channelId: channelId,
+                              entries: displayedTyping,
+                            ),
                       ],
                     ),
                   ),

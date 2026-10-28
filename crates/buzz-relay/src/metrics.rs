@@ -132,6 +132,13 @@ const GIT_DURATION_BUCKETS_S: [f64; 13] = [
     0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
 ];
 
+/// Mesh dial and reconcile-pass buckets. A pass dials peers serially, so a
+/// large or stale peer table can stretch it to minutes; the default
+/// five-second ceiling would hide exactly the stall these exist to show.
+const MESH_DURATION_BUCKETS_S: [f64; 14] = [
+    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+];
+
 /// Byte buckets for hydrated repositories and streamed clone/fetch responses.
 const GIT_BYTES_BUCKETS: [f64; 9] = [
     0.0,
@@ -234,6 +241,16 @@ fn configured_prometheus_builder(gauge_idle_timeout_secs: u64) -> PrometheusBuil
             &GIT_PACK_BUCKETS,
         )
         .expect("valid git compaction output pack-count bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full(buzz_relay_mesh::telemetry::DIAL_DURATION_SECONDS.to_owned()),
+            &MESH_DURATION_BUCKETS_S,
+        )
+        .expect("valid mesh dial bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full(buzz_relay_mesh::telemetry::RECONCILE_PASS_SECONDS.to_owned()),
+            &MESH_DURATION_BUCKETS_S,
+        )
+        .expect("valid mesh reconcile pass bucket boundaries")
         .set_buckets_for_metric(Matcher::Suffix("_seconds".to_owned()), &DURATION_BUCKETS_S)
         .expect("valid seconds bucket boundaries")
         .set_buckets_for_metric(
@@ -298,6 +315,7 @@ pub fn try_install(port: u16, gauge_idle_timeout_secs: u64) -> Result<(), Metric
     describe_db_pool_metrics();
     describe_auth_metrics();
     crate::startup_steps::describe_metrics();
+    buzz_relay_mesh::telemetry::describe_metrics();
     initialize_auth_metric_series();
     initialize_partition_audit_metric_series();
     tokio::spawn(exporter);

@@ -13,6 +13,9 @@ abstract final class BuzzIcons {
 
   static const edit = IconData(0xea98, fontFamily: 'BuzzTabler');
 
+  /// Tabler `qrcode`.
+  static const qrcode = IconData(0xeb11, fontFamily: 'BuzzTabler');
+
   /// Tabler `text-size`.
   static const aLargeSmall = IconData(0xf2b1, fontFamily: 'BuzzTabler');
 

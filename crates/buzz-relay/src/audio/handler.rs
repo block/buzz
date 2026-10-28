@@ -95,7 +95,7 @@ pub async fn ws_audio_handler(
     // WebSocket handshake. Running pre-lookup means a denied request skips the tenant
     // lookup (a resolver miss costs one bounded binding lookup) and the gate is reachable in tests without a live community.
     // [FI-TRACE-TRANSPORT-CLOSED] [NIP-FI.md §Admission pairing sequence]
-    let (nip_fi_assertion, shadow_assertion, nip_fi_deadline) = {
+    let (nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
         use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
         let mode = state.config.nip_fi.mode;
         let verifier = state.nip_fi_verifier.as_deref();
@@ -187,6 +187,7 @@ pub async fn ws_audio_handler(
             permit,
             nip_fi_assertion,
             shadow,
+            shadow_line,
             connection_time,
         )
     })
@@ -236,6 +237,7 @@ pub(crate) async fn handle_audio_connection(
     _permit: OwnedSemaphorePermit,
     nip_fi_assertion: Option<VerifiedAssertion>,
     nip_fi_shadow: Option<Arc<crate::nip_fi_shadow_session::ShadowSession>>,
+    shadow_line: Option<crate::nip_fi_shadow::PendingLine>,
     connection_time: chrono::DateTime<chrono::Utc>,
 ) {
     let cancel = CancellationToken::new();
@@ -265,6 +267,9 @@ pub(crate) async fn handle_audio_connection(
         tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
     let control = CommunityConnectionControl::new(cancel);
     control.attach_nip_fi_shadow(nip_fi_shadow);
+    // Its first verified AUTH writes it; else the read loop's end does.
+    let shadow_line = shadow_line.map(Arc::new);
+    control.attach_nip_fi_line(shadow_line.as_ref());
     let drain_reason = control.disconnect_reason();
     let pre_expiry_task = audio_session_deadline.map(|deadline| {
         crate::nip_fi_session::spawn_nip_fi_expiry_task(
@@ -416,16 +421,16 @@ where
     }
 }
 
-/// Records the NIP-42-proven pubkey and its admitting NIP-FI issuer on an audio
+/// Records the NIP-42-proven pubkey and its admitting NIP-FI session on an audio
 /// control after successful auth so the issuer-scoped NIP-FI disconnect scan
 /// can reach audio sockets alongside relay peers.  Shared by the handler and
 /// tests that register audio sockets through the production seam.
 pub(crate) fn audio_post_auth_register(
     control: &CommunityConnectionControl,
     pubkey_bytes: Vec<u8>,
-    nip_fi_issuer: Option<String>,
+    nip_fi: Option<crate::nip_fi_core::NipFiSession>,
 ) {
-    control.set_proven_identity(pubkey_bytes, nip_fi_issuer);
+    control.set_proven_identity(pubkey_bytes, nip_fi);
 }
 
 /// Runs the audio session, then holds the read half for the client's Close
@@ -749,8 +754,12 @@ async fn run_active_audio_connection(
         crate::nip_fi_test_hooks::record_pairing_reached_after_cancel(tenant.community());
     }
 
+    control.prove_nip_fi_line(pubkey);
     if let Some(shadow) = control.nip_fi_shadow() {
         shadow.observe_pairing(pubkey);
+        shadow
+            .observe_owner(&state, tenant.community(), pubkey)
+            .await;
     }
     // NIP-FI key pairing [FI-INV-05]: unconditional, using the shared production
     // seam. When an assertion was presented at upgrade, the proven NIP-42 key
@@ -798,19 +807,13 @@ async fn run_active_audio_connection(
         pubkey_bytes.clone(),
         nip_fi_assertion
             .as_ref()
-            .map(|a| a.identity().issuer().to_owned()),
+            .map(crate::nip_fi_core::NipFiSession::from_assertion),
     );
     #[cfg(test)]
     crate::nip_fi_test_hooks::before_deny_set_check(tenant.community()).await;
     if let Some(assertion) = &nip_fi_assertion {
-        if let (Some(asserted_key), Some(deny_map)) =
-            (assertion.asserted_key(), state.nip_fi_deny_map.as_deref())
-        {
-            if deny_map.is_denied(
-                assertion.identity().issuer(),
-                &asserted_key,
-                chrono::Utc::now(),
-            ) {
+        if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
                 warn!(
                     channel_id = %channel_id,
                     pubkey = %pubkey_hex,
@@ -827,8 +830,44 @@ async fn run_active_audio_connection(
     #[cfg(test)]
     crate::nip_fi_test_hooks::after_deny_set_check_passed(tenant.community()).await;
 
-    // NIP-OA owner of a delegated agent: from relay membership on a closed
-    // relay, or straight from the self-proving auth tag on an open one.
+    // Owner of a delegated agent: the verified NIP-FI token owner, else the
+    // NIP-OA owner from relay membership on a closed relay, or straight from
+    // the self-proving auth tag on an open one.
+    let token_owner = nip_fi_assertion
+        .as_ref()
+        .and_then(|assertion| assertion.owner());
+    // A token owner is linked during membership, so refuse a banned principal
+    // or token owner before that write, as root AUTH does. The final check
+    // below rereads bans.
+    let early_ban = match token_owner {
+        Some(_) => {
+            crate::handlers::auth::community_ban_outcome(
+                &state,
+                tenant.community(),
+                pubkey,
+                auth_tag_json.as_deref(),
+                Some(signed_auth_created_at),
+                token_owner,
+                false,
+            )
+            .await
+        }
+        None => crate::handlers::auth::BanOutcome::Clear,
+    };
+    if let Some(denial) = crate::handlers::auth::ban_admission_denial(early_ban) {
+        shadow_attempt.refused();
+        warn!(channel_id = %channel_id, pubkey = %pubkey_hex, reason = denial.reason, "audio: denied at ban check");
+        exit_authorization_refusal(
+            &mut ws_send,
+            &control,
+            &mut terminal_ctrl_rx,
+            nip_fi_assertion.is_some(),
+            denial.class,
+            serde_json::json!({"type": "error", "message": denial.reason}),
+        )
+        .await;
+        return;
+    }
     let mut nip_oa_owner = None;
     let relay_refusal = match crate::api::relay_members::check_relay_membership(
         &state,
@@ -836,6 +875,7 @@ async fn run_active_audio_connection(
         pubkey.as_bytes(),
         auth_tag_json.as_deref(),
         Some(signed_auth_created_at),
+        token_owner,
     )
     .await
     {
@@ -846,11 +886,13 @@ async fn run_active_audio_connection(
         Ok(decision) => {
             nip_oa_owner = match decision {
                 crate::api::relay_members::MembershipDecision::ViaOwner(owner) => Some(owner),
-                _ => crate::api::relay_members::extract_nip_oa_owner(
-                    pubkey.as_bytes(),
-                    auth_tag_json.as_deref(),
-                    Some(signed_auth_created_at),
-                ),
+                _ => token_owner.or_else(|| {
+                    crate::api::relay_members::extract_nip_oa_owner(
+                        pubkey.as_bytes(),
+                        auth_tag_json.as_deref(),
+                        Some(signed_auth_created_at),
+                    )
+                }),
             };
             None
         }
@@ -921,7 +963,7 @@ async fn run_active_audio_connection(
     if let Some(owner) = nip_oa_owner {
         #[cfg(test)]
         crate::nip_fi_test_hooks::before_owner_permit(tenant.community()).await;
-        let linked = {
+        let link = {
             let _owner_permit = match audio_gate.acquire_effect().await {
                 Ok(permit) => permit,
                 Err(crate::nip_fi_gate::SessionExpired) => {
@@ -937,17 +979,17 @@ async fn run_active_audio_connection(
                     return;
                 }
             };
-            crate::api::relay_members::materialize_nip_oa_owner(&state, &tenant, &pubkey, &owner)
-                .await
+            crate::api::relay_members::link_agent_owner(&state, &tenant, &pubkey, &owner).await
         };
-        if !linked {
+        if let Some(denial) = crate::handlers::auth::owner_link_denial(link, token_owner.is_some())
+        {
             shadow_attempt.refused();
-            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, nip_oa_owner = %owner.to_hex(),
-                "audio: NIP-OA owner could not be materialized, denying");
+            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, owner = %owner.to_hex(), ?link,
+                "audio: agent owner could not be linked, denying");
             let deny_frame = authorization_exit_frame(
                 nip_fi_assertion.is_some(),
-                buzz_auth::DenialClass::AuthorizationUnavailable,
-                serde_json::json!({"type": "error", "message": crate::handlers::auth::OWNER_LINK_ERROR}),
+                denial.class,
+                serde_json::json!({"type": "error", "message": denial.reason}),
             );
             crate::connection::send_exit_frames_bounded(&mut ws_send, [deny_frame]).await;
             return;
@@ -980,6 +1022,7 @@ async fn run_active_audio_connection(
                 pubkey,
                 auth_tag_json.as_deref(),
                 Some(signed_auth_created_at),
+                token_owner,
             )
             .await
         }
@@ -1875,10 +1918,17 @@ async fn run_active_audio_connection(
             .await;
             return;
         }
-        Err(JoinCommitError::ParentMembershipLost) => {
-            // Parent membership revoked between pre-join check and commit (IMPORTANT 4).
+        Err(refusal @ (JoinCommitError::MembershipLost | JoinCommitError::WriteRoleLost)) => {
+            // Membership revoked (IMPORTANT 4), or the channel's write rule no
+            // longer lets the joiner write, between pre-join check and commit.
             // No `joined` frame was sent — commit-won invariant holds.
-            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "parent membership lost before join commit");
+            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "{refusal} (join refused)");
+            let message = match refusal {
+                JoinCommitError::WriteRoleLost => {
+                    "error: only members can join huddles in this channel"
+                }
+                _ => "error: not a member",
+            };
             // IMPORTANT 3: cancel + await expiry task before peer/room teardown.
             cancel.cancel();
             if let Some(t) = _nip_fi_admission_expiry.take() {
@@ -1898,7 +1948,7 @@ async fn run_active_audio_connection(
                 &mut terminal_ctrl_rx,
                 nip_fi_assertion.is_some(),
                 buzz_auth::DenialClass::AuthorizationDenied,
-                serde_json::json!({"type": "error", "message": "error: not a member"}),
+                serde_json::json!({"type": "error", "message": message}),
             )
             .await;
             return;
@@ -2985,11 +3035,74 @@ async fn check_membership_for_admission(
         channel_id
     };
 
+    // Joining a huddle is a write (the role table): a guest cannot, and in an
+    // announce channel (`join_role = guest`) neither can a non-member. This
+    // holds in the channel itself and in an ephemeral huddle under it. A
+    // non-member of a private scope keeps the membership rules below.
+    let parent_record;
+    let write_scope = if lifecycle_parent_id == channel_id {
+        &channel
+    } else {
+        parent_record = state
+            .db
+            .get_channel(tenant.community(), lifecycle_parent_id)
+            .await
+            .map_err(|e| match e {
+                buzz_db::DbError::ChannelNotFound(_) => {
+                    AdmissionRefusal::Denied("parent channel not found")
+                }
+                e => AdmissionRefusal::Dependency(e),
+            })?;
+        &parent_record
+    };
+    let scope_member = state
+        .is_member_cached(tenant.community(), lifecycle_parent_id, pubkey_bytes)
+        .await
+        .map_err(AdmissionRefusal::Dependency)?;
+    if (scope_member || write_scope.visibility == "open")
+        && !crate::handlers::ingest::may_post(
+            state,
+            tenant.community(),
+            lifecycle_parent_id,
+            pubkey_bytes,
+            write_scope,
+            scope_member,
+        )
+        .await
+        .map_err(AdmissionRefusal::Dependency)?
+    {
+        return Err(AdmissionRefusal::Denied(
+            "only members can join huddles in this channel",
+        ));
+    }
+
     // Fast path: already a member.
     let is_member = state
         .is_member_cached(tenant.community(), channel_id, pubkey_bytes)
         .await
         .map_err(AdmissionRefusal::Dependency)?;
+
+    // An ephemeral huddle is its own channel with its own roles: a guest of
+    // the huddle cannot join it either, even when they may write in the
+    // parent. A non-member of a private huddle is auto-added as `member` on
+    // the parent's authority, checked above.
+    if channel_id != lifecycle_parent_id
+        && (is_member || channel.visibility == "open")
+        && !crate::handlers::ingest::may_post(
+            state,
+            tenant.community(),
+            channel_id,
+            pubkey_bytes,
+            &channel,
+            is_member,
+        )
+        .await
+        .map_err(AdmissionRefusal::Dependency)?
+    {
+        return Err(AdmissionRefusal::Denied(
+            "only members can join huddles in this channel",
+        ));
+    }
 
     if is_member {
         return Ok(MembershipAdmission::Existing {
@@ -3052,8 +3165,14 @@ pub(crate) enum JoinCommitError {
     Expired,
     /// Channel was archived between pre-join check and commit (IMPORTANT 4).
     Archived,
-    /// Parent membership was revoked between pre-join check and commit (IMPORTANT 4).
-    ParentMembershipLost,
+    /// The joiner lost the membership the pre-join check relied on, in the
+    /// huddle or its lifecycle parent, between pre-join check and commit
+    /// (IMPORTANT 4).
+    MembershipLost,
+    /// The joiner's role in the huddle or its lifecycle parent no longer
+    /// allows writing (for example, they were made a guest) between the
+    /// pre-join check and commit.
+    WriteRoleLost,
     /// Creator-signed huddle_started link was deleted between pre-join check
     /// and commit (IMPORTANT 4 residual: third carried fact).
     HuddleLinkGone,
@@ -3065,8 +3184,11 @@ impl std::fmt::Display for JoinCommitError {
             JoinCommitError::Db(e) => write!(f, "db error: {e}"),
             JoinCommitError::Expired => write!(f, "session expired before commit"),
             JoinCommitError::Archived => write!(f, "channel archived before commit"),
-            JoinCommitError::ParentMembershipLost => {
-                write!(f, "parent membership revoked before commit")
+            JoinCommitError::MembershipLost => {
+                write!(f, "membership revoked before commit")
+            }
+            JoinCommitError::WriteRoleLost => {
+                write!(f, "write role lost before commit")
             }
             JoinCommitError::HuddleLinkGone => {
                 write!(f, "huddle_started creator link gone before commit")
@@ -3087,20 +3209,20 @@ impl From<buzz_db::DbError> for JoinCommitError {
 /// Ordering (per B1 contract [e5bc0382], corrected for IMPORTANT 4 and 5):
 /// 1. Sign the `48101` event synchronously.
 /// 2. Begin a caller-owned DB transaction.
-/// 3. Archive re-check (ALL paths): `SELECT archived_at … FOR UPDATE` inside
-///    the transaction. Taking a row-level write lock serializes this join
-///    against concurrent `archive_channel` calls on both the `Existing` and
-///    `AutoAddRequired` paths — `archive_channel`'s UPDATE blocks until this
+/// 3. Take the membership locks of the huddle and its lifecycle parent, the
+///    parent's TTL lock, then the huddle's row (`FOR NO KEY UPDATE`), in the
+///    order every multi-lock channel writer uses. Re-check archive under the
+///    row lock (ALL paths): `archive_channel`'s UPDATE blocks until this
 ///    transaction completes. Closes the READ COMMITTED race.
-/// 4. Under the channel membership lock (AutoAddRequired only):
-///    a. Re-read channel archive state again — fail `Archived` if still needed.
-///    (IMPORTANT 4: defence-in-depth behind the FOR UPDATE above.)
-///    b. Re-read parent membership — fail `ParentMembershipLost` if gone.
-///    c. Re-read creator-signed huddle_started link — fail `HuddleLinkGone`
+/// 4. Under those locks (AutoAddRequired only):
+///    a. Re-read parent membership — fail `MembershipLost` if gone.
+///    b. Re-read creator-signed huddle_started link — fail `HuddleLinkGone`
 ///    if the link was deleted between pre-join check and commit.
 ///    (IMPORTANT 4 residual: third carried fact, alongside archive + parent.)
-///    d. Re-read child membership — skip auto-add insert if a concurrent
+///    c. Re-read child membership — skip auto-add insert if a concurrent
 ///    legitimate add is already present (concurrent-add preservation).
+///    d. (ALL paths) Apply the pre-join write rule again in the huddle and
+///    its parent — fail `WriteRoleLost` or `MembershipLost`.
 /// 5. Insert kind `48101` in the same transaction (uncommitted).
 /// 6. Acquire a session effect permit (or rollback + return `Err(Expired)`).
 /// 7. Commit the transaction while holding the permit.
@@ -3187,21 +3309,55 @@ async fn commit_participant_join(
         .begin_event_write_transaction(tenant.community())
         .await?;
 
-    // 3. Archive re-check (ALL paths): re-read archived_at inside the
-    //    transaction before any write, taking a row-level write lock
-    //    (`FOR NO KEY UPDATE`) on the channels row. This serializes all join
-    //    commits against archive: `archive_channel`'s
-    //    `UPDATE channels SET archived_at = NOW()` must wait until this
-    //    transaction commits or rolls back before it can proceed — closing the
-    //    READ COMMITTED race on both the `Existing` and `AutoAddRequired` paths.
+    // 3. Lock order. Every writer that takes more than one of a channel's
+    //    locks takes them as: membership lock, then TTL lock, then the
+    //    channel row (see `buzz_db::channel::update_channel`). This join
+    //    takes the membership lock of the huddle and of its lifecycle parent,
+    //    so a settings change, a membership change or a role change in
+    //    either scope commits before this check or after this join. Then it
+    //    takes the parent's TTL lock, which the 48101's commit-time TTL
+    //    refresh needs, and only then the huddle's row.
     //
-    //    The channels row is a single row identified by primary key; the lock
-    //    is held only for the duration of the join transaction (typically
-    //    sub-millisecond). See `lock_channel_archived_at_in_transaction` for why
-    //    the lock is `FOR NO KEY UPDATE` rather than `FOR UPDATE`.
-    let channel_archived_early =
-        buzz_db::channel_members::lock_channel_archived_at_in_transaction(&mut tx, channel_id)
-            .await?;
+    // Test hook: fires immediately before the channel membership locks are
+    // acquired. A test can change membership externally here to prove the
+    // re-reads below observe it.
+    // [nip_fi_test_hooks::audio_membership_lock_hook]
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_membership_lock(tenant.community()).await;
+
+    let locked_channels = if parent_channel_id == channel_id {
+        vec![channel_id]
+    } else {
+        vec![channel_id, parent_channel_id]
+    };
+    let mut membership = buzz_db::channel_members::lock_channel_memberships_in_transaction(
+        &mut tx,
+        &locked_channels,
+    )
+    .await?;
+    buzz_db::channel_members::lock_channel_ttl_shared_in_transaction(
+        membership.tx(),
+        parent_channel_id,
+    )
+    .await?;
+
+    // Archive re-check (ALL paths): re-read archived_at inside the
+    // transaction before any write, taking a row-level write lock
+    // (`FOR NO KEY UPDATE`) on the channels row. This serializes all join
+    // commits against archive: `archive_channel`'s
+    // `UPDATE channels SET archived_at = NOW()` must wait until this
+    // transaction commits or rolls back before it can proceed — closing the
+    // READ COMMITTED race on both the `Existing` and `AutoAddRequired` paths.
+    //
+    // The channels row is a single row identified by primary key; the lock
+    // is held only for the duration of the join transaction (typically
+    // sub-millisecond). See `lock_channel_archived_at_in_transaction` for why
+    // the lock is `FOR NO KEY UPDATE` rather than `FOR UPDATE`.
+    let channel_archived = buzz_db::channel_members::lock_channel_archived_at_in_transaction(
+        membership.tx(),
+        channel_id,
+    )
+    .await?;
 
     // Test hook: fires after the FOR UPDATE lock is acquired but before the
     // archived check / any write. A test can attempt a concurrent archive here
@@ -3210,7 +3366,7 @@ async fn commit_participant_join(
     #[cfg(test)]
     crate::nip_fi_test_hooks::before_archive_recheck(tenant.community()).await;
 
-    if channel_archived_early.is_some() {
+    if channel_archived.is_some() {
         retire_shadow();
         #[cfg(test)]
         crate::nip_fi_test_hooks::before_join_refusal_rollback(tenant.community()).await;
@@ -3218,53 +3374,30 @@ async fn commit_participant_join(
         return Err(JoinCommitError::Archived);
     }
 
-    // 4. Under the channel membership lock: re-validate authority + auto-add if
+    // 4. Under the membership locks: re-validate authority + auto-add if
     //    still absent. The AutoAddRequired path carries stale authority from
-    //    check_membership_for_admission; the lock serialises all membership writes
-    //    for this channel so the re-reads observe the most recent committed state.
+    //    check_membership_for_admission; the locks serialise all membership
+    //    writes for both scopes so the re-reads observe the most recent
+    //    committed state.
     if let MembershipAdmission::AutoAddRequired {
         parent_channel_id: parent_id,
         channel_created_by,
     } = membership_admission
     {
-        // Test hook: fires immediately before the channel membership lock is
-        // acquired. A test can insert a membership row externally here to prove
-        // the concurrent-add case is handled (re-read observes it → still_absent
-        // = false → auto-add insert is skipped → membership preserved).
-        // [nip_fi_test_hooks::audio_membership_lock_hook]
-        #[cfg(test)]
-        crate::nip_fi_test_hooks::before_membership_lock(tenant.community()).await;
-
-        buzz_db::channel_members::acquire_channel_membership_lock_in_transaction(
-            &mut tx, channel_id,
-        )
-        .await?;
-
-        // IMPORTANT 4a: Re-read channel archive state under the lock. A channel
-        // could be archived in the window between check_membership_for_admission
-        // and now; committing a join into an archived channel violates the
-        // "no admission after archive" invariant.
-        let channel_archived =
-            buzz_db::channel_members::lock_channel_archived_at_in_transaction(&mut tx, channel_id)
-                .await?;
-
-        if channel_archived.is_some() {
-            retire_shadow();
-            let _ = tx.rollback().await;
-            return Err(JoinCommitError::Archived);
-        }
-
         // IMPORTANT 4b: Re-read parent membership under the lock. A parent
         // membership revocation in the same window would make the auto-add
         // unjustified; reject rather than grant access from stale authority.
-        let parent_still_member =
-            buzz_db::channel_members::is_member_in_transaction(&mut tx, *parent_id, pubkey_bytes)
-                .await?;
+        let parent_still_member = buzz_db::channel_members::is_member_in_transaction(
+            membership.tx(),
+            *parent_id,
+            pubkey_bytes,
+        )
+        .await?;
 
         if !parent_still_member {
             retire_shadow();
             let _ = tx.rollback().await;
-            return Err(JoinCommitError::ParentMembershipLost);
+            return Err(JoinCommitError::MembershipLost);
         }
 
         // IMPORTANT 4 residual: Re-read the creator-signed huddle_started link
@@ -3274,7 +3407,7 @@ async fn commit_participant_join(
         // but before this transaction acquires the lock; committing a join into
         // an unlinked channel violates the "creator authority" invariant.
         let link_still_exists = buzz_db::event::huddle_started_link_exists_in_transaction(
-            &mut tx,
+            membership.tx(),
             *parent_id,
             channel_id,
             channel_created_by.as_slice(),
@@ -3289,20 +3422,65 @@ async fn commit_participant_join(
 
         // Re-read child membership — a concurrent legitimate add may have
         // already provided access; do not overwrite role/provenance.
-        let still_absent =
-            !buzz_db::channel_members::is_member_in_transaction(&mut tx, channel_id, pubkey_bytes)
-                .await?;
+        let still_absent = !buzz_db::channel_members::is_member_in_transaction(
+            membership.tx(),
+            channel_id,
+            pubkey_bytes,
+        )
+        .await?;
 
         if still_absent {
-            buzz_db::channel_members::insert_auto_membership_in_transaction(
-                &mut tx,
-                channel_id,
-                pubkey_bytes,
-                channel_created_by.as_slice(),
-            )
-            .await?;
+            membership
+                .insert_auto_membership(channel_id, pubkey_bytes, channel_created_by.as_slice())
+                .await?;
         }
         // If not still_absent: concurrent add observed — membership preserved.
+    }
+
+    // 4e. Joining is a write. Apply the pre-join write rule again, to the
+    //     state these locks hold: in the huddle and in its lifecycle parent,
+    //     an active member needs a role that may post, and a non-member needs
+    //     an open channel whose `join_role` is `member`. A non-member of a
+    //     private scope has lost the membership the pre-join check saw (the
+    //     auto-add above already made a private huddle's joiner a member).
+    for scope in locked_channels.iter().copied() {
+        let role = buzz_db::channel_members::active_role_in_transaction(
+            membership.tx(),
+            scope,
+            pubkey_bytes,
+        )
+        .await?;
+        let refusal = match role.as_deref() {
+            Some(role) => (!crate::handlers::ingest::role_may_post(Some(role)))
+                .then_some(JoinCommitError::WriteRoleLost),
+            None => {
+                let settings = buzz_db::channel_members::channel_write_settings_in_transaction(
+                    membership.tx(),
+                    scope,
+                )
+                .await?;
+                match settings {
+                    Some((visibility, _)) if visibility != "open" => {
+                        Some(JoinCommitError::MembershipLost)
+                    }
+                    Some((visibility, join_role))
+                        if crate::handlers::ingest::non_member_may_post(
+                            &visibility,
+                            &join_role,
+                        ) =>
+                    {
+                        None
+                    }
+                    Some(_) => Some(JoinCommitError::WriteRoleLost),
+                    None => Some(JoinCommitError::MembershipLost),
+                }
+            }
+        };
+        if let Some(refusal) = refusal {
+            retire_shadow();
+            let _ = tx.rollback().await;
+            return Err(refusal);
+        }
     }
 
     // 5. Insert kind `48101` uncommitted.
@@ -4010,7 +4188,7 @@ mod tests {
         // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = require_relay_membership;
-        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
+        config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string(); // sadscan:disable np.postgres.1 -- unreachable test-only URL
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let mut pool_options = sqlx::postgres::PgPoolOptions::new();
         if let Some(timeout) = acquire_timeout {
@@ -4491,7 +4669,11 @@ mod tests {
         let control = CommunityConnectionControl::new(CancellationToken::new());
         let (terminal_tx, mut terminal_rx) = mpsc::channel::<WsMessage>(1);
         control.set_terminal_frame_sender(terminal_tx);
-        audio_post_auth_register(&control, key.clone(), Some("test-issuer".to_owned()));
+        audio_post_auth_register(
+            &control,
+            key.clone(),
+            Some(crate::nip_fi_core::NipFiSession::new("test-issuer", None)),
+        );
         let _guard = registry.register(uuid::Uuid::new_v4(), community, control.clone());
 
         let mut wire = Vec::new();
@@ -6094,6 +6276,7 @@ mod tests {
                                     permit,
                                     Some(assertion_i),
                                     None,
+                                    None,
                                     conn_time,
                                 )
                                 .await
@@ -6228,11 +6411,22 @@ mod tests {
         session: Arc<crate::nip_fi_shadow_session::ShadowSession>,
         community: buzz_core::tenant::CommunityId,
     ) -> Vec<String> {
+        let control = crate::state::CommunityConnectionControl::new(CancellationToken::new());
+        control.attach_nip_fi_shadow(Some(Arc::clone(&session)));
+        audio_auth_on(state, key, control, community).await
+    }
+
+    /// Serves one audio connection under `control` in `community`, sends
+    /// `key`'s AUTH and returns the text frames until the handler ends it.
+    async fn audio_auth_on(
+        state: Arc<crate::state::AppState>,
+        key: &nostr::Keys,
+        control: crate::state::CommunityConnectionControl,
+        community: buzz_core::tenant::CommunityId,
+    ) -> Vec<String> {
         use chrono::Utc;
         let tenant =
             buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string());
-        let control = crate::state::CommunityConnectionControl::new(CancellationToken::new());
-        control.attach_nip_fi_shadow(Some(Arc::clone(&session)));
         let slot = Arc::new(std::sync::Mutex::new(Some(control)));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -6359,6 +6553,50 @@ mod tests {
             });
             assert_eq!(records, expected);
         }
+    }
+
+    // The pairing would-deny names the key AUTH proved, not the one the
+    // token asserts. Mutation: attributing the asserted key, or none, fails.
+    #[test]
+    fn shadow_audio_pairing_denial_logs_the_proven_key() {
+        use crate::nip_fi_shadow_session::tests::{shadow_logged, shadow_state};
+        let key = nostr::Keys::generate();
+        let asserted = nostr::Keys::generate().public_key();
+        let (records, lines) = shadow_logged(async {
+            let state = Arc::new(shadow_state(None).await);
+            let (session, _) = shadow_audio_auth(state, &key, asserted).await;
+            session.expire();
+        });
+        assert_eq!(records, ["pairing/denied"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("reason=\"key_mismatch\""), "{lines:?}");
+        let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
+    }
+
+    // An upgrade would-deny's line names the key the audio AUTH verifies,
+    // and is counted once, at the upgrade. Mutation: deleting audio's
+    // `prove_nip_fi_line` logs `absent`.
+    #[test]
+    fn shadow_upgrade_would_deny_logs_the_audio_auth_key() {
+        use crate::nip_fi_shadow_session::tests::{shadow_logged, shadow_state};
+        let key = nostr::Keys::generate();
+        let (records, lines) = shadow_logged(async {
+            let state = Arc::new(shadow_state(None).await);
+            let line = crate::nip_fi_shadow::tests::upgrade_line("audio");
+            let control = crate::state::CommunityConnectionControl::new(CancellationToken::new());
+            control.attach_nip_fi_line(Some(&line));
+            let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+            audio_auth_on(state, &key, control, community).await;
+        });
+        assert_eq!(records, ["assertion/missing"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("reason=\"missing_assertion\""),
+            "{lines:?}"
+        );
+        let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
     }
 
     /// Consumes Ping/Pong until the socket terminates (Close, EOF or error)
@@ -7018,16 +7256,34 @@ mod tests {
 
     #[tokio::test]
     async fn w_audio_deny_active_key_refused_at_post_registration_check() {
+        w_audio_deny_active_refused_body(None).await;
+    }
+
+    // An owner-only deny entry refuses the agent's audio AUTH at the same
+    // check. Mutation: dropping the owner arm of `assertion_denied` admits it.
+    #[tokio::test]
+    async fn w_audio_owner_deny_refuses_agent_at_post_registration_check() {
+        w_audio_deny_active_refused_body(Some(nostr::Keys::generate())).await;
+    }
+
+    async fn w_audio_deny_active_refused_body(owner: Option<nostr::Keys>) {
         use buzz_auth::VerifiedAssertion;
         use chrono::{Duration, Utc};
         use std::sync::Arc;
 
         let key = nostr::Keys::generate();
         let deadline = Utc::now() + Duration::hours(1);
-        // Assertion with "test-issuer"; the key IS in the deny map.
-        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        // Assertion with "test-issuer"; the key, or the agent's owner, IS in
+        // the deny map.
+        let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let target = owner
+            .as_ref()
+            .map_or(key.public_key(), nostr::Keys::public_key);
+        if owner.is_some() {
+            assertion = assertion.with_owner_for_test(target);
+        }
 
-        let state = audio_deny_state(Some(&key.public_key())).await;
+        let state = audio_deny_state(Some(&target)).await;
 
         let tenant = buzz_core::tenant::TenantContext::resolved(
             buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
@@ -7171,6 +7427,20 @@ mod tests {
 
     #[tokio::test]
     async fn w_audio_deny_straddle_entry_inserted_between_registration_and_check_is_caught() {
+        w_audio_deny_straddle_body(None).await;
+    }
+
+    // The owner's disconnect in the same window: the close scan finds the
+    // agent's audio socket by its recorded owner, and the check refuses it on
+    // the owner's entry. Mutation: dropping the owner in
+    // `NipFiSession::from_assertion`, or the owner arm of the audio
+    // registry's match, leaves the scan at 0.
+    #[tokio::test]
+    async fn w_audio_owner_straddle_closes_agent_and_refuses_admission() {
+        w_audio_deny_straddle_body(Some(nostr::Keys::generate())).await;
+    }
+
+    async fn w_audio_deny_straddle_body(owner: Option<nostr::Keys>) {
         // Arms `before_deny_set_check` — fires AFTER audio_post_auth_register and
         // BEFORE the is_denied call. Entry starts absent; inserted during the window.
         // The deny check finds it and closes the connection.
@@ -7180,7 +7450,14 @@ mod tests {
 
         let key = nostr::Keys::generate();
         let deadline = Utc::now() + Duration::hours(1);
-        let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+        // The deny and the close scan target the owner when there is one.
+        let target = owner
+            .as_ref()
+            .map_or(key.public_key(), nostr::Keys::public_key);
+        if owner.is_some() {
+            assertion = assertion.with_owner_for_test(target);
+        }
 
         // Build state with empty deny map (key not denied yet).
         let deny_map = Arc::new(buzz_auth::NipFiDenyMap::new(
@@ -7316,12 +7593,8 @@ mod tests {
 
         // Insert the deny entry — handler is between registration and check.
         let until = Utc::now() + Duration::seconds(3600);
-        let merge = deny_map_for_insert.merge_cross_pod_deny(
-            "test-issuer",
-            &key.public_key(),
-            until,
-            Utc::now(),
-        );
+        let merge =
+            deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now());
         assert!(
             matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
             "W_audio_deny_straddle: deny entry must be inserted during hook window"
@@ -7337,7 +7610,7 @@ mod tests {
         // Mutation evidence (Mut-C: move hook before audio_post_auth_register):
         //   disconnect_nip_fi returns 0 (not yet registered) → assertion panics.
         //   Causally falsifies the registration-before-check invariant.
-        let pubkey_bytes = key.public_key().to_bytes().to_vec();
+        let pubkey_bytes = target.to_bytes().to_vec();
         let closed = state
             .community_connections
             .disconnect_nip_fi("test-issuer", &pubkey_bytes);
@@ -7387,6 +7660,294 @@ mod tests {
     mod postgres_tests {
         use super::*;
 
+        /// Joining a huddle is a write. For an ephemeral huddle the joiner
+        /// needs a writing role in the huddle itself and in its lifecycle
+        /// parent, at the pre-join check and again at commit.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn huddle_join_needs_a_write_role_in_the_huddle_and_its_parent() {
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+
+            let state = audio_test_state_real_db()
+                .await
+                .expect("postgres-ci provides a database");
+            let pool = state.db.pool().clone();
+            let (tenant, parent_id, member_key) = seed_audio_fixture(&pool).await;
+            let community_uuid = *tenant.community().as_uuid();
+            let joiner = member_key.public_key().to_bytes().to_vec();
+            let joiner_hex = member_key.public_key().to_hex();
+            let creator: Vec<u8> = sqlx::query_scalar(
+                "SELECT created_by FROM channels WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community_uuid)
+            .bind(parent_id)
+            .fetch_one(&pool)
+            .await
+            .expect("parent creator");
+
+            // A private ephemeral huddle linked to the parent by its creator.
+            let child_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO channels \
+                 (id, community_id, name, channel_type, visibility, created_by, ttl_seconds) \
+                 VALUES ($1, $2, 'huddle-role-child', 'stream', 'private', $3, 3600)",
+            )
+            .bind(child_id)
+            .bind(community_uuid)
+            .bind(&creator)
+            .execute(&pool)
+            .await
+            .expect("seed huddle channel");
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+                 VALUES ($1, $2, $3, NOW(), 48100, '[]', $4, $5, $6)",
+            )
+            .bind(community_uuid)
+            .bind([Uuid::new_v4().into_bytes(), Uuid::new_v4().into_bytes()].concat())
+            .bind(&creator)
+            .bind(serde_json::json!({ "ephemeral_channel_id": child_id.to_string() }).to_string())
+            .bind(vec![0u8; 64])
+            .bind(parent_id)
+            .execute(&pool)
+            .await
+            .expect("seed huddle_started link");
+
+            let set_role = |channel: Uuid, role: Option<&'static str>| {
+                let pool = pool.clone();
+                let joiner = joiner.clone();
+                let creator = creator.clone();
+                let state = state.clone();
+                let tenant = tenant.clone();
+                async move {
+                    sqlx::query(
+                        "DELETE FROM channel_members \
+                         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+                    )
+                    .bind(community_uuid)
+                    .bind(channel)
+                    .bind(&joiner)
+                    .execute(&pool)
+                    .await
+                    .expect("clear role");
+                    if let Some(role) = role {
+                        sqlx::query(
+                            "INSERT INTO channel_members \
+                             (community_id, channel_id, pubkey, role, invited_by) \
+                             VALUES ($1, $2, $3, $4::member_role, $5)",
+                        )
+                        .bind(community_uuid)
+                        .bind(channel)
+                        .bind(&joiner)
+                        .bind(role)
+                        .bind(&creator)
+                        .execute(&pool)
+                        .await
+                        .expect("set role");
+                    }
+                    state.invalidate_membership(&tenant, channel, &joiner);
+                }
+            };
+            let admit = || {
+                check_membership_for_admission(&state, &tenant, child_id, &joiner, Some(parent_id))
+            };
+
+            // (parent role, huddle role, admitted)
+            let cases: [(&str, Option<&'static str>, bool); 5] = [
+                ("member", None, true),
+                ("member", Some("member"), true),
+                ("member", Some("guest"), false),
+                ("guest", None, false),
+                ("guest", Some("member"), false),
+            ];
+            for (parent_role, child_role, admitted) in cases {
+                set_role(parent_id, Some(parent_role)).await;
+                set_role(child_id, child_role).await;
+                let result = admit().await;
+                assert_eq!(
+                    result.is_ok(),
+                    admitted,
+                    "parent {parent_role}, huddle {child_role:?}: {:?}",
+                    result.as_ref().err().map(|e| match e {
+                        AdmissionRefusal::Denied(reason) => reason.to_string(),
+                        AdmissionRefusal::Dependency(e) => e.to_string(),
+                    })
+                );
+                if !admitted {
+                    assert!(matches!(
+                        result,
+                        Err(AdmissionRefusal::Denied(
+                            "only members can join huddles in this channel"
+                        ))
+                    ));
+                }
+            }
+
+            // In an announce parent (open, `join_role = guest`), a non-member
+            // would join as a guest, so they cannot join its huddle either.
+            sqlx::query(
+                "UPDATE channels SET visibility = 'open', join_role = 'guest' \
+                 WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community_uuid)
+            .bind(parent_id)
+            .execute(&pool)
+            .await
+            .expect("make the parent an announce channel");
+            set_role(parent_id, None).await;
+            set_role(child_id, None).await;
+            assert!(matches!(
+                admit().await,
+                Err(AdmissionRefusal::Denied(
+                    "only members can join huddles in this channel"
+                ))
+            ));
+            set_role(parent_id, Some("member")).await;
+            assert!(
+                admit().await.is_ok(),
+                "a member of the announce parent joins"
+            );
+
+            let commit = |channel: Uuid, parent: Uuid, admission: MembershipAdmission| {
+                let state = state.clone();
+                let tenant = tenant.clone();
+                let joiner = joiner.clone();
+                let joiner_hex = joiner_hex.clone();
+                async move {
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    let gate = crate::nip_fi_gate::SessionAdmissionGate::new(
+                        Utc::now() + Duration::hours(1),
+                        cancel,
+                    );
+                    commit_participant_join(
+                        &state,
+                        &tenant,
+                        channel,
+                        parent,
+                        &joiner_hex,
+                        &joiner,
+                        Uuid::new_v4(),
+                        0,
+                        0,
+                        1,
+                        "1",
+                        &admission,
+                        &gate,
+                        &Arc::new(crate::audio::room::Room::new(tenant.community(), channel)),
+                        None,
+                        None,
+                    )
+                    .await
+                }
+            };
+            let set_parent_settings = |visibility: &'static str, join_role: &'static str| {
+                let pool = pool.clone();
+                async move {
+                    sqlx::query(
+                        "UPDATE channels SET visibility = $3::channel_visibility, join_role = $4 \
+                         WHERE community_id = $1 AND id = $2",
+                    )
+                    .bind(community_uuid)
+                    .bind(parent_id)
+                    .bind(visibility)
+                    .bind(join_role)
+                    .execute(&pool)
+                    .await
+                    .expect("set parent settings");
+                }
+            };
+
+            // A demotion in either scope after the pre-join check refuses the
+            // commit.
+            for demoted in [child_id, parent_id] {
+                set_role(parent_id, Some("member")).await;
+                set_role(child_id, Some("member")).await;
+                let Ok(admission) = admit().await else {
+                    panic!("admitted before the demotion");
+                };
+                set_role(demoted, Some("guest")).await;
+                let result = commit(child_id, parent_id, admission).await;
+                assert!(
+                    matches!(result, Err(JoinCommitError::WriteRoleLost)),
+                    "demoted in {}: {result:?}",
+                    if demoted == child_id {
+                        "huddle"
+                    } else {
+                        "parent"
+                    }
+                );
+            }
+
+            // The commit applies the whole pre-join write rule, not only the
+            // stored role. A non-member of an open parent passes the
+            // pre-join check while its `join_role` is `member`; a change to
+            // `guest` before the commit refuses the join, in the parent's own
+            // call and in its huddle.
+            set_parent_settings("open", "member").await;
+            set_role(parent_id, None).await;
+            set_role(child_id, Some("member")).await;
+            for (channel, parent) in [(parent_id, parent_id), (child_id, parent_id)] {
+                let admission = if channel == parent {
+                    check_membership_for_admission(&state, &tenant, channel, &joiner, None).await
+                } else {
+                    admit().await
+                };
+                let Ok(admission) = admission else {
+                    panic!("a non-member of an open member-join channel is admitted");
+                };
+                set_parent_settings("open", "guest").await;
+                let result = commit(channel, parent, admission).await;
+                set_parent_settings("open", "member").await;
+                assert!(
+                    matches!(result, Err(JoinCommitError::WriteRoleLost)),
+                    "join_role changed to guest, joining {}: {result:?}",
+                    if channel == parent {
+                        "the channel"
+                    } else {
+                        "its huddle"
+                    }
+                );
+            }
+
+            // A member of a private parent who loses that membership before
+            // the commit is refused, in the parent's own call and in its
+            // huddle.
+            set_parent_settings("private", "member").await;
+            for (channel, parent) in [(parent_id, parent_id), (child_id, parent_id)] {
+                set_role(parent_id, Some("member")).await;
+                let admission = if channel == parent {
+                    check_membership_for_admission(&state, &tenant, channel, &joiner, None).await
+                } else {
+                    admit().await
+                };
+                let Ok(admission) = admission else {
+                    panic!("a member of the private parent is admitted");
+                };
+                set_role(parent_id, None).await;
+                let result = commit(channel, parent, admission).await;
+                assert!(
+                    matches!(result, Err(JoinCommitError::MembershipLost)),
+                    "parent membership lost, joining {}: {result:?}",
+                    if channel == parent {
+                        "the channel"
+                    } else {
+                        "its huddle"
+                    }
+                );
+            }
+            let rows: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM events \
+                 WHERE community_id = $1 AND channel_id = $2 AND kind = 48101",
+            )
+            .bind(community_uuid)
+            .bind(parent_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count joins");
+            assert_eq!(rows, 0, "a refused commit stores no 48101");
+        }
+
         // A paired, deny-clean audio AUTH refused by ordinary policy, relay
         // membership on a closed relay or channel membership, is never
         // admitted: no record, and none at its deadline. Mutation: recording
@@ -7416,6 +7977,97 @@ mod tests {
                     session.expire();
                 });
                 assert!(records.is_empty(), "{refusal}: {records:?}");
+            }
+        }
+
+        // Audio judges an agent assertion by its token owner where enforce
+        // does: a banned token owner or a stored owner other than the token
+        // owner records `owner/denied`; a clean owner records nothing before
+        // the channel refusal that ends this join. Mutation: deleting audio's
+        // `observe_owner` call records nothing for every case.
+        #[test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        fn shadow_audio_auth_records_token_owner_refusals() {
+            use crate::nip_fi_shadow_session::tests::{
+                owned_assertion, shadow_records, shadow_state,
+            };
+            #[derive(Clone, Copy, Debug)]
+            enum Case {
+                Clean,
+                Banned,
+                OtherStored,
+            }
+            let cases: [(Case, &[&str]); 3] = [
+                (Case::Clean, &[]),
+                (Case::Banned, &["owner/denied"]),
+                (Case::OtherStored, &["owner/denied"]),
+            ];
+            for (case, expected) in cases {
+                let records = shadow_records(async move {
+                    let mut state = (*audio_test_state_real_db()
+                        .await
+                        .expect("postgres-ci provides a database"))
+                    .clone();
+                    state.nip_fi_deny_map = shadow_state(None).await.nip_fi_deny_map;
+                    state.nip_fi_shadow_sessions = std::sync::Arc::default();
+                    let state = std::sync::Arc::new(state);
+                    let id = uuid::Uuid::new_v4();
+                    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                        .bind(id)
+                        .bind(format!("audio-owner-{}.example", id.simple()))
+                        .execute(state.db.pool())
+                        .await
+                        .expect("insert community");
+                    let community = buzz_core::tenant::CommunityId::from_uuid(id);
+                    let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+                    let owner_bytes = owner.public_key().to_bytes();
+                    match case {
+                        Case::Banned => {
+                            state
+                                .db
+                                .ban_community_member(
+                                    community,
+                                    &owner_bytes,
+                                    &owner_bytes,
+                                    None,
+                                    None,
+                                )
+                                .await
+                                .expect("ban owner");
+                        }
+                        Case::OtherStored => {
+                            let prior = nostr::Keys::generate().public_key();
+                            for key in [agent.public_key(), prior] {
+                                state
+                                    .db
+                                    .ensure_user(community, key.as_bytes())
+                                    .await
+                                    .expect("ensure user");
+                            }
+                            assert!(state
+                                .db
+                                .set_agent_owner(
+                                    community,
+                                    agent.public_key().as_bytes(),
+                                    prior.as_bytes()
+                                )
+                                .await
+                                .expect("seed stored owner"));
+                        }
+                        Case::Clean => {}
+                    }
+                    let session = crate::nip_fi_shadow_session::ShadowSession::start(
+                        &state,
+                        "audio",
+                        crate::nip_fi_shadow::BOUND.into(),
+                        owned_assertion(agent.public_key(), owner.public_key()),
+                        chrono::Utc::now(),
+                    );
+                    shadow_audio_auth_in(state, &agent, std::sync::Arc::clone(&session), community)
+                        .await;
+                    session.expire();
+                });
+                assert_eq!(records, expected, "{case:?}");
             }
         }
 
@@ -9109,7 +9761,7 @@ mod tests {
         // Exercises the concurrent-external-add path in the AutoAddRequired branch
         // of `commit_participant_join`. An external transaction inserts the
         // membership row while our transaction is paused at `before_membership_lock`
-        // — just before `acquire_channel_membership_lock_in_transaction`. When our
+        // — just before `lock_channel_memberships_in_transaction`. When our
         // transaction resumes:
         //   1. It acquires the channel membership lock.
         //   2. Re-reads membership — the external insert is committed and visible.
@@ -10168,7 +10820,8 @@ mod tests {
         /// teardown that follows writes to Postgres and Redis, which can stall
         /// with no deadline. The socket must still end within the bounded wait
         /// for the client's Close reply. This client never replies and the
-        /// teardown never finishes.
+        /// teardown never finishes. The shadow line its AUTH wrote stays a
+        /// single line throughout.
         ///
         /// Mutation: move `hand_off_socket(ws_recv, None)` to after the
         /// teardown → the socket stays open while the teardown is held →
@@ -10182,6 +10835,7 @@ mod tests {
             use chrono::{Duration, Utc};
             use std::sync::Arc;
 
+            let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
             let state = audio_test_state_real_db().await.expect(
                 "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
             );
@@ -10193,7 +10847,11 @@ mod tests {
                 vec![Utc::now() + Duration::hours(1)],
             );
             let relay_url = format!("ws://{}", tenant.host());
-            let conn_cancel = CancellationToken::new();
+            let line = crate::nip_fi_shadow::tests::upgrade_line("audio");
+            let line = Arc::new(std::sync::Mutex::new(Arc::into_inner(line)));
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+            let registry = Arc::clone(&state.community_connections);
+            let ended = Arc::new(tokio::sync::Notify::new());
 
             let (fanout_rx, fanout_release) =
                 crate::nip_fi_test_hooks::audio_participant_fanout_hook::arm(community);
@@ -10203,24 +10861,37 @@ mod tests {
             let app = axum::Router::new().route(
                 "/",
                 axum::routing::get({
-                    let conn_cancel = conn_cancel.clone();
+                    let (line, semaphore, ended) = (
+                        Arc::clone(&line),
+                        Arc::clone(&semaphore),
+                        Arc::clone(&ended),
+                    );
                     move |ws: axum::extract::ws::WebSocketUpgrade| {
-                        let (state, tenant, assertion) =
-                            (Arc::clone(&state), tenant.clone(), assertion.clone());
-                        let control =
-                            crate::state::CommunityConnectionControl::new(conn_cancel.clone());
+                        let (state, tenant, assertion, ended) = (
+                            Arc::clone(&state),
+                            tenant.clone(),
+                            assertion.clone(),
+                            Arc::clone(&ended),
+                        );
+                        let line = line.lock().expect("line").take();
+                        let permit = Arc::clone(&semaphore)
+                            .try_acquire_owned()
+                            .expect("one connection permit");
                         async move {
-                            ws.on_upgrade(move |socket| {
-                                handle_active_audio_connection(
+                            ws.on_upgrade(move |socket| async move {
+                                handle_audio_connection(
                                     socket,
                                     state,
                                     tenant,
                                     channel_id,
-                                    control,
+                                    permit,
                                     Some(assertion),
-                                    Utc::now(),
                                     None,
+                                    line,
+                                    Utc::now(),
                                 )
+                                .await;
+                                ended.notify_one();
                             })
                         }
                     }
@@ -10243,6 +10914,13 @@ mod tests {
                 .expect("fanout channel closed");
             fanout_release.notify_one();
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // The upgrade's shadow line is written at AUTH, while the socket
+            // is open. Mutation: deleting the outer `attach_nip_fi_line`, or
+            // audio's `prove_nip_fi_line`, leaves no line here.
+            let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].contains(&proven), "{lines:?}");
 
             // From here the client only reads raw bytes, so it never answers
             // the server's Close.
@@ -10250,11 +10928,12 @@ mod tests {
                 panic!("plain TCP client");
             };
             let started = std::time::Instant::now();
-            conn_cancel.cancel();
+            assert_eq!(registry.disconnect_archived_community(community), 1);
             tokio::time::timeout(std::time::Duration::from_secs(5), teardown_rx)
                 .await
                 .expect("teardown must reach the stall point")
                 .expect("teardown hook dropped");
+            assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
             // The hook runs just after the hand-off, so the socket must end
             // within the bounded wait measured from here.
             let handed_off = std::time::Instant::now();
@@ -10270,6 +10949,71 @@ mod tests {
             );
 
             teardown_release.notify_one();
+            // The outer handler owns the line; once it ends, nothing does.
+            tokio::time::timeout(std::time::Duration::from_secs(10), ended.notified())
+                .await
+                .expect("the handler finishes once teardown resumes");
+            server.abort();
+            assert_eq!(log.lines().len(), 1, "{:?}", log.lines());
+        }
+
+        /// Through `build_router`, an audio upgrade without an assertion hands
+        /// its shadow line to the socket, which writes it at the verified AUTH
+        /// with that key while the socket stays open. Mutation: passing `None`
+        /// instead of `shadow_line` to `handle_audio_connection` writes the
+        /// line as `absent` at upgrade.
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        #[tokio::test]
+        async fn shadow_audio_router_writes_line_at_auth_while_open() {
+            use std::sync::Arc;
+            use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+            let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
+            let base = audio_test_state_real_db()
+                .await
+                .expect("postgres-ci provides a database");
+            let (tenant, channel_id, key) = seed_audio_fixture(base.db.pool()).await;
+            let mut state = (*base).clone();
+            let config = Arc::make_mut(&mut state.config);
+            config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
+            config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test(
+                &format!("https://{}", tenant.host()),
+                &["https://issuer.test"],
+            );
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test listener");
+            let addr = listener.local_addr().expect("test listener addr");
+            let app = crate::router::build_router(Arc::new(state))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let mut req = format!("ws://{addr}/huddle/{channel_id}/audio")
+                .into_client_request()
+                .expect("request");
+            req.headers_mut()
+                .insert("host", tenant.host().parse().unwrap());
+            let (mut client, _) = tokio_tungstenite::connect_async(req)
+                .await
+                .expect("shadow admits the upgrade");
+            send_audio_auth(&mut client, &key, &format!("ws://{}", tenant.host()), 1).await;
+
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(10), client.next())
+                    .await
+                    .expect("joined timeout")
+                {
+                    Some(Ok(Message::Text(t))) if t.contains("\"joined\"") => break,
+                    Some(Ok(_)) => {}
+                    other => panic!("expected joined, got {other:?}"),
+                }
+            }
+
+            let lines = log.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let proven = format!("pubkey=\"{}\"", key.public_key().to_hex());
+            assert!(lines[0].contains(&proven), "{lines:?}");
+            drop(client);
             server.abort();
         }
 
@@ -10423,6 +11167,7 @@ mod tests {
                                     channel_id,
                                     permit,
                                     Some(assertion),
+                                    None,
                                     None,
                                     Utc::now(),
                                 )
@@ -10584,37 +11329,35 @@ mod tests {
             );
         }
 
-        // ── F2 (continued): `FOR NO KEY UPDATE` is compatible with concurrent
-        // membership add — no deadlock ────────────────────────────────────────────
+        // ── F2 (continued): the join's lock order ─────────────────────────────────
         //
-        // The lock-order fix (F2): join uses `FOR NO KEY UPDATE` on the channel row.
-        // `add_member` holds the advisory membership lock and then needs
-        // `KEY SHARE` on channels (FK back-reference). `FOR NO KEY UPDATE` is
-        // compatible with `KEY SHARE`, so they cannot deadlock.
+        // A join takes the channel's membership lock, then its TTL lock, then
+        // `FOR NO KEY UPDATE` on the channel row: the order every multi-lock
+        // channel writer uses. While it holds them:
+        //   - a membership write (`add_member`) and a `join_role` change
+        //     (`update_channel`) wait for it, and then succeed (no deadlock);
+        //   - a `KEY SHARE` reader (any foreign-key insert that names the
+        //     channel, such as an event) is not blocked, because
+        //     `FOR NO KEY UPDATE` is compatible with `KEY SHARE`.
         //
-        // With the old `FOR UPDATE` the combination would deadlock: join takes
-        // `FOR UPDATE` (exclusive), then tries the advisory lock; meanwhile
-        // `add_member` holds the advisory lock and tries `KEY SHARE` (upgrade path
-        // of the FK check) — which blocks on `FOR UPDATE` → circular wait.
+        // This test pauses `commit_participant_join` at the
+        // `before_archive_recheck` hook, after all three locks, and checks each.
         //
-        // This test: pause `commit_participant_join` inside the `FOR NO KEY UPDATE`
-        // hold via the `before_archive_recheck` hook, then fire `add_member` on a
-        // second connection. `add_member` must complete before the hook is released
-        // (no deadlock, no 55P03). Then release the hook and verify both the
-        // 48101 event and the new membership row are committed.
-        //
-        // Mutation oracle:
-        //   Change `FOR NO KEY UPDATE` back to `FOR UPDATE` in
-        //   `buzz_db::channel_members::lock_channel_archived_at_in_transaction`
-        //   → `add_member`'s FK KEY SHARE blocks on
-        //   FOR UPDATE → the 3-second tokio::time::timeout fires → synthesized
-        //   error → `add_member_completed` is false → assertion panics.
+        // Mutation oracles:
+        //   - `FOR NO KEY UPDATE` → `FOR UPDATE` in
+        //     `lock_channel_archived_at_in_transaction`: the KEY SHARE probe
+        //     hits its lock_timeout → assertion panics.
+        //   - Take the membership locks after the row lock in the join, as
+        //     before: the hook fires before the join holds the membership
+        //     lock → `add_member` does not wait → assertion panics. (In
+        //     production, `update_channel` would hold the membership lock and
+        //     wait on the row while the join waits on that lock: a deadlock.)
 
-        /// F2 (lock-order fix witness): `FOR NO KEY UPDATE` allows concurrent
-        /// `add_member` to proceed — no deadlock between join and membership-add.
+        /// F2 (lock-order witness): membership and settings writers wait for a
+        /// join and then succeed; a `KEY SHARE` reader does not wait.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-        async fn f2d_for_no_key_update_allows_concurrent_add_member() {
+        async fn f2d_join_lock_order_serializes_membership_and_settings_writers() {
             use chrono::{Duration, Utc};
             use std::sync::Arc;
             use uuid::Uuid;
@@ -10640,7 +11383,7 @@ mod tests {
 
             let room = Arc::new(crate::audio::room::Room::new(community_id, channel_id));
 
-            // Arm the hook — fires after FOR NO KEY UPDATE is taken.
+            // Arm the hook — fires after the membership, TTL and row locks.
             let (arrived_rx, release) =
                 crate::nip_fi_test_hooks::audio_archive_recheck_hook::arm(community_id);
 
@@ -10672,62 +11415,101 @@ mod tests {
                 .await
             });
 
-            // Wait for join to hold the FOR NO KEY UPDATE lock.
+            // Wait for join to hold its locks.
             tokio::time::timeout(std::time::Duration::from_secs(10), arrived_rx)
                 .await
                 .expect("F2d: commit_participant_join must reach before_archive_recheck within 10s")
                 .expect("arrived channel closed");
 
-            // ── Fire add_member while join holds FOR NO KEY UPDATE ────────────────
-            // Fix F2d witness: `add_member` checks out its own connection from
-            // the pool, so setting lock_timeout on `conn_b` governs nothing.
-            // Wrap the call in tokio::time::timeout instead — if FOR NO KEY
-            // UPDATE accidentally deadlocks with add_member's FK KEY SHARE
-            // (the pre-fix `FOR UPDATE` scenario), the timeout fires and the
-            // assertion below catches it via the Err branch.
-            // [F2D-WITNESS-FIX]
-            let add_result = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                buzz_db::channel_members::add_member(
-                    &pool,
-                    community_id,
-                    channel_id,
-                    &new_member_bytes,
-                    buzz_db::channel_members::MemberRole::Member,
-                    None,
-                ),
+            // ── KEY SHARE is not blocked by the join's row lock ───────────────────
+            let mut probe = pool.begin().await.expect("F2d: begin KEY SHARE probe");
+            sqlx::query("SET LOCAL lock_timeout = '2s'")
+                .execute(&mut *probe)
+                .await
+                .expect("F2d: set lock_timeout");
+            let key_share = sqlx::query(
+                "SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 FOR KEY SHARE",
             )
-            .await
-            .unwrap_or_else(|_| {
-                Err(buzz_db::DbError::Sqlx(sqlx::Error::Protocol(
-                    "F2d: add_member did not complete within 3s — \
-                 possible deadlock with commit_participant_join's lock"
-                        .to_string(),
-                )))
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .execute(&mut *probe)
+            .await;
+            probe.rollback().await.expect("F2d: end KEY SHARE probe");
+            assert!(
+                key_share.is_ok(),
+                "F2d: a KEY SHARE reader must not wait for the join's row lock: {key_share:?}"
+            );
+
+            // ── Membership and settings writers wait for the join ─────────────────
+            // The existing member invites the new key, so the add does not
+            // depend on `join_role`: the two writers may commit in either order.
+            let add = tokio::spawn({
+                let pool = pool.clone();
+                let new_member_bytes = new_member_bytes.clone();
+                let inviter = member_key.public_key().to_bytes().to_vec();
+                async move {
+                    buzz_db::channel_members::add_member(
+                        &pool,
+                        community_id,
+                        channel_id,
+                        &new_member_bytes,
+                        buzz_db::channel_members::MemberRole::Member,
+                        Some(&inviter),
+                    )
+                    .await
+                }
             });
+            let update = tokio::spawn({
+                let pool = pool.clone();
+                async move {
+                    buzz_db::channel::update_channel(
+                        &pool,
+                        community_id,
+                        channel_id,
+                        buzz_db::channel::ChannelUpdate {
+                            join_role: Some("guest".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(
+                !add.is_finished(),
+                "F2d: add_member must wait for the join's membership lock"
+            );
+            assert!(
+                !update.is_finished(),
+                "F2d: a join_role change must wait for the join's membership lock"
+            );
 
-            let add_member_completed = add_result.is_ok();
-
-            // ── Release the hook — join commits ───────────────────────────────────
+            // ── Release the hook — join commits, then the writers ─────────────────
             release.notify_one();
 
             let join_result = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
                 .await
                 .expect("F2d: commit_participant_join must return within 10s")
                 .expect("task must not panic");
-
-            assert!(
-                add_member_completed,
-                "F2d: add_member must complete while join holds FOR NO KEY UPDATE — \
-                 got {add_result:?}\n\
-                 Mutation oracle: change FOR NO KEY UPDATE to FOR UPDATE → \
-                 add_member's FK KEY SHARE blocks until join releases → \
-                 tokio::time::timeout fires (3s) → synthesized error → \
-                 this assertion panics"
-            );
             assert!(
                 join_result.is_ok(),
                 "F2d: commit_participant_join must succeed after hook release; got: {join_result:?}"
+            );
+            let add_result = tokio::time::timeout(std::time::Duration::from_secs(10), add)
+                .await
+                .expect("F2d: add_member must finish after the join")
+                .expect("add task must not panic");
+            assert!(
+                add_result.is_ok(),
+                "F2d: add_member after the join: {add_result:?}"
+            );
+            let update_result = tokio::time::timeout(std::time::Duration::from_secs(10), update)
+                .await
+                .expect("F2d: update_channel must finish after the join")
+                .expect("update task must not panic");
+            assert!(
+                update_result.is_ok(),
+                "F2d: join_role change after the join: {update_result:?}"
             );
 
             // Both rows must be committed.
@@ -12973,11 +13755,11 @@ mod tests {
             let _ = server.await;
         }
 
-        // ── F4b ParentMembershipLost transactional denial wire frame ──────────
+        // ── F4b MembershipLost transactional denial wire frame ──────────
         //
         // When `commit_participant_join` detects that the parent membership was
         // revoked between `check_membership_for_admission` and the transaction
-        // lock, it returns `JoinCommitError::ParentMembershipLost`. With an FI
+        // lock, it returns `JoinCommitError::MembershipLost`. With an FI
         // assertion present the handler sends the exact canonical restricted frame
         // via `ws_send` (not the ordinary control or terminal channels).
         //
@@ -12990,14 +13772,14 @@ mod tests {
         //      membership-lock acquisition inside the joint transaction.
         //   4. While paused: DELETE the parent membership row externally.
         //   5. Release the hook. `is_member_in_transaction(parent_channel_id)`
-        //      returns false → `ParentMembershipLost`.
+        //      returns false → `MembershipLost`.
         //   6. The handler sends `{"type":"restricted",...}` via `ws_send`.
         //
         // `run_auto_add_commit_race` drives that schedule and applies `race`
         // at step 4, so each commit-time refusal is exercised through the
         // production handler. It returns the first frame the client receives.
         enum CommitRace {
-            /// Delete the parent membership → `ParentMembershipLost`.
+            /// Delete the parent membership → `MembershipLost`.
             ParentMembershipRevoked,
             /// Delete the creator-signed huddle_started link → `HuddleLinkGone`.
             HuddleLinkDeleted,
@@ -13106,10 +13888,17 @@ mod tests {
                 vec![Utc::now() + Duration::hours(1)],
             );
 
-            // Arm the membership-lock hook BEFORE the server starts. The hook fires
-            // inside commit_participant_join just before the membership-lock acquisition.
-            let (arrived_rx, release) =
-                crate::nip_fi_test_hooks::audio_membership_lock_hook::arm(community_id);
+            // Arm the hook BEFORE the server starts. The membership-lock hook
+            // fires inside commit_participant_join just before the membership
+            // locks. The backend-lost race needs the join to hold its child row
+            // lock, so a waiter can name the join's backend: it pauses at the
+            // archive-recheck hook, after all of the join's locks.
+            let (arrived_rx, release) = match race {
+                CommitRace::TransactionBackendLost => {
+                    crate::nip_fi_test_hooks::audio_archive_recheck_hook::arm(community_id)
+                }
+                _ => crate::nip_fi_test_hooks::audio_membership_lock_hook::arm(community_id),
+            };
 
             let state_c = Arc::clone(&state);
             let tenant_c = tenant.clone();
@@ -14369,6 +15158,155 @@ mod tests {
             bystander_server.abort();
         }
 
+        /// Audio AUTH of a NIP-FI agent on a closed relay, with no NIP-OA: a
+        /// member token owner admits a non-member agent and records the
+        /// stored owner; a non-member owner, a banned owner (even for an agent
+        /// that is itself a member) and a different stored owner are each
+        /// refused with `authorization denied`. A banned owner is refused
+        /// before its owner link is written.
+        /// Mutations: drop the token-owner arm of `check_membership`, treat
+        /// `OwnerLink::Conflict` as linked, or drop audio's early ban check
+        /// → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn audio_token_owner_decides_agent_admission() {
+            #[derive(Clone, Copy, Debug)]
+            enum Case {
+                MemberOwner,
+                NonMemberOwner,
+                BannedOwnerOfMemberAgent,
+                OtherStoredOwner,
+            }
+            let mut state = (*audio_test_state_real_db()
+                .await
+                .expect("postgres-ci provides a database"))
+            .clone();
+            let mut config = (*state.config).clone();
+            config.require_relay_membership = true;
+            state.config = std::sync::Arc::new(config);
+            let state = std::sync::Arc::new(state);
+            for case in [
+                Case::MemberOwner,
+                Case::NonMemberOwner,
+                Case::BannedOwnerOfMemberAgent,
+                Case::OtherStoredOwner,
+            ] {
+                let (tenant, channel_id, _member) = seed_audio_fixture(state.db.pool()).await;
+                let community = tenant.community();
+                let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+                add_channel_member(state.db.pool(), &tenant, channel_id, &agent).await;
+                if !matches!(case, Case::NonMemberOwner) {
+                    state
+                        .db
+                        .add_relay_member(
+                            community,
+                            &owner.public_key().to_hex(),
+                            "member",
+                            None,
+                            &nostr::Keys::generate(),
+                        )
+                        .await
+                        .map(|write| write.outcome)
+                        .expect("add owner");
+                }
+                match case {
+                    Case::BannedOwnerOfMemberAgent => {
+                        state
+                            .db
+                            .add_relay_member(
+                                community,
+                                &agent.public_key().to_hex(),
+                                "member",
+                                None,
+                                &nostr::Keys::generate(),
+                            )
+                            .await
+                            .map(|write| write.outcome)
+                            .expect("add agent");
+                        let owner_bytes = owner.public_key().to_bytes();
+                        state
+                            .db
+                            .ban_community_member(community, &owner_bytes, &owner_bytes, None, None)
+                            .await
+                            .expect("ban owner");
+                    }
+                    Case::OtherStoredOwner => {
+                        let prior = nostr::Keys::generate();
+                        for key in [&agent, &prior] {
+                            state
+                                .db
+                                .ensure_user_for_authorization(
+                                    community,
+                                    key.public_key().as_bytes(),
+                                )
+                                .await
+                                .expect("seed user");
+                        }
+                        assert!(state
+                            .db
+                            .set_agent_owner_for_authorization(
+                                community,
+                                agent.public_key().as_bytes(),
+                                prior.public_key().as_bytes(),
+                            )
+                            .await
+                            .expect("seed prior owner"));
+                    }
+                    Case::MemberOwner | Case::NonMemberOwner => {}
+                }
+                let assertion = buzz_auth::VerifiedAssertion::for_test(
+                    Some(agent.public_key()),
+                    vec![chrono::Utc::now() + chrono::Duration::hours(1)],
+                )
+                .with_owner_for_test(owner.public_key());
+
+                let (mut client, server) =
+                    start_audio_auth(&state, tenant, channel_id, &agent, None, Some(assertion))
+                        .await;
+                let first = next_audio_text(&mut client).await;
+                server.abort();
+                if matches!(case, Case::MemberOwner) {
+                    assert!(!first.contains("\"error\""), "{case:?}: {first}");
+                    assert!(state
+                        .db
+                        .is_agent_owner(
+                            community,
+                            agent.public_key().as_bytes(),
+                            owner.public_key().as_bytes(),
+                        )
+                        .await
+                        .expect("read stored owner"));
+                } else {
+                    // Every refusal of a NIP-FI session is the one
+                    // `authorization denied` frame.
+                    assert_eq!(
+                        first,
+                        serde_json::json!({
+                            "message": "restricted: authorization denied",
+                            "type": "restricted"
+                        })
+                        .to_string(),
+                        "{case:?}"
+                    );
+                }
+                if matches!(case, Case::BannedOwnerOfMemberAgent) {
+                    // The ban is refused before the owner link is written.
+                    assert!(
+                        !state
+                            .db
+                            .is_agent_owner(
+                                community,
+                                agent.public_key().as_bytes(),
+                                owner.public_key().as_bytes(),
+                            )
+                            .await
+                            .expect("read stored owner"),
+                        "a banned token owner must not be linked"
+                    );
+                }
+            }
+        }
+
         /// Audio refuses an agent whose owner link cannot be recorded (the
         /// agent is already linked to a different owner): revoking its NIP-OA
         /// owner could not find it.
@@ -15242,6 +16180,7 @@ mod tests {
                                 Uuid::new_v4(),
                                 permit,
                                 Some(expired_assertion()),
+                                None,
                                 None,
                                 chrono::Utc::now(),
                             )

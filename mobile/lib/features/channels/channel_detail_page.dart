@@ -56,8 +56,8 @@ import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
-import 'channel_typing_indicator.dart';
 import 'inline_agent_typing.dart';
+import 'typing_motion_preview.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
@@ -817,9 +817,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                           data: (events) {
                             return _MessageList(
                               notifier: ref.watch(messagesProvider.notifier),
-                              inlineTyping: personalChat
-                                  ? typingEntries
-                                  : const [],
+                              inlineTyping: typingEntries,
                               stickyDateHeaderState: stickyDateHeaderState,
                               entries: timelineEntries,
                               allMessages: timelineMessages,
@@ -869,19 +867,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
               if (!resolvedChannel.isForum &&
                   (!resolvedChannel.isMember ||
                       resolvedChannel.isArchived)) ...[
-                AnimatedSize(
-                  duration: MediaQuery.disableAnimationsOf(context)
-                      ? Duration.zero
-                      : const Duration(milliseconds: 180),
-                  curve: Curves.easeOutCubic,
-                  alignment: Alignment.bottomCenter,
-                  child: personalChat || typingEntries.isEmpty
-                      ? const SizedBox.shrink()
-                      : ChannelTypingIndicator(
-                          channelId: resolvedChannel.id,
-                          entries: typingEntries,
-                        ),
-                ),
                 if (!resolvedChannel.isDm)
                   _ReadOnlyNotice(channel: resolvedChannel),
               ],
@@ -900,19 +885,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      AnimatedSize(
-                        duration: MediaQuery.disableAnimationsOf(context)
-                            ? Duration.zero
-                            : const Duration(milliseconds: 180),
-                        curve: Curves.easeOutCubic,
-                        alignment: Alignment.bottomCenter,
-                        child: personalChat || typingEntries.isEmpty
-                            ? const SizedBox.shrink()
-                            : ChannelTypingIndicator(
-                                channelId: resolvedChannel.id,
-                                entries: typingEntries,
-                              ),
-                      ),
                       ?assistant.pendingNotice,
                       ComposeBar(
                         channelId: channel.id,
@@ -936,9 +908,11 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                               }
                               var recipients = mentionPubkeys;
                               if (personalChat) {
-                                if (mePlacement?.asData?.value.channels
-                                        .contains(channel.id) !=
-                                    true) {
+                                if (!resolvedChannel.isPersonalChat(
+                                  ref.read(myPubkeyProvider),
+                                  mePlacement?.asData?.value.channels ??
+                                      const [],
+                                )) {
                                   throw StateError(
                                     'Refresh Solo before sending to this chat.',
                                   );

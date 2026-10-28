@@ -126,6 +126,83 @@ fn advancement_requires_its_own_policy_flag() {
     );
 }
 
+/// The repaired layout once January 2027 arrives: the current month and the
+/// whole lookahead route to the empty catch-all, as on a fresh install.
+fn catch_all_serving_now_audit() -> PartitionTableAudit {
+    let mut audit = repaired_audit(false);
+    audit.months = (0..=PARTITION_MANAGER_MONTHS_AHEAD as i32)
+        .map(|offset| {
+            let (year, m) = add_months(2027, 1, offset).unwrap();
+            MonthCoverage {
+                start: month(year, m),
+                kind: MonthCoverageKind::CoveredByCatchAll,
+            }
+        })
+        .collect();
+    audit
+}
+
+fn with_catch_all(
+    mut audit: PartitionTableAudit,
+    edit: impl Fn(&mut PartitionChildAudit),
+) -> PartitionTableAudit {
+    for child in &mut audit.children {
+        if child.kind == PartitionChildKind::CatchAll {
+            edit(child);
+        }
+    }
+    audit
+}
+
+#[test]
+fn only_a_catch_all_serving_the_current_month_awaits_advance() {
+    let serving = catch_all_serving_now_audit();
+    assert!(serving.awaits_catch_all_advance(ADVANCE));
+
+    // The routine monthly advance: the planner would advance, but only the end
+    // of the window routes to the catch-all, so it waits for the next pass.
+    let routine = repaired_audit(false);
+    assert!(matches!(
+        plan_maintenance(&routine, ADVANCE),
+        MaintenancePlan::Apply(_)
+    ));
+    assert!(!routine.awaits_catch_all_advance(ADVANCE));
+
+    // Advancement disabled, including by the create kill switch.
+    for policy in [
+        CREATE_ONLY,
+        PartitionMaintenancePolicy {
+            create_enabled: false,
+            advance_enabled: true,
+        },
+        PartitionMaintenancePolicy::default(),
+    ] {
+        assert!(!serving.awaits_catch_all_advance(policy), "{policy:?}");
+    }
+
+    // Layouts the planner refuses need an operator, not prompt retries.
+    let occupied = with_catch_all(serving.clone(), |child| {
+        child.catch_all_nonempty = Some(true);
+    });
+    let child_triggers = with_catch_all(serving.clone(), |child| {
+        child.extra_triggers = vec!["child_only_probe".to_string()];
+    });
+    for refused in [&occupied, &child_triggers] {
+        assert!(matches!(
+            plan_maintenance(refused, ADVANCE),
+            MaintenancePlan::Refuse(_)
+        ));
+        assert!(!refused.awaits_catch_all_advance(ADVANCE));
+    }
+
+    let catalog = |tables| PartitionAudit {
+        audited_at: month(2027, 1),
+        tables,
+    };
+    assert!(catalog(vec![routine.clone(), serving]).awaits_catch_all_advance(ADVANCE));
+    assert!(!catalog(vec![routine, occupied]).awaits_catch_all_advance(ADVANCE));
+}
+
 #[test]
 fn full_monthly_runway_is_a_noop_even_when_disabled() {
     let mut audit = repaired_audit(false);
@@ -1305,5 +1382,87 @@ mod postgres_tests {
             .iter()
             .any(|(name, ..)| name == "events_p_future_next"));
         assert_ne!(after, before, "delivery_log still advances");
+    }
+
+    /// Audits taken in a freshly migrated database before and after its first passes.
+    struct FreshInstallPasses {
+        migrated: PartitionAudit,
+        create_only: PartitionAudit,
+        advanced: PartitionAudit,
+        repeated: PartitionAudit,
+    }
+
+    /// Runs every migration in a dedicated database, then the passes a relay
+    /// would run at `fixed_now()`. The database is dropped before returning.
+    async fn fresh_install_passes() -> Result<FreshInstallPasses> {
+        let base_url = crate::test_support::database_url();
+        let admin = PgPool::connect(&base_url)
+            .await
+            .expect("connect admin database");
+        let database = format!("buzz_partition_fresh_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
+            .execute(&admin)
+            .await
+            .expect("create fresh-install database");
+        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
+        let passes = async {
+            let pool = PgPool::connect(&format!("{base_prefix}/{database}")).await?;
+            let result = async {
+                crate::migration::run_migrations(&pool).await?;
+                let now = fixed_now();
+                Ok(FreshInstallPasses {
+                    migrated: audit_partition_catalog_at(
+                        &pool,
+                        PARTITION_MANAGER_MONTHS_AHEAD,
+                        now,
+                    )
+                    .await?,
+                    create_only: maintain_partitions_at(
+                        &pool,
+                        PARTITION_MANAGER_MONTHS_AHEAD,
+                        CREATE_ONLY,
+                        now,
+                    )
+                    .await?,
+                    advanced: maintain(&pool).await?,
+                    repeated: maintain(&pool).await?,
+                })
+            }
+            .await;
+            pool.close().await;
+            result
+        }
+        .await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {database} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop fresh-install database");
+        passes
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fresh_install_catch_all_advances_on_the_first_pass() {
+        let passes = fresh_install_passes().await.expect("fresh-install passes");
+
+        // The migrations end every managed table in an empty catch-all that
+        // already serves months, and creation alone cannot replace it.
+        for audit in [&passes.migrated, &passes.create_only] {
+            assert_eq!(audit.tables.len(), PARTITIONED_TABLES.len());
+            assert!(audit.awaits_catch_all_advance(ADVANCE), "{audit:?}");
+            for table in &audit.tables {
+                assert!(table.awaits_catch_all_advance(ADVANCE), "{}", table.table);
+            }
+        }
+
+        assert_advanced(&passes.advanced);
+        assert!(!passes.advanced.awaits_catch_all_advance(ADVANCE));
+        assert!(passes.advanced.serving_safe());
+        for table in &passes.advanced.tables {
+            assert!(!table.degraded(), "{}: {table:?}", table.table);
+        }
+        assert_eq!(passes.repeated, passes.advanced);
     }
 }

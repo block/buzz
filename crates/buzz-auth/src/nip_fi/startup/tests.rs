@@ -17,7 +17,7 @@ fn test_contract(issuer: &str) -> JwksSourceContract {
 fn make_offline_policy(issuer: &str) -> IssuerPolicy {
     IssuerPolicy::new(
         issuer.to_owned(),
-        vec![format!("https://relay.example/api")],
+        vec!["https://relay.example/api".to_string()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![JwtAlgorithm::ES256],
@@ -32,7 +32,7 @@ fn make_offline_policy(issuer: &str) -> IssuerPolicy {
 fn make_status_policy(issuer: &str) -> IssuerPolicy {
     IssuerPolicy::new(
         issuer.to_owned(),
-        vec![format!("https://relay.example/api")],
+        vec!["https://relay.example/api".to_string()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
         vec![JwtAlgorithm::ES256],

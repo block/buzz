@@ -8,6 +8,9 @@
 //! Auth: NIP-98 on all routes (clone + push). No public repos for v1.
 //! Transport: shells out to `git --stateless-rpc` with `env_clear()`.
 
+// Response is the natural error type for axum handlers.
+#![allow(clippy::result_large_err)]
+
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -199,6 +202,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         .await?;
 
         let pubkey = *admission.proven_pubkey();
+        let token_owner = admission.token_owner();
         let (event, signed_auth_created_at) = admission.into_extra();
 
         // Relay membership gate (NIP-43). Git cannot carry a standalone
@@ -217,6 +221,15 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
                 legacy
             }
         };
+        // A verified agent token gets only NIP-FI's fixed denial, so the
+        // response never shows which step refused it.
+        let denied = |legacy: Response| {
+            if token_owner.is_some() {
+                crate::nip_fi_core::http_denial(buzz_auth::DenialClass::AuthorizationDenied)
+            } else {
+                legacy
+            }
+        };
         #[cfg(test)]
         crate::nip_fi_test_hooks::before_git_membership(tenant.community()).await;
         match crate::api::relay_members::check_relay_membership(
@@ -225,14 +238,15 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             pubkey.as_bytes(),
             auth_tag,
             Some(signed_auth_created_at),
+            token_owner,
         )
         .await
         {
             Ok(crate::api::relay_members::MembershipDecision::Denied) => {
                 warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
-                return Err(
-                    (StatusCode::FORBIDDEN, "restricted: not a relay member").into_response()
-                );
+                return Err(denied(
+                    (StatusCode::FORBIDDEN, "restricted: not a relay member").into_response(),
+                ));
             }
             Ok(_) => {}
             Err(e) => {
@@ -253,15 +267,39 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             &pubkey,
             auth_tag,
             Some(signed_auth_created_at),
+            token_owner,
         )
         .await
         .map_err(|denial| {
             if denial.status() == StatusCode::SERVICE_UNAVAILABLE {
                 unavailable(denial)
             } else {
-                denial
+                denied(denial)
             }
         })?;
+
+        // A token owner other than the agent's stored owner is refused; an
+        // unset stored owner is recorded.
+        if let Some(owner) = token_owner {
+            use crate::api::relay_members::{link_agent_owner, OwnerLink};
+            match link_agent_owner(state, &tenant, &pubkey, &owner).await {
+                OwnerLink::Linked => {}
+                OwnerLink::Conflict => {
+                    return Err(crate::nip_fi_core::http_denial(
+                        buzz_auth::DenialClass::AuthorizationDenied,
+                    ))
+                }
+                OwnerLink::Unavailable => {
+                    return Err(unavailable(
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            crate::handlers::auth::OWNER_LINK_ERROR,
+                        )
+                            .into_response(),
+                    ))
+                }
+            }
+        }
 
         Ok(GitAuth { pubkey, tenant })
     }
@@ -284,6 +322,7 @@ pub(super) async fn deny_banned_git_principal(
     pubkey: &nostr::PublicKey,
     auth_tag: Option<&str>,
     signed_auth_created_at: Option<u64>,
+    token_owner: Option<nostr::PublicKey>,
 ) -> Result<(), Response> {
     let agent = git_restriction_state(db, community, pubkey).await?;
 
@@ -292,11 +331,13 @@ pub(super) async fn deny_banned_git_principal(
     let owner = if agent.banned {
         None
     } else {
-        crate::api::relay_members::extract_nip_oa_owner(
-            pubkey.as_bytes(),
-            auth_tag,
-            signed_auth_created_at,
-        )
+        token_owner.or_else(|| {
+            crate::api::relay_members::extract_nip_oa_owner(
+                pubkey.as_bytes(),
+                auth_tag,
+                signed_auth_created_at,
+            )
+        })
     };
     let owner_state = match owner {
         Some(owner) => Some(git_restriction_state(db, community, &owner).await?),
@@ -3789,7 +3830,7 @@ mod sec005_postgres_tests {
         db.ensure_user(community, &member_pk).await.expect("member");
 
         assert!(
-            deny_banned_git_principal(&db, community, &member.public_key(), None, None)
+            deny_banned_git_principal(&db, community, &member.public_key(), None, None, None)
                 .await
                 .is_ok(),
             "precondition: an unbanned member passes the git ban gate"
@@ -3800,7 +3841,7 @@ mod sec005_postgres_tests {
             .expect("ban");
 
         let (status, body) = denial_parts(
-            deny_banned_git_principal(&db, community, &member.public_key(), None, None).await,
+            deny_banned_git_principal(&db, community, &member.public_key(), None, None, None).await,
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -3829,6 +3870,7 @@ mod sec005_postgres_tests {
                 &agent.public_key(),
                 Some(&auth_tag),
                 Some(200),
+                None,
             )
             .await
             .is_ok(),
@@ -3847,6 +3889,7 @@ mod sec005_postgres_tests {
                 &agent.public_key(),
                 Some(&auth_tag),
                 Some(200),
+                None,
             )
             .await,
         )
@@ -3860,7 +3903,7 @@ mod sec005_postgres_tests {
         // An unattested request from the same agent key is unaffected: the
         // cascade must follow a verified owner, not punish every agent.
         assert!(
-            deny_banned_git_principal(&db, community, &agent.public_key(), None, None)
+            deny_banned_git_principal(&db, community, &agent.public_key(), None, None, None)
                 .await
                 .is_ok(),
             "without an attestation there is no owner to inherit from"
@@ -3882,8 +3925,15 @@ mod sec005_postgres_tests {
 
         let community = buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let (status, body) = denial_parts(
-            deny_banned_git_principal(&db, community, &Keys::generate().public_key(), None, None)
-                .await,
+            deny_banned_git_principal(
+                &db,
+                community,
+                &Keys::generate().public_key(),
+                None,
+                None,
+                None,
+            )
+            .await,
         )
         .await;
         assert_eq!(
@@ -4780,11 +4830,13 @@ mod off_mode_precedence_tests {
                 const GIT_TEST_ISSUER: &str = "https://git-pack-test.issuer.invalid";
                 const GIT_TEST_AUDIENCE: &str = "https://git-pack-test.relay.invalid";
                 const GIT_TEST_KID: &str = "git-pack-test-key-1";
-                const GIT_TEST_EC_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-                    MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-                    WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-                    zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-                    -----END PRIVATE KEY-----\n";
+                const GIT_TEST_EC_PEM: &str = concat!(
+                    "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- test-only ES256 fixture
+                    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+                    "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+                    "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+                    "-----END PRIVATE KEY-----\n",
+                );
 
                 let jwks: JwkSet = serde_json::from_value(serde_json::json!({
                     "keys": [{

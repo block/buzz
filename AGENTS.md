@@ -14,7 +14,12 @@ Before planning or reviewing a non-trivial change:
 2. Read the `VISION_*.md` documents relevant to the affected product surface.
 3. Read the applicable guidance in [TESTING.md](TESTING.md) and any
    package-local `TESTING.md`.
-4. Check that the proposed design advances, or at least does not contradict,
+4. For any change to `migrations/`, `schema/`, or schema-dependent `buzz-db`
+   queries, read [docs/database.md](docs/database.md): no new triggers,
+   functions, or foreign keys; no data backfills in migrations; update every
+   schema location; and keep every migration compatible with the relay that
+   is currently deployed.
+5. Check that the proposed design advances, or at least does not contradict,
    that product intent. Call out any intentional tension explicitly.
 
 Implementation describes the product today; the vision documents describe the
@@ -128,7 +133,8 @@ crates/
 desktop/              # Tauri 2 + React 19 desktop app
 web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
-migrations/           # SQL migrations (auto-applied on relay startup)
+migrations/           # SQL migrations (run at relay startup when BUZZ_AUTO_MIGRATE is on: binary default off, Helm default on; deployments at scale apply them out of band — see docs/database.md)
+schema/               # Desired-state schema (schema/tables/public/ is the declarative schema source)
 scripts/              # Dev tooling
 .env.example          # Config template — copy to .env before running
 ```
@@ -365,8 +371,13 @@ canonical signed Nostr event fields (`id`, `pubkey`, `kind`, `content`,
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
 
-`--format compact` is a **global** flag — it goes before the subcommand:
+`--format` is a **global** flag — it goes before the subcommand:
 `buzz --format compact channels list`, NOT `buzz channels list --format compact`.
+Without the flag it falls back to `BUZZ_OUTPUT_FORMAT` (unknown values mean
+`json`); buzz-acp sets that to `agent` for agent
+processes, so their event reads drop `sig`, trim the NIP-OA `auth` tag to
+`["auth", <owner>]`, and fold the NIP-10 `root`/`reply` tags into `reply_to`
+(plus `thread_root` on nested replies); other tags remain.
 
 See `crates/buzz-cli/TESTING.md` for the full live-testing runbook.
 
@@ -602,7 +613,7 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
 6. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
-7. **`pgschema` omits seed DML and some storage parameters** — `schema/schema.sql` is an ordered `\i` manifest: `schema/tables/public/<table>.sql` holds only that table's `CREATE TABLE` and `CREATE INDEX` statements (one table per file, the shape SchemaBot reads), and types, functions, partitions, triggers, and seed rows live in the sibling `schema/` directories. Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
+7. **`pgschema` omits seed DML and some storage parameters** — `schema/schema.sql` is an ordered `\i` manifest: `schema/tables/public/<table>.sql` holds only that table's `CREATE TABLE` and `CREATE INDEX` statements (one table per file, the shape out-of-band schema tools read), and types, functions, partitions, triggers, and seed rows live in the sibling `schema/` directories. Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script, and must run pgschema from the repository root so it reads `.pgschemaignore`; from any other directory a re-apply plans to drop the partitions the relay created at runtime. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
 
 ---
 

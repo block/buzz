@@ -153,10 +153,23 @@ Future<void> offerHostedProfile(
     } catch (_) {
       return;
     }
-    await flow.requestProfile((name) async {
-      if (!current()) throw AccountFailure.unavailable;
-      await ref.read(profileProvider.notifier).updateDisplayName(name);
-    });
+    await flow.requestProfile(
+      (name) async {
+        if (!current()) throw AccountFailure.unavailable;
+        await ref.read(profileProvider.notifier).updateDisplayName(name);
+      },
+      saveDraft: (name, prepareAvatar) async {
+        if (!current()) throw AccountFailure.unavailable;
+        final writer = ref.read(profileProvider.notifier);
+        final avatar = await prepareAvatar?.call();
+        if (!current()) throw AccountFailure.unavailable;
+        if (avatar == null) {
+          await writer.updateDisplayName(name);
+        } else {
+          await writer.updateSetup(name, avatar);
+        }
+      },
+    );
   } finally {
     subscription.close();
   }

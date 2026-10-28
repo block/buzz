@@ -427,13 +427,13 @@ void main() {
     await _waitForAvatarCropToLoad(tester);
     expect(find.text('Position Photo'), findsOneWidget);
     final cancelButton = find.ancestor(
-      of: find.text('Cancel'),
+      of: find.text('Back'),
       matching: find.byType(TextButton),
     );
     final saveButton = find.byKey(const ValueKey('avatar-crop-use-photo'));
     expect(tester.getRect(cancelButton).left, Grid.gutter);
     expect(
-      tester.getSize(find.text('Cancel')).width,
+      tester.getSize(find.text('Back')).width,
       lessThan(tester.getSize(cancelButton).width),
     );
     expect(

@@ -173,8 +173,8 @@ two gauges labelled `phase`:
 - `buzz_startup_phase_seconds` is the finished step's duration.
 
 `degraded` means the step hit a non-fatal error and startup continued — for
-example, some communities failed NIP-43 reconciliation or a NIP-FI issuer did
-not warm. `failed` means startup aborted inside the step.
+example, some large channel rosters failed reconciliation or a NIP-FI issuer
+did not warm. `failed` means startup aborted inside the step.
 
 These are gauges, not counters, because each value is written once per boot
 and a monotonic-counter scrape drops a series' first sample. Each is written
@@ -183,8 +183,7 @@ field of the `Prometheus metrics exporter started` log (2700 s with default
 intervals). A step that runs longer than that timeout loses its `_current`
 series, so a pod stuck that long shows no current step. The `phase` values are
 the closed `StartupStep` vocabulary in `crates/buzz-relay/src/startup_steps.rs`;
-they never reuse an early lifecycle phase name. The NIP-43 startup reconcile
-also logs `NIP-43 startup reconciliation progress` every 5,000 communities.
+they never reuse an early lifecycle phase name.
 
 ### Readiness contract
 
@@ -417,6 +416,21 @@ reader family remains absent when no read replica is configured; use
 Pool sizing and the aggregate connection budget across all four roles remain
 deployment configuration concerns. The relay does not enforce a combined
 connection ceiling.
+
+The reader pool keeps a warm floor of one fifth of its maximum (at least one)
+established connections per relay pod, so standing reader connections are
+that floor times the pod count; size the replica's `max_connections` for it.
+Each routed read proves the replica is caught up before serving from it. A
+proof that does not answer within 1s falls back to the writer, counted as
+`buzz_db_route_decision{decision="writer",reason="reader_proof_timeout"}`.
+A sustained rise in that series means the replica is reachable but not
+answering, for example during a failover. Every connection returned to the
+reader pool passes a release check first. A connection is closed instead of
+returned, and the pool dials a replacement, when the check does not answer
+within 5s (`reason="timeout"`), fails (`error`), or finds a transaction still
+open (`open_transaction`). Each close increments
+`buzz_db_reader_release_closed_total{reason}`, a counter with those three
+series. A rise in `timeout` means reader sockets stopped answering.
 
 ## Relay Pod extensions
 

@@ -685,8 +685,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         )
         .await
         {
-            let (message, reason) = match e {
-                IngestError::Internal(_) => (
+            let (message, reason) = match e.into_legacy() {
+                // `into_legacy` never returns `Ban`; it would fail closed here.
+                IngestError::Internal(_) | IngestError::Ban { .. } => (
                     "error: internal error checking restriction state".to_string(),
                     "error",
                 ),
@@ -821,11 +822,15 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 // fixed, sanitized message strings, so unlike the
                 // persistent arm below, `Internal` text is safe to forward
                 // verbatim.
-                let (message, reason) = match e {
+                let (message, reason) = match e.into_legacy() {
                     IngestError::Rejected(message) => (message, "invalid"),
                     IngestError::CanvasConflict(message) => (message, "invalid"),
                     IngestError::AuthFailed(message) => (message, "auth"),
                     IngestError::Internal(message) => (message, "error"),
+                    // `into_legacy` never returns `Ban`; it would fail closed here.
+                    IngestError::Ban { .. } => {
+                        ("error: internal server error".to_string(), "error")
+                    }
                 };
                 reject(reason);
                 conn.send(RelayMessage::ok(&event_id_hex, false, &message));
@@ -885,12 +890,16 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
         }
         Err(e) => {
+            let e = e.into_legacy();
             // Sanitize internal errors — don't leak DB/system details over WS.
             let (msg, reason) = match &e {
                 IngestError::Rejected(m) => (m.clone(), "invalid"),
                 IngestError::CanvasConflict(m) => (m.clone(), "invalid"),
                 IngestError::AuthFailed(m) => (m.clone(), "auth"),
-                IngestError::Internal(_) => ("error: internal server error".to_string(), "error"),
+                // `into_legacy` never returns `Ban`; it would fail closed here.
+                IngestError::Internal(_) | IngestError::Ban { .. } => {
+                    ("error: internal server error".to_string(), "error")
+                }
             };
             reject(reason);
             conn.send(RelayMessage::ok(&event_id_hex, false, &msg));
@@ -1124,9 +1133,16 @@ async fn publish_channel_ephemeral(
 ) -> Result<(), IngestError> {
     // Membership refusals are client-input rejections, and the shared
     // gate's message text is surfaced verbatim.
-    super::ingest::check_channel_membership(tenant, state, ch_id, pubkey_bytes, None)
-        .await
-        .map_err(IngestError::Rejected)?;
+    super::ingest::check_channel_membership(
+        tenant.community(),
+        state,
+        ch_id,
+        pubkey_bytes,
+        None,
+        super::ingest::ChannelWrite::Post,
+    )
+    .await
+    .map_err(IngestError::Rejected)?;
 
     // Mark as local before Redis publish to prevent double-delivery when
     // the event comes back through the Redis subscriber loop.

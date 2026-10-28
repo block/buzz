@@ -400,8 +400,10 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
                 continue; // Malformed batch.
             }
             let samples: Vec<f32> = pcm_bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
 
             let mut tx = ws_tx_send.lock().await;
@@ -488,30 +490,14 @@ pub(crate) async fn fetch_channel_members_with_roles(
     Ok(members)
 }
 
-/// Fetch channel members, optionally filtered by role (e.g., "bot" for agents).
+/// Fetch all channel member pubkeys. Use `roster::fetch_huddle_roster` to
+/// tell agents from people.
 pub(crate) async fn fetch_channel_members(
     channel_id: &str,
-    role_filter: Option<&str>,
     state: &AppState,
 ) -> Result<Vec<String>, String> {
     let all = fetch_channel_members_with_roles(channel_id, state).await?;
-    Ok(all
-        .into_iter()
-        .filter(|(_, role)| role_filter.is_none_or(|r| role.as_deref() == Some(r)))
-        .map(|(pubkey, _)| pubkey)
-        .collect())
-}
-
-/// Count human (non-bot) members remaining in a channel.
-pub(crate) async fn count_human_members(
-    channel_id: &str,
-    state: &AppState,
-) -> Result<usize, String> {
-    let all = fetch_channel_members_with_roles(channel_id, state).await?;
-    Ok(all
-        .iter()
-        .filter(|(_, role)| role.as_deref() != Some("bot"))
-        .count())
+    Ok(all.into_iter().map(|(pubkey, _)| pubkey).collect())
 }
 
 #[cfg(test)]

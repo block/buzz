@@ -9,6 +9,63 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testProfileAvatarStartupFailureRestoresPageAndAllowsRetry() async throws {
+    let messenger = NavigationTestMessenger()
+    let parent = UIViewController()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.windowScene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    var starts = 0
+    var navigation: UINavigationController?
+    let pan = UIPanGestureRecognizer()
+    let alreadyDisabled = UIPanGestureRecognizer()
+    alreadyDisabled.isEnabled = false
+    let coordinator = NativeProfileSetupCoordinator(messenger: messenger, startEditorEngine: { _ in
+      starts += 1
+      XCTAssertEqual(navigation?.modalPresentationStyle, .overFullScreen)
+      XCTAssertEqual(navigation?.isModalInPresentation, starts > 1)
+      XCTAssertEqual(pan.isEnabled, starts == 1)
+      return false
+    }, configureEditorEngine: { _ in
+      XCTFail("Failed startup must not configure plugins")
+    })
+    messenger.invoke("present", arguments: ["session": 71]) { _ in }
+    let nav = try XCTUnwrap(parent.presentedViewController as? UINavigationController)
+    navigation = nav
+    if let transition = nav.transitionCoordinator {
+      await withCheckedContinuation { continuation in
+        transition.animate(alongsideTransition: nil) { _ in continuation.resume() }
+      }
+    }
+    nav.view.addGestureRecognizer(pan)
+    nav.view.addGestureRecognizer(alreadyDisabled)
+    let profile = try XCTUnwrap(nav.viewControllers.first)
+    let avatar = try XCTUnwrap(descendants(of: profile.view).compactMap { $0 as? UIButton }
+      .first { $0.accessibilityLabel == "Add profile photo" })
+    let name = try XCTUnwrap(descendants(of: profile.view).compactMap { $0 as? UITextField }.first)
+    let submit = try XCTUnwrap(descendants(of: profile.view).compactMap { $0 as? UIButton }
+      .first { $0.configuration?.title == "Continue" })
+    name.text = "Kenny"
+    name.sendActions(for: .editingChanged)
+    submit.sendActions(for: .touchUpInside)
+    for _ in 0..<2 {
+      avatar.sendActions(for: .touchUpInside)
+      XCTAssertEqual(nav.modalPresentationStyle, .overFullScreen)
+      XCTAssertTrue(pan.isEnabled)
+      XCTAssertFalse(alreadyDisabled.isEnabled)
+      XCTAssertFalse(nav.isModalInPresentation)
+      XCTAssertTrue(avatar.isEnabled)
+      XCTAssertFalse(avatar.isHidden)
+      XCTAssertTrue(nav.topViewController === profile)
+    }
+    XCTAssertEqual(starts, 3)
+    withExtendedLifetime(coordinator) {}
+    nav.dismiss(animated: false)
+  }
+
+  @MainActor
   private func descendants(of view: UIView) -> [UIView] {
     view.subviews.flatMap { [$0] + descendants(of: $0) }
   }

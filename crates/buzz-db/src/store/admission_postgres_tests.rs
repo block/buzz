@@ -141,14 +141,28 @@ async fn relay_member_writers_require_application_admission() {
     let pubkey = "d".repeat(64);
     for community in &communities[1..] {
         assert_fenced(
-            super::relay_members::add_relay_member(&db.pool, *community, &pubkey, "member", None)
-                .await
-                .expect_err("member add must reject"),
+            super::relay_members::add_relay_member(
+                &db.pool,
+                *community,
+                &pubkey,
+                "member",
+                None,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect_err("member add must reject"),
         );
         assert_fenced(
-            super::relay_members::remove_relay_member(&db.pool, *community, &pubkey)
-                .await
-                .expect_err("member remove must reject"),
+            super::relay_members::remove_relay_member(
+                &db.pool,
+                *community,
+                &pubkey,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect_err("member remove must reject"),
         );
     }
     assert!(super::relay_members::add_relay_member(
@@ -157,8 +171,10 @@ async fn relay_member_writers_require_application_admission() {
         &pubkey,
         "member",
         None,
+        &nostr::Keys::generate(),
     )
     .await
+    .map(|write| write.outcome)
     .expect("active member add succeeds"));
 }
 
@@ -185,8 +201,10 @@ async fn relay_invite_writers_require_application_admission() {
                 &[3; 32],
                 &"f".repeat(64),
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect_err("invite claim must reject before row lock"),
         );
     }
@@ -417,6 +435,7 @@ async fn channel_and_membership_writers_require_application_admission() {
                 &creator,
                 None,
                 &[],
+                false,
             )
             .await
             .expect_err("channel create must reject"),
@@ -449,6 +468,7 @@ async fn channel_and_membership_writers_require_application_admission() {
         &creator,
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel create succeeds");
@@ -520,6 +540,7 @@ async fn thread_metadata_writer_requires_application_admission() {
         &[1; 32],
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel");
@@ -567,6 +588,7 @@ async fn relay_admin_domain_writer_requires_application_admission() {
         &[1; 32],
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel");
@@ -615,6 +637,7 @@ async fn personal_read_writer_requires_application_admission() {
         &actor.public_key().to_bytes(),
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel");
@@ -661,16 +684,26 @@ async fn allowlist_backfill_requires_application_admission() {
     }
     for community in &communities[1..] {
         assert_fenced(
-            super::relay_members::backfill_from_allowlist(&db.pool, *community)
-                .await
-                .expect_err("backfill into a write-fenced community must reject"),
+            super::relay_members::backfill_from_allowlist(
+                &db.pool,
+                *community,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect_err("backfill into a write-fenced community must reject"),
         );
         assert_eq!(count_relay_members(&db, *community).await, 0);
     }
     assert_eq!(
-        super::relay_members::backfill_from_allowlist(&db.pool, communities[0])
-            .await
-            .expect("active backfill succeeds"),
+        super::relay_members::backfill_from_allowlist(
+            &db.pool,
+            communities[0],
+            &nostr::Keys::generate()
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("active backfill succeeds"),
         1
     );
     assert_eq!(count_relay_members(&db, communities[0]).await, 1);
@@ -684,9 +717,14 @@ async fn allowlist_backfill_requires_application_admission() {
         .await
         .expect("seed existing member");
     assert_eq!(
-        super::relay_members::backfill_from_allowlist(&db.pool, communities[1])
-            .await
-            .expect("no-op backfill does not need admission"),
+        super::relay_members::backfill_from_allowlist(
+            &db.pool,
+            communities[1],
+            &nostr::Keys::generate()
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("no-op backfill does not need admission"),
         0
     );
     assert_eq!(count_relay_members(&db, communities[1]).await, 1);
@@ -700,9 +738,14 @@ async fn empty_allowlist_backfill_skips_admission() {
     let (db, communities) = fixture().await;
     for community in &communities[1..] {
         assert_eq!(
-            super::relay_members::backfill_from_allowlist(&db.pool, *community)
-                .await
-                .expect("empty-allowlist backfill does not need admission"),
+            super::relay_members::backfill_from_allowlist(
+                &db.pool,
+                *community,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("empty-allowlist backfill does not need admission"),
             0
         );
         assert_eq!(count_relay_members(&db, *community).await, 0);
@@ -726,14 +769,22 @@ async fn owner_mutations_report_pending_deletion_when_admission_refuses() {
     let next_owner = "1".repeat(64);
 
     assert_eq!(
-        super::relay_members::transfer_ownership(&db.pool, quiescing, &next_owner, &owner)
-            .await
-            .expect("transfer returns a result"),
+        super::relay_members::transfer_ownership(
+            &db.pool,
+            quiescing,
+            &next_owner,
+            &owner,
+            &nostr::Keys::generate()
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("transfer returns a result"),
         super::relay_members::TransferResult::DeletionPending
     );
     assert_eq!(
-        db.provision_owner(quiescing, &owner)
+        db.provision_owner(quiescing, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("provision returns a result"),
         super::relay_members::ProvisionOwnerResult::DeletionPending
     );
@@ -741,14 +792,22 @@ async fn owner_mutations_report_pending_deletion_when_admission_refuses() {
     // Without a deletion request the refusal stays a lifecycle conflict.
     let fenced = communities[2];
     assert_eq!(
-        super::relay_members::transfer_ownership(&db.pool, fenced, &next_owner, &owner)
-            .await
-            .expect("transfer returns a result"),
+        super::relay_members::transfer_ownership(
+            &db.pool,
+            fenced,
+            &next_owner,
+            &owner,
+            &nostr::Keys::generate()
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("transfer returns a result"),
         super::relay_members::TransferResult::LifecycleConflict
     );
     assert_eq!(
-        db.provision_owner(fenced, &owner)
+        db.provision_owner(fenced, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("provision returns a result"),
         super::relay_members::ProvisionOwnerResult::LifecycleConflict
     );
@@ -1001,41 +1060,6 @@ async fn fleet_sweep_returns_committed_results_when_database_drops_mid_page() {
         2,
         "the sweep must stop at the unavailable tenant"
     );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn d_tag_backfill_admits_active_tenant_and_skips_quiescing_tenant() {
-    let (db, communities) = fixture().await;
-    crate::test_support::reject_legacy_sql_fence_predicate(&db.pool).await;
-    for (index, community) in communities[..2].iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
-             VALUES ($1, $2, $3, to_timestamp(1), 30023, '[[\"d\",\"tag\"]]'::jsonb, '', $4)",
-        )
-        .bind(community.as_uuid())
-        .bind(vec![index as u8; 32])
-        .bind(vec![2_u8; 32])
-        .bind(vec![3_u8; 64])
-        .execute(&db.pool)
-        .await
-        .expect("seed addressable event");
-    }
-    assert_eq!(db.backfill_d_tags().await.unwrap(), 1);
-    let active: Option<String> =
-        sqlx::query_scalar("SELECT d_tag FROM events WHERE community_id = $1")
-            .bind(communities[0].as_uuid())
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    let quiescing: Option<String> =
-        sqlx::query_scalar("SELECT d_tag FROM events WHERE community_id = $1")
-            .bind(communities[1].as_uuid())
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-    assert_eq!(active.as_deref(), Some("tag"));
-    assert_eq!(quiescing, None);
 }
 
 #[tokio::test]

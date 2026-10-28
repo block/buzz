@@ -66,11 +66,19 @@ class UserProfileSheet extends HookConsumerWidget {
   /// Optional actions supplied by the opening surface, below the profile tiles.
   final WidgetBuilder? contextualActions;
 
+  /// Space before the primary profile actions.
+  final double primaryActionsSpacing;
+
+  /// Space between primary actions and caller-supplied actions.
+  final double contextualActionsSpacing;
+
   const UserProfileSheet({
     super.key,
     required this.pubkey,
     this.names,
     this.contextualActions,
+    this.primaryActionsSpacing = Grid.xs + Grid.half,
+    this.contextualActionsSpacing = Grid.xs,
   });
 
   @override
@@ -82,7 +90,7 @@ class UserProfileSheet extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
-    final presenceMap = ref.watch(presenceCacheProvider);
+    final presenceMap = ref.watch(presentedPresenceProvider);
     final presence = presenceMap[pk];
     final statusCache = ref.watch(userStatusCacheProvider);
     final userStatus = statusCache[pk];
@@ -264,7 +272,7 @@ class UserProfileSheet extends HookConsumerWidget {
                       ),
                     ],
 
-                    const SizedBox(height: Grid.xs + Grid.half),
+                    SizedBox(height: primaryActionsSpacing),
 
                     Row(
                       children: [
@@ -296,7 +304,7 @@ class UserProfileSheet extends HookConsumerWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: Grid.xs),
+                    SizedBox(height: contextualActionsSpacing),
                     if (contextualActions != null)
                       Builder(builder: contextualActions!),
                   ],

@@ -25,7 +25,7 @@ use buzz_core::tenant::TenantContext;
 use buzz_db::relay_members::RemoveResult;
 
 use crate::handlers::side_effects::{
-    publish_nip43_member_added, publish_nip43_member_removed, publish_nip43_membership_list,
+    fan_out_nip43_membership_list, publish_nip43_member_added, publish_nip43_member_removed,
 };
 use crate::state::AppState;
 
@@ -192,6 +192,8 @@ pub(super) async fn handle_relay_admin_event(
     //
     // This gate wraps execution rather than opening it so no future early
     // return inside the command body can precede it.
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_command_ban_check(tenant.community()).await;
     let restriction = state
         .db
         .moderation_restriction_state(tenant.community(), &event.pubkey.to_bytes())
@@ -333,11 +335,18 @@ async fn execute_relay_admin_command(
             // Note: idempotent — if target already exists at any role, this is a
             // silent no-op. The existing role is NOT overwritten. Use kind:9032
             // to change an existing member's role.
-            let was_inserted = state
+            let write = state
                 .db
-                .add_relay_member(tenant.community(), &target_hex, &role, Some(&sender_hex))
+                .add_relay_member(
+                    tenant.community(),
+                    &target_hex,
+                    &role,
+                    Some(&sender_hex),
+                    &state.relay_keypair,
+                )
                 .await
                 .map_err(|e| format!("database error: {e}"))?;
+            let was_inserted = write.outcome;
 
             info!(
                 sender = %sender_hex,
@@ -354,11 +363,7 @@ async fn execute_relay_admin_command(
                     warn!(error = %e, "failed to publish NIP-43 member added event");
                 }
             }
-            // The canonical row survives a failed publication or process crash.
-            // A retry must repair the signed roster even when insertion is a no-op.
-            publish_nip43_membership_list(tenant, state)
-                .await
-                .map_err(|e| format!("membership stored but signed roster incomplete: {e}"))?;
+            fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
         }
 
         // kind:9031 — Remove relay member
@@ -378,23 +383,31 @@ async fn execute_relay_admin_command(
             //   This eliminates the TOCTOU race where the target could be promoted
             //   between a prior role read and the delete.
             // - Owners: can remove admins and members, not other owners.
-            let remove_result = if sender_role == "admin" {
+            let write = if sender_role == "admin" {
                 state
                     .db
-                    .remove_relay_member_if_role(tenant.community(), &target_hex, "member")
+                    .remove_relay_member_if_role(
+                        tenant.community(),
+                        &target_hex,
+                        "member",
+                        &state.relay_keypair,
+                    )
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             } else {
                 // Owner path — atomic delete that refuses to remove other owners.
                 state
                     .db
-                    .remove_relay_member(tenant.community(), &target_hex)
+                    .remove_relay_member(tenant.community(), &target_hex, &state.relay_keypair)
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             };
 
-            match remove_result {
+            match write.outcome {
                 RemoveResult::Removed => {}
+                RemoveResult::IsOwner => {
+                    return Err("cannot remove the relay owner".to_string());
+                }
                 RemoveResult::NotFound => {
                     // An absent direct membership is not proof of lost access:
                     // open relays and NIP-OA agents can still admit this key.
@@ -422,9 +435,6 @@ async fn execute_relay_admin_command(
                         }
                     }
                 }
-                RemoveResult::IsOwner => {
-                    return Err("cannot remove the relay owner".to_string());
-                }
                 RemoveResult::RoleMismatch => {
                     return Err("actor not authorized: admins can only remove members".to_string());
                 }
@@ -451,17 +461,14 @@ async fn execute_relay_admin_command(
                 Err(e) => Err(format!("invalid target pubkey: {e}")),
             };
 
-            if remove_result == RemoveResult::Removed {
+            if write.outcome == RemoveResult::Removed {
                 if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
                     warn!(error = %e, "failed to publish NIP-43 member removed event");
                 }
             }
-            // Retry absent-target removals too: deletion may have committed
-            // before roster publication or live-session revocation failed.
-            let roster = publish_nip43_membership_list(tenant, state).await;
+            fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
             revoked
                 .map_err(|e| format!("error: member removed but live revoke incomplete: {e}"))?;
-            roster.map_err(|e| format!("member removed but signed roster incomplete: {e}"))?;
         }
 
         // kind:9032 — Change relay member role
@@ -489,13 +496,18 @@ async fn execute_relay_admin_command(
                 return Err(format!("invalid role: {new_role}"));
             }
 
-            let updated = state
+            let write = state
                 .db
-                .update_relay_member_role(tenant.community(), &target_hex, &new_role)
+                .update_relay_member_role(
+                    tenant.community(),
+                    &target_hex,
+                    &new_role,
+                    &state.relay_keypair,
+                )
                 .await
                 .map_err(|e| format!("database error: {e}"))?;
 
-            if !updated {
+            if !write.outcome {
                 // Distinguish "owner (protected)" from "doesn't exist"
                 let exists = state
                     .db
@@ -516,9 +528,7 @@ async fn execute_relay_admin_command(
                 "relay member role changed"
             );
 
-            publish_nip43_membership_list(tenant, state)
-                .await
-                .map_err(|e| format!("role stored but signed roster incomplete: {e}"))?;
+            fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
         }
 
         other => {
@@ -801,89 +811,6 @@ mod postgres_tests {
         (Arc::new(state), tenant)
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn roster_publication_failure_is_reported_and_admin_retries_repair() {
-        let host = format!("roster-retry-{}.example", uuid::Uuid::new_v4().simple());
-        let (state, tenant) = workspace_profile_test_state(&host, true).await;
-        let owner = Keys::generate();
-        let target = Keys::generate().public_key().to_hex();
-        state
-            .db
-            .add_relay_member(
-                tenant.community(),
-                &owner.public_key().to_hex(),
-                "owner",
-                None,
-            )
-            .await
-            .expect("owner");
-        publish_nip43_membership_list(&tenant, &state)
-            .await
-            .expect("initial roster");
-        let command = |kind| {
-            EventBuilder::new(Kind::Custom(kind), "")
-                .tags([
-                    Tag::parse(["p", target.as_str()]).expect("target"),
-                    Tag::parse(["role", if kind == 9032 { "admin" } else { "member" }])
-                        .expect("role"),
-                ])
-                .sign_with_keys(&owner)
-                .expect("sign command")
-        };
-        // The per-test database isolates this injected failure. Membership
-        // writes still work; only the signed roster insert fails.
-        sqlx::raw_sql(
-            "CREATE FUNCTION reject_test_roster() RETURNS trigger LANGUAGE plpgsql AS $$
-            BEGIN IF NEW.kind = 13534 THEN RAISE EXCEPTION 'injected roster failure'; END IF;
-            RETURN NEW; END $$;
-            CREATE TRIGGER reject_test_roster BEFORE INSERT ON events
-            FOR EACH ROW EXECUTE FUNCTION reject_test_roster();",
-        )
-        .execute(state.db.pool())
-        .await
-        .expect("inject failure");
-        for kind in [9030, 9032, 9031] {
-            sqlx::query("ALTER TABLE events ENABLE TRIGGER reject_test_roster")
-                .execute(state.db.pool())
-                .await
-                .expect("enable failure");
-            let event = command(kind);
-            let error = handle_relay_admin_event(&tenant, &state, &event)
-                .await
-                .expect_err("report partial failure");
-            assert!(
-                matches!(&error, RelayAdminError::Rejected(message) if message.contains("signed roster incomplete")),
-                "{error:?}"
-            );
-            assert_eq!(
-                state
-                    .db
-                    .get_relay_member(tenant.community(), &target)
-                    .await
-                    .expect("canonical row")
-                    .is_some(),
-                kind != 9031
-            );
-            sqlx::query("ALTER TABLE events DISABLE TRIGGER reject_test_roster")
-                .execute(state.db.pool())
-                .await
-                .expect("restore publication");
-            // Same command, same persistent membership: no-op add / absent remove.
-            handle_relay_admin_event(&tenant, &state, &event)
-                .await
-                .expect("retry repairs roster");
-            assert!(!state
-                .db
-                .nip43_membership_snapshot_needs_reconciliation_for_maintenance(
-                    tenant.community(),
-                    &state.relay_keypair.public_key()
-                )
-                .await
-                .expect("readback"));
-        }
-    }
-
     /// Sign a fresh kind:9033 with `icon` and run it through the real
     /// admission + command path.
     async fn submit_9033(
@@ -940,8 +867,10 @@ mod postgres_tests {
                 &owner.public_key().to_hex(),
                 "owner",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed owner");
         let refused = submit_9033(&state, &tenant, &roleless, "https://evil.example/pwn.png").await;
         assert_eq!(
@@ -987,8 +916,10 @@ mod postgres_tests {
                 &member.public_key().to_hex(),
                 "member",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed member");
         state
             .db
@@ -997,8 +928,10 @@ mod postgres_tests {
                 &admin.public_key().to_hex(),
                 "admin",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed admin");
 
         for (keys, label) in [(&roleless, "roleless"), (&member, "member")] {
@@ -1045,8 +978,15 @@ mod postgres_tests {
         ] {
             state
                 .db
-                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
                 .await
+                .map(|write| write.outcome)
                 .expect("seed member");
         }
         let bound = |keys: &Keys| {
@@ -1091,7 +1031,13 @@ mod postgres_tests {
         for (keys, role) in [(&owner, "owner"), (&admin, "admin"), (&member, "member")] {
             state
                 .db
-                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &state.relay_keypair,
+                )
                 .await
                 .expect("seed membership");
         }
@@ -1133,6 +1079,7 @@ mod postgres_tests {
                 tenant.community(),
                 &member.public_key().to_hex(),
                 "member",
+                &state.relay_keypair,
             )
             .await
             .expect("committed removal");
@@ -1150,6 +1097,7 @@ mod postgres_tests {
                 &admin.public_key().to_hex(),
                 "admin",
                 None,
+                &open_state.relay_keypair,
             )
             .await
             .expect("open-relay admin");
@@ -1163,14 +1111,6 @@ mod postgres_tests {
             !open_socket.is_cancelled(),
             "a rosterless open-relay caller retains access"
         );
-        assert!(!state
-            .db
-            .nip43_membership_snapshot_needs_reconciliation_for_maintenance(
-                tenant.community(),
-                &state.relay_keypair.public_key()
-            )
-            .await
-            .expect("signed readback"));
     }
 
     #[tokio::test]
@@ -1202,6 +1142,7 @@ mod postgres_tests {
                 &owner.public_key().to_hex(),
                 "owner",
                 None,
+                &state.relay_keypair,
             )
             .await
             .expect("owner");
@@ -1256,14 +1197,6 @@ mod postgres_tests {
                     .expect("membership"),
                 kind == 9030
             );
-            assert!(!state
-                .db
-                .nip43_membership_snapshot_needs_reconciliation_for_maintenance(
-                    tenant.community(),
-                    &state.relay_keypair.public_key()
-                )
-                .await
-                .expect("persisted signed readback"));
         }
         server.abort();
     }
@@ -1330,8 +1263,10 @@ mod postgres_tests {
                 &member.public_key().to_hex(),
                 "member",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed member");
         for keys in [&member, &agent] {
             state
@@ -1478,8 +1413,15 @@ mod postgres_tests {
         ] {
             state
                 .db
-                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
                 .await
+                .map(|write| write.outcome)
                 .expect("seed member");
         }
         let target_socket = bound_root_socket(&state, tenant.community(), &target);
@@ -1519,8 +1461,8 @@ mod postgres_tests {
 
         let error = result.expect_err("the audit failure is reported");
         assert!(
-            error.contains("audit"),
-            "reports the audit failure: {error}"
+            matches!(&error, crate::handlers::ingest::IngestError::Rejected(m) if m.contains("audit")),
+            "reports the audit failure: {error:?}"
         );
         assert!(
             state
@@ -1548,8 +1490,15 @@ mod postgres_tests {
         for (keys, role) in [(&owner, "owner"), (&target, "member")] {
             state
                 .db
-                .add_relay_member(tenant.community(), &keys.public_key().to_hex(), role, None)
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
                 .await
+                .map(|write| write.outcome)
                 .expect("seed member");
         }
         let key = (tenant.community(), target.public_key().to_bytes().to_vec());
@@ -1582,7 +1531,7 @@ mod postgres_tests {
                 &tenant, &state, &event,
             )
             .await
-            .unwrap_or_else(|e| panic!("kind {} must apply: {e}", event.kind.as_u16()));
+            .unwrap_or_else(|e| panic!("kind {} must apply: {e:?}", event.kind.as_u16()));
             assert_eq!(
                 state.restriction_cache.get(&key),
                 None,

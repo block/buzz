@@ -103,11 +103,11 @@ impl ReaderOperation {
     /// bounded `close_on_drop` instead of returning it to the pool.
     ///
     /// Maintenance reads run under relay-side deadlines that drop them
-    /// mid-query when a reader goes dark. SQLx's return-to-pool path pings
-    /// that connection with no timeout while still holding a pool slot, and
-    /// the reader pool is shared with serving reads, so each abandoned read
-    /// would strand a serving slot until the kernel gives up on the socket.
-    /// Serving reads keep pooled reuse.
+    /// mid-query when a reader goes dark, and the reader pool is shared with
+    /// serving reads. The pool's release check is bounded, but SQLx's own
+    /// release ping after it is not, so a returned connection whose reader
+    /// goes silent in that window still strands its slot. Close-on-drop
+    /// bounds the whole release. Serving reads keep pooled reuse.
     pub(crate) const fn bounded_release(self) -> bool {
         matches!(self, Self::Maintenance)
     }
@@ -246,7 +246,6 @@ impl Outcome {
 pub(crate) enum TransactionOperation {
     ReplaceParameterizedEvent,
     ReplaceAddressableEvent,
-    PublishNip43MembershipLocked,
     AcceptPushLeaseEvent,
     BeginCommunityDeletionQuiescing,
     FenceCommunityDeletion,
@@ -256,10 +255,9 @@ pub(crate) enum TransactionOperation {
 
 impl TransactionOperation {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::ReplaceParameterizedEvent,
         Self::ReplaceAddressableEvent,
-        Self::PublishNip43MembershipLocked,
         Self::AcceptPushLeaseEvent,
         Self::BeginCommunityDeletionQuiescing,
         Self::FenceCommunityDeletion,
@@ -271,7 +269,6 @@ impl TransactionOperation {
         match self {
             Self::ReplaceParameterizedEvent => "replace_parameterized_event",
             Self::ReplaceAddressableEvent => "replace_addressable_event",
-            Self::PublishNip43MembershipLocked => "publish_nip43_membership_locked",
             Self::AcceptPushLeaseEvent => "accept_push_lease_event",
             Self::BeginCommunityDeletionQuiescing => "begin_community_deletion_quiescing",
             Self::FenceCommunityDeletion => "fence_community_deletion",
@@ -288,7 +285,6 @@ impl TransactionOperation {
         match self {
             Self::ReplaceParameterizedEvent
             | Self::ReplaceAddressableEvent
-            | Self::PublishNip43MembershipLocked
             | Self::AcceptPushLeaseEvent
             | Self::BeginCommunityDeletionQuiescing
             | Self::FenceCommunityDeletion => true,
@@ -300,7 +296,6 @@ impl TransactionOperation {
         match self {
             Self::ReplaceParameterizedEvent
             | Self::ReplaceAddressableEvent
-            | Self::PublishNip43MembershipLocked
             | Self::AcceptPushLeaseEvent => WriterOperation::EventWrite,
             Self::BeginCommunityDeletionQuiescing
             | Self::FenceCommunityDeletion
@@ -686,7 +681,6 @@ mod tests {
             [
                 "replace_parameterized_event",
                 "replace_addressable_event",
-                "publish_nip43_membership_locked",
                 "accept_push_lease_event",
                 "begin_community_deletion_quiescing",
                 "fence_community_deletion",
@@ -1506,8 +1500,10 @@ mod tests {
             .create_community_with_owner(
                 &format!("pool-operation-matrix-{}.invalid", Uuid::new_v4().simple()),
                 &"b".repeat(64),
+                &nostr::Keys::generate(),
             )
-            .await;
+            .await
+            .map(|write| write.outcome);
         let _ = writer_db
             .archive_community_owned_by(
                 "pool-operation-matrix.invalid",

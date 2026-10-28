@@ -43,11 +43,13 @@ class HostedJourneyFixture {
   final identityStorage = JourneyIdentityStorage();
   final requests = <http.Request>[];
   Future<void> Function()? beforeBrowserReturn;
+  Future<void> Function()? beforeStatusReturn;
   Future<void> Function()? beforeEnrollmentReturn;
   Future<void> Function()? beforeUploadReturn;
   final probes = <Community>[];
   String? refusedSelfHostedPubkey;
   final profileWrites = <String>[];
+  final profileAvatars = <String?>[];
   final recoveryScopes = <InviteJoinRecoveryScope>[];
   final rows = <Map<String, dynamic>>[];
   final cloudKeys = <nostr.Keys>[];
@@ -70,6 +72,8 @@ class HostedJourneyFixture {
   bool offerProfile = true;
   bool profileUnavailable = false;
   bool rejectList = false;
+  int saveFailures = 0;
+  final knownSaved = <String>{};
   bool missingList = false;
   bool loseCreateResponse = false;
   bool loseClaimResponse = false;
@@ -166,6 +170,7 @@ class HostedJourneyFixture {
         'identity': bound == null ? null : {'pubkey_hex': bound},
       };
     } else if (path.endsWith('/status')) {
+      await beforeStatusReturn?.call();
       result = {
         'current_nostr_pubkey': bound,
         'backup_nostr_pubkeys': cloudKeys.map((k) => k.public).toList(),
@@ -238,6 +243,23 @@ class HostedJourneyFixture {
         throw AccountFailure.unavailable;
       }
       result = {'community': created};
+    } else if (path.endsWith('/known-communities/list')) {
+      if (rejectList) return http.Response('{}', 503);
+      result = {
+        if (rows.isNotEmpty)
+          'communities': [
+            for (final row in rows)
+              {'community_url': 'wss://${row['normalized_host']}'},
+          ],
+      };
+    } else if (path.endsWith('/known-communities/add')) {
+      expect(request.method, 'POST');
+      final url = jsonDecode(request.body)['community_url'] as String;
+      knownSaved.add(url);
+      if (saveFailures-- > 0) return http.Response('{}', 503);
+      result = {
+        'community': {'community_url': url},
+      };
     } else if (path.endsWith('/communities/joined')) {
       if (rejectList) return http.Response('{}', 503);
       if (missingList) return http.Response('{}', 404);
@@ -491,6 +513,12 @@ class _Profile extends ProfileNotifier {
   @override
   Future<void> updateDisplayName(String name) async {
     fixture.profileWrites.add(name);
+  }
+
+  @override
+  Future<void> updateSetup(String name, String? avatarUrl) async {
+    fixture.profileWrites.add(name);
+    fixture.profileAvatars.add(avatarUrl);
   }
 }
 

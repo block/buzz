@@ -27,6 +27,7 @@ use sqlx::{PgPool, Row as _};
 use uuid::Uuid;
 
 use crate::error::Result;
+use crate::relay_members::{write_nip43_membership_snapshot, MembershipWrite};
 use crate::{CommunityId, Db};
 
 /// Outcome of a v2 invite claim. Expected invalid/expired/exhausted states are
@@ -255,7 +256,8 @@ pub async fn claim_relay_invite(
     token_hash: &[u8; 32],
     claimer_pubkey: &str,
     policy_version: Option<&str>,
-) -> Result<ClaimOutcome> {
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<ClaimOutcome>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
@@ -279,7 +281,7 @@ pub async fn claim_relay_invite(
     let Some(invite) = row else {
         tx.rollback().await?;
         log_claim_outcome(community, None, "invalid", None, None);
-        return Ok(ClaimOutcome::Invalid);
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Invalid));
     };
 
     let invite_id: uuid::Uuid = invite.try_get("id")?;
@@ -299,7 +301,7 @@ pub async fn claim_relay_invite(
             max_uses,
             Some(use_count),
         );
-        return Ok(ClaimOutcome::Expired);
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Expired));
     }
 
     let uses_remaining = || max_uses.map(|mu| mu - use_count);
@@ -333,10 +335,10 @@ pub async fn claim_relay_invite(
             max_uses,
             Some(use_count),
         );
-        return Ok(ClaimOutcome::AlreadyMember {
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::AlreadyMember {
             use_count,
             uses_remaining: uses_remaining(),
-        });
+        }));
     }
 
     // 7. Capacity check.
@@ -350,7 +352,7 @@ pub async fn claim_relay_invite(
                 max_uses,
                 Some(use_count),
             );
-            return Ok(ClaimOutcome::Exhausted);
+            return Ok(MembershipWrite::unchanged(ClaimOutcome::Exhausted));
         }
     }
 
@@ -392,10 +394,10 @@ pub async fn claim_relay_invite(
             max_uses,
             Some(use_count),
         );
-        return Ok(ClaimOutcome::AlreadyMember {
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::AlreadyMember {
             use_count,
             uses_remaining: uses_remaining(),
-        });
+        }));
     }
 
     // 10. Increment use_count (for every new member, even unlimited).
@@ -407,7 +409,8 @@ pub async fn claim_relay_invite(
         .execute(tx.conn())
         .await?;
 
-    // 11. Commit.
+    // 11. Write the membership list and commit.
+    let snapshot = write_nip43_membership_snapshot(&mut tx, relay_keypair).await?;
     tx.commit().await?;
 
     let new_uses_remaining = max_uses.map(|mu| mu - new_use_count);
@@ -420,9 +423,12 @@ pub async fn claim_relay_invite(
         Some(new_use_count),
     );
 
-    Ok(ClaimOutcome::Joined {
-        use_count: new_use_count,
-        uses_remaining: new_uses_remaining,
+    Ok(MembershipWrite {
+        outcome: ClaimOutcome::Joined {
+            use_count: new_use_count,
+            uses_remaining: new_uses_remaining,
+        },
+        snapshot: Some(snapshot),
     })
 }
 
@@ -461,13 +467,15 @@ impl Db {
         token_hash: &[u8; 32],
         claimer_pubkey: &str,
         policy_version: Option<&str>,
-    ) -> Result<ClaimOutcome> {
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<ClaimOutcome>> {
         claim_relay_invite(
             &self.pool,
             community,
             token_hash,
             claimer_pubkey,
             policy_version,
+            relay_keypair,
         )
         .await
     }
@@ -539,6 +547,12 @@ mod postgres_tests {
             .execute(&mut *tx)
             .await
             .expect("delete test members");
+        // Membership changes write the community's kind:13534 list.
+        sqlx::query("DELETE FROM events WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test membership lists");
         sqlx::query("DELETE FROM communities WHERE id = $1")
             .bind(community.as_uuid())
             .execute(&mut *tx)
@@ -677,28 +691,53 @@ mod postgres_tests {
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
 
+        let keys = nostr::Keys::generate();
+        let joined = claim_relay_invite(&pool, community, &hash, &first, None, &keys)
+            .await
+            .expect("first claim");
+        crate::relay_members::assert_membership_list_matches(
+            &pool,
+            community,
+            &keys,
+            joined.snapshot.as_ref(),
+        )
+        .await;
         assert_eq!(
-            claim_relay_invite(&pool, community, &hash, &first, None)
-                .await
-                .expect("first claim"),
+            joined.outcome,
             ClaimOutcome::Joined {
                 use_count: 1,
                 uses_remaining: Some(0),
             }
         );
         assert_eq!(
-            claim_relay_invite(&pool, community, &hash, &first, None)
-                .await
-                .expect("idempotent retry"),
+            claim_relay_invite(
+                &pool,
+                community,
+                &hash,
+                &first,
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("idempotent retry"),
             ClaimOutcome::AlreadyMember {
                 use_count: 1,
                 uses_remaining: Some(0),
             }
         );
         assert_eq!(
-            claim_relay_invite(&pool, community, &hash, &second, None)
-                .await
-                .expect("exhausted claim"),
+            claim_relay_invite(
+                &pool,
+                community,
+                &hash,
+                &second,
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("exhausted claim"),
             ClaimOutcome::Exhausted
         );
         assert_eq!(use_count(&pool, community, invite.invite_id).await, 1);
@@ -723,13 +762,18 @@ mod postgres_tests {
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
 
+        let keys = nostr::Keys::generate();
         let (first_outcome, second_outcome) = tokio::join!(
-            claim_relay_invite(&pool, community, &hash, &first, None),
-            claim_relay_invite(&pool, community, &hash, &second, None),
+            claim_relay_invite(&pool, community, &hash, &first, None, &keys),
+            claim_relay_invite(&pool, community, &hash, &second, None, &keys),
         );
         let outcomes = [
-            first_outcome.expect("first concurrent claim"),
-            second_outcome.expect("second concurrent claim"),
+            first_outcome
+                .map(|write| write.outcome)
+                .expect("first concurrent claim"),
+            second_outcome
+                .map(|write| write.outcome)
+                .expect("second concurrent claim"),
         ];
         assert_eq!(
             outcomes
@@ -768,9 +812,17 @@ mod postgres_tests {
         let hash = hash_v2_code(&invite.code);
 
         assert_eq!(
-            claim_relay_invite(&pool, community_b, &hash, &test_pubkey(), None)
-                .await
-                .expect("cross-tenant claim"),
+            claim_relay_invite(
+                &pool,
+                community_b,
+                &hash,
+                &test_pubkey(),
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("cross-tenant claim"),
             ClaimOutcome::Invalid
         );
 
@@ -784,9 +836,17 @@ mod postgres_tests {
         .await
         .expect("expire invite");
         assert_eq!(
-            claim_relay_invite(&pool, community_a, &hash, &test_pubkey(), None)
-                .await
-                .expect("expired claim"),
+            claim_relay_invite(
+                &pool,
+                community_a,
+                &hash,
+                &test_pubkey(),
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("expired claim"),
             ClaimOutcome::Expired
         );
         assert_eq!(use_count(&pool, community_a, invite.invite_id).await, 0);
@@ -911,9 +971,17 @@ mod postgres_tests {
 
         for (expected_count, pubkey) in [(1, test_pubkey()), (2, test_pubkey())] {
             assert_eq!(
-                claim_relay_invite(&pool, community, &hash, &pubkey, None)
-                    .await
-                    .expect("unlimited claim"),
+                claim_relay_invite(
+                    &pool,
+                    community,
+                    &hash,
+                    &pubkey,
+                    None,
+                    &nostr::Keys::generate()
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("unlimited claim"),
                 ClaimOutcome::Joined {
                     use_count: expected_count,
                     uses_remaining: None,
@@ -935,9 +1003,17 @@ mod postgres_tests {
             .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
 
-        let error = claim_relay_invite(&pool, community, &hash, &pubkey, Some("too-short"))
-            .await
-            .expect_err("policy CHECK must reject an invalid version");
+        let error = claim_relay_invite(
+            &pool,
+            community,
+            &hash,
+            &pubkey,
+            Some("too-short"),
+            &nostr::Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect_err("policy CHECK must reject an invalid version");
         assert!(matches!(error, crate::DbError::Sqlx(_)), "{error:?}");
         assert!(!is_relay_member(&pool, community, &pubkey)
             .await
@@ -945,9 +1021,17 @@ mod postgres_tests {
         assert_eq!(use_count(&pool, community, invite.invite_id).await, 0);
 
         assert!(matches!(
-            claim_relay_invite(&pool, community, &hash, &pubkey, None)
-                .await
-                .expect("claim after rollback"),
+            claim_relay_invite(
+                &pool,
+                community,
+                &hash,
+                &pubkey,
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("claim after rollback"),
             ClaimOutcome::Joined { use_count: 1, .. }
         ));
         delete_test_community(&pool, community).await;

@@ -101,6 +101,10 @@ run_unit_tests() {
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
 
+  # Inter-relay mesh crate (infra-free). Mirrors `just test-unit`.
+  run_test_step "buzz-relay-mesh tests" \
+    cargo test -p buzz-relay-mesh -- --nocapture
+
   run_test_step "buzz-cli tests" \
     cargo test -p buzz-cli -- --nocapture
 
@@ -146,6 +150,9 @@ run_unit_tests() {
 
   run_test_step "buzz-admin NIP-FI binding command tests" \
     cargo test -p buzz-admin nip_fi::tests -- --nocapture
+
+  run_test_step "buzz-admin user-deletion intake command tests" \
+    cargo test -p buzz-admin user_deletions::tests -- --nocapture
 
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
@@ -232,6 +239,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay startup step tests" \
     cargo test -p buzz-relay --lib startup_steps::tests:: -- --nocapture
+
+  run_test_step "buzz-relay mesh boot tests" \
+    cargo test -p buzz-relay --lib mesh_boot::tests:: -- --nocapture
 
   # telemetry and config tests mutate process env. libtest runs one process
   # with many threads (nextest, used by `just test-unit`, isolates each test),
@@ -360,6 +370,9 @@ run_unit_tests() {
     handlers::auth::tests::fi_invalid_nip42_proof_emits_terminal_evidence_rejected
     handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path
     handlers::auth::tests::shadow_root_auth_records_pairing_denial
+    handlers::auth::tests::shadow_root_auth_records_unavailable_owner_read
+    handlers::ingest::postgres_tests::relay_admin_ban_maps_to_blocked_auth_failure
+    handlers::ingest::postgres_tests::relay_admin_internal_maps_to_error_not_client_fault
     handlers::auth::tests::shadow_root_invalid_nip42_retires_without_record
     handlers::auth::tests::nip42_denial_class_separates_internal_failure_from_bad_evidence
     handlers::event::tests::fanout_access::owner_only_kinds_keep_only_the_owner
@@ -372,6 +385,7 @@ run_unit_tests() {
     state::tests::conn_manager_disconnect_nip_fi_is_issuer_scoped
     state::tests::conn_manager_disconnect_nip_fi_sets_authorization_denied_reason
     state::tests::nip_fi_disconnect_audio_is_issuer_scoped
+    state::tests::nip_fi_owner_disconnect_closes_owned_agent_sockets_on_root_and_audio
     state::tests::nip_fi_disconnect_closes_proven_audio_socket_and_sends_policy_close_reason
     state::tests::nip_fi_disconnect_closes_target_audio_only_and_preserves_collocated_peer
     state::tests::nip_fi_disconnect_does_not_close_different_pubkey_audio_socket

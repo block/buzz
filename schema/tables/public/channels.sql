@@ -36,6 +36,11 @@ CREATE TABLE channels (
     -- relay-signed group-state events. The relay validates their shape.
     labels          TEXT[] NOT NULL DEFAULT '{}'
         CONSTRAINT channels_labels_bounded CHECK (cardinality(labels) <= 8),
+    join_role       TEXT NOT NULL DEFAULT 'member'
+        CHECK (join_role IN ('member', 'guest')),
+    -- An unlisted open channel is readable and joinable by id but left out of
+    -- channel listings for non-members. Matters only while the channel is open.
+    unlisted        BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import '../../shared/identity_transfer/native_community_entry.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
@@ -8,7 +10,36 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../pairing/pairing_page.dart';
 import 'invite_join_provider.dart';
 
-Future<bool?> showInviteJoinSheet(BuildContext context) {
+Future<bool?> showInviteJoinSheet(BuildContext context) async {
+  final container = ProviderScope.containerOf(context);
+  final state = container.read(inviteJoinProvider);
+  if (defaultTargetPlatform == TargetPlatform.iOS &&
+      state.status == InviteJoinStatus.confirming &&
+      !state.isStarterSetupRecovery) {
+    final joined = await NativeCommunityEntry.show(
+      name: state.host ?? 'Unknown community',
+      dark: Theme.of(context).brightness == Brightness.dark,
+      primaryArgb: Theme.of(context).colorScheme.primary.toARGB32(),
+      choices: const [],
+      connect: (_, _, _, _) async {},
+      confirmInvite: () async {
+        final before = container.read(inviteJoinProvider);
+        if (before.requiresFreshInvite) {
+          return {
+            'error': before.errorMessage ?? 'Open a fresh invite to continue.',
+          };
+        }
+        await container.read(inviteJoinProvider.notifier).confirmJoin();
+        final result = container.read(inviteJoinProvider);
+        return result.status == InviteJoinStatus.success
+            ? {'joined': true}
+            : {'error': result.errorMessage ?? 'Could not join. Try again.'};
+      },
+    );
+    if (joined == false) return false;
+    if (!context.mounted) return joined;
+    // Preserve the existing success screen and starter-channel destination.
+  }
   return showBuzzModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,

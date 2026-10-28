@@ -130,9 +130,10 @@ pub async fn handle_req(
     if let Some(allowed) = token_channel_ids.as_deref() {
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
-    // System channels are outside `accessible_channels`. A filter that names
-    // one adds it to its own scope only (see `system_channels`).
-    let mut readable_system = match super::system_channels::readable_system_channels_for_filters(
+    // Named-only channels (system, and types added later) are outside
+    // `accessible_channels`. A filter that names one adds it to its own scope
+    // only (see `system_channels`).
+    let mut named_only = match super::system_channels::readable_named_only_channels_for_filters(
         &state,
         conn.tenant.community(),
         &pubkey_bytes,
@@ -144,7 +145,7 @@ pub async fn handle_req(
     {
         Ok(ids) => ids,
         Err(e) => {
-            warn!(conn_id = %conn_id, "Failed to get readable system channels: {e}");
+            warn!(conn_id = %conn_id, "Failed to get readable named-only channels: {e}");
             conn.send(RelayMessage::closed(&sub_id, "error: database error"));
             return;
         }
@@ -177,7 +178,7 @@ pub async fn handle_req(
             requested,
             token_channel_ids.as_deref(),
             &mut accessible_channels,
-            &readable_system,
+            named_only.ids(),
         )
         .await
         {
@@ -193,12 +194,12 @@ pub async fn handle_req(
                 crate::conformance::record_req_authcheck(&state.tracer, state_snap, ch_id, member);
             }
         }
-        if let Err(e) = super::system_channels::keep_repaired_system_channels_named(
+        if let Err(e) = super::system_channels::keep_repaired_named_only_channels_named(
             &state,
             conn.tenant.community(),
             &mut accessible_channels,
             repaired_from,
-            &mut readable_system,
+            &mut named_only,
         )
         .await
         {
@@ -211,7 +212,7 @@ pub async fn handle_req(
     let authorized_requested_channels = requested_channel_ids.as_ref().map(|requested| {
         let authorized: HashSet<_> = accessible_channels
             .iter()
-            .chain(&readable_system)
+            .chain(named_only.ids())
             .copied()
             .collect();
         requested
@@ -344,7 +345,7 @@ pub async fn handle_req(
                 owner,
                 &filters,
                 &accessible_channels,
-                &readable_system,
+                &named_only,
                 token_channel_ids.is_none(),
                 &conn.tenant,
                 &pubkey_bytes,
@@ -446,7 +447,7 @@ pub async fn handle_req(
                     &super::system_channels::filter_channel_scope(
                         filter,
                         &accessible_channels,
-                        &readable_system,
+                        &named_only,
                     ),
                 );
                 // Shared-gated visibility pushdown: set reader bytes so query_events
@@ -482,7 +483,7 @@ pub async fn handle_req(
             let filter_scope = super::system_channels::filter_channel_scope(
                 filter,
                 &accessible_channels,
-                &readable_system,
+                &named_only,
             );
             let events = match filter_events {
                 Ok(evs) => evs,
@@ -634,7 +635,7 @@ const SEARCH_PAGE_SIZE: u32 = 100;
 const MAX_SEARCH_PAGES: u32 = (buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32).div_ceil(SEARCH_PAGE_SIZE);
 
 /// Requested channels whose access needs a DB membership check: not already
-/// in the cached `accessible_channels` or `readable_system` sets, and inside
+/// in the cached `accessible_channels` or `named_only` sets, and inside
 /// the scoped-auth `token_channel_ids` bound when one is present. Deduplicated,
 /// in request order.
 ///
@@ -645,12 +646,12 @@ const MAX_SEARCH_PAGES: u32 = (buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32).div_ceil(
 pub(crate) fn channels_needing_membership_check(
     requested: &[uuid::Uuid],
     accessible_channels: &[uuid::Uuid],
-    readable_system: &[uuid::Uuid],
+    named_only: &[uuid::Uuid],
     token_channel_ids: Option<&[uuid::Uuid]>,
 ) -> Vec<uuid::Uuid> {
     let mut known: HashSet<uuid::Uuid> = accessible_channels
         .iter()
-        .chain(readable_system)
+        .chain(named_only)
         .copied()
         .collect();
     let token: Option<HashSet<uuid::Uuid>> =
@@ -690,12 +691,12 @@ pub(crate) async fn confirm_requested_channel_access(
     requested: &[uuid::Uuid],
     token_channel_ids: Option<&[uuid::Uuid]>,
     accessible_channels: &mut Vec<uuid::Uuid>,
-    readable_system: &[uuid::Uuid],
+    named_only: &[uuid::Uuid],
 ) -> buzz_db::Result<Vec<(uuid::Uuid, bool)>> {
     let unconfirmed = channels_needing_membership_check(
         requested,
         accessible_channels,
-        readable_system,
+        named_only,
         token_channel_ids,
     );
     if unconfirmed.is_empty() {
@@ -762,7 +763,7 @@ async fn handle_search_req(
     owner: u64,
     filters: &[Filter],
     implicit_channels: &[uuid::Uuid],
-    readable_system: &[uuid::Uuid],
+    named_only: &super::system_channels::NamedOnlyChannels,
     include_global: bool,
     tenant: &TenantContext,
     reader_pubkey_bytes: &[u8],
@@ -772,9 +773,9 @@ async fn handle_search_req(
 ) {
     // `None` means "no accessible channels and no global access" → EOSE,
     // exactly as the legacy string-filter helper short-circuited. A filter
-    // that names a readable system channel can still match it.
+    // that names a readable named-only channel can still match it.
     if build_search_channel_scope_filter(implicit_channels, include_global).is_none()
-        && readable_system.is_empty()
+        && named_only.is_empty()
     {
         conn.send(RelayMessage::eose(sub_id));
         return;
@@ -787,13 +788,10 @@ async fn handle_search_req(
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
         };
-        // Implicit channels plus the readable system channels this filter
+        // Implicit channels plus the readable named-only channels this filter
         // names; never another filter's.
-        let accessible_channels = &*super::system_channels::filter_channel_scope(
-            filter,
-            implicit_channels,
-            readable_system,
-        );
+        let accessible_channels =
+            &*super::system_channels::filter_channel_scope(filter, implicit_channels, named_only);
 
         let limit = filter
             .limit

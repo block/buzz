@@ -504,6 +504,8 @@ shape is an explicit transition, not a flag day:
   never spans communities. Serving leases use the same application admission.
   Startup and deletion catalog validation tolerate the universal fence objects
   being absent; inventories still record live fences for older executors.
+  Desired-state bootstraps install only explicitly declared legacy fences.
+  New tenant-owned tables rely on application admission, without a fence trigger.
 - **Replica floor (transition foundation):** runtime now provides a shared
   replica-floor lock helper for compliant channel-event writers, and the writer
   probe handshake takes the exclusive counterpart before sampling `S`, scanning
@@ -524,6 +526,11 @@ shape is an explicit transition, not a flag day:
 - **Fleet gates and reconciliation:** startup/fence probes verify guard catalog +
   behavior, pgschema bootstraps run reconciliation, and lock/pool metrics remain
   the operational evidence path for rollout safety.
+
+The database end state (a declarative schema source, applied out of band at
+scale; no triggers, functions, or foreign keys; backfills outside migrations)
+and the expand → deploy → backfill → contract rules every schema change follows
+are in [docs/database.md](docs/database.md).
 
 **Does NOT:** cache queries, implement connection pooling logic (delegated to sqlx), or make network calls outside Postgres.
 

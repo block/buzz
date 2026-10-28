@@ -12,8 +12,16 @@ use crate::handlers::ingest::{ingest_event, HttpAuthMethod, IngestAuth};
 use crate::state::AppState;
 use buzz_auth::Scope;
 
+/// Test state on the shared test database. The pool keeps sqlx's default
+/// acquire timeout: `test_state_with_database_url` waits only 100 ms so
+/// closed-port tests fail fast, and a first connect to a busy CI database can
+/// take longer than that (`PoolTimedOut`).
 pub(crate) async fn state() -> Arc<AppState> {
-    crate::state::tests::test_state_with_database_url(&crate::test_support::database_url()).await
+    crate::state::tests::test_state_with_database_url_and_pool_options(
+        &crate::test_support::database_url(),
+        sqlx::postgres::PgPoolOptions::new(),
+    )
+    .await
 }
 
 pub(crate) async fn community(state: &AppState, label: &str) -> TenantContext {
@@ -920,11 +928,12 @@ async fn system_channel_without_h_tag_defaults_private() {
     let stranger_bytes = stranger.public_key().to_bytes().to_vec();
     assert!(
         crate::handlers::ingest::check_channel_membership(
-            &tenant,
+            tenant.community(),
             &state,
             channel_id,
             &stranger_bytes,
-            None
+            None,
+            crate::handlers::ingest::ChannelWrite::Membership,
         )
         .await
         .is_err(),
@@ -949,4 +958,119 @@ async fn system_channel_without_h_tag_defaults_private() {
         ),
         Err(error) => assert!(format!("{error:?}").contains("restricted"), "{error:?}"),
     }
+}
+
+/// A removed creator's kind:9021 that passes the open-channel check while the
+/// channel becomes private must be refused, not restore the creator as owner.
+/// The test holds the channel's membership lock, so the join passes the
+/// relay's open-channel check and then waits in `put_member`. Under that lock
+/// the channel becomes private; the join then resumes on a private channel.
+/// Mutation: treat a creator with no active row as a bootstrap → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn removed_creator_join_racing_a_private_switch_is_refused() {
+    // Its own pool with the normal acquire timeout: the test holds one
+    // connection and the waiting join holds another, which the shared test
+    // state's 100 ms timeout does not tolerate on a loaded machine.
+    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+        .await
+        .expect("connect test pool");
+    let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+    let tenant = community(&state, "group-state-creator-rejoin").await;
+    let creator = Keys::generate();
+    let other_owner = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &creator, &[]).await;
+    let creator_bytes = creator.public_key().to_bytes().to_vec();
+    let other_bytes = other_owner.public_key().to_bytes().to_vec();
+    let community_id = tenant.community();
+
+    state
+        .db
+        .put_member(
+            community_id,
+            channel_id,
+            &other_bytes,
+            Some(buzz_db::channel::MemberRole::Owner),
+            Some(&creator_bytes),
+        )
+        .await
+        .expect("add a second owner");
+    state
+        .db
+        .remove_member(community_id, channel_id, &creator_bytes, &other_bytes)
+        .await
+        .expect("remove the creator");
+    state.invalidate_membership(&tenant, channel_id, &creator_bytes);
+
+    let lock_key = format!(
+        "buzz_channel_membership:{}:{}",
+        community_id.as_uuid(),
+        channel_id
+    );
+    let mut holder = pool.begin().await.expect("begin lock holder");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *holder)
+        .await
+        .expect("hold the membership lock");
+
+    let join = EventBuilder::new(Kind::Custom(9021), "")
+        .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
+        .sign_with_keys(&creator)
+        .unwrap();
+    let join_task = tokio::spawn({
+        let state = Arc::clone(&state);
+        let tenant = tenant.clone();
+        let auth = http_auth(&creator);
+        async move { ingest_event(&state, &tenant, join, auth).await }
+    });
+
+    // Wait until the join is blocked on the membership lock, so its
+    // open-channel check has already passed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+             AND ((classid::bigint << 32) | objid::bigint) = hashtextextended($1, 0))",
+        )
+        .bind(&lock_key)
+        .fetch_one(&pool)
+        .await
+        .expect("read lock waiters");
+        if waiting {
+            break;
+        }
+        assert!(
+            !join_task.is_finished(),
+            "the join finished without waiting for the lock"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the join never waited for the membership lock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    sqlx::query("UPDATE channels SET visibility = 'private' WHERE community_id = $1 AND id = $2")
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .execute(&mut *holder)
+        .await
+        .expect("make the channel private");
+    holder.commit().await.expect("release the membership lock");
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), join_task)
+        .await
+        .expect("the join returns after the lock is released")
+        .expect("join task must not panic");
+
+    let role = state
+        .db
+        .get_member_role(community_id, channel_id, &creator_bytes)
+        .await
+        .expect("read creator role");
+    assert_eq!(
+        role, None,
+        "a removed creator must not rejoin a channel that became private"
+    );
 }

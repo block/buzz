@@ -2,6 +2,9 @@
 #![warn(missing_docs)]
 //! Shared durable whole-community deletion engine and store adapters.
 
+/// Synthetic user-deletion request intake.
+pub mod user;
+
 use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -546,6 +549,10 @@ fn resolve_submit_host(host: Option<&str>, relay_url: Option<&str>) -> Result<St
 }
 
 async fn connect_store() -> Result<DeletionStore> {
+    Ok(store(&connect_database().await?))
+}
+
+async fn connect_database() -> Result<Db> {
     let database_url = required_env("DATABASE_URL")?;
     // The scheduled drain starts in a fresh pod whose first connection can
     // outlast the relay's three-second budget.
@@ -559,7 +566,7 @@ async fn connect_store() -> Result<DeletionStore> {
         "deletion",
     )
     .await?;
-    Ok(store(&db))
+    Ok(db)
 }
 
 fn resolve_s3_region(buzz_region: Option<String>, aws_region: Option<String>) -> String {
@@ -1967,8 +1974,9 @@ mod postgres_tests {
         let host = format!("{prefix}-{}.example", Uuid::new_v4().simple());
         let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let buzz_db::CreateCommunityWithOwnerResult::Created(community) = db
-            .create_community_with_owner(&host, &owner)
+            .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create owner preparation community")
         else {
             panic!("expected fresh owner preparation community")

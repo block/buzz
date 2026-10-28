@@ -82,6 +82,7 @@ async fn authorize_workflow_read(
     )
     .await?;
     let pubkey = *admission.proven_pubkey();
+    let token_owner = admission.token_owner();
     let (event_id_bytes, signed_created_at) = admission.into_extra();
 
     bridge::enforce_http_admission(state, &tenant, &pubkey)
@@ -95,10 +96,11 @@ async fn authorize_workflow_read(
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
     super::relay_members::enforce_relay_membership(
         state,
-        tenant.community(),
+        &tenant,
         &pubkey_bytes,
         auth_tag,
         signed_created_at,
+        token_owner,
     )
     .await
     .map_err(|e| e.into_response())?;
@@ -122,17 +124,21 @@ async fn authorize_workflow_read(
         .map_err(|error| {
             internal_error(&format!("workflow channel access lookup: {error}")).into_response()
         })?;
-    // A workflow names its channel, so a readable system channel counts.
+    // A workflow names its channel, so a readable named-only channel (a
+    // system channel, or a type added later) counts.
     let readable = accessible.contains(&channel_id)
         || state
             .db
-            .get_readable_system_channel_ids(tenant.community(), &pubkey_bytes)
+            .get_readable_named_only_channels(tenant.community(), &pubkey_bytes, &[channel_id])
             .await
             .map_err(|error| {
-                internal_error(&format!("workflow system channel access lookup: {error}"))
-                    .into_response()
+                internal_error(&format!(
+                    "workflow named-only channel access lookup: {error}"
+                ))
+                .into_response()
             })?
-            .contains(&channel_id);
+            .iter()
+            .any(|channel| channel.id == channel_id);
     if !readable {
         return Err(not_found());
     }
@@ -152,6 +158,7 @@ pub async fn workflow_runs(
         .into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn workflow_runs_inner(
     state: Arc<AppState>,
     workflow_id: Uuid,
@@ -229,6 +236,7 @@ pub async fn run_approvals(
         .into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn run_approvals_inner(
     state: Arc<AppState>,
     workflow_id: Uuid,

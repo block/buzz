@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::{relay_api, tts};
+use super::{relay_api, roster, tts};
 use crate::app_state::AppState;
 
 pub(super) async fn ensure(
@@ -51,15 +51,13 @@ pub(super) async fn ensure(
             Arc::clone(&huddle.local_tts_publishers),
         )
     };
-    let has_bot_membership =
-        relay_api::fetch_channel_members_with_roles(&ephemeral_channel_id, state)
-            .await?
-            .into_iter()
-            .any(|(pubkey, role)| {
-                pubkey.eq_ignore_ascii_case(speaker_pubkey) && role.as_deref() == Some("bot")
-            });
-    if !has_bot_membership {
-        return Err("agent is not an active bot member of the Huddle".to_string());
+    let is_huddle_agent = roster::fetch_huddle_roster(&ephemeral_channel_id, state)
+        .await?
+        .agents
+        .iter()
+        .any(|pubkey| pubkey.eq_ignore_ascii_case(speaker_pubkey));
+    if !is_huddle_agent {
+        return Err("agent is not an active agent member of the Huddle".to_string());
     }
     let publisher = relay_api::connect_tts_audio_publisher(
         &ephemeral_channel_id,

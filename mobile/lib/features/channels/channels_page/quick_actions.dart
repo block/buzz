@@ -7,7 +7,7 @@ const _kMorphCloseCurve = Cubic(0.22, 1, 0.36, 1);
 const double _kMorphOpenBounce = 0.14;
 const double _kMorphCloseBounce = 0.06;
 const double _kMorphClosedSize = 56;
-const double _kMorphOpenHeight = 216;
+const double _kMorphOpenHeight = 142;
 const double _kMorphOpenRadius = mobileTabBarHeight / 2;
 const double _kMorphSlide = 40;
 const double _kMorphScale = 0.97;
@@ -300,22 +300,23 @@ class _QuickActionsMenu extends StatelessWidget {
           _QuickActionItem(
             icon: BuzzIcons.hash,
             title: 'Create channel',
+            borderRadius: const BorderRadius.vertical(
+              top: Radius.circular(_kQuickActionCardRadius),
+              bottom: Radius.circular(8),
+            ),
             key: const Key('quick-action-create-channel-card'),
             onTap: () => onSelected(_QuickAction.createChannel),
           ),
-          const SizedBox(height: Grid.xxs),
+          const SizedBox(height: Grid.xxs - 2),
           _QuickActionItem(
             icon: BuzzIcons.messagesSquare,
             title: 'New direct message',
+            borderRadius: const BorderRadius.vertical(
+              top: Radius.circular(8),
+              bottom: Radius.circular(_kQuickActionCardRadius),
+            ),
             key: const Key('quick-action-new-dm-card'),
             onTap: () => onSelected(_QuickAction.newDm),
-          ),
-          const SizedBox(height: Grid.xxs),
-          _QuickActionItem(
-            icon: BuzzIcons.compass,
-            title: 'Browse channels',
-            key: const Key('quick-action-browse-channels-card'),
-            onTap: () => onSelected(_QuickAction.browseChannels),
           ),
         ],
       ),
@@ -327,12 +328,14 @@ class _QuickActionItem extends StatelessWidget {
   final IconData icon;
   final String title;
   final VoidCallback onTap;
+  final BorderRadius borderRadius;
 
   const _QuickActionItem({
     super.key,
     required this.icon,
     required this.title,
     required this.onTap,
+    required this.borderRadius,
   });
 
   @override
@@ -340,7 +343,10 @@ class _QuickActionItem extends StatelessWidget {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     final foreground = isIos ? context.colors.onSurface : Colors.white;
     final background = isIos
-        ? context.controlSurface
+        ? Color.alphaBlend(
+            Colors.black.withValues(alpha: 0.05),
+            context.controlSurface,
+          )
         : Color.alphaBlend(
             Colors.white.withValues(alpha: 0.1),
             const Color(0xFF262626),
@@ -349,9 +355,7 @@ class _QuickActionItem extends StatelessWidget {
     return Expanded(
       child: Material(
         color: background,
-        shape: RoundedSuperellipseBorder(
-          borderRadius: BorderRadius.circular(_kQuickActionCardRadius),
-        ),
+        shape: RoundedSuperellipseBorder(borderRadius: borderRadius),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onTap,

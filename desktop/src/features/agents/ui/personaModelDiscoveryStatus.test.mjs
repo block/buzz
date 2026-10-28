@@ -60,13 +60,30 @@ test("Buzz shared compute names a missing relay member roster", () => {
   assert.doesNotMatch(status?.message ?? "", /relay connection/);
 });
 
-test("model discovery status stays quiet for missing Databricks defaults", () => {
+for (const error of [
+  "config: DATABRICKS_HOST required",
+  "buzz-acp models failed (exit 1): config: DATABRICKS_MODEL required",
+]) {
+  test(`missing Databricks host is named, not swallowed: ${error}`, () => {
+    const status = formatModelDiscoveryErrorStatus(
+      new Error(error),
+      "databricks_v2",
+    );
+
+    assert.equal(status.tone, "warning");
+    assert.match(status.message, /DATABRICKS_HOST/);
+    assert.match(status.message, /Advanced/);
+  });
+}
+
+test("missing provider asks the user to choose one", () => {
   const status = formatModelDiscoveryErrorStatus(
-    new Error("config: DATABRICKS_HOST required"),
-    "databricks",
+    new Error("config: BUZZ_AGENT_PROVIDER is required"),
+    "",
   );
 
-  assert.equal(status, null);
+  assert.equal(status.tone, "muted");
+  assert.match(status.message, /Choose a provider/);
 });
 
 test("Databricks sign-in-required is a muted note pointing at the picker and CLI", () => {

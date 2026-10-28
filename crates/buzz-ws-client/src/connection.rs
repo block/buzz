@@ -5,6 +5,8 @@ use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, Keys, Tag};
 use serde_json::{json, Value};
 use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderMap;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::debug;
 
@@ -39,18 +41,45 @@ impl NostrWsConnection {
         keys: &Keys,
         auth_tag: Option<&Tag>,
     ) -> Result<Self, WsClientError> {
-        let mut conn = Self::connect(url).await?;
+        Self::connect_authenticated_with_headers(url, keys, auth_tag, HeaderMap::new()).await
+    }
+
+    /// [`Self::connect_authenticated`], sending `headers` on the WebSocket upgrade request.
+    ///
+    /// Use this for credentials the relay checks at upgrade time, such as a NIP-FI
+    /// `Nostr-Federated-Identity` assertion that must pair with the NIP-42 AUTH key.
+    pub async fn connect_authenticated_with_headers(
+        url: &str,
+        keys: &Keys,
+        auth_tag: Option<&Tag>,
+        headers: HeaderMap,
+    ) -> Result<Self, WsClientError> {
+        let mut conn = Self::connect_with_headers(url, headers).await?;
         conn.authenticate(keys, auth_tag).await?;
         Ok(conn)
     }
 
     /// Connects to the relay at `url` without performing authentication.
     pub async fn connect(url: &str) -> Result<Self, WsClientError> {
+        Self::connect_with_headers(url, HeaderMap::new()).await
+    }
+
+    /// [`Self::connect`], sending `headers` on the WebSocket upgrade request.
+    ///
+    /// The headers are added after the handshake headers, so supplying a handshake
+    /// header such as `Sec-WebSocket-Key` replaces it and breaks the upgrade.
+    pub async fn connect_with_headers(
+        url: &str,
+        headers: HeaderMap,
+    ) -> Result<Self, WsClientError> {
         let parsed = url
             .parse::<url::Url>()
             .map_err(|e| WsClientError::Url(e.to_string()))?;
 
-        let (ws, _response) = connect_async(parsed.as_str())
+        let mut request = parsed.as_str().into_client_request()?;
+        request.headers_mut().extend(headers);
+
+        let (ws, _response) = connect_async(request)
             .await
             .map_err(WsClientError::WebSocket)?;
 
@@ -310,5 +339,44 @@ mod tests {
     #[test]
     fn publish_ok_timeout_meets_floor() {
         const { assert!(PUBLISH_OK_TIMEOUT_SECS >= 30) };
+    }
+
+    // The handshake callback's `Result<Response, ErrorResponse>` is fixed by tungstenite.
+    #[allow(clippy::result_large_err)]
+    #[tokio::test]
+    async fn connect_with_headers_sends_headers_on_upgrade() {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+        use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut received = None;
+            let _ws = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |request: &Request, response: Response| {
+                    received = request.headers().get("nostr-federated-identity").cloned();
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            received
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Nostr-Federated-Identity",
+            HeaderValue::from_static("Bearer header.payload.signature"),
+        );
+        let _conn = NostrWsConnection::connect_with_headers(&url, headers)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            server.await.unwrap(),
+            Some(HeaderValue::from_static("Bearer header.payload.signature"))
+        );
     }
 }

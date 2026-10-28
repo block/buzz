@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import '../crypto/nip44.dart';
 import 'me_sync.dart';
 import 'me_journal.dart';
@@ -14,8 +15,11 @@ class MeChatCreation {
   /// Selected agent public key.
   final String agent;
 
+  /// Optional Solo project, frozen with the rest of the creation intent.
+  final String? project;
+
   /// Create a new intent; persistence happens before [complete] performs writes.
-  const MeChatCreation(this.id, this.name, this.agent);
+  const MeChatCreation(this.id, this.name, this.agent, {this.project});
 
   /// Account and community boundary for durable creation storage.
   static String storageKey(MeSync sync) =>
@@ -31,6 +35,7 @@ class MeChatCreation {
       value['id'] as String,
       value['name'] as String,
       value['agent'] as String,
+      project: value['project'] as String?,
     );
   }
 
@@ -41,15 +46,22 @@ class MeChatCreation {
     if (previous != null &&
         (previous.id != id ||
             previous.name != name ||
-            previous.agent != agent)) {
+            previous.agent != agent ||
+            previous.project != project)) {
       throw StateError('Resume the pending chat before starting another.');
     }
+    // A matching cached value does not prove a previous disk write succeeded.
     if (sync.prefs == null ||
         !await sync.prefs!.setString(
           storageKey(sync),
           nip44Encrypt(
             sync.key,
-            jsonEncode({'id': id, 'name': name, 'agent': agent}),
+            jsonEncode({
+              'id': id,
+              'name': name,
+              'agent': agent,
+              'project': project,
+            }),
           ),
         )) {
       throw StateError('Couldn’t save this chat on your phone. Try again.');
@@ -62,7 +74,10 @@ class MeChatCreation {
   Future<void> discard(MeSync sync) async {
     if (sync.disposed) throw StateError('Your community changed. Try again.');
     final current = pending(sync);
-    if (current?.id != id || current?.name != name || current?.agent != agent) {
+    if (current?.id != id ||
+        current?.name != name ||
+        current?.agent != agent ||
+        current?.project != project) {
       throw StateError('The unfinished chat changed. Review it again.');
     }
     await clearMeJournal(
@@ -94,11 +109,12 @@ class MeChatCreation {
     sync.check();
     final result = existing ?? await createChannel();
     sync.check();
-    final member = await hasAgent();
+    final status = await Future.wait([hasAgent(), isPlaced()]);
+    final member = status[0];
     sync.check();
     if (!member) await addAgent();
     sync.check();
-    final placed = await isPlaced();
+    final placed = status[1];
     sync.check();
     // Placement may be confirmed while its inner journal cleanup failed.
     if (!placed || sync.prefs?.getString(sync.pendingKey) != null) {

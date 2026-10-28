@@ -1,4 +1,5 @@
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
@@ -23,6 +24,12 @@ class _Channels extends ChannelsNotifier {
 class _Relay extends RelaySessionNotifier {
   VoidCallback? beforeRead;
   int reads = 0;
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [];
+
   @override
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {
@@ -58,6 +65,7 @@ void main() {
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
           call,
         ) async {
+          if (call.method == 'updateChatAssistants') return null;
           forms++;
           if (forms > 1) return null;
           if (disconnect) {
@@ -65,7 +73,11 @@ void main() {
             sync = MeSync(relay, config, prefs: prefs, connected: false);
             container.invalidate(meSyncProvider);
           }
-          return {'name': 'Saved chat', 'assistant': 'agent'};
+          return {
+            'name': 'Saved chat',
+            'assistant': 'agent',
+            'project': 'mobile',
+          };
         });
         addTearDown(
           () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -82,6 +94,17 @@ void main() {
               ),
               meAssistantsProvider.overrideWith((ref) async => []),
               channelsProvider.overrideWith(_Channels.new),
+              channelActionsProvider.overrideWith(
+                (ref) => ChannelActions(
+                  ref: ref,
+                  session: relay,
+                  signedEventRelay: SignedEventRelay(
+                    session: relay,
+                    nsec: config.nsec,
+                  ),
+                  currentPubkey: sync.pubkey,
+                ),
+              ),
             ],
             child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
           ),
@@ -106,6 +129,7 @@ void main() {
         );
         expect(saved!.name, 'Saved chat');
         expect(saved.agent, 'agent');
+        expect(saved.project, 'mobile');
         expect(
           prefs.getString(MeChatCreation.storageKey(sync)),
           isNot(contains('Saved chat')),

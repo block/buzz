@@ -19,3 +19,17 @@ stable specification after validating the design through launch and use.
 - Publish the matching gateway image and chart, update deployment configuration,
   then enable the new relay capability. Verify enrollment, delivery, renewal and
   revocation on a physical device before production activation.
+
+## Channel identifier grammar
+
+Relays advertise `h_grammar: "uuid-v4-lowercase"`. Mobile also accepts
+`uuid-lowercase`, which drops the UUID version and variant restriction so
+UUIDv5 starter channels can be subscribed. Against a `uuid-v4-lowercase` relay,
+mobile checks positive and ignore channel filters before enrollment or
+publication. It keeps the desired filters and rechecks relay capabilities every
+five minutes rather than sending a lease the relay would reject.
+
+Do not change the relay advertisement until mobile builds that only parse
+`uuid-v4-lowercase` have drained. Those builds parse the descriptor before
+renewal, opt-out and revocation, so a new grammar would leave their existing
+leases active until expiry.
