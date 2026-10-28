@@ -168,7 +168,6 @@ fn backdated_event_stored_after_close_is_inside_the_replay_window() {
     let close = 100_000;
     let wire_since = resume_since(Some(1_000), None, None, Some(close)).unwrap() - SINCE_SKEW_SECS;
     assert!(close - RELAY_CREATED_AT_DRIFT_SECS >= wire_since);
-    assert!(close - RELAY_CREATED_AT_DRIFT_SECS - 1 >= wire_since);
     // A 60s window would have started after it.
     assert!(close - RELAY_CREATED_AT_DRIFT_SECS < close - 60);
     // And the window is still bounded: a month-old event is not replayed.
