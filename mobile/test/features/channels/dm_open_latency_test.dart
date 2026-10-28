@@ -67,6 +67,16 @@ void main() {
         throwsStateError,
       );
 
+      // A reopen whose unhide snapshot the relay failed to publish fails
+      // visibly instead of opening a DM the sidebar still hides.
+      session.member = true;
+      session.hidden = {_dmId};
+      await expectLater(
+        actions.openDm(pubkeys: [_peer], waitForChannelList: false),
+        throwsStateError,
+      );
+      session.hidden = {};
+
       // Hidden-DM resurfacing keeps waiting for the list that clears its
       // hidden state, so it cannot outrun its own retry coalescing.
       session.member = true;
@@ -95,6 +105,7 @@ class _DmSession extends RelaySessionNotifier {
   _DmSession(this.self);
   final String self;
   bool member = true;
+  Set<String> hidden = {};
   void Function()? onRead;
   final published = <NostrEvent>[];
   Completer<List<NostrEvent>> stalledList = Completer();
@@ -140,6 +151,25 @@ class _DmSession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (filter.kinds.single == EventKind.dmVisibility) {
+      expect(filter.tags, {
+        '#p': [self],
+      });
+      return [
+        NostrEvent(
+          id: 'visibility',
+          pubkey: 'relay',
+          createdAt: 1,
+          kind: EventKind.dmVisibility,
+          tags: [
+            ['p', self],
+            for (final id in hidden) ['h', id],
+          ],
+          content: '',
+          sig: '',
+        ),
+      ];
+    }
     expect(filter.tags, {
       '#d': [_dmId],
     });

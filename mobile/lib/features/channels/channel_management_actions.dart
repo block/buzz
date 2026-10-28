@@ -145,7 +145,20 @@ class ChannelActions {
     }
     if (waitForChannelList) return _refreshChannelsAndRead(channelId);
     unawaited(_ref.read(channelsProvider.notifier).refresh());
-    return await findJoinedChannel(channelId) ??
+    // Reopening a hidden DM unhides it, but the relay still accepts the open
+    // when that visibility snapshot fails. Check it here so the failure shows
+    // and Done can retry, rather than leaving the DM hidden from the sidebar.
+    final pk = _currentPubkey;
+    final hiddenRequest = pk == null
+        ? Future.value(const <NostrEvent>[])
+        : _session.fetchHistory(NostrFilters.hiddenDms(pk));
+    final channelRequest = findJoinedChannel(channelId);
+    await Future.wait(eagerError: true, [hiddenRequest, channelRequest]);
+    _ensureCommunityValid();
+    if (hiddenDmIdsFromEvents(await hiddenRequest).contains(channelId)) {
+      throw StateError('DM was opened but is still hidden');
+    }
+    return await channelRequest ??
         (throw StateError('DM was opened but is not visible yet'));
   }
 
