@@ -10799,12 +10799,12 @@ void main() {
     final head = formatTimeline([
       _textMsg(id: threadIdThreadDashRoot, pubkey: 'pat', content: 'Hi'),
     ]).single;
+    final channels = _FakeChannelsNotifier(const []);
     await tester.pumpWidget(
       _buildTestable(
         messages: [],
         sender: sender,
-        // The DM was just opened, so the reloading list does not have it yet.
-        channelsNotifier: _FakeChannelsNotifier(const [])..rememberOpened(dm),
+        channelsNotifier: channels,
         home: ThreadDetailPage(
           threadHead: head,
           allMessages: [head],
@@ -10815,6 +10815,8 @@ void main() {
         ),
       ),
     );
+    // The DM was just opened, so the reloading list does not have it yet.
+    channels.rememberOpened(dm);
     await tester.pumpAndSettle();
     await tester
         .widget<ComposeBar>(find.byType(ComposeBar))

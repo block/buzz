@@ -162,9 +162,7 @@ final mentionCandidatesProvider = Provider.family
       final channels = channelsAsync.asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
       final currentPubkey = ref.watch(currentPubkeyProvider);
-      final channel = channels
-          .where((candidate) => candidate.id == args.channelId)
-          .firstOrNull;
+      final channel = ref.watch(channelByIdProvider(args.channelId));
       // Archived channels take no mentions.
       if (channel?.isArchived == true) return const [];
       final directory = channel?.mentionsOutsidePeople ?? false;
@@ -260,9 +258,7 @@ IdentityNames mentionPickerNames(
 /// section 2). Archived channels never search.
 final mentionSearchFailedProvider = Provider.family
     .autoDispose<bool, MentionChooserArgs>((ref, args) {
-      final channel = (ref.watch(channelsProvider).asData?.value ?? const [])
-          .where((candidate) => candidate.id == args.channelId)
-          .firstOrNull;
+      final channel = ref.watch(channelByIdProvider(args.channelId));
       if (channel == null ||
           channel.isArchived ||
           !channel.mentionsOutsidePeople) {

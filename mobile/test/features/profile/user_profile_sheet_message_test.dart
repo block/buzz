@@ -31,6 +31,7 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     final opened = <List<String>>[];
+    final waits = <bool>[];
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     await tester.pumpWidget(
@@ -42,7 +43,7 @@ void main() {
             }),
           ),
           channelActionsProvider.overrideWith(
-            (ref) => _FakeDmActions(dm, opened),
+            (ref) => _FakeDmActions(dm, opened, waits),
           ),
           savedPrefsProvider.overrideWithValue(prefs),
           // Solo organization is still loading.
@@ -70,6 +71,8 @@ void main() {
     expect(opened, [
       [peer],
     ]);
+    // The page opens at once instead of waiting on the full channel list.
+    expect(waits, [false]);
     expect(
       tester.widget<ChannelDetailPage>(find.byType(ChannelDetailPage)).channel,
       dm,
@@ -92,10 +95,11 @@ class _UserCache extends UserCacheNotifier {
 }
 
 class _FakeDmActions implements ChannelActions {
-  _FakeDmActions(this.dm, this.opened);
+  _FakeDmActions(this.dm, this.opened, this.waits);
 
   final Channel dm;
   final List<List<String>> opened;
+  final List<bool> waits;
 
   @override
   Future<Channel> openDm({
@@ -103,6 +107,7 @@ class _FakeDmActions implements ChannelActions {
     bool waitForChannelList = true,
   }) async {
     opened.add(pubkeys);
+    waits.add(waitForChannelList);
     return dm;
   }
 
