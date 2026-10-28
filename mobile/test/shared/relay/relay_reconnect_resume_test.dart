@@ -160,7 +160,7 @@ void main() {
       final start = h.nowSeconds;
       h.sockets.last.connectSuccessfully();
 
-      final quiet = await h.subscribeLive(_filter('quiet', since: start - 3600));
+      await h.subscribeLive(_filter('quiet', since: start - 3600));
       h.subscribeWithoutEose(_filter('no-eose'));
       final busy = await h.subscribeLive(_filter('busy'));
       final closed = await h.subscribeLive(_filter('closed'));
@@ -180,10 +180,7 @@ void main() {
 
       // A backdated event stored just after the close (up to 900s behind the
       // relay clock) is still inside the window.
-      expect(
-        h.replayedSince()['quiet']!,
-        lessThanOrEqualTo(start + 120 - 900),
-      );
+      expect(h.replayedSince()['quiet']!, lessThanOrEqualTo(start + 120 - 900));
       expect(h.replayedSince(), {
         'quiet': start - 840, // live until (start + 120) - 960s
         'no-eose': null, // never live: today's behaviour
