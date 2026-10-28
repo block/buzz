@@ -1275,11 +1275,18 @@ struct BgState {
     /// [`unix_now_secs`] in production; replaceable so tests can move time.
     now_secs: fn() -> u64,
     /// Subscription IDs a REQ was written for on the CURRENT connection.
+    /// Deliberately kept across unsubscribe: the wire ID is derived from the
+    /// channel, so a re-subscribe on the same socket reuses it and must count as
+    /// a second REQ (an EOSE for the old REQ may still be in flight). Cleared
+    /// only when the connection closes, so it is bounded by the IDs used on one
+    /// socket.
     req_sent_this_conn: HashSet<String>,
     /// Subscription IDs whose REQ was written more than once on the CURRENT
     /// connection. EOSE carries only the subscription ID, so an EOSE for the
     /// superseded REQ cannot be told from one for its replacement; such a
     /// subscription never counts as having reached EOSE on this connection.
+    /// Like `req_sent_this_conn`, kept across unsubscribe and cleared only on
+    /// connection close.
     superseded_this_conn: HashSet<String>,
 }
 
@@ -1424,8 +1431,9 @@ impl BgState {
         self.channel_dropped_since.remove(channel_id);
         let sub_id = channel_sub_id(*channel_id);
         self.eose_this_conn.remove(&sub_id);
-        self.req_sent_this_conn.remove(&sub_id);
-        self.superseded_this_conn.remove(&sub_id);
+        // `req_sent_this_conn` / `superseded_this_conn` are intentionally NOT
+        // cleared: a re-subscribe on this socket reuses the wire ID, and an EOSE
+        // for the old REQ must not count for the new one.
         self.live_until.remove(&sub_id);
         self.active_filters.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);

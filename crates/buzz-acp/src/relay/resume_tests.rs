@@ -1010,3 +1010,44 @@ async fn resume_after_an_hour_of_silence(loss: MockCtl) {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn resubscribing_after_unsubscribe_on_one_socket_ignores_the_old_reqs_eose() {
+    let (mut client, mut server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    let sub = channel_sub_id(channel);
+    let subscribe = |replay_since| RelayCommand::Subscribe {
+        channel_id: channel,
+        filter: test_channel_filter(),
+        replay_since: Some(replay_since),
+    };
+
+    // REQ #1 (recent floor), then the channel is removed and re-added with an
+    // older floor, e.g. membership flapped. The wire ID is the same.
+    assert!(execute_connected_command(&mut client, &mut state, "agent", subscribe(5_000_000)).await);
+    assert_eq!(next_test_frame(&mut server).await[0], "REQ");
+    assert!(
+        execute_connected_command(
+            &mut client,
+            &mut state,
+            "agent",
+            RelayCommand::Unsubscribe { channel_id: channel },
+        )
+        .await
+    );
+    assert_eq!(next_test_frame(&mut server).await[0], "CLOSE");
+    assert!(execute_connected_command(&mut client, &mut state, "agent", subscribe(1_000)).await);
+    assert_eq!(next_test_frame(&mut server).await[0], "REQ");
+
+    // The old REQ's EOSE is still in flight when it lands, then the socket
+    // drops before the replacement has replayed history from 1_000.
+    deliver_eose(&mut client, &mut state, &sub).await;
+    lose_connection(&mut state).await;
+
+    let since = first_replay_req(&mut state, &sub).await;
+    assert!(
+        since <= 1_000,
+        "replay must keep the re-subscribe's older floor, got since={since}"
+    );
+}
