@@ -1039,6 +1039,7 @@ mod postgres_tests {
                     &state.relay_keypair,
                 )
                 .await
+                .map(|write| write.outcome)
                 .expect("seed membership");
         }
         for keys in [&owner, &agent] {
@@ -1082,6 +1083,7 @@ mod postgres_tests {
                 &state.relay_keypair,
             )
             .await
+            .map(|write| write.outcome)
             .expect("committed removal");
         handle_relay_admin_event(&tenant, &state, &command(&member))
             .await
@@ -1100,6 +1102,7 @@ mod postgres_tests {
                 &open_state.relay_keypair,
             )
             .await
+            .map(|write| write.outcome)
             .expect("open-relay admin");
         let open_socket = bound_root_socket(&open_state, open_tenant.community(), &member);
         assert!(
@@ -1145,6 +1148,7 @@ mod postgres_tests {
                 &state.relay_keypair,
             )
             .await
+            .map(|write| write.outcome)
             .expect("owner");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
