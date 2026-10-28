@@ -69,7 +69,8 @@ enum GlobalSelector {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct GlobalSelectorIndexKey {
     community_id: CommunityId,
-    kind: Kind,
+    /// `None` for a kindless filter, which matches the selector at any kind.
+    kind: Option<Kind>,
     selector: GlobalSelector,
 }
 
@@ -198,9 +199,9 @@ impl SubscriptionRegistry {
                 }
             }
         } else {
-            // Global subscription. Fully p- or author-constrained filters can
-            // use the narrower selector index; broader filters stay on the
-            // generic kind/wildcard indexes.
+            // Global subscription. Fully p- or author-constrained filters, even
+            // kindless ones, use the narrower selector index; broader filters
+            // stay on the generic kind/wildcard indexes.
             if let Some(keys) = extract_global_selector_index_keys(community_id, &filters) {
                 for key in keys {
                     self.global_selector_index
@@ -436,12 +437,16 @@ impl SubscriptionRegistry {
             // Global event (channel_id = None) — use global indexes for sub-linear fan-out.
             // Channel-scoped subscriptions are never in these indexes, preserving the
             // scoping invariant without an explicit skip check.
-            for selector in event_global_selectors(event) {
-                let key = GlobalSelectorIndexKey {
-                    community_id,
-                    kind: event.event.kind,
-                    selector,
-                };
+            let selector_keys = event_global_selectors(event)
+                .into_iter()
+                .flat_map(|selector| {
+                    [Some(event.event.kind), None].map(|kind| GlobalSelectorIndexKey {
+                        community_id,
+                        kind,
+                        selector: selector.clone(),
+                    })
+                });
+            for key in selector_keys {
                 if let Some(candidates) = self
                     .global_selector_index
                     .get(&key)
@@ -670,8 +675,8 @@ fn p_tag() -> SingleLetterTag {
 }
 
 /// Index keys for a global subscription whose every filter is constrained to
-/// `#p` recipients, or else to authors. `None` means it needs the broader
-/// kind/wildcard indexes. `#p` wins when a filter names both.
+/// `#p` recipients, or else to authors, with or without kinds. `None` means it
+/// needs the broader kind/wildcard indexes. `#p` wins when a filter names both.
 fn extract_global_selector_index_keys(
     community_id: CommunityId,
     filters: &[Filter],
@@ -704,10 +709,11 @@ fn extract_selector_keys(
     let mut keys = Vec::new();
 
     for filter in filters {
-        let kinds = filter.kinds.as_ref()?;
-        if kinds.is_empty() {
-            continue;
-        }
+        let kinds: Vec<Option<Kind>> = match &filter.kinds {
+            Some(kinds) if kinds.is_empty() => continue,
+            Some(kinds) => kinds.iter().copied().map(Some).collect(),
+            None => vec![None],
+        };
 
         let selectors = selectors_of(filter)?;
         if selectors.is_empty() {
@@ -718,7 +724,7 @@ fn extract_selector_keys(
             for selector in &selectors {
                 let key = GlobalSelectorIndexKey {
                     community_id,
-                    kind: *kind,
+                    kind,
                     selector: selector.clone(),
                 };
                 if seen.insert(key.clone()) {
@@ -1653,7 +1659,7 @@ mod tests {
         let filter = Filter::new().kind(kind).custom_tags(p_tag(), [p]);
         let key = GlobalSelectorIndexKey {
             community_id: test_community(),
-            kind,
+            kind: Some(kind),
             selector: GlobalSelector::P(p.to_string()),
         };
 
@@ -1677,7 +1683,7 @@ mod tests {
     fn author_key(kind: Kind, author: &Keys) -> GlobalSelectorIndexKey {
         GlobalSelectorIndexKey {
             community_id: test_community(),
-            kind,
+            kind: Some(kind),
             selector: GlobalSelector::Author(author.public_key()),
         }
     }
@@ -1839,6 +1845,53 @@ mod tests {
         assert!(registry
             .fan_out(&make_stored_event_by(&author, kind))
             .is_empty());
+    }
+
+    #[test]
+    fn test_global_selector_index_kindless_filters_skip_wildcard_scan() {
+        let registry = SubscriptionRegistry::new();
+        let presence = Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16);
+        let alice = Keys::generate();
+        let p = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mentions = Uuid::new_v4();
+        let follows = Uuid::new_v4();
+
+        registry.register(
+            mentions,
+            "mentions".to_string(),
+            vec![Filter::new().custom_tags(p_tag(), [p])],
+            None,
+        );
+        registry.register(
+            follows,
+            "follows".to_string(),
+            vec![Filter::new().author(alice.public_key())],
+            None,
+        );
+        assert!(
+            registry
+                .global_wildcard_index
+                .get(&test_community())
+                .is_none(),
+            "kindless p- or author-constrained subscriptions should use the selector index"
+        );
+
+        // Any kind reaches the matching selector, and only it.
+        assert_eq!(
+            registry.fan_out(&make_stored_event_with_p(Kind::TextNote, p, None)),
+            vec![(mentions, "mentions".to_string())]
+        );
+        assert_eq!(
+            registry.fan_out(&make_stored_event_by(&alice, presence)),
+            vec![(follows, "follows".to_string())]
+        );
+        assert!(registry
+            .fan_out(&make_stored_event_by(&Keys::generate(), presence))
+            .is_empty());
+
+        registry.remove_connection(mentions);
+        registry.remove_subscription(follows, "follows");
+        assert!(registry.global_selector_index.is_empty());
     }
 
     #[test]
