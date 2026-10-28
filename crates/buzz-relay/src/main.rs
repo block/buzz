@@ -835,17 +835,15 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // `tsvector` column is populated by the `insert_event` write), so there is
     // no external collection to provision — the search service just queries the
     // same Postgres over its own pool. Search is lag-tolerant, so it prefers
-    // the read replica when one is configured.
+    // the read replica when one is configured. The pool is lazy, like the main
+    // read pool: a reader that is down at boot fails searches, not startup.
     let search_db_url = config
         .read_database_url
         .as_deref()
         .unwrap_or(&config.database_url);
-    let step = StepTimer::start(StartupStep::SearchConnect);
     let search_pool = sqlx::postgres::PgPoolOptions::new()
-        .connect(search_db_url)
-        .await
-        .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
-    step.finish();
+        .connect_lazy(search_db_url)
+        .map_err(|e| anyhow::anyhow!("Search DB URL is invalid: {e}"))?;
     let search_metrics_pool = search_pool.clone();
     let search = SearchService::new(search_pool);
     info!(
