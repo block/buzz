@@ -18,10 +18,11 @@ pub enum Op {
     HttpQuery,
     HttpEvents,
     Seed,
+    Subscribe,
 }
 
 impl Op {
-    pub const ALL: [Op; 8] = [
+    pub const ALL: [Op; 9] = [
         Op::WsConnect,
         Op::History,
         Op::PublishEphemeral,
@@ -30,6 +31,7 @@ impl Op {
         Op::HttpQuery,
         Op::HttpEvents,
         Op::Seed,
+        Op::Subscribe,
     ];
 
     pub fn name(self) -> &'static str {
@@ -42,14 +44,39 @@ impl Op {
             Op::HttpQuery => "http_query",
             Op::HttpEvents => "http_events",
             Op::Seed => "seed",
+            Op::Subscribe => "subscribe_eose",
         }
     }
+}
 
-    /// Operations whose latency and errors the abort thresholds judge.
-    /// Delivery has no error signal of its own and seeding is not load.
-    pub fn gates_abort(self) -> bool {
-        !matches!(self, Op::Deliver | Op::Seed)
-    }
+/// Why a step crossed the abort thresholds, if it did. Every operation but
+/// seeding counts toward the latency limit; delivery has no error signal of
+/// its own, so it is left out of the error-rate limit.
+pub fn abort_reason(
+    summaries: &[(Op, OpSummary)],
+    max_error_rate: f64,
+    max_p99_ms: f64,
+) -> Option<String> {
+    summaries
+        .iter()
+        .filter(|(op, s)| *op != Op::Seed && s.count + s.errors > 0)
+        .find_map(|(op, s)| {
+            if *op != Op::Deliver && s.error_rate() > max_error_rate {
+                Some(format!(
+                    "{} error rate {:.3} > {max_error_rate}",
+                    op.name(),
+                    s.error_rate()
+                ))
+            } else if s.p99_ms > max_p99_ms {
+                Some(format!(
+                    "{} p99 {:.1} ms > {max_p99_ms} ms",
+                    op.name(),
+                    s.p99_ms
+                ))
+            } else {
+                None
+            }
+        })
 }
 
 /// Bucket `i` holds latencies up to `GROWTH^i` microseconds (2% resolution).
@@ -165,7 +192,9 @@ fn normalize(reason: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    out.truncate(120);
+    if let Some((cut, _)) = out.char_indices().nth(120) {
+        out.truncate(cut);
+    }
     out
 }
 
@@ -344,5 +373,45 @@ mod tests {
         assert!(reasons
             .iter()
             .any(|(r, _)| r == "publish_message_ok: error: internal <n>"));
+    }
+
+    #[test]
+    fn long_reasons_truncate_on_char_boundaries() {
+        let stats = Stats::default();
+        for reason in ["a".repeat(119) + "é tail", "é".repeat(200), "x".repeat(300)] {
+            stats.err(Op::HttpEvents, &reason);
+        }
+        let reasons = stats.snapshot().reasons_since(&Snapshot::default(), 10);
+        assert_eq!(reasons.len(), 3);
+        assert!(reasons
+            .iter()
+            .all(|(r, _)| r.chars().count() <= "http_events: ".len() + 120));
+    }
+
+    #[test]
+    fn abort_judges_error_rate_and_every_latency_including_delivery() {
+        let stats = Stats::default();
+        stats.ok(Op::PublishMessage, Duration::from_millis(2));
+        stats.ok(Op::Deliver, Duration::from_millis(900));
+        let base = Snapshot::default();
+        let slow_delivery = stats.snapshot().since(&base);
+        let reason = abort_reason(&slow_delivery, 0.05, 500.0).expect("slow delivery aborts");
+        assert!(reason.starts_with("deliver p99"), "{reason}");
+        assert_eq!(abort_reason(&slow_delivery, 0.05, 5_000.0), None);
+
+        stats.err(Op::PublishMessage, "error: boom");
+        let failing = stats.snapshot().since(&base);
+        let reason = abort_reason(&failing, 0.05, 5_000.0).expect("errors abort");
+        assert!(
+            reason.starts_with("publish_message_ok error rate"),
+            "{reason}"
+        );
+
+        let seeding = Stats::default();
+        seeding.err(Op::Seed, "error: boom");
+        assert_eq!(
+            abort_reason(&seeding.snapshot().since(&base), 0.05, 1.0),
+            None
+        );
     }
 }

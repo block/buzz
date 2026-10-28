@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Seed { .. } => {
             let stats = Arc::new(stats::Stats::default());
             let started = std::time::Instant::now();
-            seed::seed(&scenario, &net, &stats).await?;
+            let outcome = seed::seed(&scenario, &net, &stats).await;
             let summary = stats.snapshot();
             let base = stats::Snapshot::default();
             let report = serde_json::json!({
@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
                 "failures": summary.reasons_since(&base, 10),
             });
             println!("{report}");
-            Ok(())
+            outcome
         }
         Command::Run { shard, report, .. } => {
             let (outcome, value) = match run::run(scenario, net, shard).await {

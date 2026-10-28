@@ -57,10 +57,17 @@ across shards.
 
 Each step reports every operation from the start of its ramp to the end of
 its hold, so connection failures during the ramp count. At the end of the
-hold, the run stops if any operation's error rate exceeds
-`abort.max_error_rate` or its p99 exceeds `abort.max_p99_ms`.
-Rate-limit rejections are reported as `throttled`, not errors. The process
-exits non-zero when a step aborts.
+hold, the run stops if any operation's p99 (publish→delivery included)
+exceeds `abort.max_p99_ms`, if any operation other than delivery has an
+error rate above `abort.max_error_rate`, or if a client exited unexpectedly.
+A relay `CLOSED` on a live subscription counts as a `subscribe_eose` error
+and ends that client's session. Each connect plus authentication must finish
+within `target.connect_timeout_secs` (default 10). Rate-limit rejections are
+reported as `throttled`, not errors. Ramp steps must increase `users`, since
+clients are only ever added. The process exits non-zero when a step aborts
+or a client panics.
+
+`seed` exits non-zero unless the relay accepted every planned post.
 
 ## Safety
 

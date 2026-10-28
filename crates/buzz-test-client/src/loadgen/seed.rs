@@ -11,13 +11,14 @@ use serde_json::json;
 use super::identity::{self, Role};
 use super::net::{truncate, Net};
 use super::scenario::{Community, Scenario};
-use super::stats::{Op, Stats};
+use super::stats::{Op, Snapshot, Stats};
 
 /// Content prefix of seeded thread roots; `run` finds roots by it.
 pub const ROOT_PREFIX: &str = "lg-root";
 
 /// Seeds every community. Idempotent for communities and channels; history
-/// and thread replies are appended on every call.
+/// and threads are appended on every call. Fails unless every planned post
+/// was accepted.
 pub async fn seed(scenario: &Scenario, net: &Net, stats: &Arc<Stats>) -> anyhow::Result<()> {
     for community in scenario.communities() {
         let owner = identity::keys(&scenario.run_id, Role::Owner, community.index);
@@ -33,24 +34,36 @@ pub async fn seed(scenario: &Scenario, net: &Net, stats: &Arc<Stats>) -> anyhow:
 
     let communities = scenario.communities();
     let started = Instant::now();
+    let before = stats.snapshot();
     let (roots, rest) = plan_posts(scenario);
-    let root_count = roots.len();
-    post_all(scenario, net, stats, &communities, roots, &HashMap::new()).await;
-    let root_ids = resolve_roots(scenario, net, &communities).await?;
-    let rest_count = rest.len();
+    let planned = roots.len() + rest.len();
+    let root_ids = post_all(scenario, net, stats, &communities, roots, &RootIds::new()).await;
     post_all(scenario, net, stats, &communities, rest, &root_ids).await;
+    let accepted = seeded(&stats.snapshot(), &before);
     eprintln!(
-        "seed: {} posts in {:.1}s",
-        root_count + rest_count,
+        "seed: {accepted} of {planned} posts accepted in {:.1}s",
         started.elapsed().as_secs_f64()
     );
+    if accepted < planned {
+        anyhow::bail!(
+            "seeded {accepted} of {planned} posts; {} missing",
+            planned - accepted
+        );
+    }
     Ok(())
 }
 
-/// Seeded root ids keyed by (community, channel) index.
-type RootIds = HashMap<(usize, usize), Vec<String>>;
-type RootEntry = ((usize, usize), Vec<String>);
+fn seeded(now: &Snapshot, before: &Snapshot) -> usize {
+    now.since(before)
+        .iter()
+        .find(|(op, _)| *op == Op::Seed)
+        .map_or(0, |(_, s)| s.count as usize)
+}
 
+/// Accepted post ids keyed by (community, channel, seq).
+type RootIds = HashMap<(usize, usize, usize), String>;
+
+/// Submits `posts` and returns the ids of the accepted ones.
 async fn post_all(
     scenario: &Scenario,
     net: &Net,
@@ -58,55 +71,32 @@ async fn post_all(
     communities: &[Community],
     posts: Vec<Post>,
     roots: &RootIds,
-) {
+) -> RootIds {
     stream::iter(posts)
-        .for_each_concurrent(scenario.shape.seed_concurrency, |post| {
+        .map(|post| {
             let community = &communities[post.community];
             async move {
                 let Some((keys, event)) = post.build(scenario, roots) else {
                     stats.err(Op::Seed, "thread root missing");
-                    return;
+                    return None;
                 };
                 let t0 = Instant::now();
                 match net.submit(&keys, community, &event, None).await {
-                    Ok(()) => stats.ok(Op::Seed, t0.elapsed()),
-                    Err(e) => stats.err(Op::Seed, &e.to_string()),
+                    Ok(()) => {
+                        stats.ok(Op::Seed, t0.elapsed());
+                        Some(((post.community, post.channel, post.seq), event.id.to_hex()))
+                    }
+                    Err(e) => {
+                        stats.err(Op::Seed, &e.to_string());
+                        None
+                    }
                 }
             }
         })
-        .await;
-}
-
-/// Looks up every channel's seeded root ids once, reading as rotating humans.
-async fn resolve_roots(
-    scenario: &Scenario,
-    net: &Net,
-    communities: &[Community],
-) -> anyhow::Result<RootIds> {
-    if scenario.shape.thread_roots_per_channel == 0 {
-        return Ok(RootIds::new());
-    }
-    let channels: Vec<(usize, usize)> = communities
-        .iter()
-        .flat_map(|c| (0..scenario.shape.channels_per_community).map(move |ch| (c.index, ch)))
-        .collect();
-    let results: Vec<anyhow::Result<RootEntry>> = stream::iter(channels)
-        .enumerate()
-        .map(|(n, (community, channel))| async move {
-            let reader = identity::keys(
-                &scenario.run_id,
-                Role::Human,
-                n % scenario.population.humans.max(1),
-            );
-            let owner = identity::keys(&scenario.run_id, Role::Owner, community);
-            let id = identity::channel_id(&scenario.run_id, community, channel);
-            let roots = find_roots(net, &communities[community], &reader, &owner, &id).await?;
-            Ok(((community, channel), roots))
-        })
         .buffer_unordered(scenario.shape.seed_concurrency)
+        .filter_map(std::future::ready)
         .collect()
-        .await;
-    results.into_iter().collect()
+        .await
 }
 
 async fn provision(scenario: &Scenario, net: &Net, host: &str, owner: &Keys) -> anyhow::Result<()> {
@@ -179,6 +169,7 @@ enum PostKind {
 }
 
 /// Thread roots, then history and replies (posted once root ids are known).
+/// A root's `seq` is its index within its channel.
 fn plan_posts(scenario: &Scenario) -> (Vec<Post>, Vec<Post>) {
     let shape = &scenario.shape;
     let mut roots = Vec::new();
@@ -232,7 +223,7 @@ impl Post {
                 format!("{ROOT_PREFIX} {}", self.seq),
             ),
             PostKind::Reply { root } => {
-                let root_id = roots.get(&(self.community, self.channel))?.get(root)?;
+                let root_id = roots.get(&(self.community, self.channel, root))?;
                 tags.push(tag(["e", root_id, "", "reply"]));
                 (author, format!("lg-reply {}", self.seq))
             }
@@ -245,7 +236,8 @@ impl Post {
     }
 }
 
-/// Seeded thread-root ids in `channel`, oldest first.
+/// Up to the 100 newest seeded thread-root ids in `channel`, oldest first.
+/// `run` replies into these; a sample of roots is enough load.
 pub async fn find_roots(
     net: &Net,
     community: &Community,
@@ -285,4 +277,121 @@ pub async fn find_roots(
 
 fn tag<const N: usize>(parts: [&str; N]) -> Tag {
     Tag::parse(parts).expect("static tag shape")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    /// A minimal `/events` endpoint: rejects posts whose content is `reject`,
+    /// and replies whose root it never accepted; accepts everything else.
+    async fn fake_relay(reject: Arc<str>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let accepted = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let accepted = accepted.clone();
+                let reject = reject.clone();
+                tokio::spawn(async move {
+                    let mut reader = BufReader::new(socket);
+                    loop {
+                        let mut length = 0;
+                        let mut line = String::new();
+                        loop {
+                            line.clear();
+                            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                            if let Some(v) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                length = v.trim().parse().unwrap();
+                            }
+                        }
+                        let mut body = vec![0; length];
+                        reader.read_exact(&mut body).await.unwrap();
+                        let event: Event = serde_json::from_slice(&body).unwrap();
+                        let root = event
+                            .tags
+                            .iter()
+                            .find(|t| t.kind().as_str() == "e")
+                            .and_then(|t| t.content())
+                            .map(str::to_string);
+                        let ok = event.content != *reject
+                            && root.is_none_or(|r| accepted.lock().unwrap().contains(&r));
+                        if ok {
+                            accepted.lock().unwrap().insert(event.id.to_hex());
+                        }
+                        let reply =
+                            json!({"accepted": ok, "message": if ok { "" } else { "blocked" }})
+                                .to_string();
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
+                            reply.len()
+                        );
+                        if reader
+                            .get_mut()
+                            .write_all(response.as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    async fn seed_against(reject: &str) -> (anyhow::Result<()>, Arc<Stats>) {
+        let addr = fake_relay(reject.into()).await;
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 1
+history_messages_per_channel = 2
+thread_roots_per_channel = 2
+thread_depth = 3
+[population]
+humans = 4
+agents = 0
+channels_per_member = 1
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#
+        ))
+        .unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let stats = Arc::new(Stats::default());
+        (seed(&scenario, &net, &stats).await, stats)
+    }
+
+    #[tokio::test]
+    async fn replies_use_accepted_roots_and_missing_posts_fail_the_seed() {
+        let (outcome, stats) = seed_against("none").await;
+        outcome.expect("every post accepted");
+        assert_eq!(seeded(&stats.snapshot(), &Snapshot::default()), 10);
+
+        let (outcome, stats) = seed_against("lg-history 1").await;
+        let err = outcome.expect_err("a rejected post fails the seed");
+        assert!(err.to_string().contains("seeded 9 of 10"), "{err}");
+        assert_eq!(seeded(&stats.snapshot(), &Snapshot::default()), 9);
+
+        // A rejected root leaves its three replies unpostable.
+        let (outcome, _) = seed_against(&format!("{ROOT_PREFIX} 1")).await;
+        let err = outcome.expect_err("a rejected root fails the seed");
+        assert!(err.to_string().contains("seeded 6 of 10"), "{err}");
+    }
 }

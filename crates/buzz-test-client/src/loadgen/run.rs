@@ -20,12 +20,18 @@ use super::identity::{self, Role};
 use super::net::{truncate, Net};
 use super::scenario::{Community, Scenario};
 use super::seed::find_roots;
-use super::stats::{ops_json, Op, Stats};
+use super::stats::{abort_reason, ops_json, Op, Stats};
 
 /// Content prefix of timed messages: `lg:<send unix micros>`.
 const TIMED_PREFIX: &str = "lg:";
 /// Longest an idle client blocks on its socket before rechecking the stop flag.
 const MAX_IDLE: Duration = Duration::from_secs(1);
+/// How long stopped clients get to disconnect before they are cancelled.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
+/// Live subscriptions every human opens after connecting.
+const HUMAN_SUBS: [&str; 4] = ["live", "mentions", "typing", "presence"];
+/// Prefix of the finite history subscriptions a human opens and closes.
+const HISTORY_PREFIX: &str = "history-";
 
 /// `i/n`: this process runs every global client index `g` with `g % n == i`.
 #[derive(Clone, Copy, Debug)]
@@ -118,13 +124,17 @@ pub async fn run(scenario: Scenario, net: Net, shard: Shard) -> Result<Value, Va
         let after = stats.snapshot();
         let summaries = after.since(&before);
 
-        let worst = summaries
-            .iter()
-            .filter(|(op, s)| op.gates_abort() && s.count + s.errors > 0)
-            .fold((0.0f64, 0.0f64), |(rate, p99), (_, s)| {
-                (rate.max(s.error_rate()), p99.max(s.p99_ms))
-            });
-        let abort = worst.0 > scenario.abort.max_error_rate || worst.1 > scenario.abort.max_p99_ms;
+        // Clients only return once stopped, so a finished one panicked.
+        let lost = tasks.iter().filter(|t| t.is_finished()).count();
+        let reason = if lost > 0 {
+            Some(format!("{lost} clients exited unexpectedly"))
+        } else {
+            abort_reason(
+                &summaries,
+                scenario.abort.max_error_rate,
+                scenario.abort.max_p99_ms,
+            )
+        };
         let report = json!({
             "step": n,
             "users": step.users,
@@ -139,26 +149,48 @@ pub async fn run(scenario: Scenario, net: Net, shard: Shard) -> Result<Value, Va
                 .into_iter()
                 .map(|(reason, count)| json!({"reason": reason, "count": count}))
                 .collect::<Vec<_>>(),
-            "aborted": abort,
+            "aborted": reason.is_some(),
+            "abort_reason": reason,
         });
         eprintln!("{report}");
         steps.push(report);
-        if abort {
+        if reason.is_some() {
             aborted = true;
             break;
         }
     }
 
     let _ = stop_tx.send(true);
-    for task in tasks {
-        let _ = task.await;
-    }
-    let report = json!({ "run_id": shared.scenario.run_id, "steps": steps });
-    if aborted {
+    let (panicked, cancelled) = shutdown(tasks).await;
+    let report = json!({
+        "run_id": shared.scenario.run_id,
+        "steps": steps,
+        "clients_panicked": panicked,
+        "clients_cancelled": cancelled,
+    });
+    if aborted || panicked > 0 {
         Err(report)
     } else {
         Ok(report)
     }
+}
+
+/// Waits up to [`SHUTDOWN_GRACE`] for stopped clients, then cancels the
+/// rest. Returns how many panicked and how many were cancelled.
+async fn shutdown(tasks: Vec<tokio::task::JoinHandle<()>>) -> (usize, usize) {
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+    let (mut panicked, mut cancelled) = (0, 0);
+    for mut task in tasks {
+        match tokio::time::timeout_at(deadline, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panicked += usize::from(e.is_panic()),
+            Err(_) => {
+                task.abort();
+                cancelled += 1;
+            }
+        }
+    }
+    (panicked, cancelled)
 }
 
 /// Small deterministic PRNG so every client draws an independent schedule.
@@ -214,6 +246,33 @@ fn stopped(shared: &Shared) -> bool {
     *shared.stop.borrow()
 }
 
+/// Resolves once the run is stopping.
+async fn stopping(shared: &Shared) {
+    let mut stop = shared.stop.clone();
+    let _ = stop.wait_for(|s| *s).await;
+}
+
+/// Jittered exponential backoff between failed connects or failed sessions.
+struct Backoff(f64);
+
+impl Backoff {
+    const MAX_SECS: f64 = 30.0;
+
+    fn new() -> Self {
+        Self(1.0)
+    }
+
+    /// Sleeps for the next interval, returning early when the run stops.
+    async fn wait(&mut self, shared: &Shared, rng: &mut Rng) {
+        let wait = Duration::from_secs_f64(self.0 * (0.5 + rng.unit()));
+        self.0 = (self.0 * 2.0).min(Self::MAX_SECS);
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = stopping(shared) => {}
+        }
+    }
+}
+
 /// A stream message a client can react to: its id and channel.
 #[derive(Clone)]
 struct Seen {
@@ -237,6 +296,39 @@ fn seen(message: &RelayMessage) -> Option<Seen> {
         id: event.id.to_hex(),
         channel: channel.to_string(),
     })
+}
+
+/// Handles a message for a live subscription. `EOSE` completes a subscribe
+/// and `CLOSED` is a rejection that ends the session. Events record delivery
+/// latency and become reaction targets. Late messages for a history
+/// subscription, including the relay's `CLOSED` reply to our `CLOSE`, are
+/// ignored.
+fn live(
+    stats: &Stats,
+    message: &RelayMessage,
+    subscribed: Instant,
+    last_message: &mut Option<Seen>,
+) -> Result<(), String> {
+    if subscription_of(message).is_some_and(|id| id.starts_with(HISTORY_PREFIX)) {
+        return Ok(());
+    }
+    match message {
+        RelayMessage::Eose { .. } => stats.ok(Op::Subscribe, subscribed.elapsed()),
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } => {
+            let reason = format!("CLOSED {subscription_id}: {message}");
+            stats.err(Op::Subscribe, &reason);
+            return Err(reason);
+        }
+        _ => {
+            if let Some(target) = observe(stats, message) {
+                *last_message = Some(target);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Records end-to-end delivery latency for a live timed message and returns
@@ -274,27 +366,30 @@ async fn publish(
     Ok(())
 }
 
-/// Connects with retry until connected or stopped.
+/// Connects with retry until connected or stopped. Each attempt is bounded
+/// by the connect deadline and abandoned as soon as the run stops.
 async fn connect(
     shared: &Shared,
     community: &Community,
     keys: &Keys,
     auth: Option<&Tag>,
     rng: &mut Rng,
+    backoff: &mut Backoff,
 ) -> Option<NostrWsConnection> {
-    let mut backoff = 1.0;
     while !stopped(shared) {
         let t0 = Instant::now();
-        match shared.net.connect(community, keys, auth).await {
+        let attempt = tokio::select! {
+            attempt = shared.net.connect(community, keys, auth) => attempt,
+            _ = stopping(shared) => return None,
+        };
+        match attempt {
             Ok(conn) => {
                 shared.stats.ok(Op::WsConnect, t0.elapsed());
                 return Some(conn);
             }
             Err(e) => shared.stats.err(Op::WsConnect, &e.to_string()),
         }
-        let wait = backoff * (0.5 + rng.unit());
-        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-        backoff = (backoff * 2.0f64).min(30.0);
+        backoff.wait(shared, rng).await;
     }
     None
 }
@@ -346,13 +441,17 @@ async fn human(shared: Arc<Shared>, global: usize) {
         })
         .collect();
     let mut rng = Rng::new(global as u64);
+    let mut backoff = Backoff::new();
     let mut last_message: Option<Seen> = None;
 
-    while let Some(mut conn) = connect(&shared, community, &keys, None, &mut rng).await {
+    while let Some(mut conn) =
+        connect(&shared, community, &keys, None, &mut rng, &mut backoff).await
+    {
         let since = Timestamp::now();
+        let subscribed = Instant::now();
         let subs = [
             (
-                "live",
+                HUMAN_SUBS[0],
                 Filter::new()
                     .kinds([
                         kind(KIND_STREAM_MESSAGE),
@@ -367,18 +466,18 @@ async fn human(shared: Arc<Shared>, global: usize) {
                     .since(since),
             ),
             (
-                "mentions",
+                HUMAN_SUBS[1],
                 Filter::new().pubkey(keys.public_key()).since(since),
             ),
             (
-                "typing",
+                HUMAN_SUBS[2],
                 Filter::new().kind(kind(KIND_TYPING_INDICATOR)).custom_tags(
                     nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
                     channels.clone(),
                 ),
             ),
             (
-                "presence",
+                HUMAN_SUBS[3],
                 Filter::new()
                     .kind(kind(KIND_PRESENCE_UPDATE))
                     .authors(peers.clone()),
@@ -386,14 +485,17 @@ async fn human(shared: Arc<Shared>, global: usize) {
         ];
         let mut ok = true;
         for (id, filter) in subs {
-            if send_req(&mut conn, id, filter).await.is_err() {
+            if let Err(e) = send_req(&mut conn, id, filter).await {
+                shared
+                    .stats
+                    .err(Op::WsConnect, &format!("disconnected: {e}"));
                 ok = false;
                 break;
             }
         }
         if ok && profile.history_limit > 0 {
             for (n, channel) in channels.iter().enumerate() {
-                let id = format!("history-{n}");
+                let id = format!("{HISTORY_PREFIX}{n}");
                 let filter = Filter::new()
                     .kind(kind(KIND_STREAM_MESSAGE))
                     .custom_tag(
@@ -401,10 +503,21 @@ async fn human(shared: Arc<Shared>, global: usize) {
                         channel.clone(),
                     )
                     .limit(profile.history_limit);
-                if history(&shared.stats, &mut conn, &id, filter, &mut last_message)
-                    .await
-                    .is_err()
-                {
+                let fetched = history(
+                    &shared.stats,
+                    &mut conn,
+                    &id,
+                    filter,
+                    subscribed,
+                    &mut last_message,
+                )
+                .await;
+                if let Err(e) = fetched {
+                    if let HistoryError::Socket(e) = e {
+                        shared
+                            .stats
+                            .err(Op::WsConnect, &format!("disconnected: {e}"));
+                    }
                     ok = false;
                     break;
                 }
@@ -440,8 +553,9 @@ async fn human(shared: Arc<Shared>, global: usize) {
             // subscription cannot starve this client's own sends.
             match conn.next_event(wait).await {
                 Ok(message) => {
-                    if let Some(target) = observe(&shared.stats, &message) {
-                        last_message = Some(target);
+                    if live(&shared.stats, &message, subscribed, &mut last_message).is_err() {
+                        ok = false;
+                        break;
                     }
                 }
                 Err(WsClientError::Timeout) => {}
@@ -449,6 +563,7 @@ async fn human(shared: Arc<Shared>, global: usize) {
                     shared
                         .stats
                         .err(Op::WsConnect, &format!("disconnected: {e}"));
+                    ok = false;
                     break;
                 }
             }
@@ -503,12 +618,20 @@ async fn human(shared: Arc<Shared>, global: usize) {
                 shared
                     .stats
                     .err(Op::WsConnect, &format!("disconnected: {e}"));
+                ok = false;
                 break;
             }
         }
         let _ = conn.disconnect().await;
         if stopped(&shared) {
             return;
+        }
+        // A failed session backs off like a failed connect, so a relay that
+        // rejects subscriptions cannot drive a tight reconnect loop.
+        if ok {
+            backoff = Backoff::new();
+        } else {
+            backoff.wait(&shared, &mut rng).await;
         }
     }
 }
@@ -536,14 +659,30 @@ async fn send_req(
     conn.send_raw(&json!(["REQ", id, filter])).await
 }
 
-/// Fetches history until EOSE, records the latency and closes the subscription.
+enum HistoryError {
+    /// The socket failed.
+    Socket(WsClientError),
+    /// The relay closed a live subscription (already recorded).
+    LiveClosed,
+}
+
+impl From<WsClientError> for HistoryError {
+    fn from(e: WsClientError) -> Self {
+        Self::Socket(e)
+    }
+}
+
+/// Fetches history until EOSE, records the latency and closes the
+/// subscription. Messages for the live subscriptions opened at `subscribed`
+/// go through [`live`].
 async fn history(
     stats: &Stats,
     conn: &mut NostrWsConnection,
     id: &str,
     filter: Filter,
+    subscribed: Instant,
     last_message: &mut Option<Seen>,
-) -> Result<(), WsClientError> {
+) -> Result<(), HistoryError> {
     let t0 = Instant::now();
     send_req(conn, id, filter).await?;
     let deadline = t0 + Duration::from_secs(30);
@@ -561,19 +700,37 @@ async fn history(
                 stats.err(Op::History, &message);
                 return Ok(());
             }
-            Ok(message) => {
+            Ok(message) if subscription_of(&message) == Some(id) => {
                 if let Some(target) = seen(&message) {
                     *last_message = Some(target);
+                }
+            }
+            Ok(message) => {
+                if live(stats, &message, subscribed, last_message).is_err() {
+                    return Err(HistoryError::LiveClosed);
                 }
             }
             Err(WsClientError::Timeout) => {
                 stats.err(Op::History, "EOSE timeout");
                 break;
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
     }
-    conn.send_raw(&json!(["CLOSE", id])).await
+    Ok(conn.send_raw(&json!(["CLOSE", id])).await?)
+}
+
+fn subscription_of(message: &RelayMessage) -> Option<&str> {
+    match message {
+        RelayMessage::Event {
+            subscription_id, ..
+        }
+        | RelayMessage::Eose { subscription_id }
+        | RelayMessage::Closed {
+            subscription_id, ..
+        } => Some(subscription_id),
+        _ => None,
+    }
 }
 
 /// An agent client: NIP-OA authenticated socket, HTTP `/query` polling,
@@ -592,17 +749,37 @@ async fn agent(shared: Arc<Shared>, global: usize) {
     let channels = scenario.member_channels(community.index, global);
     let me = keys.public_key().to_hex();
     let mut rng = Rng::new(u64::MAX - global as u64);
+    let mut backoff = Backoff::new();
+    let mut last_message = None;
 
-    while let Some(mut conn) = connect(&shared, community, &keys, Some(&auth), &mut rng).await {
+    while let Some(mut conn) = connect(
+        &shared,
+        community,
+        &keys,
+        Some(&auth),
+        &mut rng,
+        &mut backoff,
+    )
+    .await
+    {
         let since = Timestamp::now();
-        let mut ok = send_req(
+        let subscribed = Instant::now();
+        let mut ok = match send_req(
             &mut conn,
             "mentions",
             Filter::new().pubkey(keys.public_key()).since(since),
         )
         .await
-        .is_ok();
-        let query_per_hour = 3600.0 / profile.query_interval_secs.max(0.1);
+        {
+            Ok(()) => true,
+            Err(e) => {
+                shared
+                    .stats
+                    .err(Op::WsConnect, &format!("disconnected: {e}"));
+                false
+            }
+        };
+        let query_per_hour = 3600.0 / profile.query_interval_secs;
         let mut next_query = rng.after(query_per_hour);
         let mut next_post = rng.after(profile.events_per_hour);
         let mut next_frame = rng.after(profile.observer_frames_per_hour);
@@ -618,13 +795,17 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 .min(MAX_IDLE);
             match conn.next_event(wait).await {
                 Ok(message) => {
-                    observe(&shared.stats, &message);
+                    if live(&shared.stats, &message, subscribed, &mut last_message).is_err() {
+                        ok = false;
+                        break;
+                    }
                 }
                 Err(WsClientError::Timeout) => {}
                 Err(e) => {
                     shared
                         .stats
                         .err(Op::WsConnect, &format!("disconnected: {e}"));
+                    ok = false;
                     break;
                 }
             }
@@ -706,6 +887,11 @@ async fn agent(shared: Arc<Shared>, global: usize) {
         let _ = conn.disconnect().await;
         if stopped(&shared) {
             return;
+        }
+        if ok {
+            backoff = Backoff::new();
+        } else {
+            backoff.wait(&shared, &mut rng).await;
         }
     }
 }
@@ -801,5 +987,91 @@ mod tests {
                 .count,
             1
         );
+    }
+    #[test]
+    fn closed_live_subscriptions_end_the_session_and_count() {
+        let stats = Stats::default();
+        let mut last = None;
+        let subscribed = Instant::now();
+        let eose = RelayMessage::Eose {
+            subscription_id: "live".into(),
+        };
+        assert!(live(&stats, &eose, subscribed, &mut last).is_ok());
+        // The relay acknowledges our own CLOSE of a history subscription.
+        let closed_history = RelayMessage::Closed {
+            subscription_id: format!("{HISTORY_PREFIX}0"),
+            message: String::new(),
+        };
+        assert!(live(&stats, &closed_history, subscribed, &mut last).is_ok());
+        let closed = RelayMessage::Closed {
+            subscription_id: "live".into(),
+            message: "error: overloaded".into(),
+        };
+        assert!(live(&stats, &closed, subscribed, &mut last).is_err());
+        let summary = stats.snapshot().since(&Default::default());
+        let sub = summary
+            .iter()
+            .find(|(op, _)| *op == Op::Subscribe)
+            .unwrap()
+            .1;
+        assert_eq!((sub.count, sub.errors), (1, 1));
+        let reason = abort_reason(&summary, 0.05, 5_000.0).expect("rejected subscriptions abort");
+        assert!(reason.starts_with("subscribe_eose"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn stalled_connects_count_and_the_run_still_returns() {
+        // A peer that accepts TCP but never answers the WebSocket upgrade.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                open.push(socket);
+            }
+        });
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+connect_timeout_secs = 0.2
+[shape]
+communities = 1
+channels_per_community = 1
+[population]
+humans = 3
+agents = 1
+channels_per_member = 1
+connect_rate_per_sec = 100.0
+[[ramp]]
+users = 1.0
+hold_secs = 1
+[[ramp]]
+users = 2.0
+hold_secs = 1
+"#
+        ))
+        .unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let started = Instant::now();
+        let report = tokio::time::timeout(
+            Duration::from_secs(20),
+            run(scenario, net, Shard { index: 0, count: 1 }),
+        )
+        .await
+        .expect("run returns while every connect stalls")
+        .expect_err("a step whose connects all fail aborts");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let steps = report["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 1, "the ramp stops at the failing step");
+        assert_eq!(steps[0]["aborted"], true);
+        let errors = steps[0]["ops"]["ws_connect_auth"]["errors"]
+            .as_u64()
+            .unwrap();
+        assert!(errors >= 4, "{report}");
+        assert_eq!(report["clients_cancelled"], 0);
+        held.abort();
     }
 }

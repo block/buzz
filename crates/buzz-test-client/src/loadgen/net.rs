@@ -15,6 +15,7 @@ use super::scenario::{Community, Scenario};
 pub struct Net {
     pub http: reqwest::Client,
     connect_addr: Option<String>,
+    connect_timeout: Duration,
 }
 
 impl Net {
@@ -36,24 +37,31 @@ impl Net {
         Ok(Self {
             http: builder.build()?,
             connect_addr: scenario.target.connect_addr.clone(),
+            connect_timeout: Duration::from_secs_f64(scenario.target.connect_timeout_secs),
         })
     }
 
-    /// Opens a WebSocket to `community` and authenticates as `keys`.
+    /// Opens a WebSocket to `community` and authenticates as `keys`, failing
+    /// once the whole attempt exceeds `target.connect_timeout_secs`.
     pub async fn connect(
         &self,
         community: &Community,
         keys: &Keys,
         auth_tag: Option<&Tag>,
     ) -> anyhow::Result<NostrWsConnection> {
-        let mut conn = match (&self.connect_addr, &community.host) {
-            (Some(addr), Some(_)) => {
-                NostrWsConnection::connect_to_addr(&community.ws_url, addr).await?
-            }
-            _ => NostrWsConnection::connect(&community.ws_url).await?,
+        let attempt = async {
+            let mut conn = match (&self.connect_addr, &community.host) {
+                (Some(addr), Some(_)) => {
+                    NostrWsConnection::connect_to_addr(&community.ws_url, addr).await?
+                }
+                _ => NostrWsConnection::connect(&community.ws_url).await?,
+            };
+            conn.authenticate(keys, auth_tag).await?;
+            anyhow::Ok(conn)
         };
-        conn.authenticate(keys, auth_tag).await?;
-        Ok(conn)
+        tokio::time::timeout(self.connect_timeout, attempt)
+            .await
+            .map_err(|_| anyhow::anyhow!("connect timeout after {:?}", self.connect_timeout))?
     }
 
     /// `POST {base}{path}` with a NIP-98 header; returns status and body.
@@ -112,4 +120,56 @@ impl Net {
 
 pub fn truncate(s: &str) -> String {
     s.chars().take(200).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stalled_upgrade_fails_at_the_connect_deadline() {
+        // A peer that accepts TCP but never answers the WebSocket upgrade.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let held = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                open.push(socket);
+            }
+        });
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+connect_timeout_secs = 0.3
+[shape]
+communities = 1
+channels_per_community = 1
+[population]
+humans = 1
+agents = 0
+channels_per_member = 1
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#
+        ))
+        .unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let community = &scenario.communities()[0];
+        let started = std::time::Instant::now();
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            net.connect(community, &Keys::generate(), None),
+        )
+        .await
+        .expect("connect returns at its own deadline")
+        .err()
+        .expect("a silent peer cannot complete the upgrade");
+        assert!(err.to_string().contains("connect timeout"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        held.abort();
+    }
 }

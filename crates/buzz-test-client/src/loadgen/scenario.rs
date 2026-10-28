@@ -44,10 +44,17 @@ pub struct Target {
     /// Environment variable holding the operator's hex secret key.
     #[serde(default = "default_operator_key_env")]
     pub operator_key_env: String,
+    /// Deadline for one WebSocket connect plus NIP-42 authentication.
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout_secs: f64,
 }
 
 fn default_operator_key_env() -> String {
     "LOADGEN_OPERATOR_KEY".into()
+}
+
+fn default_connect_timeout() -> f64 {
+    10.0
 }
 
 /// Data-shape vectors created by `seed`.
@@ -196,11 +203,57 @@ impl Scenario {
         {
             return Err("population.channels_per_member must be 1..=channels_per_community".into());
         }
-        if self.ramp.is_empty() || self.ramp.iter().any(|s| s.users <= 0.0) {
-            return Err("ramp needs at least one step with users > 0".into());
+        if self.ramp.is_empty() {
+            return Err("ramp needs at least one step".into());
         }
-        if self.population.connect_rate_per_sec <= 0.0 {
-            return Err("population.connect_rate_per_sec must be > 0".into());
+        // Clients are only ever added, so a step can never shrink the population.
+        let mut previous = 0.0;
+        for step in &self.ramp {
+            if !step.users.is_finite() || step.users <= previous {
+                return Err("ramp users must be finite and increase every step".into());
+            }
+            previous = step.users;
+        }
+        let (h, a) = (&self.human, &self.agent);
+        let positive = [
+            (
+                "target.connect_timeout_secs",
+                self.target.connect_timeout_secs,
+            ),
+            (
+                "population.connect_rate_per_sec",
+                self.population.connect_rate_per_sec,
+            ),
+            ("human.presence_interval_secs", h.presence_interval_secs),
+            ("agent.query_interval_secs", a.query_interval_secs),
+            ("abort.max_p99_ms", self.abort.max_p99_ms),
+        ];
+        for (name, value) in positive {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!("{name} must be a finite number > 0"));
+            }
+        }
+        let non_negative = [
+            ("human.typing_per_hour", h.typing_per_hour),
+            ("human.messages_per_hour", h.messages_per_hour),
+            ("human.reactions_per_hour", h.reactions_per_hour),
+            ("human.mean_session_secs", h.mean_session_secs),
+            ("agent.events_per_hour", a.events_per_hour),
+            ("agent.observer_frames_per_hour", a.observer_frames_per_hour),
+        ];
+        for (name, value) in non_negative {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!("{name} must be a finite number >= 0"));
+            }
+        }
+        let fractions = [
+            ("human.thread_reply_fraction", h.thread_reply_fraction),
+            ("abort.max_error_rate", self.abort.max_error_rate),
+        ];
+        for (name, value) in fractions {
+            if !(0.0..=1.0).contains(&value) {
+                return Err(format!("{name} must be between 0 and 1"));
+            }
         }
         Ok(())
     }
@@ -310,5 +363,35 @@ hold_secs = 10
         )
         .is_err());
         assert!(Scenario::parse(&MINIMAL.replace("users = 1.0", "users = 0.0")).is_err());
+    }
+
+    #[test]
+    fn unschedulable_values_are_rejected() {
+        let cases = [
+            "[human]\nmessages_per_hour = nan\n",
+            "[human]\ntyping_per_hour = inf\n",
+            "[human]\nreactions_per_hour = -1.0\n",
+            "[human]\npresence_interval_secs = 0.0\n",
+            "[human]\nthread_reply_fraction = 1.5\n",
+            "[agent]\nquery_interval_secs = nan\n",
+            "[agent]\nobserver_frames_per_hour = inf\n",
+            "[abort]\nmax_error_rate = nan\n",
+            "[abort]\nmax_p99_ms = inf\n",
+            "[[ramp]]\nusers = inf\nhold_secs = 10\n",
+            // A down-ramp would report a smaller population than is running.
+            "[[ramp]]\nusers = 0.5\nhold_secs = 10\n",
+            "[[ramp]]\nusers = 1.0\nhold_secs = 10\n",
+        ];
+        for case in cases {
+            let text = format!("{MINIMAL}{case}");
+            assert!(Scenario::parse(&text).is_err(), "accepted: {case}");
+        }
+        let text = MINIMAL.replace(
+            "http_url = \"http://localhost:3000\"",
+            "http_url = \"http://localhost:3000\"\nconnect_timeout_secs = nan",
+        );
+        assert!(Scenario::parse(&text).is_err());
+        let up = format!("{MINIMAL}[[ramp]]\nusers = 2.0\nhold_secs = 10\n");
+        assert!(Scenario::parse(&up).is_ok());
     }
 }
