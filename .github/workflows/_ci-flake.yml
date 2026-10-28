@@ -157,7 +157,10 @@ jobs:
       - name: Create sidecar stubs
         run: just _ensure-sidecar-stubs
       # Same script as flake-rust, against the Tauri workspace's manifest and
-      # its own .config/nextest.toml `flake` profile.
+      # its own .config/nextest.toml `flake` profile. A selected test the
+      # default graph does not list is looked for under mesh-llm, whose
+      # dependency graph the restored desktop-core cache does not hold, so
+      # only such a selection builds it cold.
       - name: Repeat changed desktop Tauri tests
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"

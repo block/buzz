@@ -94,26 +94,26 @@ export const nodeTestArgs = (file) =>
 // Mirrors the mobile test shards in .github/workflows/_ci-clients.yml.
 export const dartDefine =
   "--dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example";
-// Mirrors the postgres-ci default-filter in .config/nextest.toml: those tests
-// are #[ignore]d and need Postgres, Redis, S3 or MinIO, so a selection that
-// reached one would fail every repetition without being flaky. The convention
-// is the root workspace's; nextest rejects a `binary()` predicate matching no
-// test binary in the workspace, and the Tauri workspace has none, so it gets
-// no exclusion.
-const infraTests = {
-  rust: "test(/postgres_tests::/) | binary(/^postgres_/) | test(/(^|::)external_infra[^:]*::/)",
-};
+// Mirrors the postgres-ci default-filter in .config/nextest.toml
+// (`test(/postgres_tests::/)`, `binary(/^postgres_/)` and
+// `test(/(^|::)external_infra[^:]*::/)`): those tests need Postgres, Redis,
+// S3 or MinIO, so a selection that reached one would fail every repetition
+// without being flaky. Only the root workspace has such tests.
+export const infraTest = (binaryName, name) =>
+  /postgres_tests::/.test(name) ||
+  /^postgres_/.test(binaryName) ||
+  /(^|::)external_infra[^:]*::/.test(name);
 
-// The nextest filterset listing a workspace's candidates for the selected
-// in-file test paths, less its infrastructure-backed tests.
-export function rustFilterset(runner, paths) {
-  const suffixes = [...new Set(paths)]
-    .map((path) => `test(/(^|::)${path}$/)`)
-    .join(" | ");
-  return infraTests[runner]
-    ? `(${suffixes}) & !(${infraTests[runner]})`
-    : `(${suffixes})`;
-}
+// The feature graphs the regular lanes test a package in, in order, where
+// that is not just its default graph: the Justfile's test-unit runs
+// buzz-push-gateway without and with its feature and buzz-feature-flags only
+// with LaunchDarkly, and desktop-tauri-test-mesh runs the desktop crate under
+// mesh-llm. A test behind `#[cfg(feature = …)]` is listed only in its graph.
+export const rustFeatureGraphs = {
+  "buzz-feature-flags": [["launchdarkly"]],
+  "buzz-push-gateway": [[], ["personal-dev-app-attest"]],
+  "buzz-desktop": [[], ["mesh-llm"]],
+};
 
 // Mirrors desktop/package.json "test", desktop/playwright.config.ts testDir,
 // the two cargo workspaces' packages and mobile's test directory. Paths are
@@ -875,26 +875,30 @@ export function parseJunit(xml) {
 // The listed tests an entry stands for: a test the file's module path predicts
 // exactly when nextest lists one, otherwise every test whose name ends in the
 // in-file path (a `#[path]` module breaks the prediction; a namesake in another
-// module is then repeated too rather than nothing).
+// module is then repeated too rather than nothing). `unlisted` keeps the
+// entries no candidate stands for.
 export function chooseRust(tests, candidates) {
   const chosen = new Map();
-  for (const { path, exact } of tests) {
+  const unlisted = [];
+  for (const test of tests) {
+    const { path, exact } = test;
     const suffix = candidates.filter(
       ({ name }) => name === path || name.endsWith(`::${path}`),
     );
     const predicted = suffix.filter(({ name }) => name === exact);
+    if (suffix.length === 0) unlisted.push(test);
     for (const test of predicted.length ? predicted : suffix)
       chosen.set(`${test.binary} ${test.name}`, test);
   }
-  return [...chosen.values()];
+  return { chosen: [...chosen.values()], unlisted };
 }
 
 // The repeat's cargo invocation per package: `-p <crate>` plus the target
 // flags of its selected files, each whole flag once (`--test codec --test
 // connection`; merging tokens instead gave `--test codec connection`, which
-// nextest reads as a test-name filter that matches nothing), and the tests
-// to list in those targets. Every entry must belong to one workspace, whose
-// runner is returned with the groups.
+// nextest reads as a test-name filter that matches nothing), the feature
+// graphs to list them in, and the tests to list in those targets. Every entry
+// must belong to one workspace, whose runner is returned with the groups.
 export function rustGroups(entries) {
   const groups = new Map();
   const workspaces = new Set();
@@ -910,6 +914,7 @@ export function rustGroups(entries) {
     if (targets.length === 0) group.every = true;
     for (const target of targets) group.targets.set(target.join(" "), target);
     group.tests.push({
+      entry,
       path: test,
       exact: [...rustModulePath(file), test].join("::"),
     });
@@ -919,66 +924,104 @@ export function rustGroups(entries) {
     throw new Error(
       `rust entries span workspaces: ${[...workspaces].join(", ")}`,
     );
-  for (const [crate, group] of groups)
+  for (const [crate, group] of groups) {
     group.args = [
       "-p",
       crate,
       ...(group.every ? [] : [...group.targets.values()].flat()),
     ];
+    group.graphs = rustFeatureGraphs[crate] ?? [[]];
+  }
   return { groups, runner: [...workspaces][0] };
 }
 
 // nextest has no repeat flag, so run the selection once per iteration under
 // the `flake` profile (the workspace's .config/nextest.toml: no retries, JUnit
-// per run), one cargo invocation per package so each builds only the targets
-// its files can be in. The selection is listed first, by in-file path, and
-// narrowed with chooseRust to exact (binary, test) pairs; a selection listing
-// no runnable test is one of ignored or infrastructure-backed tests, not a
-// failure. The Tauri workspace is addressed by its manifest; the root one is
-// cargo's default.
+// per run), one cargo invocation per package and feature graph so each builds
+// only the targets its files can be in. Each package's targets are listed
+// whole in its feature graphs in turn (nextest reports an ignored test as a
+// filter mismatch whatever `-E` says, so a filtered listing could not tell an
+// ignored entry from an unlisted one), and every entry is narrowed with
+// chooseRust to exact (binary, test) pairs in the first graph listing it, so
+// a later graph (and its build) is reached only by tests behind its feature.
+// An entry standing only for ignored or infrastructure-backed tests is
+// excluded; one no graph lists (a test behind a cfg the regular lanes do not
+// build here) fails the lane rather than passing unrepeated. The Tauri
+// workspace is addressed by its manifest; the root one is cargo's default.
 function repeatRust(entries, iterations) {
   const { groups, runner } = rustGroups(entries);
+  const title =
+    runner === "rust" ? "Flake check (Rust)" : "Flake check (Desktop Tauri)";
   const manifest = rustWorkspaces[runner];
   const cargoArgs = runner === "rust" ? [] : ["--manifest-path", manifest];
-  const runs = [];
-  for (const group of groups.values()) {
-    const listed = run("cargo", [
-      "nextest",
-      "list",
-      ...cargoArgs,
-      ...group.args,
-      "-E",
-      rustFilterset(
-        runner,
-        group.tests.map(({ path }) => path),
-      ),
-      "--message-format",
-      "json",
-    ]);
-    if (listed.status !== 0)
-      throw new Error(`cargo nextest list: ${listed.stderr}`);
-    const candidates = Object.entries(
-      JSON.parse(listed.stdout)["rust-suites"],
-    ).flatMap(([binary, suite]) =>
-      Object.entries(suite.testcases)
-        .filter(
-          ([, test]) =>
-            !test.ignored && test["filter-match"].status === "matches",
-        )
-        .map(([name]) => ({ binary, name })),
-    );
-    group.chosen = chooseRust(group.tests, candidates);
-    group.filterset = group.chosen
-      .map(({ binary, name }) => `(binary_id(=${binary}) & test(=${name}))`)
-      .join(" | ");
+  const invocations = [];
+  const unlisted = [];
+  for (const [crate, group] of groups) {
+    let tests = group.tests;
+    for (const features of group.graphs) {
+      if (tests.length === 0) break;
+      const args = [
+        ...group.args,
+        ...(features.length ? ["--features", features.join(",")] : []),
+      ];
+      const listed = run("cargo", [
+        "nextest",
+        "list",
+        ...cargoArgs,
+        ...args,
+        "--message-format",
+        "json",
+      ]);
+      if (listed.status !== 0)
+        throw new Error(`cargo nextest list: ${listed.stderr}`);
+      const candidates = Object.entries(
+        JSON.parse(listed.stdout)["rust-suites"],
+      ).flatMap(([binary, suite]) =>
+        Object.entries(suite.testcases).map(([name, test]) => ({
+          binary,
+          name,
+          runnable: !test.ignored && !infraTest(suite["binary-name"], name),
+        })),
+      );
+      const choice = chooseRust(tests, candidates);
+      const chosen = choice.chosen.filter((test) => test.runnable);
+      if (chosen.length)
+        invocations.push({
+          label: [crate, ...features].join("+"),
+          args,
+          chosen,
+          filterset: chosen
+            .map(
+              ({ binary, name }) => `(binary_id(=${binary}) & test(=${name}))`,
+            )
+            .join(" | "),
+        });
+      tests = choice.unlisted;
+    }
+    unlisted.push(...tests.map((test) => test.entry));
   }
-  const expected = [...groups.values()].flatMap((group) =>
-    group.chosen.map(({ binary, name }) => `${binary} ${name}`),
+  if (unlisted.length) {
+    summarize(
+      [
+        `## ${title}: ${unlisted.length} selected test(s) not listed`,
+        "",
+        "No feature graph the regular lanes test these packages in lists them on this runner, so they were not repeated:",
+        "",
+        ...unlisted.map((entry) => `- \`${entry}\``),
+        "",
+        "",
+      ].join("\n"),
+    );
+    process.exitCode = 1;
+  }
+  const expected = invocations.flatMap((invocation) =>
+    invocation.chosen.map(({ binary, name }) => `${binary} ${name}`),
   );
   if (expected.length === 0) {
-    summarize(
-      "## Flake check (Rust): nothing to repeat\n\nEvery selected test is ignored or infrastructure-backed.\n\n",
-    );
+    if (!unlisted.length)
+      summarize(
+        `## ${title}: nothing to repeat\n\nEvery selected test is ignored or infrastructure-backed.\n\n`,
+      );
     return;
   }
   // nextest keeps its store under the workspace root's target/nextest, not
@@ -989,11 +1032,11 @@ function repeatRust(entries, iterations) {
     "target/nextest/flake/junit.xml",
   );
   const dir = resultsDir(runner);
+  const runs = [];
   for (let i = 1; i <= iterations; i += 1) {
     const statuses = new Map();
     let ok = true;
-    for (const [crate, group] of groups) {
-      if (group.chosen.length === 0) continue;
+    for (const { label, args, filterset } of invocations) {
       rmSync(junit, { force: true });
       const result = run(
         "cargo",
@@ -1003,9 +1046,9 @@ function repeatRust(entries, iterations) {
           ...cargoArgs,
           "--profile",
           "flake",
-          ...group.args,
+          ...args,
           "-E",
-          group.filterset,
+          filterset,
         ],
         { stdio: "inherit" },
       );
@@ -1013,7 +1056,7 @@ function repeatRust(entries, iterations) {
       try {
         for (const [test, status] of parseJunit(readFileSync(junit, "utf8")))
           statuses.set(test, status);
-        copyFileSync(junit, `${dir}/iter-${i}-${crate}.xml`);
+        copyFileSync(junit, `${dir}/iter-${i}-${label}.xml`);
       } catch {
         ok = false;
       }
@@ -1022,10 +1065,8 @@ function repeatRust(entries, iterations) {
     runs.push({ ok, statuses });
     progress(i, iterations, ok);
   }
-  report(
-    runner === "rust" ? "Flake check (Rust)" : "Flake check (Desktop Tauri)",
-    runs,
-  );
+  report(title, runs);
+  if (unlisted.length) process.exitCode = 1;
 }
 
 // node:test has no repeat flag either. Each file runs alone, so a failure is

@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +20,7 @@ import {
   dartDefine,
   hunkRanges,
   ITERATIONS,
+  infraTest,
   listPlaywright,
   MAX_PLAYWRIGHT_JOURNEYS,
   nodeTestArgs,
@@ -20,7 +29,7 @@ import {
   playwrightRepetitions,
   playwrightShards,
   runners,
-  rustFilterset,
+  rustFeatureGraphs,
   rustGroups,
   rustImporters,
   rustIncludedTests,
@@ -335,17 +344,23 @@ test("same-named Rust tests in different modules are distinct, and a hunk select
       [{ path: "tests::same", exact: "handlers::auth::tests::same" }],
       candidates,
     ),
-    [candidates[1], candidates[3]],
+    { chosen: [candidates[1], candidates[3]], unlisted: [] },
   );
+  // An entry no candidate stands for is kept apart, not dropped.
+  const gated = { path: "tests::gated", exact: "handlers::auth::tests::gated" };
   assert.deepEqual(
     chooseRust(
       [
         { path: "tests::same", exact: "elsewhere::tests::same" },
         { path: "tests::other", exact: "handlers::auth::tests::other" },
+        gated,
       ],
       candidates,
     ),
-    [candidates[0], candidates[1], candidates[3], candidates[2]],
+    {
+      chosen: [candidates[0], candidates[1], candidates[3], candidates[2]],
+      unlisted: [gated],
+    },
   );
 });
 
@@ -428,16 +443,28 @@ test("Rust files build only the targets they can be part of, merged per package 
     () => rustGroups(["desktop/src/x.rs::tests::a"]),
     /rust entry must be/,
   );
-  // The root workspace's listing excludes its Postgres-backed tests by name
-  // and binary; nextest rejects `binary(/^postgres_/)` in the Tauri
-  // workspace, where no such binary exists, so that listing carries no
-  // exclusion.
-  assert.equal(
-    rustFilterset("rust", ["tests::a", "b", "tests::a"]),
-    "(test(/(^|::)tests::a$/) | test(/(^|::)b$/)) & !(test(/postgres_tests::/) | binary(/^postgres_/) | test(/(^|::)external_infra[^:]*::/))",
+  // Packages the regular lanes test under a feature list in those graphs, in
+  // order; the rest in their default graph alone.
+  assert.deepEqual(
+    [
+      "crates/buzz-feature-flags/src/launchdarkly.rs::tests::a",
+      "crates/buzz-push-gateway/src/lib.rs::tests::b",
+      "crates/buzz-core/src/filter.rs::tests::c",
+    ].map((entry) => [...rustGroups([entry]).groups.values()][0].graphs),
+    [[["launchdarkly"]], [[], ["personal-dev-app-attest"]], [[]]],
   );
-  assert.equal(rustFilterset("tauri", ["a"]), "(test(/(^|::)a$/))");
-  assert.doesNotMatch(rustFilterset("tauri", ["a"]), /binary\(/);
+  assert.deepEqual(
+    [
+      ...rustGroups(["desktop/src-tauri/src/lib.rs::tests::d"]).groups.values(),
+    ][0].graphs,
+    [[], ["mesh-llm"]],
+  );
+  // Postgres-backed tests are excluded by name and binary, as the postgres-ci
+  // default-filter selects them.
+  assert.ok(infraTest("buzz_db", "event_store::postgres_tests::insert"));
+  assert.ok(infraTest("postgres_relay", "admits"));
+  assert.ok(infraTest("buzz_media", "tests::external_infra_s3::upload"));
+  assert.ok(!infraTest("buzz_db", "tests::postgres_free"));
 });
 
 test("a helper under tests/ selects the integration binaries that include it", () => {
@@ -990,6 +1017,43 @@ test("repeat invocations mirror the lanes they stand in for", () => {
       /^\[profile\.flake\]\n(?:#.*\n)*retries = 0\nfail-fast = false\n\n\[profile\.flake\.junit\]\npath = "junit\.xml"\n/m,
       config,
     );
+  // The infrastructure exclusion mirrors the postgres-ci default-filter.
+  for (const predicate of [
+    "test(/postgres_tests::/)",
+    "binary(/^postgres_/)",
+    "test(/(^|::)external_infra[^:]*::/)",
+  ])
+    assert.ok(read("../.config/nextest.toml").includes(predicate), predicate);
+  // Feature graphs mirror the Justfile recipes the regular lanes run: every
+  // package test-unit runs under a feature, in each graph it runs there, and
+  // the desktop crate's default and mesh-llm lanes.
+  const justfile = read("../Justfile");
+  const graphs = {};
+  for (const [, crate, features] of justfile.matchAll(
+    /^ +cargo nextest run -p ([\w-]+)(?: --features ([\w,-]+))?$/gm,
+  )) {
+    graphs[crate] ??= [];
+    graphs[crate].push(features?.split(",") ?? []);
+  }
+  assert.ok(
+    justfile.includes(
+      "\ndesktop-tauri-test: _ensure-sidecar-stubs\n    cd desktop/src-tauri && cargo test --workspace\n",
+    ),
+  );
+  assert.ok(
+    justfile.includes(
+      "\ndesktop-tauri-test-mesh: _ensure-sidecar-stubs\n    cargo test --manifest-path {{desktop_tauri_manifest}} --features mesh-llm --lib\n",
+    ),
+  );
+  graphs["buzz-desktop"] = [[], ["mesh-llm"]];
+  assert.deepEqual(
+    rustFeatureGraphs,
+    Object.fromEntries(
+      Object.entries(graphs).filter(([, list]) =>
+        list.some((features) => features.length),
+      ),
+    ),
+  );
   const flake = read("../.github/workflows/_ci-flake.yml");
   for (const runner of ["rust", "tauri", "node", "dart"])
     assert.ok(
@@ -1021,4 +1085,236 @@ test("repeat invocations mirror the lanes they stand in for", () => {
     /^ {2}flake-check:\n(?: {4}.*\n)*? {4}if: github\.event_name == 'pull_request'\n(?: {4}.*\n)*? {4}uses: \.\/\.github\/workflows\/_ci-flake\.yml\n/m,
   );
   assert.doesNotMatch(ci, /needs: \[[^\]]*flake/);
+});
+
+// The repeat, through its entry point, in a scratch tree holding the script
+// and the packages its entries name, with a fake `cargo` on PATH listing
+// `tests` ({pkg, binary, binaryName, name, feature?, ignored?}; a feature
+// test only under that feature) and passing every test a run selects.
+function repeatWithFakeCargo(runner, entries, tests) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "flake-repeat-")));
+  try {
+    mkdirSync(join(dir, "scripts"));
+    copyFileSync(
+      join(root, "scripts/flake-check.mjs"),
+      join(dir, "scripts/flake-check.mjs"),
+    );
+    for (const [crateDir, name] of [
+      ["crates/buzz-feature-flags", "buzz-feature-flags"],
+      ["desktop/src-tauri", "buzz-desktop"],
+    ]) {
+      mkdirSync(join(dir, crateDir, "src"), { recursive: true });
+      writeFileSync(
+        join(dir, crateDir, "Cargo.toml"),
+        `[package]\nname = "${name}"\n`,
+      );
+      writeFileSync(join(dir, crateDir, "src/lib.rs"), "");
+    }
+    mkdirSync(join(dir, "bin"));
+    writeFileSync(
+      join(dir, "fake-cargo.mjs"),
+      `import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+const args = process.argv.slice(2);
+appendFileSync(process.env.FAKE_CARGO_LOG, JSON.stringify(args) + "\\n");
+const value = (flag) => args[args.indexOf(flag) + 1];
+const features = args.includes("--features") ? value("--features").split(",") : [];
+const tests = JSON.parse(process.env.FAKE_CARGO_TESTS).filter(
+  (test) => test.pkg === value("-p") && (!test.feature || features.includes(test.feature)),
+);
+if (args[1] === "list") {
+  const suites = {};
+  for (const test of tests) {
+    suites[test.binary] ??= { "binary-name": test.binaryName, testcases: {} };
+    suites[test.binary].testcases[test.name] = {
+      ignored: Boolean(test.ignored),
+      "filter-match": test.ignored ? { status: "mismatch", reason: "ignored" } : { status: "matches" },
+    };
+  }
+  process.stdout.write(JSON.stringify({ "rust-suites": suites }));
+} else {
+  const junit = join(
+    args.includes("--manifest-path") ? dirname(value("--manifest-path")) : ".",
+    "target/nextest/flake/junit.xml",
+  );
+  mkdirSync(dirname(junit), { recursive: true });
+  const cases = [...value("-E").matchAll(/binary_id\\(=([^)]+)\\) & test\\(=([^)]+)\\)/g)];
+  writeFileSync(junit, "<testsuites>" + cases.map(([, binary, name]) => '<testcase name="' + name + '" classname="' + binary + '"/>').join("") + "</testsuites>");
+}
+`,
+    );
+    writeFileSync(
+      join(dir, "bin/cargo"),
+      `#!/bin/sh\nexec "${process.execPath}" "${join(dir, "fake-cargo.mjs")}" "$@"\n`,
+      { mode: 0o755 },
+    );
+    const { GITHUB_STEP_SUMMARY, GITHUB_OUTPUT, ...inherited } = process.env;
+    const log = join(dir, "cargo.log");
+    const summary = join(dir, "summary.md");
+    writeFileSync(summary, "");
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(dir, "scripts/flake-check.mjs"),
+        runner,
+        "--iterations=2",
+        ...entries,
+      ],
+      {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...inherited,
+          PATH: `${join(dir, "bin")}:${process.env.PATH}`,
+          GITHUB_STEP_SUMMARY: summary,
+          FAKE_CARGO_LOG: log,
+          FAKE_CARGO_TESTS: JSON.stringify(tests),
+        },
+      },
+    );
+    assert.equal(result.signal, null, result.stderr);
+    return {
+      status: result.status,
+      summary: readFileSync(summary, "utf8"),
+      calls: readFileSync(log, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("feature-gated Rust tests repeat in the graph the regular lanes test them in, and unlisted ones fail the lane", () => {
+  // Reviewer probe on #8613: the repeat listed only the default graph, so a
+  // selected `#[cfg(feature = …)]` test was dropped and the lane passed as
+  // "nothing to repeat", or reported only its ungated neighbours.
+  const features = (call) =>
+    call.includes("--features") ? call[call.indexOf("--features") + 1] : "";
+  const flags = {
+    pkg: "buzz-feature-flags",
+    binary: "buzz-feature-flags",
+    binaryName: "buzz_feature_flags",
+  };
+  const root = repeatWithFakeCargo(
+    "rust",
+    [
+      "crates/buzz-feature-flags/src/lib.rs::tests::plain",
+      "crates/buzz-feature-flags/src/launchdarkly.rs::tests::null_events",
+    ],
+    [
+      { ...flags, name: "tests::plain" },
+      {
+        ...flags,
+        name: "launchdarkly::tests::null_events",
+        feature: "launchdarkly",
+      },
+    ],
+  );
+  assert.equal(root.status, 0, root.summary);
+  // buzz-feature-flags is only tested with LaunchDarkly, so it is listed and
+  // run in that graph alone.
+  assert.deepEqual(
+    root.calls.map((call) => [call[1], features(call)]),
+    [
+      ["list", "launchdarkly"],
+      ["run", "launchdarkly"],
+      ["run", "launchdarkly"],
+    ],
+  );
+  assert.match(
+    root.summary,
+    /## Flake check \(Rust\): 0 of 2 iterations failed/,
+  );
+  assert.match(
+    root.summary,
+    /\| buzz-feature-flags launchdarkly::tests::null_events \| ✅ \| ✅ \| 0\/2 \|/,
+  );
+  assert.match(
+    root.summary,
+    /\| buzz-feature-flags tests::plain \| ✅ \| ✅ \| 0\/2 \|/,
+  );
+
+  // The desktop crate is tested in its default graph, then under mesh-llm:
+  // only tests the default graph does not list reach the mesh one, a mesh
+  // test repeats there, and one no graph lists fails the lane by name while
+  // the rest still repeat. An ignored test is excluded, not unlisted.
+  const desktop = {
+    pkg: "buzz-desktop",
+    binary: "buzz-desktop",
+    binaryName: "buzz_lib",
+  };
+  const tauriTests = [
+    { ...desktop, name: "tests::plain" },
+    { ...desktop, name: "tests::skipped", ignored: true },
+    {
+      ...desktop,
+      name: "managed_agents::relay_mesh::tests::mesh_only",
+      feature: "mesh-llm",
+    },
+  ];
+  const tauri = repeatWithFakeCargo(
+    "tauri",
+    [
+      "desktop/src-tauri/src/lib.rs::tests::plain",
+      "desktop/src-tauri/src/lib.rs::tests::skipped",
+      "desktop/src-tauri/src/managed_agents/relay_mesh.rs::tests::mesh_only",
+      "desktop/src-tauri/src/lib.rs::tests::macos_only",
+    ],
+    tauriTests,
+  );
+  assert.equal(tauri.status, 1, tauri.summary);
+  assert.deepEqual(
+    tauri.calls.map((call) => [call[1], features(call)]),
+    [
+      ["list", ""],
+      ["list", "mesh-llm"],
+      ["run", ""],
+      ["run", "mesh-llm"],
+      ["run", ""],
+      ["run", "mesh-llm"],
+    ],
+  );
+  assert.match(
+    tauri.summary,
+    /## Flake check \(Desktop Tauri\): 1 selected test\(s\) not listed\n[^#]*- `desktop\/src-tauri\/src\/lib\.rs::tests::macos_only`\n/,
+  );
+  assert.doesNotMatch(tauri.summary, /skipped`/);
+  assert.match(
+    tauri.summary,
+    /## Flake check \(Desktop Tauri\): 0 of 2 iterations failed/,
+  );
+  assert.match(
+    tauri.summary,
+    /\| buzz-desktop managed_agents::relay_mesh::tests::mesh_only \| ✅ \| ✅ \| 0\/2 \|/,
+  );
+  assert.match(
+    tauri.summary,
+    /\| buzz-desktop tests::plain \| ✅ \| ✅ \| 0\/2 \|/,
+  );
+
+  // A selection of only ignored tests is excluded, and passes as such; one
+  // of only unlisted tests fails without running anything.
+  const ignored = repeatWithFakeCargo(
+    "tauri",
+    ["desktop/src-tauri/src/lib.rs::tests::skipped"],
+    tauriTests,
+  );
+  assert.equal(ignored.status, 0, ignored.summary);
+  assert.match(
+    ignored.summary,
+    /## Flake check \(Desktop Tauri\): nothing to repeat/,
+  );
+  const unlisted = repeatWithFakeCargo(
+    "tauri",
+    ["desktop/src-tauri/src/lib.rs::tests::macos_only"],
+    tauriTests,
+  );
+  assert.equal(unlisted.status, 1, unlisted.summary);
+  assert.deepEqual(
+    unlisted.calls.map((call) => call[1]),
+    ["list", "list"],
+  );
+  assert.doesNotMatch(unlisted.summary, /nothing to repeat/);
 });
