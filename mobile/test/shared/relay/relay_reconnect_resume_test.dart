@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -90,10 +92,31 @@ void main() {
   });
 
   test('RelaySocket surfaces the relay close code', () async {
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    server.listen((request) async {
-      final ws = await WebSocketTransformer.upgrade(request);
-      await ws.close(1012, 'service restart');
+    // dart:io's server refuses to send 1012, so write the close frame by hand.
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((client) {
+      client.listen((data) {
+        final key = RegExp(
+          r'Sec-WebSocket-Key: (.*)\r\n',
+          caseSensitive: false,
+        ).firstMatch(String.fromCharCodes(data));
+        if (key == null) return;
+        final accept = base64.encode(
+          sha1
+              .convert(
+                utf8.encode(
+                  '${key.group(1)!.trim()}258EAFA5-E914-47DA-95CA-C5AB0DC85B11',
+                ),
+              )
+              .bytes,
+        );
+        client.write(
+          'HTTP/1.1 101 Switching Protocols\r\n'
+          'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+          'Sec-WebSocket-Accept: $accept\r\n\r\n',
+        );
+        client.add([0x88, 2, 1012 >> 8, 1012 & 0xff]);
+      }, onError: (_) {});
     });
     final closeCode = Completer<int?>();
     late final RelaySocket socket;
@@ -109,7 +132,7 @@ void main() {
     unawaited(socket.connect());
     expect(await closeCode.future.timeout(const Duration(seconds: 5)), 1012);
     socket.dispose();
-    await server.close(force: true);
+    await server.close();
   });
 
   group('reconnect through RelaySessionNotifier', () {
