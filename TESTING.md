@@ -196,7 +196,7 @@ This change does not choose or deploy a cutoff.
 The historical maintenance companion must be separately reviewed and approved
 **before deploying this core change**. Both steps belong to the same controlled
 rollout: leaving unrepaired rows serving indefinitely would extend historical
-restriction rejection until their repair. Migration 0074 is schema-only: it adds
+restriction rejection until their repair. Migration 0075 is schema-only: it adds
 `revoked_at` and `legacy_admission` without rewriting existing invite rows.
 Reconcile any previously applied invitation migration version with the schema
 and migration history before applying it.
@@ -207,7 +207,7 @@ the drain/repair interval, including signed events, HTTP, administrative tools,
 background jobs and direct writers. If this cannot be enforced for every writer
 with existing operational controls, use a maintenance window: remove public
 traffic, stop all relay instances and other writers, drain in-flight work and
-verify no old writer remains. Keep them stopped while applying schema 0074 and
+verify no old writer remains. Keep them stopped while applying schema 0075 and
 running the separately approved repair with its isolated operator connection.
 Prepare only new-code instances; do not reopen traffic or restart other writers
 until repair validation succeeds. Readers that may run before repair must use
@@ -220,7 +220,7 @@ traffic. After repair, timeouts/mutes only block temporarily; active bans still
 revoke permanently. A rollback to code that ignores `revoked_at` requires
 invitation admission paused, using the same traffic/writer controls if needed.
 It also requires `BUZZ_AUTO_MIGRATE` off: with auto-migration on (the Helm
-default), the old binary fails at startup with SQLx `VersionMissing(74)`. See
+default), the old binary fails at startup with SQLx `VersionMissing(75)`. See
 [docs/database.md](docs/database.md) Rule 5.
 Legacy owner attribution uses the agent's currently recorded
 `agent_owner_pubkey`; deleting an owner user row out of band clears that link

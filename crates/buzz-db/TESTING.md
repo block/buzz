@@ -64,9 +64,9 @@ The runner creates one desired-state source database per invocation and clones
 it for ordinary tests. Migration-mode tests start empty. Cleanup retries
 transient disconnect races before reporting a warning.
 
-Invite upgrade tests start from the complete schema through migration 0073,
-including channel join roles, entity deletion approval, the unlisted channel setting and the user deletion target. They exercise the
-invitation schema expansion (migration 0074) through both migration and
+Invite upgrade tests start from the complete schema through migration 0074,
+including channel join roles, entity deletion approval, the unlisted channel setting and the user deletion target and fences. They exercise the
+invitation schema expansion (migration 0075) through both migration and
 desired-state paths against populated
 data, retaining a non-default channel join role. Historical repair is validated
 separately from the application/schema change.

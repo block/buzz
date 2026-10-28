@@ -1113,24 +1113,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         );
     }
 
-    let step = StepTimer::start(StartupStep::ChannelRosterFence);
-    match state.db.verify_channel_roster_fence().await {
-        Ok(()) => {
-            info!("Channel roster fence verified");
-        }
-        Err(error) => {
-            error!(%error, "Channel roster fence validation failed");
-            return Err(anyhow::anyhow!(
-                "Channel roster fence is unsafe; apply or repair migration 0032 before starting this relay: {error}"
-            ));
-        }
-    }
-    step.finish();
-
     // Repair legacy NIP-29 channel rosters that were persisted while the
-    // canonical member query still truncated at 1,000 rows. Validation above
-    // makes migration 0032 a code/schema compatibility gate before the new
-    // replacement protocol or listener can serve traffic.
+    // canonical member query still truncated at 1,000 rows.
     let mut step = StepTimer::start(StartupStep::LargeRosterReconcile);
     match buzz_relay::handlers::side_effects::reconcile_large_channel_member_snapshots(&state).await
     {

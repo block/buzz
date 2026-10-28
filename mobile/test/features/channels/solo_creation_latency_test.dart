@@ -144,12 +144,14 @@ class _SoloSession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    reads++;
-    expect(filter.kinds, [39000, 39002]);
+    // Each lookup reads metadata and roster separately.
+    final kind = filter.kinds.single;
+    if (kind == 39000) reads++;
+    expect(kind, anyOf(39000, 39002));
     expect(filter.tags, {
       '#d': ['solo-id'],
     });
-    expect(filter.limit, 2);
+    expect(filter.limit, 1);
     onRead?.call();
     if (failure != null) throw failure!;
     if (!exists) return [];
@@ -182,6 +184,6 @@ class _SoloSession extends RelaySessionNotifier {
         content: '',
         sig: '',
       ),
-    ];
+    ].where((e) => e.kind == kind).toList();
   }
 }

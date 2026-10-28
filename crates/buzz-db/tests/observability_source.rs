@@ -884,10 +884,7 @@ fn has_any_tenant_local_chokepoint(source: &str) -> bool {
 const ADMITTED_TX_SIGNATURE_MARKERS: [&str; 2] = ["&mut AdmittedTx", "&mut crate::AdmittedTx"];
 
 // Narrow reviewed exceptions for non-serving verification probes only.
-const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 2] = [
-    "pub async fn verify_floor_guard_behavior(",
-    "pub async fn verify_channel_roster_fence_behavior(",
-];
+const GUARDED_WRITE_FUNCTION_EXCEPTIONS: [&str; 1] = ["pub async fn verify_floor_guard_behavior("];
 
 const GUARDED_TX_ADAPTER_METHOD_PINS: [(&str, &str); 1] = [(
     "pub async fn replace_member_event(",
@@ -1390,10 +1387,7 @@ fn serving_table_writes_expose_syntactic_chokepoint_or_guarded_tx_routes() {
 
 // Rolled-back verification probes write `events` rows that never commit, so
 // they owe no push job or TTL refresh.
-const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 2] = [
-    "pub async fn verify_floor_guard_behavior(",
-    "pub async fn verify_channel_roster_fence_behavior(",
-];
+const EVENT_INSERT_FOLLOW_UP_EXCEPTIONS: [&str; 1] = ["pub async fn verify_floor_guard_behavior("];
 
 /// `source` with every `#[cfg(test)]` item removed, wherever it sits in the
 /// file. Each item runs to the `;` that ends it or to the brace that closes
@@ -1925,19 +1919,17 @@ fn every_production_event_insert_runs_the_follow_up_hook() {
     );
 }
 
-// Fixed channel-less kinds cannot be channel rosters. The startup probes must
-// exercise the retained DB backstops directly and roll back all their writes.
+// Fixed channel-less kinds cannot be channel rosters, and the replica-floor
+// startup probe rolls back all its writes.
 // Exemptions match by function header, so a kind 39002 insert added inside one
 // of these functions would pass the policy; keep them single-purpose.
-const EVENT_INSERT_ROSTER_GUARD_EXCEPTIONS: [&str; 4] = [
+const EVENT_INSERT_ROSTER_GUARD_EXCEPTIONS: [&str; 3] = [
     // NIP-43 membership is kind 13534 with channel_id NULL.
     "pub(crate) async fn write_nip43_membership_snapshot(",
     // Push leases are kind 30350 with channel_id NULL.
     "pub async fn accept_lease_event(",
     // Rolled-back replica-floor startup probe.
     "pub async fn verify_floor_guard_behavior(",
-    // Rolled-back roster-fence startup probe.
-    "pub async fn verify_channel_roster_fence_behavior(",
 ];
 
 fn event_insert_roster_guard_violations(production_source: &str) -> Vec<String> {
@@ -1992,9 +1984,6 @@ pub async fn accept_lease_event(tx: &mut AdmittedTx) {
 pub async fn verify_floor_guard_behavior(pool: &PgPool) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
 }
-pub async fn verify_channel_roster_fence_behavior(pool: &PgPool) {
-    sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)");
-}
 #[cfg(test)]
 mod tests {
     fn fixture() {
@@ -2038,10 +2027,10 @@ fn every_production_event_insert_runs_the_roster_guard() {
         violations.is_empty(),
         "production `INSERT INTO events` writers must run the app-side roster guard: {violations:?}"
     );
-    // Five guarded writers plus the four explicitly exempt writers/probes.
+    // Five guarded writers plus the three explicitly exempt writers/probes.
     assert!(
-        checked_writers >= 9,
-        "expected at least nine event writers, found {checked_writers}"
+        checked_writers >= 8,
+        "expected at least eight event writers, found {checked_writers}"
     );
 }
 
@@ -2161,7 +2150,7 @@ fn every_production_event_insert_names_d_tag() {
     // The same writer set as the roster-guard scan. A lower count means the
     // scan stopped seeing a writer, not that one was removed safely.
     assert!(
-        checked_writers >= 9,
-        "expected at least nine event writers, found {checked_writers}"
+        checked_writers >= 8,
+        "expected at least eight event writers, found {checked_writers}"
     );
 }

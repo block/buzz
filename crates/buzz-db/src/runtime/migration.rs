@@ -62,7 +62,6 @@ async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     // guard, so migration fails closed if any is missing. (The fence probe
     // re-runs this same check at startup on non-migrating relays.)
     crate::replica_fence::verify_floor_guard_catalog(&mut *conn).await?;
-    crate::channel::verify_channel_roster_fence_catalog(&mut *conn).await?;
     Ok(())
 }
 
@@ -550,6 +549,7 @@ mod postgres_tests {
             "entity_deletion_approvals",
             "entity_deletion_requests",
             "entity_deletion_stage_history",
+            "user_deletion_fences",
             "community_deletion_approvals",
             "community_deletion_checkpoints",
             "community_deletion_manifest_keys",
@@ -776,7 +776,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 74);
+        assert_eq!(migrations.len(), 75);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -807,8 +807,8 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE TABLE community_nip_fi_issuers"));
-        assert_eq!(migrations[73].version, 74);
-        let invite_migration = strip_sql_comments(migrations[73].sql.as_str());
+        assert_eq!(migrations[74].version, 75);
+        let invite_migration = strip_sql_comments(migrations[74].sql.as_str());
         assert!(invite_migration.contains("SET LOCAL lock_timeout = '5s'"));
         assert!(invite_migration.contains("SET LOCAL statement_timeout = '30s'"));
         assert!(
@@ -2919,6 +2919,7 @@ mod postgres_tests {
             "entity_deletion_approvals",
             "entity_deletion_requests",
             "entity_deletion_stage_history",
+            "user_deletion_fences",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -2955,6 +2956,7 @@ mod postgres_tests {
         for table in [
             "entity_deletion_requests",
             "entity_deletion_stage_history",
+            "user_deletion_fences",
             "entity_deletion_approvals",
         ] {
             assert_eq!(
