@@ -57,10 +57,17 @@ const WS_SEND_TIMEOUT_SECS: u64 = 10;
 const STABLE_CONNECTION_SECS: u64 = 60;
 /// Seconds subtracted from `since` on resubscribe to tolerate clock skew.
 const SINCE_SKEW_SECS: u64 = 5;
+/// Relay bound on how far an accepted event's `created_at` may differ from
+/// server time (`MAX_TIMESTAMP_DRIFT_SECS` in `buzz-relay`'s `handlers/ingest.rs`).
+/// An event stored just after a disconnect can therefore carry a `created_at`
+/// up to this many seconds earlier than the disconnect.
+const RELAY_CREATED_AT_DRIFT_SECS: u64 = 900;
 /// Margin subtracted from a connection's `live_until` when resuming a
-/// subscription that reached EOSE on it. Absorbs client/relay clock skew and
-/// `created_at` jitter; the replay still overlaps everything after the margin.
-const RESUME_LIVE_SKEW_SECS: u64 = 60;
+/// subscription that reached EOSE on it: the relay's `created_at` drift bound
+/// (900s) plus 60s of client/relay clock-skew margin. A narrower window would
+/// miss a backdated event stored just after the disconnect, which a quiet
+/// subscription's full replay used to catch.
+const RESUME_LIVE_SKEW_SECS: u64 = RELAY_CREATED_AT_DRIFT_SECS + 60;
 /// WebSocket close code 1001 (Going Away): the peer is shutting down.
 const CLOSE_CODE_GOING_AWAY: u16 = 1001;
 /// WebSocket close code 1012 (Service Restart): the relay pod is rolling.

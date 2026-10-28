@@ -153,11 +153,26 @@ fn resume_since_table_over_input_combinations() {
 }
 
 #[test]
-fn live_floor_is_sixty_seconds_on_the_wire() {
+fn live_floor_is_the_relay_drift_bound_plus_margin_on_the_wire() {
     // `send_subscribe` subtracts SINCE_SKEW_SECS, so the cursor handed to it
     // must land exactly RESUME_LIVE_SKEW_SECS before live_until on the wire.
     let cursor = resume_since(Some(1), None, None, Some(10_000)).unwrap();
     assert_eq!(cursor - SINCE_SKEW_SECS, 10_000 - RESUME_LIVE_SKEW_SECS);
+    assert_eq!(RESUME_LIVE_SKEW_SECS, 960);
+}
+
+#[test]
+fn backdated_event_stored_after_close_is_inside_the_replay_window() {
+    // The relay accepts created_at up to 900s from server time, so an event
+    // stored right after the disconnect can be dated up to 900s before it.
+    let close = 100_000;
+    let wire_since = resume_since(Some(1_000), None, None, Some(close)).unwrap() - SINCE_SKEW_SECS;
+    assert!(close - RELAY_CREATED_AT_DRIFT_SECS >= wire_since);
+    assert!(close - RELAY_CREATED_AT_DRIFT_SECS - 1 >= wire_since);
+    // A 60s window would have started after it.
+    assert!(close - RELAY_CREATED_AT_DRIFT_SECS < close - 60);
+    // And the window is still bounded: a month-old event is not replayed.
+    assert!(close - 30 * 86_400 < wire_since);
 }
 
 #[test]
@@ -514,6 +529,10 @@ async fn autonomous_reconnect_stamps_live_until_and_replay_req_resumes_from_it()
     let since = resubscribe_since(&mut state, channel).await;
     assert_eq!(since, live_until - RESUME_LIVE_SKEW_SECS);
     assert!(since > 1_000, "must not replay from the original floor");
+    assert!(
+        since <= live_until - RELAY_CREATED_AT_DRIFT_SECS,
+        "a backdated event stored just after the close must be replayed"
+    );
 }
 
 #[tokio::test]
