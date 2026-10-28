@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/channels/default_agent_voice_draft.dart';
+import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/me/default_agent_writer.dart';
 import 'package:buzz/shared/me/me_sync.dart';
@@ -12,6 +14,12 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
+
+class _EmptyVoiceDraft extends DefaultAgentVoiceDraft {
+  _EmptyVoiceDraft(super.identity);
+  @override
+  Future<VoiceNoteRecording?> read() async => null;
+}
 
 void main() {
   testWidgets(
@@ -39,6 +47,9 @@ void main() {
       var choices = 0;
       Widget app(MeSync scope) => ProviderScope(
         overrides: [
+          defaultAgentVoiceDraftProvider.overrideWith(
+            (ref, identity) => _EmptyVoiceDraft(identity),
+          ),
           meSyncProvider.overrideWithValue(scope),
           relaySessionProvider.overrideWith(() => relayA),
         ],

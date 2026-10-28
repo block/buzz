@@ -16,6 +16,10 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/navigation_button_surface.dart';
 import 'channel.dart';
+import 'default_agent_voice_control.dart';
+import 'default_agent_voice_draft.dart';
+import 'voice_note_recording.dart';
+import 'send_message_provider.dart';
 import 'channel_detail_page.dart';
 import 'channels_provider.dart';
 import 'channel_management_provider.dart';
@@ -39,17 +43,20 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
       return null;
     }, [pubkey]);
+    final draftIdentity =
+        '${scope.community}:${ref.watch(myPubkeyProvider) ?? 'signed-out'}:$pubkey';
     final label = pubkey != null
         ? 'Chat with ${profile?.label ?? 'your Bestie'}'
         : preference.hasError
         ? 'Retry Bestie'
         : 'Bestie';
-    Future<void> open() async {
+    Future<void> open({VoiceNoteRecording? recording}) async {
       final currentPreference = ref.read(defaultAgentProvider);
       if (opening.value ||
           currentPreference.isLoading ||
           ref.read(meSyncProvider) != scope ||
           currentPreference.value != pubkey) {
+        if (recording != null) throw StateError('The agent is unavailable.');
         return;
       }
       unawaited(HapticFeedback.lightImpact());
@@ -84,21 +91,62 @@ class DefaultAgentLauncher extends HookConsumerWidget {
             cached ??
             await ref.read(channelActionsProvider).openDm(pubkeys: [pubkey]);
         if (context.mounted) resolving.value = false;
-        if (!context.mounted) return;
+        if (!context.mounted) throw StateError('The conversation was closed.');
         // A community switch invalidates an in-flight destination.
         if (ref.read(meSyncProvider) != scope ||
             ref.read(defaultAgentProvider).isLoading ||
             ref.read(defaultAgentProvider).value != pubkey) {
+          if (recording != null) throw StateError('The agent changed.');
           return;
         }
-        await Navigator.of(context).push<void>(
-          MaterialPageRoute(
-            // Native glass and video layers must track the live route.
-            allowSnapshotting: false,
-            builder: (_) => ChannelDetailPage(channel: channel),
+        if (recording != null) {
+          final draft = ref.read(defaultAgentVoiceDraftProvider(draftIdentity));
+          final session = ref.read(relaySessionProvider.notifier);
+          final previousEvent = await draft.readEvent();
+          if (previousEvent != null) {
+            if (!context.mounted || ref.read(meSyncProvider) != scope) {
+              throw StateError('The community changed.');
+            }
+            await session.publish(previousEvent);
+          } else {
+            final sender = ref.read(sendMessageProvider);
+            final descriptor = await ref
+                .read(mediaUploadServiceProvider)
+                .uploadVoiceNote(recording.file, duration: recording.duration);
+            if (!context.mounted ||
+                ref.read(meSyncProvider) != scope ||
+                ref.read(defaultAgentProvider).value != pubkey) {
+              throw StateError('The agent or community changed.');
+            }
+            await sender.call(
+              channelId: channel.id,
+              channel: channel,
+              content: descriptor.toMarkdownImage(),
+              mentionPubkeys: [pubkey],
+              mediaTags: [descriptor.toImetaTag()],
+              beforePublish: (event) async {
+                if (!context.mounted ||
+                    ref.read(meSyncProvider) != scope ||
+                    ref.read(defaultAgentProvider).value != pubkey) {
+                  throw StateError('The agent or community changed.');
+                }
+                await draft.saveEvent(event);
+              },
+            );
+          }
+          if (!context.mounted) return;
+        }
+        unawaited(
+          Navigator.of(context).push<void>(
+            MaterialPageRoute(
+              // Native glass and video layers must track the live route.
+              allowSnapshotting: false,
+              builder: (_) => ChannelDetailPage(channel: channel),
+            ),
           ),
         );
       } catch (error) {
+        if (recording != null) rethrow;
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -114,34 +162,42 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
     }
 
-    return NavigationButtonSurface(
-      child: SizedBox.square(
-        dimension: 56,
-        child: IconButton(
-          tooltip: label,
-          padding: EdgeInsets.zero,
-          onPressed: opening.value || preference.isLoading ? null : open,
-          icon: ExcludeSemantics(
-            child: resolving.value
-                ? const SizedBox.square(
-                    dimension: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : pubkey == null
-                ? const AgentNavigationIcon(size: 24)
-                : usesInsetAgentArtwork(profile?.avatarUrl)
-                ? PresetAgentAvatar(
-                    imageUrl: profile!.avatarUrl!,
-                    size: 47.88,
-                    fallback: Center(child: Text(profile.initial)),
-                  )
-                : AvatarImage(
-                    imageUrl: profile?.avatarUrl,
-                    radius: 18,
-                    isAgent: true,
-                    backgroundColor: context.controlSurface,
-                    fallback: Center(child: Text(profile?.initial ?? 'A')),
-                  ),
+    final avatar = ExcludeSemantics(
+      child: resolving.value
+          ? const SizedBox.square(
+              dimension: 22,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : pubkey == null
+          ? const AgentNavigationIcon(size: 24)
+          : usesInsetAgentArtwork(profile?.avatarUrl)
+          ? PresetAgentAvatar(
+              imageUrl: profile!.avatarUrl!,
+              size: 47.88,
+              fallback: Center(child: Text(profile.initial)),
+            )
+          : AvatarImage(
+              imageUrl: profile?.avatarUrl,
+              radius: 18,
+              isAgent: true,
+              backgroundColor: context.controlSurface,
+              fallback: Center(child: Text(profile?.initial ?? 'A')),
+            ),
+    );
+    return DefaultAgentVoiceControl(
+      key: ValueKey((scope, pubkey)),
+      draftIdentity: draftIdentity,
+      enabled: pubkey != null && !opening.value && !preference.isLoading,
+      onRecorded: (recording) => open(recording: recording),
+      recordingAvatar: avatar,
+      child: NavigationButtonSurface(
+        child: SizedBox.square(
+          dimension: 56,
+          child: IconButton(
+            tooltip: label,
+            padding: EdgeInsets.zero,
+            onPressed: opening.value || preference.isLoading ? null : open,
+            icon: avatar,
           ),
         ),
       ),
