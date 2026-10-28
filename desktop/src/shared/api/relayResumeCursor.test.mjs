@@ -19,16 +19,8 @@ for (const [name, input, expected] of [
   ["no cursor replays the original filter", {}, undefined],
   ["lastSeen only", { lastSeenCreatedAt: 1_000 }, 995],
   ["liveUntil only", { liveUntil: 1_000 }, 940],
-  [
-    "newer lastSeen wins",
-    { lastSeenCreatedAt: 1_000, liveUntil: 900 },
-    995,
-  ],
-  [
-    "newer liveUntil wins",
-    { lastSeenCreatedAt: 900, liveUntil: 1_000 },
-    940,
-  ],
+  ["newer lastSeen wins", { lastSeenCreatedAt: 1_000, liveUntil: 900 }, 995],
+  ["newer liveUntil wins", { lastSeenCreatedAt: 900, liveUntil: 1_000 }, 940],
   [
     "a future-dated lastSeen is still the lower bound",
     { lastSeenCreatedAt: 2_000, liveUntil: 1_000 },

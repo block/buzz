@@ -110,7 +110,7 @@ export class RelayReconnectBackoff {
   constructor(
     baseMs = RECONNECT_BASE_DELAY_MS,
     maxMs = RECONNECT_MAX_DELAY_MS,
-    random = Math.random,
+    random = () => Math.random(),
   ) {
     this.baseMs = baseMs;
     this.backoffMs = baseMs;

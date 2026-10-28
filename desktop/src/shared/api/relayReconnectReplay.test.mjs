@@ -1402,7 +1402,11 @@ test("quiet non-paged subscription resumes from liveUntil - 60s with its full li
   assert.deepEqual(sent, [
     ["REQ", "live-1", { ...filter, since: 9_940, limit: 1000 }],
   ]);
-  assert.deepEqual(repairs, [], "non-paged subscriptions never use HTTP repair");
+  assert.deepEqual(
+    repairs,
+    [],
+    "non-paged subscriptions never use HTTP repair",
+  );
 });
 
 test("resume since never drops below the original filter since", async () => {
@@ -1433,7 +1437,11 @@ test("a subscription with no cursor still replays its original filter", async ()
   assert.equal(sent[0][2], filter);
   const paged = buildChannelFilter("channel-1", 1000);
   const second = await replayOne(liveSub(paged));
-  assert.equal(second.sent[0][2], paged, "no cursor means no repair to lean on");
+  assert.equal(
+    second.sent[0][2],
+    paged,
+    "no cursor means no repair to lean on",
+  );
   assert.deepEqual(second.repairs, []);
 });
 
@@ -1479,7 +1487,11 @@ test("paged repair starts only after the live-only REQ is acknowledged", async (
     },
   });
   await drainMicrotasks();
-  assert.deepEqual(repairs, [], "no repair before EOSE: the gap would be unowned");
+  assert.deepEqual(
+    repairs,
+    [],
+    "no repair before EOSE: the gap would be unowned",
+  );
   markReconnectLiveEose(subscription, 0);
   await replay;
   assert.equal(repairs.length, 1);

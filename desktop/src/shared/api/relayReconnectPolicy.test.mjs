@@ -166,7 +166,10 @@ test("ordinary reconnect jitter is symmetric +/-25% and capped", () => {
 test("backoff doubles per attempt up to the cap and only reset() returns it to base", () => {
   const backoff = new RelayReconnectBackoff(1_000, 30_000, () => 0.5);
   const delays = Array.from({ length: 7 }, () => backoff.next());
-  assert.deepEqual(delays, [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+  assert.deepEqual(
+    delays,
+    [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000],
+  );
   backoff.reset();
   assert.equal(backoff.next(), 1_000);
 });

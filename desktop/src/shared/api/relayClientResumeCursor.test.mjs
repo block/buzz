@@ -113,7 +113,12 @@ async function liveClient(filters, eosed = filters.length) {
   return { client, ids };
 }
 
-const quiet = { kinds: [9, 5, 7], "#h": ["channel-0"], since: 123, limit: 1000 };
+const quiet = {
+  kinds: [9, 5, 7],
+  "#h": ["channel-0"],
+  since: 123,
+  limit: 1000,
+};
 
 test("a close after EOSE stamps liveUntil and the replay resumes from it", async () => {
   now = 2_000_000;
