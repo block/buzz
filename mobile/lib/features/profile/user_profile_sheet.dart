@@ -154,7 +154,7 @@ class UserProfileSheet extends HookConsumerWidget {
       try {
         final channel = await ref
             .read(channelActionsProvider)
-            .openDm(pubkeys: [pk]);
+            .openDm(pubkeys: [pk], waitForChannelList: false);
         if (!context.mounted) return;
         Navigator.of(context).pop(channel);
       } catch (_) {

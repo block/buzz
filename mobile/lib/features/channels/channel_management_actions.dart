@@ -93,6 +93,7 @@ class ChannelActions {
     return Channel(
       id: channelId,
       name: details.name,
+      participantPubkeys: ChannelData.fromEvent(metadata).participantPubkeys,
       channelType: details.channelType,
       labels: details.labels,
       visibility: details.visibility,
@@ -112,8 +113,15 @@ class ChannelActions {
   ///
   /// This submits a kind:41010 command event; the relay responds with an OK
   /// message whose content carries `response:{...}` containing the new
-  /// `channel_id`.
-  Future<Channel> openDm({required List<String> pubkeys}) async {
+  /// `channel_id`. With [waitForChannelList] false, the DM opens from its own
+  /// metadata and roster while the channel list reconciles in the background,
+  /// since a full reload can take many seconds on a large account or slow
+  /// connection. Callers that depend on fresh list state, such as hidden-DM
+  /// resurfacing, keep the default.
+  Future<Channel> openDm({
+    required List<String> pubkeys,
+    bool waitForChannelList = true,
+  }) async {
     _ensureCommunityValid();
     final result = await _signedEventRelay.submit(
       kind: 41010,
@@ -126,7 +134,10 @@ class ChannelActions {
     if (channelId == null || channelId.isEmpty) {
       throw Exception('Relay did not return a DM channel id');
     }
-    return _refreshChannelsAndRead(channelId);
+    if (waitForChannelList) return _refreshChannelsAndRead(channelId);
+    unawaited(_ref.read(channelsProvider.notifier).refresh());
+    return await findJoinedChannel(channelId) ??
+        (throw StateError('DM was opened but is not visible yet'));
   }
 
   Future<void> addMembers({
