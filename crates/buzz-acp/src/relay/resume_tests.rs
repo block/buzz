@@ -720,7 +720,14 @@ async fn delayed_eose_of_a_superseded_req_keeps_the_channel_overflow_floor() {
     // History arrives faster than the consumer drains it: the third event
     // overflows the queue and is recorded as lost.
     for ts in [1_010, 1_020, 1_100] {
-        deliver_event(&mut client, &mut state, &tx, &sub, &tagged_event(channel, ts)).await;
+        deliver_event(
+            &mut client,
+            &mut state,
+            &tx,
+            &sub,
+            &tagged_event(channel, ts),
+        )
+        .await;
     }
     assert_eq!(state.channel_dropped_since[&channel], 1_100);
     while rx.try_recv().is_ok() {}
@@ -815,7 +822,9 @@ async fn mock_relay() -> (String, mpsc::UnboundedReceiver<MockConn>) {
                     return;
                 };
                 let _ = ws
-                    .send(Message::Text(json!(["AUTH", "challenge"]).to_string().into()))
+                    .send(Message::Text(
+                        json!(["AUTH", "challenge"]).to_string().into(),
+                    ))
                     .await;
                 loop {
                     let Some(Ok(Message::Text(text))) = ws.next().await else {
@@ -928,7 +937,10 @@ async fn silent_socket_death_resumes_from_last_inbound_frame_not_detection_time(
         })
         .await
         .unwrap();
-    cmd_tx.send(RelayCommand::SubscribeMembership).await.unwrap();
+    cmd_tx
+        .send(RelayCommand::SubscribeMembership)
+        .await
+        .unwrap();
     next_req(&mut conn0).await;
     next_req(&mut conn0).await;
 
@@ -970,5 +982,8 @@ async fn silent_socket_death_resumes_from_last_inbound_frame_not_detection_time(
     }
 
     cmd_tx.send(RelayCommand::Shutdown).await.unwrap();
-    timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
+    timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
 }
