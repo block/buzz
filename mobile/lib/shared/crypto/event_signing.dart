@@ -54,3 +54,78 @@ nostr.Event signNostrEvent({
   );
   return unsigned.copyWith(sig: _encodeHex(signature));
 }
+
+final _hex128 = RegExp(r'^[0-9a-fA-F]{128}$');
+
+/// Verifies a BIP-340 Schnorr [signature] (128 hex) over the 32-byte
+/// [messageHex] digest for the x-only [publicKey] with libsecp256k1.
+///
+/// Returns false for malformed hex as well as for invalid signatures.
+bool verifySchnorrHex({
+  required String publicKey,
+  required String messageHex,
+  required String signature,
+}) {
+  if (!_hex64.hasMatch(publicKey) ||
+      !_hex64.hasMatch(messageHex) ||
+      !_hex128.hasMatch(signature)) {
+    return false;
+  }
+  return secp256k1.schnorrVerify(
+    signature: _decodeHex(signature),
+    message: _decodeHex(messageHex),
+    publicKey: _decodeHex(publicKey),
+  );
+}
+
+/// Signs a 32-byte [messageHex] digest with [secretKey] and returns the
+/// 128-hex BIP-340 signature, computed by libsecp256k1.
+String signSchnorrHex({required String secretKey, required String messageHex}) {
+  if (!_hex64.hasMatch(messageHex)) {
+    throw ArgumentError('Message must be 64 hex characters');
+  }
+  return _encodeHex(
+    secp256k1.schnorrSign(
+      message: _decodeHex(messageHex),
+      secretKey: _decodeSecretKey(secretKey),
+    ),
+  );
+}
+
+/// Parses [payload] like `nostr.Event.fromJson` and verifies its timestamp,
+/// id and signature like `verify: true` does, with the signature check in
+/// libsecp256k1.
+///
+/// Throws the same `nostr` exception types as the pure-Dart path.
+nostr.Event verifiedNostrEventFromJson(String payload) {
+  final event = nostr.Event.fromJson(payload, verify: false);
+  if (event.createdAt <= 0 || event.createdAt >= 253402300800) {
+    throw nostr.EventValidationException(
+      'created_at ${event.createdAt} is not a valid Unix timestamp (seconds)',
+      nostr.EventValidationReason.invalidTimestamp,
+    );
+  }
+  if (event.id != event.getEventId()) {
+    throw const nostr.EventValidationException(
+      'event id mismatch',
+      nostr.EventValidationReason.idMismatch,
+    );
+  }
+  if (!_hex64.hasMatch(event.pubkey) || !_hex128.hasMatch(event.sig)) {
+    throw const nostr.EventValidationException(
+      'malformed pubkey or signature',
+      nostr.EventValidationReason.malformedSignature,
+    );
+  }
+  if (!verifySchnorrHex(
+    publicKey: event.pubkey,
+    messageHex: event.id,
+    signature: event.sig,
+  )) {
+    throw const nostr.EventValidationException(
+      'Schnorr signature invalid',
+      nostr.EventValidationReason.invalidSignature,
+    );
+  }
+  return event;
+}

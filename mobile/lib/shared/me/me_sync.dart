@@ -348,7 +348,7 @@ class MeSync {
         )) {
       throw const FormatException('Invalid Solo record');
     }
-    nostr.Event.fromJson(jsonEncode(event.toJson()));
+    verifiedNostrEventFromJson(jsonEncode(event.toJson()));
     return MeGroups.decode(nip44Decrypt(key, event.content), community);
   }
 

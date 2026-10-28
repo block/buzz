@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
@@ -79,5 +80,94 @@ void main() {
         reason: bad,
       );
     }
+  });
+
+  group('verifiedNostrEventFromJson', () {
+    final secretKey = _randomSecretKey(Random(2));
+    final event = nostr.Event.from(
+      kind: 1,
+      content: 'hello',
+      secretKey: secretKey,
+      createdAt: 1700000000,
+      tags: [
+        ['t', 'x'],
+      ],
+    );
+    Map<String, dynamic> map() => Map<String, dynamic>.from(event.toMap());
+
+    test('accepts what the pure-Dart verifier accepts', () {
+      final verified = verifiedNostrEventFromJson(jsonEncode(map()));
+      expect(verified.id, event.id);
+      expect(verified.sig, event.sig);
+    });
+
+    test('rejects what the pure-Dart verifier rejects', () {
+      final otherSig = signNostrEvent(
+        kind: 1,
+        content: 'other',
+        secretKey: secretKey,
+      ).sig;
+      final cases = <String, Map<String, dynamic>>{
+        'tampered content': map()..['content'] = 'hellO',
+        'wrong signature': map()..['sig'] = otherSig,
+        'other pubkey': map()..['pubkey'] = 'a' * 64,
+        'malformed sig': map()..['sig'] = 'zz' * 64,
+        'short sig': map()..['sig'] = event.sig.substring(2),
+        'zero timestamp': map()..['created_at'] = 0,
+      };
+      for (final MapEntry(key: reason, value: payload) in cases.entries) {
+        final json = jsonEncode(payload);
+        expect(
+          () => nostr.Event.fromJson(json),
+          throwsA(isA<nostr.NostrException>()),
+          reason: '$reason (pure Dart)',
+        );
+        expect(
+          () => verifiedNostrEventFromJson(json),
+          throwsA(isA<nostr.NostrException>()),
+          reason: reason,
+        );
+      }
+    });
+  });
+
+  test('Schnorr hex helpers interoperate with nostr.Schnorr', () {
+    final secretKey = _randomSecretKey(Random(3));
+    final publicKey = derivePublicKeyHex(secretKey);
+    final digest = 'ab' * 32;
+    final signature = signSchnorrHex(secretKey: secretKey, messageHex: digest);
+    expect(
+      nostr.Schnorr.verify(
+        publicKey: publicKey,
+        message: digest,
+        signature: signature,
+      ),
+      isTrue,
+    );
+    final reference = nostr.Schnorr.sign(secretKey: secretKey, message: digest);
+    expect(
+      verifySchnorrHex(
+        publicKey: publicKey,
+        messageHex: digest,
+        signature: reference,
+      ),
+      isTrue,
+    );
+    expect(
+      verifySchnorrHex(
+        publicKey: publicKey,
+        messageHex: 'cd' * 32,
+        signature: reference,
+      ),
+      isFalse,
+    );
+    expect(
+      verifySchnorrHex(
+        publicKey: 'zz',
+        messageHex: digest,
+        signature: reference,
+      ),
+      isFalse,
+    );
   });
 }
