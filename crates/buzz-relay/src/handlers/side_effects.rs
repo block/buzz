@@ -981,6 +981,11 @@ async fn fan_out_system_message(
 /// incremented, so the emitted summary is exact even under concurrent
 /// replies/deletes (newest `created_at` wins client-side).
 ///
+/// Coalesced per root through [`AppState::thread_summary_refresh`]: a quiet
+/// thread emits at once, while a busy one emits at most once per
+/// [`crate::state::THREAD_SUMMARY_REFRESH_INTERVAL`] per pod, with a trailing
+/// emit that reads state committed after the last mutation in the burst.
+///
 /// Spawned: runs after the triggering write committed and must not add
 /// latency to the ingest acknowledgement, mirroring
 /// `dispatch_persistent_event`.
@@ -990,86 +995,97 @@ pub fn emit_live_thread_summary(
     channel_id: Uuid,
     root_id: Vec<u8>,
 ) {
+    let key = (tenant.community(), root_id.clone());
     let tenant = tenant.clone();
-    let state = Arc::clone(state);
-    tokio::spawn(async move {
-        let summary = match state
-            .db
-            .get_thread_summary(tenant.community(), &root_id)
-            .await
-        {
-            Ok(Some(summary)) => summary,
-            // Root has no thread row — nothing to summarize (e.g., the root
-            // itself was just deleted).
-            Ok(None) => return,
-            Err(e) => {
-                warn!(
-                    root = %hex::encode(&root_id),
-                    "live thread summary lookup failed: {e}"
-                );
-                return;
-            }
-        };
-
-        let root_hex = hex::encode(&root_id);
-        // Same tags/content shape as the channel-window page overlay in
-        // `api/bridge.rs` — one contract, two delivery doors.
-        let content = serde_json::json!({
-            "reply_count": summary.reply_count,
-            "descendant_count": summary.descendant_count,
-            "last_reply_at": summary.last_reply_at.map(|t| t.timestamp()),
-            "participants": summary.participants.iter().map(hex::encode).collect::<Vec<_>>(),
-        });
-        let tags = [
-            Tag::parse(["e", &root_hex]),
-            Tag::parse(["d", &root_hex]),
-            Tag::parse(["h", &channel_id.to_string()]),
-        ];
-        let mut parsed = Vec::with_capacity(tags.len());
-        for tag in tags {
-            match tag {
-                Ok(tag) => parsed.push(tag),
-                Err(e) => {
-                    warn!(root = %root_hex, "live thread summary tag failed: {e}");
-                    return;
-                }
-            }
-        }
-        let event = match EventBuilder::new(
-            Kind::Custom(KIND_THREAD_SUMMARY as u16),
-            content.to_string(),
+    let task_state = Arc::clone(state);
+    state.thread_summary_refresh.request(key, move || {
+        publish_live_thread_summary(
+            tenant.clone(),
+            Arc::clone(&task_state),
+            channel_id,
+            root_id.clone(),
         )
-        .tags(parsed)
-        .sign_with_keys(&state.relay_keypair)
-        {
-            Ok(event) => event,
-            Err(e) => {
-                warn!(root = %root_hex, "live thread summary sign failed: {e}");
-                return;
-            }
-        };
-
-        // Redis before local fan-out so subscribers on other relay pods
-        // receive it too, matching `dispatch_persistent_event`.
-        state.mark_local_event(tenant.community(), &event.id);
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&tenant, EventTopic::Channel(channel_id), &event)
-            .await
-        {
-            state
-                .local_event_ids
-                .invalidate(&(tenant.community(), event.id.to_bytes()));
-            warn!(root = %root_hex, "live thread summary Redis publish failed: {e}");
-        }
-        let stored = StoredEvent::new(event, Some(channel_id));
-        crate::handlers::event::fan_out_event_to_local_subscribers(
-            &state,
-            tenant.community(),
-            &stored,
-        )
-        .await;
     });
+}
+
+async fn publish_live_thread_summary(
+    tenant: TenantContext,
+    state: Arc<AppState>,
+    channel_id: Uuid,
+    root_id: Vec<u8>,
+) {
+    let summary = match state
+        .db
+        .get_thread_summary(tenant.community(), &root_id)
+        .await
+    {
+        Ok(Some(summary)) => summary,
+        // Root has no thread row — nothing to summarize (e.g., the root
+        // itself was just deleted).
+        Ok(None) => return,
+        Err(e) => {
+            warn!(
+                root = %hex::encode(&root_id),
+                "live thread summary lookup failed: {e}"
+            );
+            return;
+        }
+    };
+
+    let root_hex = hex::encode(&root_id);
+    // Same tags/content shape as the channel-window page overlay in
+    // `api/bridge.rs` — one contract, two delivery doors.
+    let content = serde_json::json!({
+        "reply_count": summary.reply_count,
+        "descendant_count": summary.descendant_count,
+        "last_reply_at": summary.last_reply_at.map(|t| t.timestamp()),
+        "participants": summary.participants.iter().map(hex::encode).collect::<Vec<_>>(),
+    });
+    let tags = [
+        Tag::parse(["e", &root_hex]),
+        Tag::parse(["d", &root_hex]),
+        Tag::parse(["h", &channel_id.to_string()]),
+    ];
+    let mut parsed = Vec::with_capacity(tags.len());
+    for tag in tags {
+        match tag {
+            Ok(tag) => parsed.push(tag),
+            Err(e) => {
+                warn!(root = %root_hex, "live thread summary tag failed: {e}");
+                return;
+            }
+        }
+    }
+    let event = match EventBuilder::new(
+        Kind::Custom(KIND_THREAD_SUMMARY as u16),
+        content.to_string(),
+    )
+    .tags(parsed)
+    .sign_with_keys(&state.relay_keypair)
+    {
+        Ok(event) => event,
+        Err(e) => {
+            warn!(root = %root_hex, "live thread summary sign failed: {e}");
+            return;
+        }
+    };
+
+    // Redis before local fan-out so subscribers on other relay pods
+    // receive it too, matching `dispatch_persistent_event`.
+    state.mark_local_event(tenant.community(), &event.id);
+    if let Err(e) = state
+        .pubsub
+        .publish_event(&tenant, EventTopic::Channel(channel_id), &event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(root = %root_hex, "live thread summary Redis publish failed: {e}");
+    }
+    let stored = StoredEvent::new(event, Some(channel_id));
+    crate::handlers::event::fan_out_event_to_local_subscribers(&state, tenant.community(), &stored)
+        .await;
 }
 
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).
