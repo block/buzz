@@ -15,28 +15,133 @@ const SUB_FLOOR_OFFSET: u64 = RESUME_LIVE_SKEW_SECS - SINCE_SKEW_SECS;
 fn resume_since_table_over_input_combinations() {
     // (name, base, last_seen, dropped, live_until, expected)
     #[allow(clippy::type_complexity)]
-    let cases: &[(&str, Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<u64>)] = &[
+    let cases: &[(
+        &str,
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+        Option<u64>,
+    )] = &[
         // No EOSE on the closed connection: today's behavior.
         ("no eose, nothing", Some(1000), None, None, None, Some(1000)),
         ("no eose, no baseline", None, None, None, None, None),
-        ("no eose, events", Some(1000), Some(2000), None, None, Some(2000)),
-        ("no eose, dropped only", Some(1000), None, Some(1500), None, Some(1500)),
-        ("no eose, dropped below last_seen", Some(1000), Some(2000), Some(1500), None, Some(1500)),
-        ("no eose, dropped above last_seen", Some(1000), Some(2000), Some(2500), None, Some(2000)),
+        (
+            "no eose, events",
+            Some(1000),
+            Some(2000),
+            None,
+            None,
+            Some(2000),
+        ),
+        (
+            "no eose, dropped only",
+            Some(1000),
+            None,
+            Some(1500),
+            None,
+            Some(1500),
+        ),
+        (
+            "no eose, dropped below last_seen",
+            Some(1000),
+            Some(2000),
+            Some(1500),
+            None,
+            Some(1500),
+        ),
+        (
+            "no eose, dropped above last_seen",
+            Some(1000),
+            Some(2000),
+            Some(2500),
+            None,
+            Some(2000),
+        ),
         // EOSE and no events: a quiet sub resumes from live_until, not the baseline.
-        ("eose, quiet", Some(1000), None, None, Some(5000), Some(5000 - SUB_FLOOR_OFFSET)),
-        ("eose, quiet, no baseline", None, None, None, Some(5000), Some(5000 - SUB_FLOOR_OFFSET)),
+        (
+            "eose, quiet",
+            Some(1000),
+            None,
+            None,
+            Some(5000),
+            Some(5000 - SUB_FLOOR_OFFSET),
+        ),
+        (
+            "eose, quiet, no baseline",
+            None,
+            None,
+            None,
+            Some(5000),
+            Some(5000 - SUB_FLOOR_OFFSET),
+        ),
         // EOSE and events: newest of last_seen and the live floor wins.
-        ("eose, last_seen newer than floor", Some(1000), Some(4990), None, Some(5000), Some(4990)),
-        ("eose, floor newer than last_seen", Some(1000), Some(4000), None, Some(5000), Some(5000 - SUB_FLOOR_OFFSET)),
+        (
+            "eose, last_seen newer than floor",
+            Some(1000),
+            Some(4990),
+            None,
+            Some(5000),
+            Some(4990),
+        ),
+        (
+            "eose, floor newer than last_seen",
+            Some(1000),
+            Some(4000),
+            None,
+            Some(5000),
+            Some(5000 - SUB_FLOOR_OFFSET),
+        ),
         // Dropped / gap floor keeps precedence over the live cursor.
-        ("eose, dropped below cursor", Some(1000), Some(4990), Some(3000), Some(5000), Some(3000)),
-        ("eose, dropped only", Some(1000), None, Some(3000), Some(5000), Some(3000)),
-        ("eose, dropped above cursor", Some(1000), None, Some(4990), Some(5000), Some(5000 - SUB_FLOOR_OFFSET)),
+        (
+            "eose, dropped below cursor",
+            Some(1000),
+            Some(4990),
+            Some(3000),
+            Some(5000),
+            Some(3000),
+        ),
+        (
+            "eose, dropped only",
+            Some(1000),
+            None,
+            Some(3000),
+            Some(5000),
+            Some(3000),
+        ),
+        (
+            "eose, dropped above cursor",
+            Some(1000),
+            None,
+            Some(4990),
+            Some(5000),
+            Some(5000 - SUB_FLOOR_OFFSET),
+        ),
         // Clock-skew edges: never below the original floor, never underflow.
-        ("eose, live_until before baseline", Some(1000), None, None, Some(30), Some(1000)),
-        ("eose, live_until barely above baseline", Some(1000), None, None, Some(1100), Some(1100 - SUB_FLOOR_OFFSET).max(Some(1000))),
-        ("eose, live_until underflow, no baseline", None, None, None, Some(0), Some(0)),
+        (
+            "eose, live_until before baseline",
+            Some(1000),
+            None,
+            None,
+            Some(30),
+            Some(1000),
+        ),
+        (
+            "eose, live_until barely above baseline",
+            Some(1000),
+            None,
+            None,
+            Some(1100),
+            Some(1100 - SUB_FLOOR_OFFSET).max(Some(1000)),
+        ),
+        (
+            "eose, live_until underflow, no baseline",
+            None,
+            None,
+            None,
+            Some(0),
+            Some(0),
+        ),
     ];
     for (name, base, last_seen, dropped, live_until, expected) in cases {
         assert_eq!(
@@ -222,7 +327,10 @@ async fn quiet_channel_and_membership_resume_from_live_until() {
     deliver_eose(&mut client, &mut state, MEMBERSHIP_NOTIF_SUB_ID).await;
     begin_reconnect(&mut state, 5_000, 0.0);
 
-    assert_eq!(state.channel_since(&channel), Some(5_000 - SUB_FLOOR_OFFSET));
+    assert_eq!(
+        state.channel_since(&channel),
+        Some(5_000 - SUB_FLOOR_OFFSET)
+    );
     assert_eq!(state.membership_since(), Some(5_000 - SUB_FLOOR_OFFSET));
 
     // A recorded gap still wins for both.
@@ -242,11 +350,17 @@ async fn closed_connection_without_eose_keeps_the_previous_cursor() {
     begin_reconnect(&mut state, 5_000, 0.0);
     // The next connection never reaches EOSE before it closes too.
     begin_reconnect(&mut state, 9_000, 0.0);
-    assert_eq!(state.channel_since(&channel), Some(5_000 - SUB_FLOOR_OFFSET));
+    assert_eq!(
+        state.channel_since(&channel),
+        Some(5_000 - SUB_FLOOR_OFFSET)
+    );
     // Once a connection does reach EOSE, the cursor moves on.
     deliver_eose(&mut client, &mut state, &channel_sub_id(channel)).await;
     begin_reconnect(&mut state, 9_500, 0.0);
-    assert_eq!(state.channel_since(&channel), Some(9_500 - SUB_FLOOR_OFFSET));
+    assert_eq!(
+        state.channel_since(&channel),
+        Some(9_500 - SUB_FLOOR_OFFSET)
+    );
 }
 
 #[tokio::test]
@@ -291,7 +405,12 @@ async fn removing_a_channel_clears_its_resume_state() {
     deliver_eose(&mut client, &mut state, &channel_sub_id(pending)).await;
 
     for channel in [stamped, pending] {
-        apply_command_to_state(&mut state, RelayCommand::Unsubscribe { channel_id: channel });
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::Unsubscribe {
+                channel_id: channel,
+            },
+        );
     }
     assert!(state.live_until.is_empty());
     assert!(state.eose_this_conn.is_empty());

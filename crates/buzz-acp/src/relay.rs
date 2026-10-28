@@ -1916,9 +1916,15 @@ async fn run_background_task(
             // recovery fires even when rate_limited_pending is empty.
             if state.check_rate_gate().is_none() {
                 if state.membership_resub_needed && budget > 0 {
-                    let replay_since =
-                        state.membership_since();
-                    if send_membership_subscribe(&mut ws, &mut state, &agent_pubkey_hex, replay_since).await {
+                    let replay_since = state.membership_since();
+                    if send_membership_subscribe(
+                        &mut ws,
+                        &mut state,
+                        &agent_pubkey_hex,
+                        replay_since,
+                    )
+                    .await
+                    {
                         state.membership_resub_needed = false;
                         state.membership_dropped_since = None;
                         budget = budget.saturating_sub(1);
@@ -2512,9 +2518,9 @@ async fn handle_ws_message(
                             return false;
                         }
                     } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
-                        let since =
-                            state.membership_since();
-                        let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
+                        let since = state.membership_since();
+                        let sent =
+                            send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
                         if sent {
                             // Success — subscription is live again.
                             state.membership_dropped_since = None;
