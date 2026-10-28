@@ -211,25 +211,28 @@ void main() {
       });
     });
 
-    test('a background disconnect resumes from the last frame before it', () async {
-      final h = await _Harness.start();
-      final start = h.nowSeconds;
-      h.sockets.last.connectSuccessfully();
-      await h.subscribeLive(_filter('quiet'));
+    test(
+      'a background disconnect resumes from the last frame before it',
+      () async {
+        final h = await _Harness.start();
+        final start = h.nowSeconds;
+        h.sockets.last.connectSuccessfully();
+        await h.subscribeLive(_filter('quiet'));
 
-      h.session.onAppPaused();
-      h.now = h.now.add(const Duration(seconds: 20));
-      h.receive(['NOTICE', 'still here']);
-      h.now = h.now.add(const Duration(seconds: 10));
-      h.session.debugPauseNow();
-      h.now = h.now.add(const Duration(minutes: 10));
-      h.session.onAppResumed();
-      await h.settle();
-      h.sockets.last.connectSuccessfully();
-      await h.settle();
+        h.session.onAppPaused();
+        h.now = h.now.add(const Duration(seconds: 20));
+        h.receive(['NOTICE', 'still here']);
+        h.now = h.now.add(const Duration(seconds: 10));
+        h.session.debugPauseNow();
+        h.now = h.now.add(const Duration(minutes: 10));
+        h.session.onAppResumed();
+        await h.settle();
+        h.sockets.last.connectSuccessfully();
+        await h.settle();
 
-      expect(h.replayedSince(), {'quiet': start + 20 - 960});
-    });
+        expect(h.replayedSince(), {'quiet': start + 20 - 960});
+      },
+    );
 
     test('a later connection that never reaches EOSE keeps the older cursor, '
         'then advances once live again', () async {
