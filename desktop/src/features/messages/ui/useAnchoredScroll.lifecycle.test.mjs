@@ -626,3 +626,71 @@ test("unresolved virtual target keeps the bottom pin", async () => {
   assert.equal(bottomWrites.length, 2, "geometry still re-pins to bottom");
   await act(async () => root.unmount());
 });
+
+test("target arriving before the second mount frame supersedes the bottom pin", async () => {
+  const nodes = makePinnedCenterNodes();
+  nodes.container.querySelector = () => null;
+  const frames = new Map();
+  let nextFrameId = 0;
+  const previousRaf = globalThis.requestAnimationFrame;
+  const previousCancelRaf = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => {
+    nextFrameId += 1;
+    frames.set(nextFrameId, callback);
+    return nextFrameId;
+  };
+  globalThis.cancelAnimationFrame = (id) => frames.delete(id);
+  const writes = [];
+  let targetLoaded = false;
+  const scrollContainerRef = { current: nodes.container };
+  const contentRef = { current: nodes.content };
+  function RaceHarness({ messages }) {
+    useAnchoredScroll({
+      channelId: "conversation",
+      contentRef,
+      isLoading: false,
+      messages,
+      scrollContainerRef,
+      targetMessageId: "selected",
+      virtualizerOwnsPrependAnchoring: true,
+      virtualScrollToBottom: () => writes.push("bottom"),
+      virtualScrollToMessage: () => {
+        if (!targetLoaded) return false;
+        writes.push("target");
+        return true;
+      },
+    });
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  try {
+    // The target is not loaded on mount, so the hook pins to bottom now and
+    // queues a second pin for the next frame.
+    await act(async () =>
+      root.render(
+        React.createElement(RaceHarness, { messages: [{ id: "tail" }] }),
+      ),
+    );
+    // The target lands before that frame runs.
+    targetLoaded = true;
+    await act(async () =>
+      root.render(
+        React.createElement(RaceHarness, {
+          messages: [{ id: "selected" }, { id: "tail" }],
+        }),
+      ),
+    );
+    await act(async () => {
+      for (const [id, callback] of [...frames]) {
+        frames.delete(id);
+        callback();
+      }
+    });
+
+    assert.equal(writes.at(-1), "target", JSON.stringify(writes));
+  } finally {
+    await act(async () => root.unmount());
+    globalThis.requestAnimationFrame = previousRaf;
+    globalThis.cancelAnimationFrame = previousCancelRaf;
+  }
+});
