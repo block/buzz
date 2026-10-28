@@ -222,6 +222,52 @@ test("the real stall path stamps liveUntil at the pre-sleep inbound frame", asyn
   );
 });
 
+// After a long pause (timers suspended) the native layer's terminal notice can
+// be dequeued before the overdue idle tick. It is not proof the socket was
+// alive, so it must not refresh the liveness clock that bounds `liveUntil`.
+for (const [name, terminal] of [
+  ["Close 1006", { type: "Close", data: { code: 1006, reason: "abnormal" } }],
+  ["Close without a frame", { type: "Close", data: null }],
+  ["Error", { type: "Error", data: "connection reset" }],
+]) {
+  test(`${name} after a long pause does not count as liveness`, async () => {
+    now = 2_000_000;
+    const { client, ids } = await liveClient([quiet]);
+    client.stallWatchdog.start();
+    now = 2_030_000;
+    await deliver(client, ["NOTICE", "hello"]); // last real relay frame
+    now = 2_030_000 + 3_600_000; // an hour asleep; the idle tick has not run
+    await client.handleWsMessage(terminal, client.connectionGeneration);
+    assert.equal(client.subscriptions.get(ids[0]).liveUntil, 2_030);
+    window.clearTimeout(client.reconnectTimeout);
+    client.reconnectTimeout = null;
+
+    const earlyInGap = 2_030 + 120;
+    client.wsId = 8;
+    writes.length = 0;
+    await client.replayLiveSubscriptions();
+    const { since } = writes[0].frame[2];
+    assert.ok(
+      earlyInGap >= since,
+      `message at ${earlyInGap} must satisfy REQ since ${since}`,
+    );
+  });
+}
+
+test("a peer Ping is liveness; the close after it is not", async () => {
+  now = 2_000_000;
+  const { client, ids } = await liveClient([quiet]);
+  client.stallWatchdog.start();
+  now = 2_060_000;
+  await client.handleWsMessage(
+    { type: "Ping", data: [] },
+    client.connectionGeneration,
+  );
+  now = 2_060_000 + 3_600_000;
+  await close(client, 1006);
+  assert.equal(client.subscriptions.get(ids[0]).liveUntil, 2_060);
+});
+
 for (const code of [1012, 1001]) {
   test(`close ${code} spreads the first reconnect over [0, 10s] and keeps the backoff escalated`, async () => {
     const { client } = await liveClient([quiet]);

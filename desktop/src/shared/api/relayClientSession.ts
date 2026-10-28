@@ -866,7 +866,6 @@ export class RelayClient {
 
   private async handleWsMessage(message: unknown, generation: number) {
     if (generation !== this.connectionGeneration) return;
-    this.stallWatchdog.recordInbound();
 
     if (isWebSocketClose(message)) {
       this.resetConnection(new Error("Relay connection closed."), {
@@ -878,6 +877,11 @@ export class RelayClient {
       this.resetConnection(new Error("Relay connection errored."));
       return;
     }
+    // Only frames the peer sent count as liveness (Text, Binary, Ping, Pong).
+    // Close and Error are the native layer's terminal notices, delivered
+    // whenever it noticed the socket was gone, so they must not refresh the
+    // idle clock that bounds `liveUntil`.
+    this.stallWatchdog.recordInbound();
 
     const payload = getTextPayload(message);
     if (!payload) {
