@@ -53,6 +53,11 @@ export class RelayStallWatchdog {
     this.lastInboundAt = 0;
   }
 
+  /** Time of the last inbound frame, or 0 when the watchdog is not running. */
+  lastInboundAtMs(): number {
+    return this.lastInboundAt;
+  }
+
   /** Record any inbound WS frame as proof the socket is still alive. */
   recordInbound(): void {
     if (this.intervalHandle === null) {

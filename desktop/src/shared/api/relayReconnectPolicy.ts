@@ -21,6 +21,11 @@
  *    subscription, no `keepAliveRequested` from `preconnect()` → don't
  *    keep an idle socket.
  */
+import {
+  RECONNECT_BASE_DELAY_MS,
+  RECONNECT_MAX_DELAY_MS,
+} from "@/shared/api/relayClientTimings";
+
 export type RelayReconnectInputs = {
   terminal: boolean;
   hasPendingReconnect: boolean;
@@ -59,6 +64,11 @@ export function isWebSocketClose(
   );
 }
 
+/**
+ * Whether the relay closed the socket because it is going away: 1012 (Service
+ * Restart, sent to every client of a pod during a rolling deploy) or 1001
+ * (Going Away). Both mean "the whole fleet is about to reconnect".
+ */
 export function isServiceRestartClose(message: unknown): boolean {
   if (!isWebSocketClose(message)) return false;
   if (!("data" in message)) return false;
@@ -67,8 +77,64 @@ export function isServiceRestartClose(message: unknown): boolean {
     typeof data === "object" &&
     data !== null &&
     "code" in data &&
-    data.code === 1012
+    (data.code === 1012 || data.code === 1001)
   );
+}
+
+/**
+ * Server-side close drain is spread over ~10s; the first reconnect after a
+ * restart close spreads arrival across the same window ("full jitter").
+ */
+export const SERVICE_RESTART_RECONNECT_SPREAD_MS = 10_000;
+
+/**
+ * Exponential reconnect backoff with jitter.
+ *
+ * - After a service-restart close the first attempt waits a uniform random
+ *   delay in `[0, SERVICE_RESTART_RECONNECT_SPREAD_MS]` instead of resetting to
+ *   the minimum backoff, so a fleet bounced by one deploy does not stampede.
+ * - Otherwise the delay gets symmetric +/-25% jitter, hard-capped at `maxMs`
+ *   (a retry never waits longer than the cap).
+ * - Every attempt, including a spread one, doubles the stored backoff; only
+ *   `reset()` (called after a connection stayed up, or a community switch)
+ *   returns it to the minimum. Merely opening a socket never does.
+ *
+ * `random` is injectable for tests and must return a value in `[0, 1)`.
+ */
+export class RelayReconnectBackoff {
+  private backoffMs: number;
+  private readonly baseMs: number;
+  private readonly maxMs: number;
+  private readonly random: () => number;
+
+  constructor(
+    baseMs = RECONNECT_BASE_DELAY_MS,
+    maxMs = RECONNECT_MAX_DELAY_MS,
+    random = Math.random,
+  ) {
+    this.baseMs = baseMs;
+    this.backoffMs = baseMs;
+    this.maxMs = maxMs;
+    this.random = random;
+  }
+
+  /** Current un-jittered backoff, for diagnostics and tests. */
+  get currentMs(): number {
+    return this.backoffMs;
+  }
+
+  reset(): void {
+    this.backoffMs = this.baseMs;
+  }
+
+  /** Delay before the next attempt; advances the backoff. */
+  next(serviceRestart = false): number {
+    const delay = serviceRestart
+      ? this.random() * SERVICE_RESTART_RECONNECT_SPREAD_MS
+      : Math.min(this.backoffMs * (0.75 + this.random() * 0.5), this.maxMs);
+    this.backoffMs = Math.min(this.backoffMs * 2, this.maxMs);
+    return delay;
+  }
 }
 
 /** Whether a WS-layer message is the plugin's `Error` frame. */

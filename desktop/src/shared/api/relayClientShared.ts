@@ -80,6 +80,13 @@ type LiveSubscription = {
   /** Release readiness/cancellation listeners when this entry is retired. */
   onRemoved?: () => void;
   lastSeenCreatedAt?: number;
+  /** Connection generation on which this subscription last reached EOSE. */
+  eoseGeneration?: number;
+  /**
+   * Unix seconds up to which this subscription was provably live: stamped when
+   * a connection that delivered its EOSE closes. See `relayResumeCursor.ts`.
+   */
+  liveUntil?: number;
   /**
    * Lower bound of a reconnect backfill window that has not yet completed.
    *
@@ -97,6 +104,11 @@ type LiveSubscription = {
     seenEventIds: Set<string>;
     liveEose: boolean;
     repairDone: boolean;
+    /**
+     * Wakes the repair worker waiting for the restored live REQ's EOSE: on
+     * EOSE, or when a newer replay supersedes this one.
+     */
+    liveEoseWaiter?: () => void;
   };
   closedRetryAttempt?: number;
   closedRetryTimeout?: number;
