@@ -795,6 +795,9 @@ async fn delayed_eose_of_a_superseded_req_keeps_the_membership_overflow_floor() 
 enum MockFrame {
     Text(Value),
     Pong,
+    /// The agent's own keepalive Ping. tungstenite queues an auto-Pong for it,
+    /// which is only written out by the mock's next write.
+    Ping,
 }
 
 enum MockCtl {
@@ -856,6 +859,9 @@ async fn mock_relay() -> (String, mpsc::UnboundedReceiver<MockConn>) {
                             Some(Ok(Message::Pong(_))) => {
                                 let _ = frames_tx.send(MockFrame::Pong);
                             }
+                            Some(Ok(Message::Ping(_))) => {
+                                let _ = frames_tx.send(MockFrame::Ping);
+                            }
                             Some(Ok(_)) => {}
                             _ => return,
                         },
@@ -904,6 +910,26 @@ async fn next_req(conn: &mut MockConn) -> Value {
             if v[0] == "REQ" {
                 return v;
             }
+        }
+    }
+}
+
+/// Waits until `reqs` REQs and the agent's keepalive Ping have all reached the
+/// mock. The keepalive interval ticks immediately on start, so the relay owes
+/// the agent an auto-Pong; once the mock has read that Ping, its next scripted
+/// write flushes the Pong ahead of itself. Without this the Pong can arrive
+/// after the test moves the clock and be stamped as a frame from the future.
+async fn next_reqs_and_keepalive(conn: &mut MockConn, reqs: usize) {
+    let (mut seen_reqs, mut seen_ping) = (0, false);
+    while seen_reqs < reqs || !seen_ping {
+        let frame = timeout(Duration::from_secs(5), conn.frames.recv())
+            .await
+            .expect("timed out waiting for REQs and the keepalive Ping")
+            .expect("mock connection closed");
+        match frame {
+            MockFrame::Text(v) if v[0] == "REQ" => seen_reqs += 1,
+            MockFrame::Ping => seen_ping = true,
+            _ => {}
         }
     }
 }
@@ -968,8 +994,7 @@ async fn resume_after_an_hour_of_silence(loss: MockCtl) {
         .send(RelayCommand::SubscribeMembership)
         .await
         .unwrap();
-    next_req(&mut conn0).await;
-    next_req(&mut conn0).await;
+    next_reqs_and_keepalive(&mut conn0, 2).await;
 
     for sub in [channel_sub_id(channel), MEMBERSHIP_NOTIF_SUB_ID.to_owned()] {
         conn0.ctl.send(MockCtl::Send(json!(["EOSE", sub]))).unwrap();
