@@ -1015,9 +1015,10 @@ async fn resume_after_an_hour_of_silence(loss: MockCtl) {
     let mention_in_gap = T0 + 600;
     // The throwaway subscription is replayed too; only the two that reached
     // EOSE are checked.
-    let mut pending: HashSet<String> = [channel_sub_id(channel), MEMBERSHIP_NOTIF_SUB_ID.to_owned()]
-        .into_iter()
-        .collect();
+    let mut pending: HashSet<String> =
+        [channel_sub_id(channel), MEMBERSHIP_NOTIF_SUB_ID.to_owned()]
+            .into_iter()
+            .collect();
     while !pending.is_empty() {
         let req = next_req(&mut conn1).await;
         if !pending.remove(req[1].as_str().unwrap()) {
