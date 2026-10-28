@@ -75,6 +75,17 @@ void main() {
         actions.openDm(pubkeys: [_peer], waitForChannelList: false),
         throwsStateError,
       );
+      expect(session.visibilityReads, greaterThan(0));
+      // A newly created DM cannot be in an older snapshot, so it skips that
+      // read and cannot fail on it after the relay created the DM.
+      session.created = true;
+      final reads = session.visibilityReads;
+      expect(
+        (await actions.openDm(pubkeys: [_peer], waitForChannelList: false)).id,
+        _dmId,
+      );
+      expect(session.visibilityReads, reads);
+      session.created = false;
       session.hidden = {};
 
       // Hidden-DM resurfacing keeps waiting for the list that clears its
@@ -106,6 +117,8 @@ class _DmSession extends RelaySessionNotifier {
   final String self;
   bool member = true;
   Set<String> hidden = {};
+  bool created = false;
+  int visibilityReads = 0;
   void Function()? onRead;
   final published = <NostrEvent>[];
   Completer<List<NostrEvent>> stalledList = Completer();
@@ -141,7 +154,8 @@ class _DmSession extends RelaySessionNotifier {
       createdAt: event.createdAt,
       kind: event.kind,
       tags: event.tags,
-      content: 'response:${jsonEncode({'channel_id': _dmId})}',
+      content:
+          'response:${jsonEncode({'channel_id': _dmId, 'created': created})}',
       sig: event.sig,
     );
   }
@@ -152,6 +166,7 @@ class _DmSession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (filter.kinds.single == EventKind.dmVisibility) {
+      visibilityReads++;
       expect(filter.tags, {
         '#p': [self],
       });

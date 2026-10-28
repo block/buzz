@@ -148,8 +148,9 @@ class ChannelActions {
     // Reopening a hidden DM unhides it, but the relay still accepts the open
     // when that visibility snapshot fails. Check it here so the failure shows
     // and Done can retry, rather than leaving the DM hidden from the sidebar.
+    // A newly created DM cannot be in an older snapshot.
     final pk = _currentPubkey;
-    final hiddenRequest = pk == null
+    final hiddenRequest = pk == null || response?['created'] == true
         ? Future.value(const <NostrEvent>[])
         : _session.fetchHistory(NostrFilters.hiddenDms(pk));
     final channelRequest = findJoinedChannel(channelId);
