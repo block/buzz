@@ -199,6 +199,9 @@ pub async fn mint_relay_invite(
 
 /// Lock invitation admission against community restriction and owner writes.
 /// Call before reading restrictions or locking an invite row, and hold to commit.
+/// A joined claim holds it through its NIP-43 membership snapshot, so mint, ban,
+/// timeout and first owner link wait for that snapshot, which grows with the
+/// member count. Claims reject unknown codes before taking it.
 pub(crate) async fn lock_admission(
     tx: &mut sqlx::PgConnection,
     community: CommunityId,
@@ -420,6 +423,21 @@ pub async fn claim_relay_invite_with_owner(
     verified_owner: Option<&str>,
     relay_keypair: &nostr::Keys,
 ) -> Result<MembershipWrite<InviteClaimResult>> {
+    // Unknown codes are free to forge, so reject them before taking the
+    // community-wide admission lock; the locked read below stays authoritative.
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM relay_invites \
+         WHERE community_id = $1 AND token_hash = $2)",
+    )
+    .bind(community.as_uuid())
+    .bind(token_hash)
+    .fetch_one(pool)
+    .await?;
+    if !known {
+        log_claim_outcome(community, None, "invalid", None, None);
+        return Ok(MembershipWrite::unchanged(ClaimOutcome::Invalid.into()));
+    }
+
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,

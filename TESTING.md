@@ -219,6 +219,9 @@ keep it closed until it is active and repaired, then recheck zero before admitti
 traffic. After repair, timeouts/mutes only block temporarily; active bans still
 revoke permanently. A rollback to code that ignores `revoked_at` requires
 invitation admission paused, using the same traffic/writer controls if needed.
+It also requires `BUZZ_AUTO_MIGRATE` off: with auto-migration on (the Helm
+default), the old binary fails at startup with SQLx `VersionMissing(74)`. See
+[docs/database.md](docs/database.md) Rule 5.
 Legacy owner attribution uses the agent's currently recorded
 `agent_owner_pubkey`; deleting an owner user row out of band clears that link
 through its foreign key, so a later repair cannot recover the former

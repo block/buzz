@@ -357,3 +357,22 @@ async fn linked_authorization_owner_and_missing_agent_do_not_wait_on_admission()
     ));
     claim.rollback().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unknown_claim_code_is_rejected_without_waiting_on_admission() {
+    let (pool, community, _, claimant) = fixture().await;
+    let mut held = pool.begin().await.unwrap();
+    lock_admission(&mut held, community).await.unwrap();
+    // A forged code must not queue behind admission; if the claim takes the
+    // lock before looking the code up, this bounded call cannot finish.
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        claim_relay_invite_outcome(&pool, community, &[0xAB; 32], &claimant, None),
+    )
+    .await
+    .expect("unknown code waited on the admission lock")
+    .unwrap();
+    assert_eq!(outcome, ClaimOutcome::Invalid);
+    held.rollback().await.unwrap();
+}

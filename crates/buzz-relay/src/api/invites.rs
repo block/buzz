@@ -330,7 +330,7 @@ async fn mint_invite_checked(
             super::relay_members::OwnerLink::Unavailable => {
                 return api_error(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "restriction lookup unavailable",
+                    crate::handlers::auth::OWNER_LINK_ERROR,
                 )
                 .into_response();
             }
@@ -517,6 +517,9 @@ pub async fn claim_invite(
             buzz_db::relay_invite::ClaimOutcome::Exhausted => {
                 Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"))
             }
+            // Deliberately indistinguishable, even for an issuer timeout whose
+            // link works again later: a claim never reveals the issuer's
+            // moderation state.
             buzz_db::relay_invite::ClaimOutcome::Revoked
             | buzz_db::relay_invite::ClaimOutcome::IssuerRestricted => {
                 Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))

@@ -351,7 +351,7 @@ pub(super) mod postgres_tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             read_json(response).await["error"],
-            "restriction lookup unavailable"
+            crate::handlers::auth::OWNER_LINK_ERROR
         );
         let after: i64 = sqlx::query_scalar("SELECT count(*) FROM relay_invites")
             .fetch_one(state.db.pool())
