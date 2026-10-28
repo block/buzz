@@ -2070,9 +2070,14 @@ async fn run_background_task_with_state(
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
                            Some(Ok(msg)) => {
-                               // Any frame, Pong included, proves the socket was
-                               // alive now; it bounds `live_until` on close.
-                               state.last_inbound_secs = Some((state.now_secs)());
+                               // A frame that proves the relay was live now
+                               // (Text, Binary, Ping, Pong) bounds `live_until`
+                               // on close. A Close frame is only transport
+                               // teardown: it may have sat in the kernel buffer
+                               // across a sleep and says nothing about liveness.
+                               if !matches!(msg, Message::Close(_)) {
+                                   state.last_inbound_secs = Some((state.now_secs)());
+                               }
                                if matches!(msg, Message::Pong(_)) {
                                    last_pong = Instant::now();
                                    ping_sent = false;

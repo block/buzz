@@ -801,6 +801,8 @@ enum MockCtl {
     Send(Value),
     Ping,
     Drop,
+    /// Send a Close frame with this code, then hang up.
+    Close(u16),
 }
 
 struct MockConn {
@@ -864,6 +866,14 @@ async fn mock_relay() -> (String, mpsc::UnboundedReceiver<MockConn>) {
                             Some(MockCtl::Ping) => {
                                 let _ = ws.send(Message::Ping(vec![1].into())).await;
                             }
+                            Some(MockCtl::Close(code)) => {
+                                let frame = CloseFrame {
+                                    code: CloseCode::from(code),
+                                    reason: "".into(),
+                                };
+                                let _ = ws.send(Message::Close(Some(frame))).await;
+                                return;
+                            }
                             Some(MockCtl::Drop) | None => return,
                         },
                     }
@@ -899,6 +909,18 @@ async fn next_req(conn: &mut MockConn) -> Value {
 /// last frame the relay actually sent, not from the wake time.
 #[tokio::test]
 async fn silent_socket_death_resumes_from_last_inbound_frame_not_detection_time() {
+    resume_after_an_hour_of_silence(MockCtl::Drop).await;
+}
+
+/// Same outage, but the relay's Close frame (rolling restart) sat in the
+/// kernel buffer across the sleep and is the first thing read on wake. A Close
+/// frame is not proof of liveness, so it must not move the stamp to wake time.
+#[tokio::test]
+async fn close_frame_read_after_a_sleep_does_not_stamp_wake_time() {
+    resume_after_an_hour_of_silence(MockCtl::Close(1012)).await;
+}
+
+async fn resume_after_an_hour_of_silence(loss: MockCtl) {
     const T0: u64 = 1_700_000_000;
     FAKE_NOW.store(T0, Ordering::SeqCst);
     let (url, mut conns) = mock_relay().await;
@@ -962,8 +984,9 @@ async fn silent_socket_death_resumes_from_last_inbound_frame_not_detection_time(
 
     // One hour passes with nothing from the relay; then the loss is noticed.
     FAKE_NOW.store(T0 + 3_600, Ordering::SeqCst);
-    conn0.ctl.send(MockCtl::Drop).unwrap();
-    let mut conn1 = timeout(Duration::from_secs(10), conns.recv())
+    conn0.ctl.send(loss).unwrap();
+    // A 1012 close waits a random [0, 10s] before the first reconnect attempt.
+    let mut conn1 = timeout(Duration::from_secs(20), conns.recv())
         .await
         .expect("socket owner reconnected")
         .unwrap();
