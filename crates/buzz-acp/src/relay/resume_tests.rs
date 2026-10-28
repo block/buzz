@@ -885,6 +885,10 @@ async fn mock_relay() -> (String, mpsc::UnboundedReceiver<MockConn>) {
 }
 
 static FAKE_NOW: AtomicU64 = AtomicU64::new(0);
+/// `FAKE_NOW` is process-global, so every test that moves it holds this lock
+/// for its whole run; otherwise parallel threads corrupt each other's clock.
+/// A tokio mutex: safe to hold across `.await` and not poisoned by a panic.
+static FAKE_CLOCK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn fake_now() -> u64 {
     FAKE_NOW.load(Ordering::SeqCst)
@@ -921,6 +925,7 @@ async fn close_frame_read_after_a_sleep_does_not_stamp_wake_time() {
 }
 
 async fn resume_after_an_hour_of_silence(loss: MockCtl) {
+    let _clock = FAKE_CLOCK_LOCK.lock().await;
     const T0: u64 = 1_700_000_000;
     FAKE_NOW.store(T0, Ordering::SeqCst);
     let (url, mut conns) = mock_relay().await;
