@@ -900,13 +900,16 @@ class ThreadDetailPage extends HookConsumerWidget {
       return null;
     }, [settledImeBottomInset.value]);
 
-    final channel = ref.watch(
-      channelsProvider.select(
-        (channels) => channels.value
-            ?.where((candidate) => candidate.id == channelId)
-            .firstOrNull,
-      ),
-    );
+    final channel =
+        ref.watch(
+          channelsProvider.select(
+            (channels) => channels.value
+                ?.where((candidate) => candidate.id == channelId)
+                .firstOrNull,
+          ),
+        ) ??
+        // A DM opened ahead of a reloading list.
+        ref.read(channelsProvider.notifier).channelById(channelId);
     final channelNamesMap = ref.watch(channelIdsByNameProvider);
 
     return FrostedScaffold(

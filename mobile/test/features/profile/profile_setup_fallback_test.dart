@@ -1,0 +1,40 @@
+import 'package:buzz/features/profile/profile_setup_page.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import '../../helpers/hosted_communities_fixture.dart';
+import '../../helpers/widget_helpers.dart';
+
+void main() {
+  testWidgets('failed fallback save can continue without saving', (
+    tester,
+  ) async {
+    FlutterSecureStorage.setMockInitialValues({});
+    final fixture = HostedCommunitiesFixture();
+    await fixture.initialize(widget: true);
+    addTearDown(fixture.dispose);
+    var attempts = 0;
+    final pending = fixture.flow.requestProfile((_) async {
+      attempts++;
+      throw StateError('Relay unavailable');
+    });
+    await tester.pumpWidget(
+      WidgetHelpers.testable(child: ProfileSetupPage(flow: fixture.flow)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Not now'), findsNothing);
+    await tester.enterText(find.byType(TextField), 'Kenny');
+    await tester.pump();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(attempts, 1);
+    expect(find.text('Not now'), findsOneWidget);
+    await tester.tap(find.text('Not now'));
+    await tester.pumpAndSettle();
+    await pending;
+    expect(attempts, 1);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+}

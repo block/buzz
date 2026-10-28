@@ -31,6 +31,9 @@ pub(crate) enum NipFiUpgradeOutcome {
     /// its community, whose deadline enforce would re-check after the tenant
     /// lookup.
     Observed(VerifiedAssertion, ResolvedCommunity),
+    /// Shadow: enforce would refuse the upgrade. Its counted would-deny's
+    /// line waits for the connection's first verified AUTH key.
+    WouldDeny(crate::nip_fi_shadow::PendingLine),
     /// Enforcement active but assertion absent/rejected — return the HTTP
     /// denial response.
     Denied(Response<Body>),
@@ -39,10 +42,12 @@ pub(crate) enum NipFiUpgradeOutcome {
 /// The enforced and the shadow-observed assertion slots of an admitted upgrade,
 /// and the deadline to re-check immediately before accepting the socket. The
 /// observed assertion carries its own community, for [`observe_deadline`].
+/// Last is a shadow upgrade would-deny's unwritten line.
 pub(crate) type UpgradeAssertions = (
     Option<VerifiedAssertion>,
     Option<(VerifiedAssertion, ResolvedCommunity)>,
     AdmissionDeadline,
+    Option<crate::nip_fi_shadow::PendingLine>,
 );
 
 /// Shadow's re-check at the point enforce re-checks its deadline: a binding
@@ -58,7 +63,12 @@ pub(crate) fn observe_deadline(
     match community.deadline().check() {
         Ok(()) => Some((assertion, label)),
         Err(class) => {
-            let verdict = Err((crate::nip_fi_shadow::Stage::Deadline, class));
+            let verdict = Err(crate::nip_fi_shadow::WouldDeny::new(
+                crate::nip_fi_shadow::Stage::Deadline,
+                class,
+                crate::nip_fi_shadow::STALE,
+            )
+            .by(assertion.asserted_key()));
             crate::nip_fi_shadow::record_for(route.shadow_label(), label, verdict);
             None
         }
@@ -69,13 +79,15 @@ impl NipFiUpgradeOutcome {
     /// The enforced and the shadow-observed assertion, or the denial response.
     pub(crate) fn into_assertions(self) -> Result<UpgradeAssertions, Box<Response<Body>>> {
         match self {
-            Self::NotRequired => Ok((None, None, AdmissionDeadline::default())),
-            Self::Admitted(assertion, deadline) => Ok((Some(assertion), None, deadline)),
+            Self::NotRequired => Ok((None, None, AdmissionDeadline::default(), None)),
+            Self::Admitted(assertion, deadline) => Ok((Some(assertion), None, deadline, None)),
             Self::Observed(assertion, community) => Ok((
                 None,
                 Some((assertion, community)),
                 AdmissionDeadline::default(),
+                None,
             )),
+            Self::WouldDeny(line) => Ok((None, None, AdmissionDeadline::default(), Some(line))),
             Self::Denied(response) => Err(Box::new(response)),
         }
     }
@@ -108,23 +120,26 @@ pub(crate) async fn check_nip_fi_at_upgrade<'a>(
         if mode.observes_only() {
             let community = communities.resolve(headers).await;
             let verdict = match &community {
-                Err(class) => Err((crate::nip_fi_shadow::Stage::Community, *class)),
-                Ok(binding) => {
-                    evaluate_attached_assertion(headers, binding, verifier).map_err(|rejection| {
-                        (
-                            crate::nip_fi_shadow::Stage::Assertion,
-                            rejection.denial_class(),
-                        )
-                    })
-                }
+                Err(class) => Err(crate::nip_fi_shadow::WouldDeny::new(
+                    crate::nip_fi_shadow::Stage::Community,
+                    *class,
+                    crate::nip_fi_shadow::UNRESOLVED,
+                )),
+                Ok(binding) => evaluate_attached_assertion(headers, binding, verifier)
+                    .map_err(crate::nip_fi_shadow::WouldDeny::assertion),
             };
             match (verdict, community) {
                 (Ok(assertion), Ok(community)) => {
                     return NipFiUpgradeOutcome::Observed(assertion, community)
                 }
                 (verdict, community) => {
+                    let label = crate::nip_fi_shadow::label(&community);
                     let verdict = verdict.map(drop);
-                    crate::nip_fi_shadow::record(route.shadow_label(), &community, verdict);
+                    if let Some(line) =
+                        crate::nip_fi_shadow::record_pending(route.shadow_label(), label, verdict)
+                    {
+                        return NipFiUpgradeOutcome::WouldDeny(line);
+                    }
                 }
             }
         }
@@ -771,11 +786,11 @@ mod tests {
             .now_or_never()
             .expect("env resolution never waits")
         };
-        let Ok((None, Some(_), _)) = check().into_assertions() else {
+        let Ok((None, Some(_), _, None)) = check().into_assertions() else {
             panic!("a passing shadow assertion is observed, never enforced");
         };
         assert_eq!(verifier.calls(), 1, "shadow must evaluate the assertion");
-        let Ok((None, None, _)) = check_nip_fi_at_upgrade(
+        let Ok((None, None, _, Some(_))) = check_nip_fi_at_upgrade(
             ROOT,
             &host_headers(),
             &communities(),
@@ -811,7 +826,7 @@ mod tests {
                     )
                     .now_or_never()
                     .expect("env resolution never waits");
-                    assert!(matches!(outcome, NipFiUpgradeOutcome::NotRequired));
+                    assert!(matches!(outcome, NipFiUpgradeOutcome::WouldDeny(_)));
                 }
             }
         });

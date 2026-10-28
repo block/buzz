@@ -41,14 +41,8 @@ class EmojiAvatarTile extends StatelessWidget {
         key: ValueKey('emoji-avatar-$tileId'),
         borderRadius: BorderRadius.circular(Radii.sm),
         onTap: onTap,
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: isSelected ? context.controlSurface : Colors.transparent,
-            borderRadius: BorderRadius.circular(Radii.sm),
-          ),
-          child: Center(
-            child: NativeEmojiGlyph(emoji: emoji, size: 30, opticalBoxSize: 30),
-          ),
+        child: Center(
+          child: NativeEmojiGlyph(emoji: emoji, size: 40, opticalBoxSize: 40),
         ),
       ),
     ),

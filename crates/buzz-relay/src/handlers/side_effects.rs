@@ -335,9 +335,9 @@ pub async fn handle_side_effects(
     match kind {
         0 => handle_kind0_profile(tenant, event, state).await,
         5 => handle_standard_deletion_event(tenant, event, state).await,
-        // kind:9000 belongs to the put-user path in ingest, which reports
-        // each person's result.
-        9000 => Err(anyhow::anyhow!("kind:9000 requires apply_put_user")),
+        // kind:9000 belongs to the atomic put-user path in ingest, which
+        // reports each person's result.
+        9000 => Err(anyhow::anyhow!("kind:9000 requires persist_put_user")),
         9001 => handle_remove_user(tenant, event, state).await,
         // kind:9002 belongs to the atomic persistence path in ingest.
         9002 => Err(anyhow::anyhow!("kind:9002 requires atomic persistence")),
@@ -597,7 +597,7 @@ pub async fn validate_admin_event(
 
     match kind {
         // Ingest validates kind:9000 with `validate_put_user`, which keeps
-        // each person's result for `apply_put_user`.
+        // each person's result for `persist_put_user`.
         9000 => Err(anyhow::anyhow!("kind:9000 requires validate_put_user")),
         9001 => {
             // REMOVE_USER: self-remove allowed unless actor is the last owner; removing others requires owner/admin
@@ -1760,17 +1760,27 @@ impl PutUserReport {
     }
 }
 
-/// Apply a stored kind:9000 and return its OK message. An event naming
-/// several people reports each person's result; one naming a single person
-/// keeps the empty message a single add has always had. `put_member` decides
-/// every admission rule again under the channel's membership lock, so a person
-/// validation allowed can still be refused here.
-pub(crate) async fn apply_put_user(
+/// Store a validated kind:9000 and apply it, returning the stored event,
+/// whether it was new, and its OK message.
+///
+/// One transaction stores the event and writes every allowed person. If it
+/// fails, nothing is stored and the client is told, so it can resend the same
+/// event. `put_members_with_event` decides every admission rule again under
+/// the channel's membership lock, so a person validation allowed can still be
+/// refused there; when everyone is refused, nothing is stored and the error is
+/// a [`buzz_db::DbError::AccessDenied`] with the same text validation gives.
+///
+/// An event naming several people reports each person's result; one naming a
+/// single person keeps the empty message a single add has always had. Live
+/// effects (cache invalidation, notices, discovery events) run only after the
+/// commit.
+pub(crate) async fn persist_put_user(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
     plan: PutUserPlan,
-) -> String {
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> anyhow::Result<(buzz_core::StoredEvent, bool, String)> {
     let channel_id = plan.channel_id;
     let batch = plan.targets.len() > 1;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
@@ -1790,21 +1800,30 @@ pub(crate) async fn apply_put_user(
             requested: target.role,
         })
         .collect();
-    let results = match state
+    let (stored, results) = match state
         .db
-        .put_members(tenant.community(), channel_id, &puts, Some(&actor_bytes))
-        .await
+        .put_members_with_event(tenant.community(), channel_id, event, &puts, thread_meta)
+        .await?
     {
-        Ok(results) => results,
-        // Nothing was written.
-        Err(e) => {
-            error!(channel = %channel_id, error = %e, "NIP-29 PUT_USER write failed");
-            for target in &allowed {
-                report.reject(&target.pubkey, "error: membership write failed".into());
+        buzz_db::channel_members::MemberPutEventWrite::Applied { stored, results } => {
+            (stored, results)
+        }
+        buzz_db::channel_members::MemberPutEventWrite::Duplicate(stored) => {
+            return Ok((stored, false, String::new()));
+        }
+        buzz_db::channel_members::MemberPutEventWrite::Refused(errors) => {
+            for (target, error) in allowed.iter().zip(errors) {
+                report.reject(&target.pubkey, put_refusal_reason(error));
             }
-            Vec::new()
+            let message = match report.rejected.as_slice() {
+                // One person keeps the single-add error text.
+                [(reason, _)] if !batch => reason.clone(),
+                _ => report.message(),
+            };
+            return Err(buzz_db::DbError::AccessDenied(message).into());
         }
     };
+
     // Every person's notification is tagged with the channel's type: read it
     // once. No channel row means no type to tag, so no notifications.
     let channel_type = if results.iter().any(Result::is_ok) {
@@ -1830,13 +1849,8 @@ pub(crate) async fn apply_put_user(
     for (target, result) in allowed.iter().zip(results) {
         let put = match result {
             Ok(put) => put,
-            Err(buzz_db::DbError::AccessDenied(reason)) => {
-                report.reject(&target.pubkey, reason);
-                continue;
-            }
-            Err(e) => {
-                error!(channel = %channel_id, error = %e, "NIP-29 PUT_USER write failed");
-                report.reject(&target.pubkey, "error: membership write failed".into());
+            Err(error) => {
+                report.reject(&target.pubkey, put_refusal_reason(error));
                 continue;
             }
         };
@@ -1901,10 +1915,19 @@ pub(crate) async fn apply_put_user(
         rejected = report.rejected.iter().map(|(_, pubkeys)| pubkeys.len()).sum::<usize>(),
         "NIP-29 PUT_USER processed"
     );
-    if batch {
+    let message = if batch {
         report.message()
     } else {
         String::new()
+    };
+    Ok((stored, true, message))
+}
+
+/// The reported reason a person was refused under the membership lock.
+fn put_refusal_reason(error: buzz_db::DbError) -> String {
+    match error {
+        buzz_db::DbError::AccessDenied(reason) => reason,
+        other => other.to_string(),
     }
 }
 

@@ -78,6 +78,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   List<NostrEvent> _directoryMetas = const [];
   Set<String> _hiddenDmIds = const {};
 
+  /// Channels opened from their own metadata before this list had them, as a
+  /// fast DM open does. The list takes precedence once it has them; a DM's
+  /// participants are fixed, so the opened copy stays valid until then.
+  Map<String, Channel> _openedAhead = const {};
+
   /// Fences directory responses to the relay and identity that requested them.
   late final _ChannelRefreshCoordinator _refreshCoordinator =
       _ChannelRefreshCoordinator.forRef(ref);
@@ -97,6 +102,16 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       Map.unmodifiable(_latestObservedByChannel);
 
   Set<String> get hiddenDmIds => Set.unmodifiable(_hiddenDmIds);
+
+  /// Keeps [channel], opened before this list has it, findable by
+  /// [channelById] while the list reloads.
+  void rememberOpened(Channel channel) =>
+      _openedAhead = {..._openedAhead, channel.id: channel};
+
+  /// [channelId] from the list, else as it was opened ahead of the list.
+  Channel? channelById(String channelId) =>
+      state.value?.where((channel) => channel.id == channelId).firstOrNull ??
+      _openedAhead[channelId];
 
   bool get hasLoaded => _hasLoaded;
 
@@ -161,6 +176,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _memberSnapshotsByChannelId = const {};
       _directoryMetas = const [];
       _hiddenDmIds = const {};
+      _openedAhead = const {};
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
       _refreshCoordinator.retireInFlight();
@@ -1020,6 +1036,28 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         );
       }
     }
+  }
+
+  /// Reads [channelId]'s kind:39000 metadata so a link can open a channel
+  /// that is not in the loaded list.
+  ///
+  /// The loaded list holds member channels and, after Browse, the open
+  /// directory. A link can name an open channel outside both. The relay
+  /// filters the read by the caller's access, so call this only on a
+  /// connected session. Like directory discovery, a private channel or DM
+  /// opens only from the member list. Returns null when no channel qualifies.
+  Future<Channel?> fetchOpenChannel(String channelId) async {
+    final metas = await ref
+        .read(relaySessionProvider.notifier)
+        .fetchHistory(NostrFilters.channelMetadata([channelId]));
+    final latest = _latestChannelEvents(
+      metas,
+      kind: 39000,
+    ).where((event) => event.getTagValue('d') == channelId).firstOrNull;
+    if (latest == null) return null;
+    final data = ChannelData.fromEvent(latest);
+    if (data.visibility == 'private' || data.channelType == 'dm') return null;
+    return _channelFromMeta(latest, data, isMember: false);
   }
 
   /// Loads the directory when Browse channels opens after startup or an error.

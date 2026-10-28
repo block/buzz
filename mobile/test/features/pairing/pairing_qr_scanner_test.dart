@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:buzz/features/pairing/pairing_qr_scanner.dart';
+import 'package:buzz/features/pairing/pairing_page.dart';
+import '../../helpers/widget_helpers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -136,6 +138,8 @@ void main() {
       await tester.binding.setSurfaceSize(const Size(393, 852));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
+      final cameraStart = Completer<void>();
+      fakeScannerPlatform.startGate = cameraStart.future;
       var scannerClosed = false;
       await tester.pumpWidget(
         MaterialApp(
@@ -164,6 +168,22 @@ void main() {
         const ValueKey('dynamic-island-qr-scanner-portal'),
       );
       expect(tester.getRect(portal), const Rect.fromLTWH(136.5, 11, 120, 36));
+      final prompt = find
+          .ancestor(
+            of: find.text('Scan a QR code'),
+            matching: find.byType(Opacity),
+          )
+          .first;
+      final camera = find
+          .ancestor(
+            of: find.byType(MobileScanner),
+            matching: find.byType(Opacity),
+          )
+          .first;
+      expect(tester.widget<Opacity>(prompt).opacity, 0);
+      expect(find.byType(MobileScanner), findsOneWidget);
+      await tester.pump();
+      expect(fakeScannerPlatform.startCalls, 1);
       expect(
         tester.widget<ClipRSuperellipse>(portal).borderRadius,
         BorderRadius.circular(18),
@@ -173,10 +193,19 @@ void main() {
         Clip.antiAlias,
       );
 
-      await tester.pump(const Duration(milliseconds: 16));
+      await tester.pump(const Duration(milliseconds: 12));
       final firstOpeningFrame = tester.getRect(portal);
-      expect(firstOpeningFrame.height, inExclusiveRange(36, 50));
-      await tester.pump(const Duration(milliseconds: 214));
+      expect(firstOpeningFrame.height, inExclusiveRange(36, 363));
+      await tester.pump(const Duration(milliseconds: 218));
+      expect(
+        tester.widget<Opacity>(prompt).opacity,
+        tester.widget<Opacity>(camera).opacity,
+      );
+      expect(tester.widget<Opacity>(prompt).opacity, inExclusiveRange(0, 1));
+      expect(
+        tester.getRect(portal).height,
+        greaterThan(firstOpeningFrame.height),
+      );
       final openingRadius =
           (tester.widget<ClipRSuperellipse>(portal).borderRadius
                   as BorderRadius)
@@ -185,6 +214,21 @@ void main() {
       expect(openingRadius, inExclusiveRange(18, 40));
 
       await tester.pumpAndSettle();
+      final readyFade = find.byKey(const ValueKey('qr-camera-ready-fade'));
+      final previewFade = find
+          .descendant(of: readyFade, matching: find.byType(FadeTransition))
+          .first;
+      expect(tester.widget<FadeTransition>(previewFade).opacity.value, 0);
+      cameraStart.complete();
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 60));
+      expect(
+        tester.widget<FadeTransition>(previewFade).opacity.value,
+        inExclusiveRange(0, 1),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.widget<FadeTransition>(previewFade).opacity.value, 1);
       expect(
         tester.widget<ClipRSuperellipse>(portal).borderRadius,
         BorderRadius.circular(40),
@@ -243,6 +287,90 @@ void main() {
   );
 
   testWidgets(
+    'welcome content follows the scanner spring and returns on close',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_qrScannerPlatformChannel, (call) async {
+            return call.method == 'usesDynamicIslandQrScannerPortal'
+                ? true
+                : null;
+          });
+      await tester.binding.setSurfaceSize(const Size(393, 852));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      for (final reduced in [false, true]) {
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            disableAnimations: reduced,
+            child: const PairingPage(
+              connectionLanding: true,
+              showConnectionOptions: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final opacity = find.byKey(const Key('scanner-welcome-opacity'));
+        final scale = find.byKey(const Key('scanner-welcome-scale'));
+        expect(tester.widget<Opacity>(opacity).opacity, 1);
+        await tester.tap(find.text('Scan a QR code').hitTestable());
+        await tester.pump();
+        // Opening must begin without waiting for the welcome double-tap timeout.
+        expect(
+          find.byKey(const ValueKey('dynamic-island-qr-scanner-portal')),
+          findsOneWidget,
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        if (!reduced) {
+          final portal = find.byKey(
+            const ValueKey('dynamic-island-qr-scanner-portal'),
+          );
+          final progress = (tester.getSize(portal).height - 36) / (363 - 36);
+          expect(
+            tester.widget<Opacity>(opacity).opacity,
+            closeTo(1 - progress, 0.001),
+          );
+          expect(
+            tester.widget<Transform>(scale).transform.storage[0],
+            closeTo(1 - 0.04 * progress, 0.001),
+          );
+        }
+        await tester.pumpAndSettle();
+        expect(tester.widget<Opacity>(opacity).opacity, 0);
+        expect(
+          tester.widget<Transform>(scale).transform.storage[0],
+          closeTo(reduced ? 1 : 0.96, 0.001),
+        );
+        expect(
+          find
+              .ancestor(
+                of: find.text('Scan a QR code'),
+                matching: find.byType(FilledButton),
+              )
+              .hitTestable(),
+          findsNothing,
+        );
+        await tester.tapAt(const Offset(196.5, 700));
+        await tester.pumpAndSettle();
+        expect(tester.widget<Opacity>(opacity).opacity, 1);
+        expect(tester.widget<Transform>(scale).transform.storage[0], 1);
+        expect(
+          find
+              .ancestor(
+                of: find.text('Scan a QR code'),
+                matching: find.byType(FilledButton),
+              )
+              .hitTestable(),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      }
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
     'an early dismissal keeps its frame and settles back into the island',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(393, 852));
@@ -263,19 +391,28 @@ void main() {
       );
       await tester.tap(find.text('Open scanner'));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 80));
+      await tester.pump(const Duration(milliseconds: 72));
       final portal = find.byKey(
         const ValueKey('dynamic-island-qr-scanner-portal'),
       );
+      final beforeLastOpeningFrame = tester.getRect(portal);
+      await tester.pump(const Duration(milliseconds: 8));
       final beforeDismissal = tester.getRect(portal);
       await tester.tapAt(const Offset(196.5, 700));
       await tester.pump();
-      expect(tester.getRect(portal), beforeDismissal);
+      expect(
+        tester.getRect(portal),
+        rectMoreOrLessEquals(beforeDismissal, epsilon: 0.00001),
+      );
       // Preserve the outgoing velocity briefly instead of abruptly flipping it.
       await tester.pump(const Duration(milliseconds: 8));
       final afterDismissal = tester.getRect(portal);
       expect(afterDismissal.height, greaterThan(beforeDismissal.height));
-      expect(afterDismissal.height - beforeDismissal.height, lessThan(12));
+      // Reversing decelerates the outgoing motion over an equal frame interval.
+      expect(
+        afterDismissal.height - beforeDismissal.height,
+        lessThan(beforeDismissal.height - beforeLastOpeningFrame.height),
+      );
       await tester.tapAt(const Offset(196.5, 700));
       await tester.pumpAndSettle();
       expect(closeCount, 1);
@@ -345,6 +482,8 @@ class _FakeMobileScannerPlatform extends MobileScannerPlatform {
   final _barcodes = StreamController<BarcodeCapture?>.broadcast();
   var _isDisposed = false;
   var stopCalls = 0;
+  var startCalls = 0;
+  Future<void>? startGate;
 
   @override
   Stream<BarcodeCapture?> get barcodesStream => _barcodes.stream;
@@ -358,6 +497,8 @@ class _FakeMobileScannerPlatform extends MobileScannerPlatform {
 
   @override
   Future<MobileScannerViewAttributes> start(StartOptions startOptions) async {
+    startCalls++;
+    await startGate;
     return const MobileScannerViewAttributes(
       cameraDirection: CameraFacing.back,
       currentTorchMode: TorchState.unavailable,

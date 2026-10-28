@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
+import '../../shared/relay/relay.dart';
 import '../invites/invite_join_provider.dart';
 import '../invites/invite_join_sheet.dart';
 import 'channel.dart';
@@ -45,6 +46,9 @@ class DeepLinkDispatcher extends ConsumerStatefulWidget {
 class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   bool _preparingInvite = false;
   bool _handlingOnboarding = false;
+  bool _resolvingLink = false;
+  bool _lookupInterrupted = false;
+  ProviderSubscription<SessionState>? _session;
 
   @override
   void initState() {
@@ -53,6 +57,18 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
       if (!mounted) return;
       _maybeDispatch(ref.read(pendingDeepLinkProvider));
     });
+  }
+
+  @override
+  void didUpdateWidget(DeepLinkDispatcher oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A link parked while dispatch was off waits for this, not a new event.
+    if (widget.dispatchMessageLinks && !oldWidget.dispatchMessageLinks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      });
+    }
   }
 
   @override
@@ -164,6 +180,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   }
 
   void _dispatchNavigableLink(BuzzDeepLink link) {
+    if (_resolvingLink || !widget.dispatchMessageLinks) return;
     final channelId = switch (link) {
       MessageDeepLink(:final channelId) => channelId,
       ChannelDeepLink(:final channelId) => channelId,
@@ -174,24 +191,86 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     // listener re-attempts once data arrives.
     if (channels == null) return;
 
-    final channel = channels
-        .where((c) => c.id == channelId)
-        .cast<Channel?>()
-        .firstOrNull;
-    if (channel == null) {
+    // Cached channels stay usable while the session reconnects.
+    final listed = channels.where((c) => c.id == channelId).firstOrNull;
+    if (listed != null) {
+      _pushChannel(listed, link);
       ref.read(pendingDeepLinkProvider.notifier).consume();
+      return;
+    }
+    // Keep the link parked; the session listener re-attempts on connect.
+    if (_watchSession().status != SessionStatus.connected) return;
+    unawaited(_fetchAndPush(link, channelId));
+  }
+
+  /// An unlisted channel's lookup needs an authenticated session. A drop
+  /// cancels a running lookup; a connect retries the parked link.
+  SessionState _watchSession() {
+    _session ??= ref.listenManual<SessionState>(relaySessionProvider, (
+      previous,
+      next,
+    ) {
+      if (next.status != SessionStatus.connected) {
+        if (_resolvingLink) _lookupInterrupted = true;
+        return;
+      }
+      if (previous?.status != SessionStatus.connected) {
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      }
+    });
+    return _session!.read();
+  }
+
+  Future<void> _fetchAndPush(BuzzDeepLink link, String channelId) async {
+    _resolvingLink = true;
+    _lookupInterrupted = false;
+    Channel? channel;
+    Object? failure;
+    try {
+      channel = await ref
+          .read(channelsProvider.notifier)
+          .fetchOpenChannel(channelId);
+    } catch (error) {
+      failure = error;
+    } finally {
+      _resolvingLink = false;
+    }
+    // Dispatch can turn off during the lookup (hosted setup is showing).
+    // Keep the link parked; didUpdateWidget re-dispatches when it turns on.
+    if (!mounted || !widget.dispatchMessageLinks) return;
+    if (ref.read(pendingDeepLinkProvider) != link) {
+      // The guard above held back whatever replaced this link meanwhile.
+      _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      return;
+    }
+    if (failure != null) {
+      final connected = _watchSession().status == SessionStatus.connected;
+      if (!connected || _lookupInterrupted) {
+        // The session dropped and cancelled the lookup. Keep the link: retry
+        // now if it is already back, else the session listener retries.
+        if (connected) _maybeDispatch(link);
+        return;
+      }
+    }
+    if (channel != null) {
+      _pushChannel(channel, link);
+      ref.read(pendingDeepLinkProvider.notifier).consume();
+      return;
+    }
+    ref.read(pendingDeepLinkProvider.notifier).consume();
+    if (failure != null) {
+      debugPrint('deep-link: channel $channelId lookup failed: $failure');
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('Could not open the channel')),
+      );
+    } else {
       debugPrint(
         'deep-link: channel $channelId not found in workspace; dropping link',
       );
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         const SnackBar(content: Text('Channel not found in this workspace')),
       );
-      return;
     }
-    if (!context.mounted) return;
-
-    _pushChannel(channel, link);
-    ref.read(pendingDeepLinkProvider.notifier).consume();
   }
 
   void _pushChannel(Channel channel, BuzzDeepLink link) {

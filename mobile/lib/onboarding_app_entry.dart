@@ -80,6 +80,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
         flow.stage != HostedFlowStage.complete &&
         flow.stage != HostedFlowStage.profile &&
         flow.stage != HostedFlowStage.chooseIdentity &&
+        flow.stage != HostedFlowStage.setupIdentity &&
         flow.stage != HostedFlowStage.chooseCommunities &&
         flow.stage != HostedFlowStage.communityConflict &&
         !flow.canChangeCommunities;
@@ -153,6 +154,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             : () => unawaited(flow.signInAccount()),
         accountStatus: status,
         builderlabBusy: busy,
+        signInPending: signingIn || busy,
         setupContent: flow != null && inlineSetup
             ? Column(
                 mainAxisSize: MainAxisSize.min,
@@ -168,7 +170,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             ? 'Connecting…'
             : connected
             ? 'Continue with Builderlab'
-            : 'Sign in with builderlab',
+            : 'Sign in with email',
         onWelcomeBack: back,
         onAlreadyUseBuzz: () => existingUser.value = true,
       ),

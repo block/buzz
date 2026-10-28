@@ -9,6 +9,7 @@ import 'device_identity_source.dart';
 enum HostedIdentityState {
   ready,
   needsSelection,
+  needsSetup,
   needsBinding,
   needsBackup,
   mismatch,
@@ -21,9 +22,11 @@ class HostedIdentityResult {
     this.state, {
     this.pubkey,
     this.choices = const [],
+    this.canCreate = false,
   });
   final HostedIdentityState state;
   final String? pubkey;
+  final bool canCreate;
   final List<DeviceIdentityChoice> choices;
 }
 
@@ -44,11 +47,15 @@ class HostedIdentityService {
   Future<HostedIdentityResult> resolve({
     bool Function()? isCurrent,
     String? selectedPubkey,
-  }) => _resolve(isCurrent, selectedPubkey);
+    bool createNew = false,
+    String? importNsec,
+  }) => _resolve(isCurrent, selectedPubkey, createNew, importNsec);
 
   Future<HostedIdentityResult> _resolve(
     bool Function()? isCurrent,
     String? selectedPubkey,
+    bool createNew,
+    String? importNsec,
   ) async {
     void checkCurrent() {
       if (isCurrent != null && !isCurrent()) throw AccountFailure.unavailable;
@@ -71,7 +78,9 @@ class HostedIdentityService {
     } else {
       throw AccountFailure.invalidResponse;
     }
-    if (local != null && bound != null) return _result(local, bound, subject);
+    if (local != null && bound != null && importNsec == null) {
+      return _result(local, bound, subject);
+    }
 
     final status = await account.post('/v1/buzz/nsec-backups/status', {});
     _sameAccount(subject);
@@ -85,6 +94,25 @@ class HostedIdentityService {
         : _pubkey(status['current_nostr_pubkey']);
     final statusKeys = listed.map(_pubkey).toSet();
     if (statusBound != bound) throw AccountFailure.invalidResponse;
+    if (importNsec != null) {
+      final pubkey = AccountIdentityStore.publicKeyForNsec(importNsec);
+      // A backup arriving while setup is open must use normal recovery, which
+      // records the selected backup receipt before adopting its identity.
+      if (bound == null && statusKeys.isNotEmpty) {
+        throw AccountFailure.unavailable;
+      }
+      if (bound != null && bound != pubkey) {
+        throw AccountIdentityFailure.mismatch;
+      }
+      final imported = await store.create(
+        importNsec,
+        checkCurrent: () {
+          _sameAccount(subject);
+          checkCurrent();
+        },
+      );
+      return _result(imported, bound, subject);
+    }
     if (local != null) {
       // A previously chosen recovery key may still await binding after a
       // restart. Its account-scoped receipt and current backup listing preserve
@@ -145,7 +173,19 @@ class HostedIdentityService {
         return _result(saved, bound, subject);
       }
     }
+    if (statusKeys.isEmpty && bound != null && !matchingDevice) {
+      return HostedIdentityResult(
+        HostedIdentityState.needsSetup,
+        pubkey: bound,
+      );
+    }
     if (statusBound == null && statusKeys.isEmpty) {
+      if (!createNew) {
+        return const HostedIdentityResult(
+          HostedIdentityState.needsSetup,
+          canCreate: true,
+        );
+      }
       final generated = await store.generateIfAbsent(
         authorize: () async {
           _sameAccount(subject);

@@ -50,11 +50,11 @@ const CHANNEL_MEMBERSHIP_LOCK_NAMESPACE: &str = "buzz_channel_membership:";
 /// Verify that migration 0032's roster fence is active on the partitioned
 /// `events` parent and every attached partition.
 ///
-/// New roster publishers depend on this database-side guard to serialize with
-/// legacy publishers during a rolling deployment. If the migration has not
-/// been applied, publishing with the new lock protocol would falsely appear
-/// safe while an old pod could still overwrite it with stale membership.
-pub async fn verify_channel_roster_fence_catalog<'e>(
+/// Only tests use this. The relay no longer requires the trigger at startup or
+/// after migrating: [`validate_channel_roster_snapshot`] enforces the same rule
+/// in every roster writer, so the trigger can be dropped.
+#[cfg(test)]
+pub(crate) async fn verify_channel_roster_fence_catalog<'e>(
     executor: impl sqlx::PgExecutor<'e>,
 ) -> Result<()> {
     // tgtype bits: 1 = ROW, 2 = BEFORE, 4 = INSERT, 16 = UPDATE, 64 = INSTEAD.
@@ -91,87 +91,6 @@ pub async fn verify_channel_roster_fence_catalog<'e>(
             missing.join(", ")
         )));
     }
-    Ok(())
-}
-
-/// Prove migration 0032's roster fence semantics through the live writer pool.
-///
-/// The catalog check cannot detect a no-op or otherwise corrupted trigger
-/// function. This rolled-back probe verifies that a canonical empty roster is
-/// accepted while a stale roster member is rejected with `check_violation`.
-pub async fn verify_channel_roster_fence_behavior(pool: &sqlx::PgPool) -> Result<()> {
-    let connection = crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::Bootstrap,
-    )
-    .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
-    let community_id = Uuid::new_v4();
-    let channel_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-        .bind(community_id)
-        .bind(format!(
-            "roster-fence-verify-{}.invalid",
-            community_id.simple()
-        ))
-        .execute(&mut *tx)
-        .await?;
-
-    let insert = |id: Vec<u8>, tags: serde_json::Value| {
-        sqlx::query(
-            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
-             VALUES ($1, $2, $3, NOW(), 39002, $4, '', $5, NOW(), $6, $7)",
-        )
-        .bind(community_id)
-        .bind(id)
-        .bind(vec![0u8; 32])
-        .bind(tags)
-        .bind(vec![0u8; 64])
-        .bind(channel_id)
-        .bind(channel_id.to_string())
-    };
-
-    insert(
-        vec![0u8; 32],
-        serde_json::json!([["d", channel_id.to_string()]]),
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| {
-        DbError::InvalidData(format!(
-            "channel roster fence rejected a canonical probe roster: {error}"
-        ))
-    })?;
-
-    sqlx::query("SAVEPOINT roster_fence_probe")
-        .execute(&mut *tx)
-        .await?;
-    let stale = insert(
-        vec![1u8; 32],
-        serde_json::json!([
-            ["d", channel_id.to_string()],
-            ["p", hex::encode([2u8; 32]), "", "member"]
-        ]),
-    )
-    .execute(&mut *tx)
-    .await;
-    match stale {
-        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23514") => {}
-        Ok(_) => {
-            return Err(DbError::InvalidData(
-                "channel roster fence is inert: a stale probe roster was accepted".into(),
-            ));
-        }
-        Err(error) => {
-            return Err(DbError::InvalidData(format!(
-                "channel roster fence probe failed unexpectedly: {error}"
-            )));
-        }
-    }
-    sqlx::query("ROLLBACK TO SAVEPOINT roster_fence_probe")
-        .execute(&mut *tx)
-        .await?;
-    tx.rollback().await?;
     Ok(())
 }
 
@@ -792,14 +711,7 @@ pub async fn put_members(
     targets: &[MemberPut<'_>],
     invited_by: Option<&[u8]>,
 ) -> Result<Vec<Result<PutMemberResult>>> {
-    let mut seen = std::collections::HashSet::with_capacity(targets.len());
-    if let Some(dup) = targets.iter().find(|t| !seen.insert(t.pubkey)) {
-        return Err(DbError::InvalidData(format!(
-            "pubkey {} appears more than once",
-            hex::encode(dup.pubkey)
-        )));
-    }
-
+    check_distinct_targets(targets)?;
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community_id,
@@ -810,7 +722,100 @@ pub async fn put_members(
     // First statement: serialize the whole decision / owner-count / upsert
     // sequence against concurrent membership writes on this channel.
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
+    let results = put_members_on(&mut tx, channel_id, targets, invited_by).await?;
+    tx.commit().await?;
+    Ok(results)
+}
 
+/// The result of [`Db::put_members_with_event`].
+pub enum MemberPutEventWrite {
+    /// The event was stored and at least one person was written. One result
+    /// per target, in order, as from [`put_members`].
+    Applied {
+        /// The stored kind:9000 event.
+        stored: buzz_core::StoredEvent,
+        /// One result per target.
+        results: Vec<Result<PutMemberResult>>,
+    },
+    /// The event was already stored. Nothing changed: its membership changes
+    /// committed with it the first time.
+    Duplicate(buzz_core::StoredEvent),
+    /// Every person was refused, so nothing was stored. One error per target.
+    Refused(Vec<DbError>),
+}
+
+/// Store a kind:9000 `event` and apply its [`put_members`] writes in one
+/// transaction. If any write fails, nothing is stored, so the client can
+/// resend the same event and have it applied.
+///
+/// The membership lock comes first, as in [`put_members`] and the channel
+/// settings writers, so a second copy of the event waits for the first and
+/// then finds it stored.
+pub(crate) async fn put_members_with_event(
+    pool: &PgPool,
+    push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    event: &nostr::Event,
+    targets: &[MemberPut<'_>],
+    thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+) -> Result<MemberPutEventWrite> {
+    check_distinct_targets(targets)?;
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    tx.set_push_enqueue(push_enqueue);
+    acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
+
+    // The same writes as `Db::insert_event_with_thread_metadata`.
+    let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+        &mut tx,
+        event,
+        Some(channel_id),
+        thread_meta,
+    )
+    .await?;
+    if !inserted {
+        tx.rollback().await?;
+        return Ok(MemberPutEventWrite::Duplicate(stored));
+    }
+    crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+
+    let actor = event.pubkey.to_bytes();
+    let results = put_members_on(&mut tx, channel_id, targets, Some(&actor)).await?;
+    if results.iter().all(Result::is_err) {
+        tx.rollback().await?;
+        return Ok(MemberPutEventWrite::Refused(
+            results.into_iter().filter_map(Result::err).collect(),
+        ));
+    }
+    tx.commit().await?;
+    Ok(MemberPutEventWrite::Applied { stored, results })
+}
+
+fn check_distinct_targets(targets: &[MemberPut<'_>]) -> Result<()> {
+    let mut seen = std::collections::HashSet::with_capacity(targets.len());
+    match targets.iter().find(|t| !seen.insert(t.pubkey)) {
+        Some(dup) => Err(DbError::InvalidData(format!(
+            "pubkey {} appears more than once",
+            hex::encode(dup.pubkey)
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The decisions and upsert of [`put_members`], on a transaction that holds
+/// `channel_id`'s membership lock. The caller owns the commit.
+async fn put_members_on(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+    targets: &[MemberPut<'_>],
+    invited_by: Option<&[u8]>,
+) -> Result<Vec<Result<PutMemberResult>>> {
+    let community_id = tx.community();
     let channel = get_channel_tx(tx.conn(), community_id, channel_id).await?;
     let private = channel.visibility == "private";
     let join_role = buzz_core::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
@@ -947,7 +952,6 @@ pub async fn put_members(
             written.insert(member.pubkey.clone(), member);
         }
     }
-    tx.commit().await?;
 
     Ok(targets
         .iter()
@@ -2049,20 +2053,6 @@ pub async fn get_member_role(
 }
 
 impl Db {
-    /// Verify the mixed-version channel-roster database fence end to end.
-    #[datastore_span(name = "verify_channel_roster_fence", system = "postgresql")]
-    pub async fn verify_channel_roster_fence(&self) -> Result<()> {
-        {
-            let mut connection = crate::observability::acquire_writer(
-                &self.pool,
-                crate::observability::WriterOperation::Bootstrap,
-            )
-            .await?;
-            verify_channel_roster_fence_catalog(&mut *connection).await?;
-        }
-        verify_channel_roster_fence_behavior(&self.pool).await
-    }
-
     /// Capture the active roster while holding the membership-writer lock.
     #[datastore_span(name = "lock_member_snapshot", system = "postgresql")]
     pub async fn lock_member_snapshot(
@@ -2117,17 +2107,28 @@ impl Db {
         .await
     }
 
-    /// [`Db::put_member`] for several people in one transaction (see
-    /// [`put_members`]).
-    #[datastore_span(name = "put_members", system = "postgresql")]
-    pub async fn put_members(
+    /// Stores a kind:9000 `event` and applies its [`put_members`] writes,
+    /// with the event's author as the actor, in one transaction (see
+    /// [`put_members_with_event`]).
+    #[datastore_span(name = "put_members_with_event", system = "postgresql")]
+    pub async fn put_members_with_event(
         &self,
         community_id: CommunityId,
         channel_id: Uuid,
+        event: &nostr::Event,
         targets: &[MemberPut<'_>],
-        invited_by: Option<&[u8]>,
-    ) -> Result<Vec<Result<PutMemberResult>>> {
-        put_members(&self.pool, community_id, channel_id, targets, invited_by).await
+        thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+    ) -> Result<MemberPutEventWrite> {
+        put_members_with_event(
+            &self.pool,
+            self.push_enqueue.clone(),
+            community_id,
+            channel_id,
+            event,
+            targets,
+            thread_meta,
+        )
+        .await
     }
 
     /// Removes a member from a channel.
@@ -3476,6 +3477,112 @@ mod postgres_tests {
         .await
         .expect_err("duplicate pubkey");
         assert!(matches!(err, DbError::InvalidData(_)), "{err:?}");
+    }
+
+    /// `put_members_with_event` stores the event only with the writes it
+    /// carries: a stored event applies its people, a resend changes nothing,
+    /// and an event whose every person is refused under the lock is not
+    /// stored. Mutations: commit when everyone is refused → the refused event
+    /// is stored → RED; write people on a duplicate → the removed person is
+    /// back → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn put_members_with_event_stores_the_event_with_its_writes() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let (owner, outsider) = (Keys::generate(), Keys::generate());
+        let (owner_pk, outsider_pk) = (
+            owner.public_key().to_bytes().to_vec(),
+            outsider.public_key().to_bytes().to_vec(),
+        );
+        let person = random_pubkey();
+        for pk in [&owner_pk, &outsider_pk, &person] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "put-members-event",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner_pk,
+            None,
+        )
+        .await
+        .expect("create channel");
+        let event = |actor: &Keys| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(9000), "")
+                .tags([
+                    nostr::Tag::parse(["h", &channel.id.to_string()]).unwrap(),
+                    nostr::Tag::parse(["p", &hex::encode(&person)]).unwrap(),
+                ])
+                .sign_with_keys(actor)
+                .expect("sign 9000")
+        };
+        let targets = [MemberPut {
+            pubkey: &person,
+            requested: None,
+        }];
+        let stored = |id: nostr::EventId| {
+            let pool = pool.clone();
+            async move {
+                crate::event::get_event_by_id(&pool, community, id.as_bytes())
+                    .await
+                    .expect("read event")
+                    .is_some()
+            }
+        };
+
+        // A non-member may not add anyone to a private channel.
+        let refused = event(&outsider);
+        let write =
+            put_members_with_event(&pool, None, community, channel.id, &refused, &targets, None)
+                .await
+                .expect("refused write");
+        assert!(
+            matches!(&write, MemberPutEventWrite::Refused(errors)
+                if matches!(errors.as_slice(), [DbError::AccessDenied(_)])),
+            "expected a refusal"
+        );
+        assert!(!stored(refused.id).await, "a refused event is not stored");
+        assert_eq!(
+            get_member_role(&pool, community, channel.id, &person)
+                .await
+                .expect("read role"),
+            None
+        );
+
+        let added = event(&owner);
+        let write =
+            put_members_with_event(&pool, None, community, channel.id, &added, &targets, None)
+                .await
+                .expect("applied write");
+        let MemberPutEventWrite::Applied { results, .. } = write else {
+            panic!("expected the event to apply");
+        };
+        let put = results[0].as_ref().expect("person added");
+        assert_eq!(put.prior_role, None);
+        assert!(stored(added.id).await);
+
+        // A resend finds the event stored and leaves the roster alone.
+        remove_member(&pool, community, channel.id, &person, &owner_pk)
+            .await
+            .expect("remove person");
+        let write =
+            put_members_with_event(&pool, None, community, channel.id, &added, &targets, None)
+                .await
+                .expect("duplicate write");
+        assert!(matches!(write, MemberPutEventWrite::Duplicate(_)));
+        assert_eq!(
+            get_member_role(&pool, community, channel.id, &person)
+                .await
+                .expect("read role"),
+            None
+        );
     }
 
     /// `put_member` enforces admission itself, so a caller that skips the
@@ -5075,140 +5182,31 @@ mod postgres_tests {
         .expect("create channel");
     }
 
+    /// The relay must run without the 0032 roster trigger: the app-side check
+    /// in every roster writer is the fence, and a later migration drops the
+    /// trigger. Migrating a database that has no trigger must succeed.
+    ///
+    /// Mutation: restore the catalog check after `MIGRATOR.run` in
+    /// `run_migrations_locked` → migrating fails → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn unmigrated_roster_fence_blocks_startup_until_0032_is_applied() {
+    async fn migrations_run_without_the_roster_trigger() {
         let admin = PgPool::connect(&admin_url().await)
             .await
             .expect("connect admin");
-        let (pool, scratch_name) =
-            create_scratch_db_through(&admin, "roster_fence_unmigrated", Some(31)).await;
-        let db = Db::from_pool(pool.clone());
-
-        let error = db
-            .verify_channel_roster_fence()
-            .await
-            .expect_err("pre-0032 schema must block roster publishers");
-        assert!(
-            error.to_string().contains("channel roster fence trigger"),
-            "startup gate must report the missing schema fence: {error}"
-        );
-        let rows_before: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE kind = 39002")
-            .fetch_one(&pool)
-            .await
-            .expect("count pre-migration rosters");
-        assert_eq!(
-            rows_before, 0,
-            "failed startup gate must not publish a roster"
-        );
+        let (pool, scratch_name) = create_scratch_db(&admin, "roster_fence_absent").await;
+        sqlx::raw_sql(
+            "DROP TRIGGER trg_events_guard_channel_roster_snapshot ON events; \
+             DROP FUNCTION guard_channel_roster_snapshot();",
+        )
+        .execute(&pool)
+        .await
+        .expect("drop the roster trigger");
+        assert!(verify_channel_roster_fence_catalog(&pool).await.is_err());
 
         migration::run_migrations(&pool)
             .await
-            .expect("apply migration 0032");
-        db.verify_channel_roster_fence()
-            .await
-            .expect("0032 must open the startup gate");
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn channel_roster_fence_behavior_verification_detects_inert_function() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (pool, scratch_name) = create_scratch_db(&admin, "roster_fence_inert").await;
-        let db = Db::from_pool(pool.clone());
-
-        sqlx::raw_sql(
-            "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot() \
-             RETURNS TRIGGER AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;",
-        )
-        .execute(&pool)
-        .await
-        .expect("replace roster fence with inert body");
-        let error = db
-            .verify_channel_roster_fence()
-            .await
-            .expect_err("inert roster fence must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("stale probe roster was accepted"),
-            "behavior probe must identify inert semantics: {error}"
-        );
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn channel_roster_fence_catalog_verification_fails_closed() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (pool, scratch_name) = create_scratch_db(&admin, "roster_fence_catalog").await;
-        let db = Db::from_pool(pool.clone());
-
-        db.verify_channel_roster_fence()
-            .await
-            .expect("migrated roster fence must verify");
-
-        let child: String = sqlx::query_scalar(
-            "SELECT n.nspname || '.' || c.relname \
-             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE i.inhparent = 'public.events'::regclass ORDER BY i.inhrelid LIMIT 1",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("load event partition");
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "ALTER TABLE {child} DISABLE TRIGGER trg_events_guard_channel_roster_snapshot"
-        )))
-        .execute(&pool)
-        .await
-        .expect("disable partition roster trigger");
-        let error = db
-            .verify_channel_roster_fence()
-            .await
-            .expect_err("disabled partition roster fence must fail closed");
-        assert!(
-            error.to_string().contains(&child),
-            "verification must identify the unfenced partition: {error}"
-        );
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn channel_roster_fence_verification_supports_size_one_pool() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (seed_pool, scratch_name) = create_scratch_db(&admin, "roster_fence_size_one").await;
-        seed_pool.close().await;
-
-        let base_url = admin_url().await;
-        let path = base_url.rfind('/').expect("database URL path");
-        let scratch_url = format!("{}/{}", &base_url[..path], scratch_name);
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_secs(1))
-            .connect(&scratch_url)
-            .await
-            .expect("connect size-one writer pool");
-        let db = Db::from_pool(pool.clone());
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            db.verify_channel_roster_fence(),
-        )
-        .await
-        .expect("roster verification must not self-deadlock on its second checkout")
-        .expect("migrated roster fence verifies on a size-one pool");
+            .expect("migrating must not require the roster trigger");
 
         drop_scratch_db(&admin, pool, &scratch_name).await;
     }

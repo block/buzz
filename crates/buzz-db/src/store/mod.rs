@@ -28,6 +28,8 @@ pub(crate) mod event_follow_up;
 pub mod nip_fi_binding;
 /// User-specific deletion submission and inventory preparation.
 pub mod user_deletion;
+/// Operator-global user restrictions and identity-lock primitives.
+pub mod user_deletion_fences;
 
 #[cfg(test)]
 mod event_follow_up_postgres_tests;
