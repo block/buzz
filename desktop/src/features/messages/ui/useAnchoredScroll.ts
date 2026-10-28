@@ -101,6 +101,12 @@ function isAtBottomNow(
   );
 }
 
+function isInViewport(el: HTMLElement, container: HTMLElement): boolean {
+  const rect = el.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  return rect.top >= containerRect.top && rect.bottom <= containerRect.bottom;
+}
+
 /**
  * Pick an anchor for the current scroll position.
  *
@@ -118,12 +124,6 @@ function isAtBottomNow(
  * choice is what keeps the row the reader is *reading* fixed under
  * in-viewport reflow (image-load, embed expansion).
  */
-function isInViewport(el: HTMLElement, container: HTMLElement): boolean {
-  const rect = el.getBoundingClientRect();
-  const containerRect = container.getBoundingClientRect();
-  return rect.top >= containerRect.top && rect.bottom <= containerRect.bottom;
-}
-
 function computeAnchor(
   container: HTMLDivElement,
   treatNearBottomAsBottom = true,
