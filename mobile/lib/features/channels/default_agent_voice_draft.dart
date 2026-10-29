@@ -33,7 +33,9 @@ class DefaultAgentVoiceDraft {
     final data =
         jsonDecode(await manifest.readAsString()) as Map<String, dynamic>;
     return VoiceNoteRecording(
-      file: XFile(data['path'] as String, mimeType: 'audio/mp4'),
+      // iOS can relocate the app container on update/reinstall. The audio
+      // always lives beside its manifest, including drafts from older builds.
+      file: XFile('${manifest.path}.m4a', mimeType: 'audio/mp4'),
       duration: Duration(milliseconds: data['duration'] as int),
       waveform: (data['waveform'] as List)
           .cast<num>()
@@ -53,7 +55,6 @@ class DefaultAgentVoiceDraft {
     await temporary.writeAsString(
       jsonEncode({
         ...existing,
-        'path': path,
         'duration': note.duration.inMilliseconds,
         'waveform': note.waveform,
       }),

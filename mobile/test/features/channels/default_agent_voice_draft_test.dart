@@ -10,7 +10,7 @@ void main() {
   test(
     'restores audio and the same signed event across retry and restart',
     () async {
-      final directory = await Directory.systemTemp.createTemp(
+      var directory = await Directory.systemTemp.createTemp(
         'agent-voice-draft-test',
       );
       addTearDown(() => directory.delete(recursive: true));
@@ -41,6 +41,8 @@ void main() {
       await draft.saveEvent(event);
       await draft.save(retained);
       await source.delete();
+      // Updating an iOS app relocates its data container, including the draft.
+      directory = await directory.rename('${directory.path}-relocated');
       final restored = DefaultAgentVoiceDraft(
         'community:account:agent',
         directory: () async => directory,
@@ -52,9 +54,10 @@ void main() {
         directory: () async => directory,
       );
       expect(await other.read(), isNull);
+      final relocatedAudio = (await restored.read())!.file.path;
       await restored.clear();
       expect(await restored.read(), isNull);
-      expect(await File(retained.file.path).exists(), isFalse);
+      expect(await File(relocatedAudio).exists(), isFalse);
     },
   );
 }
