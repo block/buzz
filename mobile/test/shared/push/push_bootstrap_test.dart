@@ -81,8 +81,9 @@ void main() {
           calls++;
           // This is the production Swift driver's durable pre-request mutation.
           grant = '';
-          if (failGateway)
+          if (failGateway) {
             throw PlatformException(code: 'transient_gateway_failure');
+          }
         }
         return null;
       });
