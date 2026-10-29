@@ -452,7 +452,7 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                 if (recording.value)
                   Positioned(
                     bottom: 56 + Grid.xs,
-                    left: 0,
+                    width: 224 + Grid.xs * 2,
                     right: 0,
                     child: IgnorePointer(
                       child: Text(
