@@ -62,6 +62,7 @@ class HostedJourneyFixture {
   int browserStarts = 0;
   final browserUrls = <Uri>[];
   bool needsAccountSetup = false;
+  bool screeningPending = false;
   int secondRelayFailures = 0;
   DateTime assertionNow = DateTime.now();
   bool relayAuthEnabled = false;
@@ -135,7 +136,12 @@ class HostedJourneyFixture {
       result = {
         'subject': subject,
         'expires_at': expiry,
-        if (needsAccountSetup)
+        'account_status': needsAccountSetup
+            ? 'ACCOUNT_STATUS_NEEDS_DETAILS'
+            : screeningPending
+            ? 'ACCOUNT_STATUS_PENDING'
+            : 'ACCOUNT_STATUS_OK',
+        if (needsAccountSetup || screeningPending)
           'account_standing': {
             'details_status': 'ACCOUNT_DETAILS_STATUS_MISSING',
             'screening_status': 'ACCOUNT_SCREENING_STATUS_NOT_SCREENED',

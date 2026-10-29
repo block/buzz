@@ -219,12 +219,8 @@ class BuilderlabAccountClient {
       throw AccountFailure.invalidResponse;
     }
     if (!parsed.isAfter(DateTime.now().toUtc())) throw AccountFailure.signedOut;
-    final standing = result['account_standing'];
     final needsSetup =
-        standing is Map &&
-        (standing['details_status'] == 'ACCOUNT_DETAILS_STATUS_MISSING' ||
-            standing['screening_status'] ==
-                'ACCOUNT_SCREENING_STATUS_NOT_SCREENED');
+        result['account_status'] == 'ACCOUNT_STATUS_NEEDS_DETAILS';
     return BuilderlabAccount(
       subject: subject,
       expiresAt: parsed,
