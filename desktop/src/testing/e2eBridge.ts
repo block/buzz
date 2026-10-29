@@ -377,6 +377,11 @@ type E2eConfig = {
     /** Reject successive mock `join_channel` calls, then resume. */
     joinChannelErrors?: string[];
     channelsReadDelayMs?: number;
+    /**
+     * Hold the first `get_channels` read until
+     * `__BUZZ_E2E_RELEASE_CHANNELS_READ__` is called.
+     */
+    deferFirstChannelsRead?: boolean;
     /** Return not-modified for this many reads before resuming full payloads. */
     channelsNotModifiedResponses?: number;
     /** When true, a matching knownHash returns a not-modified channel payload. */
@@ -1352,6 +1357,11 @@ declare global {
       event: string,
       payload: unknown,
     ) => Promise<void>;
+    /**
+     * Number of live app listeners for a mocked Tauri event. Spec
+     * subscriptions made through `__TAURI_INTERNALS__.listen` are not counted.
+     */
+    __BUZZ_E2E_EVENT_LISTENER_COUNT__?: (event: string) => number;
     __BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__?: (input: {
       members: MockHuddleMemberSeed[];
       transcriptionEnabled: boolean;
@@ -8771,7 +8781,7 @@ async function replayInstallOutput(
       );
     }
     // `emit` reaches listeners registered through the real `listen` API, which
-    // is what the UI hook uses; mockIPC's shouldMockEvents wires the two.
+    // is what the UI hook uses; the bridge's mocked event plugin wires the two.
     await emit("acp-install-output", {
       runtime_id: runtimeId,
       seq: installOutputSeq++,
@@ -11824,7 +11834,7 @@ export function maybeInstallE2eTauriMocks() {
     for (const release of held) release();
     return held.length;
   };
-  deferNextChannelsRead = false;
+  deferNextChannelsRead = config.mock?.deferFirstChannelsRead === true;
   deferredChannelsReadResolve = null;
   window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
   window.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__ = () => {
@@ -15380,21 +15390,78 @@ export function maybeInstallE2eTauriMocks() {
     handleMockCommand(command, payload ?? null);
   window.__BUZZ_E2E_EMIT_TAURI_EVENT__ = (event, payload) =>
     emit(event, payload);
-  mockIPC(handleMockCommand, { shouldMockEvents: true });
-  const tauriInternals = (
-    window as typeof window & {
-      __TAURI_INTERNALS__: {
-        listen?: (
-          event: string,
-          callback: () => void,
-        ) => Promise<() => Promise<void>>;
-      };
+  // The mocked emit drops events that have no listener yet. The event plugin is
+  // mocked here, as mockIPC's `shouldMockEvents` would, so live app listeners
+  // can be counted per event and specs can wait for the app to subscribe first.
+  // Wrapping `__TAURI_INTERNALS__.invoke` instead would break specs that trap
+  // mockIPC's assignment of it.
+  // Spec subscriptions pass this target object, which listen() forwards as is
+  // and the mock ignores, so a spec that subscribes first cannot satisfy that
+  // wait for the app.
+  const tauriInternals = () =>
+    (
+      window as typeof window & {
+        __TAURI_INTERNALS__: {
+          runCallback: (id: number, data: unknown) => void;
+          listen?: (
+            event: string,
+            callback: () => void,
+          ) => Promise<() => Promise<void>>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+  const specListenTarget = { kind: "Any" } as const;
+  const eventHandlers = new Map<string, number[]>();
+  const appEventHandlers = new Map<string, Set<number>>();
+  const handleMockIpc = (command: string, payload: unknown) => {
+    const args = (payload ?? {}) as {
+      event: string;
+      handler?: number;
+      eventId?: number;
+      target?: unknown;
+    };
+    switch (command) {
+      case "plugin:event|listen": {
+        const handler = args.handler as number;
+        eventHandlers.set(args.event, [
+          ...(eventHandlers.get(args.event) ?? []),
+          handler,
+        ]);
+        if (args.target !== specListenTarget) {
+          const handlers =
+            appEventHandlers.get(args.event) ?? new Set<number>();
+          handlers.add(handler);
+          appEventHandlers.set(args.event, handlers);
+        }
+        return Promise.resolve(handler);
+      }
+      case "plugin:event|emit":
+        for (const handler of eventHandlers.get(args.event) ?? []) {
+          tauriInternals().runCallback(handler, args);
+        }
+        return Promise.resolve(null);
+      case "plugin:event|unlisten":
+        eventHandlers.set(
+          args.event,
+          (eventHandlers.get(args.event) ?? []).filter(
+            (handler) => handler !== args.eventId,
+          ),
+        );
+        appEventHandlers.get(args.event)?.delete(args.eventId as number);
+        return Promise.resolve(null);
+      default:
+        return handleMockCommand(command, payload);
     }
-  ).__TAURI_INTERNALS__;
+  };
+  mockIPC(handleMockIpc);
+  window.__BUZZ_E2E_EVENT_LISTENER_COUNT__ = (event) =>
+    appEventHandlers.get(event)?.size ?? 0;
   // Page-evaluated E2E specs use this surface; delegate to Tauri's mocked channel
   // so their listeners observe the same events emitted by application test seams.
-  tauriInternals.listen = async (event, callback) => {
-    const unlisten = await listen(event, () => callback());
+  tauriInternals().listen = async (event, callback) => {
+    const unlisten = await listen(event, () => callback(), {
+      target: specListenTarget,
+    });
     return async () => unlisten();
   };
 

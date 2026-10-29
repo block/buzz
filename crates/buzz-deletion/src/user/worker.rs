@@ -121,6 +121,8 @@ async fn run_stage_with_heartbeat(
     // Poll renewal alongside the handler. Awaiting renewal inside a selected
     // timer branch would stop polling a handler that may hold the parent lock.
     // Both futures live here, so cancellation leaves no detached heartbeat task.
+    // A handler can finish mid-heartbeat; `heartbeat` is one autocommit
+    // statement so that drop cannot strand an open transaction on the pool.
     let renewal = async {
         loop {
             interval.tick().await;
