@@ -12,7 +12,7 @@ final class BrowserAuthBridgeTests: XCTestCase {
     let bridge = BuzzBrowserAuthBridge(messenger: messenger, isActive: { active },
       startSession: { _ in starts += 1; return true })
     defer { withExtendedLifetime(bridge) {} }
-    let arguments = ["url": "https://app.builderlabstaging.xyz/api/goose/v1/auth/login"]
+    let arguments = ["url": "https://app.builderlabstaging.xyz/auth/native"]
     var results: [String] = []
     messenger.invoke("start", arguments: arguments) {
       results.append(($0 as? FlutterError)?.code ?? "success")
@@ -38,7 +38,9 @@ final class BrowserAuthBridgeTests: XCTestCase {
     XCTAssertEqual(results, ["cancelled"])
     messenger.invoke("cancel", arguments: [:]) { _ in }
     XCTAssertEqual(results, ["cancelled", "cancelled"])
-    messenger.invoke("start", arguments: arguments) { _ in }
+    messenger.invoke("start", arguments: [
+      "url": "https://app.builderlab.xyz/api/goose/v1/auth/login"
+    ]) { _ in }
     XCTAssertEqual(starts, 2, "Ordinary active-app login should start immediately")
     messenger.invoke("cancel", arguments: [:]) { _ in }
   }

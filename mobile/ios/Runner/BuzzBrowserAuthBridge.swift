@@ -37,7 +37,8 @@ final class BuzzBrowserAuthBridge: NSObject, ASWebAuthenticationPresentationCont
         let raw = args["url"], let url = URL(string: raw),
         url.scheme == "https",
         ["app.builderlab.xyz", "app.builderlabstaging.xyz"].contains(url.host ?? ""),
-        url.path == "/api/goose/v1/auth/login", url.user == nil, url.password == nil,
+        ["/api/goose/v1/auth/login", "/auth/native"].contains(url.path),
+        url.user == nil, url.password == nil,
         url.port == nil, url.fragment == nil
       else { result(FlutterError(code: "unavailable", message: nil, details: nil)); return }
       self.pending = result
