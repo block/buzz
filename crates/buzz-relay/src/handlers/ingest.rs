@@ -3818,7 +3818,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn check_channel_write_denies_when_channel_lookup_fails() {
-        let state = crate::state::tests::test_state_with_database_url(
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
             "postgres://buzz:buzz_dev@127.0.0.1:1/buzz", // sadscan:disable np.postgres.1
         )
         .await;
