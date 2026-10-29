@@ -1,13 +1,18 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
+
+/// The body cap for hosted responses that do not declare their own.
+const hostedResponseMaxBytes = 64 * 1024;
 
 /// One deadline covers headers and the bounded body. Abort only this request,
 /// leaving the shared client usable for sign-out and subsequent attempts.
 Future<http.Response> boundedHttpResponse(
   http.Client client,
-  http.Request source,
-) async {
+  http.Request source, {
+  int maxBytes = hostedResponseMaxBytes,
+}) async {
   final abort = Completer<void>();
   final request =
       http.AbortableRequest(
@@ -26,15 +31,15 @@ Future<http.Response> boundedHttpResponse(
       await iterator.cancel();
       throw http.RequestAbortedException();
     }
-    final bytes = <int>[];
+    final bytes = BytesBuilder();
     while (await iterator.moveNext()) {
-      if (bytes.length + iterator.current.length > 65536) {
+      if (bytes.length + iterator.current.length > maxBytes) {
         throw const FormatException('Response too large');
       }
-      bytes.addAll(iterator.current);
+      bytes.add(iterator.current);
     }
     return http.Response.bytes(
-      bytes,
+      bytes.takeBytes(),
       response.statusCode,
       headers: response.headers,
     );

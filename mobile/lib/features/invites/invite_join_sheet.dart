@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+
 import '../../shared/identity_transfer/native_community_entry.dart';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
@@ -9,13 +11,16 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../pairing/pairing_page.dart';
 import 'invite_join_provider.dart';
+import '../../shared/hosted/hosted_join_policy_view.dart';
 
 Future<bool?> showInviteJoinSheet(BuildContext context) async {
   final container = ProviderScope.containerOf(context);
   final state = container.read(inviteJoinProvider);
+  var continueWithPolicy = false;
   if (defaultTargetPlatform == TargetPlatform.iOS &&
       state.status == InviteJoinStatus.confirming &&
-      !state.isStarterSetupRecovery) {
+      !state.isStarterSetupRecovery &&
+      state.joinPolicy == null) {
     final joined = await NativeCommunityEntry.show(
       name: state.host ?? 'Unknown community',
       dark: Theme.of(context).brightness == Brightness.dark,
@@ -31,12 +36,18 @@ Future<bool?> showInviteJoinSheet(BuildContext context) async {
         }
         await container.read(inviteJoinProvider.notifier).confirmJoin();
         final result = container.read(inviteJoinProvider);
+        if (result.joinPolicy != null &&
+            result.status == InviteJoinStatus.error &&
+            !result.requiresFreshInvite) {
+          continueWithPolicy = true;
+          return {'continueInFlutter': true};
+        }
         return result.status == InviteJoinStatus.success
             ? {'joined': true}
             : {'error': result.errorMessage ?? 'Could not join. Try again.'};
       },
     );
-    if (joined == false) return false;
+    if (joined == false && !continueWithPolicy) return false;
     if (!context.mounted) return joined;
     // Preserve the existing success screen and starter-channel destination.
   }
@@ -169,7 +180,43 @@ class InviteJoinSheet extends ConsumerWidget {
                 ),
               ),
             ],
+            if (state.isLoadingJoinPolicy) ...[
+              const SizedBox(height: Grid.sm),
+              Row(
+                children: [
+                  const BuzzLoadingIndicator(
+                    size: 16,
+                    semanticLabel: 'Loading community policy',
+                  ),
+                  const SizedBox(width: Grid.xs),
+                  Expanded(
+                    // The indicator owns the announcement.
+                    child: ExcludeSemantics(
+                      child: Text(
+                        'Loading community policy…',
+                        style: context.textTheme.bodyMedium?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: Grid.lg),
+            if (state.joinPolicy != null &&
+                !state.requiresFreshInvite &&
+                !isStarterSetupRecovery &&
+                !isClaiming)
+              HostedJoinPolicyView(
+                key: ValueKey(state.joinPolicy!.version),
+                policy: state.joinPolicy!,
+                onAccept: () => ref
+                    .read(inviteJoinProvider.notifier)
+                    .confirmJoin(
+                      acceptedPolicyVersion: state.joinPolicy!.version,
+                    ),
+              ),
             Row(
               children: [
                 Expanded(
@@ -181,28 +228,34 @@ class InviteJoinSheet extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(width: Grid.sm),
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: isClaiming || state.requiresFreshInvite
-                        ? null
-                        : () async => ref
-                              .read(inviteJoinProvider.notifier)
-                              .confirmJoin(),
-                    icon: isClaiming
-                        ? SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: BuzzLoadingIndicator(
-                              size: 16,
-                              semanticLabel: isStarterSetupRecovery
-                                  ? 'Finishing setup'
-                                  : 'Joining community',
-                            ),
-                          )
-                        : const Icon(BuzzIcons.check),
-                    label: Text(primaryLabel),
+                if (state.joinPolicy == null ||
+                    isStarterSetupRecovery ||
+                    isClaiming)
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed:
+                          isClaiming ||
+                              state.requiresFreshInvite ||
+                              state.isLoadingJoinPolicy
+                          ? null
+                          : () async => ref
+                                .read(inviteJoinProvider.notifier)
+                                .confirmJoin(),
+                      icon: isClaiming
+                          ? SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: BuzzLoadingIndicator(
+                                size: 16,
+                                semanticLabel: isStarterSetupRecovery
+                                    ? 'Finishing setup'
+                                    : 'Joining community',
+                              ),
+                            )
+                          : const Icon(BuzzIcons.check),
+                      label: Text(primaryLabel),
+                    ),
                   ),
-                ),
               ],
             ),
           ],

@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
-import '../../shared/hosted/hosted_join_policy.dart';
-import '../../shared/theme/grid.dart';
+
+import 'hosted_join_policy.dart';
+import '../theme/grid.dart';
 
 /// Consent is explicit and scoped to the policy version shown on this screen.
 class HostedJoinPolicyView extends HookWidget {
