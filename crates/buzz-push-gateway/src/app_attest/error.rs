@@ -4,7 +4,8 @@ use std::{error::Error, fmt};
 /// an untrusted path from a malformed or misused certificate.
 #[derive(Debug, PartialEq)]
 pub enum CertificateCheck {
-    /// `x5c` is missing, not an array, or empty.
+    /// `x5c` is not an array, or is empty. A missing `x5c` fails the CBOR
+    /// schema first, as `InvalidCbor`.
     Chain,
     /// The configured Apple root is not exactly one PEM certificate.
     Root,
@@ -20,7 +21,7 @@ pub enum CertificateCheck {
 impl fmt::Display for CertificateCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Chain => write!(f, "missing or empty x5c"),
+            Self::Chain => write!(f, "x5c is not a non-empty array"),
             Self::Root => write!(f, "invalid configured root"),
             Self::Encoding { index } => write!(f, "invalid encoding at x5c[{index}]"),
             Self::Path(error) => write!(f, "path rejected: {error}"),
