@@ -128,10 +128,7 @@ impl WorkflowEngine {
                 .max_capacity(10_000)
                 .time_to_live(std::time::Duration::from_secs(10))
                 .build(),
-            ban_denial_warned: moka::sync::Cache::builder()
-                .max_capacity(10_000)
-                .time_to_live(BAN_DENIAL_WARN_INTERVAL)
-                .build(),
+            ban_denial_warned: ban_denial_warn_cache(BAN_DENIAL_WARN_INTERVAL),
         }
     }
 
@@ -796,6 +793,18 @@ impl WorkflowEngine {
             workflows.iter().map(|w| (w.community_id, w.id)).collect();
         self.last_fired.retain(|key, _| active_ids.contains(key));
     }
+}
+
+/// The cache behind [`WorkflowEngine::ban_denial_warned`]: an entry expires
+/// `warn_interval` after the WARN that inserted it, so the next ban denial
+/// for that workflow warns again.
+fn ban_denial_warn_cache(
+    warn_interval: std::time::Duration,
+) -> moka::sync::Cache<(CommunityId, Uuid), ()> {
+    moka::sync::Cache::builder()
+        .max_capacity(10_000)
+        .time_to_live(warn_interval)
+        .build()
 }
 
 /// Whether an owner-authority denial for this workflow logs at WARN. A ban
@@ -2242,10 +2251,8 @@ steps:
 
     #[test]
     fn ban_denial_warns_once_per_interval_while_other_denials_always_warn() {
-        let warned = moka::sync::Cache::builder()
-            .max_capacity(16)
-            .time_to_live(BAN_DENIAL_WARN_INTERVAL)
-            .build();
+        let interval = std::time::Duration::from_millis(500);
+        let warned = ban_denial_warn_cache(interval);
         let community = CommunityId::from_uuid(Uuid::new_v4());
         let (wf_a, wf_b) = (Uuid::new_v4(), Uuid::new_v4());
         let banned = WorkflowError::OwnerBanned;
@@ -2269,6 +2276,16 @@ steps:
         assert!(
             should_warn_owner_denial(&warned, community, wf_a, &lookup_failed),
             "a failed lookup is never rate-limited"
+        );
+
+        std::thread::sleep(interval * 2);
+        assert!(
+            should_warn_owner_denial(&warned, community, wf_a, &banned),
+            "a ban denial warns again once the interval has passed"
+        );
+        assert!(
+            !should_warn_owner_denial(&warned, community, wf_a, &banned),
+            "and is suppressed again for the next interval"
         );
     }
 
