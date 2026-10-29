@@ -84,8 +84,10 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
       sending.value = true;
       pending.value = note;
       error.value = null;
+      var saved = false;
       try {
         final retained = await draft.save(note);
+        saved = true;
         if (retained.file.path != note.file.path) {
           await deleteDroppedVoiceNoteRecording(note.file.path);
         }
@@ -96,11 +98,13 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
       } catch (failure) {
         debugPrint('Default agent voice delivery failed: $failure');
         if (context.mounted) {
-          error.value = 'Retry voice note';
+          error.value = saved ? 'Retry voice note' : 'Retry saving voice note';
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
+            SnackBar(
               content: Text(
-                'Could not confirm delivery. Your voice note is saved.',
+                saved
+                    ? 'Could not confirm delivery. Your voice note is saved.'
+                    : 'Could not save your voice note. Keep this screen open and retry; closing it may lose the recording.',
               ),
             ),
           );

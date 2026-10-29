@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:buzz/features/channels/default_agent_voice_control.dart';
 import 'package:buzz/features/channels/default_agent_voice_draft.dart';
@@ -50,10 +51,12 @@ class Recorder implements VoiceNoteRecorder {
 class Draft extends DefaultAgentVoiceDraft {
   Draft() : super('test');
   VoiceNoteRecording? note;
+  bool failSave = false;
   @override
   Future<VoiceNoteRecording?> read() async => note;
   @override
   Future<VoiceNoteRecording> save(VoiceNoteRecording value) async {
+    if (failSave) throw FileSystemException('No space left on device');
     note = value;
     return value;
   }
@@ -342,14 +345,32 @@ void main() {
     expect(sent, 1);
     expect(find.byType(BuzzLoadingIndicator), findsNothing);
   });
-  testWidgets('failed send retains recording and offers retry', (tester) async {
-    fail = true;
+  testWidgets('save failure stays unsaved; delivery failure retains retry', (
+    tester,
+  ) async {
+    draft.failSave = true;
     await mount(tester);
     final gesture = await hold(tester);
     await gesture.up();
     await tester.pumpAndSettle();
+    expect(draft.note, isNull);
+    expect(sent, 0);
+    expect(
+      find.textContaining('Could not save your voice note.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Your voice note is saved.'), findsNothing);
+    ScaffoldMessenger.of(
+      tester.element(find.byType(DefaultAgentVoiceControl)),
+    ).hideCurrentSnackBar();
+    await tester.pumpAndSettle();
+    draft.failSave = false;
+    fail = true;
+    await tester.tap(find.text('Retry saving voice note'));
+    await tester.pumpAndSettle();
     expect(draft.note, isNotNull);
     expect(sent, 0);
+    expect(find.textContaining('Your voice note is saved.'), findsOneWidget);
     fail = false;
     await tester.tap(find.text('Retry voice note'));
     await tester.pumpAndSettle();
