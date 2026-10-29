@@ -5,9 +5,14 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
 /// The default transport. `dart:io` would inflate gzip responses on the
-/// calling isolate, so leave them compressed for the response decoder.
-http.Client _gzipPassthroughClient() =>
-    IOClient(HttpClient()..autoUncompress = false);
+/// calling isolate, so leave them compressed for the response decoder. A
+/// client supplied through `http.runWithClient` is used as is.
+http.Client _gzipPassthroughClient() {
+  final client = http.Client();
+  if (client is! IOClient) return client;
+  client.close();
+  return IOClient(HttpClient()..autoUncompress = false);
+}
 
 /// Owns the reusable HTTP transport used for relay `/query` requests.
 ///
