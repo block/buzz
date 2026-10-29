@@ -5,7 +5,7 @@ use crate::community::submit_and_prepare;
 use crate::RETRY_DELAY;
 use anyhow::{bail, Context, Result};
 use buzz_core::CommunityId;
-use buzz_db::deletion::{DeletionRequest, DeletionStage, DeletionStore};
+use buzz_db::deletion::{DeletionRequest, DeletionRequestOrigin, DeletionStage, DeletionStore};
 use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityStage};
 use buzz_media::MediaStorage;
 use serde_json::{json, Value};
@@ -97,9 +97,9 @@ async fn observe(
             .await?
         }
     };
-    if saved_child.is_some_and(|id| id != child.id.to_string()) {
-        bail!("community deletion request changed; operator reconciliation is required");
-    }
+    // The stage tracks the approved community, not one deletion attempt. A
+    // replacement request returned by community-ID lookup becomes its current
+    // observation without changing or approving the child.
     let completed = child.stage == DeletionStage::RetentionPending
         && child.completed_at.is_some()
         && child.blocked_reason.is_none();
@@ -122,14 +122,37 @@ fn observation(child: &DeletionRequest, completed: bool) -> Value {
             "Community logical deletion is complete. Retained copies remain subject to community retention policy.",
             vec![inspect],
         )
-    } else if child.blocked_reason.is_some() || child.stage == DeletionStage::Aborted {
+    } else if child.stage == DeletionStage::Aborted {
         (
             "operator_intervention",
-            "Inspect the blocked or aborted child and resolve it manually; this handler will not replace or reset it.",
-            vec![inspect],
+            "Inspect the aborted child. To continue deletion, submit a replacement for this community; the user stage will follow it on the next invocation.",
+            vec![inspect, json!(["buzz-admin", "deletions", "submit", "--host", child.community_host, "--requested-by", "<operator>"])],
+        )
+    } else if child.blocked_reason.is_some() {
+        (
+            "operator_intervention",
+            "Inspect and fix the recorded cause, then unblock the community deletion request.",
+            vec![
+                inspect,
+                json!([
+                    "buzz-admin",
+                    "deletions",
+                    "unblock",
+                    id,
+                    "--unblocked-by",
+                    "<operator>",
+                    "--reason",
+                    "<remediation>"
+                ]),
+            ],
         )
     } else {
         match child.stage {
+            DeletionStage::Submitted if child.request_origin == DeletionRequestOrigin::Owner => (
+                "owner_preparation_pending",
+                "Let the community deletion drain prepare and approve the existing owner-origin request after validating its recorded owner intent.",
+                vec![inspect],
+            ),
             DeletionStage::Submitted => (
                 "preparation_required",
                 "Finish community inventory preparation using the original submitter, then obtain separate community approval.",

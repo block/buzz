@@ -61,10 +61,12 @@ data for display; the handler never executes them.
 
 | Last observed child state | User stage outcome | Operator action |
 | --- | --- | --- |
-| Submitted | Waiting | Finish preparation with the original submitter, then seek approval |
+| Submitted, operator-origin | Waiting | Finish preparation with the original submitter, then seek approval |
+| Submitted, owner-origin | Waiting | Let the community drain prepare inventory and approve the recorded owner intent after validation |
 | Inventoried | Waiting | Inspect the frozen inventory and separately approve the child |
 | Approved or executing | Waiting | Let community drain run it, or use the existing community `run` command |
-| Blocked or aborted | Waiting | Inspect and resolve manually; no automatic replacement or reset |
+| Blocked | Waiting | Inspect and fix the cause, then use `deletions unblock` with operator identity and remediation reason |
+| Aborted | Waiting | Inspect, then explicitly submit a replacement if deletion should continue; the next handler invocation follows it |
 | Retention pending with completion time | Completed | Logical deletion is complete; retained-copy obligations remain visible in the saved result |
 
 Waiting currently means `status = 'running'` plus `metadata_json.waiting`.
@@ -81,8 +83,13 @@ This initial implementation deliberately does not retry preparation during
 lookup. A crash between creating the child and saving its ID is also
 recoverable by community-ID lookup. No derived UUID or new linking table is needed.
 
-Once an ID has been observed, a missing or replaced child is an error requiring
-reconciliation. An old lease generation cannot overwrite the user's saved
+The user stage tracks the approved community ID, not a particular child request.
+If an operator aborts child A and submits child B for the same community, the next
+handler invocation updates the same stage row with B's ID and observed status.
+It neither changes nor approves B. The stage stays waiting until the current
+child completes logical deletion. A previously observed child disappearing
+without a replacement remains an error; the handler does not silently resubmit.
+An old lease generation cannot overwrite the user's saved
 observation or result. Failures to record a retry also propagate.
 
 ## Summarize the request using only our tables
@@ -126,6 +133,9 @@ visit the unfinished row. A separate integration change must permit proceeding
 past external waits, revisit those rows on a later run, and stop with a saved
 unfinished request when only external dependencies remain. Summary reporting
 must remain read-only. Claim/heartbeat/release stays the worker's responsibility.
+Waiting currently clears `next_attempt_at`; integration must define an explicit
+resume or a bounded revisit cadence before enabling automatic scheduling, so a
+released waiting request cannot be claimed repeatedly in a hot loop.
 
 ## Test this slice
 
@@ -147,4 +157,6 @@ repeat lookup, stale summaries, child completion, preparation failure recovery,
 concurrent parent/CLI admission, aborted requests, stale generations, input
 mismatch, host/ID mismatch before insertion, CLI preparation retry, and propagation
 of database failures even when a child already exists.
+Replacement coverage saves A, aborts it, submits B through the shared CLI path,
+then verifies the same user stage waits on B and completes only when B does.
 Owned inventory is fixture-seeded because real user intake still rejects it.

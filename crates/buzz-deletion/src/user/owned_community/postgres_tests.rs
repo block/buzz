@@ -96,6 +96,15 @@ fn lookup_only_media() -> Arc<MediaStorage> {
 }
 
 async fn submission_media() -> (Arc<MediaStorage>, tokio::task::JoinHandle<()>) {
+    submission_media_with_pause(None).await
+}
+
+async fn submission_media_with_pause(
+    mut pause: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+) -> (Arc<MediaStorage>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -114,6 +123,13 @@ async fn submission_media() -> (Arc<MediaStorage>, tokio::task::JoinHandle<()>) 
             assert!(std::str::from_utf8(&headers[..size])
                 .unwrap()
                 .starts_with("GET "));
+            if let Some((started, resume)) = pause.take() {
+                started.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(10), resume)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
             let body = "<ListVersionsResult><Name>test</Name><IsTruncated>false</IsTruncated></ListVersionsResult>";
             let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             socket.write_all(response.as_bytes()).await.unwrap();
@@ -128,6 +144,160 @@ async fn child(f: &Fixture) -> DeletionRequest {
         .await
         .unwrap()
         .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn stage_follows_replacement_child_for_the_same_community() {
+    let f = fixture().await;
+    let store = f.db.deletion_store();
+    let (media, server) = submission_media().await;
+    handle(&f.store, &f.lease, &f.row, &store, &media)
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let a = child(&f).await;
+    let saved = f.store.inspect(f.row.request_id).await.unwrap();
+    assert_eq!(
+        saved.stage_history[0].metadata_json["waiting"]["child_request_id"],
+        a.id.to_string()
+    );
+    store
+        .abort(a.id, "operator", "replace request")
+        .await
+        .unwrap();
+    // Use the same submission/preparation entry point as the community CLI.
+    let (media, server) = submission_media().await;
+    let b = submit_and_prepare(
+        &store,
+        &media,
+        Some("owned.example"),
+        "operator",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    server.await.unwrap();
+    assert_ne!(a.id, b.id);
+    assert_eq!(b.community_id, a.community_id);
+    assert_eq!(b.stage, DeletionStage::Inventoried);
+    let media = lookup_only_media();
+    assert_eq!(
+        handle(&f.store, &f.lease, &f.row, &store, &media)
+            .await
+            .unwrap(),
+        OwnedCommunityOutcome::Waiting
+    );
+    let saved = f.store.inspect(f.row.request_id).await.unwrap();
+    assert_eq!(saved.stage_history.len(), 1);
+    let row = &saved.stage_history[0];
+    assert_eq!(row.id, f.row.id);
+    assert_eq!(row.status, "running");
+    assert_eq!(
+        row.metadata_json["waiting"]["child_request_id"],
+        b.id.to_string()
+    );
+    assert_eq!(row.metadata_json["waiting"]["child_stage"], "inventoried");
+    assert_eq!(saved.execution.retry_count, 0);
+    assert!(saved.execution.last_error.is_none());
+    assert_eq!(store.get(a.id).await.unwrap().stage, DeletionStage::Aborted);
+    assert_eq!(store.get(b.id).await.unwrap(), b);
+    assert!(store.inspect(b.id).await.unwrap().approval.is_none());
+    // Model the separate community worker completing B, as in the main flow test.
+    sqlx::query("UPDATE community_deletion_requests SET stage = 'retention_pending', completed_at = now() WHERE id = $1")
+        .bind(b.id).execute(f.db.pool()).await.unwrap();
+    assert_eq!(
+        handle(&f.store, &f.lease, &f.row, &store, &media)
+            .await
+            .unwrap(),
+        OwnedCommunityOutcome::Completed
+    );
+    let saved = f.store.inspect(f.row.request_id).await.unwrap();
+    assert_eq!(saved.stage_history.len(), 1);
+    assert_eq!(saved.stage_history[0].id, f.row.id);
+    assert_eq!(saved.stage_history[0].status, "completed");
+    assert_eq!(
+        saved.stage_history[0].metadata_json["result"]["child_request_id"],
+        b.id.to_string()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn submission_preserves_operator_transition_during_inventory_listing() {
+    let f = fixture().await;
+    let store = f.db.deletion_store();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+    let (media, server) = submission_media_with_pause(Some((started_tx, resume_rx))).await;
+    let submission = submit_and_prepare(&store, &media, None, "operator", None, Some(f.community));
+    let intervention = async {
+        tokio::time::timeout(Duration::from_secs(10), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let request = child(&f).await;
+        assert_eq!(request.stage, DeletionStage::Submitted);
+        let aborted = store
+            .abort(request.id, "operator", "cancel during inventory")
+            .await
+            .unwrap();
+        resume_tx.send(()).unwrap();
+        aborted
+    };
+    let (result, aborted) = tokio::join!(submission, intervention);
+    server.await.unwrap();
+    assert_eq!(result.unwrap(), aborted);
+    assert_eq!(store.get(aborted.id).await.unwrap(), aborted);
+    assert!(store.inspect(aborted.id).await.unwrap().approval.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn operator_guidance_distinguishes_blocked_aborted_and_owner_submitted() {
+    let f = fixture().await;
+    let mut child =
+        f.db.deletion_store()
+            .submit(Some("owned.example"), "operator", None, None)
+            .await
+            .unwrap();
+    let observed = observation(&child, false);
+    assert_eq!(observed["reason"], "preparation_required");
+    assert_eq!(observed["commands"][1][2], "submit");
+    child.request_origin = DeletionRequestOrigin::Owner;
+    let observed = observation(&child, false);
+    assert_eq!(observed["reason"], "owner_preparation_pending");
+    assert_eq!(observed["commands"].as_array().unwrap().len(), 1);
+    child.blocked_reason = Some("unsafe inventory".into());
+    let observed = observation(&child, false);
+    assert_eq!(
+        observed["commands"][1],
+        json!([
+            "buzz-admin",
+            "deletions",
+            "unblock",
+            child.id.to_string(),
+            "--unblocked-by",
+            "<operator>",
+            "--reason",
+            "<remediation>"
+        ])
+    );
+    child.stage = DeletionStage::Aborted;
+    let observed = observation(&child, false);
+    assert_eq!(
+        observed["commands"][1],
+        json!([
+            "buzz-admin",
+            "deletions",
+            "submit",
+            "--host",
+            child.community_host,
+            "--requested-by",
+            "<operator>"
+        ])
+    );
 }
 
 #[tokio::test]

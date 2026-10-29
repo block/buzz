@@ -850,10 +850,9 @@ impl DeletionStore {
     /// when a `submitted` request already exists. With `expected_community`,
     /// admission is create-only and pinned to that ID (and host, if supplied);
     /// existing requests, including aborted ones, are left for the caller to read.
-    /// Owner provenance pins an
-    /// owner-origin request's `requested_by` to its `owner_pubkey`, so taking
-    /// one over manually means passing that owner pubkey; the operator's own
-    /// pubkey conflicts with the existing request instead of converging.
+    /// Owner provenance pins an owner-origin request's `requested_by` to its
+    /// `owner_pubkey`. Manual takeover must pass that owner pubkey; the operator's
+    /// own pubkey conflicts with the existing request instead of converging.
     pub async fn submit(
         &self,
         community_host: Option<&str>,
@@ -926,10 +925,15 @@ impl DeletionStore {
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
+        let target_label = community_host.map(str::to_owned).unwrap_or_else(|| {
+            expected_community
+                .map(|id| id.as_uuid().to_string())
+                .unwrap_or_default()
+        });
         match row {
             Some(row) => row_to_request(row),
             None => Err(DbError::DeletionSafety(format!(
-                "community {community_host:?} is missing, already requested, fenced, or tombstoned"
+                "community {target_label} is missing, already requested, fenced, or tombstoned"
             ))),
         }
     }
