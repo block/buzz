@@ -36,7 +36,7 @@ pub async fn seed(scenario: &Scenario, net: &Net, stats: &Arc<Stats>) -> anyhow:
     let started = Instant::now();
     let before = stats.snapshot();
     let (roots, rest) = plan_posts(scenario);
-    let planned = roots.len() + rest.len();
+    let planned: usize = roots.iter().chain(&rest).map(Vec::len).sum();
     let root_ids = post_all(scenario, net, stats, &communities, roots, &RootIds::new()).await;
     post_all(scenario, net, stats, &communities, rest, &root_ids).await;
     let accepted = seeded(&stats.snapshot(), &before);
@@ -63,38 +63,48 @@ fn seeded(now: &Snapshot, before: &Snapshot) -> usize {
 /// Accepted post ids keyed by (community, channel, seq).
 type RootIds = HashMap<(usize, usize, usize), String>;
 
-/// Submits `posts` and returns the ids of the accepted ones.
+/// Posts submitted in order, each attaching to the previous accepted one.
+type Chain = Vec<Post>;
+
+/// Submits the chains concurrently, each in order, and returns the ids of the
+/// accepted posts. A chain stops making progress at its first failed post.
 async fn post_all(
     scenario: &Scenario,
     net: &Net,
     stats: &Stats,
     communities: &[Community],
-    posts: Vec<Post>,
+    chains: Vec<Chain>,
     roots: &RootIds,
 ) -> RootIds {
-    stream::iter(posts)
-        .map(|post| {
-            let community = &communities[post.community];
-            async move {
-                let Some((keys, event)) = post.build(scenario, roots) else {
-                    stats.err(Op::Seed, "thread root missing");
-                    return None;
+    stream::iter(chains)
+        .map(|chain| async move {
+            let mut accepted = Vec::new();
+            let mut previous: Option<String> = None;
+            for post in chain {
+                let community = &communities[post.community];
+                let Some((keys, event)) = post.build(scenario, roots, previous.as_deref()) else {
+                    stats.err(Op::Seed, "thread parent missing");
+                    previous = None;
+                    continue;
                 };
                 let t0 = Instant::now();
                 match net.submit(&keys, community, &event, None).await {
                     Ok(()) => {
                         stats.ok(Op::Seed, t0.elapsed());
-                        Some(((post.community, post.channel, post.seq), event.id.to_hex()))
+                        let id = event.id.to_hex();
+                        accepted.push(((post.community, post.channel, post.seq), id.clone()));
+                        previous = Some(id);
                     }
                     Err(e) => {
                         stats.err(Op::Seed, &e.to_string());
-                        None
+                        previous = None;
                     }
                 }
             }
+            accepted
         })
         .buffer_unordered(scenario.shape.seed_concurrency)
-        .filter_map(std::future::ready)
+        .flat_map(stream::iter)
         .collect()
         .await
 }
@@ -169,35 +179,40 @@ enum PostKind {
 }
 
 /// Thread roots, then history and replies (posted once root ids are known).
-/// A root's `seq` is its index within its channel.
-fn plan_posts(scenario: &Scenario) -> (Vec<Post>, Vec<Post>) {
+/// A root's `seq` is its index within its channel. Each thread's replies form
+/// one chain, so reply `k` sits at depth `k + 1`; threads and history posts
+/// are independent of each other.
+fn plan_posts(scenario: &Scenario) -> (Vec<Chain>, Vec<Chain>) {
     let shape = &scenario.shape;
     let mut roots = Vec::new();
     let mut rest = Vec::new();
     for community in 0..shape.communities {
         for channel in 0..shape.channels_per_community {
             for seq in 0..shape.history_messages_per_channel {
-                rest.push(Post {
+                rest.push(vec![Post {
                     community,
                     channel,
                     kind: PostKind::History,
                     seq,
-                });
+                }]);
             }
             for root in 0..shape.thread_roots_per_channel {
-                roots.push(Post {
+                roots.push(vec![Post {
                     community,
                     channel,
                     kind: PostKind::Root,
                     seq: root,
-                });
-                for seq in 0..shape.thread_depth {
-                    rest.push(Post {
+                }]);
+                let replies: Chain = (0..shape.thread_depth)
+                    .map(|seq| Post {
                         community,
                         channel,
                         kind: PostKind::Reply { root },
                         seq,
-                    });
+                    })
+                    .collect();
+                if !replies.is_empty() {
+                    rest.push(replies);
                 }
             }
         }
@@ -206,7 +221,14 @@ fn plan_posts(scenario: &Scenario) -> (Vec<Post>, Vec<Post>) {
 }
 
 impl Post {
-    fn build(&self, scenario: &Scenario, roots: &RootIds) -> Option<(Keys, Event)> {
+    /// Builds the event. A reply attaches to `previous`, the accepted reply
+    /// before it in its thread; the first reply attaches to the thread root.
+    fn build(
+        &self,
+        scenario: &Scenario,
+        roots: &RootIds,
+        previous: Option<&str>,
+    ) -> Option<(Keys, Event)> {
         let channel = identity::channel_id(&scenario.run_id, self.community, self.channel);
         // Rotate authors across humans to stay under per-pubkey rate limits.
         let humans = scenario.population.humans.max(1);
@@ -224,7 +246,12 @@ impl Post {
             ),
             PostKind::Reply { root } => {
                 let root_id = roots.get(&(self.community, self.channel, root))?;
-                tags.push(tag(["e", root_id, "", "reply"]));
+                let parent = if self.seq == 0 {
+                    root_id.as_str()
+                } else {
+                    previous?
+                };
+                tags.extend(reply_tags(root_id, parent));
                 (author, format!("lg-reply {}", self.seq))
             }
         };
@@ -234,6 +261,16 @@ impl Post {
             .ok()?;
         Some((keys, event))
     }
+}
+
+/// NIP-10 markers for a reply. `root` always names the thread root, since the
+/// relay rejects a reply whose root differs from its parent's, and `reply`
+/// names the parent, from which the relay derives depth (parent depth + 1).
+fn reply_tags(root: &str, parent: &str) -> [Tag; 2] {
+    [
+        tag(["e", root, "", "root"]),
+        tag(["e", parent, "", "reply"]),
+    ]
 }
 
 /// Up to the 100 newest seeded thread-root ids in `channel`, oldest first.
@@ -284,19 +321,25 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-    /// A minimal `/events` endpoint: rejects posts whose content is `reject`,
-    /// and replies whose root it never accepted; accepts everything else.
-    async fn fake_relay(reject: Arc<str>) -> String {
+    /// Serves HTTP/1.1 on loopback. `handler(method, target, body)` returns
+    /// the status and JSON body of each response.
+    async fn fake_http<F>(handler: F) -> String
+    where
+        F: Fn(&str, &str, &[u8]) -> (u16, String) + Send + Sync + 'static,
+    {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        let accepted = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let handler = Arc::new(handler);
         tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
-                let accepted = accepted.clone();
-                let reject = reject.clone();
+                let handler = handler.clone();
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(socket);
                     loop {
+                        let mut request_line = String::new();
+                        if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
                         let mut length = 0;
                         let mut line = String::new();
                         loop {
@@ -315,23 +358,11 @@ mod tests {
                         }
                         let mut body = vec![0; length];
                         reader.read_exact(&mut body).await.unwrap();
-                        let event: Event = serde_json::from_slice(&body).unwrap();
-                        let root = event
-                            .tags
-                            .iter()
-                            .find(|t| t.kind().as_str() == "e")
-                            .and_then(|t| t.content())
-                            .map(str::to_string);
-                        let ok = event.content != *reject
-                            && root.is_none_or(|r| accepted.lock().unwrap().contains(&r));
-                        if ok {
-                            accepted.lock().unwrap().insert(event.id.to_hex());
-                        }
-                        let reply =
-                            json!({"accepted": ok, "message": if ok { "" } else { "blocked" }})
-                                .to_string();
+                        let mut parts = request_line.split_whitespace();
+                        let (method, target) = (parts.next().unwrap(), parts.next().unwrap());
+                        let (status, reply) = handler(method, target, &body);
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
+                            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
                             reply.len()
                         );
                         if reader
@@ -349,8 +380,41 @@ mod tests {
         addr
     }
 
-    async fn seed_against(reject: &str) -> (anyhow::Result<()>, Arc<Stats>) {
-        let addr = fake_relay(reject.into()).await;
+    /// Accepted event id to (thread root id, depth); a root's depth is 0.
+    type Accepted = Arc<std::sync::Mutex<HashMap<String, (String, usize)>>>;
+
+    /// A minimal `/events` endpoint that rejects posts whose content is
+    /// `reject`. Like the relay it accepts a reply only when its parent was
+    /// accepted and its `root` marker names the parent's root, and it derives
+    /// depth as the parent's depth + 1.
+    async fn fake_relay(reject: Arc<str>) -> (String, Accepted) {
+        let accepted: Accepted = Default::default();
+        let known = accepted.clone();
+        let addr = fake_http(move |_, _, body| {
+            let event: Event = serde_json::from_slice(body).unwrap();
+            let mut known = known.lock().unwrap();
+            let id = event.id.to_hex();
+            let placed = match buzz_core::nip10::parse_thread_markers(&event.tags).resolve() {
+                None => Some((id.clone(), 0)),
+                Some((root, parent)) => known
+                    .get(&parent)
+                    .filter(|(parent_root, _)| *parent_root == root || parent == root)
+                    .map(|(_, depth)| (root.clone(), depth + 1)),
+            };
+            let placed = placed.filter(|_| event.content != *reject);
+            let ok = placed.is_some();
+            if let Some(placed) = placed {
+                known.insert(id, placed);
+            }
+            let reply = json!({"accepted": ok, "message": if ok { "" } else { "blocked" }});
+            (200, reply.to_string())
+        })
+        .await;
+        (addr, accepted)
+    }
+
+    async fn seed_against(reject: &str) -> (anyhow::Result<()>, Arc<Stats>, Accepted) {
+        let (addr, accepted) = fake_relay(reject.into()).await;
         let scenario = Scenario::parse(&format!(
             r#"
 run_id = "t"
@@ -375,23 +439,88 @@ hold_secs = 1
         .unwrap();
         let net = Net::new(&scenario).await.unwrap();
         let stats = Arc::new(Stats::default());
-        (seed(&scenario, &net, &stats).await, stats)
+        (seed(&scenario, &net, &stats).await, stats, accepted)
     }
 
     #[tokio::test]
     async fn replies_use_accepted_roots_and_missing_posts_fail_the_seed() {
-        let (outcome, stats) = seed_against("none").await;
+        let (outcome, stats, _) = seed_against("none").await;
         outcome.expect("every post accepted");
         assert_eq!(seeded(&stats.snapshot(), &Snapshot::default()), 10);
 
-        let (outcome, stats) = seed_against("lg-history 1").await;
+        let (outcome, stats, _) = seed_against("lg-history 1").await;
         let err = outcome.expect_err("a rejected post fails the seed");
         assert!(err.to_string().contains("seeded 9 of 10"), "{err}");
         assert_eq!(seeded(&stats.snapshot(), &Snapshot::default()), 9);
 
         // A rejected root leaves its three replies unpostable.
-        let (outcome, _) = seed_against(&format!("{ROOT_PREFIX} 1")).await;
+        let (outcome, _, _) = seed_against(&format!("{ROOT_PREFIX} 1")).await;
         let err = outcome.expect_err("a rejected root fails the seed");
         assert!(err.to_string().contains("seeded 6 of 10"), "{err}");
+
+        // A rejected reply leaves the replies chained to it unpostable.
+        let (outcome, _, _) = seed_against("lg-reply 1").await;
+        let err = outcome.expect_err("a rejected reply fails the seed");
+        assert!(err.to_string().contains("seeded 6 of 10"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn thread_depth_builds_deep_threads() {
+        let (outcome, _, accepted) = seed_against("none").await;
+        outcome.expect("every post accepted");
+        // Two threads of three chained replies, not six direct replies.
+        let mut depths: Vec<usize> = accepted
+            .lock()
+            .unwrap()
+            .values()
+            .map(|(_, depth)| *depth)
+            .filter(|depth| *depth > 0)
+            .collect();
+        depths.sort();
+        assert_eq!(depths, [1, 1, 2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn reply_k_points_reply_at_reply_k_minus_one_and_root_at_the_root() {
+        let scenario = Scenario::parse(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://localhost:3000"
+http_url = "http://localhost:3000"
+[shape]
+communities = 1
+channels_per_community = 1
+thread_roots_per_channel = 1
+thread_depth = 4
+[population]
+humans = 2
+agents = 0
+channels_per_member = 1
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#,
+        )
+        .unwrap();
+        let (roots, rest) = plan_posts(&scenario);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(rest.len(), 1, "one chain per thread");
+        let root_id = "a".repeat(64);
+        let known: RootIds = [((0, 0, 0), root_id.clone())].into();
+
+        let mut previous: Option<String> = None;
+        for (k, post) in rest[0].iter().enumerate() {
+            let (_, event) = post
+                .build(&scenario, &known, previous.as_deref())
+                .expect("reply builds once its parent is known");
+            let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
+            assert_eq!(markers.root.as_deref(), Some(root_id.as_str()), "reply {k}");
+            let parent = previous.as_deref().unwrap_or(&root_id);
+            assert_eq!(markers.reply.as_deref(), Some(parent), "reply {k}");
+            previous = Some(event.id.to_hex());
+        }
+        // A reply cannot be placed without its predecessor.
+        assert!(rest[0][2].build(&scenario, &known, None).is_none());
     }
 }

@@ -22,6 +22,11 @@ cargo run --release -p buzz-test-client --bin buzz-loadgen -- run perf/scenarios
 | Throughput per client | `[human]` and `[agent]` rates |
 | Reconnect churn | `human.mean_session_secs`, `population.connect_rate_per_sec` |
 
+`shape.thread_depth` seeds each thread as a chain: reply `k` replies to reply
+`k-1`, so the thread's deepest reply sits at depth `thread_depth`. The relay
+rejects depths above 100, so scenarios do too. Threads are seeded in parallel
+with each other.
+
 ## What each client does
 
 - **Human**: authenticates over WebSocket and subscribes to its channels'

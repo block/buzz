@@ -57,6 +57,9 @@ fn default_connect_timeout() -> f64 {
     10.0
 }
 
+/// Deepest reply nesting the relay accepts.
+const MAX_THREAD_DEPTH: usize = 100;
+
 /// Data-shape vectors created by `seed`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,7 +69,8 @@ pub struct Shape {
     /// Top-level kind:9 messages seeded per channel.
     #[serde(default)]
     pub history_messages_per_channel: usize,
-    /// Thread roots seeded per channel, each with `thread_depth` replies.
+    /// Thread roots seeded per channel, each a chain of `thread_depth` nested
+    /// replies (at most 100, the relay's limit).
     #[serde(default)]
     pub thread_roots_per_channel: usize,
     #[serde(default)]
@@ -197,6 +201,12 @@ impl Scenario {
         }
         if self.shape.communities > 1 && self.target.community_host_template.is_none() {
             return Err("more than one community needs target.community_host_template".into());
+        }
+        // The relay rejects replies nested deeper than this.
+        if self.shape.thread_depth > MAX_THREAD_DEPTH {
+            return Err(format!(
+                "shape.thread_depth must be at most {MAX_THREAD_DEPTH}"
+            ));
         }
         if self.population.channels_per_member == 0
             || self.population.channels_per_member > self.shape.channels_per_community
@@ -393,5 +403,18 @@ hold_secs = 10
         assert!(Scenario::parse(&text).is_err());
         let up = format!("{MINIMAL}[[ramp]]\nusers = 2.0\nhold_secs = 10\n");
         assert!(Scenario::parse(&up).is_ok());
+    }
+
+    #[test]
+    fn thread_depth_is_limited_to_what_the_relay_accepts() {
+        let with_depth = |depth: usize| {
+            MINIMAL.replace(
+                "channels_per_community = 4",
+                &format!("channels_per_community = 4\nthread_depth = {depth}"),
+            )
+        };
+        assert!(Scenario::parse(&with_depth(100)).is_ok());
+        let err = Scenario::parse(&with_depth(101)).unwrap_err();
+        assert!(err.contains("thread_depth"), "{err}");
     }
 }
