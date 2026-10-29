@@ -1,6 +1,8 @@
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:duo_kit/duo_kit.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -24,6 +26,8 @@ import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/duo_toolbar.dart';
+import '../../shared/widgets/bottom_up_page_route.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/immediate_page_route.dart';
 
@@ -77,74 +81,133 @@ class SettingsPage extends HookConsumerWidget {
       bottomHeight: Grid.xxs,
     );
 
+    final strip = FoldGeometry.of(context).strip;
+    final wide =
+        bookDivisionOf(context) != null ||
+        MediaQuery.sizeOf(context).width - (strip?.width ?? 0) >= 640;
     // Keep feedback local even while Home is mounted during the transition.
-    return ScaffoldMessenger(
-      child: FrostedScaffold(
-        useUtilitySurfaceTheme: true,
-        appBar: FrostedAppBar(
-          nativeTitle: embedded ? '' : 'Settings',
-          nativeLeading: embedded
-              ? null
-              : IosNavigationAction(
-                  label: 'Close settings',
-                  symbol: 'xmark',
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-          automaticallyImplyLeading: false,
-          horizontalInset: Grid.gutter,
-          showBottomDivider: false,
-          leading: embedded
-              ? null
-              : Theme.of(context).platform == TargetPlatform.iOS
-              ? IosGlassNavigationButton(
-                  key: const ValueKey('settings-ios-glass-close'),
-                  icon: IosGlassNavigationIcon.close,
-                  semanticLabel: 'Close settings',
-                  onPressed: () {
-                    unawaited(HapticFeedback.lightImpact());
-                    Navigator.of(context).pop();
-                  },
-                  foregroundColor: navigationPrimaryForeground(context),
-                )
-              : SizedBox(
-                  width: Grid.xl,
-                  height: Grid.xl,
-                  child: IconButton(
-                    tooltip: 'Close settings',
-                    onPressed: () {
-                      unawaited(HapticFeedback.lightImpact());
-                      Navigator.of(context).pop();
-                    },
-                    color: navigationPrimaryForeground(context),
-                    icon: const Icon(BuzzIcons.x),
-                  ),
-                ),
-          bottomHeight: Grid.xxs,
-          bottom: const SizedBox.expand(),
-        ),
-        body: ListView(
-          padding: EdgeInsets.only(
-            top: topSectionHeight,
-            bottom: MediaQuery.paddingOf(context).bottom + Grid.xs,
-          ),
-          children: [
-            profileHeader,
-            _StatusSection(onSetStatus: onSetStatus),
-            _ProfileSection(
-              profileEditPageBuilder: profileEditPageBuilder,
-              onEditDisplayName: onEditDisplayName,
-              onEditProfileDescription: onEditProfileDescription,
-            ),
-            const _NotificationsSection(),
-            _ConnectionSection(
-              identityRecoveryPageBuilder: identityRecoveryPageBuilder,
-            ),
-            if (packageInfo.hasData)
-              _VersionFooter(
-                version: packageInfo.data!.version,
-                buildNumber: packageInfo.data!.buildNumber,
+    return Theme(
+      data: utilitySurfaceThemeData(Theme.of(context)),
+      child: AdaptiveConversationDestination(
+        emptyLabel: 'Select a setting',
+        child: Builder(
+          builder: (paneContext) => ScaffoldMessenger(
+            child: FrostedScaffold(
+              useUtilitySurfaceTheme: true,
+              appBar: FrostedAppBar(
+                nativeTitle: embedded ? '' : 'Settings',
+                nativeLeading: embedded
+                    ? null
+                    : IosNavigationAction(
+                        label: 'Close settings',
+                        symbol: 'xmark',
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                automaticallyImplyLeading: false,
+                horizontalInset: Grid.gutter,
+                showBottomDivider: false,
+                leading: embedded
+                    ? null
+                    : Theme.of(context).platform == TargetPlatform.iOS
+                    ? IosGlassNavigationButton(
+                        key: const ValueKey('settings-ios-glass-close'),
+                        icon: IosGlassNavigationIcon.close,
+                        semanticLabel: 'Close settings',
+                        onPressed: () {
+                          unawaited(HapticFeedback.lightImpact());
+                          Navigator.of(context).pop();
+                        },
+                        foregroundColor: navigationPrimaryForeground(context),
+                      )
+                    : SizedBox(
+                        width: Grid.xl,
+                        height: Grid.xl,
+                        child: IconButton(
+                          tooltip: 'Close settings',
+                          onPressed: () {
+                            unawaited(HapticFeedback.lightImpact());
+                            Navigator.of(context).pop();
+                          },
+                          color: navigationPrimaryForeground(context),
+                          icon: const Icon(BuzzIcons.x),
+                        ),
+                      ),
+                bottomHeight: Grid.xxs,
+                bottom: const SizedBox.expand(),
               ),
-          ],
+              body: ListView(
+                padding: EdgeInsets.only(
+                  top: topSectionHeight,
+                  bottom: MediaQuery.paddingOf(context).bottom + Grid.xs,
+                ),
+                children: [
+                  profileHeader,
+                  if (wide) ...[
+                    for (final section in <(String, Widget)>[
+                      ('Status', _StatusSection(onSetStatus: onSetStatus)),
+                      (
+                        'Profile',
+                        _ProfileSection(
+                          profileEditPageBuilder: profileEditPageBuilder,
+                          onEditDisplayName: onEditDisplayName,
+                          onEditProfileDescription: onEditProfileDescription,
+                        ),
+                      ),
+                      if (_notificationsVisible(ref))
+                        ('Notifications', const _NotificationsSection()),
+                      (
+                        'Connection',
+                        _ConnectionSection(
+                          identityRecoveryPageBuilder:
+                              identityRecoveryPageBuilder,
+                        ),
+                      ),
+                    ])
+                      AppListRow(
+                        title: section.$1,
+                        trailing: const _RowChevron(),
+                        onTap: () => openConversationPane(
+                          paneContext,
+                          section.$1,
+                          (detailContext) => FrostedScaffold(
+                            useUtilitySurfaceTheme: true,
+                            appBar: FrostedAppBar(
+                              nativeTitle: section.$1,
+                              title: Text(section.$1),
+                            ),
+                            body: ListView(
+                              padding: EdgeInsets.only(
+                                top: frostedAppBarHeight(detailContext),
+                                bottom:
+                                    MediaQuery.paddingOf(context).bottom +
+                                    Grid.xs,
+                              ),
+                              children: [section.$2],
+                            ),
+                          ),
+                        ),
+                      ),
+                  ] else ...[
+                    _StatusSection(onSetStatus: onSetStatus),
+                    _ProfileSection(
+                      profileEditPageBuilder: profileEditPageBuilder,
+                      onEditDisplayName: onEditDisplayName,
+                      onEditProfileDescription: onEditProfileDescription,
+                    ),
+                    const _NotificationsSection(),
+                    _ConnectionSection(
+                      identityRecoveryPageBuilder: identityRecoveryPageBuilder,
+                    ),
+                  ],
+                  if (packageInfo.hasData)
+                    _VersionFooter(
+                      version: packageInfo.data!.version,
+                      buildNumber: packageInfo.data!.buildNumber,
+                    ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );

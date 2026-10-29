@@ -9,6 +9,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final inRail = DuoToolbarScope.maybeOf(context)?.strip != null;
     final stored = ref.read(communityThemeProvider);
     final draftMode = useState(stored.mode);
     final draftAccent = useState(chatColorIndex(stored.accent));
@@ -32,6 +33,13 @@ class _ThemePreviewExperience extends HookConsumerWidget {
       draftMode.value = _appearanceOrder[(index + 1) % _appearanceOrder.length];
     }
 
+    void chooseColor() => showAccentColorPickerSheet(
+      context: context,
+      colorScheme: selectedBaseScheme,
+      selectedIndex: draftAccent.value,
+      onSelected: (index) => draftAccent.value = index,
+    );
+
     void applySelection() {
       unawaited(HapticFeedback.mediumImpact());
       ref
@@ -53,7 +61,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
       Navigator.of(context).pop();
     }
 
-    return FrostedScaffold(
+    final scaffold = FrostedScaffold(
       useUtilitySurfaceTheme: true,
       appBar: FrostedAppBar(
         automaticallyImplyLeading: false,
@@ -72,6 +80,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
         actions: [_ThemePreviewSetButton(onPressed: applySelection)],
       ),
       body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(height: frostedAppBarHeight(context)),
           Expanded(
@@ -80,58 +89,109 @@ class _ThemePreviewExperience extends HookConsumerWidget {
               mode: draftMode.value,
               accentIndex: draftAccent.value,
               platformBrightness: platformBrightness,
-              titleHorizontalOffset: 0,
             ),
           ),
-          SafeArea(
-            top: false,
-            minimum: const EdgeInsets.only(bottom: Grid.xs),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                Grid.gutter,
-                Grid.twelve,
-                Grid.gutter,
-                0,
-              ),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 64,
-                    child: _PreviewSheetCircleAction(
-                      key: const ValueKey('theme-preview-accent-action-button'),
-                      semanticLabel: 'Chat color',
-                      color: chatColorForScheme(
-                        selectedBaseScheme,
-                        draftAccent.value,
+          if (inRail) SizedBox(height: frostedAppBarHeight(context)),
+          if (!inRail)
+            SafeArea(
+              top: false,
+              minimum: const EdgeInsets.only(bottom: Grid.xs),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Grid.gutter,
+                  Grid.twelve,
+                  Grid.gutter,
+                  0,
+                ),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 64,
+                      child: _PreviewSheetCircleAction(
+                        key: const ValueKey(
+                          'theme-preview-accent-action-button',
+                        ),
+                        semanticLabel: 'Chat color',
+                        color: chatColorForScheme(
+                          selectedBaseScheme,
+                          draftAccent.value,
+                        ),
+                        onTap: chooseColor,
                       ),
-                      onTap: () => showAccentColorPickerSheet(
-                        context: context,
-                        colorScheme: selectedBaseScheme,
-                        selectedIndex: draftAccent.value,
-                        onSelected: (index) => draftAccent.value = index,
+                    ),
+                    Expanded(
+                      child: Text(
+                        appearanceModeLabel(draftMode.value),
+                        textAlign: TextAlign.center,
                       ),
                     ),
-                  ),
-                  Expanded(
-                    child: Text(
-                      appearanceModeLabel(draftMode.value),
-                      textAlign: TextAlign.center,
+                    SizedBox(
+                      width: 64,
+                      child: _AppearanceCycleAction(
+                        mode: draftMode.value,
+                        reduceMotion: reduceMotion,
+                        onTap: cycleAppearance,
+                      ),
                     ),
-                  ),
-                  SizedBox(
-                    width: 64,
-                    child: _AppearanceCycleAction(
-                      mode: draftMode.value,
-                      reduceMotion: reduceMotion,
-                      onTap: cycleAppearance,
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
         ],
       ),
+    );
+    final portal = useMemoized(() => OverlayPortalController()..show());
+    return OverlayPortal(
+      overlayLocation: OverlayChildLocation.rootOverlay,
+      controller: portal,
+      overlayChildBuilder: (context) {
+        final scope = DuoToolbarScope.maybeOf(context);
+        final strip = scope?.strip;
+        if (strip == null) return const SizedBox.shrink();
+        final window =
+            View.of(context).physicalSize / View.of(context).devicePixelRatio;
+        return Positioned(
+          left:
+              IosNavigationMetrics.of(
+                context,
+              ).railCenter(window, strip.rect.center.dx) -
+              32,
+          top: strip.rect.bottom - strip.bottomClearance - 132,
+          width: 64,
+          child: Offstage(
+            offstage:
+                !(scope?.active ?? true) ||
+                !(ModalRoute.isCurrentOf(context) ?? true),
+            child: Column(
+              key: const ValueKey('theme-preview-rail-bottom'),
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  height: 60,
+                  child: _PreviewSheetCircleAction(
+                    key: const ValueKey('theme-preview-accent-action-button'),
+                    semanticLabel: 'Chat color',
+                    color: chatColorForScheme(
+                      selectedBaseScheme,
+                      draftAccent.value,
+                    ),
+                    onTap: chooseColor,
+                  ),
+                ),
+                SizedBox(
+                  height: 60,
+                  child: _AppearanceCycleAction(
+                    mode: draftMode.value,
+                    reduceMotion: reduceMotion,
+                    onTap: cycleAppearance,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+      child: scaffold,
     );
   }
 }
@@ -142,85 +202,40 @@ class _ThemePreviewPage extends StatelessWidget {
     required this.mode,
     required this.accentIndex,
     required this.platformBrightness,
-    required this.titleHorizontalOffset,
   });
 
   final ThemeColors theme;
   final ThemeMode mode;
   final int accentIndex;
   final Brightness platformBrightness;
-  final double titleHorizontalOffset;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(Grid.gutter, Grid.xxs, Grid.gutter, 0),
+    padding: EdgeInsets.fromLTRB(
+      Grid.gutter,
+      Grid.xxs,
+      Grid.gutter,
+      DuoToolbarScope.maybeOf(context)?.strip != null ? Grid.xxs : 0,
+    ),
     child: DecoratedBox(
       key: ValueKey('theme-preview-page-${theme.name}'),
       decoration: BoxDecoration(
         color: context.colors.surfaceContainerLow,
         borderRadius: BorderRadius.circular(Radii.container),
       ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          const previewWidth = 858.0;
-          const previewHeight = 852.0;
-          final availableWidth = constraints.maxWidth - Grid.xs * 2;
-          final availableHeight = constraints.maxHeight - Grid.xs * 2;
-          final widthScale = availableWidth / previewWidth;
-          final heightScale = availableHeight / previewHeight;
-          final scale = widthScale < heightScale ? widthScale : heightScale;
-          final previewTop =
-              (constraints.maxHeight - previewHeight * scale) / 2;
-          final desiredTitleBottom =
-              constraints.maxHeight - previewTop + Grid.md;
-          final landscapeTitleBottom =
-              constraints.maxHeight - Grid.xs - Grid.lg;
-          final titleBottom =
-              heightScale < widthScale &&
-                  desiredTitleBottom > landscapeTitleBottom
-              ? landscapeTitleBottom
-              : desiredTitleBottom;
-
-          return Stack(
-            children: [
-              Positioned.fill(
-                child: Padding(
-                  padding: const EdgeInsets.all(Grid.xs),
-                  child: FittedBox(
-                    key: ValueKey('theme-full-preview-${theme.name}'),
-                    fit: BoxFit.contain,
-                    alignment: Alignment.center,
-                    child: _ThemeDevicePairPreview(
-                      theme: theme,
-                      mode: mode,
-                      accentIndex: accentIndex,
-                      platformBrightness: platformBrightness,
-                    ),
-                  ),
-                ),
-              ),
-              Positioned(
-                left: Grid.xs,
-                right: Grid.xs,
-                bottom: titleBottom,
-                child: Transform.translate(
-                  key: ValueKey('theme-preview-name-motion-${theme.name}'),
-                  offset: Offset(titleHorizontalOffset, 0),
-                  child: Text(
-                    _themeLabelFor(theme, mode),
-                    key: ValueKey('theme-preview-name-${theme.name}'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: context.textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
+      child: Padding(
+        padding: const EdgeInsets.all(Grid.xs),
+        child: FittedBox(
+          key: ValueKey('theme-full-preview-${theme.name}'),
+          fit: BoxFit.contain,
+          alignment: Alignment.center,
+          child: _ThemeDevicePairPreview(
+            theme: theme,
+            mode: mode,
+            accentIndex: accentIndex,
+            platformBrightness: platformBrightness,
+          ),
+        ),
       ),
     ),
   );

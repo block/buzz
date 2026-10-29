@@ -5,6 +5,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import 'package:buzz/features/settings/settings_page.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -34,6 +35,72 @@ void main() {
     );
   });
 
+  testWidgets('wide Settings opens categories and editors in the detail pane', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1000, 800);
+    addTearDown(tester.view.reset);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+            profileEditPageBuilder: (_) =>
+                Scaffold(appBar: AppBar(title: const Text('Photo editor'))),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Select a setting'), findsOneWidget);
+    final workspaceTheme = Theme.of(
+      tester.element(find.byType(AdaptiveConversationDestination)),
+    );
+    expect(
+      workspaceTheme.colorScheme.surface,
+      utilitySurfaceThemeData(AppTheme.light()).colorScheme.surface,
+    );
+    expect(
+      workspaceTheme.scaffoldBackgroundColor,
+      workspaceTheme.colorScheme.surface,
+    );
+
+    await tester.tap(find.text('Profile'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getCenter(find.text('Edit photo')).dx,
+      greaterThan(tester.getCenter(find.text('Status')).dx),
+    );
+    await tester.tap(find.text('Edit photo'));
+    await tester.pumpAndSettle();
+    expect(find.text('Photo editor'), findsOneWidget);
+    expect(find.text('Status'), findsOneWidget);
+    tester.view.physicalSize = const Size(390, 800);
+    await tester.pumpAndSettle();
+    expect(find.text('Photo editor'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Edit photo'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(678, 466);
+    tester.view.viewPadding = const FakeViewPadding(right: 84);
+    tester.view.padding = const FakeViewPadding(right: 84);
+    await tester.pumpAndSettle();
+    expect(find.text('Profile'), findsNothing);
+    expect(find.text('Display name'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   for (final buildNumber in ['432', '', '2147483647']) {
     testWidgets('shows version with build number "$buildNumber"', (
       tester,
@@ -51,6 +118,7 @@ void main() {
       );
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
+      _usePhoneViewport(tester);
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -104,6 +172,7 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final capability = Completer<BuzzPushLeaseDescriptor?>();
       var permissionReads = 0;
+      _usePhoneViewport(tester);
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -165,6 +234,7 @@ void main() {
 
     final capability = Future<BuzzPushLeaseDescriptor?>.value(_pushDescriptor);
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -227,6 +297,7 @@ void main() {
         SharedPreferences.setMockInitialValues({});
         final prefs = await SharedPreferences.getInstance();
 
+        _usePhoneViewport(tester);
         await tester.pumpWidget(
           ProviderScope(
             overrides: [savedPrefsProvider.overrideWithValue(prefs)],
@@ -306,6 +377,7 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     final opened = <String>[];
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [savedPrefsProvider.overrideWithValue(prefs)],
@@ -347,6 +419,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [savedPrefsProvider.overrideWithValue(prefs)],
@@ -379,6 +452,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -411,6 +485,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -442,6 +517,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -473,6 +549,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -517,3 +594,11 @@ const _pushDescriptor = BuzzPushLeaseDescriptor(
   maxEndpointLength: 2048,
   maxStringLength: 512,
 );
+
+void _usePhoneViewport(WidgetTester tester) {
+  if (tester.view.physicalSize.width / tester.view.devicePixelRatio >= 640) {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 1200);
+    addTearDown(tester.view.reset);
+  }
+}

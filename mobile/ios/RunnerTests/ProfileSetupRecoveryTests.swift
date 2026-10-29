@@ -6,6 +6,114 @@ import XCTest
 
 final class ProfileSetupRecoveryTests: XCTestCase {
   @MainActor
+  func testNativeEditorsPreferRightPaneOnlyWithDuoRail() async throws {
+    for duo in [false, true] {
+      for method in ["presentStatus", "present"] {
+        let messenger = ProfileSetupTestMessenger()
+        let parent = SheetPlacementPresenter()
+        parent.view = SheetPlacementView(duo: duo)
+        let coordinator = NativeProfileTextEditorCoordinator(
+          messenger: messenger, parentViewController: parent)
+        defer { withExtendedLifetime(coordinator) {} }
+        messenger.invoke(method, arguments: [
+          "title": "Profile description", "initialValue": "", "placeholder": "",
+          "multiline": true, "brightness": "light",
+          "pageBackgroundArgb": 0xFFFFFFFF, "containerBackgroundArgb": 0xFFF0F0F0,
+          "containerCornerRadius": 16,
+        ])
+        await withCheckedContinuation { continuation in
+          DispatchQueue.main.async { continuation.resume() }
+        }
+        let sheet = try XCTUnwrap(parent.captured?.sheetPresentationController)
+        #if canImport(UIKit, _version: 9127.0.85)
+        if #available(iOS 27.1, *) {
+          XCTAssertEqual(sheet.preferredPlacement, duo ? .trailing : .automatic)
+        }
+        #endif
+        XCTAssertEqual(sheet.detents.map(\.identifier), [.large])
+        XCTAssertNil(sheet.sourceView)
+      }
+    }
+  }
+
+  @MainActor
+  func testStatusFormPresetsCustomExpirationClearAndRailActions() throws {
+    var values: [[String: Any]] = []
+    var cancelled = false
+    let expiration = Date().addingTimeInterval(172800)
+    let editor = NativeStatusEditorViewController(
+      configuration: ["text": "", "emoji": "", "duration": 0,
+                      "expiresAt": expiration.timeIntervalSince1970,
+                      "hasExistingStatus": true],
+      onChooseEmoji: { $0(":buzz:") },
+      onCancel: { cancelled = true }, onSet: { values.append($0) })
+    let navigation = UINavigationController(rootViewController: editor)
+    navigation.loadViewIfNeeded()
+    editor.loadViewIfNeeded()
+    for style in [UIUserInterfaceStyle.light, .dark] {
+      let traits = UITraitCollection(userInterfaceStyle: style)
+      XCTAssertEqual(editor.view.tintColor.resolvedColor(with: traits), UIColor.label.resolvedColor(with: traits))
+      XCTAssertEqual(navigation.navigationBar.tintColor.resolvedColor(with: traits), UIColor.label.resolvedColor(with: traits))
+      XCTAssertEqual(editor.datePicker.tintColor.resolvedColor(with: traits), UIColor.label.resolvedColor(with: traits))
+    }
+    let cancel = try XCTUnwrap(editor.navigationItem.leftBarButtonItem)
+    let submit = try XCTUnwrap(editor.navigationItem.rightBarButtonItem)
+    XCTAssertEqual(cancel.accessibilityLabel, "Close")
+    XCTAssertFalse(submit.isEnabled)
+    #if canImport(UIKit, _version: 9127.0.85)
+    if #available(iOS 27.1, *) {
+      XCTAssertEqual(cancel.axisBehavior, .verticalPreferred)
+      XCTAssertEqual(submit.axisBehavior, .verticalPreferred)
+    }
+    #endif
+    XCTAssertEqual(editor.tableView(editor.tableView, numberOfRowsInSection: 1), 2)
+    editor.tableView(editor.tableView, didSelectRowAt: IndexPath(row: 0, section: 2))
+    XCTAssertTrue(submit.isEnabled)
+    XCTAssertEqual(editor.statusField.text, "In a meeting")
+    let emojiCell = editor.tableView(editor.tableView, cellForRowAt: IndexPath(row: 1, section: 0))
+    let chooseEmoji = try XCTUnwrap(descendants(emojiCell).compactMap { $0 as? UIButton }.first { $0.title(for: .normal) == "Choose emoji" })
+    chooseEmoji.sendActions(for: .touchUpInside)
+    XCTAssertEqual(editor.emojiField.text, ":buzz:")
+    UIApplication.shared.sendAction(try XCTUnwrap(submit.action), to: submit.target, from: submit, for: nil)
+    XCTAssertEqual(values.last?["text"] as? String, "In a meeting")
+    XCTAssertEqual(values.last?["emoji"] as? String, ":buzz:")
+    XCTAssertEqual(try XCTUnwrap(values.last?["expiresAt"] as? Double), expiration.timeIntervalSince1970, accuracy: 1)
+    editor.tableView(editor.tableView, didSelectRowAt: IndexPath(row: 0, section: 3))
+    XCTAssertEqual(values.last?["clear"] as? Bool, true)
+    UIApplication.shared.sendAction(try XCTUnwrap(cancel.action), to: cancel.target, from: cancel, for: nil)
+    XCTAssertTrue(cancelled)
+  }
+
+  @MainActor
+  func testNativeProfileFieldsRetainCancelAndPreferVerticalControls() throws {
+    for multiline in [false, true] {
+      var cancelled = false
+      let editor = NativeProfileTextEditorViewController(
+        title: multiline ? "Profile description" : "Display name",
+        initialValue: "Original", placeholder: "Text", multiline: multiline,
+        pageBackgroundColor: .systemBackground, containerBackgroundColor: .secondarySystemBackground,
+        containerCornerRadius: 16, allowUnchangedSubmission: false,
+        channelDescription: nil, originalName: nil, originalDescription: nil,
+        canEditDetails: true, canEditCanvas: false, canvasContent: "", canvasLoaded: false,
+        chatOptions: nil, onCancel: { cancelled = true }, onSet: { _ in }
+      )
+      editor.loadViewIfNeeded()
+      let cancel = try XCTUnwrap(editor.navigationItem.leftBarButtonItem)
+      let submit = try XCTUnwrap(editor.navigationItem.rightBarButtonItem)
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *) {
+        XCTAssertEqual(cancel.axisBehavior, .verticalPreferred)
+        XCTAssertEqual(submit.axisBehavior, .verticalPreferred)
+      }
+      #endif
+      XCTAssertTrue(cancel.isEnabled)
+      XCTAssertFalse(submit.isEnabled)
+      UIApplication.shared.sendAction(try XCTUnwrap(cancel.action), to: cancel.target, from: cancel, for: nil)
+      XCTAssertTrue(cancelled)
+    }
+  }
+
+  @MainActor
   func testSelectedEditorIconsContrastInBothAppearances() throws {
     for dark in [false, true] {
       for icon in ["emoji", "palette"] {
@@ -262,5 +370,28 @@ private final class ProfileSetupTestMessenger: NSObject, FlutterBinaryMessenger 
     handler?(codec.encode(FlutterMethodCall(methodName: method, arguments: arguments))) { data in
       if let data { self.completionAction = try? codec.decodeEnvelope(data) as? String }
     }
+  }
+}
+
+
+private final class SheetPlacementView: UIView {
+  let duo: Bool
+  init(duo: Bool) {
+    self.duo = duo
+    super.init(frame: CGRect(x: 0, y: 0, width: 932, height: 656))
+  }
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  override var safeAreaInsets: UIEdgeInsets {
+    duo ? UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 84)
+        : UIEdgeInsets(top: 62, left: 0, bottom: 34, right: 0)
+  }
+}
+
+private final class SheetPlacementPresenter: UIViewController {
+  var captured: UIViewController?
+  override func present(_ viewControllerToPresent: UIViewController,
+                        animated: Bool, completion: (() -> Void)? = nil) {
+    captured = viewControllerToPresent
+    completion?()
   }
 }

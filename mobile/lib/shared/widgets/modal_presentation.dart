@@ -1,8 +1,11 @@
 import 'package:flutter/foundation.dart';
+import 'package:duo_kit/duo_kit.dart';
 import 'package:flutter/material.dart';
 
 import '../theme/theme.dart';
 import 'buzz_sheet_header.dart';
+import 'duo_toolbar.dart';
+import 'ios_navigation_bar.dart';
 import 'buzz_titled_sheet_layout.dart';
 import 'concentric_sheet_surface.dart';
 
@@ -23,6 +26,7 @@ const buzzModalAnimationStyle = AnimationStyle(
 /// uses native concentric corners when available and paints a requested drag
 /// handle inside the shared header so its spacing is consistent on every
 /// platform.
+/// Set [useDuoFullWidth] to false for a bounded sheet with local controls.
 /// Set [padBottom] to false when the content owns its bottom edge spacing.
 Future<T?> showBuzzModalBottomSheet<T>({
   required BuildContext context,
@@ -38,10 +42,12 @@ Future<T?> showBuzzModalBottomSheet<T>({
   bool isScrollControlled = false,
   double scrollControlDisabledMaxHeightRatio = 9.0 / 16.0,
   bool useRootNavigator = false,
+  bool useDuoFullWidth = true,
   bool isDismissible = true,
   bool enableDrag = true,
   bool? showDragHandle,
   bool showCloseButton = true,
+  bool showRailCloseButton = false,
   bool useSafeArea = false,
   bool padBottom = true,
   RouteSettings? routeSettings,
@@ -51,6 +57,9 @@ Future<T?> showBuzzModalBottomSheet<T>({
   bool? requestFocus,
 }) {
   final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+  final strip =
+      DuoToolbarScope.maybeOf(context)?.strip ?? FoldGeometry.of(context).strip;
+  final fullWidth = strip != null && useDuoFullWidth;
   final theme = Theme.of(context);
   // Explicitly colored sheets (for example the dark Huddle drawer) own their
   // complete surface treatment. Standard utility sheets use the quieter page
@@ -67,28 +76,62 @@ Future<T?> showBuzzModalBottomSheet<T>({
 
   return showModalBottomSheet<T>(
     context: context,
-    builder: (sheetContext) => Theme(
-      data: sheetTheme,
-      child: Builder(
-        builder: (themedContext) => ConcentricSheetSurface(
-          enabled: isIos,
-          color: surfaceColor,
-          child: _SheetContent(
-            title: title,
-            showCloseButton: showCloseButton,
-            showDragHandle: showDragHandle == true,
-            surfaceColor: surfaceColor,
-            // Keep the entire scroll viewport above gesture navigation. The
-            // inner builder sees a consumed bottom inset, so sheet-local safe
-            // areas and scroll padding do not reserve that system inset twice.
-            child: SafeArea(
-              top: false,
-              left: false,
-              right: false,
-              bottom: padBottom,
-              child: Padding(
-                padding: EdgeInsets.only(bottom: padBottom ? Grid.half : 0),
-                child: Builder(builder: builder),
+    builder: (sheetContext) => _SheetLocalSafeArea(
+      localize: strip != null && !fullWidth,
+      child: DuoToolbarPortal(
+        strip: isIos && fullWidth ? strip : null,
+        active: ModalRoute.isCurrentOf(sheetContext) ?? true,
+        actions: [
+          if (showCloseButton || showRailCloseButton)
+            IosNavigationAction(
+              label: 'Close ${title ?? 'sheet'}',
+              symbol: 'xmark',
+              onPressed: () => Navigator.of(sheetContext).pop(),
+            ),
+        ],
+        child: DuoSheetCloseScope(
+          inRail:
+              isIos && fullWidth && (showCloseButton || showRailCloseButton),
+          child: Theme(
+            data: sheetTheme,
+            child: Builder(
+              builder: (themedContext) => ConcentricSheetSurface(
+                enabled: isIos,
+                padding: fullWidth
+                    ? EdgeInsets.zero
+                    : const EdgeInsets.only(
+                        left: Grid.xxs,
+                        right: Grid.xxs,
+                        bottom: Grid.xxs,
+                      ),
+                color: surfaceColor,
+                child: SafeArea(
+                  top: false,
+                  bottom: false,
+                  left: fullWidth,
+                  right: fullWidth,
+                  child: _SheetContent(
+                    title: title,
+                    showCloseButton: showCloseButton,
+                    showDragHandle: showDragHandle == true,
+                    surfaceColor: surfaceColor,
+                    // Keep the entire scroll viewport above gesture navigation. The
+                    // inner builder sees a consumed bottom inset, so sheet-local safe
+                    // areas and scroll padding do not reserve that system inset twice.
+                    child: SafeArea(
+                      top: false,
+                      left: false,
+                      right: false,
+                      bottom: padBottom,
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          bottom: padBottom ? Grid.half : 0,
+                        ),
+                        child: Builder(builder: builder),
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
@@ -100,17 +143,19 @@ Future<T?> showBuzzModalBottomSheet<T>({
     elevation: elevation,
     shape: shape,
     clipBehavior: clipBehavior,
-    constraints: constraints,
+    constraints:
+        constraints ??
+        (fullWidth ? const BoxConstraints(maxWidth: double.infinity) : null),
     barrierColor: barrierColor,
     isScrollControlled: isScrollControlled,
     scrollControlDisabledMaxHeightRatio: scrollControlDisabledMaxHeightRatio,
-    useRootNavigator: useRootNavigator,
+    useRootNavigator: strip != null || useRootNavigator,
     isDismissible: isDismissible,
     enableDrag: enableDrag,
     // The shared header owns the handle so Android does not reserve a second
     // handle band above the title row and iOS keeps it inside its native inset.
     showDragHandle: false,
-    useSafeArea: useSafeArea,
+    useSafeArea: fullWidth ? false : useSafeArea,
     routeSettings: routeSettings,
     transitionAnimationController: transitionAnimationController,
     anchorPoint: anchorPoint,
@@ -119,6 +164,40 @@ Future<T?> showBuzzModalBottomSheet<T>({
         : (sheetAnimationStyle ?? buzzModalAnimationStyle),
     requestFocus: requestFocus,
   );
+}
+
+/// Window insets only apply where they intersect a centered sheet's bounds.
+class _SheetLocalSafeArea extends StatelessWidget {
+  const _SheetLocalSafeArea({required this.localize, required this.child});
+
+  final bool localize;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!localize) return child;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final media = MediaQuery.of(context);
+        final margin = (media.size.width - constraints.maxWidth) / 2;
+        EdgeInsets localInsets(EdgeInsets insets) => insets.copyWith(
+          left: (insets.left - margin).clamp(0.0, double.infinity),
+          right: (insets.right - margin).clamp(0.0, double.infinity),
+        );
+        return DuoToolbarScope(
+          strip: null,
+          active: true,
+          child: MediaQuery(
+            data: media.copyWith(
+              padding: localInsets(media.padding),
+              viewPadding: localInsets(media.viewPadding),
+            ),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
 }
 
 class _SheetContent extends StatelessWidget {

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:buzz/features/pairing/pairing_qr_scanner.dart';
+import 'package:duo_kit/testing.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import '../../helpers/widget_helpers.dart';
 import 'package:flutter/foundation.dart';
@@ -58,6 +59,81 @@ void main() {
       expect(geometry.scannerOpacityAt(1), 1);
     });
   });
+
+  for (final pose in [
+    FoldTestPose.duoCoverWithOcclusions,
+    FoldTestPose.duoCoverLandscapeLeft,
+    FoldTestPose.duoCoverLandscapeRight,
+  ]) {
+    for (final reducedMotion in [false, true]) {
+      testWidgets(
+        'Duo camera portal ${pose.name}, reduced motion $reducedMotion',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          final media = pose.data;
+          await tester.binding.setSurfaceSize(media.size);
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          final camera = media.displayFeatures.first.bounds;
+          Rect? detectedCamera;
+          await tester.pumpWidget(
+            MaterialApp(
+              builder: (_, child) => MediaQuery(
+                data: media.copyWith(disableAnimations: reducedMotion),
+                child: child!,
+              ),
+              home: Builder(
+                builder: (context) => TextButton(
+                  onPressed: () {
+                    detectedCamera = duoQrScannerCameraFrame(context);
+                    showDynamicIslandPairingQrScanner(context);
+                  },
+                  child: const Text('Open scanner'),
+                ),
+              ),
+            ),
+          );
+          await tester.tap(find.text('Open scanner'));
+          await tester.pump();
+          expect(detectedCamera, camera);
+          final portal = find.byKey(
+            const ValueKey('dynamic-island-qr-scanner-portal'),
+          );
+          if (!reducedMotion) {
+            expect(tester.getRect(portal), camera);
+            expect(
+              tester.widget<ClipRSuperellipse>(portal).borderRadius,
+              BorderRadius.circular(camera.height / 2),
+            );
+          }
+          await tester.pumpAndSettle();
+          final expanded = tester.getRect(portal);
+          expect(expanded.contains(camera.center), isTrue);
+          expect((Offset.zero & media.size).contains(expanded.topLeft), isTrue);
+          expect(
+            (Offset.zero & media.size).contains(expanded.bottomRight),
+            isTrue,
+          );
+          expect(expanded.width, expanded.height);
+          await tester.tapAt(expanded.center);
+          await tester.pump();
+          if (!reducedMotion) {
+            await tester.pump(const Duration(milliseconds: 300));
+            final closing = tester.getRect(portal);
+            expect(
+              (closing.center - camera.center).distance,
+              lessThan((expanded.center - camera.center).distance),
+            );
+            expect(closing.width, lessThan(expanded.width));
+          }
+          await tester.pumpAndSettle();
+          expect(portal, findsNothing);
+          expect(fakeScannerPlatform._isDisposed, isTrue);
+          expect(tester.takeException(), isNull);
+          debugDefaultTargetPlatformOverride = null;
+        },
+      );
+    }
+  }
 
   group('usesDynamicIslandQrScannerPortal', () {
     test('asks the native bridge on iOS', () async {

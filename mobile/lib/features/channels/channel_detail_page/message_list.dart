@@ -643,7 +643,8 @@ class _MessageList extends HookConsumerWidget {
       active:
           readStateReady &&
           appInUse &&
-          (ModalRoute.of(context)?.isCurrent ?? true),
+          (ModalRoute.of(context)?.isCurrent ?? true) &&
+          ConversationPaneScope.isActiveOf(context),
       onDwell: readVisibleRows,
       keys: [channelId, readingContentKey(allMessages), navigationBottomInset],
     );

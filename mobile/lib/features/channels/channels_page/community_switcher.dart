@@ -262,23 +262,32 @@ class CommunitySwitcherPage extends HookConsumerWidget {
     }
 
     final ios = defaultTargetPlatform == TargetPlatform.iOS;
+    final toolbarScope = DuoToolbarScope.maybeOf(context);
+    final strip = ios
+        ? (toolbarScope == null
+              ? FoldGeometry.of(context).strip
+              : toolbarScope.strip)
+        : null;
+    final closeAction = IosNavigationAction(
+      label: 'Close community switcher',
+      symbol: 'xmark',
+      onPressed: () => Navigator.of(context).pop(),
+    );
+    final editAction = IosNavigationAction(
+      label: isEditing.value ? 'Done' : 'Edit',
+      symbol: strip == null ? null : (isEditing.value ? 'checkmark' : 'pencil'),
+      onPressed: () => isEditing.value = !isEditing.value,
+    );
     final header = ios
         ? SizedBox(
             height: frostedAppBarHeight(context),
-            child: IosNavigationBar(
-              title: '',
-              leading: IosNavigationAction(
-                label: 'Close community switcher',
-                symbol: 'xmark',
-                onPressed: () => Navigator.of(context).pop(),
-              ),
-              actions: [
-                IosNavigationAction(
-                  label: isEditing.value ? 'Done' : 'Edit',
-                  onPressed: () => isEditing.value = !isEditing.value,
-                ),
-              ],
-            ),
+            child: strip == null
+                ? IosNavigationBar(
+                    title: '',
+                    leading: closeAction,
+                    actions: [editAction],
+                  )
+                : null,
           )
         : Padding(
             padding: const EdgeInsets.all(Grid.xxs),
@@ -396,75 +405,88 @@ class CommunitySwitcherPage extends HookConsumerWidget {
       ),
     );
 
-    return PopScope(
-      canPop: flight.value == null,
-      child: IgnorePointer(
-        ignoring: flight.value != null,
-        child: AnimatedBuilder(
-          animation: Listenable.merge([centering, controller, reveal]),
-          child: RepaintBoundary(child: surface),
-          builder: (context, child) {
-            final selected = flight.value;
-            final departure = _communityDepartureCurve.transform(
-              controller.value,
-            );
-            final surfaceExit = Curves.easeOutCubic.transform(centering.value);
-            final centerProgress = _communityCenterCurve.transform(
-              centering.value,
-            );
-            final screen = MediaQuery.sizeOf(context);
-            final center = Offset(screen.width / 2, screen.height / 2);
-            final destinationRect = landingBounds.value;
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                if (selected != null)
+    return DuoToolbarPortal(
+      strip: strip,
+      active:
+          (toolbarScope?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true) &&
+          flight.value == null,
+      actions: [closeAction, editAction],
+      child: PopScope(
+        canPop: flight.value == null,
+        child: IgnorePointer(
+          ignoring: flight.value != null,
+          child: AnimatedBuilder(
+            animation: Listenable.merge([centering, controller, reveal]),
+            child: RepaintBoundary(child: surface),
+            builder: (context, child) {
+              final selected = flight.value;
+              final departure = _communityDepartureCurve.transform(
+                controller.value,
+              );
+              final surfaceExit = Curves.easeOutCubic.transform(
+                centering.value,
+              );
+              final centerProgress = _communityCenterCurve.transform(
+                centering.value,
+              );
+              final screen = MediaQuery.sizeOf(context);
+              final center = Offset(screen.width / 2, screen.height / 2);
+              final destinationRect = landingBounds.value;
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (selected != null)
+                    Opacity(
+                      key: const Key('community-loading-backdrop'),
+                      opacity: 1 - Curves.easeOutCubic.transform(reveal.value),
+                      child: ColoredBox(color: context.colors.surface),
+                    ),
                   Opacity(
-                    key: const Key('community-loading-backdrop'),
-                    opacity: 1 - Curves.easeOutCubic.transform(reveal.value),
-                    child: ColoredBox(color: context.colors.surface),
+                    key: const Key('community-picker-opacity'),
+                    opacity: 1 - surfaceExit,
+                    child: Transform.scale(
+                      scale: 1 + 0.04 * surfaceExit,
+                      child: child,
+                    ),
                   ),
-                Opacity(
-                  key: const Key('community-picker-opacity'),
-                  opacity: 1 - surfaceExit,
-                  child: Transform.scale(
-                    scale: 1 + 0.04 * surfaceExit,
-                    child: child,
-                  ),
-                ),
-                if (selected != null && controller.value == 0)
-                  Positioned(
-                    top: center.dy + _communityCenteredAvatarSize / 2 + Grid.md,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: RepaintBoundary(
-                        child: BuzzLoadingIndicator(
-                          key: const Key('community-switch-loading'),
-                          size: 18,
-                          color: context.colors.onSecondaryContainer,
-                          semanticLabel: 'Loading ${selected.community.name}',
+                  if (selected != null && controller.value == 0)
+                    Positioned(
+                      top:
+                          center.dy +
+                          _communityCenteredAvatarSize / 2 +
+                          Grid.md,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: RepaintBoundary(
+                          child: BuzzLoadingIndicator(
+                            key: const Key('community-switch-loading'),
+                            size: 18,
+                            color: context.colors.onSecondaryContainer,
+                            semanticLabel: 'Loading ${selected.community.name}',
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                if (selected != null)
-                  _CommunityFlyingAvatar(
-                    avatar: flightAvatar,
-                    origin: selected.origin.center,
-                    destination:
-                        destinationRect ??
-                        Rect.fromCenter(
-                          center: center,
-                          width: _communityCenteredAvatarSize,
-                          height: _communityCenteredAvatarSize,
-                        ),
-                    centerProgress: centerProgress,
-                    departure: departure,
-                  ),
-              ],
-            );
-          },
+                  if (selected != null)
+                    _CommunityFlyingAvatar(
+                      avatar: flightAvatar,
+                      origin: selected.origin.center,
+                      destination:
+                          destinationRect ??
+                          Rect.fromCenter(
+                            center: center,
+                            width: _communityCenteredAvatarSize,
+                            height: _communityCenteredAvatarSize,
+                          ),
+                      centerProgress: centerProgress,
+                      departure: departure,
+                    ),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );

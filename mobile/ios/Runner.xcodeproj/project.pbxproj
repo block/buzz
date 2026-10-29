@@ -36,6 +36,7 @@
 		4A71C0152F40B00100A17E01 /* HuddleMediaPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0162F40B00100A17E01 /* HuddleMediaPlugin.swift */; };
 		4A71C0172F40C00100A17E01 /* HuddleAudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0182F40C00100A17E01 /* HuddleAudioEngine.swift */; };
 		4A71C0192F40D00100A17E01 /* NativeProfileTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */; };
+		F84390190000000000000001 /* NativeStatusEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F84390190000000000000002 /* NativeStatusEditor.swift */; };
 		7B81D0192F40D00100A17E01 /* NativeCommunityEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B81D01A2F40D00100A17E01 /* NativeCommunityEntry.swift */; };
 		7B81D0192F40D00100A17E91 /* NativeProfileSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B81D01A2F40D00100A17E91 /* NativeProfileSetup.swift */; };
 		4A71C01B2F40E00100A17E01 /* NativeSkinToneControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01C2F40E00100A17E01 /* NativeSkinToneControl.swift */; };
@@ -133,6 +134,7 @@
 		4A71C0162F40B00100A17E01 /* HuddleMediaPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuddleMediaPlugin.swift; sourceTree = "<group>"; };
 		4A71C0182F40C00100A17E01 /* HuddleAudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HuddleAudioEngine.swift; sourceTree = "<group>"; };
 		4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeProfileTextEditor.swift; sourceTree = "<group>"; };
+		F84390190000000000000002 /* NativeStatusEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeStatusEditor.swift; sourceTree = "<group>"; };
 		7B81D01A2F40D00100A17E01 /* NativeCommunityEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCommunityEntry.swift; sourceTree = "<group>"; };
 		7B81D01A2F40D00100A17E91 /* NativeProfileSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeProfileSetup.swift; sourceTree = "<group>"; };
 		4A71C01C2F40E00100A17E01 /* NativeSkinToneControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSkinToneControl.swift; sourceTree = "<group>"; };
@@ -312,6 +314,7 @@
 				C0AF00000000000000000022 /* NativePresenceMenu.swift */,
 				C0AF00000000000000000012 /* NativeAddMembersSheet.swift */,
 				4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */,
+				F84390190000000000000002 /* NativeStatusEditor.swift */,
 				7B81D01A2F40D00100A17E01 /* NativeCommunityEntry.swift */,
 				7B81D01A2F40D00100A17E91 /* NativeProfileSetup.swift */,
 				4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */,
@@ -657,6 +660,7 @@
 				C0AF00000000000000000021 /* NativePresenceMenu.swift in Sources */,
 				C0AF00000000000000000011 /* NativeAddMembersSheet.swift in Sources */,
 				4A71C0192F40D00100A17E01 /* NativeProfileTextEditor.swift in Sources */,
+				F84390190000000000000001 /* NativeStatusEditor.swift in Sources */,
 				7B81D0192F40D00100A17E01 /* NativeCommunityEntry.swift in Sources */,
 				7B81D0192F40D00100A17E91 /* NativeProfileSetup.swift in Sources */,
 				4A71C0192F40D00100A17E02 /* MeAvatarLoader.swift in Sources */,

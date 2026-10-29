@@ -193,15 +193,15 @@ class _MessageTile extends ConsumerWidget {
     if (channel == null) return;
 
     if (hit.kind == 45001) {
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ForumThreadPage(
-            channelId: channel.id,
-            postEventId: hit.eventId,
-            currentPubkey: currentPubkey,
-            isMember: channel.isMember,
-            isArchived: channel.isArchived,
-          ),
+      openConversationPane(
+        context,
+        hit.eventId,
+        (_) => ForumThreadPage(
+          channelId: channel.id,
+          postEventId: hit.eventId,
+          currentPubkey: currentPubkey,
+          isMember: channel.isMember,
+          isArchived: channel.isArchived,
         ),
       );
     } else {

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:duo_kit/duo_kit.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -16,6 +17,7 @@ import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -51,6 +53,16 @@ class ProfileEditPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final directWideDuoEditor = useMemoized(
+      () =>
+          startInPhotoEditor &&
+          (DuoToolbarScope.maybeOf(context)?.strip ??
+                  FoldGeometry.of(context).strip) !=
+              null &&
+          (View.of(context).physicalSize / View.of(context).devicePixelRatio)
+                  .shortestSide >=
+              600,
+    );
     final profileAsync = ref.watch(profileProvider);
     final profile = profileAsync.asData?.value;
     final profileHydrated = profileAsync.hasValue;
@@ -69,12 +81,13 @@ class ProfileEditPage extends HookConsumerWidget {
     final isImageCameraActive = useState(false);
     final avatarMode = useState(ProfileAvatarMode.image);
     final avatarTransition = useAnimationController(
+      initialValue: directWideDuoEditor ? 1 : 0,
       duration: reduceMotion
           ? Duration.zero
           : const Duration(milliseconds: 200),
     );
     useEffect(() {
-      if (!startInPhotoEditor) return null;
+      if (!startInPhotoEditor || directWideDuoEditor) return null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted) unawaited(avatarTransition.forward(from: 0));
       });
@@ -168,7 +181,7 @@ class ProfileEditPage extends HookConsumerWidget {
         return;
       }
       isClosingAvatar.value = true;
-      await avatarTransition.reverse();
+      if (!directWideDuoEditor) await avatarTransition.reverse();
       if (!context.mounted) return;
       if (startInPhotoEditor) {
         Navigator.of(context).pop();

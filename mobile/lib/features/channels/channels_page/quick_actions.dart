@@ -16,8 +16,11 @@ const double _kMorphBlur = 2;
 const double _kQuickActionCardRadius = _kMorphOpenRadius - Grid.xxs;
 
 class _MorphingQuickActionsButton extends HookWidget {
+  final double closedSize;
   final bool open;
   final double openEdgeOffset;
+  final double horizontalInset;
+  final double maxOpenWidth;
   final VoidCallback? onToggle;
   final String label;
   final IconData icon;
@@ -25,7 +28,10 @@ class _MorphingQuickActionsButton extends HookWidget {
 
   const _MorphingQuickActionsButton({
     required this.open,
+    this.closedSize = _kMorphClosedSize,
     required this.openEdgeOffset,
+    this.horizontalInset = 0,
+    this.maxOpenWidth = double.infinity,
     required this.onToggle,
     required this.label,
     required this.icon,
@@ -36,9 +42,10 @@ class _MorphingQuickActionsButton extends HookWidget {
   Widget build(BuildContext context) {
     final reducedMotion = MediaQuery.of(context).disableAnimations;
     final mediaQuery = MediaQuery.of(context);
-    final openWidth = (mediaQuery.size.width - (Grid.gutter * 2))
-        .clamp(_kMorphClosedSize, double.infinity)
-        .toDouble();
+    final openWidth =
+        (mediaQuery.size.width - horizontalInset - (Grid.gutter * 2))
+            .clamp(closedSize, maxOpenWidth)
+            .toDouble();
     final surfaceController = useAnimationController(
       initialValue: open ? 1 : 0,
       upperBound: 1.02,
@@ -112,14 +119,14 @@ class _MorphingQuickActionsButton extends HookWidget {
           final surfaceValue = surfaceController.value;
           final surfaceProgress = surfaceValue.clamp(0.0, 1.0);
           final fadeValue = fadeAnimation.value.clamp(0.0, 1.0);
-          final width = lerpDouble(_kMorphClosedSize, openWidth, surfaceValue)!;
+          final width = lerpDouble(closedSize, openWidth, surfaceValue)!;
           final height = lerpDouble(
-            _kMorphClosedSize,
+            closedSize,
             _kMorphOpenHeight,
             surfaceValue,
           )!;
           final radius = lerpDouble(
-            _kMorphClosedSize / 2,
+            closedSize / 2,
             _kMorphOpenRadius,
             surfaceValue,
           )!;
@@ -183,8 +190,8 @@ class _MorphingQuickActionsButton extends HookWidget {
                         Positioned(
                           right: 0,
                           bottom: 0,
-                          width: _kMorphClosedSize,
-                          height: _kMorphClosedSize,
+                          width: closedSize,
+                          height: closedSize,
                           child: IgnorePointer(
                             ignoring: open,
                             child: ExcludeSemantics(

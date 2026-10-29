@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
+import 'package:duo_kit/duo_kit.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -8,6 +9,8 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:image/image.dart' as image;
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/duo_toolbar.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 
 const _cropOutputSize = 512;
@@ -37,7 +40,6 @@ class ProfileAvatarCropPage extends HookWidget {
     final dimensions = dimensionsData == null
         ? null
         : _ImageDimensions(dimensionsData[0], dimensionsData[1]);
-    final initializedForSize = useRef<Size?>(null);
     final cropGeometry = useRef<_CropGeometry?>(null);
     final displaySize = useRef<Size?>(null);
     final isClampingTransform = useRef(false);
@@ -95,246 +97,288 @@ class ProfileAvatarCropPage extends HookWidget {
       return () => disposed = true;
     }, [imageBytes]);
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
+    final strip = defaultTargetPlatform == TargetPlatform.iOS
+        ? (DuoToolbarScope.maybeOf(context)?.strip ??
+              FoldGeometry.of(context).strip)
+        : null;
+    return DuoToolbarPortal(
+      strip: strip,
+      active:
+          (DuoToolbarScope.maybeOf(context)?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true),
+      actions: [
+        IosNavigationAction(
+          label: 'Cancel photo positioning',
+          symbol: 'xmark',
+          onPressed: isCropping.value ? null : () => Navigator.pop(context),
+        ),
+      ],
+      child: Scaffold(
         backgroundColor: Colors.black,
-        foregroundColor: Colors.white,
-        centerTitle: true,
-        titleSpacing: 0,
-        title: Text(
-          'Position Photo',
-          maxLines: 1,
-          style: context.textTheme.titleSmall?.copyWith(
-            color: Colors.white,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        leadingWidth: 120,
-        leading: Padding(
-          padding: const EdgeInsets.only(left: Grid.gutter),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: _CropHeaderButton(
-              label: 'Back',
-              onPressed: isCropping.value ? null : () => Navigator.pop(context),
+        appBar: AppBar(
+          backgroundColor: Colors.black,
+          foregroundColor: Colors.white,
+          centerTitle: true,
+          titleSpacing: 0,
+          title: Text(
+            'Position Photo',
+            maxLines: 1,
+            style: context.textTheme.titleSmall?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
             ),
           ),
-        ),
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: Grid.gutter),
-            child: _CropHeaderButton(
-              key: const ValueKey('avatar-crop-use-photo'),
-              label: 'Done',
-              loading: isCropping.value,
-              onPressed:
-                  isCropping.value ||
-                      preparedBytes.value == null ||
-                      dimensions == null
-                  ? null
-                  : () async {
-                      isCropping.value = true;
-                      unawaited(HapticFeedback.lightImpact());
-                      try {
-                        if (!context.mounted) return;
-                        final geometry = cropGeometry.value;
-                        if (geometry == null) return;
-                        final cropped = await compute(
-                          _cropAvatar,
-                          _CropRequest(
-                            bytes: preparedBytes.value!,
-                            sourceWidth: dimensions.width,
-                            sourceHeight: dimensions.height,
-                            canvasWidth: geometry.canvasWidth,
-                            canvasHeight: geometry.canvasHeight,
-                            cropDiameter: geometry.cropDiameter,
-                            transform: List<double>.from(
-                              controller.value.storage,
+          automaticallyImplyLeading: false,
+          leadingWidth: strip == null ? 120 : null,
+          leading: strip != null
+              ? null
+              : Padding(
+                  padding: const EdgeInsets.only(left: Grid.gutter),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: _CropHeaderButton(
+                      label: 'Back',
+                      onPressed: isCropping.value
+                          ? null
+                          : () => Navigator.pop(context),
+                    ),
+                  ),
+                ),
+          actions: [
+            Padding(
+              padding: const EdgeInsets.only(right: Grid.gutter),
+              child: _CropHeaderButton(
+                key: const ValueKey('avatar-crop-use-photo'),
+                label: 'Done',
+                loading: isCropping.value,
+                onPressed:
+                    isCropping.value ||
+                        preparedBytes.value == null ||
+                        dimensions == null
+                    ? null
+                    : () async {
+                        isCropping.value = true;
+                        unawaited(HapticFeedback.lightImpact());
+                        try {
+                          if (!context.mounted) return;
+                          final geometry = cropGeometry.value;
+                          if (geometry == null) return;
+                          final cropped = await compute(
+                            _cropAvatar,
+                            _CropRequest(
+                              bytes: preparedBytes.value!,
+                              sourceWidth: dimensions.width,
+                              sourceHeight: dimensions.height,
+                              canvasWidth: geometry.canvasWidth,
+                              canvasHeight: geometry.canvasHeight,
+                              cropDiameter: geometry.cropDiameter,
+                              transform: List<double>.from(
+                                controller.value.storage,
+                              ),
                             ),
-                          ),
-                        );
-                        if (context.mounted) Navigator.pop(context, cropped);
-                      } finally {
-                        if (context.mounted) isCropping.value = false;
-                      }
-                    },
+                          );
+                          if (context.mounted) Navigator.pop(context, cropped);
+                        } finally {
+                          if (context.mounted) isCropping.value = false;
+                        }
+                      },
+              ),
             ),
-          ),
-        ],
-      ),
-      body: loadError.value || dimensionsSnapshot.hasError
-          ? const Center(
-              child: Text(
-                "We couldn't prepare that photo.",
-                style: TextStyle(color: Colors.white),
-              ),
-            )
-          : preparedBytes.value == null || dimensions == null
-          ? const Center(
-              child: BuzzLoadingIndicator(
-                color: Colors.white,
-                semanticLabel: 'Preparing photo',
-              ),
-            )
-          : LayoutBuilder(
-              builder: (context, constraints) {
-                final canvasWidth = constraints.maxWidth;
-                final canvasHeight = math.max(1.0, constraints.maxHeight);
-                final cropDiameter = math.min(canvasWidth, canvasHeight);
-                cropGeometry.value = _CropGeometry(
-                  canvasWidth: canvasWidth,
-                  canvasHeight: canvasHeight,
-                  cropDiameter: cropDiameter,
-                );
-                final aspect = dimensions.width / dimensions.height;
-                final displayWidth = aspect >= 1
-                    ? cropDiameter * aspect
-                    : cropDiameter;
-                final displayHeight = aspect >= 1
-                    ? cropDiameter
-                    : cropDiameter / aspect;
-                displaySize.value = Size(displayWidth, displayHeight);
-                final canvasSize = Size(canvasWidth, canvasHeight);
-                if (initializedForSize.value != canvasSize) {
-                  initializedForSize.value = canvasSize;
-                  controller.value = Matrix4.identity()
-                    ..translateByDouble(
-                      (canvasWidth - displayWidth) / 2,
-                      (canvasHeight - displayHeight) / 2,
-                      0,
-                      1,
-                    );
-                }
-                void movePhoto(Offset delta) {
-                  unawaited(HapticFeedback.selectionClick());
-                  final matrix = controller.value.clone();
-                  matrix.storage[12] += delta.dx;
-                  matrix.storage[13] += delta.dy;
-                  controller.value = matrix;
-                }
+          ],
+        ),
+        body: loadError.value || dimensionsSnapshot.hasError
+            ? const Center(
+                child: Text(
+                  "We couldn't prepare that photo.",
+                  style: TextStyle(color: Colors.white),
+                ),
+              )
+            : preparedBytes.value == null || dimensions == null
+            ? const Center(
+                child: BuzzLoadingIndicator(
+                  color: Colors.white,
+                  semanticLabel: 'Preparing photo',
+                ),
+              )
+            : LayoutBuilder(
+                builder: (context, constraints) {
+                  final canvasWidth = constraints.maxWidth;
+                  final canvasHeight = math.max(1.0, constraints.maxHeight);
+                  final cropDiameter = math.min(canvasWidth, canvasHeight);
+                  final previousGeometry = cropGeometry.value;
+                  cropGeometry.value = _CropGeometry(
+                    canvasWidth: canvasWidth,
+                    canvasHeight: canvasHeight,
+                    cropDiameter: cropDiameter,
+                  );
+                  final aspect = dimensions.width / dimensions.height;
+                  final displayWidth = aspect >= 1
+                      ? cropDiameter * aspect
+                      : cropDiameter;
+                  final displayHeight = aspect >= 1
+                      ? cropDiameter
+                      : cropDiameter / aspect;
+                  displaySize.value = Size(displayWidth, displayHeight);
+                  if (previousGeometry == null) {
+                    controller.value = Matrix4.identity()
+                      ..translateByDouble(
+                        (canvasWidth - displayWidth) / 2,
+                        (canvasHeight - displayHeight) / 2,
+                        0,
+                        1,
+                      );
+                  } else if (previousGeometry.canvasWidth != canvasWidth ||
+                      previousGeometry.canvasHeight != canvasHeight ||
+                      previousGeometry.cropDiameter != cropDiameter) {
+                    // Display dimensions scale with the crop diameter. Keep
+                    // the same source-image point under the crop center and
+                    // retain zoom, so the selected source rectangle survives.
+                    final ratio = cropDiameter / previousGeometry.cropDiameter;
+                    final matrix = controller.value.clone();
+                    matrix.storage[12] =
+                        canvasWidth / 2 -
+                        (previousGeometry.canvasWidth / 2 -
+                                matrix.storage[12]) *
+                            ratio;
+                    matrix.storage[13] =
+                        canvasHeight / 2 -
+                        (previousGeometry.canvasHeight / 2 -
+                                matrix.storage[13]) *
+                            ratio;
+                    // The listener clamps against the new geometry. Scale is
+                    // unchanged, so cropScale remains synchronized as well.
+                    controller.value = matrix;
+                  }
+                  void movePhoto(Offset delta) {
+                    unawaited(HapticFeedback.selectionClick());
+                    final matrix = controller.value.clone();
+                    matrix.storage[12] += delta.dx;
+                    matrix.storage[13] += delta.dy;
+                    controller.value = matrix;
+                  }
 
-                void zoomPhoto(double factor) {
-                  unawaited(HapticFeedback.selectionClick());
-                  final matrix = controller.value.clone();
-                  final currentScale = matrix.getMaxScaleOnAxis();
-                  final nextScale = (currentScale * factor)
-                      .clamp(1.0, 5.0)
-                      .toDouble();
-                  final appliedFactor = nextScale / currentScale;
-                  final center = Offset(canvasWidth / 2, canvasHeight / 2);
-                  matrix.storage[12] =
-                      center.dx -
-                      (center.dx - matrix.storage[12]) * appliedFactor;
-                  matrix.storage[13] =
-                      center.dy -
-                      (center.dy - matrix.storage[13]) * appliedFactor;
-                  matrix.storage[0] *= appliedFactor;
-                  matrix.storage[5] *= appliedFactor;
-                  matrix.storage[10] *= appliedFactor;
-                  controller.value = matrix;
-                  cropScale.value = nextScale;
-                }
+                  void zoomPhoto(double factor) {
+                    unawaited(HapticFeedback.selectionClick());
+                    final matrix = controller.value.clone();
+                    final currentScale = matrix.getMaxScaleOnAxis();
+                    final nextScale = (currentScale * factor)
+                        .clamp(1.0, 5.0)
+                        .toDouble();
+                    final appliedFactor = nextScale / currentScale;
+                    final center = Offset(canvasWidth / 2, canvasHeight / 2);
+                    matrix.storage[12] =
+                        center.dx -
+                        (center.dx - matrix.storage[12]) * appliedFactor;
+                    matrix.storage[13] =
+                        center.dy -
+                        (center.dy - matrix.storage[13]) * appliedFactor;
+                    matrix.storage[0] *= appliedFactor;
+                    matrix.storage[5] *= appliedFactor;
+                    matrix.storage[10] *= appliedFactor;
+                    controller.value = matrix;
+                    cropScale.value = nextScale;
+                  }
 
-                final currentScale = cropScale.value;
-                final maskBottom = (canvasHeight + cropDiameter) / 2;
-                return Stack(
-                  children: [
-                    SizedBox(
-                      width: canvasWidth,
-                      height: canvasHeight,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          ClipRect(
-                            child: Semantics(
-                              label: 'Photo crop',
-                              value: '${(currentScale * 100).round()}% zoom',
-                              customSemanticsActions: {
-                                const CustomSemanticsAction(
-                                  label: 'Move left',
-                                ): () =>
-                                    movePhoto(const Offset(-24, 0)),
-                                const CustomSemanticsAction(
-                                  label: 'Move right',
-                                ): () =>
-                                    movePhoto(const Offset(24, 0)),
-                                const CustomSemanticsAction(
-                                  label: 'Move up',
-                                ): () =>
-                                    movePhoto(const Offset(0, -24)),
-                                const CustomSemanticsAction(
-                                  label: 'Move down',
-                                ): () =>
-                                    movePhoto(const Offset(0, 24)),
-                                if (currentScale < 5)
+                  final currentScale = cropScale.value;
+                  final maskBottom = (canvasHeight + cropDiameter) / 2;
+                  return Stack(
+                    children: [
+                      SizedBox(
+                        width: canvasWidth,
+                        height: canvasHeight,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            ClipRect(
+                              child: Semantics(
+                                label: 'Photo crop',
+                                value: '${(currentScale * 100).round()}% zoom',
+                                customSemanticsActions: {
                                   const CustomSemanticsAction(
-                                    label: 'Zoom in',
+                                    label: 'Move left',
                                   ): () =>
-                                      zoomPhoto(1.1),
-                                if (currentScale > 1)
+                                      movePhoto(const Offset(-24, 0)),
                                   const CustomSemanticsAction(
-                                    label: 'Zoom out',
+                                    label: 'Move right',
                                   ): () =>
-                                      zoomPhoto(1 / 1.1),
-                              },
-                              child: ExcludeSemantics(
-                                child: InteractiveViewer(
-                                  key: const ValueKey('avatar-crop-viewer'),
-                                  transformationController: controller,
-                                  constrained: false,
-                                  panEnabled: true,
-                                  scaleEnabled: true,
-                                  minScale: 1,
-                                  maxScale: 5,
-                                  onInteractionUpdate: (_) {
-                                    final nextScale = controller.value
-                                        .getMaxScaleOnAxis();
-                                    if ((cropScale.value - nextScale).abs() >
-                                        0.001) {
-                                      cropScale.value = nextScale;
-                                    }
-                                  },
-                                  boundaryMargin: EdgeInsets.all(
-                                    math.max(canvasWidth, canvasHeight),
-                                  ),
-                                  child: Image.memory(
-                                    preparedBytes.value!,
-                                    width: displayWidth,
-                                    height: displayHeight,
-                                    fit: BoxFit.fill,
-                                    gaplessPlayback: true,
+                                      movePhoto(const Offset(24, 0)),
+                                  const CustomSemanticsAction(
+                                    label: 'Move up',
+                                  ): () =>
+                                      movePhoto(const Offset(0, -24)),
+                                  const CustomSemanticsAction(
+                                    label: 'Move down',
+                                  ): () =>
+                                      movePhoto(const Offset(0, 24)),
+                                  if (currentScale < 5)
+                                    const CustomSemanticsAction(
+                                      label: 'Zoom in',
+                                    ): () =>
+                                        zoomPhoto(1.1),
+                                  if (currentScale > 1)
+                                    const CustomSemanticsAction(
+                                      label: 'Zoom out',
+                                    ): () =>
+                                        zoomPhoto(1 / 1.1),
+                                },
+                                child: ExcludeSemantics(
+                                  child: InteractiveViewer(
+                                    key: const ValueKey('avatar-crop-viewer'),
+                                    transformationController: controller,
+                                    constrained: false,
+                                    panEnabled: true,
+                                    scaleEnabled: true,
+                                    minScale: 1,
+                                    maxScale: 5,
+                                    onInteractionUpdate: (_) {
+                                      final nextScale = controller.value
+                                          .getMaxScaleOnAxis();
+                                      if ((cropScale.value - nextScale).abs() >
+                                          0.001) {
+                                        cropScale.value = nextScale;
+                                      }
+                                    },
+                                    boundaryMargin: EdgeInsets.all(
+                                      math.max(canvasWidth, canvasHeight),
+                                    ),
+                                    child: Image.memory(
+                                      preparedBytes.value!,
+                                      width: displayWidth,
+                                      height: displayHeight,
+                                      fit: BoxFit.fill,
+                                      gaplessPlayback: true,
+                                    ),
                                   ),
                                 ),
                               ),
                             ),
-                          ),
-                          IgnorePointer(
-                            child: CustomPaint(
-                              painter: _CropMaskPainter(cropDiameter),
+                            IgnorePointer(
+                              child: CustomPaint(
+                                painter: _CropMaskPainter(cropDiameter),
+                              ),
                             ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      top: math.min(
-                        maskBottom + Grid.twelve,
-                        canvasHeight - 24,
-                      ),
-                      child: const Center(
-                        child: Text(
-                          'Move and scale',
-                          style: TextStyle(color: Colors.white70),
+                          ],
                         ),
                       ),
-                    ),
-                  ],
-                );
-              },
-            ),
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        top: math.min(
+                          maskBottom + Grid.twelve,
+                          canvasHeight - 24,
+                        ),
+                        child: const Center(
+                          child: Text(
+                            'Move and scale',
+                            style: TextStyle(color: Colors.white70),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+      ),
     );
   }
 }
