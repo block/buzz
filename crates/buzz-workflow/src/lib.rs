@@ -208,6 +208,10 @@ impl WorkflowEngine {
     /// Looks the run up for its workflow id, inserts the approval record
     /// (the token is hashed inside `create_approval`), then flips the run
     /// status. Returns `Err(message)` for the caller to record as a failure.
+    ///
+    /// Follow-up: emit a kind-46010 approval event so mobile/desktop feeds
+    /// surface the gate. That needs a design for engine-authored event
+    /// signing first — there is deliberately no system key plumbed here yet.
     async fn persist_approval_gate(
         &self,
         community_id: CommunityId,
