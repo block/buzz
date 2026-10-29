@@ -1,4 +1,5 @@
 import 'dart:ui' as ui;
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -13,6 +14,8 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/avatar_image_source_controls.dart';
+import '../../shared/widgets/image_avatar_capture.dart';
+import '../../shared/widgets/camera_disposal_barrier.dart';
 import '../../shared/widgets/emoji_avatar_controls.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/profile_avatar_crop_page.dart';
@@ -91,9 +94,11 @@ class AgentAvatarPicker extends HookConsumerWidget {
     );
     final error = useState<String?>(null);
     final busy = useState(false);
+    final cameraActive = useState(false);
+    final cameraDisposal = useMemoized(CameraDisposalBarrier.new);
     final emojiSection = useState(EmojiEditorSection.emoji);
     final dataset = ref.watch(emojiDatasetProvider);
-    final locked = disabled || busy.value;
+    final locked = disabled || busy.value || cameraActive.value;
 
     Future<void> selectEmoji() async {
       // Export pixels, as desktop does: registry pictures are ordinary HTTPS
@@ -145,15 +150,41 @@ class AgentAvatarPicker extends HookConsumerWidget {
       }
     }
 
-    Future<void> pickImage({bool camera = false}) async {
+    Future<void> applyImage(Uint8List bytes) async {
+      // Crop exports JPEG; convert to PNG so all local drafts share one MIME.
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+      frame.image.dispose();
+      codec.dispose();
+      if (!context.mounted || data == null) return;
+      image.value = AgentAvatarSelection.image(data.buffer.asUint8List());
+      mode.value = 2;
+      onChanged(image.value!);
+    }
+
+    Future<void> acceptCameraImage(Uint8List bytes) async {
+      try {
+        await applyImage(bytes);
+      } catch (_) {
+        if (context.mounted) {
+          error.value = 'Could not prepare that image. Try again.';
+        }
+      } finally {
+        if (context.mounted) {
+          cameraActive.value = false;
+          onBusyChanged(false);
+        }
+      }
+    }
+
+    Future<void> pickImage() async {
       busy.value = true;
       onBusyChanged(true);
       error.value = null;
       try {
         final service = ref.read(mediaUploadServiceProvider);
-        final picked = await (camera
-            ? service.captureImage()
-            : service.pickGalleryImage());
+        final picked = await service.pickGalleryImage();
         if (picked == null || !context.mounted) return;
         final prepared = await service.prepareImageBytes(picked);
         if (!context.mounted) return;
@@ -165,18 +196,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
           ),
         );
         if (cropped == null || !context.mounted) return;
-        // Crop exports JPEG; convert to PNG so all local drafts share one MIME.
-        final codec = await ui.instantiateImageCodec(cropped);
-        final frame = await codec.getNextFrame();
-        final data = await frame.image.toByteData(
-          format: ui.ImageByteFormat.png,
-        );
-        frame.image.dispose();
-        codec.dispose();
-        if (!context.mounted || data == null) return;
-        image.value = AgentAvatarSelection.image(data.buffer.asUint8List());
-        mode.value = 2;
-        onChanged(image.value!);
+        await applyImage(cropped);
       } catch (_) {
         if (context.mounted) {
           error.value = 'Could not prepare that image. Try again.';
@@ -202,6 +222,27 @@ class AgentAvatarPicker extends HookConsumerWidget {
       if (next == 2 && image.value != null) onChanged(image.value!);
     }
 
+    final preview = Semantics(
+      label: 'Selected agent avatar',
+      image: true,
+      child: SizedBox.square(
+        dimension: 220,
+        child: selection.bytes != null
+            ? ClipOval(child: Image.memory(selection.bytes!, fit: BoxFit.cover))
+            : PresetAgentAvatar(
+                imageUrl: selection.url!,
+                size: 220,
+                fallback: const Icon(Icons.smart_toy_outlined, size: 80),
+              ),
+      ),
+    );
+
+    final imageHeight = controlsHeight + 228;
+    final cameraTop = math.max(
+      0.0,
+      (imageHeight - 115 - imageAvatarCameraPreviewSize) / 2,
+    );
+
     return Column(
       children: [
         SizedBox(
@@ -226,23 +267,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
                 ),
         ),
         const SizedBox(height: Grid.xxs),
-        Semantics(
-          label: 'Selected agent avatar',
-          image: true,
-          child: SizedBox.square(
-            dimension: 220,
-            child: selection.bytes != null
-                ? ClipOval(
-                    child: Image.memory(selection.bytes!, fit: BoxFit.cover),
-                  )
-                : PresetAgentAvatar(
-                    imageUrl: selection.url!,
-                    size: 220,
-                    fallback: const Icon(Icons.smart_toy_outlined, size: 80),
-                  ),
-          ),
-        ),
-        const SizedBox(height: Grid.xxs),
+        if (mode.value != 2) ...[preview, const SizedBox(height: Grid.xxs)],
         if (mode.value == 0)
           SizedBox(
             height: controlsHeight,
@@ -322,11 +347,40 @@ class AgentAvatarPicker extends HookConsumerWidget {
             ),
           ),
         if (mode.value == 2)
-          AvatarImageSourceControls(
-            height: controlsHeight,
-            isPicking: locked,
-            onCamera: () => pickImage(camera: true),
-            onLibrary: pickImage,
+          SizedBox(
+            height: imageHeight,
+            child: cameraActive.value
+                ? Padding(
+                    padding: EdgeInsets.only(top: cameraTop),
+                    child: ImageAvatarCapture(
+                      height: imageHeight - cameraTop,
+                      disposalBarrier: cameraDisposal,
+                      initialPreview: preview,
+                      onAccepted: acceptCameraImage,
+                      onClosed: () {
+                        cameraActive.value = false;
+                        onBusyChanged(false);
+                      },
+                    ),
+                  )
+                : Stack(
+                    children: [
+                      Positioned.fill(
+                        bottom: 115,
+                        child: Center(child: preview),
+                      ),
+                      AvatarImageSourceControls(
+                        height: imageHeight,
+                        isPicking: locked,
+                        onCamera: () {
+                          error.value = null;
+                          cameraActive.value = true;
+                          onBusyChanged(true);
+                        },
+                        onLibrary: pickImage,
+                      ),
+                    ],
+                  ),
           ),
         if (busy.value) const LinearProgressIndicator(),
         if (error.value != null)

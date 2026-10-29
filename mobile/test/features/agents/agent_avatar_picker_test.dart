@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:camera_platform_interface/camera_platform_interface.dart';
 import 'package:buzz/features/agents/agent_avatar_picker.dart';
 import 'package:buzz/shared/agents/agent_avatar_catalog.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
@@ -11,6 +12,9 @@ void main() {
   testWidgets('grid selection and shared emoji controls preserve the avatar', (
     tester,
   ) async {
+    final previousCamera = CameraPlatform.instance;
+    CameraPlatform.instance = _NoCameras();
+    addTearDown(() => CameraPlatform.instance = previousCamera);
     late Completer<void> rendered;
     var selection = AgentAvatarSelection.url(agentAvatarCatalog.first.url);
     await tester.pumpWidget(
@@ -106,6 +110,24 @@ void main() {
     expect(find.byKey(const ValueKey('image-source-library')), findsOneWidget);
     expect(selection.url, character);
 
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('image-source-camera')),
+    );
+    await tester.tap(find.byKey(const ValueKey('image-source-camera')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('image-avatar-camera')), findsOneWidget);
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('image-camera-left-action')),
+    );
+    await tester.tap(find.byKey(const ValueKey('image-camera-left-action')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('image-source-library')), findsOneWidget);
+    expect(selection.url, character);
     expect(tester.takeException(), isNull);
   });
+}
+
+class _NoCameras extends CameraPlatform {
+  @override
+  Future<List<CameraDescription>> availableCameras() async => [];
 }
