@@ -3086,12 +3086,15 @@ pub(crate) mod tests {
         build_test_state(config, pool).await
     }
 
-    /// The same test state with an explicit database target. This lets handler
-    /// tests deterministically exercise fail-closed database seams without
-    /// depending on whether a developer has the normal test database running.
-    /// Its pool waits only 100 ms for a connection, so closed-port targets
-    /// fail fast.
-    pub(crate) async fn test_state_with_database_url(database_url: &str) -> Arc<AppState> {
+    /// The same test state with an unreachable database target. This lets
+    /// handler tests deterministically exercise fail-closed database seams
+    /// without depending on whether a developer has the normal test database
+    /// running. Its pool waits only 100 ms for a connection, so closed-port
+    /// targets fail fast; a real database can miss that budget, so tests that
+    /// need one use [`test_state_with_database_url_and_pool_options`].
+    pub(crate) async fn test_state_with_unreachable_database_url(
+        database_url: &str,
+    ) -> Arc<AppState> {
         test_state_with_database_url_and_pool_options(
             database_url,
             sqlx::postgres::PgPoolOptions::new()
@@ -3369,8 +3372,16 @@ pub(crate) mod tests {
         #[ignore = "requires Postgres"]
         async fn a_lost_open_set_invalidation_grants_a_revoked_channel_only_until_max_age() {
             let database_url = crate::test_support::database_url();
-            let writer_pod = test_state_with_database_url(&database_url).await;
-            let reader_pod = test_state_with_database_url(&database_url).await;
+            let writer_pod = test_state_with_database_url_and_pool_options(
+                &database_url,
+                sqlx::postgres::PgPoolOptions::new(),
+            )
+            .await;
+            let reader_pod = test_state_with_database_url_and_pool_options(
+                &database_url,
+                sqlx::postgres::PgPoolOptions::new(),
+            )
+            .await;
             let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
             let community = writer_pod
                 .db
@@ -4291,7 +4302,7 @@ pub(crate) mod tests {
     /// archive, so it retains sockets for lifecycle revalidation instead.
     #[tokio::test]
     async fn bare_community_disconnect_fails_closed_when_the_fence_is_unavailable() {
-        let state = test_state_with_database_url(
+        let state = test_state_with_unreachable_database_url(
             "postgres://unused:unused@127.0.0.1:1/unused", // sadscan:disable np.postgres.1
         )
         .await;

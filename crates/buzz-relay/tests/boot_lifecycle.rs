@@ -82,6 +82,11 @@ impl RelayProcess {
             }
             thread::sleep(Duration::from_millis(10));
         };
+        self.collect(status)
+    }
+
+    /// The captured output of a child that has already exited as `status`.
+    fn collect(&mut self, status: ExitStatus) -> Output {
         self.child.take();
         let output = Output {
             status,
@@ -166,7 +171,7 @@ fn wait_for_relay_metrics(process: &mut RelayProcess, port: u16) -> String {
 
 /// Polls the relay's own `/metrics` until `needle` appears, bounded by
 /// [`METRICS_SCRAPE_DEADLINE`]. A relay that exits first is a failure, not a
-/// timeout, so the panic names the real cause.
+/// timeout, so the panic names the real cause and carries the relay's output.
 fn wait_for_scraped_metric(process: &mut RelayProcess, port: u16, needle: &str) -> String {
     wait_for_scraped_metrics(process, port, &[needle])
 }
@@ -180,10 +185,14 @@ fn wait_for_scraped_metrics(process: &mut RelayProcess, port: u16, needles: &[&s
     let mut last_error: Option<String>;
     let deadline = Instant::now() + METRICS_SCRAPE_DEADLINE;
     loop {
-        assert!(
-            process.try_wait().is_none(),
-            "relay exited before exporting {requested}"
-        );
+        if let Some(status) = process.try_wait() {
+            let output = process.collect(status);
+            panic!(
+                "relay exited ({status}) before exporting {requested}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         match scrape_metrics(port) {
             Ok(response) => {
                 if needles

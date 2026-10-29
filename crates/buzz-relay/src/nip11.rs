@@ -524,8 +524,10 @@ mod tests {
     #[tokio::test]
     async fn shadow_serves_the_same_nip11_document_as_enforce() {
         use buzz_auth::NipFiMode;
-        let base =
-            crate::state::tests::test_state_with_database_url("postgres://127.0.0.1:1/none").await;
+        let base = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://127.0.0.1:1/none",
+        )
+        .await;
         let mut docs = Vec::new();
         for mode in [NipFiMode::Off, NipFiMode::Enforce, NipFiMode::Shadow] {
             let mut state = (*base).clone();
