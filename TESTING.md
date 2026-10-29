@@ -236,8 +236,8 @@ can be repaired under the same controls.
 
 Use a **fresh disposable database through migration 0074**, the complete
 pre-change schema including channel join roles, for upgrade testing. Do not reuse
-an older database that applied the invitation migration numbered 0074 or a
-different 0075 checksum; reconcile it separately without resetting a user's
+an older database that applied an invitation migration under an earlier number
+or a different 0075 checksum; reconcile it separately without resetting a user's
 database. Seed legacy links for a restricted issuer and an unrelated issuer;
 lift the first restriction before
 upgrade. Apply schema-only 0075 and confirm it rewrites no invite rows. Before
