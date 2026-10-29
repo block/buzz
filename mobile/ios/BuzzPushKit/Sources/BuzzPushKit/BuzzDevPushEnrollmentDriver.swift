@@ -76,6 +76,10 @@ public protocol BuzzPushEndpointGrantStore {
   func records() throws -> [BuzzPushEndpointGrantRecord]
   /// Atomically replaces the grant for its gateway and relay origin.
   func save(_ record: BuzzPushEndpointGrantRecord) throws
+  /// Atomically updates all grants affected by one installation mutation.
+  func replaceAll(_ records: [BuzzPushEndpointGrantRecord]) throws
+  /// Returns pending operations so cancellation can settle every issuance.
+  func pendingEnrollments() throws -> [BuzzPushPendingEnrollmentRecord]
   /// Loads the exact retry journal for a gateway and relay origin.
   func pendingEnrollment(
     gatewayOrigin: String,
@@ -401,6 +405,134 @@ public final class BuzzDevPushEnrollmentDriver {
     try store.records().filter { $0.gatewayOrigin == gatewayOrigin }
   }
 
+  /// Returns durable pending requests, including enrollment whose response was lost.
+  public func pendingEnrollments() throws -> [BuzzPushPendingEnrollmentRecord] {
+    try store.pendingEnrollments().filter { $0.gatewayOrigin == gatewayOrigin }
+  }
+
+  /// Settles an interrupted enrollment before revoking its resulting authority.
+  public func revokePendingDelegation(relayOrigin: String, relayPubkey: String) async throws {
+    try await settlePendingEnrollments(relayOrigin: relayOrigin, relayPubkey: relayPubkey)
+    let records = try store.records()
+    for record in records where record.gatewayOrigin == gatewayOrigin
+      && record.relayOrigin == relayOrigin && (relayPubkey.isEmpty || record.relayPubkey == relayPubkey)
+    {
+      if records.contains(where: {
+        $0.gatewayOrigin == gatewayOrigin && $0.relayOrigin != relayOrigin
+          && $0.gatewayInstallationHandle == record.gatewayInstallationHandle
+          && $0.relayPubkey == record.relayPubkey && !$0.endpointGrant.isEmpty
+          && $0.expiresAt > Int64(now().timeIntervalSince1970)
+      }) { continue }
+      if let handle = record.gatewayInstallationHandle, let installation = UUID(uuidString: handle) {
+        try await revokeDelegation(installationHandle: installation, keyId: record.appAttestKeyId,
+          relayPubkey: record.relayPubkey, generation: record.generation)
+      }
+    }
+  }
+
+  private func settlePendingEnrollments(relayOrigin: String? = nil, relayPubkey: String) async throws {
+    for pending in try pendingEnrollments() where (relayOrigin == nil || pending.relayOrigin == relayOrigin)
+      && (relayPubkey.isEmpty || pending.relayPubkey == relayPubkey)
+    {
+      if pending.expiresAt <= Int64(now().timeIntervalSince1970) {
+        try await retireReplacedDelegation(relayOrigin: pending.relayOrigin,
+          installationHandle: pending.gatewayInstallationHandle, relayPubkey: pending.relayPubkey)
+        try store.removePendingEnrollment(gatewayOrigin: gatewayOrigin, relayOrigin: pending.relayOrigin)
+      } else {
+        do {
+          _ = try await completeEnrollment(pending, storedRecords: store.records(), relayMetadataPubkey: nil)
+        } catch let error as BuzzDevPushEnrollmentError {
+          // A 404 rules out the journaled installation, not prior authority
+          // still retained for this origin.
+          guard case .unexpectedStatus(route: "v1/installations", _, 404, _) = error else { throw error }
+          try await retireReplacedDelegation(relayOrigin: pending.relayOrigin,
+            installationHandle: pending.gatewayInstallationHandle, relayPubkey: pending.relayPubkey)
+          try store.removePendingEnrollment(gatewayOrigin: gatewayOrigin, relayOrigin: pending.relayOrigin)
+        }
+      }
+    }
+  }
+
+  /// Revokes one exact delegation without contacting its relay. The caller keeps
+  /// its cleanup journal until this request and the local save both succeed.
+  public func revokeDelegation(
+    installationHandle: UUID, keyId: String, relayPubkey: String, generation: Int64,
+    settlePending: Bool = false
+  ) async throws {
+    if settlePending {
+      let handle = installationHandle.uuidString.lowercased()
+      let origins = Set(try store.records().filter {
+        $0.gatewayOrigin == gatewayOrigin && $0.gatewayInstallationHandle == handle
+          && $0.relayPubkey == relayPubkey
+      }.map(\.relayOrigin)).union(try pendingEnrollments().filter {
+        $0.gatewayInstallationHandle == handle && $0.relayPubkey == relayPubkey
+      }.map(\.relayOrigin))
+      for origin in origins {
+        try await settlePendingEnrollments(relayOrigin: origin, relayPubkey: relayPubkey)
+      }
+      var includedOriginal = false
+      let records = try store.records()
+      for record in records where record.gatewayOrigin == gatewayOrigin
+        && record.relayPubkey == relayPubkey
+      {
+        if record.gatewayInstallationHandle != handle {
+          guard origins.contains(record.relayOrigin), !records.contains(where: {
+            $0.gatewayOrigin == gatewayOrigin && !origins.contains($0.relayOrigin)
+              && $0.gatewayInstallationHandle == record.gatewayInstallationHandle
+              && $0.relayPubkey == relayPubkey && !$0.endpointGrant.isEmpty
+              && $0.expiresAt > Int64(now().timeIntervalSince1970)
+          }) else { continue }
+        }
+        if let handle = record.gatewayInstallationHandle, let installation = UUID(uuidString: handle) {
+          if installation == installationHandle { includedOriginal = true }
+          try await revokeDelegation(installationHandle: installation, keyId: record.appAttestKeyId,
+            relayPubkey: relayPubkey, generation: record.generation)
+        }
+      }
+      if !includedOriginal {
+        try await revokeDelegation(installationHandle: installationHandle, keyId: keyId,
+          relayPubkey: relayPubkey, generation: generation)
+      }
+      return
+    }
+    let matching = try store.records().filter {
+      $0.gatewayOrigin == gatewayOrigin
+        && $0.gatewayInstallationHandle == installationHandle.uuidString.lowercased()
+        && $0.relayPubkey == relayPubkey
+    }
+    if !matching.isEmpty && matching.allSatisfy({ $0.expiresAt <= Int64(now().timeIntervalSince1970) }) { return }
+    if try store.records().contains(where: {
+      $0.gatewayOrigin == gatewayOrigin
+        && $0.gatewayInstallationHandle == installationHandle.uuidString.lowercased()
+        && $0.relayPubkey == relayPubkey && $0.generation > generation
+    }) { return }
+    try store.replaceAll(store.records().map { record in
+      guard record.gatewayOrigin == gatewayOrigin
+        && record.gatewayInstallationHandle == installationHandle.uuidString.lowercased()
+        && record.relayPubkey == relayPubkey && record.generation == generation
+      else { return record }
+      // Keep the version/lifetime but stop local reuse before awaiting network.
+      return record.with(endpointGrant: "")
+    })
+    let requestExpiresAt = Int64(now().timeIntervalSince1970) + Self.managementRequestLifetimeSeconds
+    let clientData = try BuzzPushTranscript.revokeDelegation(
+      gatewayOrigin: gatewayBaseURL, requestExpiresAt: requestExpiresAt,
+      installationHandle: installationHandle, relayPubkey: relayPubkey, generation: generation
+    )
+    let assertion = try await appAttest.assertion(keyId: keyId, clientData: clientData)
+    let response: MutationResponse = try await post(
+      route: "v1/delegations/revoke", expectedStatus: 200,
+      body: RevokeDelegationRequest(
+        v: 2, gatewayOrigin: gatewayOrigin, requestExpiresAt: requestExpiresAt,
+        installationHandle: installationHandle.uuidString.lowercased(),
+        relayPubkey: relayPubkey, generation: generation, assertion: assertion
+      )
+    )
+    guard response.status == "revoked" else {
+      throw BuzzDevPushEnrollmentError.invalidResponse(route: "v1/delegations/revoke")
+    }
+  }
+
   /// Fetches the relay's current NIP-11 push key, enrolls the APNs endpoint,
   /// delegates to that key, and durably saves the resulting opaque grant.
   public func enroll(
@@ -458,6 +590,8 @@ public final class BuzzDevPushEnrollmentDriver {
           )
         }
       } else {
+        try await retireReplacedDelegation(relayOrigin: pending.relayOrigin,
+          installationHandle: pending.gatewayInstallationHandle, relayPubkey: pending.relayPubkey)
         try store.removePendingEnrollment(
           gatewayOrigin: gatewayOrigin,
           relayOrigin: relayOrigin.text
@@ -468,7 +602,7 @@ public final class BuzzDevPushEnrollmentDriver {
     let newestSharedGrant = storedRecords.filter {
       $0.gatewayOrigin == gatewayOrigin && $0.relayPubkey == relayPubkey
         && $0.endpointHash == endpointHash && $0.endpointEpoch == Self.endpointEpoch
-        && $0.expiresAt > nowSeconds + 300
+        && $0.expiresAt > nowSeconds + 300 && !$0.endpointGrant.isEmpty
     }.max { $0.generation < $1.generation }
     if pendingEnrollment == nil, let reusableGrant = newestSharedGrant {
       // Reuse the newest delegation without invalidating sibling communities.
@@ -486,6 +620,8 @@ public final class BuzzDevPushEnrollmentDriver {
         generation: reusableGrant.generation,
         expiresAt: reusableGrant.expiresAt
       )
+      try await retireReplacedDelegation(relayOrigin: record.relayOrigin,
+        installationHandle: record.gatewayInstallationHandle, relayPubkey: record.relayPubkey)
       try store.save(record)
       try store.removePendingEnrollment(
         gatewayOrigin: gatewayOrigin,
@@ -849,12 +985,34 @@ public final class BuzzDevPushEnrollmentDriver {
       generation: generation,
       expiresAt: pending.expiresAt
     )
+    try await retireReplacedDelegation(relayOrigin: record.relayOrigin,
+      installationHandle: record.gatewayInstallationHandle, relayPubkey: record.relayPubkey)
     try store.save(record)
     try store.removePendingEnrollment(
       gatewayOrigin: gatewayOrigin,
       relayOrigin: pending.relayOrigin
     )
     return record
+  }
+
+  private func retireReplacedDelegation(
+    relayOrigin: String, installationHandle: String?, relayPubkey: String
+  ) async throws {
+    let records = try store.records()
+    guard let old = records.first(where: {
+      $0.gatewayOrigin == gatewayOrigin && $0.relayOrigin == relayOrigin
+    }), old.gatewayInstallationHandle != installationHandle || old.relayPubkey != relayPubkey,
+      let handle = old.gatewayInstallationHandle, let installation = UUID(uuidString: handle)
+    else { return }
+    guard !records.contains(where: {
+      $0.gatewayOrigin == old.gatewayOrigin && $0.relayOrigin != old.relayOrigin
+        && $0.gatewayInstallationHandle == handle && $0.relayPubkey == old.relayPubkey
+        && $0.expiresAt > Int64(now().timeIntervalSince1970) && !$0.endpointGrant.isEmpty
+    }) else { return }
+    // Keep the old target durable until its revocation succeeds; replacing the
+    // origin record first would lose it even if the new issuance is journaled.
+    try await revokeDelegation(installationHandle: installation, keyId: old.appAttestKeyId,
+      relayPubkey: old.relayPubkey, generation: old.generation)
   }
 
   private func makeInstallationId() throws -> String {
@@ -1225,5 +1383,37 @@ private struct DelegationConflict: Decodable {
   enum CodingKeys: String, CodingKey {
     case error
     case currentGeneration = "current_generation"
+  }
+}
+
+private struct RevokeDelegationRequest: Encodable {
+  let v: Int
+  let gatewayOrigin: String
+  let requestExpiresAt: Int64
+  let installationHandle: String
+  let relayPubkey: String
+  let generation: Int64
+  let assertion: String
+  enum CodingKeys: String, CodingKey {
+    case v
+    case gatewayOrigin = "gateway_origin"
+    case requestExpiresAt = "request_expires_at"
+    case installationHandle = "installation_handle"
+    case relayPubkey = "relay_pubkey"
+    case generation, assertion
+  }
+}
+private struct MutationResponse: Decodable { let status: String }
+
+
+private extension BuzzPushEndpointGrantRecord {
+  func with(endpointGrant: String) -> Self {
+    Self(
+      gatewayOrigin: gatewayOrigin, relayOrigin: relayOrigin, relayPubkey: relayPubkey,
+      relayMetadataPubkey: relayMetadataPubkey, gatewayInstallationHandle: gatewayInstallationHandle,
+      appAttestKeyId: appAttestKeyId, installationId: installationId,
+      endpointGrant: endpointGrant, endpointHash: endpointHash,
+      endpointEpoch: endpointEpoch, generation: generation, expiresAt: expiresAt
+    )
   }
 }

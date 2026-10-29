@@ -591,7 +591,18 @@ import os.log
           store: endpointGrantStore,
           appAttestKeychainAccessGroup: pushKeychainAccessGroup
         )
-        result(try driver.endpointGrants().map(\.flutterArguments))
+        var grants = try driver.endpointGrants().map(\.flutterArguments)
+        for pending in try driver.pendingEnrollments() {
+          grants.removeAll { $0["relayOrigin"] as? String == pending.relayOrigin }
+          grants.append([
+            "relayOrigin": pending.relayOrigin, "relayPubkey": pending.relayPubkey,
+            "installationId": pending.installationId, "endpointGrant": "",
+            "endpointHash": pending.endpointHash, "endpointEpoch": 1,
+            "generation": max(1, pending.delegationGeneration), "expiresAt": pending.expiresAt,
+            "pending": true,
+          ])
+        }
+        result(grants)
       } catch {
         result(
           FlutterError(
@@ -600,6 +611,44 @@ import os.log
             details: error.localizedDescription
           )
         )
+      }
+    case "revokePushDelegation":
+      guard enrollmentTask == nil,
+        let arguments = call.arguments as? [String: Any],
+        let gatewayText = arguments["gatewayUrl"] as? String,
+        let gatewayURL = URL(string: gatewayText),
+        let relayPubkey = arguments["relayPubkey"] as? String,
+        let generation = arguments["generation"] as? Int64, generation > 0
+      else {
+        result(FlutterError(code: "push_management_busy_or_invalid", message: "Push management is busy or invalid.", details: nil))
+        return
+      }
+      do {
+        let driver = try BuzzDevPushEnrollmentDriver(
+          gatewayBaseURL: gatewayURL, store: endpointGrantStore,
+          appAttestKeychainAccessGroup: pushKeychainAccessGroup
+        )
+        enrollmentTask = Task { [weak self] in
+          defer { self?.enrollmentTask = nil }
+          do {
+            if let handle = arguments["installationHandle"] as? String,
+              let installation = UUID(uuidString: handle), let keyId = arguments["keyId"] as? String {
+              try await driver.revokeDelegation(
+                installationHandle: installation, keyId: keyId,
+                relayPubkey: relayPubkey, generation: generation, settlePending: true
+              )
+            } else if let relayOrigin = arguments["relayOrigin"] as? String {
+              try await driver.revokePendingDelegation(relayOrigin: relayOrigin, relayPubkey: relayPubkey)
+            } else { throw BuzzDevPushEnrollmentError.invalidRelayURL }
+            await MainActor.run { result(nil) }
+          } catch {
+            await MainActor.run {
+              result(FlutterError(code: "push_revocation_failed", message: "Push revocation failed.", details: error.localizedDescription))
+            }
+          }
+        }
+      } catch {
+        result(FlutterError(code: "push_revocation_failed", message: "Push revocation failed.", details: error.localizedDescription))
       }
     case "enrollPush":
       handleDevPushEnrollment(call, result: result)

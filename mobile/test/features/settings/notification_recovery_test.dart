@@ -13,6 +13,7 @@ import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -30,6 +31,18 @@ void main() {
       addTearDown(tester.view.reset);
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const nativePush = MethodChannel('buzz/push');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        nativePush,
+        (call) async => switch (call.method) {
+          'endpointGrants' => [],
+          'takePendingNotificationResponse' => null,
+          _ => throw StateError('Unexpected native call ${call.method}'),
+        },
+      );
+      addTearDown(() => messenger.setMockMethodCallHandler(nativePush, null));
       PackageInfo.setMockInitialValues(
         appName: 'Buzz',
         packageName: 'buzz',

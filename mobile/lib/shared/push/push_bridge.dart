@@ -156,6 +156,9 @@ Future<void> startBuzzPushRegistration() async {
 }
 
 class BuzzPushEndpointGrant {
+  final bool pending;
+  final String? gatewayInstallationHandle;
+  final String? appAttestKeyId;
   final String relayOrigin;
   final String relayPubkey;
   final String installationId;
@@ -166,6 +169,9 @@ class BuzzPushEndpointGrant {
   final int expiresAt;
 
   const BuzzPushEndpointGrant({
+    this.pending = false,
+    this.gatewayInstallationHandle,
+    this.appAttestKeyId,
     required this.relayOrigin,
     required this.relayPubkey,
     required this.installationId,
@@ -176,9 +182,29 @@ class BuzzPushEndpointGrant {
     required this.expiresAt,
   });
 
+  Map<String, dynamic>? get gatewayRevocationTarget => pending
+      ? {
+          'gatewayUrl': Env.pushGatewayUrl,
+          'relayOrigin': relayOrigin,
+          'relayPubkey': relayPubkey,
+          'generation': generation,
+        }
+      : gatewayInstallationHandle == null || appAttestKeyId == null
+      ? null
+      : {
+          'gatewayUrl': Env.pushGatewayUrl,
+          'installationHandle': gatewayInstallationHandle,
+          'keyId': appAttestKeyId,
+          'relayPubkey': relayPubkey,
+          'generation': generation,
+        };
+
   factory BuzzPushEndpointGrant.fromMap(Map<dynamic, dynamic> map) {
     final generation = map['generation'] as int;
     return BuzzPushEndpointGrant(
+      pending: map['pending'] == true,
+      gatewayInstallationHandle: map['gatewayInstallationHandle'] as String?,
+      appAttestKeyId: map['appAttestKeyId'] as String?,
       relayOrigin: map['relayOrigin'] as String,
       relayPubkey: map['relayPubkey'] as String,
       installationId: map['installationId'] as String,
@@ -240,6 +266,11 @@ Future<BuzzPushEndpointGrant> enrollBuzzPush(
     }
   }
   return grant;
+}
+
+/// Revokes the exact gateway authority retained by the durable cleanup journal.
+Future<void> revokeBuzzPushDelegation(Map<String, dynamic> target) async {
+  await _channel.invokeMethod<void>('revokePushDelegation', target);
 }
 
 /// Latest failure to export the community snapshot used by the iOS

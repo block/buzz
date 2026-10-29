@@ -1,4 +1,5 @@
 import '../hosted/hosted_relay_auth.dart';
+
 import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:math';
@@ -110,7 +111,11 @@ typedef CommunityPushLeaseRevocationEnqueuer =
 
 final communityPushLeaseRevocationEnqueuerProvider =
     Provider<CommunityPushLeaseRevocationEnqueuer>((ref) {
-      return ref.watch(buzzPushLeaseRevocationOutboxProvider).enqueueCommunity;
+      final outbox = ref.watch(buzzPushLeaseRevocationOutboxProvider);
+      return (community) => outbox.enqueueCommunity(
+        community,
+        remainingCommunities: ref.read(communityListProvider).value ?? const [],
+      );
     });
 
 typedef CommunityPushLeaseRevocationTrigger = Future<void> Function();
@@ -509,6 +514,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {
     var shouldDeactivate = false;
+    var gatewayCleanupJournaled = false;
     await _serializePushMutation(() async {
       final storage = ref.read(communityStorageProvider);
       final current = state.value ?? await storage.loadAll();
@@ -529,6 +535,11 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         pushNotificationsEnabled: enabled,
         pushSubscriptionState: pushState,
       );
+      if (!enabled && pushState.pendingTombstoneGeneration == null) {
+        gatewayCleanupJournaled = await ref.read(
+          communityPushLeaseRevocationEnqueuerProvider,
+        )(updated);
+      }
       await storage.save(updated);
       final updatedList = [...current]..[index] = updated;
       state = AsyncData(updatedList);
@@ -536,6 +547,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       shouldDeactivate =
           !enabled && pushState.pendingTombstoneGeneration != null;
     });
+    if (gatewayCleanupJournaled) {
+      unawaited(ref.read(communityPushLeaseRevocationTriggerProvider)());
+    }
     if (shouldDeactivate) {
       try {
         await retryPendingPushLeaseTombstone(id);
@@ -608,6 +622,41 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final generation = pendingGeneration;
     if (community == null || generation == null) return;
     try {
+      final grants = await readBuzzPushEndpointGrants();
+      final matching = grants.where(
+        (grant) =>
+            grant.relayOrigin ==
+            canonicalBuzzPushRelayOrigin(community.relayUrl),
+      );
+      if (matching.length == 1) {
+        final grant = matching.single;
+        final target = grant.gatewayRevocationTarget;
+        final current =
+            state.value ?? await ref.read(communityStorageProvider).loadAll();
+        final pending = current.where((candidate) => candidate.id == id);
+        if (pending.isEmpty ||
+            pending.single.pushNotificationsEnabled ||
+            pending.single.pushSubscriptionState.pendingTombstoneGeneration !=
+                generation) {
+          return;
+        }
+        final shared = current.any(
+          (other) =>
+              other.id != id &&
+              other.pushNotificationsEnabled &&
+              grants.any(
+                (candidate) =>
+                    candidate.relayOrigin ==
+                        canonicalBuzzPushRelayOrigin(other.relayUrl) &&
+                    candidate.relayPubkey == grant.relayPubkey &&
+                    (grant.pending
+                        ? candidate.relayOrigin == grant.relayOrigin
+                        : candidate.gatewayInstallationHandle ==
+                              grant.gatewayInstallationHandle),
+              ),
+        );
+        if (!shared && target != null) await revokeBuzzPushDelegation(target);
+      }
       await ref.read(communityPushLeaseDeactivatorProvider)(
         community,
         generation: generation,
