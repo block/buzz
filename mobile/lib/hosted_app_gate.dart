@@ -16,8 +16,10 @@ import 'shared/hosted/hosted_community_connection.dart';
 import 'shared/hosted/hosted_flow.dart';
 import 'shared/hosted/hosted_environment.dart';
 import 'features/onboarding/hosted_reconnect_banner.dart';
+import 'features/onboarding/organization_sign_in_banner.dart';
 
 import 'shared/hosted/hosted_flow_provider.dart';
+import 'shared/hosted/organization_sign_in.dart';
 
 /// Composition seam shared by signed-in and signed-out application states.
 class HostedAppGate extends HookConsumerWidget {
@@ -48,6 +50,8 @@ class HostedAppGate extends HookConsumerWidget {
       return () => flow.removeListener(onFlowChanged);
     }, [flow]);
     final inlineEntry = ref.watch(hostedInlineEntryProvider);
+    // Create the organization's browser owner before any callback is handled.
+    ref.watch(organizationSignInProvider);
     final visible =
         flow != null &&
         flow.stage != HostedFlowStage.idle &&
@@ -138,6 +142,7 @@ class HostedAppGate extends HookConsumerWidget {
             ),
           ),
           if (fullScreenSetup) ColoredBox(color: context.colors.surface),
+          if (authenticated && !visible) const OrganizationSignInBanner(),
           if (flow != null) ...[
             if (authenticated && !visible) HostedReconnectBanner(flow: flow),
             if (flow.stage == HostedFlowStage.signIn &&
