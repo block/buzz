@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -600,6 +601,106 @@ void main() {
 
     expect(manager.getEffectiveTimestamp('channel-1'), 100);
   });
+  group('does not decrypt an event it already applied', () {
+    // The history fetch returns [history]; the live subscription then
+    // delivers events, as the relay replays stored ones after the fetch and
+    // again after a reconnect.
+    Future<_Harness> start(List<NostrEvent> Function(_Harness) history) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final real = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final counting = _CountingCrypto(real);
+      final relay = _FakeRelaySession();
+      final harness = _Harness(
+        pubkey: keychain.public,
+        real: real,
+        counting: counting,
+        relay: relay,
+        manager: ReadStateManager(
+          pubkey: keychain.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: counting,
+          relaySession: relay,
+          signedEventRelay: _FakeSignedEventRelay(),
+          remoteEnabled: true,
+          onChanged: () {},
+        ),
+      );
+      relay.historyEvents = history(harness);
+      await harness.manager.initialize();
+      return harness;
+    }
+
+    test('history events seen again on the live subscription', () async {
+      final h = await start(
+        (h) => [
+          h.event(slot: 'a', createdAt: 100, contexts: {'channel-1': 10}),
+          h.event(slot: 'b', createdAt: 120, contexts: {'channel-2': 20}),
+        ],
+      );
+      expect(h.counting.decryptCount, 2);
+
+      // Replay in a different order, as after a reconnect.
+      for (final e in h.relay.historyEvents.reversed) {
+        h.relay.deliver(e);
+      }
+
+      expect(h.counting.decryptCount, 2);
+      expect(h.manager.getEffectiveTimestamp('channel-1'), 10);
+      expect(h.manager.getEffectiveTimestamp('channel-2'), 20);
+    });
+
+    test('the same event three times in one batch', () async {
+      final h = await start((h) {
+        final e = h.event(
+          slot: 'a',
+          createdAt: 100,
+          contexts: {'channel-1': 10},
+        );
+        return [e, e, e];
+      });
+
+      expect(h.counting.decryptCount, 1);
+      expect(h.manager.getEffectiveTimestamp('channel-1'), 10);
+    });
+
+    test('a different event for the same slot is still merged, even when '
+        'older or tied on created_at, in any arrival order', () async {
+      final h = await start(
+        (h) => [
+          h.event(slot: 'a', createdAt: 100, contexts: {'channel-1': 10}),
+        ],
+      );
+
+      // Newer, tied (different id), then older: each carries a mark the
+      // others lack, so skipping any of them would lose state.
+      h.relay.deliver(
+        h.event(slot: 'a', createdAt: 200, contexts: {'channel-2': 20}),
+      );
+      h.relay.deliver(
+        h.event(
+          slot: 'a',
+          createdAt: 200,
+          contexts: {'channel-3': 30},
+          idSuffix: 'tie',
+        ),
+      );
+      h.relay.deliver(
+        h.event(slot: 'a', createdAt: 50, contexts: {'channel-4': 40}),
+      );
+
+      expect(h.counting.decryptCount, 4);
+      expect(h.manager.getEffectiveTimestamp('channel-1'), 10);
+      expect(h.manager.getEffectiveTimestamp('channel-2'), 20);
+      expect(h.manager.getEffectiveTimestamp('channel-3'), 30);
+      expect(h.manager.getEffectiveTimestamp('channel-4'), 40);
+    });
+  });
 }
 
 class _SubmittedEvent {
@@ -748,10 +849,84 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async => historyEvents;
 
+  final List<void Function(NostrEvent)> _handlers = [];
+
+  /// Delivers [event] on every live subscription, as a flushed batch does.
+  void deliver(NostrEvent event) {
+    for (final handler in _handlers) {
+      handler(event);
+    }
+  }
+
   @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
-  }) async => () {};
+  }) async {
+    _handlers.add(onEvent);
+    return () {};
+  }
+}
+
+class _Harness {
+  _Harness({
+    required this.pubkey,
+    required this.real,
+    required this.counting,
+    required this.relay,
+    required this.manager,
+  });
+
+  final String pubkey;
+  final ReadStateCrypto real;
+  final _CountingCrypto counting;
+  final _FakeRelaySession relay;
+  final ReadStateManager manager;
+
+  NostrEvent event({
+    required String slot,
+    required int createdAt,
+    required Map<String, int> contexts,
+    String? idSuffix,
+  }) {
+    final e = _readStateEvent(
+      pubkey: pubkey,
+      crypto: real,
+      clientId: 'client-$slot',
+      slotId: slot,
+      contexts: contexts,
+      createdAt: createdAt,
+    );
+    if (idSuffix == null) return e;
+    return NostrEvent(
+      id: '${e.id}-$idSuffix',
+      pubkey: e.pubkey,
+      createdAt: e.createdAt,
+      kind: e.kind,
+      tags: e.tags,
+      content: e.content,
+      sig: e.sig,
+    );
+  }
+}
+
+/// Counts decrypts, delegating to the real cipher.
+class _CountingCrypto implements ReadStateCrypto {
+  _CountingCrypto(this.real);
+
+  final ReadStateCrypto real;
+  int decryptCount = 0;
+
+  @override
+  Uint8List get conversationKey => real.conversationKey;
+
+  @override
+  String encrypt(String plaintext) => real.encrypt(plaintext);
+
+  @override
+  String decrypt(String ciphertext) {
+    decryptCount++;
+    return real.decrypt(ciphertext);
+  }
 }

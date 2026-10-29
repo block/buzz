@@ -39,6 +39,9 @@ class ReadStateCrypto {
       nip44Decrypt(conversationKey, ciphertext);
 }
 
+// Enough for every slot the history fetch can return, several times over.
+const _maxAppliedEventIds = readStateFetchLimit * 4;
+
 enum _ApplyRemoteContextResult { unchanged, advanced }
 
 class ReadStateManager {
@@ -74,6 +77,11 @@ class ReadStateManager {
   int _maxFetchedCreatedAt = 0;
   final Map<String, int> _contextSourceCreatedAt = {};
   final Set<String> _pendingSyncedAdvances = {};
+  // Ids of events already decoded and merged. Re-delivery of one (the live
+  // subscription replays the stored events the history fetch already took in,
+  // and again after a reconnect) cannot change state, so it is not decrypted.
+  // Kept in arrival order, oldest dropped first.
+  final Set<String> _appliedEventIds = {};
 
   ReadStateManager({
     required this.pubkey,
@@ -249,12 +257,14 @@ class ReadStateManager {
     var ownBlobCreatedAt = 0;
 
     for (final event in events) {
+      if (_appliedEventIds.contains(event.id)) continue;
       final decoded = decodeReadStateEvent(
         event,
         pubkey: pubkey,
         decrypt: _crypto.decrypt,
       );
       if (decoded == null) continue;
+      _rememberApplied(event.id);
 
       if (_isPlausibleCreatedAt(event.createdAt)) {
         _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
@@ -336,6 +346,7 @@ class ReadStateManager {
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed || !_servesThisCommunity) return;
+    if (_appliedEventIds.contains(event.id)) return;
     debugPrint(
       '[ReadStateManager] incoming event=${event.id.substring(0, 8)}… created_at=${event.createdAt}',
     );
@@ -346,6 +357,7 @@ class ReadStateManager {
       decrypt: _crypto.decrypt,
     );
     if (decoded == null) return;
+    _rememberApplied(event.id);
 
     if (_isPlausibleCreatedAt(event.createdAt)) {
       _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
@@ -392,6 +404,13 @@ class ReadStateManager {
     if (decoded.blob.clientId != _clientId &&
         !_isIdenticalToLastPublished(_currentContexts())) {
       _schedulePublish();
+    }
+  }
+
+  void _rememberApplied(String eventId) {
+    _appliedEventIds.add(eventId);
+    if (_appliedEventIds.length > _maxAppliedEventIds) {
+      _appliedEventIds.remove(_appliedEventIds.first);
     }
   }
 
