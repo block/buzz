@@ -296,6 +296,12 @@ run_unit_tests() {
   run_test_step "buzz-relay readiness tests" \
     cargo test -p buzz-relay --lib readiness::tests:: -- --nocapture
 
+  run_test_step "buzz-relay accessible-channel cache tests" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      state::tests::accessible_channel_invalidation_is_scoped_to_community \
+      state::tests::accessible_channels_join_member_and_open_halves \
+      state::tests::channel_deleted_invalidation_is_scoped_to_community
+
   run_test_step "buzz-relay admission regression test" \
     cargo test -p buzz-relay --lib state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket -- --nocapture
 

@@ -1275,10 +1275,15 @@ pub struct AppState {
     /// Short TTL (10s) — membership changes are rare but must propagate.
     #[allow(clippy::type_complexity)]
     pub membership_cache: Arc<moka::sync::Cache<(CommunityId, Uuid, Vec<u8>), bool>>,
-    /// Accessible channel IDs cache: (community_id, pubkey_bytes) → channel UUIDs.
-    /// Short TTL (10s) — invalidated on membership or channel visibility changes.
+    /// Member channel IDs cache: (community_id, pubkey_bytes) → the legacy-type
+    /// channels the pubkey is an active member of. Short TTL (10s) —
+    /// invalidated on membership changes and community-wide channel changes.
     #[allow(clippy::type_complexity)]
-    pub accessible_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<Uuid>>>,
+    pub member_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<Uuid>>>,
+    /// Listed open channel IDs per community, the half of every reader's
+    /// accessible set that does not depend on the reader. Short TTL (10s) —
+    /// invalidated with the community's accessible channels.
+    pub open_channels_cache: Arc<moka::sync::Cache<CommunityId, Arc<[Uuid]>>>,
     /// Per-community channel visibility string, used to gate the private-channel fan-out
     /// access check so open channels stay zero-cost. Invalidated on a flip.
     pub channel_visibility_cache: Arc<moka::sync::Cache<(CommunityId, Uuid), String>>,
@@ -1582,11 +1587,17 @@ impl AppState {
                     .support_invalidation_closures()
                     .build(),
             ),
-            accessible_channels_cache: Arc::new(
+            member_channels_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(10))
                     .support_invalidation_closures()
+                    .build(),
+            ),
+            open_channels_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
             channel_visibility_cache: Arc::new(
@@ -1830,7 +1841,7 @@ impl AppState {
     ) {
         self.membership_cache
             .invalidate(&(community_id, channel_id, pubkey.to_vec()));
-        self.accessible_channels_cache
+        self.member_channels_cache
             .invalidate(&(community_id, pubkey.to_vec()));
     }
 
@@ -1842,8 +1853,9 @@ impl AppState {
 
     /// Local-only accessible-channels drop. See [`invalidate_membership_local`].
     pub(crate) fn invalidate_all_accessible_channels_local(&self, community_id: CommunityId) {
+        self.open_channels_cache.invalidate(&community_id);
         if let Err(error) = self
-            .accessible_channels_cache
+            .member_channels_cache
             .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
         {
             // AppState enables invalidation closures at construction time. If
@@ -1853,7 +1865,7 @@ impl AppState {
                 ?error,
                 "community-scoped accessible-channel invalidation unavailable; falling back to full invalidation"
             );
-            self.accessible_channels_cache.invalidate_all();
+            self.member_channels_cache.invalidate_all();
         }
     }
 
@@ -1899,16 +1911,7 @@ impl AppState {
             );
             self.membership_cache.invalidate_all();
         }
-        if let Err(error) = self
-            .accessible_channels_cache
-            .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
-        {
-            tracing::error!(
-                ?error,
-                "community-scoped accessible-channel invalidation unavailable; falling back to full invalidation"
-            );
-            self.accessible_channels_cache.invalidate_all();
-        }
+        self.invalidate_all_accessible_channels_local(community_id);
         if let Err(error) = self
             .channel_visibility_cache
             .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
@@ -2311,17 +2314,46 @@ impl AppState {
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>, buzz_db::DbError> {
         let key = (community_id, pubkey.to_vec());
-        if let Some(cached) = self.accessible_channels_cache.get(&key) {
-            metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
-            return Ok(cached);
-        }
-        metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
-        let result = self
-            .db
-            .get_accessible_channel_ids(community_id, pubkey)
-            .await?;
-        self.accessible_channels_cache.insert(key, result.clone());
-        Ok(result)
+        let mut ids = match self.member_channels_cache.get(&key) {
+            Some(cached) => {
+                metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
+                cached
+            }
+            None => {
+                metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
+                let ids = self.db.get_member_channel_ids(community_id, pubkey).await?;
+                self.member_channels_cache.insert(key, ids.clone());
+                ids
+            }
+        };
+        let open = match self.open_channels_cache.get(&community_id) {
+            Some(cached) => cached,
+            None => {
+                let open: Arc<[Uuid]> = self
+                    .db
+                    .get_listed_open_channel_ids(community_id)
+                    .await?
+                    .into();
+                self.open_channels_cache.insert(community_id, open.clone());
+                open
+            }
+        };
+        buzz_db::channel_members::merge_channel_ids(&mut ids, &open);
+        Ok(ids)
+    }
+
+    /// Seeds both accessible-channel caches so `pubkey` reads exactly
+    /// `channels`, with no open channels, without touching the database.
+    #[cfg(test)]
+    pub(crate) fn seed_accessible_channels(
+        &self,
+        community_id: CommunityId,
+        pubkey: Vec<u8>,
+        channels: Vec<Uuid>,
+    ) {
+        self.member_channels_cache
+            .insert((community_id, pubkey), channels);
+        self.open_channels_cache.insert(community_id, Arc::from([]));
     }
 
     /// Channel visibility string. Caches only `private` (10s); never caches a
@@ -3523,28 +3555,55 @@ pub(crate) mod tests {
         let channels_a = vec![Uuid::from_u128(1)];
         let channels_b = vec![Uuid::from_u128(2)];
 
-        state
-            .accessible_channels_cache
-            .insert((community_a, pubkey.clone()), channels_a);
-        state
-            .accessible_channels_cache
-            .insert((community_b, pubkey.clone()), channels_b.clone());
+        state.seed_accessible_channels(community_a, pubkey.clone(), channels_a);
+        state.seed_accessible_channels(community_b, pubkey.clone(), channels_b.clone());
 
         state.invalidate_all_accessible_channels_local(community_a);
 
         assert_eq!(
             state
-                .accessible_channels_cache
+                .member_channels_cache
                 .get(&(community_a, pubkey.clone())),
             None
         );
+        assert!(state.open_channels_cache.get(&community_a).is_none());
         assert_eq!(
             state
-                .accessible_channels_cache
+                .member_channels_cache
                 .get(&(community_b, pubkey.clone())),
             Some(channels_b),
             "A's cache drop must not evict B's accessible-channel entry"
         );
+        assert!(state.open_channels_cache.get(&community_b).is_some());
+    }
+
+    #[tokio::test]
+    async fn accessible_channels_join_member_and_open_halves() {
+        let state = test_state().await;
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let [member, both, open] = [1, 2, 3].map(Uuid::from_u128);
+        let reader = vec![7u8; 32];
+        state.seed_accessible_channels(community, reader.clone(), vec![member, both]);
+        state
+            .open_channels_cache
+            .insert(community, Arc::from([both, open]));
+
+        let ids = state
+            .get_accessible_channel_ids_cached(community, &reader)
+            .await
+            .expect("both halves are cached");
+        assert_eq!(ids, vec![member, both, open]);
+
+        // Another reader shares the community's open half.
+        let other = vec![8u8; 32];
+        state
+            .member_channels_cache
+            .insert((community, other.clone()), vec![]);
+        let ids = state
+            .get_accessible_channel_ids_cached(community, &other)
+            .await
+            .expect("both halves are cached");
+        assert_eq!(ids, vec![both, open]);
     }
 
     #[tokio::test]
@@ -3559,9 +3618,7 @@ pub(crate) mod tests {
             state
                 .membership_cache
                 .insert((community, channel_id, pubkey.clone()), true);
-            state
-                .accessible_channels_cache
-                .insert((community, pubkey.clone()), vec![channel_id]);
+            state.seed_accessible_channels(community, pubkey.clone(), vec![channel_id]);
             state
                 .channel_visibility_cache
                 .insert((community, channel_id), "private".to_string());
@@ -3577,10 +3634,11 @@ pub(crate) mod tests {
         );
         assert_eq!(
             state
-                .accessible_channels_cache
+                .member_channels_cache
                 .get(&(community_a, pubkey.clone())),
             None
         );
+        assert!(state.open_channels_cache.get(&community_a).is_none());
         assert_eq!(
             state
                 .channel_visibility_cache
@@ -3595,10 +3653,11 @@ pub(crate) mod tests {
         );
         assert_eq!(
             state
-                .accessible_channels_cache
+                .member_channels_cache
                 .get(&(community_b, pubkey.clone())),
             Some(vec![channel_id])
         );
+        assert!(state.open_channels_cache.get(&community_b).is_some());
         assert_eq!(
             state
                 .channel_visibility_cache
