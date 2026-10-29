@@ -69,12 +69,21 @@ void main() {
   late int sent;
   late int taps;
   late bool fail;
+  final haptics = <String>[];
   setUp(() {
     recorder = Recorder();
     draft = Draft();
     sent = 0;
     taps = 0;
     fail = false;
+    haptics.clear();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            haptics.add(call.arguments as String);
+          }
+          return null;
+        });
   });
   Future<void> mount(WidgetTester tester, {bool nativeAvatar = false}) async {
     await tester.pumpWidget(
@@ -223,6 +232,7 @@ void main() {
     final gesture = await hold(tester);
     await gesture.up();
     await tester.pump();
+    expect(haptics, ['HapticFeedbackType.mediumImpact']);
     recorder.startup!.complete();
     await tester.pumpAndSettle();
     expect(recorder.cancelled, isTrue);
@@ -235,6 +245,13 @@ void main() {
     await gesture.moveBy(const Offset(0, -90));
     await tester.pump();
     expect(find.text('Release to cancel'), findsOneWidget);
+    expect(haptics, [
+      'HapticFeedbackType.mediumImpact',
+      'HapticFeedbackType.selectionClick',
+    ]);
+    await gesture.moveBy(const Offset(0, -10));
+    await tester.pump();
+    expect(haptics.length, 2);
     await gesture.up();
     await tester.pumpAndSettle();
     expect(recorder.cancelled, isTrue);

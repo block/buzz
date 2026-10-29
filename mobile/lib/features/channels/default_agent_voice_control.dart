@@ -182,6 +182,7 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
       recorder.value = current;
       started.value = false;
       cancelled.value = false;
+      unawaited(HapticFeedback.mediumImpact());
       recording.value = true;
       samples.value = [];
       elapsed.value = Duration.zero;
@@ -193,7 +194,6 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
         await current.start();
         if (!context.mounted || recorder.value != current) return;
         started.value = true;
-        unawaited(HapticFeedback.mediumImpact());
         final watch = Stopwatch()..start();
         timer.value = Timer.periodic(const Duration(milliseconds: 200), (_) {
           if (!context.mounted) return;
@@ -294,7 +294,11 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
           onLongPressStart: enabled ? (_) => unawaited(start()) : null,
           onLongPressMoveUpdate: (details) {
             if (recording.value) {
-              cancelled.value = details.offsetFromOrigin.dy < -64;
+              final willCancel = details.offsetFromOrigin.dy < -64;
+              if (willCancel && !cancelled.value) {
+                unawaited(HapticFeedback.selectionClick());
+              }
+              cancelled.value = willCancel;
             }
           },
           onLongPressEnd: (_) => unawaited(finish()),
@@ -456,7 +460,7 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                             ? 'Release to cancel'
                             : 'Slide up to cancel',
                         textAlign: TextAlign.center,
-                        style: context.textTheme.labelSmall,
+                        style: context.textTheme.labelMedium,
                       ),
                     ),
                   ),

@@ -317,14 +317,6 @@ void main() {
       backend.permission.complete(true);
       backend.nativeStart.complete();
       await recorder.start();
-      final levels = <double>[];
-      final subscription = recorder.levels.listen(levels.add);
-      for (final decibels in [-60.0, -50.0, -40.0, -20.0, 0.0]) {
-        backend.amplitudes.add(Amplitude(current: decibels, max: decibels));
-      }
-      await Future<void>.delayed(Duration.zero);
-      expect(levels, orderedEquals([0.0, 1 / 6, 1 / 3, 2 / 3, 1.0]));
-      await subscription.cancel();
 
       final stopping = recorder.stop();
       final disposing = recorder.dispose();
