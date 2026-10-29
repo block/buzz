@@ -20,6 +20,31 @@ function retainRefetchReconciliationEvents(events: RelayEvent[]) {
 }
 
 /**
+ * An acknowledged send keeps its optimistic id as `localKey`, and its row
+ * renders under that key. A head refetch or a live echo of the same event
+ * arrives without one, so carry it over by event id. Otherwise the row
+ * remounts and a frozen unread tail treats it as deleted.
+ */
+function retainAcknowledgedLocalKeys(
+  windowEvents: RelayEvent[],
+  messages: RelayEvent[],
+) {
+  const localKeys = new Map<string, string>();
+  for (const message of messages) {
+    if (message.localKey !== undefined) {
+      localKeys.set(message.id, message.localKey);
+    }
+  }
+  if (localKeys.size === 0) return windowEvents;
+  return windowEvents.map((event) => {
+    const localKey = localKeys.get(event.id);
+    return localKey === undefined || event.localKey !== undefined
+      ? event
+      : { ...event, localKey };
+  });
+}
+
+/**
  * Project the timeline from the authoritative window while retaining local
  * pending sends and non-broadcast thread replies the window does not contain.
  */
@@ -27,7 +52,10 @@ export function reconcileChannelWindowMessages(
   window: ChannelWindowStore,
   messages: RelayEvent[],
 ) {
-  const windowEvents = flattenChannelWindowEvents(window);
+  const windowEvents = retainAcknowledgedLocalKeys(
+    flattenChannelWindowEvents(window),
+    messages,
+  );
   if (window.pages.length === 0) {
     // A pageless window is unresolved, not authoritative. This state can exist
     // briefly when the companion window query mounts beside an already-cached
