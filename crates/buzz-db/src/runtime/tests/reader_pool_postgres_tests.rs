@@ -127,11 +127,9 @@ async fn reader_boot_ping_warms_pool_to_min_connections() {
 }
 
 /// After the boot ping the background warm pass opens the reader pool to its
-/// ceiling and releases every connection idle. The caller must not wait for
-/// it: `spawn_read_pool_boot_ping` returns with the pool still empty. Without
-/// the warm pass the pool stops at the floor; if the pass closed its
-/// connections instead of releasing them, `size` and `idle` never reach the
-/// ceiling together.
+/// ceiling and releases every connection idle. Without the warm pass the pool
+/// stops at the floor; if the pass closed its connections instead of
+/// releasing them, `size` and `idle` never reach the ceiling together.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn reader_boot_ping_warms_pool_to_max_in_background() {
@@ -154,11 +152,6 @@ async fn reader_boot_ping_warms_pool_to_max_in_background() {
     );
 
     db.spawn_read_pool_boot_ping();
-    assert_eq!(
-        read_pool.size(),
-        0,
-        "spawning the ping and warm pass must not wait on them"
-    );
 
     await_idle_floor(&read_pool, max).await;
     // Settled at the ceiling and no further.

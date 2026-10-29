@@ -574,7 +574,8 @@ fn read_budget_from_ms(ms: u64) -> Option<Duration> {
 struct ReaderWarmReport {
     /// Connections the pass aimed to hold: the pool's ceiling.
     target: u32,
-    /// Connections opened (or reused idle) and then released back to idle.
+    /// Connections held at the end of the pass, then released back to idle:
+    /// the ones it dialed plus any idle floor connections it reused.
     held: u32,
     /// Acquires that errored or timed out.
     failed: u32,
@@ -997,8 +998,11 @@ impl Db {
     /// (the reader logs `could not accept SSL connection: EOF detected`), the
     /// read falls back to the writer, and the next read dials again. Under a
     /// fleet-wide burst that loop turns brief reader slowness into writer pool
-    /// exhaustion. The floor is per relay process: size the reader's
-    /// `max_connections` for the floor times the number of relay processes.
+    /// exhaustion. The floor is per relay process, but every boot also
+    /// warms the pool to its ceiling ([`Db::warm_read_pool`]) and keeps the
+    /// surplus until `idle_timeout` reaps it: size the reader's
+    /// `max_connections` for the ceiling times the number of relay
+    /// processes, counting old and new pods that overlap in a rolling deploy.
     fn reader_min_connections(max_connections: u32) -> u32 {
         (max_connections / 5).max(1).min(max_connections)
     }
@@ -1174,7 +1178,9 @@ impl Db {
     /// starting alongside its peers does not stampede the reader with
     /// simultaneous TCP+TLS+SCRAM handshakes (a stampede is what pushes a
     /// dial past [`Db::READER_ACQUIRE_TIMEOUT`]), large enough that a full
-    /// pool is warm within a handful of dial times.
+    /// pool is warm within a handful of dial times. sqlx's floor maintenance,
+    /// triggered by the boot ping, dials alongside the first wave, so a
+    /// booting pod can have up to the floor plus this many dials in flight.
     const READER_WARM_CONCURRENCY: u32 = 5;
 
     /// Connections the next warm wave should open: the remaining shortfall,
@@ -1202,16 +1208,16 @@ impl Db {
         if report.held < report.target {
             tracing::warn!(
                 target = report.target,
-                opened = report.held,
+                held = report.held,
                 failed = report.failed,
                 elapsed_ms,
-                "read pool warm-up opened fewer connections than its ceiling; \
+                "read pool warm-up holds fewer connections than its ceiling; \
                  the rest dial on demand (warm-up is best effort)"
             );
         } else {
             tracing::info!(
                 target = report.target,
-                opened = report.held,
+                held = report.held,
                 failed = report.failed,
                 elapsed_ms,
                 "read pool warmed to its ceiling"
