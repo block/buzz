@@ -5,6 +5,10 @@ import 'package:http/http.dart' as http;
 import 'builderlab_account.dart';
 import 'bounded_http_response.dart';
 
+/// Each relay policy document is capped at 256 KiB before JSON encoding. Four
+/// MiB covers two maximally escaped documents plus the envelope, as on Desktop.
+const _joinPolicyResponseMaxBytes = 4 * 1024 * 1024;
+
 /// Public policy text bound to the exact version the user accepts.
 class HostedJoinPolicy {
   const HostedJoinPolicy({
@@ -33,11 +37,12 @@ Future<Map<String, dynamic>> readJoinResponse(
   http.Client client,
   http.Request request, {
   bool allowNotFound = false,
+  int maxBytes = hostedResponseMaxBytes,
 }) async {
   final http.Response response;
   final Map<String, dynamic> data;
   try {
-    response = await boundedHttpResponse(client, request);
+    response = await boundedHttpResponse(client, request, maxBytes: maxBytes);
     if (allowNotFound && response.statusCode == 404) return {};
     if (response.statusCode == 429 ||
         (response.statusCode >= 500 && response.statusCode < 600)) {
@@ -137,6 +142,7 @@ Future<HostedJoinPolicy?> loadJoinPolicy({
     client,
     request,
     allowNotFound: allowLegacyRelay,
+    maxBytes: _joinPolicyResponseMaxBytes,
   );
   final raw = data['policy'];
   if (raw == null) return null;

@@ -108,7 +108,12 @@ void main() {
   // Wire limits stay focused; consent/claim ordering is covered by the journey.
   for (final (name, response, status, failure) in [
     ('redirect', '{}', 302, AccountFailure.denied),
-    ('oversized policy', ' ' * 65537, 200, AccountFailure.invalidResponse),
+    (
+      'oversized policy',
+      '{"policy":null}${' ' * (4 * 1024 * 1024)}',
+      200,
+      AccountFailure.invalidResponse,
+    ),
     ('invalid JSON', 'not JSON', 200, AccountFailure.invalidResponse),
     ('wrong shape', '[]', 200, AccountFailure.invalidResponse),
   ]) {
@@ -137,6 +142,49 @@ void main() {
       );
     });
   }
+
+  test('only policy discovery admits relay-sized responses', () async {
+    await store.create(keys.nsec);
+    await backup();
+    final terms = 'x' * 65536;
+    HostedJoinPolicy? confirmed;
+    admission.dispose();
+    admission = HostedAdmission(
+      account: account,
+      relayAuth: HostedRelayAuth(account, enabled: false),
+      store: store,
+      probe: (_) async {},
+      confirmPolicy: (policy) async {
+        confirmed = policy;
+        return true;
+      },
+      client: MockClient((request) async {
+        if (request.url.path == '/api/join-policy') {
+          return http.Response(
+            jsonEncode({
+              'policy': {
+                'version': 'v1',
+                'age_attestation_required': false,
+                'terms_markdown': terms,
+              },
+            }),
+            200,
+          );
+        }
+        if (request.url.path == '/api/invites/accept-policy') {
+          return http.Response('{"receipt":"fresh"}${' ' * 65536}', 200);
+        }
+        claims.add(request);
+        return http.Response('{}', 200);
+      }),
+    );
+    await expectLater(
+      admission.prepare(invite, 'owner', keys.public),
+      throwsA(AccountFailure.invalidResponse),
+    );
+    expect(confirmed?.terms, terms);
+    expect(claims, isEmpty);
+  });
 
   testWidgets('total policy deadline cancels body and permits policy retry', (
     tester,
