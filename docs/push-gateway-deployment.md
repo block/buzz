@@ -65,6 +65,19 @@ Mount the App Attest root read-only and startup will reject any byte mismatch. T
 
 The gateway stores APNs tokens encrypted in PostgreSQL. Database backups therefore contain ciphertext plus authority metadata and must receive the same access controls and retention treatment as the service secrets.
 
+For APNs storage-key rotation, first distribute `old,new` readers to every replica
+and rollback image. Then switch every writer to `new,old` and drain old writers.
+With normal gateway configuration, run `buzz-push-gateway --reencrypt-token-storage`
+against the authority database. It scans finite snapshots in batches of 128,
+re-encrypts with compare-and-swap predicates on ciphertext, epoch and destination,
+and fails unless its final audit finds zero rows needing a predecessor key.
+Concurrent endpoint updates win; drain old writers and rerun on incomplete audit.
+Only retire a service reader after this zero-row evidence. Startup rejects any
+unreadable stored ciphertext, including tombstones; elapsed installation lifetime
+is insufficient because renewal can extend it. Keep protected recovery keys for
+retained backups, and rerun maintenance after restoring an older backup.
+
+
 ## PostgreSQL and replicas
 
 ### First deployment, not a legacy upgrade

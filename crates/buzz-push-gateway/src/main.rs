@@ -41,6 +41,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let c = Config::from_env()?;
+    let token_keyring = TokenKeyring::new(
+        c.token_keys
+            .iter()
+            .map(|key| TokenKey::new(&key.id, &key.key))
+            .collect::<Result<_, _>>()?,
+    )?;
+    let pool_options = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .after_connect(|connection, _| Box::pin(async move {
+                sqlx::raw_sql("SET lock_timeout='2s'; SET statement_timeout='10s'; SET idle_in_transaction_session_timeout='15s'")
+                    .execute(connection).await?;
+                Ok(())
+            }));
+    if std::env::args().nth(1).as_deref() == Some("--reencrypt-token-storage") {
+        let pool = pool_options
+            .max_connections(1)
+            .connect(&c.database_url)
+            .await?;
+        token_keyring.reencrypt_storage(&pool).await?;
+        tracing::info!("APNs token storage verified: zero rows require predecessor keys");
+        return Ok(());
+    }
     let metrics_handle = buzz_push_gateway::metrics::install()?;
     let app_attest_root = fs::read(&c.app_attest_root_cert_path)?;
     let configured = &c.application;
@@ -61,21 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             transport,
         }
     };
-    let token_keyring = TokenKeyring::new(
-        c.token_keys
-            .iter()
-            .map(|key| TokenKey::new(&key.id, &key.key))
-            .collect::<Result<_, _>>()?,
-    )?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(20)
-        .after_connect(|connection, _| Box::pin(async move {
-                sqlx::raw_sql("SET lock_timeout='2s'; SET statement_timeout='10s'; SET idle_in_transaction_session_timeout='15s'")
-                    .execute(connection).await?;
-                Ok(())
-            }))
-            .connect(&c.database_url)
-        .await?;
+    let pool = pool_options.connect(&c.database_url).await?;
+    token_keyring.audit_storage(&pool).await?;
     let authority = Arc::new(PostgresAuthorityStore::new(pool));
     authority
         .reap_expired(chrono::Utc::now().timestamp())
