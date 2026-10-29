@@ -124,7 +124,10 @@ class AgentsPage extends HookConsumerWidget {
     useListenable(controller.account.subjectChanges);
     final flow = ref.watch(hostedFlowProvider);
     useListenable(flow);
-    final signingIn = flow.reconnecting && flow.stage != HostedFlowStage.idle;
+    final signingIn =
+        flow.reconnecting &&
+        (flow.stage == HostedFlowStage.signIn ||
+            flow.stage == HostedFlowStage.working);
     // Account sign-in belongs to the shared hosted flow; reload once it lands.
     useEffect(() {
       if (flow.reconnecting && flow.stage == HostedFlowStage.complete) {
@@ -195,9 +198,13 @@ class AgentsPage extends HookConsumerWidget {
     }
 
     final VoidCallback? addAgent =
-        community == null || controller.busy || creating.value
+        community == null || controller.busy || creating.value || signingIn
         ? null
         : () async {
+            if (controller.account.account == null) {
+              await flow.reconnectAccount();
+              return;
+            }
             creating.value = true;
             try {
               await showBuzzModalBottomSheet<bool>(
@@ -231,8 +238,7 @@ class AgentsPage extends HookConsumerWidget {
       backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
         nativeActions: [
-          if (supportsRemoteAgents(community) &&
-              controller.account.account != null)
+          if (supportsRemoteAgents(community))
             IosNavigationAction(
               label: 'Add agent',
               symbol: 'plus',
@@ -260,8 +266,7 @@ class AgentsPage extends HookConsumerWidget {
         bottomHeight: Grid.xxs,
         bottom: const SizedBox.expand(),
         actions: [
-          if (supportsRemoteAgents(community) &&
-              controller.account.account != null)
+          if (supportsRemoteAgents(community))
             IconButton(
               tooltip: 'Add agent',
               onPressed: addAgent,
@@ -282,24 +287,7 @@ class AgentsPage extends HookConsumerWidget {
                 SliverToBoxAdapter(
                   child: Column(
                     children: [
-                      if (loading) const LinearProgressIndicator(),
-                      if (supportsRemoteAgents(community) &&
-                          controller.account.account == null)
-                        ListTile(
-                          title: const Text('Sign in to create an agent'),
-                          trailing: TextButton(
-                            onPressed: controller.busy || signingIn
-                                ? null
-                                : () => unawaited(flow.reconnectAccount()),
-                            child: const Text('Sign in'),
-                          ),
-                        ),
-                      if (!controller.busy &&
-                          controller.account.account != null &&
-                          controller.status.isNotEmpty &&
-                          !creating.value)
-                        ListTile(subtitle: Text(controller.status)),
-                      if (failed)
+                      if (failed && keys.isEmpty)
                         ListTile(
                           title: const Text('Could not load agents'),
                           trailing: TextButton(

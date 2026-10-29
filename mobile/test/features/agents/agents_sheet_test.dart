@@ -28,6 +28,12 @@ void main() {
         expect(button.onPressed, isNull);
       }
     }
+    await h.controller.run(() async {
+      throw StateError('Resume unfinished setup');
+    });
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Resume unfinished setup'), findsNothing);
+    expect(find.byType(LinearProgressIndicator), findsNothing);
     final list = tester.element(find.byType(AgentsPage));
     final container = ProviderScope.containerOf(list);
     expect(find.text('Set as default'), findsNothing);
