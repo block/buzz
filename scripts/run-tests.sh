@@ -275,6 +275,7 @@ run_unit_tests() {
       handlers::req::tests::timed_out_historical_read_deregisters_before_closed \
       handlers::req::tests::superseded_timeout_leaves_replacement_intact \
       handlers::req::tests::search_claim_retires_live_and_yields_to_replacement \
+      handlers::req::tests::failed_search_closes_without_eose_or_trying_later_filters \
       handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner \
       handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim \
       handlers::req::tests::revoke_then_replacement_keeps_replacement_whole \

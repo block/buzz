@@ -876,8 +876,19 @@ async fn handle_search_req(
             let search_result = match state.search.search(&search_query).await {
                 Ok(r) => r,
                 Err(e) => {
+                    // CLOSED, not EOSE: an empty EOSE would read as "no
+                    // matches". Stop the whole REQ so later filters do not
+                    // each wait out the search pool's acquire timeout too.
                     warn!(sub_id = %sub_id, "NIP-50 search failed: {e}");
-                    break;
+                    super::close::close_if_owner(
+                        sub_id,
+                        owner,
+                        Some(SEARCH_FAILED_CLOSED),
+                        conn,
+                        state,
+                    )
+                    .await;
+                    return;
                 }
             };
 
@@ -1614,6 +1625,10 @@ fn history_read_closed_reason(e: &buzz_db::DbError) -> &'static str {
     }
 }
 
+/// CLOSED reason for a NIP-50 search the search service could not answer
+/// (e.g. the read replica it queries is down).
+pub(crate) const SEARCH_FAILED_CLOSED: &str = "error: search failed";
+
 /// CLOSED reason for a failed one-shot DB read (COUNT): a statement cancel gets
 /// the stable timeout reason; anything else keeps the raw error.
 pub(crate) fn db_read_closed_reason(e: &buzz_db::DbError) -> String {
@@ -2049,6 +2064,63 @@ mod tests {
         assert!(registered(&state, &conn, "x"));
         assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 1);
         assert!(closed_frames(&mut send_rx).is_empty());
+    }
+
+    /// A NIP-50 search the search pool cannot serve (its reader is down) ends
+    /// the REQ with a CLOSED error, never an EOSE that reads as "no matches",
+    /// and the REQ's later search filters never wait on the pool.
+    #[tokio::test]
+    async fn failed_search_closes_without_eose_or_trying_later_filters() {
+        const ACQUIRE: std::time::Duration = std::time::Duration::from_millis(500);
+        let state = crate::state::tests::test_state_with_database_url_and_pool_options(
+            "postgres://127.0.0.1:1/none",
+            sqlx::postgres::PgPoolOptions::new().acquire_timeout(ACQUIRE),
+        )
+        .await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let owner = claim_search_subscription("s", &conn, &state)
+            .await
+            .expect("claim");
+        let filters: Vec<Filter> = (0..4)
+            .map(|i| {
+                Filter::new()
+                    .kind(nostr::Kind::TextNote)
+                    .search(format!("needle{i}"))
+            })
+            .collect();
+
+        let started = std::time::Instant::now();
+        handle_search_req(
+            "s",
+            owner,
+            &filters,
+            &[],
+            &super::super::system_channels::NamedOnlyChannels::default(),
+            true,
+            &conn.tenant,
+            &[0; 32],
+            &conn,
+            &state,
+            None,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            closed_frames(&mut send_rx),
+            vec![format!(r#"["CLOSED","s","{SEARCH_FAILED_CLOSED}"]"#)],
+            "exactly one CLOSED error and no EOSE"
+        );
+        assert!(
+            conn.subscriptions.lock().await.is_empty(),
+            "the failed search must release its ID"
+        );
+        // Each filter that reaches the pool waits out ACQUIRE on the dead port.
+        assert!(
+            elapsed < ACQUIRE * 3,
+            "later filters must not try the pool: took {elapsed:?} for {} filters",
+            filters.len()
+        );
     }
 
     /// Concurrent same-ID claims and stale teardowns: whichever claim lands

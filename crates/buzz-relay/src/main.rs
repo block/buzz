@@ -51,6 +51,22 @@ async fn connect_audit_pool(config: &DbConfig) -> anyhow::Result<sqlx::PgPool> {
         .map_err(Into::into)
 }
 
+/// The search pool. Search is lag-tolerant, so it prefers the read replica
+/// when one is configured. Like the main read pool it is lazy, so a reader
+/// that is down at boot fails searches, not startup, and it waits no longer
+/// than the writer pool for a connection, so a dead reader fails each search
+/// within that bound instead of sqlx's 30s default.
+fn connect_search_pool(config: &DbConfig) -> anyhow::Result<sqlx::PgPool> {
+    let url = config
+        .read_database_url
+        .as_deref()
+        .unwrap_or(&config.database_url);
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(config.acquire_timeout_secs))
+        .connect_lazy(url)
+        .map_err(|e| anyhow::anyhow!("Search DB URL is invalid: {e}"))
+}
+
 fn relay_keypair_from_config(relay_private_key: Option<&str>) -> anyhow::Result<nostr::Keys> {
     let hex = relay_private_key.ok_or_else(|| {
         anyhow::anyhow!(
@@ -834,16 +850,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // Postgres FTS: the searchable row IS the persisted event row (its
     // `tsvector` column is populated by the `insert_event` write), so there is
     // no external collection to provision — the search service just queries the
-    // same Postgres over its own pool. Search is lag-tolerant, so it prefers
-    // the read replica when one is configured. The pool is lazy, like the main
-    // read pool: a reader that is down at boot fails searches, not startup.
-    let search_db_url = config
-        .read_database_url
-        .as_deref()
-        .unwrap_or(&config.database_url);
-    let search_pool = sqlx::postgres::PgPoolOptions::new()
-        .connect_lazy(search_db_url)
-        .map_err(|e| anyhow::anyhow!("Search DB URL is invalid: {e}"))?;
+    // same Postgres over its own pool (see `connect_search_pool`).
+    let search_pool = connect_search_pool(&db_config)?;
     let search_metrics_pool = search_pool.clone();
     let search = SearchService::new(search_pool);
     info!(
@@ -3220,9 +3228,9 @@ mod tests {
 
     use super::{
         apply_activity_refresh, apply_stock_refresh, buzz_auto_migrate_enabled, connect_audit_pool,
-        counted_partition_audit, dropped_in_memory_keys, emit_cached_fleet_usage_metrics,
-        idle_timeout_secs, jwks_next_retry_after_failed_refresh, nip_fi_jwks_refresh_loop,
-        record_legacy_usage_collection, refresh_due_fleet_usage,
+        connect_search_pool, counted_partition_audit, dropped_in_memory_keys,
+        emit_cached_fleet_usage_metrics, idle_timeout_secs, jwks_next_retry_after_failed_refresh,
+        nip_fi_jwks_refresh_loop, record_legacy_usage_collection, refresh_due_fleet_usage,
         refresh_legacy_active_gauge_recency, relay_keypair_from_config,
         run_jwks_refresh_supervisor, run_periodic_until_cancelled, startup_partition_audit,
         EmissionScope, FleetUsageSchedule, InMemoryMetricKey, PartitionAuditSchedule,
@@ -3234,6 +3242,22 @@ mod tests {
         debugging::DebugValue,
         registry::{GenerationalAtomicStorage, Registry},
     };
+
+    #[tokio::test]
+    async fn search_pool_is_lazy_prefers_the_reader_and_bounds_acquire() {
+        // Unroutable per RFC 5737 TEST-NET-1: construction must not dial it.
+        let config = DbConfig {
+            read_database_url: Some("postgres://u:p@192.0.2.1:5432/none".to_owned()), // sadscan:disable np.postgres.1
+            ..DbConfig::default()
+        };
+        let pool = connect_search_pool(&config).expect("lazy construction must not dial");
+        assert_eq!(pool.connect_options().get_host(), "192.0.2.1");
+        assert_eq!(
+            pool.options().get_acquire_timeout(),
+            Duration::from_secs(config.acquire_timeout_secs),
+            "a dead reader must fail a search within the writer's acquire bound"
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn periodic_loop_exits_immediately_on_cancellation() {
