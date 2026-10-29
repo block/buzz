@@ -94,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let accepting = Arc::new(AtomicBool::new(true));
     let (public, health) = router_with_metrics(
         AppState {
+            gateway_origin: c.gateway_origin,
             authority,
             token_keyring: Arc::new(token_keyring),
             application: Arc::new(application),

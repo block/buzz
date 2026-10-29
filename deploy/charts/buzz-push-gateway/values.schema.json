@@ -13,8 +13,8 @@
     },
     "gatewayOrigin": {
       "type": "string",
-      "description": "Routing origin for the optional HTTPRoute; not passed to the gateway binary.",
-      "pattern": "^(https://[^/?#@:]+/?)?$"
+      "description": "Canonical public origin bound by management assertions and used by HTTPRoute.",
+      "pattern": "^https://[^/?#@:]+$"
     },
     "maxGrantLifetimeSeconds": {
       "type": "integer",

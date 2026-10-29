@@ -98,6 +98,8 @@ pub enum DeliveryDisposition {
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorityError {
+    #[error("delegation generation changed to {0}")]
+    StaleGeneration(i64),
     #[error("authority state rejected the request")]
     Rejected,
     #[error("installation authority is already live")]
@@ -106,6 +108,16 @@ pub enum AuthorityError {
     RateLimited,
     #[error("authority store unavailable")]
     Unavailable,
+}
+
+/// Verified App Attest counter and signed request lifetime, committed with its mutation.
+#[derive(Debug, Clone, Copy)]
+pub struct AssertionCounter {
+    pub previous: u32,
+    pub next: u32,
+    pub request_expires_at: i64,
+    pub now: i64,
+    pub expected_generation: Option<i64>,
 }
 
 /// Every mutating method is an atomic store operation. Implementations must
@@ -145,13 +157,11 @@ pub trait AuthorityStore: Send + Sync {
         id: Uuid,
         now: i64,
     ) -> Result<Installation, AuthorityError>;
-    async fn advance_assertion_counter(
+    async fn upsert_delegation(
         &self,
-        installation_id: Uuid,
-        previous: u32,
-        next: u32,
+        delegation: Delegation,
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError>;
-    async fn upsert_delegation(&self, delegation: Delegation) -> Result<(), AuthorityError>;
     async fn rotate_endpoint(
         &self,
         installation_id: Uuid,
@@ -159,6 +169,7 @@ pub trait AuthorityStore: Send + Sync {
         new_epoch: i64,
         token_ciphertext: Vec<u8>,
         token_fingerprint: [u8; 32],
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError>;
     /// Revoke a delegation only when `expected_generation` is current,
     /// retaining that generation as the replacement watermark. Repeating the
@@ -168,12 +179,14 @@ pub trait AuthorityStore: Send + Sync {
         installation_id: Uuid,
         relay_pubkey: &str,
         expected_generation: i64,
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError>;
     async fn revoke_installation(
         &self,
         installation_id: Uuid,
         expected_epoch: i64,
         new_epoch: i64,
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError>;
     /// Atomically validate and lock installation then delegation authority,
     /// reserve quota/replay state, and commit. That durable commit is the
@@ -218,6 +231,20 @@ struct MemoryState {
 /// linearization point for every authority transition.
 #[derive(Default)]
 pub struct MemoryAuthorityStore(Mutex<MemoryState>);
+
+fn check_counter(i: &Installation, a: AssertionCounter) -> Result<(), AuthorityError> {
+    if a.next <= a.previous
+        || i.assertion_counter != a.previous
+        || a.request_expires_at <= a.now
+        || i.expires_at < a.now
+    {
+        return Err(AuthorityError::Rejected);
+    }
+    Ok(())
+}
+fn commit_counter(i: &mut Installation, a: AssertionCounter) {
+    i.assertion_counter = a.next;
+}
 
 #[async_trait]
 impl AuthorityStore for MemoryAuthorityStore {
@@ -370,28 +397,11 @@ impl AuthorityStore for MemoryAuthorityStore {
             .cloned())
     }
 
-    async fn advance_assertion_counter(
+    async fn upsert_delegation(
         &self,
-        id: Uuid,
-        previous: u32,
-        next: u32,
+        d: Delegation,
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError> {
-        if next <= previous {
-            return Err(AuthorityError::Rejected);
-        }
-        let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
-        let i = s
-            .installations
-            .get_mut(&id)
-            .ok_or(AuthorityError::Rejected)?;
-        if i.assertion_counter != previous {
-            return Err(AuthorityError::Rejected);
-        }
-        i.assertion_counter = next;
-        Ok(())
-    }
-
-    async fn upsert_delegation(&self, d: Delegation) -> Result<(), AuthorityError> {
         let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
         let installation = s
             .installations
@@ -404,7 +414,19 @@ impl AuthorityStore for MemoryAuthorityStore {
         {
             return Err(AuthorityError::Rejected);
         }
+        check_counter(installation, assertion)?;
         let key = (d.installation_id, d.relay_pubkey.clone());
+        let old = s.delegations.get(&key);
+        {
+            let expected = assertion
+                .expected_generation
+                .ok_or(AuthorityError::Rejected)?;
+            if d.generation <= expected || old.map_or(0, |d| d.generation) != expected {
+                return Err(AuthorityError::StaleGeneration(
+                    old.map_or(0, |d| d.generation),
+                ));
+            }
+        }
         if s.delegations
             .get(&key)
             .is_some_and(|old| d.generation <= old.generation)
@@ -416,7 +438,9 @@ impl AuthorityStore for MemoryAuthorityStore {
             .installations
             .get_mut(&d.installation_id)
             .ok_or(AuthorityError::Rejected)?;
+        commit_counter(installation, assertion);
         installation.expires_at = installation.expires_at.max(d.expires_at);
+        s.delegation_ids.retain(|_, existing| existing != &key);
         s.delegation_ids.insert(d.id, key.clone());
         s.delegations.insert(key, d);
         Ok(())
@@ -429,6 +453,7 @@ impl AuthorityStore for MemoryAuthorityStore {
         new: i64,
         ciphertext: Vec<u8>,
         fingerprint: [u8; 32],
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError> {
         if new != expected.checked_add(1).ok_or(AuthorityError::Rejected)? {
             return Err(AuthorityError::Rejected);
@@ -436,6 +461,16 @@ impl AuthorityStore for MemoryAuthorityStore {
         let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
         let old_fingerprint = {
             let i = s.installations.get(&id).ok_or(AuthorityError::Rejected)?;
+            check_counter(i, assertion)?;
+            if !i.revoked && i.endpoint_epoch == new && i.token_fingerprint == fingerprint {
+                commit_counter(
+                    s.installations
+                        .get_mut(&id)
+                        .ok_or(AuthorityError::Rejected)?,
+                    assertion,
+                );
+                return Ok(());
+            }
             if i.revoked || i.endpoint_epoch != expected {
                 return Err(AuthorityError::Rejected);
             }
@@ -454,6 +489,7 @@ impl AuthorityStore for MemoryAuthorityStore {
             .installations
             .get_mut(&id)
             .ok_or(AuthorityError::Rejected)?;
+        commit_counter(i, assertion);
         i.endpoint_epoch = new;
         i.token_ciphertext = ciphertext;
         i.token_fingerprint = fingerprint;
@@ -465,20 +501,36 @@ impl AuthorityStore for MemoryAuthorityStore {
         id: Uuid,
         relay: &str,
         expected_generation: i64,
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError> {
         let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
-        let key = (id, relay.to_owned());
+        check_counter(
+            s.installations.get(&id).ok_or(AuthorityError::Rejected)?,
+            assertion,
+        )?;
         let old = s
             .delegations
-            .get_mut(&key)
+            .get_mut(&(id, relay.to_owned()))
             .ok_or(AuthorityError::Rejected)?;
-        if expected_generation != old.generation {
-            return Err(AuthorityError::Rejected);
-        }
         if old.revoked {
-            return Ok(());
+            if old.generation != expected_generation
+                && expected_generation.checked_add(1) != Some(old.generation)
+            {
+                return Err(AuthorityError::Rejected);
+            }
+        } else {
+            if expected_generation != old.generation {
+                return Err(AuthorityError::Rejected);
+            }
+            old.generation = old.generation.saturating_add(1);
+            old.revoked = true;
         }
-        old.revoked = true;
+        commit_counter(
+            s.installations
+                .get_mut(&id)
+                .ok_or(AuthorityError::Rejected)?,
+            assertion,
+        );
         Ok(())
     }
 
@@ -487,6 +539,7 @@ impl AuthorityStore for MemoryAuthorityStore {
         id: Uuid,
         expected: i64,
         new: i64,
+        assertion: AssertionCounter,
     ) -> Result<(), AuthorityError> {
         if new != expected.checked_add(1).ok_or(AuthorityError::Rejected)? {
             return Err(AuthorityError::Rejected);
@@ -496,12 +549,15 @@ impl AuthorityStore for MemoryAuthorityStore {
             .installations
             .get_mut(&id)
             .ok_or(AuthorityError::Rejected)?;
+        check_counter(i, assertion)?;
         if i.revoked && i.endpoint_epoch == new {
+            commit_counter(i, assertion);
             return Ok(());
         }
         if i.revoked || i.endpoint_epoch != expected {
             return Err(AuthorityError::Rejected);
         }
+        commit_counter(i, assertion);
         i.endpoint_epoch = new;
         i.revoked = true;
         Ok(())
@@ -606,6 +662,26 @@ impl AuthorityStore for MemoryAuthorityStore {
 }
 
 #[cfg(test)]
+pub(crate) async fn test_assertion(
+    store: &dyn AuthorityStore,
+    id: Uuid,
+    expected_generation: Option<i64>,
+) -> AssertionCounter {
+    let previous = store
+        .installation_for_revocation(id, 0)
+        .await
+        .unwrap()
+        .assertion_counter;
+    AssertionCounter {
+        previous,
+        next: previous.saturating_add(1),
+        request_expires_at: i64::MAX,
+        now: 0,
+        expected_generation,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -648,17 +724,20 @@ mod tests {
             .await
             .unwrap();
         store
-            .upsert_delegation(Delegation {
-                id: Uuid::from_u128(2),
-                grant_hash: crate::grant::test_hash(Uuid::from_u128(2)),
-                installation_id: Uuid::from_u128(1),
-                relay_pubkey: "11".repeat(32),
-                endpoint_epoch: 1,
-                generation: 1,
-                not_before: 900,
-                expires_at: 1_500,
-                revoked: false,
-            })
+            .upsert_delegation(
+                Delegation {
+                    id: Uuid::from_u128(2),
+                    grant_hash: crate::grant::test_hash(Uuid::from_u128(2)),
+                    installation_id: Uuid::from_u128(1),
+                    relay_pubkey: "11".repeat(32),
+                    endpoint_epoch: 1,
+                    generation: 1,
+                    not_before: 900,
+                    expires_at: 1_500,
+                    revoked: false,
+                },
+                crate::authority::test_assertion(&store, Uuid::from_u128(1), Some(0)).await,
+            )
             .await
             .unwrap();
         store
@@ -722,17 +801,20 @@ mod tests {
     async fn authenticated_delegation_renews_installation_lifetime() {
         let store = store().await;
         store
-            .upsert_delegation(Delegation {
-                id: Uuid::from_u128(3),
-                grant_hash: crate::grant::test_hash(Uuid::from_u128(3)),
-                installation_id: Uuid::from_u128(1),
-                relay_pubkey: "11".repeat(32),
-                endpoint_epoch: 1,
-                generation: 2,
-                not_before: 1_900,
-                expires_at: 2_500,
-                revoked: false,
-            })
+            .upsert_delegation(
+                Delegation {
+                    id: Uuid::from_u128(3),
+                    grant_hash: crate::grant::test_hash(Uuid::from_u128(3)),
+                    installation_id: Uuid::from_u128(1),
+                    relay_pubkey: "11".repeat(32),
+                    endpoint_epoch: 1,
+                    generation: 2,
+                    not_before: 1_900,
+                    expires_at: 2_500,
+                    revoked: false,
+                },
+                crate::authority::test_assertion(&store, Uuid::from_u128(1), Some(1)).await,
+            )
             .await
             .expect("new delegation renews its installation");
         assert_eq!(
@@ -746,19 +828,22 @@ mod tests {
 
         assert_eq!(
             store
-                .upsert_delegation(Delegation {
-                    id: Uuid::from_u128(4),
-                    grant_hash: crate::grant::test_hash(Uuid::from_u128(4)),
-                    installation_id: Uuid::from_u128(1),
-                    relay_pubkey: "11".repeat(32),
-                    endpoint_epoch: 1,
-                    generation: 2,
-                    not_before: 2_000,
-                    expires_at: 3_000,
-                    revoked: false,
-                })
+                .upsert_delegation(
+                    Delegation {
+                        id: Uuid::from_u128(4),
+                        grant_hash: crate::grant::test_hash(Uuid::from_u128(4)),
+                        installation_id: Uuid::from_u128(1),
+                        relay_pubkey: "11".repeat(32),
+                        endpoint_epoch: 1,
+                        generation: 2,
+                        not_before: 2_000,
+                        expires_at: 3_000,
+                        revoked: false,
+                    },
+                    crate::authority::test_assertion(&store, Uuid::from_u128(1), Some(1)).await
+                )
                 .await,
-            Err(AuthorityError::Rejected)
+            Err(AuthorityError::StaleGeneration(2))
         );
         assert_eq!(
             store.installation(Uuid::from_u128(1), 2_600).await,
@@ -846,13 +931,23 @@ mod tests {
 
         assert_eq!(
             store
-                .revoke_delegation(Uuid::from_u128(1), &"11".repeat(32), 0)
+                .revoke_delegation(
+                    Uuid::from_u128(1),
+                    &"11".repeat(32),
+                    0,
+                    crate::authority::test_assertion(&store, Uuid::from_u128(1), None).await
+                )
                 .await,
             Err(AuthorityError::Rejected)
         );
         assert_eq!(
             store
-                .revoke_delegation(Uuid::from_u128(1), &"11".repeat(32), 2)
+                .revoke_delegation(
+                    Uuid::from_u128(1),
+                    &"11".repeat(32),
+                    2,
+                    crate::authority::test_assertion(&store, Uuid::from_u128(1), None).await
+                )
                 .await,
             Err(AuthorityError::Rejected)
         );
@@ -861,11 +956,21 @@ mod tests {
             .expect("rejected revocations must leave generation 1 active");
 
         store
-            .revoke_delegation(Uuid::from_u128(1), &"11".repeat(32), 1)
+            .revoke_delegation(
+                Uuid::from_u128(1),
+                &"11".repeat(32),
+                1,
+                crate::authority::test_assertion(&store, Uuid::from_u128(1), None).await,
+            )
             .await
             .expect("the current generation can be revoked");
         store
-            .revoke_delegation(Uuid::from_u128(1), &"11".repeat(32), 1)
+            .revoke_delegation(
+                Uuid::from_u128(1),
+                &"11".repeat(32),
+                1,
+                crate::authority::test_assertion(&store, Uuid::from_u128(1), None).await,
+            )
             .await
             .expect("the exact revocation is idempotent after response loss");
         assert!(admitted(&store, &"55".repeat(32), Uuid::new_v4())
@@ -885,12 +990,18 @@ mod tests {
         };
         assert_eq!(
             store
-                .upsert_delegation(replacement(Uuid::from_u128(3), 1))
+                .upsert_delegation(
+                    replacement(Uuid::from_u128(3), 1),
+                    crate::authority::test_assertion(&store, Uuid::from_u128(1), Some(0)).await
+                )
                 .await,
-            Err(AuthorityError::Rejected)
+            Err(AuthorityError::StaleGeneration(2))
         );
         store
-            .upsert_delegation(replacement(Uuid::from_u128(4), 2))
+            .upsert_delegation(
+                replacement(Uuid::from_u128(4), 3),
+                crate::authority::test_assertion(&store, Uuid::from_u128(1), Some(2)).await,
+            )
             .await
             .expect("only a strictly newer generation can reactivate the delegation");
         store
@@ -905,17 +1016,21 @@ mod tests {
                 1_000,
             )
             .await
-            .expect("generation 2 authority is active");
+            .expect("generation 3 authority is active");
     }
 
     #[tokio::test]
     async fn installation_revocation_is_authenticated_and_idempotent() {
         let store = store().await;
         let id = Uuid::from_u128(1);
-        let before = store.installation(id, 1_000).await.unwrap();
 
         store
-            .revoke_installation(id, 1, 2)
+            .revoke_installation(
+                id,
+                1,
+                2,
+                crate::authority::test_assertion(&store, id, None).await,
+            )
             .await
             .expect("the current endpoint epoch can be revoked");
         let tombstone = store
@@ -924,11 +1039,12 @@ mod tests {
             .expect("revocation retry can authenticate against the tombstone");
         assert!(tombstone.revoked);
         store
-            .advance_assertion_counter(id, before.assertion_counter, before.assertion_counter + 1)
-            .await
-            .expect("an authenticated tombstone retry can advance its assertion counter");
-        store
-            .revoke_installation(id, 1, 2)
+            .revoke_installation(
+                id,
+                1,
+                2,
+                crate::authority::test_assertion(&store, id, None).await,
+            )
             .await
             .expect("the exact installation revocation is idempotent");
         store
@@ -956,7 +1072,14 @@ mod tests {
                 .revoked
         );
         assert_eq!(
-            store.revoke_installation(id, 2, 3).await,
+            store
+                .revoke_installation(
+                    id,
+                    2,
+                    3,
+                    crate::authority::test_assertion(&store, id, None).await
+                )
+                .await,
             Err(AuthorityError::Rejected)
         );
     }

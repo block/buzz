@@ -68,10 +68,11 @@ pub struct InstallationEnrollResponse {
 #[serde(deny_unknown_fields)]
 pub struct DelegationRequest {
     pub v: u8,
-    pub challenge_id: uuid::Uuid,
-    pub challenge: String,
+    pub gateway_origin: String,
+    pub request_expires_at: i64,
     pub installation_handle: uuid::Uuid,
     pub endpoint_epoch: i64,
+    pub expected_generation: i64,
     pub generation: i64,
     pub relay_pubkey: String,
     pub not_before: i64,
@@ -88,8 +89,8 @@ pub struct DelegationResponse {
 #[serde(deny_unknown_fields)]
 pub struct RotateEndpointRequest {
     pub v: u8,
-    pub challenge_id: uuid::Uuid,
-    pub challenge: String,
+    pub gateway_origin: String,
+    pub request_expires_at: i64,
     pub installation_handle: uuid::Uuid,
     pub endpoint_epoch: i64,
     pub new_endpoint_epoch: i64,
@@ -101,8 +102,8 @@ pub struct RotateEndpointRequest {
 #[serde(deny_unknown_fields)]
 pub struct RevokeDelegationRequest {
     pub v: u8,
-    pub challenge_id: uuid::Uuid,
-    pub challenge: String,
+    pub gateway_origin: String,
+    pub request_expires_at: i64,
     pub installation_handle: uuid::Uuid,
     pub relay_pubkey: String,
     pub generation: i64,
@@ -113,8 +114,8 @@ pub struct RevokeDelegationRequest {
 #[serde(deny_unknown_fields)]
 pub struct RevokeInstallationRequest {
     pub v: u8,
-    pub challenge_id: uuid::Uuid,
-    pub challenge: String,
+    pub gateway_origin: String,
+    pub request_expires_at: i64,
     pub installation_handle: uuid::Uuid,
     pub endpoint_epoch: i64,
     pub new_endpoint_epoch: i64,

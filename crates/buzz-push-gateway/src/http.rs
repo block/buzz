@@ -3,7 +3,8 @@ use crate::{
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
     app_attest::AppAttestVerifier,
     authority::{
-        AuthorityError, AuthorityStore, Challenge, Delegation, DeliveryDisposition, NewInstallation,
+        AssertionCounter, AuthorityError, AuthorityStore, Challenge, Delegation,
+        DeliveryDisposition, NewInstallation,
     },
     config::{
         DELEGATE_AUDIENCE, ENROLL_AUDIENCE, REVOKE_DELEGATION_AUDIENCE,
@@ -44,6 +45,7 @@ pub struct ApplicationRuntime {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub gateway_origin: String,
     pub authority: Arc<dyn AuthorityStore>,
     pub token_keyring: Arc<TokenKeyring>,
     /// Server-owned application identity and APNs transport.
@@ -121,6 +123,7 @@ fn decode_challenge(value: &str) -> Option<[u8; 32]> {
 }
 fn authority_error(e: AuthorityError) -> Response {
     match e {
+        AuthorityError::StaleGeneration(current_generation) => (StatusCode::CONFLICT, Json(serde_json::json!({"error":"stale_generation", "current_generation": current_generation}))).into_response(),
         AuthorityError::Rejected => error(StatusCode::NOT_FOUND, "not_authorized"),
         AuthorityError::Conflict => installation_conflict(),
         AuthorityError::RateLimited => error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
@@ -304,24 +307,31 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         .into_response()
 }
 
-struct AssertionChallenge<'a> {
-    id: uuid::Uuid,
-    text: &'a str,
+struct ManagementRequest<'a> {
+    v: u8,
+    gateway_origin: &'a str,
+    request_expires_at: i64,
+    expected_generation: Option<i64>,
 }
 
-#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
+#[allow(clippy::result_large_err)]
 async fn verify_installation_assertion<T: serde::Serialize>(
     s: &AppState,
     installation_id: uuid::Uuid,
-    challenge: AssertionChallenge<'_>,
+    request: ManagementRequest<'_>,
     assertion: &str,
     domain: &str,
     signed: &T,
     include_revoked: bool,
-) -> Result<(), Response> {
+) -> Result<AssertionCounter, Response> {
     let now = (s.now)();
-    let challenge_bytes = decode_challenge(challenge.text)
-        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
+    if request.v != 2
+        || request.gateway_origin != s.gateway_origin
+        || request.request_expires_at <= now
+        || request.request_expires_at > now.saturating_add(300)
+    {
+        return Err(error(StatusCode::BAD_REQUEST, "invalid_request"));
+    }
     let installation = if include_revoked {
         s.authority
             .installation_for_revocation(installation_id, now)
@@ -330,42 +340,38 @@ async fn verify_installation_assertion<T: serde::Serialize>(
         s.authority.installation(installation_id, now).await
     }
     .map_err(authority_error)?;
-    let transcript = transcript(domain, signed)
+    let signed = transcript(domain, signed)
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
     let verified = s
         .application
         .app_attest
         .verify_assertion(
             assertion,
-            transcript.as_bytes(),
+            signed.as_bytes(),
             &installation.app_attest_public_key,
             installation.assertion_counter,
-            challenge.text,
-            challenge.text,
+            "",
+            "",
         )
         .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid_attestation"))?;
-    s.authority
-        .consume_challenge(challenge.id, challenge_bytes, now)
-        .await
-        .map_err(authority_error)?;
-    s.authority
-        .advance_assertion_counter(
-            installation_id,
-            installation.assertion_counter,
-            verified.counter,
-        )
-        .await
-        .map_err(authority_error)
+    Ok(AssertionCounter {
+        request_expires_at: request.request_expires_at,
+        previous: installation.assertion_counter,
+        next: verified.counter,
+        expected_generation: request.expected_generation,
+        now,
+    })
 }
 
 #[derive(serde::Serialize)]
 struct DelegateTranscript<'a> {
     v: u8,
     audience: &'a str,
-    challenge_id: uuid::Uuid,
-    challenge: &'a str,
+    gateway_origin: &'a str,
+    request_expires_at: i64,
     installation_handle: uuid::Uuid,
     endpoint_epoch: i64,
+    expected_generation: i64,
     generation: i64,
     relay_pubkey: &'a str,
     not_before: i64,
@@ -377,11 +383,13 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
     let now = (s.now)();
-    if r.v != WIRE_VERSION
+    if r.v != 2
         || !valid_relay_pubkey(&r.relay_pubkey)
         || r.endpoint_epoch < 1
-        || r.generation < 1
+        || r.expected_generation < 0
+        || r.generation <= r.expected_generation
         || r.not_before > now + 300
+        || r.expires_at <= now
         || r.expires_at <= r.not_before
         || r.expires_at > now + s.max_grant_lifetime_seconds
     {
@@ -390,31 +398,35 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
     let t = DelegateTranscript {
         v: r.v,
         audience: DELEGATE_AUDIENCE,
-        challenge_id: r.challenge_id,
-        challenge: &r.challenge,
+        gateway_origin: r.gateway_origin.as_str(),
+        request_expires_at: r.request_expires_at,
         installation_handle: r.installation_handle,
         endpoint_epoch: r.endpoint_epoch,
+        expected_generation: r.expected_generation,
         generation: r.generation,
         relay_pubkey: &r.relay_pubkey,
         not_before: r.not_before,
         expires_at: r.expires_at,
     };
-    if let Err(e) = verify_installation_assertion(
+    let assertion = match verify_installation_assertion(
         &s,
         r.installation_handle,
-        AssertionChallenge {
-            id: r.challenge_id,
-            text: &r.challenge,
+        ManagementRequest {
+            v: r.v,
+            gateway_origin: &r.gateway_origin,
+            request_expires_at: r.request_expires_at,
+            expected_generation: Some(r.expected_generation),
         },
         &r.assertion,
-        "buzz.push.delegate.v1",
+        "buzz.push.delegate.v2",
         &t,
         false,
     )
     .await
     {
-        return e;
-    }
+        Ok(assertion) => assertion,
+        Err(e) => return e,
+    };
     let (endpoint_grant, grant_hash) = match crate::grant::issue() {
         Ok(grant) => grant,
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
@@ -423,14 +435,14 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
         id: crate::grant::id(&grant_hash),
         grant_hash,
         installation_id: r.installation_handle,
-        relay_pubkey: r.relay_pubkey.clone(),
+        relay_pubkey: r.relay_pubkey,
         endpoint_epoch: r.endpoint_epoch,
         generation: r.generation,
         not_before: r.not_before,
         expires_at: r.expires_at,
         revoked: false,
     };
-    if let Err(e) = s.authority.upsert_delegation(d.clone()).await {
+    if let Err(e) = s.authority.upsert_delegation(d, assertion).await {
         return authority_error(e);
     }
     (
@@ -444,8 +456,8 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
 struct RotateTranscript<'a> {
     v: u8,
     audience: &'a str,
-    challenge_id: uuid::Uuid,
-    challenge: &'a str,
+    gateway_origin: &'a str,
+    request_expires_at: i64,
     installation_handle: uuid::Uuid,
     endpoint_epoch: i64,
     new_endpoint_epoch: i64,
@@ -460,7 +472,7 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    if r.v != WIRE_VERSION
+    if r.v != 2
         || r.endpoint_epoch < 1
         || r.new_endpoint_epoch != r.endpoint_epoch.saturating_add(1)
     {
@@ -469,29 +481,32 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
     let t = RotateTranscript {
         v: r.v,
         audience: ROTATE_ENDPOINT_AUDIENCE,
-        challenge_id: r.challenge_id,
-        challenge: &r.challenge,
+        gateway_origin: r.gateway_origin.as_str(),
+        request_expires_at: r.request_expires_at,
         installation_handle: r.installation_handle,
         endpoint_epoch: r.endpoint_epoch,
         new_endpoint_epoch: r.new_endpoint_epoch,
         endpoint: &r.endpoint,
     };
-    if let Err(e) = verify_installation_assertion(
+    let assertion = match verify_installation_assertion(
         &s,
         r.installation_handle,
-        AssertionChallenge {
-            id: r.challenge_id,
-            text: &r.challenge,
+        ManagementRequest {
+            v: r.v,
+            gateway_origin: &r.gateway_origin,
+            request_expires_at: r.request_expires_at,
+            expected_generation: None,
         },
         &r.assertion,
-        "buzz.push.rotate-endpoint.v1",
+        "buzz.push.rotate-endpoint.v2",
         &t,
         false,
     )
     .await
     {
-        return e;
-    }
+        Ok(assertion) => assertion,
+        Err(e) => return e,
+    };
     let ciphertext = match s.token_keyring.seal(&token) {
         Ok(v) => v,
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
@@ -504,6 +519,7 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
             r.new_endpoint_epoch,
             ciphertext,
             endpoint_fingerprint(&token),
+            assertion,
         )
         .await
     {
@@ -515,8 +531,8 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
 struct RevokeDelegationTranscript<'a> {
     v: u8,
     audience: &'a str,
-    challenge_id: uuid::Uuid,
-    challenge: &'a str,
+    gateway_origin: &'a str,
+    request_expires_at: i64,
     installation_handle: uuid::Uuid,
     relay_pubkey: &'a str,
     generation: i64,
@@ -526,37 +542,45 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
         Ok(r) => r,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    if r.v != WIRE_VERSION || !valid_relay_pubkey(&r.relay_pubkey) || r.generation < 1 {
+    if r.v != 2 || !valid_relay_pubkey(&r.relay_pubkey) || r.generation < 1 {
         return error(StatusCode::BAD_REQUEST, "invalid_request");
     }
     let t = RevokeDelegationTranscript {
         v: r.v,
         audience: REVOKE_DELEGATION_AUDIENCE,
-        challenge_id: r.challenge_id,
-        challenge: &r.challenge,
+        gateway_origin: r.gateway_origin.as_str(),
+        request_expires_at: r.request_expires_at,
         installation_handle: r.installation_handle,
         relay_pubkey: &r.relay_pubkey,
         generation: r.generation,
     };
-    if let Err(e) = verify_installation_assertion(
+    let assertion = match verify_installation_assertion(
         &s,
         r.installation_handle,
-        AssertionChallenge {
-            id: r.challenge_id,
-            text: &r.challenge,
+        ManagementRequest {
+            v: r.v,
+            gateway_origin: &r.gateway_origin,
+            request_expires_at: r.request_expires_at,
+            expected_generation: None,
         },
         &r.assertion,
-        "buzz.push.revoke-delegation.v1",
+        "buzz.push.revoke-delegation.v2",
         &t,
         false,
     )
     .await
     {
-        return e;
-    }
+        Ok(assertion) => assertion,
+        Err(e) => return e,
+    };
     match s
         .authority
-        .revoke_delegation(r.installation_handle, &r.relay_pubkey, r.generation)
+        .revoke_delegation(
+            r.installation_handle,
+            &r.relay_pubkey,
+            r.generation,
+            assertion,
+        )
         .await
     {
         Ok(()) => (StatusCode::OK, Json(MutationResponse { status: "revoked" })).into_response(),
@@ -567,8 +591,8 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
 struct RevokeInstallationTranscript<'a> {
     v: u8,
     audience: &'a str,
-    challenge_id: uuid::Uuid,
-    challenge: &'a str,
+    gateway_origin: &'a str,
+    request_expires_at: i64,
     installation_handle: uuid::Uuid,
     endpoint_epoch: i64,
     new_endpoint_epoch: i64,
@@ -578,7 +602,7 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
         Ok(r) => r,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    if r.v != WIRE_VERSION
+    if r.v != 2
         || r.endpoint_epoch < 1
         || r.new_endpoint_epoch != r.endpoint_epoch.saturating_add(1)
     {
@@ -587,34 +611,38 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
     let t = RevokeInstallationTranscript {
         v: r.v,
         audience: REVOKE_INSTALLATION_AUDIENCE,
-        challenge_id: r.challenge_id,
-        challenge: &r.challenge,
+        gateway_origin: r.gateway_origin.as_str(),
+        request_expires_at: r.request_expires_at,
         installation_handle: r.installation_handle,
         endpoint_epoch: r.endpoint_epoch,
         new_endpoint_epoch: r.new_endpoint_epoch,
     };
-    if let Err(e) = verify_installation_assertion(
+    let assertion = match verify_installation_assertion(
         &s,
         r.installation_handle,
-        AssertionChallenge {
-            id: r.challenge_id,
-            text: &r.challenge,
+        ManagementRequest {
+            v: r.v,
+            gateway_origin: &r.gateway_origin,
+            request_expires_at: r.request_expires_at,
+            expected_generation: None,
         },
         &r.assertion,
-        "buzz.push.revoke-installation.v1",
+        "buzz.push.revoke-installation.v2",
         &t,
         true,
     )
     .await
     {
-        return e;
-    }
+        Ok(assertion) => assertion,
+        Err(e) => return e,
+    };
     match s
         .authority
         .revoke_installation(
             r.installation_handle,
             r.endpoint_epoch,
             r.new_endpoint_epoch,
+            assertion,
         )
         .await
     {
@@ -678,7 +706,7 @@ async fn deliver(
             crate::metrics::record_delivery_error("invalid_grant");
             return error(StatusCode::NOT_FOUND, "invalid_grant");
         }
-        Err(AuthorityError::Conflict) => {
+        Err(AuthorityError::Conflict | AuthorityError::StaleGeneration(_)) => {
             crate::metrics::record_admission(crate::metrics::Admission::Rejected);
             crate::metrics::record_delivery_error("invalid_grant");
             return error(StatusCode::NOT_FOUND, "invalid_grant");
@@ -869,6 +897,7 @@ mod request_limit_tests {
         )
         .expect("pinned Apple root fixture");
         AppState {
+            gateway_origin: "https://push.buzz.xyz".into(),
             authority: Arc::new(MemoryAuthorityStore::default()),
             token_keyring: Arc::new(
                 TokenKeyring::new(vec![TokenKey::new("test", &[2; 32]).unwrap()]).unwrap(),
@@ -1036,72 +1065,77 @@ mod transcript_vector_tests {
     #[test]
     fn delegate_transcript_vector() {
         let t = DelegateTranscript {
-            v: 1,
+            v: 2,
             audience: "https://push.buzz.xyz/v1/delegations",
-            challenge_id: CHALLENGE_ID,
-            challenge: CHALLENGE,
+            gateway_origin: "https://push.buzz.xyz",
+            request_expires_at: 1_752_620_300,
             installation_handle: INSTALLATION,
             endpoint_epoch: 1,
+            expected_generation: 0,
             generation: 1,
             relay_pubkey: RELAY_PUBKEY,
             not_before: 1_752_620_000,
             expires_at: 1_752_624_000,
         };
         assert_vector(
-            "delegate",
-            &transcript("buzz.push.delegate.v1", &t).unwrap(),
+            "delegate_v2",
+            &transcript("buzz.push.delegate.v2", &t).unwrap(),
         );
     }
 
     #[test]
     fn rotate_endpoint_transcript_vector() {
         let t = RotateTranscript {
-            v: 1,
+            v: 2,
             audience: "https://push.buzz.xyz/v1/installations/endpoint",
-            challenge_id: CHALLENGE_ID,
-            challenge: CHALLENGE,
+            gateway_origin: "https://push.buzz.xyz",
+            request_expires_at: 1_752_620_300,
             installation_handle: INSTALLATION,
             endpoint_epoch: 1,
             new_endpoint_epoch: 2,
             endpoint: ENDPOINT,
         };
         assert_vector(
-            "rotate_endpoint",
-            &transcript("buzz.push.rotate-endpoint.v1", &t).unwrap(),
+            "rotate_endpoint_v2",
+            &transcript("buzz.push.rotate-endpoint.v2", &t).unwrap(),
         );
     }
 
     #[test]
     fn revoke_delegation_transcript_vector() {
         let t = RevokeDelegationTranscript {
-            v: 1,
+            v: 2,
             audience: "https://push.buzz.xyz/v1/delegations/revoke",
-            challenge_id: CHALLENGE_ID,
-            challenge: CHALLENGE,
+            gateway_origin: "https://push.buzz.xyz",
+            request_expires_at: 1_752_620_300,
             installation_handle: INSTALLATION,
             relay_pubkey: RELAY_PUBKEY,
             generation: 2,
         };
         assert_vector(
-            "revoke_delegation",
-            &transcript("buzz.push.revoke-delegation.v1", &t).unwrap(),
+            "revoke_delegation_v2",
+            &transcript("buzz.push.revoke-delegation.v2", &t).unwrap(),
         );
     }
 
     #[test]
     fn revoke_installation_transcript_vector() {
         let t = RevokeInstallationTranscript {
-            v: 1,
+            v: 2,
             audience: "https://push.buzz.xyz/v1/installations/revoke",
-            challenge_id: CHALLENGE_ID,
-            challenge: CHALLENGE,
+            gateway_origin: "https://push.buzz.xyz",
+            request_expires_at: 1_752_620_300,
             installation_handle: INSTALLATION,
             endpoint_epoch: 1,
             new_endpoint_epoch: 2,
         };
         assert_vector(
-            "revoke_installation",
-            &transcript("buzz.push.revoke-installation.v1", &t).unwrap(),
+            "revoke_installation_v2",
+            &transcript("buzz.push.revoke-installation.v2", &t).unwrap(),
         );
     }
 }
+
+#[cfg(test)]
+#[path = "http_protocol_tests.rs"]
+mod protocol_postgres_tests;

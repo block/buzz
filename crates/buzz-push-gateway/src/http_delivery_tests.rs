@@ -67,21 +67,25 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         .unwrap();
     let delegation_id = crate::grant::id(&grant_hash);
     authority
-        .upsert_delegation(Delegation {
-            id: delegation_id,
-            grant_hash,
-            installation_id,
-            relay_pubkey: keys.public_key().to_hex(),
-            endpoint_epoch: 1,
-            generation: 1,
-            not_before: now(),
-            expires_at: now() + 600,
-            revoked: false,
-        })
+        .upsert_delegation(
+            Delegation {
+                id: delegation_id,
+                grant_hash,
+                installation_id,
+                relay_pubkey: keys.public_key().to_hex(),
+                endpoint_epoch: 1,
+                generation: 1,
+                not_before: now(),
+                expires_at: now() + 600,
+                revoked: false,
+            },
+            crate::authority::test_assertion(authority.as_ref(), installation_id, Some(0)).await,
+        )
         .await
         .unwrap();
     let sends = Arc::new(AtomicUsize::new(0));
     let (app, _) = router(AppState {
+        gateway_origin: "https://push.buzz.xyz".into(),
         authority,
         token_keyring,
         application: Arc::new(ApplicationRuntime {

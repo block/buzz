@@ -20,8 +20,8 @@ migration:
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {cpu: 250m, memory: 128Mi}
-# Routing origin used only when httpRoute.enabled=true. Not passed to the binary.
-gatewayOrigin: ""
+# Canonical public origin bound by management assertions and used by HTTPRoute.
+gatewayOrigin: "https://push.buzz.xyz"
 maxGrantLifetimeSeconds: 2592000
 application:
   # Production MUST override this with the exact Apple TEAMID.bundle-id.

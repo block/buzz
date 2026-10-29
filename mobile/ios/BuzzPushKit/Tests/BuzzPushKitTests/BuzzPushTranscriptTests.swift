@@ -68,6 +68,30 @@ final class BuzzPushTranscriptTests: XCTestCase {
 
     // MARK: Known-answer vectors
 
+    func testManagementV2Vectors() throws {
+        let expiry: Int64 = 1_752_620_300
+        try assertMatchesVector("delegate_v2", BuzzPushTranscript.delegate(
+            gatewayOrigin: Self.gatewayOrigin, requestExpiresAt: expiry,
+            installationHandle: Self.installationHandle, endpointEpoch: 1,
+            expectedGeneration: 0, generation: 1, relayPubkey: Self.relayPubkey,
+            notBefore: Self.notBefore, expiresAt: Self.expiresAt
+        ))
+        try assertMatchesVector("rotate_endpoint_v2", BuzzPushTranscript.rotateEndpoint(
+            gatewayOrigin: Self.gatewayOrigin, requestExpiresAt: expiry,
+            installationHandle: Self.installationHandle, endpointEpoch: 1,
+            newEndpointEpoch: 2, endpoint: Self.endpoint
+        ))
+        try assertMatchesVector("revoke_delegation_v2", BuzzPushTranscript.revokeDelegation(
+            gatewayOrigin: Self.gatewayOrigin, requestExpiresAt: expiry,
+            installationHandle: Self.installationHandle, relayPubkey: Self.relayPubkey,
+            generation: 2
+        ))
+        try assertMatchesVector("revoke_installation_v2", BuzzPushTranscript.revokeInstallation(
+            gatewayOrigin: Self.gatewayOrigin, requestExpiresAt: expiry,
+            installationHandle: Self.installationHandle, endpointEpoch: 1, newEndpointEpoch: 2
+        ))
+    }
+
     func testEnrollVector() throws {
         try assertMatchesVector("enroll", BuzzPushTranscript.enroll(
             gatewayOrigin: Self.gatewayOrigin,
@@ -80,88 +104,56 @@ final class BuzzPushTranscriptTests: XCTestCase {
         ))
     }
 
-    func testDelegateVector() throws {
-        try assertMatchesVector("delegate", BuzzPushTranscript.delegate(
-            gatewayOrigin: Self.gatewayOrigin,
-            challengeId: Self.challengeId,
-            challenge: Self.challenge,
-            installationHandle: Self.installationHandle,
-            endpointEpoch: 1,
-            generation: 1,
-            relayPubkey: Self.relayPubkey,
-            notBefore: Self.notBefore,
-            expiresAt: Self.expiresAt
-        ))
-    }
 
-    func testRotateEndpointVector() throws {
-        try assertMatchesVector("rotate_endpoint", BuzzPushTranscript.rotateEndpoint(
-            gatewayOrigin: Self.gatewayOrigin,
-            challengeId: Self.challengeId,
-            challenge: Self.challenge,
-            installationHandle: Self.installationHandle,
-            endpointEpoch: 1,
-            newEndpointEpoch: 2,
-            endpoint: Self.endpoint
-        ))
-    }
 
-    func testRevokeDelegationVector() throws {
-        try assertMatchesVector("revoke_delegation", BuzzPushTranscript.revokeDelegation(
-            gatewayOrigin: Self.gatewayOrigin,
-            challengeId: Self.challengeId,
-            challenge: Self.challenge,
-            installationHandle: Self.installationHandle,
-            relayPubkey: Self.relayPubkey,
-            generation: 2
-        ))
-    }
 
-    func testRevokeInstallationVector() throws {
-        try assertMatchesVector("revoke_installation", BuzzPushTranscript.revokeInstallation(
-            gatewayOrigin: Self.gatewayOrigin,
-            challengeId: Self.challengeId,
-            challenge: Self.challenge,
-            installationHandle: Self.installationHandle,
-            endpointEpoch: 1,
-            newEndpointEpoch: 2
-        ))
-    }
 
     func testAllFixtureVectorsCovered() throws {
         XCTAssertEqual(
             Set(try Self.fixture().vectors.map(\.name)),
-            ["enroll", "delegate", "rotate_endpoint", "revoke_delegation", "revoke_installation"],
+            ["enroll", "delegate_v2", "rotate_endpoint_v2", "revoke_delegation_v2", "revoke_installation_v2"],
             "fixture gained or lost a vector; add/remove the matching known-answer test"
         )
     }
 
     func testConfiguredTransportOriginKeepsRegisteredTranscriptAudience() throws {
-        let bytes = try BuzzPushTranscript.delegate(
-            gatewayOrigin: URL(string: "https://push.example")!,
-            challengeId: Self.challengeId,
-            challenge: Self.challenge,
-            installationHandle: Self.installationHandle,
-            endpointEpoch: 1,
-            generation: 1,
-            relayPubkey: Self.relayPubkey,
-            notBefore: Self.notBefore,
-            expiresAt: Self.expiresAt
-        )
-
-        XCTAssertTrue(
-            String(decoding: bytes, as: UTF8.self)
-                .contains("\"audience\":\"https://push.buzz.xyz/v1/delegations\"")
-        )
+        for (configured, expected) in [
+            ("https://push.example:443", "https://push.example"),
+            ("http://push.example:80", "http://push.example"),
+            ("https://push.example:8443", "https://push.example:8443"),
+            ("http://push.example:8080", "http://push.example:8080"),
+        ] {
+            let bytes = try BuzzPushTranscript.delegate(
+                gatewayOrigin: URL(string: configured)!,
+                requestExpiresAt: Self.notBefore + 300,
+                installationHandle: Self.installationHandle,
+                endpointEpoch: 1,
+                expectedGeneration: 0,
+                generation: 1,
+                relayPubkey: Self.relayPubkey,
+                notBefore: Self.notBefore,
+                expiresAt: Self.expiresAt
+            )
+            let transcript = String(decoding: bytes, as: UTF8.self)
+            XCTAssertTrue(transcript.contains("\"audience\":\"https://push.buzz.xyz/v1/delegations\""))
+            XCTAssertTrue(transcript.contains("\"gateway_origin\":\"\(expected)\""))
+            let canonical = try BuzzPushTranscript.canonicalGatewayOrigin(URL(string: configured)!)
+            XCTAssertEqual(canonical.text, expected)
+            XCTAssertEqual(canonical.url.absoluteString, expected)
+            XCTAssertEqual(
+                canonical.url.appendingPathComponent("v1/delegations").absoluteString,
+                "\(expected)/v1/delegations"
+            )
+        }
     }
 
     func testInvalidGatewayOriginRejected() {
         XCTAssertThrowsError(try BuzzPushTranscript.delegate(
             gatewayOrigin: URL(string: "https://push.example/path")!,
-            challengeId: Self.challengeId,
-            challenge: Self.challenge,
+            requestExpiresAt: Self.notBefore + 300,
             installationHandle: Self.installationHandle,
             endpointEpoch: 1,
+            expectedGeneration: 0,
             generation: 1,
             relayPubkey: Self.relayPubkey,
             notBefore: Self.notBefore,

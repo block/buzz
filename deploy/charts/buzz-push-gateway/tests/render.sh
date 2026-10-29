@@ -7,12 +7,13 @@ out=$(mktemp); production_out=$(mktemp); route_out=$(mktemp); datadog_out=$(mkte
 trap 'rm -f "$out" "$production_out" "$route_out" "$datadog_out" "${monitoring_out:-}"' EXIT
 gateway_origin_arg=(--set 'gatewayOrigin=https://push.example')
 
-# Generic values work without an application origin.
+# Generic values bind the configured application origin.
 helm lint deploy/charts/buzz-push-gateway >/dev/null
 helm template push deploy/charts/buzz-push-gateway >"$out"
 # Production values support a platform-owned ingress without rendering an
 # HTTPRoute. The environment-owned inputs remain mandatory.
 production_args=(
+  "${gateway_origin_arg[@]}"
   -f deploy/charts/buzz-push-gateway/values-production.yaml
   --set 'image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   --set 'application.appAttestAppId=REALTEAM.com.example.production'
@@ -84,10 +85,9 @@ env_names = d.dig("spec", "template", "spec", "containers", 0, "env")
 required = Set.new(%w[
   DATABASE_URL BUZZ_PUSH_APNS_CERT_PATH
   BUZZ_PUSH_APNS_TOPIC BUZZ_PUSH_APP_ATTEST_APP_ID
-  BUZZ_PUSH_TOKEN_KEYS BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS
+  BUZZ_PUSH_TOKEN_KEYS BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS BUZZ_PUSH_GATEWAY_ORIGIN
 ])
 assert!(required.subset?(env_names))
-assert!(!env_names.include?("BUZZ_PUSH_GATEWAY_ORIGIN"))
 assert!(!env_names.any? { |name| name.include?("APP_STORE") })
 apns_volume = d.dig("spec", "template", "spec", "volumes").find { |volume| volume["name"] == "apns" }
 assert!(apns_volume.dig("secret", "defaultMode") == 0o400, apns_volume.inspect)
@@ -128,9 +128,9 @@ assert!(!route.dig("spec", "parentRefs").empty?)
 assert!(route.dig("spec", "hostnames") == ["push.example"])
 RUBY
 
-# An origin is needed only to produce the optional routing hostname.
+# Management always requires a canonical public origin.
 if helm template push deploy/charts/buzz-push-gateway \
-  --set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gateway' >/dev/null 2>&1; then
+  --set gatewayOrigin= --set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gateway' >/dev/null 2>&1; then
   echo 'expected enabled HTTPRoute without gatewayOrigin to fail' >&2
   exit 1
 fi
