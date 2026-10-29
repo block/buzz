@@ -15,6 +15,7 @@ import '../../shared/clipboard_utils.dart';
 import '../../shared/success_haptic.dart';
 import '../../shared/push/push_relay_capability_provider.dart';
 import '../../shared/push/push_bootstrap.dart';
+import '../../shared/push/push_subscription_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
 import '../pairing/pairing_provider.dart';

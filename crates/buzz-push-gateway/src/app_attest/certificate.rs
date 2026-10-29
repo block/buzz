@@ -1,5 +1,5 @@
 //! Apple certificate adapters; path and signature validation remain in webpki.
-use super::error::AppAttestError as Error;
+use super::error::{AppAttestError as Error, CertificateCheck as Check};
 use aws_lc_rs::digest::{digest, SHA256};
 use p256::elliptic_curve::sec1::ToSec1Point;
 use rustls_pki_types::{CertificateDer, UnixTime};
@@ -24,23 +24,30 @@ impl webpki::ExtendedKeyUsageValidator for AppleUsage {
     }
 }
 
-fn parsed(bytes: &[u8]) -> Result<X509Certificate<'_>, Error> {
-    let (rest, cert) = parse_x509_certificate(bytes).map_err(|_| Error::InvalidCertificate)?;
+fn parsed(bytes: &[u8], index: usize) -> Result<X509Certificate<'_>, Error> {
+    let invalid = || Error::InvalidCertificate(Check::Encoding { index });
+    let (rest, cert) = parse_x509_certificate(bytes).map_err(|_| invalid())?;
     if !rest.is_empty() {
-        return Err(Error::InvalidCertificate);
+        return Err(invalid());
     }
     // RFC 5280 requires each extension at most once, including unknown OIDs.
-    cert.extensions_map()
-        .map_err(|_| Error::InvalidCertificate)?;
+    cert.extensions_map().map_err(|_| invalid())?;
     Ok(cert)
 }
 
+fn path_rejected(error: webpki::Error) -> Error {
+    Error::InvalidCertificate(Check::Path(format!("{error:?}")))
+}
+
 pub(super) fn verify_chain(certificates: &[Vec<u8>], root: &[u8]) -> Result<(), Error> {
-    let leaf = certificates.first().ok_or(Error::InvalidCertificate)?;
+    let leaf = certificates
+        .first()
+        .ok_or(Error::InvalidCertificate(Check::Chain))?;
     let root = CertificateDer::from(root);
-    let anchor = webpki::anchor_from_trusted_cert(&root).map_err(|_| Error::InvalidCertificate)?;
+    let anchor = webpki::anchor_from_trusted_cert(&root)
+        .map_err(|_| Error::InvalidCertificate(Check::Root))?;
     let leaf_der = CertificateDer::from(leaf.as_slice());
-    let end = webpki::EndEntityCert::try_from(&leaf_der).map_err(|_| Error::InvalidCertificate)?;
+    let end = webpki::EndEntityCert::try_from(&leaf_der).map_err(path_rejected)?;
     let intermediates: Vec<_> = certificates[1..]
         .iter()
         .map(|c| CertificateDer::from(c.as_slice()))
@@ -54,14 +61,17 @@ pub(super) fn verify_chain(certificates: &[Vec<u8>], root: &[u8]) -> Result<(), 
         None,
         None,
     )
-    .map_err(|_| Error::InvalidCertificate)?;
+    .map_err(path_rejected)?;
     for (index, bytes) in certificates.iter().enumerate() {
-        let cert = parsed(bytes)?;
-        if let Some(usage) = cert.key_usage().map_err(|_| Error::InvalidCertificate)? {
+        let cert = parsed(bytes, index)?;
+        let usage = cert
+            .key_usage()
+            .map_err(|_| Error::InvalidCertificate(Check::Encoding { index }))?;
+        if let Some(usage) = usage {
             if (index == 0 && !usage.value.digital_signature())
                 || (index > 0 && !usage.value.key_cert_sign())
             {
-                return Err(Error::InvalidCertificate);
+                return Err(Error::InvalidCertificate(Check::KeyUsage { index }));
             }
         }
     }
@@ -69,7 +79,7 @@ pub(super) fn verify_chain(certificates: &[Vec<u8>], root: &[u8]) -> Result<(), 
 }
 
 pub(super) fn public_key(bytes: &[u8]) -> Result<[u8; 65], Error> {
-    let cert = parsed(bytes)?;
+    let cert = parsed(bytes, 0)?;
     let spki = cert.public_key();
     if spki.algorithm.algorithm.to_id_string() != "1.2.840.10045.2.1"
         || spki
@@ -93,7 +103,7 @@ pub(super) fn public_key(bytes: &[u8]) -> Result<[u8; 65], Error> {
 }
 
 pub(super) fn verify_nonce(bytes: &[u8], expected: &[u8]) -> Result<(), Error> {
-    let cert = parsed(bytes)?;
+    let cert = parsed(bytes, 0)?;
     let extension = cert
         .extensions()
         .iter()

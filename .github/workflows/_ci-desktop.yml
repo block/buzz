@@ -52,6 +52,8 @@ jobs:
         run: just desktop-check
       - name: Desktop unit tests
         run: just desktop-test
+      - name: Flake check selection tests
+        run: node --test scripts/flake-check.test.mjs
       - name: Desktop build
         run: just desktop-build
       - name: Save pnpm store cache

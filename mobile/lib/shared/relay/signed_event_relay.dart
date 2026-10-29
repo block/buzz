@@ -5,6 +5,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'nostr_models.dart';
 import 'relay_session.dart';
 import 'relay_socket.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// Signs and submits Nostr events through the relay WebSocket connection.
 class SignedEventRelay {
@@ -46,13 +47,12 @@ class SignedEventRelay {
       throw Exception('Invalid nsec');
     }
 
-    final event = nostr.Event.from(
+    final event = signNostrEvent(
       kind: kind,
       content: content,
       tags: tags,
       secretKey: privkeyHex,
       createdAt: createdAt,
-      verify: false,
     );
 
     final nostrEvent = NostrEvent.fromJson(event.toMap());
@@ -77,13 +77,12 @@ Future<NostrEvent> submitSignedEventOnce({
 }) async {
   final privateKey = nostr.Nip19.decode(payload: nsec).data;
   if (privateKey.isEmpty) throw const FormatException('Invalid nsec');
-  final signed = nostr.Event.from(
+  final signed = signNostrEvent(
     kind: kind,
     content: content,
     tags: tags,
     secretKey: privateKey,
     createdAt: createdAt,
-    verify: false,
   );
   final event = NostrEvent.fromJson(signed.toMap());
   final result = Completer<NostrEvent>();

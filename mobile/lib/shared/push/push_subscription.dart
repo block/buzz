@@ -12,6 +12,14 @@ const buzzPushMaxSubscriptions = 16;
 const buzzPushMaxIgnoreFilters = 8;
 const buzzPushHellthreadParticipantLimit = 20;
 
+/// Channels one lease can follow channel-wide after its self-directed
+/// subscription, and muted channels its ignores can cover after the
+/// self-authored ignore.
+const buzzPushMaxChannelWideChannels =
+    (buzzPushMaxSubscriptions - 1) * buzzPushChannelChunkSize;
+const buzzPushMaxMutedChannels =
+    (buzzPushMaxIgnoreFilters - 1) * buzzPushChannelChunkSize;
+
 const _supportedNotificationClasses = {'default'};
 const _filterKeys = {'kinds', 'authors', '#p', '#h', '#e'};
 final _exactHexPattern = RegExp(r'^[0-9a-f]{64}$');

@@ -139,13 +139,28 @@ YAML
 run_contract >/dev/null
 rm -rf "$tmp/.github/actions" "$tmp/.github/workflows/new-cache-user.yaml"
 
+cp "$root/.github/workflows/_ci-flake.yml" "$tmp/flake.orig"
+python3 - "$tmp/.github/workflows/_ci-flake.yml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+workflow = path.read_text()
+needle = "          shared-key: unit-tests-sherpa-cache-v1\n          save-if: false\n"
+if workflow.count(needle) != 1:
+    raise SystemExit("expected one flake-rust cache restore key")
+path.write_text(workflow.replace(needle, "          shared-key: unit-tests\n          save-if: false\n"))
+PY
+expect_failure 'flake-rust rust-cache action must restore with.shared-key unit-tests-sherpa-cache-v1'
+mv "$tmp/flake.orig" "$tmp/.github/workflows/_ci-flake.yml"
+
 python3 - "$tmp/.github/workflows/_ci-rust.yml" <<'PY'
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
 workflow = path.read_text()
-needle = "          key: sherpa-cache-v1\n          save-if:"
+needle = "          shared-key: unit-tests-sherpa-cache-v1\n          save-if:"
 replacement = "          save-if:"
 if workflow.count(needle) != 1:
     raise SystemExit("expected one Unit Tests cache generation key")
@@ -153,9 +168,9 @@ workflow = workflow.replace(needle, replacement)
 job = "  unit-tests:\n"
 if workflow.count(job) != 1:
     raise SystemExit("expected one Unit Tests job")
-workflow = workflow.replace(job, job + "    env:\n      key: sherpa-cache-v1\n", 1)
+workflow = workflow.replace(job, job + "    env:\n      shared-key: unit-tests-sherpa-cache-v1\n", 1)
 path.write_text(workflow)
 PY
-expect_failure 'rust-cache action must keep with.key set to sherpa-cache-v1'
+expect_failure 'rust-cache action must keep with.shared-key set to unit-tests-sherpa-cache-v1'
 
 echo "rust cache contract regressions passed"

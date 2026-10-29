@@ -7751,9 +7751,8 @@ mod postgres_tests {
         use sqlx::postgres::PgConnectOptions;
         use tokio_util::sync::CancellationToken;
 
-        // A schema with bans but no `users` table: the ban commits, and only
-        // the owned-agent lookup fails. It carries `communities` and the
-        // deletion lock key so the ban passes community write admission.
+        // A supported ban writer commits before the users table is taken away:
+        // only the subsequent owned-agent lookup fails.
         let db_url = crate::test_support::database_url();
         let admin = sqlx::PgPool::connect(&db_url)
             .await
@@ -7761,6 +7760,8 @@ mod postgres_tests {
         let schema = format!("revoke_owner_{}", Uuid::new_v4().simple());
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "CREATE SCHEMA {schema}; \
+             CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
+             CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
              CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
              CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
              CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
@@ -7842,6 +7843,10 @@ mod postgres_tests {
             )
             .await
             .expect("ban commits");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TABLE {schema}.users")))
+            .execute(&admin)
+            .await
+            .expect("break only the post-commit owner lookup");
         let revoked = state
             .revoke_live_access(
                 &tenant,
