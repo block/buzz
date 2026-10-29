@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../../shared/mentions/mention_rules.dart';
+import '../../../shared/text/initial.dart';
 import '../../../shared/utils/string_utils.dart';
 
 /// A mention autocomplete candidate. Mirrors the desktop's
@@ -63,8 +64,8 @@ class MentionCandidate {
   /// render `N` for everyone).
   String get initial {
     final name = displayName?.trim();
-    if (name != null && name.isNotEmpty) return name[0].toUpperCase();
-    return pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?';
+    if (name != null && name.isNotEmpty) return avatarInitial(name);
+    return avatarInitial(pubkey);
   }
 }
 
