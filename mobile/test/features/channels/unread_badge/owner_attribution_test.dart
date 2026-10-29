@@ -26,6 +26,7 @@ void main() {
         kind: 9,
         tags: [
           ...tags,
+          ['buzz:workflow', 'true'],
           ['h', 'channel-1'],
           ['e', 'd' * 64, '', 'reply'],
         ],

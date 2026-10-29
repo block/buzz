@@ -64,7 +64,10 @@ pub(crate) async fn insert_mentions_in_transaction(
         .iter()
         .filter_map(|tag| {
             let tag_vec = tag.as_slice();
-            if tag_vec.len() >= 2 && tag_vec[0] == "p" {
+            if tag_vec.len() >= 2
+                && tag_vec[0] == "p"
+                && !buzz_core::filter::is_workflow_owner_attribution(event, tag)
+            {
                 Some(tag_vec[1].as_str())
             } else {
                 None

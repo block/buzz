@@ -183,13 +183,23 @@ void main() {
       (
         [
           ['p', me, '', 'owner'],
+          ['buzz:workflow', 'true'],
         ],
         false,
       ),
       (
         [
           ['p', me, '', 'owner'],
+          ['buzz:workflow', 'true'],
           ['p', me],
+        ],
+        true,
+      ),
+      // Without the workflow marker the fourth field means something else,
+      // such as a NIP-29 roster role.
+      (
+        [
+          ['p', me, '', 'owner'],
         ],
         true,
       ),

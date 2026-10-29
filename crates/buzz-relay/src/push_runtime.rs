@@ -1,12 +1,13 @@
 //! Durable NIP-PL event matcher and gateway delivery worker.
 
 use std::{
-    borrow::Cow,
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use buzz_core::filter::{filters_match, reader_authorized_for_event};
+use buzz_core::filter::{
+    filters_match, is_workflow_owner_attribution, reader_authorized_for_event,
+};
 use chrono::{TimeDelta, Utc};
 use nostr::Filter;
 use serde::{Deserialize, Serialize};
@@ -292,7 +293,6 @@ fn match_job(
     context: &MatchContext,
 ) -> anyhow::Result<Vec<buzz_db::push::WakeRequest>> {
     let mut wakes = Vec::new();
-    let event = without_owner_attribution(&job.event);
     for lease in &context.leases {
         let author_hex = hex::encode(&lease.author);
         if !reader_authorized_for_event(&job.event.event, &author_hex) {
@@ -313,19 +313,23 @@ fn match_job(
                 serde_json::from_value(serde_json::Value::Object(sub.filter.clone()))?;
             if !push_filter_authorized_for_event(&filter, &job.event.event, &author_hex)
                 || !push_filter_reads_channel(&filter, job.event.channel_id, &context.named_only)
-                || !filters_match(std::slice::from_ref(&filter), &event)
+                || !filters_match(std::slice::from_ref(&filter), &job.event)
             {
                 continue;
             }
             let ignored = sub.ignore.iter().any(|raw| {
                 serde_json::from_value::<Filter>(serde_json::Value::Object(raw.clone()))
-                    .is_ok_and(|f| filters_match(&[f], &event))
+                    .is_ok_and(|f| filters_match(&[f], &job.event))
             });
-            let p_count = event
+            let p_count = job
+                .event
                 .event
                 .tags
                 .iter()
-                .filter(|t| t.kind().to_string() == "p")
+                .filter(|t| {
+                    t.kind().to_string() == "p"
+                        && !is_workflow_owner_attribution(&job.event.event, t)
+                })
                 .count() as u64;
             if ignored
                 || sub
@@ -355,30 +359,6 @@ fn match_job(
         });
     }
     Ok(wakes)
-}
-
-/// The event as push matching sees it: without `p` tags marked `owner`. A
-/// workflow message names its owner in `["p", <owner>, "", "owner"]` so
-/// clients can show who owns it. That is attribution, not a mention, so it
-/// must not wake the owner through a `#p` self filter. The sink adds a plain
-/// `p` tag when the workflow does mention its owner. Dropping a marked tag can
-/// only withhold a wake from the pubkey its author chose to mark.
-fn without_owner_attribution(event: &buzz_core::StoredEvent) -> Cow<'_, buzz_core::StoredEvent> {
-    let is_owner_attribution = |tag: &nostr::Tag| matches!(tag.as_slice(), [name, _, _, marker, ..] if name == "p" && marker == "owner");
-    if !event.event.tags.iter().any(is_owner_attribution) {
-        return Cow::Borrowed(event);
-    }
-    let mut view = event.clone();
-    view.event.tags = nostr::Tags::from_list(
-        event
-            .event
-            .tags
-            .iter()
-            .filter(|tag| !is_owner_attribution(tag))
-            .cloned()
-            .collect(),
-    );
-    Cow::Owned(view)
 }
 
 /// Whether a lease filter may push an event in `channel`, by the same rule as
@@ -947,6 +927,7 @@ mod tests {
         let woken = |mentioned: &[&nostr::Keys]| -> Vec<Vec<u8>> {
             let event = EventBuilder::new(Kind::Custom(9), "workflow output")
                 .tag(Tag::parse(["p", &owner_hex, "", "owner"]).unwrap())
+                .tag(Tag::parse(["buzz:workflow", "true"]).unwrap())
                 .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
                 .tags(
                     mentioned
@@ -991,6 +972,7 @@ mod tests {
             };
             let event = EventBuilder::new(Kind::Custom(9), "workflow output")
                 .tag(Tag::parse(["p", &owner_hex, "", "owner"]).unwrap())
+                .tag(Tag::parse(["buzz:workflow", "true"]).unwrap())
                 .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
                 .tags(
                     mentioned
@@ -1282,6 +1264,26 @@ mod postgres_tests {
             woken,
             vec![vec![agent_bytes], vec![], vec![owner_bytes]],
             "agent mention wakes the agent; no mention wakes no one; owner mention wakes the owner"
+        );
+
+        // A `#p` history read joins the mention index, which must agree with
+        // live matching: only the message that mentions the owner is theirs.
+        let owner_mentions = state
+            .db
+            .query_events(&buzz_db::EventQuery {
+                kinds: Some(vec![9]),
+                p_tag_hex: Some(owner.public_key().to_hex()),
+                ..buzz_db::EventQuery::for_community(community)
+            })
+            .await
+            .expect("query owner mentions");
+        assert_eq!(
+            owner_mentions
+                .iter()
+                .map(|stored| stored.event.id)
+                .collect::<Vec<_>>(),
+            vec![batch.jobs[2].event.event.id],
+            "the mention index skips the owner attribution"
         );
     }
 
