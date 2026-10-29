@@ -34,12 +34,15 @@ void main() {
     );
     expectStyle(
       messageTimestampTextStyle,
-      fontSize: 15,
+      fontSize: 13.1,
       fontWeight: FontWeight.w400,
       lineHeight: 17,
       letterSpacing: 0,
     );
-    expect(messageTimestampTextStyle, messageMetadataTextStyle);
+    expect(
+      messageTimestampTextStyle.fontSize,
+      lessThan(messageUsernameTextStyle.fontSize!),
+    );
     expectStyle(
       replyPreviewTextStyle,
       fontSize: 13.1,
@@ -87,7 +90,7 @@ void main() {
     );
     expectStyle(
       activityTimestampTextStyle,
-      fontSize: 15,
+      fontSize: 13.1,
       fontWeight: FontWeight.w400,
       lineHeight: 17,
       letterSpacing: 0,
@@ -128,6 +131,13 @@ void main() {
       fontSize: 15,
       fontWeight: FontWeight.w400,
       lineHeight: 17,
+      letterSpacing: 0,
+    );
+    expectStyle(
+      filterChipTextStyle,
+      fontSize: 15,
+      fontWeight: FontWeight.w400,
+      lineHeight: 15,
       letterSpacing: 0,
     );
   });

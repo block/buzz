@@ -7,9 +7,9 @@
 //!   → bounded sync_channel (TEXT_QUEUE_DEPTH = 8)
 //!   → tts_worker thread (owns 1 Pocket TTS engine + 1 persistent Player)
 //!       1. Preprocess text
-//!       2. Split into sentences
-//!       3. Synthesize each sentence individually → f32 PCM
-//!       4. Clamp to full scale + fade out each sentence
+//!       2. Split into tokenizer-safe natural units, prioritizing sentence one
+//!       3. Synthesize each unit → f32 PCM
+//!       4. Clamp to full scale + fade out each unit
 //!       5. Append each buffer to the persistent rodio Player (gapless)
 //!       6. While audio is draining, keep pulling queued text items and
 //!          synthesizing ahead — playback of item N overlaps synthesis of
@@ -18,10 +18,9 @@
 //!   → cancel flag: a 10 ms barge-in monitor thread silences the player and
 //!     releases tts_active on the flag's rising edge (~15 ms flag-to-silence,
 //!     even mid-sentence while the worker is blocked in synth_chunk); the
-//!     worker then consumes the flag — drain queue + clear + play (un-pause).
-//!     Monitor clears and worker player mutations are serialized through the
-//!     `player_ops` mutex, with the flag re-checked under the lock — see the
-//!     monitor block in `tts_worker` for the race this closes.
+//!     worker then consumes the flag and drains stale text. Every Player
+//!     operation is serialized by `PlaybackCoordinator`; cancellation swaps in
+//!     a fresh queue and drops the old Player after releasing the coordinator.
 //! ```
 //!
 //! Lookahead pipelining spans *items*, not just sentences within one item:
@@ -35,25 +34,30 @@
 //! can gate microphone input while the agent is speaking.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     num::NonZero,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+use super::human_floor::HumanFloor;
 use super::pocket::{
     load_text_to_speech, load_voice_style, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
 };
-use super::preprocessing::{preprocess_for_tts, split_sentences};
+use super::preprocessing::preprocess_for_tts;
 
 #[path = "tts_voice_transition.rs"]
 mod voice_transition;
+use super::tts_playback::*;
+#[path = "tts_append.rs"]
+mod append;
+use append::*;
 use voice_transition::*;
 #[path = "tts_startup.rs"]
 mod startup;
@@ -61,6 +65,23 @@ use startup::await_worker_startup;
 #[path = "tts_audio.rs"]
 mod audio;
 use audio::*;
+#[path = "tts_activity.rs"]
+mod activity;
+use activity::*;
+#[path = "tts_pipeline_controls.rs"]
+mod pipeline_controls;
+#[path = "tts_speaker_cancellation.rs"]
+mod speaker_cancellation;
+use speaker_cancellation::*;
+#[path = "tts_streaming.rs"]
+mod streaming;
+use streaming::*;
+#[path = "tts_broadcast.rs"]
+mod broadcast;
+use broadcast::TtsBroadcasters;
+pub(crate) use broadcast::{
+    LocalTtsPublisherLease, LocalTtsPublishers, TtsAudioPublisher, TtsBroadcastPacket,
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -77,6 +98,7 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(100);
 /// ~5 ms — so playing audio dies ~15 ms after the flag is set, even while
 /// the worker is blocked inside `synth_chunk`.
 const MONITOR_TICK: Duration = Duration::from_millis(10);
+const SPEAKER_ACTIVITY_TICK: Duration = Duration::from_millis(50);
 const AUDIO_PRIME_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Pocket TTS is a one-step consistency model, not diffusion. Kept for API compat.
@@ -90,39 +112,37 @@ const SYNTH_STEPS: usize = 1;
 /// the leading waveform is important.
 const FADE_OUT_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.008) as usize;
 
-/// Length of the zero-sample cushion prepended before each synthesized
-/// sentence chunk, so the OS audio device / rodio mixer has a fully-quiet
-/// ramp-up window before the real onset hits.
-///
-/// This used to be applied only before the first sentence of a whole response.
-/// That still left later sentence chunks vulnerable to first-syllable clipping
-/// when their first phoneme was soft (notably `I'm` / `I've`) and rodio crossed
-/// from an explicit silence buffer straight into non-zero speech. 20 ms ≈ 480
-/// samples is enough to cover a CoreAudio buffer turnover without being audible
-/// as latency. At sentence boundaries this lead-in is budgeted out of the
-/// existing inter-sentence pause, so it does not lengthen multi-sentence gaps.
-const SENTENCE_LEAD_IN_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.020) as usize;
+/// rodio 0.22.2 bootstraps `UniformSourceIterator` when a source is added to
+/// the mixer (`conversions/uniform.rs:49-66`). Its empty queue's 512-sample
+/// span (`queue.rs::SourcesQueueInput::new`) can therefore retain placeholder
+/// format metadata until the next span. The lead-in covers that whole span,
+/// rounded up to the next millisecond, while preserving the product's existing
+/// 20 ms quiet ramp-up. Continuously queued chunks receive no synthetic padding.
+const SAMPLES_PER_MS: usize = SAMPLE_RATE as usize / 1_000;
+const PRODUCT_RAMP_UP_MS: usize = 20;
+const PRODUCT_RAMP_UP_SAMPLES: usize = PRODUCT_RAMP_UP_MS * SAMPLES_PER_MS;
+const RODIO_ADD_BOOTSTRAP_SPAN_SAMPLES: usize = 512;
+const RODIO_ADD_BOOTSTRAP_CUSHION_MS: usize =
+    RODIO_ADD_BOOTSTRAP_SPAN_SAMPLES.div_ceil(SAMPLES_PER_MS);
+const SENTENCE_LEAD_IN_SAMPLES: usize = {
+    let bootstrap_cushion = RODIO_ADD_BOOTSTRAP_CUSHION_MS * SAMPLES_PER_MS;
+    if PRODUCT_RAMP_UP_SAMPLES > bootstrap_cushion {
+        PRODUCT_RAMP_UP_SAMPLES
+    } else {
+        bootstrap_cushion
+    }
+};
 
-/// Approximate character budget for one synthesis chunk.
-///
-/// Upstream pocket-tts groups sentences into chunks of up to
-/// `MAX_TOKEN_PER_CHUNK = 50` tokenizer tokens (`default_parameters.py`) —
-/// typically multi-sentence chunks — because every `generate()` call is an
-/// independent generation with a cold FlowLM start, and each chunk boundary
-/// is an exposed prosody seam (kyutai-labs/pocket-tts #151; the Kyutai team
-/// names chunk stitching as the reliability lever). Our previous
-/// sentence-per-call path created ~2–4× more seams than upstream.
-///
-/// This character budget performs only coarse sentence packing. The April
-/// engine applies its SentencePiece tokenizer afterward and refines every
-/// result at the bundle's exact 50-token boundary.
-const MAX_CHUNK_CHARS: usize = 200;
-
-/// Silence inserted between sentences by the TTS pipeline (seconds).
-/// Injected as a silent buffer between each synthesized sentence chunk.
-const INTER_SENTENCE_SILENCE: f32 = 0.1;
-
-type WorkerControlState = (Arc<AtomicBool>, Arc<AtomicBool>, WorkerCancelSignals);
+type WorkerControlState = (
+    Arc<AtomicBool>,
+    Arc<AtomicBool>,
+    WorkerCancelSignals,
+    SpeakerGenerations,
+    ActiveSpeaker,
+    SpeakerCancellation,
+    PlaybackProbe,
+    TtsBroadcasters,
+);
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
@@ -142,6 +162,7 @@ pub struct TtsPipeline {
     /// Kept alive here so the Arc isn't dropped — the worker holds a clone.
     #[allow(dead_code)]
     cancel: Arc<AtomicBool>,
+    human_floor: HumanFloor,
     /// Internal cancellation used only for voice changes. Kept separate so a
     /// concurrent human barge-in always clears every queued message.
     voice_cancel: Arc<AtomicBool>,
@@ -150,8 +171,20 @@ pub struct TtsPipeline {
     voice: Arc<Mutex<String>>,
     /// Tags messages so a voice change drops only pre-change queue entries.
     voice_generation: Arc<AtomicU64>,
+    /// Per-agent generations let removal invalidate that agent's queued and
+    /// in-flight text without poisoning speech queued after the agent rejoins.
+    speaker_generations: SpeakerGenerations,
+    /// Speaker whose audio currently owns the shared player queue.
+    active_speaker: ActiveSpeaker,
+    /// Targeted cancellation used when an agent leaves the huddle.
+    speaker_cancel: SpeakerCancellation,
+    /// Shared player handle used to reject Stop clicks after playback drains.
+    playback_probe: PlaybackProbe,
     /// Completed after the worker drains pre-change text and installs the new style.
     voice_change_ack: VoiceChangeAck,
+    /// Agent-authenticated Huddle publishers used to carry synthesized speech
+    /// to remote clients without impersonating the hosting human.
+    broadcasters: TtsBroadcasters,
     /// Worker thread handle — taken on drop to join cleanly.
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -165,15 +198,19 @@ impl TtsPipeline {
         model_dir: PathBuf,
         tts_active: Arc<AtomicBool>,
         cancel: Arc<AtomicBool>,
+        human_floor: HumanFloor,
         voice: &str,
         output_device: Option<String>,
+        activity_app: Option<tauri::AppHandle>,
     ) -> Result<Self, String> {
         let (text_tx, text_rx) = mpsc::sync_channel::<QueuedText>(TEXT_QUEUE_DEPTH);
         let shutdown = Arc::new(AtomicBool::new(false));
-        // cancel is passed in from HuddleState.tts_cancel — shared with STT for barge-in.
+        // cancel is passed in from HuddleState.tts_cancel — shared with remote
+        // participant interruption and the push-to-talk shortcut.
 
         let shutdown_worker = Arc::clone(&shutdown);
         let cancel_worker = Arc::clone(&cancel);
+        let worker_human_floor = human_floor.clone();
         let voice_cancel = Arc::new(AtomicBool::new(false));
         let worker_voice_cancel = Arc::clone(&voice_cancel);
         let tts_active_worker = Arc::clone(&tts_active);
@@ -181,8 +218,18 @@ impl TtsPipeline {
         let voice_worker = Arc::clone(&voice);
         let voice_generation = Arc::new(AtomicU64::new(1));
         let worker_voice_generation = Arc::clone(&voice_generation);
+        let speaker_generations = Arc::new(Mutex::new(HashMap::new()));
+        let worker_speaker_generations = Arc::clone(&speaker_generations);
+        let active_speaker = Arc::new(Mutex::new(None));
+        let worker_active_speaker = Arc::clone(&active_speaker);
+        let speaker_cancel = Arc::new(Mutex::new(None));
+        let worker_speaker_cancel = Arc::clone(&speaker_cancel);
+        let playback_probe = PlaybackProbe::new();
+        let worker_playback_probe = playback_probe.clone();
         let voice_change_ack = Arc::new(Mutex::new(None));
         let worker_voice_change_ack = Arc::clone(&voice_change_ack);
+        let broadcasters = TtsBroadcasters::default();
+        let worker_broadcasters = broadcasters.clone();
         let model_dir_worker = model_dir.clone();
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
 
@@ -197,12 +244,19 @@ impl TtsPipeline {
                         worker_voice_change_ack,
                     ),
                     text_rx,
+                    worker_human_floor,
                     (
                         tts_active_worker,
                         shutdown_worker,
                         (cancel_worker, worker_voice_cancel),
+                        worker_speaker_generations,
+                        worker_active_speaker,
+                        worker_speaker_cancel,
+                        worker_playback_probe,
+                        worker_broadcasters,
                     ),
                     output_device,
+                    activity_app,
                     startup_tx,
                 )
             })
@@ -214,85 +268,25 @@ impl TtsPipeline {
             tts_active,
             shutdown,
             cancel,
+            human_floor,
             voice_cancel,
             voice,
             voice_generation,
+            speaker_generations,
+            active_speaker,
+            speaker_cancel,
+            playback_probe,
             voice_change_ack,
+            broadcasters,
             thread: Some(handle),
         })
-    }
-
-    /// Queue `text` for TTS synthesis and playback.
-    ///
-    /// Non-blocking. Returns `Err` if the queue is full (bounded at
-    /// `TEXT_QUEUE_DEPTH`) — caller may log and discard.
-    pub fn speak(&self, text: String) -> Result<(), String> {
-        self.text_tx
-            .try_send(QueuedText {
-                generation: self.voice_generation.load(Ordering::Acquire),
-                route_id: 0,
-                text,
-            })
-            .map_err(|e| {
-                eprintln!("buzz-desktop: TTS queue saturated, dropping message: {e}");
-                format!("TTS queue full, dropping: {e}")
-            })
-    }
-
-    /// Clone the bounded queue sender so callers can apply backpressure without
-    /// holding the huddle mutex. Disabling TTS drops the receiver and unblocks
-    /// any waiting sender while the shared cancellation flag stops playback.
-    pub(crate) fn text_sender(&self) -> TtsTextSender {
-        TtsTextSender {
-            text_tx: self.text_tx.clone(),
-            generation: self.voice_generation.load(Ordering::Acquire),
-        }
-    }
-
-    /// Select a bundled Pocket voice for subsequent speech.
-    ///
-    /// Current playback and queued text are cancelled immediately so content
-    /// cannot continue in the old voice. The worker keeps its warmed inference
-    /// engine and reloads only the reference style before the next utterance.
-    pub fn select_voice(&self, voice: &str) -> Option<tokio::sync::oneshot::Receiver<()>> {
-        let acknowledged = begin_voice_change(
-            &self.voice,
-            &self.voice_generation,
-            &self.voice_cancel,
-            &self.voice_change_ack,
-            voice,
-        );
-        if acknowledged.is_some() {
-            eprintln!("buzz-desktop: tts stage=cancellation reason=voice_switch route_id=0");
-        }
-        acknowledged
-    }
-
-    /// Reconcile the voice of a pipeline that has not been published yet.
-    ///
-    /// No caller can enqueue text before publication, so raising the shared
-    /// cancellation flag here would create a race that could discard the first
-    /// message queued immediately after installation.
-    pub(crate) fn select_voice_before_publish(&self, voice: &str) {
-        *self.voice.lock().unwrap_or_else(|error| error.into_inner()) = voice.to_string();
-    }
-
-    /// Signal the worker thread to stop.
-    pub fn shutdown(&self) {
-        eprintln!("buzz-desktop: tts stage=cancellation reason=shutdown route_id=0");
-        self.shutdown.store(true, Ordering::Release);
-    }
-
-    /// Returns `true` if the worker thread has exited (init failure, crash, or normal exit).
-    /// Used by hot-start to detect dead pipelines and clear them for retry.
-    pub fn is_finished(&self) -> bool {
-        self.thread.as_ref().is_none_or(|h| h.is_finished())
     }
 }
 
 impl Drop for TtsPipeline {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.broadcasters.shutdown();
         // Dropping `text_tx` unblocks the worker's recv_timeout loop.
         // Join to ensure the audio thread exits cleanly.
         if let Some(thread) = self.thread.take() {
@@ -303,16 +297,49 @@ impl Drop for TtsPipeline {
 
 // ── Worker thread ─────────────────────────────────────────────────────────────
 
+fn authorize_or_defer_queued_text(
+    human_floor: &HumanFloor,
+    deferred_text: &mut VecDeque<QueuedText>,
+    queued_text: QueuedText,
+) -> Result<QueuedText, HumanFloorAuthorization> {
+    match human_floor.authorization(queued_text.floor_epoch) {
+        HumanFloorAuthorization::Blocked => {
+            deferred_text.push_front(queued_text);
+            Err(HumanFloorAuthorization::Blocked)
+        }
+        HumanFloorAuthorization::Stale => {
+            eprintln!(
+                "buzz-desktop: tts stage=queue status=dropped reason=barge_in route_id={}",
+                queued_text.route_id
+            );
+            Err(HumanFloorAuthorization::Stale)
+        }
+        HumanFloorAuthorization::Permitted => Ok(queued_text),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tts_worker(
     model_dir: PathBuf,
     voice_state: WorkerVoiceState,
     text_rx: mpsc::Receiver<QueuedText>,
+    human_floor: HumanFloor,
     control_state: WorkerControlState,
     output_device: Option<String>,
+    activity_app: Option<tauri::AppHandle>,
     startup_tx: mpsc::SyncSender<Result<(), String>>,
 ) {
     let (selected_voice, voice_generation, voice_change_ack) = voice_state;
-    let (tts_active, shutdown, cancel_signals) = control_state;
+    let (
+        tts_active,
+        shutdown,
+        cancel_signals,
+        speaker_generations,
+        active_speaker,
+        speaker_cancel,
+        playback_probe,
+        broadcasters,
+    ) = control_state;
     let (cancel, voice_cancel) = cancel_signals;
     // ── 1. Initialise TTS engine ──────────────────────────────────────────────
     let model_dir_str = model_dir.to_string_lossy().to_string();
@@ -351,6 +378,7 @@ fn tts_worker(
         ));
         return;
     }
+    let mut style_cache = HashMap::from([(voice_name.clone(), style.clone())]);
 
     // ── 2b. Warmup inference ─────────────────────────────────────────────────
     // The first ONNX inference on any session is significantly slower than
@@ -368,7 +396,6 @@ fn tts_worker(
 
     // ── 3. Initialise rodio output device ─────────────────────────────────────
     use rodio::buffer::SamplesBuffer;
-    use rodio::Player;
 
     let sink_handle = match super::audio_output::open_output_sink_by_name(output_device.as_deref())
     {
@@ -396,27 +423,25 @@ fn tts_worker(
         }
     };
 
-    // Single persistent Player for the lifetime of the worker — all sentence
-    // buffers from all text items append here, and rodio plays them gaplessly.
-    // Persistence is what enables cross-item pipelining: the worker never
-    // waits for one item to drain before synthesizing the next.
-    //
-    // Shared (Arc) with the barge-in monitor thread below, which needs to
-    // silence it while this thread is blocked inside `synth_chunk`.
-    let player = Arc::new(Player::connect_new(sink_handle.mixer()));
+    // One coordinator owns the current Player, floor state, and every operation.
+    // It was allocated with the huddle state so onset and playback share the
+    // same serialization boundary even before the TTS worker starts.
+    let playback = human_floor.playback();
+    playback.bind_mixer(sink_handle.mixer());
+    playback_probe.install(Arc::clone(&playback));
 
     // Prime the audio output stream with a short silent buffer.
     // On macOS, CoreAudio initializes the output device lazily on first use.
     // Without this, the first real append races against device startup and
-    // player.empty() returns true before audio has started draining — causing
+    // playback.empty() returns true before audio has started draining — causing
     // the first TTS message to be truncated after a few words.
     {
         let silence = vec![0.0f32; SAMPLE_RATE as usize / 10]; // 100ms of silence
-        player.append(SamplesBuffer::new(channels, rate, silence));
+        playback.append_untracked(SamplesBuffer::new(channels, rate, silence));
         // Wait for the silent buffer to drain — this ensures the output stream
         // is fully initialized before the first real utterance.
         let deadline = std::time::Instant::now() + AUDIO_PRIME_TIMEOUT;
-        while !player.empty() {
+        while !playback.empty() {
             if std::time::Instant::now() >= deadline {
                 eprintln!("buzz-desktop: tts stage=startup status=failed reason=output_prime");
                 let _ = startup_tx.send(Err(
@@ -432,59 +457,20 @@ fn tts_worker(
     }
     eprintln!("buzz-desktop: tts stage=startup status=ready");
 
-    // ── 3b. Barge-in monitor thread ───────────────────────────────────────────
-    //
-    // The worker loop only observes `cancel` between sentences — while it is
-    // blocked inside `synth_chunk` (hundreds of ms for a long sentence),
-    // nothing would silence the audio that is already playing. The monitor
-    // closes that gap: every MONITOR_TICK it checks the flag and, while set,
-    // silences the player and releases the mic gate. It does NOT consume the
-    // flag — the worker still owns that (drain queue, reset lead-in), so the
-    // monitor keeps re-clearing until the worker catches up, which also
-    // covers a sentence appended in the race window after the worker's own
-    // post-synthesis cancel check.
-    //
-    // `player_ops` closes the converse race (found in review): the monitor
-    // loads `cancel == true`, is preempted, the worker consumes the cancel
-    // and appends a fresh post-cancel utterance, then the monitor resumes
-    // from its stale branch and deletes audio that was meant to play. All
-    // worker player mutations (appends and cancel/shutdown clears) hold this
-    // lock, and the monitor re-checks `cancel` *while holding it* — so its
-    // clear either runs before fresh audio can be appended, or observes
-    // `cancel == false` and no-ops. The lock is uncontended except during an
-    // actual barge-in, so the hot path is unaffected.
-    let player_ops = Arc::new(Mutex::new(()));
+    let activity_frames = Arc::new(Mutex::new(VecDeque::<TtsSpeakerActivityFrame>::new()));
     let monitor_stop = Arc::new(AtomicBool::new(false));
-    let monitor = {
-        let player = Arc::clone(&player);
-        let cancel = Arc::clone(&cancel);
-        let voice_cancel = Arc::clone(&voice_cancel);
-        let tts_active = Arc::clone(&tts_active);
-        let stop = Arc::clone(&monitor_stop);
-        let player_ops = Arc::clone(&player_ops);
-        thread::Builder::new()
-            .name("tts-barge-in-monitor".into())
-            .spawn(move || {
-                while !stop.load(Ordering::Acquire) {
-                    if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
-                        let _ops = lock_player_ops(&player_ops);
-                        // Re-check under the lock: the worker may have
-                        // consumed this cancel (and appended fresh audio)
-                        // between the load above and the lock acquisition.
-                        if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
-                            // clear() pauses the persistent player; play()
-                            // un-pauses (see handle_cancel_or_shutdown).
-                            // Idempotent — safe to repeat every tick until
-                            // the worker consumes the flag.
-                            player.clear();
-                            player.play();
-                            tts_active.store(false, Ordering::Release);
-                        }
-                    }
-                    thread::sleep(MONITOR_TICK);
-                }
-            })
-    };
+    let monitor = spawn_tts_monitor(TtsMonitorState {
+        playback: Arc::clone(&playback),
+        cancel: Arc::clone(&cancel),
+        voice_cancel: Arc::clone(&voice_cancel),
+        tts_active: Arc::clone(&tts_active),
+        stop: Arc::clone(&monitor_stop),
+        activity_frames: Arc::clone(&activity_frames),
+        active_speaker: Arc::clone(&active_speaker),
+        speaker_cancel: Arc::clone(&speaker_cancel),
+        broadcasters: broadcasters.clone(),
+        activity_app,
+    });
     if let Err(ref e) = monitor {
         // Degraded but functional: barge-in still works between sentences
         // via the worker's own checks, just not mid-synthesis.
@@ -499,44 +485,65 @@ fn tts_worker(
     // `tts_active` lifecycle: set on the first append while idle, cleared
     // whenever the player has fully drained — either in the idle timeout
     // arm or on item receipt before synthesis begins.
-    let silence_buf_len = (INTER_SENTENCE_SILENCE * SAMPLE_RATE as f32) as usize;
-    // `first_append` = "no audio queued since the player last went idle".
-    // Flipped by `build_sentence_append_buffer` on the first real append; the
-    // idle branch below uses it to decide when to drop `tts_active` and to
-    // arm a fresh lead-in cushion for the next utterance.
-    let mut first_append = true;
+    // EXPERIMENTAL (latency bench): `Some(emit_frames)` = stream PCM deltas
+    // out of Pocket as they are generated (see tts_streaming.rs).
+    let tts_streaming = streaming_emit_frames();
     let mut last_route_id = 0;
     let mut deferred_text = VecDeque::new();
-    let append_audio = |prepared: PreparedModelAudio, route_id: u64| {
-        let _ops = lock_player_ops(&player_ops);
-        if cancel.load(Ordering::Acquire)
-            || voice_cancel.load(Ordering::Acquire)
-            || shutdown.load(Ordering::Acquire)
-        {
-            let reason = if shutdown.load(Ordering::Acquire) {
-                "shutdown"
-            } else if cancel.load(Ordering::Acquire) {
-                "barge_in"
-            } else {
-                "voice_switch"
-            };
-            eprintln!(
-                "buzz-desktop: tts stage=synthesis status=cancelled reason={reason} route_id={route_id}"
-            );
-            return false;
-        }
-        player.append(SamplesBuffer::new(channels, rate, prepared.buffer));
-        eprintln!(
-            "buzz-desktop: tts stage=player status=append_accepted route_id={route_id} chunk_index={} sample_count={}",
-            prepared.chunk_index, prepared.sample_count
-        );
-        // Set this only after append so STT remains open during synthesis.
-        tts_active.store(true, Ordering::Release);
-        true
+    let append_context = TtsAppendContext {
+        playback: &playback,
+        #[cfg(test)]
+        human_floor: &human_floor,
+        cancel: &cancel,
+        voice_cancel: &voice_cancel,
+        shutdown: &shutdown,
+        tts_active: &tts_active,
+        speaker_generations: &speaker_generations,
+        active_speaker: &active_speaker,
+        activity_frames: &activity_frames,
+        broadcasters: &broadcasters,
+        channels,
+        rate,
+    };
+    let append_audio = |prepared: PreparedModelAudio,
+                        route_id: u64,
+                        speaker_pubkey: Option<&str>,
+                        speaker_generation: u64,
+                        floor_epoch: u64| {
+        let broadcast_samples = speaker_pubkey.map(|_| prepared.buffer.clone());
+        append_worker_audio(
+            &append_context,
+            prepared,
+            route_id,
+            speaker_pubkey,
+            speaker_generation,
+            floor_epoch,
+            || {
+                if let (Some(pubkey), Some(samples)) = (speaker_pubkey, broadcast_samples) {
+                    broadcasters.publish(pubkey, speaker_generation, samples);
+                }
+            },
+        )
     };
 
     loop {
         let mut no_current_text = None;
+        if consume_speaker_cancel(
+            &speaker_cancel,
+            &active_speaker,
+            &speaker_generations,
+            &tts_active,
+            (&text_rx, &mut deferred_text, &mut no_current_text),
+            Some(&playback),
+        ) {
+            continue;
+        }
+        if cancel.load(Ordering::Acquire)
+            || voice_cancel.load(Ordering::Acquire)
+            || shutdown.load(Ordering::Acquire)
+        {
+            broadcasters.cancel_all();
+        }
         if handle_cancel_or_shutdown(
             (&cancel, &voice_cancel),
             &shutdown,
@@ -544,25 +551,29 @@ fn tts_worker(
             (&text_rx, &mut deferred_text, &mut no_current_text),
             &voice_change_ack,
             None,
-            Some((&player, &player_ops)),
+            Some(&playback),
         ) {
             if shutdown.load(Ordering::Acquire) {
                 break;
             }
             // Cancel consumed: queued audio cleared, queue drained. The next
             // append starts a new utterance and needs its own lead-in cushion.
-            first_append = true;
             continue;
         }
 
-        // Voice changes cancel the old utterance/queue and are observed here,
-        // before receiving subsequent text. A bad bundled asset falls back to
-        // Mary without discarding the already-warmed Pocket engine.
-        let voice_ready =
-            reconcile_selected_voice(&model_dir, &selected_voice, &mut voice_name, &mut style);
-        acknowledge_voice_change(&voice_change_ack, &voice_cancel);
-        if !voice_ready {
-            continue;
+        // A global Settings voice change cancels the old utterance and is
+        // acknowledged before receiving subsequent text. Per-agent voice
+        // changes are carried by each queue item and never drain other agents.
+        if has_pending_voice_change(&voice_change_ack) {
+            let voice_ready =
+                reconcile_selected_voice(&model_dir, &selected_voice, &mut voice_name, &mut style);
+            if voice_ready {
+                style_cache.insert(voice_name.clone(), style.clone());
+            }
+            acknowledge_voice_change(&voice_change_ack, &voice_cancel);
+            if !voice_ready {
+                continue;
+            }
         }
 
         let mut queued_text = Some(match deferred_text.pop_front() {
@@ -573,13 +584,16 @@ fn tts_worker(
                     // Nothing queued. If playback has also finished, the agent
                     // has gone quiet — release the mic gate and reset the
                     // lead-in so the next utterance gets a fresh cushion.
-                    if player.empty() && !first_append {
+                    playback.release_if_drained(|| {
                         tts_active.store(false, Ordering::Release);
+                        active_speaker
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .take();
                         eprintln!(
                             "buzz-desktop: tts stage=player status=drained route_id={last_route_id}"
                         );
-                        first_append = true;
-                    }
+                    });
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -589,6 +603,12 @@ fn tts_worker(
         // Check cancel again after unblocking — a cancel may have arrived
         // while we were waiting.
         let pending_route_id = queued_text.as_ref().map(|queued| queued.route_id);
+        if cancel.load(Ordering::Acquire)
+            || voice_cancel.load(Ordering::Acquire)
+            || shutdown.load(Ordering::Acquire)
+        {
+            broadcasters.cancel_all();
+        }
         if handle_cancel_or_shutdown(
             (&cancel, &voice_cancel),
             &shutdown,
@@ -596,17 +616,23 @@ fn tts_worker(
             (&text_rx, &mut deferred_text, &mut queued_text),
             &voice_change_ack,
             pending_route_id,
-            Some((&player, &player_ops)),
+            Some(&playback),
         ) {
             if shutdown.load(Ordering::Acquire) {
                 break;
             }
-            first_append = true;
             continue;
         }
         let Some(queued_text) = queued_text else {
             continue;
         };
+        if !queued_speaker_is_current(&speaker_generations, &queued_text) {
+            eprintln!(
+                "buzz-desktop: tts stage=queue status=dropped reason=speaker_removed route_id={}",
+                queued_text.route_id
+            );
+            continue;
+        }
         if queued_text.generation < voice_generation.load(Ordering::Acquire) {
             eprintln!(
                 "buzz-desktop: tts stage=queue status=dropped reason=voice_switch route_id={}",
@@ -614,33 +640,80 @@ fn tts_worker(
             );
             continue;
         }
+        if !playback.empty()
+            && queued_text
+                .speaker_pubkey
+                .as_deref()
+                .is_some_and(|speaker| {
+                    active_speaker
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_deref()
+                        .is_some_and(|active| !active.eq_ignore_ascii_case(speaker))
+                })
+        {
+            deferred_text.push_front(queued_text);
+            thread::sleep(RECV_TIMEOUT);
+            continue;
+        }
+        let mut queued_text =
+            match authorize_or_defer_queued_text(&human_floor, &mut deferred_text, queued_text) {
+                Ok(queued_text) => queued_text,
+                Err(HumanFloorAuthorization::Blocked) => {
+                    thread::sleep(RECV_TIMEOUT);
+                    continue;
+                }
+                Err(HumanFloorAuthorization::Stale) => continue,
+                Err(HumanFloorAuthorization::Permitted) => {
+                    unreachable!("permitted text is returned")
+                }
+            };
+        let requested_voice = queued_text.voice_reference.take().unwrap_or_else(|| {
+            selected_voice
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        });
         let raw_text = queued_text.text;
+        let speaker_pubkey = queued_text.speaker_pubkey;
+        let speaker_generation = queued_text.speaker_generation;
+        let floor_epoch = queued_text.floor_epoch;
         let route_id = queued_text.route_id;
         eprintln!("buzz-desktop: tts stage=synthesis status=started route_id={route_id}");
 
-        // The selected voice can change while this worker is blocked in
-        // recv_timeout. Reconcile again after receipt so the first message
-        // queued after an unpublished pipeline is installed cannot use the
-        // voice captured when construction began.
-        if !reconcile_selected_voice(&model_dir, &selected_voice, &mut voice_name, &mut style) {
+        // If playback already drained while we were waiting for this item,
+        // release stale ownership before doing any potentially slow voice or
+        // synthesis work. Serialize the drain decision with Stop and append so
+        // those paths observe one coherent utterance boundary.
+        playback.release_if_drained(|| {
+            tts_active.store(false, Ordering::Release);
+            active_speaker
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            eprintln!("buzz-desktop: tts stage=player status=drained route_id={last_route_id}");
+        });
+
+        // From this point until the item finishes, an empty player can mean a
+        // voice-preparation or synthesis gap rather than a drained utterance.
+        // Stop must remain able to invalidate the in-flight speaker generation.
+        let _synthesis_flight = playback_probe.begin_synthesis();
+
+        // The selected per-agent voice travels with the queue item, preserving
+        // message order while allowing one warmed Pocket engine to alternate
+        // between cached reference styles.
+        if !reconcile_queued_voice(
+            &model_dir,
+            &requested_voice,
+            &selected_voice,
+            &mut voice_name,
+            &mut style,
+            &mut style_cache,
+        ) {
             eprintln!(
                 "buzz-desktop: tts stage=synthesis status=failed reason=voice_unavailable route_id={route_id}"
             );
             continue;
-        }
-
-        // If playback already drained while we were waiting for this item,
-        // the agent is silent — release the mic gate BEFORE preprocessing/
-        // synthesis. Without this, an item arriving inside the recv timeout
-        // window would run the whole synthesis pass with `tts_active` stuck
-        // true and nothing playing, making STT discard human speech as
-        // "echo" during a silent window. (Pipelining is unaffected: when
-        // audio is still draining, `player.empty()` is false and the flag
-        // stays set across items.)
-        if player.empty() && !first_append {
-            tts_active.store(false, Ordering::Release);
-            eprintln!("buzz-desktop: tts stage=player status=drained route_id={last_route_id}");
-            first_append = true;
         }
 
         // Preprocess text.
@@ -652,17 +725,20 @@ fn tts_worker(
             continue;
         }
 
-        // Split into sentences, then group into synthesis chunks: the first
-        // sentence stays alone (fast time-to-first-audio), the rest pack
-        // greedily up to MAX_CHUNK_CHARS. Playback of each model unit overlaps
-        // synthesis of the next one. The Pocket engine applies its exact
-        // 50-token split; keeping those units within one playback chunk avoids
-        // adding fades and pauses at token-only boundaries.
-        let sentences: Vec<String> = split_sentences(&text)
-            .into_iter()
-            .filter(|s| !s.trim().is_empty())
-            .collect();
-        let chunks = group_sentences_into_chunks(&sentences, MAX_CHUNK_CHARS);
+        // Let Pocket's tokenizer-aware splitter isolate the first sentence for
+        // minimum time-to-first-audio, then pack later sentences into the
+        // largest natural units within the model's exact 50-token limit. Once
+        // each unit is appended, generation of the next proceeds while rodio
+        // plays the already-queued audio.
+        let chunks = match engine.split_text_for_playback(&text) {
+            Ok(chunks) => chunks,
+            Err(_) => {
+                eprintln!(
+                    "buzz-desktop: tts stage=synthesis status=failed reason=chunking route_id={route_id}"
+                );
+                continue;
+            }
+        };
         if chunks.is_empty() {
             eprintln!(
                 "buzz-desktop: tts stage=synthesis status=empty reason=no_chunks route_id={route_id}"
@@ -675,6 +751,12 @@ fn tts_worker(
         let mut model_unit_index = 0_usize;
         'playback_chunks: for chunk in &chunks {
             let mut no_current_text = None;
+            if cancel.load(Ordering::Acquire)
+                || voice_cancel.load(Ordering::Acquire)
+                || shutdown.load(Ordering::Acquire)
+            {
+                broadcasters.cancel_all();
+            }
             if handle_cancel_or_shutdown(
                 (&cancel, &voice_cancel),
                 &shutdown,
@@ -682,15 +764,49 @@ fn tts_worker(
                 (&text_rx, &mut deferred_text, &mut no_current_text),
                 &voice_change_ack,
                 Some(route_id),
-                Some((&player, &player_ops)),
+                Some(&playback),
             ) {
-                first_append = true;
                 synthesis_outcome = "cancelled";
                 break;
             }
 
             let text = chunk.trim();
             if text.is_empty() {
+                continue;
+            }
+
+            // EXPERIMENTAL (latency bench): streaming synthesis path — see
+            // tts_streaming.rs for the mechanics and exactness constraints.
+            if let Some(emit_frames) = tts_streaming {
+                let outcome = synthesize_streaming(
+                    &engine,
+                    text,
+                    &style,
+                    emit_frames,
+                    (&cancel, &voice_cancel, &shutdown),
+                    StreamingPlayback {
+                        playback: &playback,
+                        route_id,
+                    },
+                    &mut |prepared| {
+                        if !append_audio(
+                            prepared,
+                            route_id,
+                            speaker_pubkey.as_deref(),
+                            speaker_generation,
+                            floor_epoch,
+                        ) {
+                            return false;
+                        }
+                        appended_audio = true;
+                        last_route_id = route_id;
+                        true
+                    },
+                );
+                if let Some(outcome) = outcome {
+                    synthesis_outcome = outcome;
+                    break 'playback_chunks;
+                }
                 continue;
             }
 
@@ -715,6 +831,12 @@ fn tts_worker(
                 let chunk_index = model_unit_index;
                 model_unit_index += 1;
                 let mut no_current_text = None;
+                if cancel.load(Ordering::Acquire)
+                    || voice_cancel.load(Ordering::Acquire)
+                    || shutdown.load(Ordering::Acquire)
+                {
+                    broadcasters.cancel_all();
+                }
                 if handle_cancel_or_shutdown(
                     (&cancel, &voice_cancel),
                     &shutdown,
@@ -722,9 +844,8 @@ fn tts_worker(
                     (&text_rx, &mut deferred_text, &mut no_current_text),
                     &voice_change_ack,
                     Some(route_id),
-                    Some((&player, &player_ops)),
+                    Some(&playback),
                 ) {
-                    first_append = true;
                     synthesis_outcome = "cancelled";
                     break 'playback_chunks;
                 }
@@ -748,21 +869,21 @@ fn tts_worker(
                     // synthesis that completed after cancellation so stale audio
                     // never reaches the player, while keeping buzz-voice's
                     // extracted April engine API unchanged.
-                    first_append = true;
                     synthesis_outcome = "cancelled";
                     break 'playback_chunks;
                 }
                 match synthesis {
                     Ok(samples) if !samples.is_empty() => {
-                        if let Some(prepared) = playback_audio.push(
-                            samples,
-                            chunk_index,
-                            &mut first_append,
-                            silence_buf_len,
-                            player.empty(),
-                        ) {
-                            if !append_audio(prepared, route_id) {
-                                first_append = true;
+                        if let Some(prepared) = playback
+                            .prepare_audio(|empty| playback_audio.push(samples, chunk_index, empty))
+                        {
+                            if !append_audio(
+                                prepared,
+                                route_id,
+                                speaker_pubkey.as_deref(),
+                                speaker_generation,
+                                floor_epoch,
+                            ) {
                                 synthesis_outcome = "cancelled";
                                 break 'playback_chunks;
                             }
@@ -784,11 +905,14 @@ fn tts_worker(
                     }
                 }
             }
-            if let Some(prepared) =
-                playback_audio.finish(&mut first_append, silence_buf_len, player.empty())
-            {
-                if !append_audio(prepared, route_id) {
-                    first_append = true;
+            if let Some(prepared) = playback.prepare_audio(|empty| playback_audio.finish(empty)) {
+                if !append_audio(
+                    prepared,
+                    route_id,
+                    speaker_pubkey.as_deref(),
+                    speaker_generation,
+                    floor_epoch,
+                ) {
                     synthesis_outcome = "cancelled";
                     break 'playback_chunks;
                 }
@@ -808,8 +932,8 @@ fn tts_worker(
         }
     }
 
-    // Stop the barge-in monitor before exiting — it holds a Player clone,
-    // and an orphaned monitor would keep ticking against a dead pipeline.
+    // Stop the barge-in monitor before exiting so an orphaned monitor cannot
+    // keep ticking against a dead pipeline.
     monitor_stop.store(true, Ordering::Release);
     if let Ok(handle) = monitor {
         let _ = handle.join();
@@ -817,90 +941,6 @@ fn tts_worker(
 
     finish_voice_change_ack(&voice_change_ack);
     tts_active.store(false, Ordering::Release);
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Check for cancel or shutdown. Returns `true` if the caller should break/continue.
-/// On cancel: drains the text queue and clears the cancel flag.
-///
-/// `player` pairs the Player with the `player_ops` mutex shared with the
-/// barge-in monitor thread; the cancel/shutdown clear runs under that lock so
-/// it is serialized with the monitor's stale-branch re-check (see the monitor
-/// block in `tts_worker`).
-fn handle_cancel_or_shutdown(
-    cancel_signals: CancelSignals<'_>,
-    shutdown: &AtomicBool,
-    tts_active: &AtomicBool,
-    text_state: CancelTextState<'_>,
-    voice_change_ack: &VoiceChangeAck,
-    active_route_id: Option<u64>,
-    player: Option<(&rodio::Player, &Mutex<()>)>,
-) -> bool {
-    let (cancel, voice_cancel) = cancel_signals;
-    let (text_rx, deferred_text, current_text) = text_state;
-    if shutdown.load(Ordering::Acquire) {
-        eprintln!(
-            "buzz-desktop: tts stage=cancellation reason=shutdown route_id={}",
-            active_route_id.unwrap_or(0)
-        );
-        if let Some((p, ops)) = player {
-            let _ops = lock_player_ops(ops);
-            p.clear();
-        }
-        tts_active.store(false, Ordering::Release);
-        return true;
-    }
-    if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
-        // Serialize with begin_voice_change so the generation boundary and
-        // cancel consumption are observed as one transition.
-        let pending_voice_change = voice_change_ack
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        // Consume at the serialization point. A later barge-in remains true
-        // for the next pass instead of being overwritten after queue cleanup.
-        let barge_in = cancel.swap(false, Ordering::AcqRel);
-        voice_cancel.store(false, Ordering::Release);
-        eprintln!(
-            "buzz-desktop: tts stage=cancellation reason={} route_id={}",
-            if barge_in { "barge_in" } else { "voice_switch" },
-            active_route_id.unwrap_or(0)
-        );
-        let preserve_generation = (!barge_in)
-            .then(|| {
-                pending_voice_change
-                    .as_ref()
-                    .map(|pending| pending.generation)
-            })
-            .flatten();
-        retain_cancelled_text(deferred_text, current_text, text_rx, preserve_generation);
-        if let Some((p, ops)) = player {
-            let _ops = lock_player_ops(ops);
-            // `Player::clear()` removes queued sources AND pauses the player
-            // (rodio 0.22 `clear()` ends with `self.pause()`). With one
-            // persistent Player for the worker's lifetime, the un-pause is
-            // mandatory: without `play()`, every append after a barge-in
-            // would queue silently forever.
-            p.clear();
-            p.play();
-            // Consume the flag under the lock: once released with
-            // `cancel == false`, the monitor's stale branch no-ops instead
-            // of clearing the fresh post-cancel utterance.
-        }
-        tts_active.store(false, Ordering::Release);
-        return true;
-    }
-    false
-}
-
-/// Acquire the `player_ops` lock, recovering from poison.
-///
-/// The data under the mutex is `()` — it only serializes Player mutations —
-/// so a panicked holder leaves nothing inconsistent to observe and recovery
-/// is always safe. Without this, a worker panic would wedge the monitor (or
-/// vice versa) on `unwrap()`.
-fn lock_player_ops(ops: &Mutex<()>) -> MutexGuard<'_, ()> {
-    ops.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

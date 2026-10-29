@@ -4,6 +4,7 @@
 
 use nostr::Filter;
 
+use crate::channel::LEGACY_CHANNEL_TYPES;
 use crate::event::StoredEvent;
 
 /// Returns `true` if the event matches any of the provided NIP-01 filters.
@@ -12,9 +13,9 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 }
 
 /// Result-level read authorization for relay-signed events whose content is
-/// private to a single viewer. Currently gates `KIND_DM_VISIBILITY` and
-/// `KIND_AGENT_TURN_METRIC`: the reader MUST equal the event's `#p` tag
-/// (owner). Returns `true` for every other kind.
+/// private to a single viewer: the kinds in
+/// [`crate::kind::RESULT_GATED_KINDS`]. The reader MUST equal the event's
+/// `#p` tag (owner). Returns `true` for every other kind.
 ///
 /// This guards every delivery surface — WS historical pull (`req.rs`), HTTP
 /// bridge (`bridge.rs`), and live fan-out (`event.rs`) — so a query that
@@ -22,7 +23,7 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 /// a known event id) still cannot read another user's private event.
 pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
     let kind = crate::kind::event_kind_u32(event);
-    if kind != crate::kind::KIND_DM_VISIBILITY && kind != crate::kind::KIND_AGENT_TURN_METRIC {
+    if !crate::kind::RESULT_GATED_KINDS.contains(&kind) {
         return true;
     }
     let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
@@ -32,7 +33,70 @@ pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str
         .any(|t| t.content() == Some(reader_pubkey_hex))
 }
 
+/// The membership notice kinds (44100 added, 44101 removed). Only the relay
+/// signs them, and it tags each one with its channel's type:
+/// `["t", <channel_type>]` (NIP-CL).
+pub const MEMBERSHIP_NOTICE_KINDS: [u32; 2] = [
+    crate::kind::KIND_MEMBER_ADDED_NOTIFICATION,
+    crate::kind::KIND_MEMBER_REMOVED_NOTIFICATION,
+];
+
+/// The tag name that carries a membership notice's channel type.
+pub const NOTICE_CHANNEL_TYPE_TAG: &str = "t";
+
+/// Whether `event` is a membership notice (kind 44100/44101).
+pub fn is_membership_notice(event: &nostr::Event) -> bool {
+    MEMBERSHIP_NOTICE_KINDS.contains(&crate::kind::event_kind_u32(event))
+}
+
+/// The channel types whose membership notices `filter` may see: its `#t`
+/// values, or [`LEGACY_CHANNEL_TYPES`] when it has no `#t`. A notice without
+/// a type tag (stored before NIP-CL) counts as every legacy type.
+///
+/// This is the one rule for notice visibility (NIP-CL). [`filters_match`]
+/// applies it, and `EventQuery::notice_channel_types` applies it in SQL.
+pub fn notice_channel_types(filter: &Filter) -> Option<Vec<String>> {
+    filter
+        .generic_tags
+        .get(&nostr::SingleLetterTag::lowercase(nostr::Alphabet::T))
+        .map(|values| values.iter().map(ToString::to_string).collect())
+}
+
+/// Whether a filter whose visible types are `visible` (see
+/// [`notice_channel_types`]) may see membership notice `event`.
+///
+/// A tagged notice matches when one of its types is visible. An untagged
+/// notice is a legacy type, so it matches when a legacy type is visible.
+pub fn notice_visible(visible: Option<&[String]>, event: &nostr::Event) -> bool {
+    let is_visible = |channel_type: &str| match visible {
+        Some(types) => types.iter().any(|t| t == channel_type),
+        None => LEGACY_CHANNEL_TYPES.contains(&channel_type),
+    };
+    let mut tagged = false;
+    for tag in event.tags.iter() {
+        let tag = tag.as_slice();
+        if tag.first().map(String::as_str) != Some(NOTICE_CHANNEL_TYPE_TAG) {
+            continue;
+        }
+        tagged = true;
+        if tag
+            .get(1)
+            .is_some_and(|channel_type| is_visible(channel_type))
+        {
+            return true;
+        }
+    }
+    !tagged && LEGACY_CHANNEL_TYPES.iter().any(|t| is_visible(t))
+}
+
 fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
+    // A membership notice's `#t` is its channel type, matched by the notice
+    // rule above instead of the plain tag match below.
+    let notice = is_membership_notice(&ev.event);
+    if notice && !notice_visible(notice_channel_types(f).as_deref(), &ev.event) {
+        return false;
+    }
+
     if let Some(kinds) = &f.kinds {
         if !kinds.contains(&ev.event.kind) {
             return false;
@@ -67,6 +131,9 @@ fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
 
     for (tag_key, tag_values) in f.generic_tags.iter() {
         let tag_key_str = tag_key.to_string();
+        if notice && tag_key_str == NOTICE_CHANNEL_TYPE_TAG {
+            continue;
+        }
         let has_match = tag_values.iter().any(|filter_val| {
             ev.event
                 .tags
@@ -117,6 +184,88 @@ mod tests {
             .sign_with_keys(&keys)
             .expect("sign");
         StoredEvent::with_received_at(event, Utc::now(), None, true)
+    }
+
+    #[test]
+    fn a_notice_matches_only_filters_that_know_its_channel_type() {
+        let relay = Keys::generate();
+        let member = Keys::generate().public_key();
+        let notice = |kind: u32, channel_type: Option<&str>| {
+            let mut tags = vec![
+                Tag::parse(["p", &member.to_hex()]).unwrap(),
+                Tag::parse(["h", "c"]).unwrap(),
+            ];
+            if let Some(channel_type) = channel_type {
+                tags.push(Tag::parse([NOTICE_CHANNEL_TYPE_TAG, channel_type]).unwrap());
+            }
+            let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags(tags)
+                .sign_with_keys(&relay)
+                .expect("sign");
+            StoredEvent::with_received_at(event, Utc::now(), None, true)
+        };
+        let filter = |json: serde_json::Value| -> Filter { serde_json::from_value(json).unwrap() };
+        let p = member.to_hex();
+        let all = ["stream", "forum", "dm", "workflow", "system"];
+        // (filter, sees untagged, stream, system, a type added later)
+        let cases = [
+            (
+                serde_json::json!({"kinds": [44100, 44101], "#p": [p]}),
+                [true, true, false, false],
+            ),
+            (serde_json::json!({"#p": [p]}), [true, true, false, false]),
+            (serde_json::json!({}), [true, true, false, false]),
+            (
+                serde_json::json!({"#t": ["other"]}),
+                [false, false, false, false],
+            ),
+            (
+                serde_json::json!({"kinds": [44100, 44101], "#p": [p], "#t": all}),
+                [true, true, true, false],
+            ),
+            (
+                serde_json::json!({"#t": ["system"]}),
+                [false, false, true, false],
+            ),
+            (
+                serde_json::json!({"#t": ["dm"]}),
+                [true, false, false, false],
+            ),
+            (
+                serde_json::json!({"#t": ["future"]}),
+                [false, false, false, true],
+            ),
+        ];
+        for kind in MEMBERSHIP_NOTICE_KINDS {
+            let notices = [
+                notice(kind, None),
+                notice(kind, Some("stream")),
+                notice(kind, Some("system")),
+                notice(kind, Some("future")),
+            ];
+            for (json, expected) in &cases {
+                let f = filter(json.clone());
+                for (ev, expected) in notices.iter().zip(expected) {
+                    assert_eq!(
+                        filters_match(std::slice::from_ref(&f), ev),
+                        *expected,
+                        "kind {kind}, filter {json}, notice {:?}",
+                        ev.event.tags
+                    );
+                }
+            }
+        }
+        // Other kinds keep the plain `#t` match.
+        let other = notice(44200, Some("system"));
+        assert!(filters_match(&[filter(serde_json::json!({}))], &other));
+        assert!(filters_match(
+            &[filter(serde_json::json!({"#t": ["system"]}))],
+            &other
+        ));
+        assert!(!filters_match(
+            &[filter(serde_json::json!({"#t": ["stream"]}))],
+            &other
+        ));
     }
 
     #[test]
@@ -182,6 +331,28 @@ mod tests {
             &[Filter::new().event(nostr::EventId::from_byte_array([1u8; 32]))],
             &ev
         ));
+    }
+
+    #[test]
+    fn h_tag_multi_value_filter_matches_any_channel() {
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let stored = stored_with_tag(Tag::parse(["h", &channel_b.to_string()]).unwrap());
+        let filter = Filter::new().custom_tags(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            [channel_a.to_string(), channel_b.to_string()],
+        );
+
+        assert!(filters_match(&[filter], &stored));
+    }
+
+    #[test]
+    fn empty_h_tag_filter_matches_nothing() {
+        let channel_id = uuid::Uuid::new_v4();
+        let stored = stored_with_tag(Tag::parse(["h", &channel_id.to_string()]).unwrap());
+        let filter: Filter = serde_json::from_value(serde_json::json!({ "#h": [] })).unwrap();
+
+        assert!(!filters_match(&[filter], &stored));
     }
 
     #[test]

@@ -12,13 +12,18 @@ import {
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
+import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import type {
   RelayMember,
   RelayMemberRole,
   UserProfileSummary,
 } from "@/shared/api/types";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import {
+  normalizePubkey,
+  truncateNpub,
+  UNAVAILABLE_KEY_LABEL,
+} from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -64,7 +69,7 @@ function HoverMemberIdentity({
   displayName: string;
   pubkey: string;
 }) {
-  const npub = npubFromPubkey(pubkey) ?? pubkey;
+  const npub = npubFromPubkey(pubkey) ?? UNAVAILABLE_KEY_LABEL;
   return (
     <span className="inline-grid min-w-0 max-w-full grid-cols-1" title={npub}>
       <span
@@ -77,7 +82,7 @@ function HoverMemberIdentity({
         className="col-start-1 row-start-1 max-w-0 truncate font-mono text-2xs opacity-0 blur-0 transition-[max-width,opacity,filter] duration-[250ms] ease-in-out group-hover/member:max-w-40 group-hover/member:opacity-100 group-hover/member:blur-0 group-focus-within/member:max-w-40 group-focus-within/member:opacity-100 group-focus-within/member:blur-0 motion-reduce:transition-none"
         data-testid={`relay-member-npub-${pubkey}`}
       >
-        {truncatePubkey(npub)}
+        {truncateNpub(npub)}
       </span>
     </span>
   );
@@ -139,6 +144,7 @@ function RelayMemberRow({
           avatarUrl={profile?.avatarUrl ?? null}
           className="h-9 w-9 text-xs shadow-none"
           label={displayName}
+          shape={profile?.isAgent === true ? "squircle" : "circle"}
         />
       </UserProfilePopover>
       <div className="min-w-0 flex-1">
@@ -154,7 +160,10 @@ function RelayMemberRow({
             <Shield className="h-4 w-4 text-blue-500" />
           ) : null}
         </div>
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <div
+          className="flex items-center gap-1.5 text-xs text-muted-foreground/70"
+          data-settings-subcopy
+        >
           <span className="shrink-0 capitalize">{member.role}</span>
           <span aria-hidden="true" className="shrink-0">
             ·
@@ -311,19 +320,17 @@ export function CommunityMembersSettingsCard({
         description="Manage members and community access."
       />
 
-      <div className="overflow-hidden rounded-2xl border border-border/70 bg-background/70 shadow-xs">
+      <SettingsOptionGroup
+        title={
+          <>
+            Members
+            {members.length > 0 ? (
+              <span className="ml-1.5 font-normal">{members.length}</span>
+            ) : null}
+          </>
+        }
+      >
         <div className="space-y-3 p-4 sm:p-5">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-sm font-medium">
-              Members
-              {members.length > 0 ? (
-                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                  {members.length}
-                </span>
-              ) : null}
-            </h2>
-          </div>
-
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <input
@@ -374,7 +381,7 @@ export function CommunityMembersSettingsCard({
             />
           )}
         </div>
-      </div>
+      </SettingsOptionGroup>
 
       <CommunityInviteDialog
         isOwner={currentRole === "owner"}

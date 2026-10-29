@@ -133,9 +133,14 @@ pub fn backup_file_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join(BACKUP_FILE_NAME)
 }
 
-/// Atomically write `ncryptsec` to `path` with owner-only permissions, then
-/// reread and byte-compare. Same crash-safety pattern as
+/// Atomically write the app-managed `ncryptsec` backup with owner-only
+/// permissions, then reread and byte-compare. Same crash-safety pattern as
 /// `app_state::save_key_file`.
+///
+/// Portable exports selected through a native save panel must use
+/// [`write_portable_backup_file`] instead: sandboxed macOS grants access to the
+/// selected path, but not to the sibling temporary file this writer needs.
+#[allow(dead_code)] // Retained for durable app-managed backups; portable exports must not use it.
 pub fn write_backup_file(path: &std::path::Path, ncryptsec: &str) -> Result<(), String> {
     use atomic_write_file::AtomicWriteFile;
     use std::io::Write;
@@ -155,6 +160,56 @@ pub fn write_backup_file(path: &std::path::Path, ncryptsec: &str) -> Result<(), 
     file.commit()
         .map_err(|e| format!("commit backup file: {e}"))?;
 
+    verify_backup_file(path, ncryptsec)
+}
+
+/// Write a user-selected portable backup without creating a sibling file.
+///
+/// Native macOS save panels authorize the exact selected path in protected
+/// folders such as Downloads, not an atomic writer's hidden sibling. Opening
+/// with `create_new` uses only that authorized path and also guarantees an
+/// existing backup is never truncated: users must choose a new filename when
+/// the destination already exists. After writing, the file is synced and its
+/// persisted bytes are reread before success is reported.
+pub fn write_portable_backup_file(path: &std::path::Path, ncryptsec: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "backup file already exists; choose a new filename so the existing backup stays safe"
+                .to_string()
+        } else {
+            format!("create portable backup file: {error}")
+        }
+    })?;
+
+    let write_result = file
+        .write_all(ncryptsec.as_bytes())
+        .map_err(|e| format!("write portable backup file: {e}"))
+        .and_then(|()| {
+            file.sync_all()
+                .map_err(|e| format!("sync portable backup file: {e}"))
+        });
+    drop(file);
+
+    let result = write_result.and_then(|()| verify_backup_file(path, ncryptsec));
+    if result.is_err() {
+        // This function created the destination exclusively, so cleanup cannot
+        // clobber a backup that existed before the save attempt.
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn verify_backup_file(path: &std::path::Path, ncryptsec: &str) -> Result<(), String> {
     // Reread and byte-compare: only report success for bytes that are
     // actually on disk.
     let on_disk = std::fs::read_to_string(path).map_err(|e| format!("reread backup file: {e}"))?;

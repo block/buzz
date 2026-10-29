@@ -14,7 +14,7 @@ import {
   KIND_GIT_STATUS_OPEN,
   KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
-import type { Project } from "./hooks";
+import type { Repository as Project } from "./hooks";
 import {
   nextProjectPullRequestStatusCreatedAt,
   type ProjectPullRequest,
@@ -84,8 +84,8 @@ async function updateProjectPullRequestStatus({
 
   await relayClient.publishEvent(
     event,
-    "Timed out updating pull request status.",
-    "Failed to update pull request status.",
+    "Timed out updating review status.",
+    "Failed to update review status.",
   );
 }
 
@@ -177,9 +177,9 @@ const REVIEW_DECISION_DETAILS: Record<
 > = {
   approve: {
     content: "Approved these changes",
-    errorMessage: "Failed to approve pull request.",
+    errorMessage: "Failed to approve review.",
     label: PR_APPROVAL_LABEL,
-    timeoutMessage: "Timed out approving pull request.",
+    timeoutMessage: "Timed out approving review.",
   },
   "request-changes": {
     content: "Requested changes",
@@ -203,7 +203,7 @@ async function submitProjectPullRequestReview({
   pullRequest: ProjectPullRequest;
 }): Promise<void> {
   if (!pullRequest.commit) {
-    throw new Error("The pull request has no commit to review.");
+    throw new Error("The review has no commit to inspect.");
   }
   const details = REVIEW_DECISION_DETAILS[decision];
   const recipients = new Set([

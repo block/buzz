@@ -175,7 +175,7 @@ pub fn resolve_voice_for_backend(
     resolve_voice_for_backend_in_registry(preferences, backend, &bundled_voice_registry())
 }
 
-fn resolve_voice_for_backend_in_registry(
+pub(crate) fn resolve_voice_for_backend_in_registry(
     preferences: &[String],
     backend: &str,
     registry: &[VoiceRegistryEntry],
@@ -622,8 +622,10 @@ pub async fn preview_pocket_voice(
             model_dir,
             active.clone(),
             cancel,
+            super::human_floor::HumanFloor::new(),
             &voice_name,
             output_device,
+            None,
         )?;
         pipeline.speak("Hello! This is how I’ll read agent responses.".to_string())?;
         let started = std::time::Instant::now();

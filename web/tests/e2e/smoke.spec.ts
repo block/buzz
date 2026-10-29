@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
+import {
+  BUZZ_ANDROID_PLAY_STORE_URL,
+  BUZZ_IOS_APP_STORE_URL,
+  BUZZ_RELEASES_URL,
+} from "../../src/shared/lib/buzz-download";
 
 test("home page loads with Buzz branding", async ({ page }) => {
   await page.goto("/");
@@ -74,6 +79,9 @@ test("invite requires age and legal consent before opening Buzz", async ({
     "href",
     "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_x64-setup_alpha-unsigned.exe",
   );
+  await expect(
+    page.getByRole("link", { name: "Browse releases" }),
+  ).toHaveAttribute("href", "https://github.com/block/buzz/releases");
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
@@ -201,6 +209,66 @@ test("invite can enroll a NIP-07 identity for browser access", async ({
   expect(claimObserved).toBe(true);
 });
 
+for (const [sentinel, guidance] of [
+  [
+    "invite_restricted",
+    "This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.",
+  ],
+  [
+    "invite_owner_mismatch",
+    "This account does not match its recorded owner. Use the correct account or owner identity to join this community.",
+  ],
+]) {
+  test(`invite shows recovery for ${sentinel} without automatically retrying`, async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.assign(window, {
+        nostr: {
+          async getPublicKey() {
+            return "ab".repeat(32);
+          },
+          async signEvent(event: Record<string, unknown>) {
+            return {
+              ...event,
+              id: "cd".repeat(32),
+              pubkey: "ab".repeat(32),
+              sig: "ef".repeat(64),
+            };
+          },
+        },
+      });
+    });
+    await page.route("**/api/join-policy", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ policy: null }),
+      }),
+    );
+    let attempts = 0;
+    await page.route("**/api/invites/claim", async (route) => {
+      attempts++;
+      expect(route.request().postDataJSON()).toEqual({ code: "browser-code" });
+      await route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({ error: sentinel }),
+      });
+    });
+    await page.goto("/invite/browser-code");
+    const join = page.getByRole("button", { name: "Join in browser" });
+    await join.click();
+    await expect(page.getByRole("alert")).toHaveText(guidance);
+    await expect(join).toBeEnabled();
+    expect(attempts).toBe(1);
+    await expect(page).toHaveURL(/\/invite\/browser-code$/);
+    await join.click();
+    await expect(page.getByRole("alert")).toHaveText(guidance);
+    expect(attempts).toBe(2);
+  });
+}
+
 test("invite asks Safari users to choose their Mac download", async ({
   browser,
 }) => {
@@ -260,12 +328,13 @@ test("invite asks Safari users to choose their Mac download", async ({
   await context.close();
 });
 
-test("invite download falls back for mobile and non-desktop devices", async ({
+test("invite download links to the appropriate platform destination", async ({
   browser,
 }) => {
-  const unsupportedDevices = [
+  const devices = [
     {
       name: "iPhone Safari",
+      expectedUrl: BUZZ_IOS_APP_STORE_URL,
       platform: "iPhone",
       userAgent:
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15",
@@ -273,6 +342,7 @@ test("invite download falls back for mobile and non-desktop devices", async ({
     },
     {
       name: "iPadOS desktop mode",
+      expectedUrl: BUZZ_IOS_APP_STORE_URL,
       platform: "MacIntel",
       userAgent:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15",
@@ -280,20 +350,30 @@ test("invite download falls back for mobile and non-desktop devices", async ({
     },
     {
       name: "Android phone",
+      expectedUrl: BUZZ_ANDROID_PLAY_STORE_URL,
       platform: "Linux armv8l",
       userAgent:
         "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 Mobile",
       maxTouchPoints: 5,
     },
     {
+      name: "Fire tablet",
+      expectedUrl: BUZZ_RELEASES_URL,
+      platform: "Linux armv8l",
+      userAgent:
+        "Mozilla/5.0 (Linux; Android 9; KFMAWI) AppleWebKit/537.36 Silk/126.0 like Chrome/126.0.0.0 Safari/537.36",
+      maxTouchPoints: 5,
+    },
+    {
       name: "ChromeOS",
+      expectedUrl: BUZZ_RELEASES_URL,
       platform: "Linux x86_64",
       userAgent: "Mozilla/5.0 (X11; CrOS x86_64 16093.68.0) AppleWebKit/537.36",
       maxTouchPoints: 0,
     },
   ];
 
-  for (const device of unsupportedDevices) {
+  for (const device of devices) {
     const context = await browser.newContext({ userAgent: device.userAgent });
     await context.addInitScript(({ platform, maxTouchPoints }) => {
       Object.defineProperties(navigator, {
@@ -301,7 +381,12 @@ test("invite download falls back for mobile and non-desktop devices", async ({
         maxTouchPoints: { configurable: true, value: maxTouchPoints },
         userAgentData: {
           configurable: true,
-          value: { platform, mobile: maxTouchPoints > 0 },
+          value: {
+            platform,
+            mobile: maxTouchPoints > 0,
+            // Store routing must not wait for desktop architecture hints.
+            getHighEntropyValues: () => new Promise(() => {}),
+          },
         },
       });
     }, device);
@@ -343,7 +428,17 @@ test("invite download falls back for mobile and non-desktop devices", async ({
     await expect(
       page.getByRole("link", { name: "Download it now" }),
       device.name,
+    ).toHaveAttribute("href", device.expectedUrl);
+    await expect(
+      page.getByRole("link", { name: "Browse releases" }),
+      device.name,
     ).toHaveAttribute("href", "https://github.com/block/buzz/releases");
+    await context.route(device.expectedUrl, (route) =>
+      route.fulfill({ contentType: "text/html", body: "Store destination" }),
+    );
+    const destination = context.waitForEvent("page");
+    await page.getByRole("link", { name: "Download it now" }).click();
+    await expect(await destination).toHaveURL(device.expectedUrl);
     await context.close();
   }
 });

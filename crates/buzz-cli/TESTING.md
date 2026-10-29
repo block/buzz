@@ -216,8 +216,11 @@ echo 'Body with `backticks` and $vars stays literal.' \
 buzz messages get --channel "$CHANNEL_ID" | jq .
 buzz messages get --channel "$CHANNEL_ID" --limit 5 | jq .
 
-# messages thread
+# messages thread from the root, a reply, and a canonical link
 buzz messages thread --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq .
+buzz messages thread --channel "$CHANNEL_ID" --event "$REPLY_ID" | jq .
+buzz messages thread \
+  --link "buzz://message?channel=$CHANNEL_ID&id=$REPLY_ID&thread=$EVENT_ID" | jq .
 
 # messages search
 buzz messages search --query "Hello" | jq .
@@ -330,7 +333,7 @@ buzz users presence --pubkeys "$MY_PUBKEY" | jq .
 buzz users set-presence --status online | jq .
 buzz users set-presence --status away | jq .
 buzz users set-presence --status offline | jq .
-# Note: set-presence may fail — kind:20001 is ephemeral and rejected by the HTTP bridge
+# Note: set-presence may fail — the HTTP bridge rejects kind:20001; presence is WebSocket-only
 
 # users set-status — NIP-38 kind:30315 on the d:general coordinate
 buzz users set-status --text "reviewing PRs" --emoji "🔍" | jq .
@@ -425,7 +428,8 @@ buzz workflows delete --workflow "$WF_ID" | jq .
 ```bash
 buzz feed get | jq .
 buzz feed get --limit 5 | jq .
-# Expected: [{id,pubkey,kind,content,created_at,tags}] — sig-stripped, sorted newest-first
+# Expected: complete signed Nostr events with
+# {id,pubkey,kind,content,created_at,sig,tags}, sorted newest-first
 ```
 
 ### 6.11 Forum & Voting

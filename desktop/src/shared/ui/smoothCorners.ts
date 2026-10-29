@@ -1,3 +1,36 @@
+/**
+ * Corner smoothing ("squircle") for media surfaces.
+ *
+ * CSS `border-radius` can only draw a circular arc. This helper reads an
+ * element's computed radius and replaces the shape with an equivalent
+ * *smoothed* corner, applied at runtime as an inline `clip-path`. The radius
+ * token stays the source of truth — `rounded-2xl` still means a 16px corner,
+ * it just renders as a smoothed 16px corner (the curve starts 1.6x further
+ * along the edge, so it reads wider and softer than a plain arc).
+ *
+ * INVARIANT — flush children must share the parent's corner treatment.
+ *
+ * A smooth-cornered parent clips its subtree. Any child that sits *flush*
+ * against a clipped edge therefore has those corners carved by the parent's
+ * smoothed path, while its remaining corners are drawn by its own
+ * `border-radius`. A plain arc and a smoothed corner of the *same* radius are
+ * different shapes, so such a child renders visibly mismatched corners — the
+ * number matching is not enough.
+ *
+ * So when a child is flush to a smooth-cornered parent (typically because the
+ * parent zeroes its padding, e.g. `p-0`), either:
+ *   - give the child `useSmoothCorners` too, so both sides share one curve
+ *     (see `compact-link-preview-attachment.tsx`), or
+ *   - give the child no radius on the flush side and let the parent's clip own
+ *     that silhouette entirely.
+ *
+ * Inset children are unaffected: they never share a corner with the clip.
+ *
+ * This cannot be caught by a lint rule — "flush" is a runtime layout fact, not
+ * something visible in the source. Guard it with `expectSmoothCorners()` from
+ * `desktop/tests/helpers/css.ts` instead.
+ */
+
 import * as React from "react";
 
 export const SMOOTH_CORNER_SMOOTHING = 0.6;

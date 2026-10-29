@@ -17,6 +17,10 @@
 //! are driven by user-initiated file transfers rather than bridge event flow,
 //! and they have independent retry logic.
 //!
+//! The native WS client also arms this gate for the explicit
+//! `shared admission unavailable` signal. Quota/concurrency CLOSEDs stay on
+//! WebSocket; they do not consume the HTTP bridge's separate ApiCalls budget.
+//!
 //! **Community scope:** the gate is reset on every `apply_workspace` call,
 //! mirroring the TS gate's `resetRateLimitGate()` on community switch in
 //! `useCommunityInit.ts`. A 429 from community A cannot stall community B.
@@ -36,11 +40,14 @@ const DEFAULT_RATE_LIMIT_SECONDS: u64 = 10;
 /// Prevents an untrusted relay from pinning traffic for an unreasonable window
 /// or overflowing `Instant` arithmetic.
 /// Exposed `pub` so `relay.rs` can clamp the hint before embedding it in the
-/// returned error string — ensuring every consumer (Rust gate and TS gate via
-/// `applyTauriRateLimitIfNeeded`) sees the same capped value.
+/// returned error string, matching the window the native HTTP gate honours.
 pub const MAX_HINT_SECONDS: u64 = 300;
 
 static GATE_EXPIRY: Mutex<Option<Instant>> = Mutex::new(None);
+
+// The gate is process-wide, so every test that can arm it must serialize.
+#[cfg(test)]
+pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Arm (or extend) the admission gate from a relay 429.
 ///
@@ -105,9 +112,8 @@ mod tests {
     use super::*;
 
     // The gate is a process-wide static shared by every test in this binary,
-    // so all gate tests serialize on one async lock to keep armed expiries
+    // so all tests that arm it serialize on one async lock to keep expiries
     // from bleeding between parallel test threads.
-    pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test(start_paused = true)]
     async fn wait_returns_immediately_when_gate_is_inactive() {

@@ -6,6 +6,7 @@ import {
   selectTimelineBodySurface,
   selectTimelineIntroSurface,
 } from "@/features/messages/lib/timelineSnapshot";
+import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import { preloadTimelineImages } from "@/features/messages/lib/timelineImagePreload";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
@@ -16,8 +17,10 @@ import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
+import { useCommittedEmptyTimeline } from "./useCommittedEmptyTimeline";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { ChannelIntroBlock, type ChannelIntro } from "./ChannelIntroBlock";
+import { MessageTimelineErrorCard } from "./MessageTimelineErrorCard";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import type { TimelineVirtualizerApi } from "./TimelineMessageList";
@@ -51,7 +54,9 @@ type MessageTimelineProps = {
     displayName: string;
     participants: DirectMessageIntroParticipant[];
   } | null;
+  isError?: boolean;
   isLoading?: boolean;
+  onRetry?: () => void;
   entranceMessageId?: string | null;
   onEntranceMessageComplete?: (messageId: string) => void;
   emptyTitle?: string;
@@ -70,6 +75,14 @@ type MessageTimelineProps = {
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
+  /** Companion huddle transcripts are live conversations, not channel history. */
+  hideDayDividers?: boolean;
+  /** Show speaker identity on every row instead of grouping consecutive messages. */
+  alwaysShowMessageIdentity?: boolean;
+  /** Hide agent access-policy badges in the purpose-built Huddle chat. */
+  hideAgentAccessBadges?: boolean;
+  /** Stable context rendered above the timeline, including when it is empty. */
+  pinnedIntro?: React.ReactNode;
   isFetchingOlder?: boolean;
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
@@ -84,6 +97,7 @@ type MessageTimelineProps = {
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
+  onOpenThread?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
@@ -153,7 +167,9 @@ const MessageTimelineBase = React.forwardRef<
     messages,
     mainEntries,
     threadSummaries,
+    isError = false,
     isLoading = false,
+    onRetry,
     entranceMessageId = null,
     onEntranceMessageComplete,
     emptyTitle = "No messages yet",
@@ -161,6 +177,10 @@ const MessageTimelineBase = React.forwardRef<
     currentPubkey,
     fetchOlder,
     hasComposerOverlay = true,
+    hideDayDividers = false,
+    alwaysShowMessageIdentity = false,
+    hideAgentAccessBadges = false,
+    pinnedIntro,
     hasOlderMessages = true,
     historyExhausted = false,
     isFetchingOlder = false,
@@ -178,6 +198,7 @@ const MessageTimelineBase = React.forwardRef<
     onMarkUnread,
     onMarkRead,
     onReply,
+    onOpenThread,
     channelName,
     channelType,
     isSendingVideoReviewComment = false,
@@ -271,13 +292,25 @@ const MessageTimelineBase = React.forwardRef<
     setTimelineVirtualizerApi(null);
   }, [scrollContainerRef, scrollContainerDomKey]);
 
+  const hasPersistentIntro =
+    channelIntro !== null || directMessageIntro !== null || pinnedIntro != null;
+  const timelineIsLoading = isLoading || isDeferredSnapshotStale;
+  const preserveSettledEmptyIntro = useCommittedEmptyTimeline({
+    channelId: channelId ?? null,
+    deferredCount: deferredMessages.length,
+    hasPersistentIntro,
+    isLoading: timelineIsLoading,
+    liveCount: messages.length,
+  });
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
-    hasPersistentIntro: channelIntro !== null || directMessageIntro !== null,
-    isLoading: isLoading || isDeferredSnapshotStale,
+    preserveSettledEmptyIntro,
+    isError,
+    isLoading: timelineIsLoading,
     liveCount: messages.length,
   });
   const showTimelineSkeleton = timelineBodySurface === "skeleton";
+  const showTimelineError = timelineBodySurface === "error";
   const [isSemanticallyAtBottom, setIsSemanticallyAtBottom] =
     React.useState(true);
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset semantic tail state when the active channel changes
@@ -399,16 +432,33 @@ const MessageTimelineBase = React.forwardRef<
     },
     [onVirtualizerAtBottomStateChange, queueSemanticBottom],
   );
+  const hasPendingLiveRows = bufferedTimeline.pendingCount > 0;
+  React.useEffect(() => {
+    // With nothing buffered, the freeze is a model no-op, so the synthetic
+    // bottom report the suppression waits for never arrives. Disarm it, and
+    // release if the reader already came back, so a single scroll back to
+    // the floor (scrollbar jump, End key) does not strand the tail frozen.
+    if (isSemanticallyAtBottom || hasPendingLiveRows) return;
+    suppressNextSemanticBottomRef.current = false;
+    if (isAtBottom) queueSemanticBottom(true);
+  }, [
+    hasPendingLiveRows,
+    isAtBottom,
+    isSemanticallyAtBottom,
+    queueSemanticBottom,
+  ]);
 
-  const timelineIntroSurface = selectTimelineIntroSurface({
-    hasChannelIntro: channelIntro !== null && directMessageIntro === null,
-    hasDirectMessageIntro: directMessageIntro !== null,
-    hasReachedChannelStart:
-      !isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) &&
-      !isHoldingPrepend &&
-      (messages.length === 0 || (!hasOlderMessages && !isFetchingOlder)),
-    isSkeletonVisible: showTimelineSkeleton,
-  });
+  const timelineIntroSurface = showTimelineError
+    ? null
+    : selectTimelineIntroSurface({
+        hasChannelIntro: channelIntro !== null && directMessageIntro === null,
+        hasDirectMessageIntro: directMessageIntro !== null,
+        hasReachedChannelStart:
+          !isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) &&
+          !isHoldingPrepend &&
+          (messages.length === 0 || (!hasOlderMessages && !isFetchingOlder)),
+        isSkeletonVisible: showTimelineSkeleton,
+      });
   const showDirectMessageIntro =
     timelineIntroSurface === "direct-message-intro";
   const showChannelIntro = timelineIntroSurface === "channel-intro";
@@ -416,11 +466,16 @@ const MessageTimelineBase = React.forwardRef<
     ? directMessageIntro
     : null;
   const activeChannelIntro = showChannelIntro ? channelIntro : null;
+  const activePinnedIntro = pinnedIntro ?? null;
   const showIntro =
-    activeDirectMessageIntro !== null || activeChannelIntro !== null;
+    activeDirectMessageIntro !== null ||
+    activeChannelIntro !== null ||
+    activePinnedIntro !== null;
   const showGenericEmpty = timelineBodySurface === "empty" && !showIntro;
   const showMessageList = timelineBodySurface === "list";
   const showChannelIntroOnly = activeChannelIntro !== null && !showMessageList;
+  const showPinnedIntroOnly = activePinnedIntro !== null && !showMessageList;
+  const omitHistoryLeadIn = showChannelIntroOnly || showPinnedIntroOnly;
 
   const prepareForOwnMessage = React.useCallback(() => {
     // The user's own send is the deliberate Zulip exception: release buffered
@@ -443,8 +498,6 @@ const MessageTimelineBase = React.forwardRef<
     [prepareForOwnMessage, scrollToBottom, timelineVirtualizerApi],
   );
 
-  // Jump-to-message is purely DOM-based now: all loaded rows are mounted, so
-  // `scrollToMessage` always finds the target row. No virtualizer convergence.
   const jumpToMessage = React.useCallback(
     (messageId: string, options?: { behavior?: ScrollBehavior }) => {
       return scrollToMessage(messageId, { highlight: true, ...options });
@@ -487,8 +540,8 @@ const MessageTimelineBase = React.forwardRef<
 
   // Scroll to the active search match when it changes. `jumpToMessage` updates
   // the scroll anchor (so the post-commit restore won't yank the view back off
-  // the match) and, when virtualized, converges on the target through the index
-  // model — the row may be windowed out of the DOM.
+  // the match) and, when virtualized, scrolls through the index model — the row
+  // may be windowed out of the DOM.
   const prevSearchActiveRef = React.useRef<string | null>(null);
   const pendingSearchTargetRef = React.useRef<string | null>(null);
   React.useEffect(() => {
@@ -510,22 +563,10 @@ const MessageTimelineBase = React.forwardRef<
     }
   }, [jumpToMessage, searchActiveMessageId, showTimelineSkeleton]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: deferredMessages and virtualizerRenderVersion are intentional retry triggers — a search hit may be spliced into messages asynchronously, and in virtualized mode a phase-1 index jump only realizes the row; retry when the rendered range changes so the DOM-visible path can center and highlight it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deferredMessages and virtualizerRenderVersion are intentional retry triggers — a search hit may be spliced into messages asynchronously, so retry until the timeline can scroll to it.
   React.useEffect(() => {
     const target = pendingSearchTargetRef.current;
     if (!target || showTimelineSkeleton) return;
-    if (
-      useTimelineVirtualizer &&
-      !activeScrollContainerRef.current?.querySelector(
-        `[data-message-id="${CSS.escape(target)}"]`,
-      )
-    ) {
-      // Phase 1: ask the virtualizer to realize the match's index. The retry effect
-      // runs again on range change and the DOM-visible path does the actual
-      // center + highlight once the row exists.
-      void jumpToMessage(target, { behavior: "auto" });
-      return;
-    }
     if (jumpToMessage(target, { behavior: "auto" })) {
       pendingSearchTargetRef.current = null;
     }
@@ -579,7 +620,9 @@ const MessageTimelineBase = React.forwardRef<
 
   const virtualizedLeadingContent = React.useMemo(
     () =>
-      activeChannelIntro ? (
+      activePinnedIntro ? (
+        <div className="pt-3">{activePinnedIntro}</div>
+      ) : activeChannelIntro ? (
         <ChannelIntroBlock className="pb-4 pt-2" intro={activeChannelIntro} />
       ) : activeDirectMessageIntro ? (
         <div
@@ -601,7 +644,7 @@ const MessageTimelineBase = React.forwardRef<
           </p>
         </div>
       ) : null,
-    [activeChannelIntro, activeDirectMessageIntro],
+    [activeChannelIntro, activeDirectMessageIntro, activePinnedIntro],
   );
 
   const handleVirtualizerRangeChanged = React.useCallback(() => {
@@ -628,6 +671,9 @@ const MessageTimelineBase = React.forwardRef<
       mainEntries={renderedMessages === messages ? mainEntries : undefined}
       leadingContent={virtualizedLeadingContent}
       historyExhausted={renderedHistoryExhausted}
+      hideDayDividers={hideDayDividers}
+      alwaysShowMessageIdentity={alwaysShowMessageIdentity}
+      hideAgentAccessBadges={hideAgentAccessBadges}
       threadSummaries={threadSummaries}
       messages={renderedMessages}
       onDelete={onDelete}
@@ -635,6 +681,7 @@ const MessageTimelineBase = React.forwardRef<
       onMarkUnread={onMarkUnread}
       onMarkRead={onMarkRead}
       onReply={onReply}
+      onOpenThread={onOpenThread}
       isSendingVideoReviewComment={isSendingVideoReviewComment}
       onSendVideoReviewComment={onSendVideoReviewComment}
       onStartReached={loadOlderViaVirtualizer}
@@ -656,13 +703,16 @@ const MessageTimelineBase = React.forwardRef<
   ) : null;
 
   return (
-    <TooltipProvider delayDuration={200}>
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+    <TooltipProvider>
+      <div
+        className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+        onCopy={handleTimelineMentionCopy}
+      >
         {showUnreadPill ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-30 flex translate-y-3 justify-center px-4",
-              channelChrome.top,
+              "pointer-events-none absolute inset-x-0 z-30 flex justify-center px-4",
+              channelChrome.stickyTimelineTop,
             )}
           >
             <UnreadPill
@@ -681,8 +731,8 @@ const MessageTimelineBase = React.forwardRef<
         isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-30 flex translate-y-3 justify-center px-4",
-              channelChrome.top,
+              "pointer-events-none absolute inset-x-0 z-30 flex justify-center px-4",
+              channelChrome.stickyTimelineTop,
             )}
             data-testid="message-timeline-fetching-older"
           >
@@ -729,12 +779,15 @@ const MessageTimelineBase = React.forwardRef<
                 showChannelIntroOnly
                   ? "pt-[var(--channel-top-chrome-height,4.5rem)]"
                   : channelChrome.contentPadding,
-                (showIntro || showGenericEmpty || showMessageList) &&
+                (showIntro ||
+                  showTimelineError ||
+                  showGenericEmpty ||
+                  showMessageList) &&
                   "min-h-full",
               )}
               ref={contentRef}
             >
-              {showChannelIntroOnly ? null : (
+              {omitHistoryLeadIn ? null : (
                 <div ref={topSentinelRef} aria-hidden className="h-px" />
               )}
 
@@ -742,15 +795,14 @@ const MessageTimelineBase = React.forwardRef<
                   stable across load-older fetches. The intro-only state has no
                   history to anchor, so omitting it matches the virtualized
                   leading row's top geometry when the first message arrives. */}
-              {showChannelIntroOnly ? null : (
-                <div aria-hidden className="h-8" />
-              )}
+              {omitHistoryLeadIn ? null : <div aria-hidden className="h-8" />}
 
               <div
                 className={cn(
                   "flex min-h-[18rem] min-w-0 flex-col gap-2",
                   useTimelineVirtualizer && "min-h-0 flex-1",
-                  (showIntro || showGenericEmpty) && "min-h-full",
+                  (showIntro || showTimelineError || showGenericEmpty) &&
+                    "min-h-full",
                   showMessageList &&
                     !showIntro &&
                     !useTimelineVirtualizer &&
@@ -759,6 +811,9 @@ const MessageTimelineBase = React.forwardRef<
               >
                 {showTimelineSkeleton ? (
                   <TimelineSkeleton rows={timelineSkeletonRows} />
+                ) : null}
+                {showTimelineError ? (
+                  <MessageTimelineErrorCard onRetry={onRetry} />
                 ) : null}
                 {activeDirectMessageIntro ? (
                   <div
@@ -779,6 +834,10 @@ const MessageTimelineBase = React.forwardRef<
                       .
                     </p>
                   </div>
+                ) : null}
+
+                {activePinnedIntro ? (
+                  <div className="pt-3">{activePinnedIntro}</div>
                 ) : null}
 
                 {activeChannelIntro ? (
@@ -821,11 +880,18 @@ const MessageTimelineBase = React.forwardRef<
           )}
         </div>
 
-        {!isAtBottom ? (
+        {/* A frozen tail can be physically at bottom while live rows are still
+            buffered. Keep the release action reachable in that state. */}
+        {!isAtBottom || bufferedTimeline.pendingCount > 0 ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-50 flex justify-center px-4",
-              hasComposerOverlay ? "bottom-36" : "bottom-4",
+              "pointer-events-none absolute inset-x-0 bottom-4 z-50 flex justify-center px-4",
+              // Position the pill with layout rather than a transform. WebKit
+              // can keep an inherited custom property stale on a promoted
+              // transform layer when the composer grows, leaving the pill
+              // stranded inside the dock.
+              hasComposerOverlay &&
+                "bottom-[calc(1rem+var(--composer-overlay-height,8rem))] transition-[bottom] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
             )}
           >
             <UnreadPill

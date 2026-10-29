@@ -1,8 +1,5 @@
 import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
-import {
-  formatNotificationTitle,
-  truncateNotificationBody,
-} from "@/features/notifications/lib/notificationFormat";
+import { formatMessageNotification } from "@/features/notifications/lib/notificationFormat";
 
 export type NotificationChannel = Pick<Channel, "id" | "name" | "channelType">;
 
@@ -31,44 +28,28 @@ export function enrichFeedItemChannel(
   };
 }
 
-export function notificationTitle(item: FeedItem, senderName?: string) {
-  const channelLabel =
-    item.channelType !== "dm" && item.channelName.trim()
-      ? `#${item.channelName.trim()}`
-      : null;
+function feedNotificationSource(item: FeedItem) {
+  if (item.channelType === "dm") return "dm" as const;
+  if (item.category === "mention") return "mention" as const;
+  if (item.kind === 46010) return "approval" as const;
+  return "needs_action" as const;
+}
 
-  if (item.channelType === "dm") {
-    return senderName || "Direct message";
-  }
-
-  if (item.category === "mention") {
-    return formatNotificationTitle({
-      prefix: senderName ? `${senderName} mentioned you` : "@Mention",
-      channelLabel,
-    });
-  }
-
-  if (item.kind === 46010) {
-    return formatNotificationTitle({
-      prefix: senderName
-        ? `${senderName} requested approval`
-        : "Approval Requested",
-      channelLabel,
-    });
-  }
-
-  return formatNotificationTitle({
-    prefix: senderName ? senderName : "Needs Action",
-    channelLabel,
+export function formatFeedNotification(item: FeedItem, senderName?: string) {
+  return formatMessageNotification({
+    source: feedNotificationSource(item),
+    senderName,
+    channelName: item.channelType !== "dm" ? item.channelName : null,
+    content: item.content,
   });
 }
 
+export function notificationTitle(item: FeedItem, senderName?: string) {
+  return formatFeedNotification(item, senderName).title;
+}
+
 export function notificationBody(item: FeedItem) {
-  const fallback =
-    item.kind === 46010
-      ? "A workflow is waiting for your approval."
-      : "Something in Buzz needs your attention.";
-  return truncateNotificationBody(item.content, fallback);
+  return formatFeedNotification(item).body;
 }
 
 export function collectHomeAlertItems(feed: HomeFeedResponse) {

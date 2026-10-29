@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:share_plus/share_plus.dart';
@@ -17,132 +18,200 @@ import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
-import '../../shared/widgets/sheet_divider.dart';
+import '../../shared/emoji/native_emoji_glyph.dart';
+import '../../shared/emoji/emoji_data_provider.dart';
+import '../../shared/widgets/sheet_action_section.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
+import 'channels_provider.dart';
 import 'emoji_picker.dart';
 import 'reaction_row.dart';
 import 'recent_emoji_provider.dart';
-import 'read_state/message_read_state.dart';
-import 'read_state/read_state_format.dart';
-import 'read_state/read_state_provider.dart';
+import '../../shared/read_state/message_read_state.dart';
+import '../../shared/read_state/read_state_format.dart';
+import '../../shared/read_state/read_state_provider.dart';
 import 'thread_detail_page.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
+import 'unread_badge/is_high_priority_event.dart';
+
+part 'message_actions/quick_reaction_row.dart';
 
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
 const _reminderPreviewLength = 100;
 
-void showMessageActions({
+// A weak, route-owned latch shared by every action, including pointers that
+// were already down when another selection started dismissing the sheet.
+final _selectedMessageActionRoutes = Expando<bool>();
+
+bool _selectMessageAction(BuildContext context) {
+  final route = ModalRoute.of(context);
+  if (route == null ||
+      !route.isCurrent ||
+      _selectedMessageActionRoutes[route] == true) {
+    return false;
+  }
+  _selectedMessageActionRoutes[route] = true;
+  Navigator.of(context).pop(true);
+  return true;
+}
+
+/// Presents message reactions and grouped actions in the shared bottom sheet.
+/// Grouped rows can supply aggregate reactions and a toggle for all source events.
+/// Snapshot and preview callbacks are not used by the sheet presentation.
+Future<void> showMessageActions({
   required BuildContext context,
   required WidgetRef ref,
   required TimelineMessage message,
   required String channelId,
   required bool canManageMessage,
   List<TimelineMessage>? allMessages,
+  List<TimelineReaction>? reactions,
+  ValueChanged<String>? onToggleReaction,
   String? currentPubkey,
   bool isMember = false,
+  Rect? anchorRect,
+  Future<ui.Image> Function()? captureAnchorSnapshot,
+  ValueChanged<bool>? onPopoverPreviewVisibilityChanged,
+  VoidCallback? onPopoverDismissed,
+  FocusNode? composerFocusNode,
+  VoidCallback? restoreComposerFocus,
   bool isArchived = false,
-}) {
-  showModalBottomSheet<void>(
+  EdgeInsets popoverSpotlightPadding = const EdgeInsets.all(Grid.xxs),
+}) async {
+  if (!context.mounted) return;
+  unawaited(HapticFeedback.mediumImpact());
+  final restoreFocusOnCancel = composerFocusNode?.hasFocus ?? false;
+  composerFocusNode?.unfocus();
+
+  final selectedAction = await showBuzzModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
+    showCloseButton: false,
+    constraints: BoxConstraints(
+      maxWidth: 640,
+      maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+    ),
     builder: (sheetContext) => SafeArea(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.7,
-        ),
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.gutter,
-              0,
-              Grid.gutter,
-              Grid.xs,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _QuickReactionRow(
-                  message: message,
-                  sheetContext: sheetContext,
-                  pageContext: context,
-                  pageRef: ref,
-                ),
-                const SizedBox(height: Grid.xs),
-                if (!message.isSystem) ...[
-                  // Fast actions: respond now, hand off context, defer.
-                  _FastActionsRow(
+      top: false,
+      child: IconTheme.merge(
+        data: const IconThemeData(size: 22),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.7,
+          ),
+          child: SingleChildScrollView(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(
+                Grid.gutter,
+                0,
+                Grid.gutter,
+                Grid.xs,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _QuickReactionRow(
                     message: message,
-                    channelId: channelId,
-                    allMessages: allMessages,
-                    currentPubkey: currentPubkey,
-                    isMember: isMember,
-                    isArchived: isArchived,
+                    reactions: reactions ?? message.reactions,
+                    onToggleReaction: onToggleReaction,
+                    sheetContext: sheetContext,
                     pageContext: context,
+                    pageRef: ref,
                   ),
-                  const SizedBox(height: Grid.xs),
-                  // Triage: come back to this message later.
-                  _MarkReadUnreadTile(message: message, channelId: channelId),
-                  _FollowThreadTile(message: message),
-                  const SheetDivider(),
-                  // Export: take the content out of the conversation.
-                  ListTile(
-                    leading: const Icon(LucideIcons.copy),
-                    title: const Text('Copy text'),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      // Copy to clipboard
-                      final data = ClipboardData(text: message.content);
-                      Clipboard.setData(data);
-                    },
-                  ),
-                ],
-                if (canManageMessage) ...[
-                  if (!message.isSystem) const SheetDivider(),
-                  ListTile(
-                    leading: const Icon(LucideIcons.pencil),
-                    title: const Text('Edit message'),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      _showEditSheet(
-                        context: context,
-                        ref: ref,
-                        message: message,
-                        channelId: channelId,
-                      );
-                    },
-                  ),
-                  ListTile(
-                    leading: Icon(
-                      LucideIcons.trash2,
-                      color: sheetContext.colors.error,
+                  SizedBox(height: message.isSystem ? Grid.xxs : Grid.xs),
+                  if (!message.isSystem) ...[
+                    // Fast actions: respond now, hand off context, defer.
+                    _MessageQuickActionsRow(
+                      message: message,
+                      channelId: channelId,
+                      allMessages: allMessages,
+                      currentPubkey: currentPubkey,
+                      isMember: isMember,
+                      isArchived: isArchived,
+                      pageContext: context,
                     ),
-                    title: Text(
-                      'Delete message',
-                      style: TextStyle(color: sheetContext.colors.error),
+                    // Section cards supply the other half of the 16pt gap.
+                    const SizedBox(height: Grid.xxs),
+                    // Triage: come back to this message later.
+                    SheetActionSection(
+                      children: [
+                        _MarkReadUnreadTile(
+                          message: message,
+                          channelId: channelId,
+                          currentPubkey: currentPubkey,
+                        ),
+                        _FollowThreadTile(message: message),
+                      ],
                     ),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      _confirmDelete(
-                        context: context,
-                        ref: ref,
-                        channelId: channelId,
-                        messageId: message.id,
-                      );
-                    },
-                  ),
+                    SheetActionSection(
+                      children: [
+                        // Export: take the content out of the conversation.
+                        ListTile(
+                          leading: const Icon(BuzzIcons.copy),
+                          title: const Text('Copy text'),
+                          onTap: () {
+                            if (!_selectMessageAction(sheetContext)) return;
+                            // Copy to clipboard
+                            final data = ClipboardData(text: message.content);
+                            Clipboard.setData(data);
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                  if (canManageMessage)
+                    SheetActionSection(
+                      children: [
+                        ListTile(
+                          leading: const Icon(BuzzIcons.pencil),
+                          title: const Text('Edit message'),
+                          onTap: () {
+                            if (!_selectMessageAction(sheetContext)) return;
+                            _showEditSheet(
+                              context: context,
+                              ref: ref,
+                              message: message,
+                              channelId: channelId,
+                            );
+                          },
+                        ),
+                        ListTile(
+                          leading: Icon(
+                            BuzzIcons.trash2,
+                            color: sheetContext.colors.error,
+                          ),
+                          title: Text(
+                            'Delete message',
+                            style: TextStyle(color: sheetContext.colors.error),
+                          ),
+                          onTap: () {
+                            if (!_selectMessageAction(sheetContext)) return;
+                            _confirmDelete(
+                              context: context,
+                              ref: ref,
+                              channelId: channelId,
+                              messageId: message.id,
+                            );
+                          },
+                        ),
+                      ],
+                    ),
                 ],
-              ],
+              ),
             ),
           ),
         ),
       ),
     ),
   );
+  if (selectedAction != true && restoreFocusOnCancel && context.mounted) {
+    restoreComposerFocus?.call();
+  }
 }
 
 /// Image-focused actions shown from the full-screen viewer.
@@ -155,78 +224,98 @@ void showImageActions({
   required bool canManageMessage,
   VoidCallback? onDeleted,
 }) {
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
+    isScrollControlled: true,
     showDragHandle: true,
+    title: 'Image',
     builder: (sheetContext) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          Grid.gutter,
-          0,
-          Grid.gutter,
-          Grid.xs,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(LucideIcons.download),
-              title: const Text('Save image'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                unawaited(_saveImage(context, ref, imageUrl));
-              },
+      child: SingleChildScrollView(
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
             ),
-            ListTile(
-              leading: const Icon(LucideIcons.share2),
-              title: const Text('Share image'),
-              onTap: () {
-                final renderBox = context.findRenderObject() as RenderBox?;
-                final shareOrigin = renderBox == null
-                    ? null
-                    : renderBox.localToGlobal(Offset.zero) & renderBox.size;
-                Navigator.of(sheetContext).pop();
-                unawaited(
-                  _shareImage(context, ref, imageUrl, shareOrigin: shareOrigin),
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(LucideIcons.link2),
-              title: const Text('Copy image link'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                copyToClipboard(
-                  context,
-                  imageUrl,
-                  message: 'Image link copied',
-                );
-              },
-            ),
-            if (canManageMessage) ...[
-              const SheetDivider(),
-              ListTile(
-                leading: Icon(
-                  LucideIcons.trash2,
-                  color: sheetContext.colors.error,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SheetActionSection(
+                  children: [
+                    ListTile(
+                      leading: const Icon(BuzzIcons.download),
+                      title: const Text('Save image'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        unawaited(_saveImage(context, ref, imageUrl));
+                      },
+                    ),
+                    ListTile(
+                      leading: const Icon(BuzzIcons.share2),
+                      title: const Text('Share image'),
+                      onTap: () {
+                        final renderBox =
+                            context.findRenderObject() as RenderBox?;
+                        final shareOrigin = renderBox == null
+                            ? null
+                            : renderBox.localToGlobal(Offset.zero) &
+                                  renderBox.size;
+                        Navigator.of(sheetContext).pop();
+                        unawaited(
+                          _shareImage(
+                            context,
+                            ref,
+                            imageUrl,
+                            shareOrigin: shareOrigin,
+                          ),
+                        );
+                      },
+                    ),
+                    ListTile(
+                      leading: const Icon(BuzzIcons.link2),
+                      title: const Text('Copy image link'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        copyToClipboard(
+                          context,
+                          imageUrl,
+                          message: 'Image link copied',
+                        );
+                      },
+                    ),
+                  ],
                 ),
-                title: Text(
-                  'Delete message',
-                  style: TextStyle(color: sheetContext.colors.error),
-                ),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  _confirmDelete(
-                    context: context,
-                    ref: ref,
-                    channelId: channelId,
-                    messageId: message.id,
-                    onDeleted: onDeleted,
-                  );
-                },
-              ),
-            ],
-          ],
+                if (canManageMessage)
+                  SheetActionSection(
+                    children: [
+                      ListTile(
+                        leading: Icon(
+                          BuzzIcons.trash2,
+                          color: sheetContext.colors.error,
+                        ),
+                        title: Text(
+                          'Delete message',
+                          style: TextStyle(color: sheetContext.colors.error),
+                        ),
+                        onTap: () {
+                          Navigator.of(sheetContext).pop();
+                          _confirmDelete(
+                            context: context,
+                            ref: ref,
+                            channelId: channelId,
+                            messageId: message.id,
+                            onDeleted: onDeleted,
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
         ),
       ),
     ),
@@ -353,6 +442,40 @@ Future<void> _shareImage(
   }
 }
 
+/// Whether the actions menu should offer **Mark read** for `message`.
+///
+/// This is the one decision every menu presentation (sheet, popover, native)
+/// uses. Mentions are classified with the signing key, not the optional
+/// profile, so a user without a published profile sees the same read state
+/// as the badge and the channel list. `activity:<channel>` reads only
+/// ordinary top-level messages in a known non-DM channel; an unknown channel
+/// or reader counts as not read, because a DM or mention needs its own mark.
+bool messageActionShowsUnread(
+  WidgetRef ref,
+  ReadStateState readState, {
+  required String channelId,
+  required TimelineMessage message,
+}) {
+  final readerPubkey = ref.read(myPubkeyProvider);
+  final channel = ref.read(channelsProvider.notifier).channelById(channelId);
+  final channelCatchUp =
+      readerPubkey != null &&
+      channel != null &&
+      readByChannelCatchUp(
+        isDm: channel.isDm,
+        isReply: message.parentId != null,
+        highPriority: isHighPriorityEvent(message.tags, readerPubkey),
+      );
+  return isMessageUnread(
+    readState,
+    channelId: channelId,
+    messageId: message.id,
+    createdAt: message.createdAt,
+    threadRootId: message.rootId,
+    channelCatchUp: channelCatchUp,
+  );
+}
+
 /// Canonical `buzz://message` link for a timeline message, including thread
 /// context when the message is a reply.
 String messageLinkFor({
@@ -369,27 +492,31 @@ String messageLinkFor({
 class _MarkReadUnreadTile extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;
+  final String? currentPubkey;
 
-  const _MarkReadUnreadTile({required this.message, required this.channelId});
+  const _MarkReadUnreadTile({
+    required this.message,
+    required this.channelId,
+    required this.currentPubkey,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final readState = ref.watch(readStateProvider);
     if (!readState.isReady) return const SizedBox.shrink();
 
-    final unread = isMessageUnread(
+    final unread = messageActionShowsUnread(
+      ref,
       readState,
       channelId: channelId,
-      messageId: message.id,
-      createdAt: message.createdAt,
-      threadRootId: message.rootId,
+      message: message,
     );
 
     return ListTile(
-      leading: Icon(unread ? LucideIcons.mailCheck : LucideIcons.mailOpen),
+      leading: Icon(unread ? BuzzIcons.mailCheck : BuzzIcons.mailOpen),
       title: Text(unread ? 'Mark read' : 'Mark unread'),
       onTap: () {
-        Navigator.of(context).pop();
+        if (!_selectMessageAction(context)) return;
         final notifier = ref.read(readStateProvider.notifier);
         if (unread) {
           // Advances the `msg:` marker and clears this message's own forced
@@ -427,10 +554,10 @@ class _FollowThreadTile extends ConsumerWidget {
     final following = follows.isFollowing(rootId);
 
     return ListTile(
-      leading: Icon(following ? LucideIcons.bellOff : LucideIcons.bellRing),
+      leading: Icon(following ? BuzzIcons.bellOff : BuzzIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
       onTap: () {
-        Navigator.of(context).pop();
+        if (!_selectMessageAction(context)) return;
         final notifier = ref.read(threadFollowsProvider.notifier);
         if (following) {
           notifier.unfollowThread(rootId);
@@ -442,10 +569,7 @@ class _FollowThreadTile extends ConsumerWidget {
   }
 }
 
-/// Promoted actions for the three dominant mobile jobs: respond now (Reply),
-/// hand off context (Copy link — the `buzz://message` link is the workspace's
-/// context-transfer primitive), and defer (Remind me).
-class _FastActionsRow extends ConsumerWidget {
+class _MessageQuickActionsRow extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;
   final List<TimelineMessage>? allMessages;
@@ -457,7 +581,7 @@ class _FastActionsRow extends ConsumerWidget {
   /// for the thread push and the copy-link snackbar.
   final BuildContext pageContext;
 
-  const _FastActionsRow({
+  const _MessageQuickActionsRow({
     required this.message,
     required this.channelId,
     required this.allMessages,
@@ -474,11 +598,11 @@ class _FastActionsRow extends ConsumerWidget {
 
     final tiles = <Widget>[
       if (messages != null)
-        _FastActionTile(
-          icon: LucideIcons.messageSquareReply,
+        _MessageQuickActionTile(
+          icon: BuzzIcons.messageSquareReply,
           label: 'Reply',
           onTap: () {
-            Navigator.of(context).pop();
+            if (!_selectMessageAction(context)) return;
             Navigator.of(pageContext).push(
               MaterialPageRoute<void>(
                 builder: (_) => ThreadDetailPage(
@@ -493,11 +617,11 @@ class _FastActionsRow extends ConsumerWidget {
             );
           },
         ),
-      _FastActionTile(
-        icon: LucideIcons.link2,
+      _MessageQuickActionTile(
+        icon: BuzzIcons.link2,
         label: 'Copy link',
         onTap: () {
-          Navigator.of(context).pop();
+          if (!_selectMessageAction(context)) return;
           copyToClipboard(
             pageContext,
             messageLinkFor(message: message, channelId: channelId),
@@ -506,15 +630,15 @@ class _FastActionsRow extends ConsumerWidget {
         },
       ),
       if (canRemind)
-        _FastActionTile(
-          icon: LucideIcons.clock,
+        _MessageQuickActionTile(
+          icon: BuzzIcons.clock,
           label: 'Remind me',
           onTap: () {
             final rootContext = Navigator.of(
               context,
               rootNavigator: true,
             ).context;
-            Navigator.of(context).pop();
+            if (!_selectMessageAction(context)) return;
             showRemindMeLaterSheet(
               context: rootContext,
               ref: ref,
@@ -531,138 +655,67 @@ class _FastActionsRow extends ConsumerWidget {
         ),
     ];
 
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-      children: tiles,
-    );
-  }
-}
-
-class _FastActionTile extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  const _FastActionTile({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Pill-shaped icon container with the caption below the fill,
-          // matching the emoji circles' fill and tap treatment.
-          Container(
-            width: 76,
-            height: 56,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: context.colors.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(Radii.dialog),
-            ),
-            child: Icon(icon, size: 24, color: context.colors.onSurface),
-          ),
-          const SizedBox(height: Grid.xxs),
-          Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: context.textTheme.labelMedium?.copyWith(
-              color: context.colors.onSurface,
-            ),
-          ),
+          for (var index = 0; index < tiles.length; index++) ...[
+            Expanded(child: tiles[index]),
+            if (index < tiles.length - 1) const SizedBox(width: Grid.twelve),
+          ],
         ],
       ),
     );
   }
 }
 
-/// The row of one-tap reactions at the top of the action sheet, plus the "+"
-/// tile that opens the full picker.
-///
-/// The emoji shown are the user's own frequently-used set (desktop's
-/// `useQuickReactionEmojis` behaviour), topped up with [defaultQuickEmojis] so
-/// the row is full on a fresh install.
-class _QuickReactionRow extends ConsumerWidget {
-  final TimelineMessage message;
+class _MessageQuickActionTile extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
 
-  /// The sheet's context, popped before the reaction fires.
-  final BuildContext sheetContext;
-
-  /// The long-pressed message's page context — survives the sheet pop, so the
-  /// picker opened from "+" isn't torn down with the sheet.
-  final BuildContext pageContext;
-
-  /// The long-pressed message's page ref. The picker callback outlives this
-  /// bottom sheet, so it must not read through the sheet's disposed ref.
-  final WidgetRef pageRef;
-
-  const _QuickReactionRow({
-    required this.message,
-    required this.sheetContext,
-    required this.pageContext,
-    required this.pageRef,
+  const _MessageQuickActionTile({
+    required this.icon,
+    required this.label,
+    required this.onTap,
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final customEmoji = ref.watch(customEmojiListProvider);
-    final emoji = quickReactionEmoji(
-      ref.watch(recentEmojiProvider),
-      customShortcodes: {
-        for (final entry in customEmoji) entry.shortcode.toLowerCase(),
-      },
-    );
-    final customByShortcode = {
-      for (final entry in customEmoji) entry.shortcode.toLowerCase(): entry,
-    };
-
-    void react(String value) {
-      // The generic picker is also used for composing and statuses. Record
-      // recency here, at the reaction call site, so only reactions drive the
-      // quick-reaction row.
-      pageRef.read(recentEmojiProvider.notifier).record(value);
-      // The sheet is on its way out, so the burst can't come from this tile —
-      // hand it to the pill that's about to appear in the timeline.
-      armReactionBurst(pageRef, message, value);
-      pageRef.read(channelActionsProvider).addReaction(message.id, value);
-    }
-
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-      children: [
-        for (final value in emoji)
-          _QuickReactionCircle(
-            onTap: () {
-              Navigator.of(sheetContext).pop();
-              react(value);
-            },
-            child: _QuickReactionGlyph(
-              value: value,
-              customByShortcode: customByShortcode,
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    child: Material(
+      color: context.colors.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(Radii.dialog),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () {
+          unawaited(HapticFeedback.lightImpact());
+          onTap();
+        },
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 68 + (Grid.xxs * 2)),
+          child: Padding(
+            padding: const EdgeInsets.all(Grid.xxs),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 22, color: context.colors.onSurface),
+                const SizedBox(height: Grid.xxs),
+                Text(
+                  label,
+                  textAlign: TextAlign.center,
+                  style: context.textTheme.labelMedium?.copyWith(
+                    color: context.colors.onSurface,
+                  ),
+                ),
+              ],
             ),
           ),
-        _QuickReactionCircle(
-          onTap: () {
-            Navigator.of(sheetContext).pop();
-            showEmojiPicker(context: pageContext, onSelect: react);
-          },
-          child: Icon(
-            LucideIcons.plus,
-            size: 24,
-            color: context.colors.onSurfaceVariant,
-          ),
         ),
-      ],
-    );
-  }
+      ),
+    ),
+  );
 }
 
 /// Renders a quick-reaction value: a Unicode glyph as text, a `:shortcode:` as
@@ -689,7 +742,7 @@ class _QuickReactionGlyph extends StatelessWidget {
         );
       }
     }
-    return Text(value, style: const TextStyle(fontSize: 24));
+    return NativeEmojiGlyph(emoji: value, size: 24);
   }
 }
 
@@ -698,22 +751,49 @@ class _QuickReactionGlyph extends StatelessWidget {
 class _QuickReactionCircle extends StatelessWidget {
   final VoidCallback onTap;
   final Widget child;
+  final double size;
+  final String label;
+  final bool? selected;
 
-  const _QuickReactionCircle({required this.onTap, required this.child});
+  const _QuickReactionCircle({
+    required this.onTap,
+    required this.child,
+    required this.size,
+    required this.label,
+    this.selected,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return Semantics(
+      button: true,
+      label: label,
+      selected: selected,
+      excludeSemantics: true,
       onTap: onTap,
-      child: Container(
-        width: 52,
-        height: 52,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: context.colors.surfaceContainerHighest,
-          shape: BoxShape.circle,
+      child: GestureDetector(
+        excludeFromSemantics: true,
+        onTap: () {
+          unawaited(HapticFeedback.lightImpact());
+          onTap();
+        },
+        child: Container(
+          width: size,
+          height: size,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected == true
+                ? context.colors.primary.withValues(alpha: 0.10)
+                : context.colors.surfaceContainerHighest,
+            border: selected == true
+                ? Border.all(
+                    color: context.colors.primary.withValues(alpha: 0.40),
+                  )
+                : null,
+            shape: BoxShape.circle,
+          ),
+          child: child,
         ),
-        child: child,
       ),
     );
   }
@@ -726,7 +806,7 @@ void _showEditSheet({
   required String channelId,
 }) {
   final controller = TextEditingController(text: message.content);
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
@@ -793,7 +873,7 @@ void _confirmDelete({
   required String messageId,
   VoidCallback? onDeleted,
 }) {
-  showDialog<void>(
+  showBuzzDialog<void>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: const Text('Delete message'),

@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getMentionOffset, hasMention } from "./hasMention.ts";
+import {
+  getMentionOffset,
+  getMentionOffsets,
+  hasMention,
+} from "./hasMention.ts";
+import {
+  extractMentionPubkeys,
+  selectedMentionLabel,
+  selectedMentionLabels,
+} from "./extractMentionPubkeys.ts";
 
 // ── Plain @mention ────────────────────────────────────────────────────
 
@@ -95,6 +104,111 @@ test("does not false-positive on partial name match", () => {
   assert.equal(hasMention("@Alice", "Al"), false);
 });
 
+test("returns every mention offset", () => {
+  const text = "@Fast Fizz Codex and @Fast Fizz";
+  assert.deepEqual(getMentionOffsets(text, "Fast Fizz"), [0, 21]);
+});
+
+test("selected longer mention excludes a prefix member at the same offset", () => {
+  const pubkeys = extractMentionPubkeys({
+    text: "Hive Codex(@Fast Fizz Codex)",
+    selectedMentions: new Map([["Fast Fizz Codex", "codex-pubkey"]]),
+    memberCandidates: [
+      {
+        kind: "identity",
+        pubkey: "fast-fizz-pubkey",
+        displayName: "Fast Fizz",
+        isMember: true,
+        isAgent: true,
+      },
+      {
+        kind: "identity",
+        pubkey: "codex-pubkey",
+        displayName: "Fast Fizz Codex",
+        isMember: true,
+        isAgent: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(pubkeys, ["codex-pubkey"]);
+});
+
+test("manual longer mention excludes its prefix member", () => {
+  const pubkeys = extractMentionPubkeys({
+    text: "@Fast Fizz Codex",
+    selectedMentions: new Map(),
+    memberCandidates: [
+      {
+        kind: "identity",
+        pubkey: "fast-fizz-pubkey",
+        displayName: "Fast Fizz",
+        isMember: true,
+        isAgent: true,
+      },
+      {
+        kind: "identity",
+        pubkey: "codex-pubkey",
+        displayName: "Fast Fizz Codex",
+        isMember: true,
+        isAgent: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(pubkeys, ["codex-pubkey"]);
+});
+
+test("manual prefix mentions choose the longest name at each offset", () => {
+  const pubkeys = extractMentionPubkeys({
+    text: "@Fast Fizz Codex, please pair with @Fast Fizz.",
+    selectedMentions: new Map(),
+    memberCandidates: [
+      {
+        kind: "identity",
+        pubkey: "fast-fizz-pubkey",
+        displayName: "Fast Fizz",
+        isMember: true,
+        isAgent: true,
+      },
+      {
+        kind: "identity",
+        pubkey: "codex-pubkey",
+        displayName: "Fast Fizz Codex",
+        isMember: true,
+        isAgent: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(pubkeys, ["fast-fizz-pubkey", "codex-pubkey"]);
+});
+
+test("keeps manually typed prefix member mentions at distinct offsets", () => {
+  const pubkeys = extractMentionPubkeys({
+    text: "@Fast Fizz Codex, please pair with @Fast Fizz.",
+    selectedMentions: new Map([["Fast Fizz Codex", "codex-pubkey"]]),
+    memberCandidates: [
+      {
+        kind: "identity",
+        pubkey: "fast-fizz-pubkey",
+        displayName: "Fast Fizz",
+        isMember: true,
+        isAgent: true,
+      },
+      {
+        kind: "identity",
+        pubkey: "codex-pubkey",
+        displayName: "Fast Fizz Codex",
+        isMember: true,
+        isAgent: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(pubkeys, ["codex-pubkey", "fast-fizz-pubkey"]);
+});
+
 // ── Markdown code ─────────────────────────────────────────────────────
 
 test("ignores mentions in inline code", () => {
@@ -134,4 +248,80 @@ test("does not treat escaped or unclosed backticks as code", () => {
 test("requires matching inline-code delimiter lengths", () => {
   assert.equal(hasMention("`` @Alice ` still code ``", "Alice"), false);
   assert.equal(hasMention("`` @Alice `", "Alice"), true);
+});
+
+for (const selected of [false, true]) {
+  test(`duplicate names ${selected ? "stay bound to selection after rename" : "require explicit selection"}`, () => {
+    const opts = {
+      text: "@Scout hello",
+      selectedMentions: new Map(selected ? [["Scout", "first"]] : []),
+      memberCandidates: [
+        {
+          pubkey: "first",
+          displayName: selected ? "Renamed" : "Scout",
+          isMember: true,
+        },
+        { pubkey: "second", displayName: "Scout", isMember: true },
+      ],
+    };
+    if (selected) assert.deepEqual(extractMentionPubkeys(opts), ["first"]);
+    else
+      assert.throws(
+        () => extractMentionPubkeys(opts),
+        /ambiguous.*Choose a recipient/,
+      );
+  });
+}
+
+test("a second same-name selection cannot redirect the first mention", () => {
+  const selected = new Map([["Scout", "first"]]);
+  const secondLabel = selectedMentionLabel("Scout", "second", selected);
+  selected.set(secondLabel, "second");
+  assert.deepEqual(
+    extractMentionPubkeys({
+      text: `@Scout and @${secondLabel}`,
+      selectedMentions: selected,
+      memberCandidates: [],
+    }),
+    ["first", "second"],
+  );
+});
+
+test("qualified-looking names cannot redirect an existing selection", () => {
+  const selected = new Map([
+    ["Scout", "first"],
+    ["Scout (second)", "third"],
+  ]);
+  const label = selectedMentionLabel("Scout", "second", selected);
+  assert.notEqual(label.toLowerCase(), "scout (second)");
+  selected.set(label, "second");
+  assert.deepEqual(
+    extractMentionPubkeys({
+      text: `@Scout and @Scout (second) and @${label}`,
+      selectedMentions: selected,
+      memberCandidates: [],
+    }),
+    ["first", "third", "second"],
+  );
+  assert.equal(selectedMentionLabel("Scout", "second", selected), label);
+});
+
+test("same-name teammates are bound sequentially without replacing either recipient", () => {
+  const selected = selectedMentionLabels(
+    [
+      { displayName: "Scout", pubkey: "first" },
+      { displayName: "Scout", pubkey: "second" },
+    ],
+    new Map(),
+  );
+  const bindings = new Map(selected.map((s) => [s.displayName, s.pubkey]));
+  assert.equal(bindings.size, 2);
+  assert.deepEqual(
+    extractMentionPubkeys({
+      text: selected.map((s) => `@${s.displayName}`).join(" "),
+      selectedMentions: bindings,
+      memberCandidates: [],
+    }),
+    ["first", "second"],
+  );
 });

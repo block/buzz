@@ -1,3 +1,4 @@
+import { squareEmojiAvatarDataUrl } from "@/features/profile/ui/ProfileAvatarEditor.utils";
 import { fetchMediaBytes } from "@/shared/api/tauriMedia";
 
 type SnapshotAvatarPngDependencies = {
@@ -54,7 +55,7 @@ async function rasterizeSvg(
 ): Promise<string | undefined> {
   try {
     const image = (dependencies.createImage ?? (() => new Image()))();
-    image.src = squareEmojiAvatarBackground(svgDataUrl);
+    image.src = squareEmojiAvatarDataUrl(svgDataUrl);
     await image.decode();
 
     const canvas = (
@@ -68,36 +69,6 @@ async function rasterizeSvg(
     return canvas.toDataURL("image/png");
   } catch {
     return undefined;
-  }
-}
-
-/**
- * Emoji avatars use a circular SVG background in profile surfaces. Snapshot
- * attachments already clip artwork to a rounded-square media slot, so remove
- * that source-level circle before rasterizing to let the artwork fill the slot.
- */
-function squareEmojiAvatarBackground(svgDataUrl: string) {
-  const commaIndex = svgDataUrl.indexOf(",");
-  if (
-    commaIndex === -1 ||
-    svgDataUrl.slice(0, commaIndex).includes(";base64")
-  ) {
-    return svgDataUrl;
-  }
-
-  try {
-    const prefix = svgDataUrl.slice(0, commaIndex + 1);
-    const svg = decodeURIComponent(svgDataUrl.slice(commaIndex + 1));
-    const squaredSvg = svg.replace(
-      /(<rect\b[^>]*\bwidth="512"[^>]*\bheight="512"[^>]*?)\s+rx="256"/u,
-      "$1",
-    );
-
-    return squaredSvg === svg
-      ? svgDataUrl
-      : `${prefix}${encodeURIComponent(squaredSvg)}`;
-  } catch {
-    return svgDataUrl;
   }
 }
 

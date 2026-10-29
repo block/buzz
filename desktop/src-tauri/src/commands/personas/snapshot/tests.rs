@@ -20,6 +20,8 @@ use std::collections::BTreeMap;
 /// persona_id.
 fn make_definition(slug: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: String::new(),
         slug: Some(slug.to_string()),
         name: slug.to_string(),
@@ -48,6 +50,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -69,10 +72,12 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
     }
 }
 
@@ -80,11 +85,23 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
 /// have `slug: None` and link to their definition via `persona_id`.
 fn make_instance(pubkey: &str, persona_id: &str) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
         pubkey: pubkey.to_string(),
         slug: None,
         persona_id: Some(persona_id.to_string()),
         ..make_definition("")
     }
+}
+
+#[test]
+fn linked_instance_snapshot_materializes_the_definition_description() {
+    let mut definition = make_definition("reviewer");
+    definition.description = Some("Reviews changes.".to_string());
+    let mut instance = make_instance("agent-pubkey", "reviewer");
+
+    materialize_snapshot_description(&mut instance, false, std::slice::from_ref(&definition));
+
+    assert_eq!(instance.description, definition.description);
 }
 
 /// Build a minimal valid AgentSnapshot for import tests.
@@ -96,6 +113,8 @@ fn make_snapshot(
         format: FORMAT_DISCRIMINATOR.to_string(),
         version: FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
+            session_policy: Default::default(),
+            acp_command: None,
             name: "Test Agent".to_string(),
             source_is_builtin: false,
             system_prompt: Some("You are helpful.".to_string()),
@@ -564,7 +583,7 @@ fn import_preview_includes_exported_definition_metadata() {
     let bytes = crate::managed_agents::agent_snapshot::encode_snapshot_json(&snapshot).unwrap();
     let decoded = decode_snapshot_from_bytes(&bytes).unwrap();
 
-    let preview = build_agent_snapshot_import_preview(&decoded);
+    let preview = build_agent_snapshot_import_preview(&decoded, false).unwrap();
 
     assert!(preview.is_builtin);
     assert_eq!(preview.model.as_deref(), Some("claude-opus-4-5"));
@@ -949,51 +968,14 @@ fn test_parse_format_is_png_invalid_returns_error() {
 }
 
 // ── Export: validate_snapshot_encode_size ────────────────────────────────────
-//
-// Tests call `validate_snapshot_encode_size` directly so they prove the exact
-// production guard — not a manual reconstruction.  Removing or reversing the
-// check in production code will cause these tests to fail.
 
-/// JSON: boundary-1 passes, boundary is the last legal byte count.
-#[test]
-fn validate_encode_size_json_at_boundary_minus_1_passes() {
-    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_JSON_BYTES - 1, false).is_ok());
-}
+#[path = "tests_memory_entries.rs"]
+mod memory_entries;
 
-/// JSON: exactly at the boundary is the last accepted size.
-#[test]
-fn validate_encode_size_json_at_boundary_passes() {
-    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_JSON_BYTES, false).is_ok());
-}
+#[path = "tests_encode_size.rs"]
+mod encode_size;
 
-/// JSON: boundary+1 is rejected.
-#[test]
-fn validate_encode_size_json_over_boundary_is_rejected() {
-    let err = super::validate_snapshot_encode_size(MAX_SNAPSHOT_JSON_BYTES + 1, false).unwrap_err();
-    assert!(
-        err.contains("size limit"),
-        "error must mention size limit, got: {err}"
-    );
-}
+// ── Import: decode_snapshot_for_import (locked cards) ─────────────────────
 
-/// PNG: boundary-1 passes.
-#[test]
-fn validate_encode_size_png_at_boundary_minus_1_passes() {
-    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_PNG_BYTES - 1, true).is_ok());
-}
-
-/// PNG: exactly at the boundary passes.
-#[test]
-fn validate_encode_size_png_at_boundary_passes() {
-    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_PNG_BYTES, true).is_ok());
-}
-
-/// PNG: boundary+1 is rejected.
-#[test]
-fn validate_encode_size_png_over_boundary_is_rejected() {
-    let err = super::validate_snapshot_encode_size(MAX_SNAPSHOT_PNG_BYTES + 1, true).unwrap_err();
-    assert!(
-        err.contains("size limit"),
-        "error must mention size limit, got: {err}"
-    );
-}
+#[path = "tests_locked.rs"]
+mod locked_import;

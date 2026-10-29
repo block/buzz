@@ -1,12 +1,20 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' as ui;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../animated_avatar.dart';
+import '../emoji/emoji_avatar.dart';
+import '../emoji/native_emoji_glyph.dart';
 import '../relay/relay.dart';
 
-/// A circular avatar that supports both remote URLs and inline image data.
+part 'avatar_image_native.dart';
+
+/// An avatar that supports both remote URLs and inline image data.
 ///
 /// Flutter's [NetworkImage] only loads network URLs, while desktop browsers also
 /// accept `data:image/*` sources directly. Agent emoji avatars are inline SVGs,
@@ -16,6 +24,7 @@ class AvatarImage extends StatelessWidget {
   final double radius;
   final Color? backgroundColor;
   final Widget fallback;
+  final bool isAgent;
 
   const AvatarImage({
     super.key,
@@ -23,25 +32,46 @@ class AvatarImage extends StatelessWidget {
     required this.radius,
     required this.fallback,
     this.backgroundColor,
+    this.isAgent = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    return CircleAvatar(
-      radius: radius,
-      backgroundColor: backgroundColor,
-      child: ClipOval(
-        child: SizedBox.square(
-          dimension: radius * 2,
-          child: AvatarImageContent(imageUrl: imageUrl, fallback: fallback),
-        ),
+    final animatedAvatar = parseAnimatedAvatarUrl(imageUrl);
+    final color = animatedAvatar == null ? backgroundColor : Colors.transparent;
+    final content = SizedBox.square(
+      dimension: radius * 2,
+      child: AvatarImageContent(
+        imageUrl: animatedAvatar?.posterUrl ?? imageUrl,
+        fallback: fallback,
+      ),
+    );
+    if (!isAgent) {
+      return CircleAvatar(
+        radius: radius,
+        backgroundColor: color,
+        child: ClipOval(child: content),
+      );
+    }
+
+    final borderRadius = BorderRadius.circular(radius * 0.6);
+    return DecoratedBox(
+      decoration: BoxDecoration(color: color, borderRadius: borderRadius),
+      child: ClipRRect(
+        borderRadius: borderRadius,
+        child: !usesInsetAgentArtwork(imageUrl)
+            ? content
+            : Transform.scale(
+                scale: animatedAvatarArtworkScale,
+                child: content,
+              ),
       ),
     );
   }
 }
 
 /// Image content for avatar surfaces whose shape is supplied by their parent.
-class AvatarImageContent extends StatefulWidget {
+class AvatarImageContent extends ConsumerStatefulWidget {
   final String? imageUrl;
   final Widget fallback;
   final BoxFit fit;
@@ -54,10 +84,10 @@ class AvatarImageContent extends StatefulWidget {
   });
 
   @override
-  State<AvatarImageContent> createState() => _AvatarImageContentState();
+  ConsumerState<AvatarImageContent> createState() => _AvatarImageContentState();
 }
 
-class _AvatarImageContentState extends State<AvatarImageContent> {
+class _AvatarImageContentState extends ConsumerState<AvatarImageContent> {
   late _AvatarSource? _source = _AvatarSource.parse(widget.imageUrl);
 
   @override
@@ -76,16 +106,16 @@ class _AvatarImageContentState extends State<AvatarImageContent> {
       _EmojiAvatarSource(:final emoji, :final color) => ColoredBox(
         color: color,
         child: LayoutBuilder(
-          builder: (_, constraints) => Center(
-            child: Text(
-              emoji,
-              textScaler: TextScaler.noScaling,
-              style: TextStyle(
-                fontSize: constraints.biggest.shortestSide * 258 / 512,
-                height: 1,
+          builder: (_, constraints) {
+            final glyphSize = constraints.biggest.shortestSide * 258 / 512;
+            return Center(
+              child: NativeEmojiGlyph(
+                emoji: emoji,
+                size: glyphSize,
+                opticalBoxSize: glyphSize,
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
       _SvgAvatarSource(:final svg) => SvgPicture.string(
@@ -94,10 +124,9 @@ class _AvatarImageContentState extends State<AvatarImageContent> {
         placeholderBuilder: (_) => centeredFallback,
         errorBuilder: (_, _, _) => centeredFallback,
       ),
-      _RasterDataAvatarSource(:final bytes) => Image.memory(
-        bytes,
-        fit: widget.fit,
-        errorBuilder: (_, _, _) => centeredFallback,
+      _RasterDataAvatarSource(:final bytes) => _rasterImage(
+        bytes: bytes,
+        fallback: centeredFallback,
       ),
       _NetworkAvatarSource(:final url) => MediaImage(
         url: url,
@@ -106,6 +135,14 @@ class _AvatarImageContentState extends State<AvatarImageContent> {
       ),
       null => centeredFallback,
     };
+  }
+
+  Widget _rasterImage({required Uint8List bytes, required Widget fallback}) {
+    return Image.memory(
+      bytes,
+      fit: widget.fit,
+      errorBuilder: (_, _, _) => fallback,
+    );
   }
 }
 
@@ -122,36 +159,19 @@ sealed class _AvatarSource {
       if (data.mimeType == 'image/svg+xml') {
         final Uint8List bytes = data.contentAsBytes();
         final svg = utf8.decode(bytes);
-        return _parseEmojiAvatar(svg) ?? _SvgAvatarSource(svg);
+        final emojiAvatar = parseEmojiAvatarSvg(svg);
+        return emojiAvatar == null
+            ? _SvgAvatarSource(svg)
+            : _EmojiAvatarSource(
+                emojiAvatar.emoji,
+                Color(emojiAvatar.colorValue),
+              );
       }
       return _RasterDataAvatarSource(data.contentAsBytes());
     } on FormatException {
       return null;
     }
   }
-}
-
-_EmojiAvatarSource? _parseEmojiAvatar(String svg) {
-  final colorValue = RegExp(
-    r'<rect\b[^>]*\sfill="([^"]+)"',
-  ).firstMatch(svg)?[1];
-  final emojiValue = RegExp(r'<text\b[^>]*>(.*?)</text>').firstMatch(svg)?[1];
-  if (colorValue == null || emojiValue == null) return null;
-
-  final color = _parseHexColor(colorValue);
-  if (color == null) return null;
-  final emoji = emojiValue
-      .replaceAll('&gt;', '>')
-      .replaceAll('&lt;', '<')
-      .replaceAll('&amp;', '&');
-  return _EmojiAvatarSource(emoji, color);
-}
-
-Color? _parseHexColor(String value) {
-  final hex = value.startsWith('#') ? value.substring(1) : value;
-  if (!RegExp(r'^[0-9a-fA-F]{6}$').hasMatch(hex)) return null;
-  final rgb = int.tryParse(hex, radix: 16);
-  return rgb == null ? null : Color(0xFF000000 | rgb);
 }
 
 class _EmojiAvatarSource extends _AvatarSource {

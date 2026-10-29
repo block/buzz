@@ -315,6 +315,27 @@ pub trait Tracer: Send + Sync {
     /// Record one trace step. Implementations MAY be no-ops in production
     /// builds and write to JSONL in tests.
     fn record(&self, step: TraceStep);
+
+    /// Whether recorded steps are actually observed.
+    ///
+    /// Emitters on hot paths MUST consult this before doing work whose
+    /// *only* consumer is the trace — most importantly extra database
+    /// reads that project row labels independently of the fetch query
+    /// (the read-seam's `communities_of_channels` lookup). With a
+    /// discarding tracer that work is pure overhead.
+    ///
+    /// This is the `log.isDebugEnabled()` of the trace seam. It exists to
+    /// let callers skip *building emit inputs*, never to let them skip an
+    /// emit they would otherwise have made: when this returns `true`
+    /// every seam must behave exactly as it did before the gate existed,
+    /// so the coverage-breach guard stays non-vacuous.
+    ///
+    /// Defaults to `true` — a new tracer is assumed to observe steps until
+    /// it says otherwise. Wrappers that delegate to an inner tracer MUST
+    /// forward this method rather than inherit the default.
+    fn enabled(&self) -> bool {
+        true
+    }
 }
 
 /// A no-op tracer for production. Zero cost: the build can omit emission
@@ -324,4 +345,9 @@ pub struct NoopTracer;
 
 impl Tracer for NoopTracer {
     fn record(&self, _step: TraceStep) {}
+
+    /// Nothing is observed, so emitters should skip building inputs.
+    fn enabled(&self) -> bool {
+        false
+    }
 }

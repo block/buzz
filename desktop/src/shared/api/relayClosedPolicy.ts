@@ -19,16 +19,23 @@ export function classifyRelayClosed(message: string): RelayClosedClass {
   if (normalized.startsWith("rate-limited:")) {
     return "rate-limited";
   }
+  // `auth-required:` is deliberately retryable, NOT terminal: it occurs
+  // transiently when a REQ races the AUTH handshake after a reconnect. The
+  // backoff retry re-sends the REQ once the session is authenticated. A
+  // session that is genuinely unauthenticated latches `terminal` at the
+  // connection level (AUTH OK=false), so this cannot loop forever.
   if (
     normalized.startsWith("restricted:") ||
-    normalized.startsWith("auth-required:") ||
     normalized.startsWith("blocked:") ||
     normalized.startsWith("invalid:") ||
     normalized.startsWith("pow:") ||
     normalized.startsWith("duplicate:") ||
     normalized.startsWith("unsupported:") ||
     normalized.startsWith("error: mixed search") ||
-    normalized.startsWith("error: too many subscriptions")
+    normalized.startsWith("error: too many subscriptions") ||
+    // Server statement deadline: re-sending the same REQ re-runs the same
+    // slow query, so a live retry loop would hammer the database.
+    normalized.startsWith("error: query timed out")
   ) {
     return "terminal";
   }

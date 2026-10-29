@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { rankMentionCandidates } from "./mentionRanking.ts";
+import {
+  pickDefaultAgentCandidate,
+  rankMentionCandidates,
+} from "./mentionRanking.ts";
 
 const CHANNEL_BRAIN_PUBKEY = "1".repeat(64);
 const OTHER_BRAIN_PUBKEY = "2".repeat(64);
@@ -138,4 +141,109 @@ test("rankMentionCandidates: owned teams rank with runnable personas", () => {
     ),
     ["team", "identity"],
   );
+});
+
+test("pickDefaultAgentCandidate: active agents outrank stopped channel members", () => {
+  const stoppedMember = candidate({
+    displayName: "Ada",
+    isActiveAgent: false,
+    isAgent: true,
+    isMember: true,
+    pubkey: CHANNEL_BRAIN_PUBKEY,
+  });
+  const runningNonMember = candidate({
+    displayName: "Bea",
+    isActiveAgent: true,
+    isAgent: true,
+    pubkey: OTHER_BRAIN_PUBKEY,
+  });
+
+  assert.equal(
+    pickDefaultAgentCandidate([stoppedMember, runningNonMember]),
+    runningNonMember,
+  );
+});
+
+test("pickDefaultAgentCandidate: stable labels break ties instead of roster order", () => {
+  const vogue = candidate({
+    displayName: "Vogue",
+    isActiveAgent: true,
+    isAgent: true,
+    isMember: true,
+    pubkey: OTHER_BRAIN_PUBKEY,
+  });
+  const morgarita = candidate({
+    displayName: "Morgarita",
+    isActiveAgent: true,
+    isAgent: true,
+    isMember: true,
+    pubkey: CHANNEL_BRAIN_PUBKEY,
+  });
+
+  assert.equal(pickDefaultAgentCandidate([vogue, morgarita]), morgarita);
+  assert.equal(pickDefaultAgentCandidate([morgarita, vogue]), morgarita);
+});
+
+test("pickDefaultAgentCandidate: runnable personas break otherwise equal ties", () => {
+  const plain = candidate({
+    displayName: "Zulu",
+    isActiveAgent: true,
+    isAgent: true,
+    pubkey: OTHER_BRAIN_PUBKEY,
+  });
+  const runnable = candidate({
+    displayName: "Zulu 2",
+    isActiveAgent: true,
+    isAgent: true,
+    personaId: "active-persona",
+    pubkey: CHANNEL_BRAIN_PUBKEY,
+  });
+
+  assert.equal(
+    pickDefaultAgentCandidate([plain, runnable], new Set(["active-persona"])),
+    runnable,
+  );
+});
+
+test("pickDefaultAgentCandidate: recent eligible mentions outrank the fallback ranking", () => {
+  const stoppedRecentMember = candidate({
+    displayName: "Ada",
+    isActiveAgent: false,
+    isAgent: true,
+    isMember: true,
+    pubkey: CHANNEL_BRAIN_PUBKEY,
+  });
+  const runningNonMember = candidate({
+    displayName: "Bea",
+    isActiveAgent: true,
+    isAgent: true,
+    pubkey: OTHER_BRAIN_PUBKEY,
+  });
+
+  assert.equal(
+    pickDefaultAgentCandidate(
+      [runningNonMember, stoppedRecentMember],
+      new Set(),
+      [CHANNEL_BRAIN_PUBKEY],
+    ),
+    stoppedRecentMember,
+  );
+});
+
+test("pickDefaultAgentCandidate: skips recent pubkeys that are not eligible candidates", () => {
+  const runningAgent = candidate({
+    isActiveAgent: true,
+    isAgent: true,
+    pubkey: OTHER_BRAIN_PUBKEY,
+  });
+
+  assert.equal(
+    pickDefaultAgentCandidate([runningAgent], new Set(), ["f".repeat(64)]),
+    runningAgent,
+  );
+});
+
+test("pickDefaultAgentCandidate: returns null without an addressable agent", () => {
+  assert.equal(pickDefaultAgentCandidate([]), null);
+  assert.equal(pickDefaultAgentCandidate([candidate()]), null);
 });

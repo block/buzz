@@ -4,6 +4,7 @@
 //! the voice pipelines. Extracted from mod.rs to keep the command layer thin.
 
 use std::{
+    ops::AsyncFnOnce,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -20,6 +21,7 @@ use crate::events;
 
 use super::models;
 use super::relay_api::{self, fetch_channel_members, parse_channel_uuid};
+use super::roster::fetch_huddle_roster;
 use super::state::{HuddlePhase, HuddleState, VoiceInputMode};
 use super::stt;
 use super::tts;
@@ -36,6 +38,15 @@ pub(crate) enum PostConnectOutcome {
 /// the huddle is not active or pipelines are already running.
 #[tauri::command]
 pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), String> {
+    pipeline_hotstart(&state, start_ready_pipelines).await
+}
+
+/// Hot-start body. `start_pipelines` starts the voice pipelines whose models
+/// are ready; tests replace it to keep model files and audio out of the run.
+async fn pipeline_hotstart(
+    state: &AppState,
+    start_pipelines: impl AsyncFnOnce(&AppState, Option<&str>) -> Result<(), String>,
+) -> Result<(), String> {
     let (is_active, ephemeral_channel_id, huddle_generation) = {
         let hs = state.huddle()?;
         (
@@ -49,13 +60,47 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
         return Ok(());
     }
 
+    start_pipelines(state, ephemeral_channel_id.as_deref()).await?;
+
+    // Periodically refresh agent membership from the relay.
+    // This catches mid-huddle additions/removals by other participants, keeps
+    // STT p-tags authoritative, and auto-enables transcription when the first
+    // agent appears unless the user has already chosen a transcription state.
+    // Throttled independently from the more frequent hotstart poll.
+    //
+    // NOTE: The frontend ALSO polls agent membership independently via
+    // get_huddle_agent_pubkeys. This is intentional — the two polls have
+    // different failure semantics:
+    //   - Rust (here): preserves stale list on failure (STT p-tags should not
+    //     disappear on a transient network blip).
+    //   - React (HuddleContext.tsx): clears list on failure (TTS authorization
+    //     must fail-closed — never speak from a stale agent list).
+    //
+    // On a complete roster: replace (even with empty — agents may have been
+    // removed). On an incomplete roster (managed-agent records unreadable):
+    // add the role-proven agents and keep stored agents that are still
+    // members. On Err: preserve the existing list (transient failure shouldn't
+    // zero it).
+    if let Some(eph_id) = &ephemeral_channel_id {
+        refresh_huddle_roster(state, eph_id, huddle_generation).await?;
+    }
+
+    Ok(())
+}
+
+/// Start the STT and TTS pipelines whose models are ready, and clear handles
+/// of pipelines whose worker has exited.
+async fn start_ready_pipelines(
+    state: &AppState,
+    ephemeral_channel_id: Option<&str>,
+) -> Result<(), String> {
     // Detect dead pipelines: if the worker thread has exited (init failure or crash),
     // clear the pipeline handle so hot-start can retry on the next cycle.
     {
         let mut hs = state.huddle()?;
         if let Some(ref p) = hs.stt_pipeline {
             if p.is_finished() {
-                hs.stt_pipeline = None;
+                hs.take_stt_pipeline();
             }
         }
         if let Some(ref p) = hs.tts_pipeline {
@@ -82,83 +127,133 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
         .map(|m| m.take_tts_ready())
         .unwrap_or(false);
 
-    // Start TTS first (so STT can capture tts_cancel).
+    // Start TTS first so STT can observe its active-playback gate.
     if !has_tts && (tts_ready || models::is_tts_ready()) {
-        if let Err(e) = maybe_start_tts_pipeline(&state).await {
+        if let Err(e) = maybe_start_tts_pipeline(state).await {
             eprintln!("buzz-desktop: TTS hotstart failed: {e}");
         }
     }
     if transcription_enabled && !has_stt && (stt_ready || models::is_stt_ready()) {
-        if let Some(eph_id) = &ephemeral_channel_id {
-            if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
+        if let Some(eph_id) = ephemeral_channel_id {
+            if let Err(e) = maybe_start_stt_pipeline(state, eph_id).await {
                 eprintln!("buzz-desktop: STT hotstart failed: {e}");
             }
         }
     }
-
-    // Periodically refresh agent membership from the relay.
-    // This catches mid-huddle additions/removals by other participants, keeps
-    // STT p-tags authoritative, and auto-enables transcription when the first
-    // agent appears unless the user has already chosen a transcription state.
-    // Throttled independently from the more frequent hotstart poll.
-    //
-    // NOTE: The frontend ALSO polls agent membership independently via
-    // get_huddle_agent_pubkeys. This is intentional — the two polls have
-    // different failure semantics:
-    //   - Rust (here): preserves stale list on failure (STT p-tags should not
-    //     disappear on a transient network blip).
-    //   - React (HuddleContext.tsx): clears list on failure (TTS authorization
-    //     must fail-closed — never speak from a stale agent list).
-    //
-    // On Ok: always replace (even with empty — agents may have been removed).
-    // On Err: preserve the existing list (transient failure shouldn't zero it).
-    if let Some(eph_id) = &ephemeral_channel_id {
-        let should_refresh = {
-            let hs = state.huddle()?;
-            match hs.last_agent_refresh {
-                None => true,
-                Some(t) => t.elapsed() >= std::time::Duration::from_secs(15),
-            }
-        };
-        if should_refresh {
-            // Fetch agents (for STT p-tags) before all members (for participant
-            // list) so relay membership queries remain ordered.
-            // Only update the throttle timestamp when at least one fetch succeeds,
-            // so transient failures retry immediately on the next poll cycle.
-            // Fetch both lists before acquiring the lock — no lock held across await.
-            let fresh_agents = fetch_channel_members(eph_id, Some("bot"), &state)
-                .await
-                .ok();
-            let fresh_members = fetch_channel_members(eph_id, None, &state).await.ok();
-            let transcription_auto_enabled = if fresh_agents.is_some() || fresh_members.is_some() {
-                let mut hs = state.huddle()?;
-                if !hs.is_current_huddle(eph_id, huddle_generation) {
-                    return Ok(());
-                }
-                if let Some(agents) = fresh_agents {
-                    *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) = agents;
-                }
-                if let Some(members) = fresh_members {
-                    hs.participants = members;
-                }
-                hs.last_agent_refresh = Some(std::time::Instant::now());
-                hs.maybe_auto_enable_transcription_for_agents()
-            } else {
-                false
-            };
-            if transcription_auto_enabled {
-                start_auto_enabled_transcription(&state, eph_id).await;
-            }
-        }
-    }
-
     Ok(())
 }
 
+/// Periodic roster refresh for an active Huddle, at most every 15 s: store
+/// the agents and participants read from the relay.
+async fn refresh_huddle_roster(
+    state: &AppState,
+    eph_id: &str,
+    huddle_generation: u64,
+) -> Result<(), String> {
+    let should_refresh = {
+        let hs = state.huddle()?;
+        match hs.last_agent_refresh {
+            None => true,
+            Some(t) => t.elapsed() >= std::time::Duration::from_secs(15),
+        }
+    };
+    if should_refresh {
+        // Fetch agents (for STT p-tags) before all members (for participant
+        // list) so relay membership queries remain ordered.
+        // Only update the throttle timestamp when at least one fetch succeeds,
+        // so transient failures retry immediately on the next poll cycle.
+        // Fetch both lists before acquiring the lock — no lock held across await.
+        let fresh_agents = fetch_huddle_roster(eph_id, state).await.ok();
+        let fresh_members = fetch_channel_members(eph_id, state).await.ok();
+        let (roster_changed, transcription_auto_enabled) = if fresh_agents.is_some()
+            || fresh_members.is_some()
+        {
+            let mut hs = state.huddle()?;
+            if !hs.is_current_huddle(eph_id, huddle_generation) {
+                return Ok(());
+            }
+            let mut roster_changed = false;
+            if let Some(roster) = fresh_agents {
+                let mut current_agents = hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner());
+                roster_changed |= roster.apply_agents(&mut current_agents);
+            }
+            if let Some(members) = fresh_members {
+                if hs.participants != members {
+                    hs.participants = members;
+                    roster_changed = true;
+                }
+            }
+            hs.last_agent_refresh = Some(std::time::Instant::now());
+            (
+                roster_changed,
+                hs.maybe_auto_enable_transcription_for_agents(),
+            )
+        } else {
+            (false, false)
+        };
+        if transcription_auto_enabled {
+            start_auto_enabled_transcription(state, eph_id).await;
+        }
+        // Audio authentication auto-adds a joining human to the ephemeral
+        // channel. Emit whenever that authoritative roster changes so the
+        // desktop participant strip updates immediately instead of waiting
+        // for its slow fallback IPC read.
+        if roster_changed || transcription_auto_enabled {
+            state.emit_huddle_state_changed();
+        }
+    }
+    Ok(())
+}
+
+/// First roster read after connecting: store the agents and participants read
+/// from the relay. Returns false when the Huddle is no longer current.
+async fn hydrate_huddle_roster(
+    state: &AppState,
+    ephemeral_channel_id: &str,
+    huddle_generation: u64,
+) -> Result<bool, String> {
+    // Hydrate agent pubkeys and participants from relay in parallel
+    // (authoritative — overrides local guesses).
+    let (agents_result, all_members_result) = tokio::join!(
+        async { fetch_huddle_roster(ephemeral_channel_id, state).await.ok() },
+        fetch_channel_members(ephemeral_channel_id, state),
+    );
+    let (roster_changed, transcription_auto_enabled) = {
+        let mut hs = state.huddle()?;
+        if !hs.is_current_huddle(ephemeral_channel_id, huddle_generation) {
+            return Ok(false);
+        }
+        let mut roster_changed = false;
+        if let Some(roster) = agents_result {
+            let mut current_agents = hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner());
+            roster_changed |= roster.apply_agents(&mut current_agents);
+        }
+        if let Ok(all_members) = all_members_result {
+            if !all_members.is_empty() && hs.participants != all_members {
+                hs.participants = all_members;
+                roster_changed = true;
+            }
+        }
+        (
+            roster_changed,
+            hs.maybe_auto_enable_transcription_for_agents(),
+        )
+    };
+
+    if roster_changed || transcription_auto_enabled {
+        state.emit_huddle_state_changed();
+    }
+    Ok(true)
+}
+
+/// Setup after the Huddle connects: read the roster, then run `start_media`.
+/// Callers pass [`start_huddle_media`]; tests replace it to keep model files
+/// and audio out of the run.
 pub(crate) async fn post_connect_setup(
     state: &AppState,
     ephemeral_channel_id: &str,
     huddle_generation: u64,
+    start_media: impl AsyncFnOnce(&AppState, &str, u64) -> Result<PostConnectOutcome, String>,
 ) -> Result<PostConnectOutcome, String> {
     {
         let hs = state.huddle()?;
@@ -167,32 +262,20 @@ pub(crate) async fn post_connect_setup(
         }
     }
 
-    // Hydrate agent pubkeys and participants from relay in parallel
-    // (authoritative — overrides local guesses).
-    let (agents_result, all_members_result) = tokio::join!(
-        fetch_channel_members(ephemeral_channel_id, Some("bot"), state),
-        fetch_channel_members(ephemeral_channel_id, None, state),
-    );
-    let transcription_auto_enabled = {
-        let mut hs = state.huddle()?;
-        if !hs.is_current_huddle(ephemeral_channel_id, huddle_generation) {
-            return Ok(PostConnectOutcome::Stale);
-        }
-        if let Ok(agents) = agents_result {
-            *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) = agents;
-        }
-        if let Ok(all_members) = all_members_result {
-            if !all_members.is_empty() {
-                hs.participants = all_members;
-            }
-        }
-        hs.maybe_auto_enable_transcription_for_agents()
-    };
-
-    if transcription_auto_enabled {
-        state.emit_huddle_state_changed();
+    if !hydrate_huddle_roster(state, ephemeral_channel_id, huddle_generation).await? {
+        return Ok(PostConnectOutcome::Stale);
     }
 
+    start_media(state, ephemeral_channel_id, huddle_generation).await
+}
+
+/// Download voice models, connect the audio relay, and start the voice
+/// pipelines. Audio relay failure is an error.
+pub(crate) async fn start_huddle_media(
+    state: &AppState,
+    ephemeral_channel_id: &str,
+    huddle_generation: u64,
+) -> Result<PostConnectOutcome, String> {
     // Prepare voice models. Agent presence may have auto-enabled transcription;
     // explicit user choices remain authoritative.
     if let Some(mgr) = models::global_model_manager() {
@@ -248,10 +331,6 @@ pub(crate) async fn post_connect_setup(
 ///
 /// Returns `Ok(true)` if the pipeline was started, `Ok(false)` if models are
 /// not ready (voice-only mode), or `Err` on a real failure.
-///
-/// Creates the shared `tts_active` flag and passes it to the STT pipeline
-/// for barge-in / echo gating. The same flag is later passed to the TTS
-/// pipeline so it can signal when audio is playing.
 pub(crate) async fn maybe_start_stt_pipeline(
     state: &AppState,
     ephemeral_channel_id: &str,
@@ -280,13 +359,14 @@ pub(crate) async fn maybe_start_stt_pipeline(
     // Take the old pipeline OUT of the lock before dropping — Drop joins
     // the worker thread (~200ms) and must not block under the mutex.
     let (
-        tts_active,
-        tts_cancel,
         agent_pubkeys_arc,
         session_gen,
         expected_generation,
         stt_starting,
         ptt_active_for_stt,
+        manual_mic_unmuted_for_stt,
+        human_floor,
+        output_device,
         old_stt,
     ) = {
         let mut hs = state.huddle()?;
@@ -301,7 +381,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
         if hs.stt_pipeline.is_some() {
             hs.session_generation.fetch_add(1, Ordering::Release);
         }
-        let old = hs.stt_pipeline.take();
+        let old = hs.take_stt_pipeline();
         if let Some(ref p) = old {
             p.shutdown();
         }
@@ -310,14 +390,25 @@ pub(crate) async fn maybe_start_stt_pipeline(
         } else {
             None
         };
+        let manual_mic_unmuted = if hs.voice_input_mode == VoiceInputMode::PushToTalk {
+            Some(Arc::clone(&hs.manual_mic_unmuted))
+        } else {
+            None
+        };
         (
-            Arc::clone(&hs.tts_active),
-            Some(Arc::clone(&hs.tts_cancel)),
             Arc::clone(&hs.agent_pubkeys),
             Arc::clone(&hs.session_generation),
             hs.session_generation.load(Ordering::Acquire),
             stt_starting,
             ptt,
+            manual_mic_unmuted,
+            hs.human_floor.clone(),
+            state
+                .huddle_audio
+                .output_device
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             old,
         )
     };
@@ -325,7 +416,13 @@ pub(crate) async fn maybe_start_stt_pipeline(
     drop(old_stt);
 
     let constructed = tokio::task::spawn_blocking(move || {
-        stt::SttPipeline::new(model_dir, tts_active, tts_cancel, ptt_active_for_stt)
+        stt::SttPipeline::new(
+            model_dir,
+            ptt_active_for_stt,
+            manual_mic_unmuted_for_stt,
+            human_floor,
+            output_device,
+        )
     })
     .await;
     let (pipeline, text_rx) = match constructed {
@@ -354,7 +451,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
         {
             return Ok(false);
         }
-        hs.stt_pipeline = Some(Arc::clone(&pipeline));
+        hs.set_stt_pipeline(Arc::clone(&pipeline));
     }
 
     spawn_transcription_task(text_rx, channel_uuid, agent_pubkeys_arc, session_gen, state);
@@ -421,15 +518,15 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
         .lock()
         .map_err(|error| format!("text-to-speech settings lock poisoned: {error}"))
         .map(|settings| settings.voice_preferences.clone())?;
-    let initial_voice = match app {
-        Some(app) => super::tts_settings::pocket_voice_reference(&app, &voice_preferences)?,
+    let initial_voice = match app.as_ref() {
+        Some(app) => super::tts_settings::pocket_voice_reference(app, &voice_preferences)?,
         None => super::tts_settings::bundled_pocket_voice_reference(&voice_preferences),
     };
 
     // Atomically check preconditions and claim the construction slot.
     // The sentinel prevents a second caller from starting construction
     // while we're building outside the lock.
-    let (tts_active, tts_cancel, tts_starting) = {
+    let (tts_active, tts_cancel, human_floor, tts_starting) = {
         let hs = state.huddle()?;
         if hs.tts_pipeline.is_some() {
             return Ok(false);
@@ -443,6 +540,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
         (
             Arc::clone(&hs.tts_active),
             Arc::clone(&hs.tts_cancel),
+            hs.human_floor.clone(),
             Arc::clone(&hs.tts_starting),
         )
     };
@@ -456,8 +554,10 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
             model_dir,
             tts_active,
             tts_cancel,
+            human_floor,
             &initial_voice,
             output_device,
+            app,
         )
     })
     .await;
@@ -619,14 +719,24 @@ pub(crate) fn spawn_transcription_task(
                 .clone();
 
             let p_tags: Vec<&str> = agent_pubkeys.iter().map(|s| s.as_str()).collect();
-            let builder =
-                match events::build_message(channel_uuid, &t, None, &p_tags, &[], &[], &[]) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        eprintln!("buzz-desktop: STT build_message: {e}");
-                        continue;
-                    }
-                };
+            let builder = match events::build_message(
+                channel_uuid,
+                &t,
+                None,
+                &p_tags,
+                &[],
+                &[],
+                &[],
+                &[],
+                None,
+                &crate::relay::relay_api_base_url(),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("buzz-desktop: STT build_message: {e}");
+                    continue;
+                }
+            };
             // Wait before signing: the relay enforces NIP-98 freshness (±60s)
             // and the gate may hold for up to MAX_HINT_SECONDS (300s). Sign
             // the kind event and build NIP-98 auth after the wait so both
@@ -678,6 +788,10 @@ pub(crate) fn spawn_transcription_task(
         }
     });
 }
+
+#[cfg(test)]
+#[path = "roster_hydration_tests.rs"]
+mod roster_hydration_tests;
 
 #[cfg(test)]
 mod tts_start_race_tests {

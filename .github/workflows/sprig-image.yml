@@ -1,0 +1,233 @@
+name: Sprig image
+
+# Builds and publishes the public agent container image as
+# ghcr.io/block/buzz-sprig — the digest-pinned box the Kubernetes backend
+# deploys agents into (see Dockerfile.sprig and docs/remote-agents.md).
+#
+# Strategy mirrors docker.yml (the relay image): each architecture builds on
+# its native runner, pushes to GHCR by digest, then a merge job stitches the
+# per-arch digests into one multi-arch manifest and attests provenance.
+# No QEMU emulation.
+#
+# Triggers:
+#   - push to main (paths-filtered) → :main + :sha-<7>
+#   - tag sprig-v*                  → semver family (shared with sprig.yml's
+#                                     binary release — one tag versions both)
+#   - pull_request (paths-filtered) → build only, no push
+#   - workflow_dispatch             → manual publish at the current ref
+#
+# NOTE: the first push creates the GHCR package PRIVATE by default. An org
+# admin must flip ghcr.io/block/buzz-sprig to public once (Package settings →
+# Change visibility). Subsequent pushes keep the visibility.
+
+on:
+  push:
+    branches: [main]
+    tags: ["sprig-v[0-9]*"]
+    paths:
+      - "Dockerfile.sprig"
+      - "scripts/sprig-entrypoint.sh"
+      - ".github/workflows/sprig-image.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+  pull_request:
+    paths:
+      - "Dockerfile.sprig"
+      - "scripts/sprig-entrypoint.sh"
+      - ".github/workflows/sprig-image.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sprig-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' && github.event_name == 'pull_request' }}
+
+permissions: {}
+
+env:
+  # Single source of truth for the image name; override with the
+  # GHCR_SPRIG_IMAGE repo variable (same pattern as docker.yml).
+  IMAGE_NAME: ${{ vars.GHCR_SPRIG_IMAGE != '' && vars.GHCR_SPRIG_IMAGE || 'ghcr.io/block/buzz-sprig' }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        with:
+          # Same OOM cap as docker.yml — Rust compiles blow the 7GB runner
+          # at buildkit's default parallelism of 4.
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # match=^sprig-v(.*)$ strips the tag prefix for the semver parser,
+          # exactly as docker.yml does for relay-v. :latest comes from
+          # flavor.latest=auto — stable semver only, never main pushes.
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}},match=^sprig-v(.*)$
+            type=semver,pattern={{major}}.{{minor}},match=^sprig-v(.*)$
+          labels: |
+            org.opencontainers.image.title=Buzz Sprig
+            org.opencontainers.image.description=Agent runtime image for Buzz remote agents (buzz-acp multicall + git + curl)
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile.sprig
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: |
+            type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
+          cache-to: |
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref={0}-buildcache:{1},mode=max,compression=zstd', env.IMAGE_NAME, matrix.arch) || '' }}
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sprig-digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge multi-arch manifest
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download per-arch digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: sprig-digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # Must mirror the build job's tag matrix exactly (see docker.yml).
+          flavor: |
+            latest=auto
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}},match=^sprig-v(.*)$
+            type=semver,pattern={{major}}.{{minor}},match=^sprig-v(.*)$
+
+      - name: Create and push manifest list
+        id: manifest
+        working-directory: /tmp/digests
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          tags=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && tags+=("-t" "$tag")
+          done <<< "$META_TAGS"
+
+          digests=()
+          for digest in *; do
+            digests+=("${IMAGE_NAME}@sha256:${digest}")
+          done
+
+          docker buildx imagetools create "${tags[@]}" "${digests[@]}"
+
+          first_tag=$(echo "$META_TAGS" | head -n1)
+          merged_digest=$(docker buildx imagetools inspect "$first_tag" \
+            --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=${merged_digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest provenance for the merged image
+        # Verify with: gh attestation verify oci://ghcr.io/block/buzz-sprig:<tag> --owner block
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: |
+          {
+            echo "### Sprig image published"
+            echo '```'
+            echo "${IMAGE_NAME}@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

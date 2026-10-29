@@ -27,6 +27,14 @@
 //! handle_complete(&event)              → complete_event
 //! ```
 
+//! # Code-entry confirmation extension
+//!
+//! A target advertises `"confirmation":"desktop-code-v1"` in its encrypted
+//! offer. The source generates a separate random six-digit code, never included
+//! in the QR or challenge. The target submits user input through NIP-44. Only a
+//! matching code releases the source proof and payload; five guesses abort the
+//! entire session. Legacy offers still require explicit source-side approval.
+
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -104,6 +112,9 @@ pub struct PairingSession {
     created_at: Instant,
     /// Maximum session lifetime.
     timeout: Duration,
+    desktop_code_requested: bool,
+    desktop_code: Option<Zeroizing<String>>,
+    code_attempts: u8,
 }
 
 impl PairingSession {
@@ -136,6 +147,9 @@ impl PairingSession {
             processed_ids: HashSet::new(),
             created_at: Instant::now(),
             timeout: DEFAULT_TIMEOUT,
+            desktop_code_requested: false,
+            desktop_code: None,
+            code_attempts: 0,
         };
 
         (session, qr)
@@ -147,17 +161,33 @@ impl PairingSession {
     /// formatted SAS code to display. After this call the session is in
     /// [`SessionState::Confirming`].
     pub fn handle_offer(&mut self, event: &Event) -> Result<String, PairingError> {
+        self.handle_offer_with_confirmation(event)
+            .map(|(code, _)| code)
+    }
+
+    /// Validate an offer and return its SAS and whether the target requests
+    /// code-entry confirmation. The capability is encrypted so strict relays
+    /// still receive only the required recipient tag.
+    pub fn handle_offer_with_confirmation(
+        &mut self,
+        event: &Event,
+    ) -> Result<(String, bool), PairingError> {
         self.check_expired()?;
         self.expect_state(SessionState::Waiting)?;
         self.expect_role(Role::Source)?;
         self.validate_event_basics(event)?;
 
         let msg = self.decrypt_message(event)?;
-        let (session_id_hex, version) = match &msg {
+        let (session_id_hex, version, code_entry) = match &msg {
             PairingMessage::Offer {
                 session_id,
                 version,
-            } => (session_id.clone(), *version),
+                confirmation,
+            } => (
+                session_id.clone(),
+                *version,
+                confirmation.as_deref() == Some("desktop-code-v1"),
+            ),
             other => return Err(unexpected("offer", other)),
         };
 
@@ -192,7 +222,8 @@ impl PairingSession {
         self.state = SessionState::Confirming;
         self.record_event(event);
 
-        Ok(format_sas(code))
+        self.desktop_code_requested = code_entry;
+        Ok((format_sas(code), code_entry))
     }
 
     /// (Source) User confirmed the SAS codes match. Build the `sas-confirm`
@@ -220,6 +251,48 @@ impl PairingSession {
         };
         let event = self.build_event(&msg)?;
         self.state = SessionState::Transferring;
+        Ok(event)
+    }
+
+    /// (Source) Process a payload sent back by the target.
+    ///
+    /// This is used by recovery flows where the QR-displaying device requests
+    /// a secret from an already-authorized scanning device.
+    pub fn handle_return_payload(
+        &mut self,
+        event: &Event,
+    ) -> Result<(PayloadType, Zeroizing<String>), PairingError> {
+        self.check_expired()?;
+        self.expect_state(SessionState::Transferring)?;
+        self.expect_role(Role::Source)?;
+        self.validate_event_from_peer(event)?;
+
+        let msg = self.decrypt_message(event)?;
+        match msg {
+            PairingMessage::Payload {
+                payload_type,
+                payload,
+            } => {
+                self.state = SessionState::PayloadExchanged;
+                self.record_event(event);
+                Ok((payload_type, Zeroizing::new(payload)))
+            }
+            other => Err(unexpected("payload", &other)),
+        }
+    }
+
+    /// (Source) Report whether a returned payload was imported successfully.
+    pub fn send_source_complete(&mut self, success: bool) -> Result<Event, PairingError> {
+        self.check_expired()?;
+        self.expect_state(SessionState::PayloadExchanged)?;
+        self.expect_role(Role::Source)?;
+
+        let event = self.build_event(&PairingMessage::Complete { success })?;
+        self.state = if success {
+            SessionState::Completed
+        } else {
+            SessionState::Aborted
+        };
         Ok(event)
     }
 
@@ -307,12 +380,16 @@ impl PairingSession {
             processed_ids: HashSet::new(),
             created_at: Instant::now(),
             timeout: DEFAULT_TIMEOUT,
+            desktop_code_requested: false,
+            desktop_code: None,
+            code_attempts: 0,
         };
 
         // Build and return the offer event.
         let msg = PairingMessage::Offer {
             session_id: hex::encode(session_id),
             version: 1,
+            confirmation: None,
         };
         let event = session.build_event(&msg)?;
         session.state = SessionState::Confirming;
@@ -472,9 +549,15 @@ impl PairingSession {
         }
     }
 
+    /// Absolute protocol deadline. Transports must use this same deadline for
+    /// UI expiry so connection setup never adds time to an expired QR.
+    pub fn deadline(&self) -> Instant {
+        self.created_at + self.timeout
+    }
+
     /// Check if the session has expired.
     pub fn is_expired(&self) -> bool {
-        self.created_at.elapsed() > self.timeout
+        Instant::now() >= self.deadline()
     }
 
     /// Current protocol state.
@@ -742,6 +825,9 @@ impl Drop for PairingSession {
 fn unexpected(expected: &str, got: &PairingMessage) -> PairingError {
     let got_name = match got {
         PairingMessage::Offer { .. } => "offer",
+        PairingMessage::DesktopCode {} => "desktop-code",
+        PairingMessage::CodeSubmit { .. } => "code-submit",
+        PairingMessage::CodeRejected { .. } => "code-rejected",
         PairingMessage::SasConfirm { .. } => "sas-confirm",
         PairingMessage::Payload { .. } => "payload",
         PairingMessage::Complete { .. } => "complete",
@@ -819,6 +905,74 @@ mod tests {
             .handle_complete(&complete_event)
             .expect("handle complete");
         assert_eq!(source.state(), SessionState::Completed);
+    }
+
+    /// Reverse happy-path: the scanning target returns an nsec and the source
+    /// reports the import result. Duplicate payloads remain single-use.
+    #[test]
+    fn reverse_payload_flow_is_single_use() {
+        let (mut source, qr) = PairingSession::new_source("wss://relay.test".into());
+        let (mut target, offer) = PairingSession::new_target(&qr).expect("target");
+        let source_sas = source.handle_offer(&offer).expect("offer");
+        let sas_confirm = source.confirm_sas().expect("source confirm");
+        assert_eq!(
+            target
+                .handle_sas_confirm(&sas_confirm)
+                .expect("sas-confirm"),
+            source_sas
+        );
+        target.confirm_target_sas().expect("target confirm");
+
+        let payload = target
+            .build_event(&PairingMessage::Payload {
+                payload_type: PayloadType::Nsec,
+                payload: "nsec1recovered".into(),
+            })
+            .expect("return payload");
+        let (payload_type, secret) = source
+            .handle_return_payload(&payload)
+            .expect("handle return payload");
+        assert_eq!(payload_type, PayloadType::Nsec);
+        assert_eq!(*secret, "nsec1recovered");
+        assert_eq!(source.state(), SessionState::PayloadExchanged);
+        assert!(source.handle_return_payload(&payload).is_err());
+
+        let complete = source.send_source_complete(true).expect("source complete");
+        assert_eq!(source.state(), SessionState::Completed);
+        assert!(matches!(
+            target.decrypt_message(&complete).expect("decrypt complete"),
+            PairingMessage::Complete { success: true }
+        ));
+    }
+
+    #[test]
+    fn reverse_payload_import_failure_aborts_both_peers() {
+        let (mut source, qr) = PairingSession::new_source("wss://relay.test".into());
+        let (mut target, offer) = PairingSession::new_target(&qr).expect("target");
+        source.handle_offer(&offer).expect("offer");
+        let sas_confirm = source.confirm_sas().expect("source confirm");
+        target
+            .handle_sas_confirm(&sas_confirm)
+            .expect("sas-confirm");
+        target.confirm_target_sas().expect("target confirm");
+        let payload = target
+            .build_event(&PairingMessage::Payload {
+                payload_type: PayloadType::Nsec,
+                payload: "invalid".into(),
+            })
+            .expect("return payload");
+        source
+            .handle_return_payload(&payload)
+            .expect("handle return payload");
+
+        let complete = source
+            .send_source_complete(false)
+            .expect("failure complete");
+        assert_eq!(source.state(), SessionState::Aborted);
+        assert!(matches!(
+            target.decrypt_message(&complete).expect("decrypt complete"),
+            PairingMessage::Complete { success: false }
+        ));
     }
 
     /// State machine rejects out-of-order operations.
@@ -1313,3 +1467,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "session_code_entry_tests.rs"]
+mod code_entry_tests;
+
+#[path = "session_desktop_code.rs"]
+mod desktop_code;

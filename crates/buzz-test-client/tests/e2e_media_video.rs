@@ -19,6 +19,17 @@ fn relay_http_url() -> String {
     std::env::var("RELAY_HTTP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
 }
 
+/// Extract the host:port authority from the relay URL for use as the `server` tag.
+fn relay_server_authority() -> String {
+    let url = relay_http_url();
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("localhost:3000")
+        .to_string()
+}
+
 fn http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(30))
@@ -28,16 +39,37 @@ fn http_client() -> Client {
 
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
-    let exp_str = (now + 300).to_string();
+    let exp_str = (now + 55).to_string();
+    let server = relay_server_authority();
     let tags = vec![
         Tag::parse(["t", "upload"]).expect("t tag"),
         Tag::parse(["x", sha256]).expect("x tag"),
         Tag::parse(["expiration", &exp_str]).expect("expiration tag"),
+        Tag::parse(["server", &server]).expect("server tag"),
     ];
     EventBuilder::new(Kind::from(24242), "Upload test")
         .tags(tags)
         .sign_with_keys(keys)
         .expect("sign blossom auth")
+}
+
+/// Sign a kind:24242 Blossom *read* auth event. Reads are authenticated
+/// unconditionally, so blob and range GETs must present one of these -- without it
+/// the 206 and 416 range behaviour below would never be reached.
+fn sign_blossom_get_auth(keys: &Keys, sha256: &str) -> nostr::Event {
+    let now = Timestamp::now().as_secs();
+    let exp_str = (now + 55).to_string();
+    let server = relay_server_authority();
+    let tags = vec![
+        Tag::parse(["t", "get"]).expect("t tag"),
+        Tag::parse(["x", sha256]).expect("x tag"),
+        Tag::parse(["expiration", &exp_str]).expect("expiration tag"),
+        Tag::parse(["server", &server]).expect("server tag"),
+    ];
+    EventBuilder::new(Kind::from(24242), "Get test")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .expect("sign blossom get auth")
 }
 
 fn blossom_auth_header(event: &nostr::Event) -> String {
@@ -272,7 +304,15 @@ async fn test_video_upload_and_get() {
 
     // GET the blob back
     let get_url = desc["url"].as_str().unwrap();
-    let get_resp = client.get(get_url).send().await.expect("GET blob");
+    let get_resp = client
+        .get(get_url)
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_get_auth(&keys, &sha256)),
+        )
+        .send()
+        .await
+        .expect("GET blob");
     assert_eq!(get_resp.status(), StatusCode::OK);
     let body = get_resp.bytes().await.expect("body bytes");
     assert_eq!(body.len(), mp4.len());
@@ -345,6 +385,10 @@ async fn test_video_range_request_206() {
     // Range request: first 100 bytes
     let range_resp = client
         .get(blob_url)
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_get_auth(&keys, &sha256)),
+        )
         .header("Range", "bytes=0-99")
         .send()
         .await
@@ -389,6 +433,10 @@ async fn test_video_range_request_416() {
     // Request a range beyond the file size
     let range_resp = client
         .get(blob_url)
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_get_auth(&keys, &sha256)),
+        )
         .header(
             "Range",
             format!("bytes={}-{}", mp4.len() + 1000, mp4.len() + 2000),

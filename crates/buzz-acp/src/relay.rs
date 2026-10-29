@@ -57,6 +57,14 @@ const WS_SEND_TIMEOUT_SECS: u64 = 10;
 const STABLE_CONNECTION_SECS: u64 = 60;
 /// Seconds subtracted from `since` on resubscribe to tolerate clock skew.
 const SINCE_SKEW_SECS: u64 = 5;
+/// WebSocket close code 1001 (Going Away): the peer is shutting down.
+const CLOSE_CODE_GOING_AWAY: u16 = 1001;
+/// WebSocket close code 1012 (Service Restart): the relay pod is rolling.
+const CLOSE_CODE_SERVICE_RESTART: u16 = 1012;
+/// Upper bound of the uniform random wait before the first reconnect attempt
+/// after a 1001/1012 close. The relay already spreads its own closes over ~10s
+/// during a rolling deploy; this spreads the clients' arrival the same way.
+const RESTART_RECONNECT_SPREAD: Duration = Duration::from_secs(10);
 /// Timeout for the NIP-42 auth handshake steps.
 ///
 /// Raised from 5s to 20s (≈2 RTTs at the observed 10s max round-trip on degraded
@@ -106,9 +114,12 @@ const REQ_PACING_INTERVAL: Duration = Duration::from_millis(125);
 /// blocked for more than one REQ's worth of I/O between drain ticks.
 const DRAIN_BUDGET_PER_ITER: usize = 1;
 /// Maximum observer telemetry frames parked while the rate-limit gate is armed
-/// (or the socket is down). The upstream pacer feeds at most ~6 frames/s, so
-/// this covers ~40 s of gating; beyond that the oldest frames are dropped with
-/// visible accounting (`gated_observer_dropped`).
+/// (or the socket is down). The upstream publisher ships at most ONE batched
+/// frame per second GLOBALLY (one publish slot per tick, regardless of how
+/// many channels are active), so this covers ~4 minutes of gating; beyond that
+/// the oldest frames are dropped with visible accounting
+/// (`gated_observer_dropped`). Note each dropped frame may carry a whole batch
+/// of events, so event-level loss is larger than the frame count.
 const GATED_OBSERVER_QUEUE_CAP: usize = 256;
 
 use std::time::Instant;
@@ -133,6 +144,8 @@ use crate::config::ChannelFilter;
 pub struct ChannelInfo {
     pub name: String,
     pub channel_type: String,
+    /// Channel description from the kind-39000 `about` tag, if present.
+    pub description: Option<String>,
 }
 
 pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
@@ -144,12 +157,17 @@ pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
             match arr.first().and_then(|v| v.as_str()) {
                 Some("hidden") => is_hidden = true,
                 Some("private") => is_private = true,
-                Some("t") => declared_type = arr.get(1).and_then(|v| v.as_str()),
+                // The first `t` is the channel type; later `t` tags are labels.
+                Some("t") if declared_type.is_none() => {
+                    declared_type = arr.get(1).and_then(|v| v.as_str())
+                }
                 _ => {}
             }
         }
     }
-    if declared_type == Some("dm") || is_hidden {
+    // `hidden` marks a DM only on metadata without a declared type; a private
+    // system channel is hidden too.
+    if declared_type == Some("dm") || (declared_type.is_none() && is_hidden) {
         "dm".to_string()
     } else if declared_type == Some("private") || is_private {
         "private".to_string()
@@ -172,7 +190,7 @@ pub(crate) fn merge_discovered_channels(
     channel_uuids: Vec<Uuid>,
     meta_events: &serde_json::Value,
 ) -> HashMap<Uuid, ChannelInfo> {
-    let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
+    let mut meta_map: HashMap<Uuid, (String, String, Option<String>)> = HashMap::new();
     let mut archived: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     if let Some(arr) = meta_events.as_array() {
         for ev in arr {
@@ -183,11 +201,13 @@ pub(crate) fn merge_discovered_channels(
             let mut d_val = None;
             let mut name = None;
             let mut is_archived = false;
+            let mut description = None;
             for tag in tags {
                 if let Some(arr) = tag.as_array() {
                     match arr.first().and_then(|v| v.as_str()) {
                         Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
                         Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
+                        Some("about") => description = arr.get(1).and_then(|v| v.as_str()),
                         Some("archived") => {
                             is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
                         }
@@ -203,7 +223,11 @@ pub(crate) fn merge_discovered_channels(
                     }
                     let ch_name = name.unwrap_or("unknown").to_string();
                     let ch_type = channel_type_from_tags(tags);
-                    meta_map.insert(uuid, (ch_name, ch_type));
+                    let ch_desc = description
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    meta_map.insert(uuid, (ch_name, ch_type, ch_desc));
                 }
             }
         }
@@ -214,10 +238,17 @@ pub(crate) fn merge_discovered_channels(
         if archived.contains(&uuid) {
             continue;
         }
-        let (name, channel_type) = meta_map
+        let (name, channel_type, description) = meta_map
             .remove(&uuid)
-            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-        map.insert(uuid, ChannelInfo { name, channel_type });
+            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string(), None));
+        map.insert(
+            uuid,
+            ChannelInfo {
+                name,
+                channel_type,
+                description,
+            },
+        );
     }
     map
 }
@@ -259,6 +290,75 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    /// Fetch the relay's stable signing identity from its NIP-11 document.
+    ///
+    /// Relay-authored workflow attribution is trusted only when the event signer
+    /// matches this key. Missing, malformed, or unavailable identity data fails
+    /// closed by returning an error/`None` to the caller. NIP-11 is standardized
+    /// at the relay root; `/info` remains a compatibility fallback for relays
+    /// that expose the document through Buzz's explicit alias.
+    pub async fn relay_self(&self) -> Result<Option<String>, RelayError> {
+        let mut failures = Vec::new();
+        let mut saw_document_without_self = false;
+
+        for path in ["/", "/info"] {
+            let url = format!("{}{path}", self.base_url);
+            let response = match self
+                .http
+                .get(&url)
+                .header(reqwest::header::ACCEPT, "application/nostr+json")
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    failures.push(format!("GET {path} failed: {error}"));
+                    continue;
+                }
+            };
+
+            if !response.status().is_success() {
+                failures.push(format!("GET {path} returned HTTP {}", response.status()));
+                continue;
+            }
+
+            let document: serde_json::Value = match response.json().await {
+                Ok(document) => document,
+                Err(error) => {
+                    failures.push(format!("GET {path} returned invalid NIP-11 JSON: {error}"));
+                    continue;
+                }
+            };
+            let Some(relay_self) = document.get("self") else {
+                saw_document_without_self = true;
+                continue;
+            };
+            let Some(relay_self) = relay_self.as_str() else {
+                failures.push(format!("GET {path} returned a non-string NIP-11 self key"));
+                continue;
+            };
+            let relay_self = match nostr::PublicKey::from_hex(relay_self) {
+                Ok(pubkey) => pubkey.to_hex(),
+                Err(error) => {
+                    failures.push(format!(
+                        "GET {path} returned an invalid NIP-11 self key: {error}"
+                    ));
+                    continue;
+                }
+            };
+            return Ok(Some(relay_self));
+        }
+
+        if saw_document_without_self {
+            Ok(None)
+        } else {
+            Err(RelayError::Http(format!(
+                "failed to fetch a usable NIP-11 document: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -346,6 +446,13 @@ impl RestClient {
                     )));
                 }
                 Ok(resp) => {
+                    // Surface non-retriable statuses (401/403/500/…): callers
+                    // often swallow the Err, and a silent auth failure here has
+                    // previously masqueraded as "the agent just went quiet".
+                    tracing::warn!(
+                        "{method} {path} returned non-retriable HTTP {}",
+                        resp.status()
+                    );
                     return Err(RelayError::Http(format!(
                         "{method} {} returned HTTP {}",
                         path,
@@ -405,6 +512,64 @@ impl RestClient {
             .map_err(|e| RelayError::Http(e.to_string()))
     }
 
+    /// Query events via `POST /query` with a raw NIP-01 filter document.
+    ///
+    /// `nostr::Filter` only encodes single-letter generic tags. Project home
+    /// lookup needs `#buzz-channel`, which this path serializes verbatim.
+    pub async fn query_raw(&self, filters: &[Value]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let resp = self.bridge_post("/query", &body_bytes).await?;
+        resp.json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Query every historical event matching one raw filter across bounded pages.
+    ///
+    /// Uses the bridge's composite `(until, before_id)` cursor so a full page
+    /// never becomes evidence that older project metadata is absent.
+    pub async fn query_raw_all(&self, mut filter: Value) -> Result<Vec<Value>, RelayError> {
+        const PAGE_SIZE: usize = 500;
+        const EVENT_BOUND: usize = 10_000;
+        let mut events = Vec::new();
+        loop {
+            let remaining_probe = EVENT_BOUND + 1 - events.len();
+            let page_limit = PAGE_SIZE.min(remaining_probe);
+            filter["limit"] = serde_json::json!(page_limit);
+            let page = self.query_raw(std::slice::from_ref(&filter)).await?;
+            let page = page
+                .as_array()
+                .ok_or_else(|| RelayError::Http("query response is not an array".into()))?;
+            let done = page.len() < page_limit;
+            if events.len() + page.len() > EVENT_BOUND {
+                return Err(RelayError::Http(format!(
+                    "query exceeded the exhaustive {EVENT_BOUND}-event bound"
+                )));
+            }
+            if !done {
+                let last = page
+                    .last()
+                    .ok_or_else(|| RelayError::Http("full query page is empty".into()))?;
+                let created_at = last
+                    .get("created_at")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| RelayError::Http("query page event lacks created_at".into()))?;
+                let id = last
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| id.len() == 64 && id.chars().all(|ch| ch.is_ascii_hexdigit()))
+                    .ok_or_else(|| RelayError::Http("query page event has invalid id".into()))?;
+                filter["until"] = serde_json::json!(created_at);
+                filter["before_id"] = serde_json::json!(id);
+            }
+            events.extend(page.iter().cloned());
+            if done {
+                return Ok(events);
+            }
+        }
+    }
+
     /// Count events via the HTTP bridge: `POST /count` with NIP-98 auth.
     ///
     /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
@@ -439,6 +604,10 @@ impl RestClient {
 /// Events the harness cares about.
 #[derive(Debug, Clone)]
 pub struct BuzzEvent {
+    /// Which authenticated relay connection delivered this event. Generation 0
+    /// is the initial connection; each successful reconnect increments it
+    /// before any buffered or live event from that connection is forwarded.
+    pub connection_generation: u64,
     /// Which channel this event belongs to.
     pub channel_id: Uuid,
     /// The underlying Nostr event.
@@ -1011,10 +1180,8 @@ struct BgState {
     /// On reconnect resubscribe, `since` = min(last_seen, channel_dropped_since).
     /// Cleared per-channel after a successful resubscribe.
     channel_dropped_since: HashMap<Uuid, u64>,
-    /// Set by the backpressure handler when the event channel is full.
-    /// The main loop checks this flag and triggers a proactive resubscribe
-    /// (without waiting for a disconnect) so dropped events are replayed.
-    proactive_resubscribe_needed: bool,
+    /// Rate/fairness bookkeeping only; replay cursors retain baseline semantics.
+    recovery: recovery::RecoverySchedule,
     /// Unix timestamp captured just before the relay connection was established.
     /// Used as the floor `since` for membership notification replay so events
     /// predating this session are never re-delivered.
@@ -1064,12 +1231,42 @@ struct BgState {
     /// A single failed channel REQ is parked here instead of aborting the whole
     /// reconnect. Drained by the main loop. Flushed on each reconnect attempt.
     resubscribe_retry: HashSet<Uuid>,
+    /// Current authenticated WebSocket generation. Incremented immediately
+    /// after each successful reconnect handshake, before buffered or live
+    /// events from the new connection are forwarded.
+    connection_generation: u64,
     /// Current position in the exponential backoff ladder.
     ///
     /// Persisted across calls to `wait_for_reconnect` so a flapping link stays at
     /// the elevated rung it earned. Reset to 0 by the stability block once the
     /// connection has been up for `STABLE_CONNECTION_SECS`.
     backoff_step: usize,
+    /// Loss records (`channel_dropped_since` / `membership_dropped_since`)
+    /// that a REQ written on the CURRENT connection retired, keyed by
+    /// subscription ID. Writing a replay REQ retires its loss record, but the
+    /// replay only finished once that REQ reaches a counted EOSE, which removes
+    /// the entry. If the connection closes first, the record is restored, so
+    /// the next replay is still held at or before the loss whatever `last_seen`
+    /// says. Cleared on every close; it never outlives the connection, so on a
+    /// live connection overflow recovery behaves as before.
+    retired_loss_this_conn: HashMap<String, u64>,
+    /// Close code of the last WebSocket Close frame received, consumed by the
+    /// next reconnect to choose the first-attempt delay.
+    last_close_code: Option<u16>,
+    /// Subscription IDs a REQ was written for on the CURRENT connection.
+    /// Deliberately kept across unsubscribe: the wire ID is derived from the
+    /// channel, so a re-subscribe on the same socket reuses it and must count as
+    /// a second REQ (an EOSE for the old REQ may still be in flight). Cleared
+    /// only when the connection closes, so it is bounded by the IDs used on one
+    /// socket.
+    req_sent_this_conn: HashSet<String>,
+    /// Subscription IDs whose REQ was written more than once on the CURRENT
+    /// connection. EOSE carries only the subscription ID, so an EOSE for the
+    /// superseded REQ cannot be told from one for its replacement; such a
+    /// subscription's EOSE never releases its retired loss record on this
+    /// connection. Like `req_sent_this_conn`, kept across unsubscribe and
+    /// cleared only on connection close.
+    superseded_this_conn: HashSet<String>,
 }
 
 impl BgState {
@@ -1084,7 +1281,7 @@ impl BgState {
             membership_sub_active: false,
             observer_control_sub_active: false,
             channel_dropped_since: HashMap::new(),
-            proactive_resubscribe_needed: false,
+            recovery: recovery::RecoverySchedule::default(),
             startup_watermark: None,
             subscribe_since: HashMap::new(),
             rate_limit_gate: None,
@@ -1095,7 +1292,12 @@ impl BgState {
             observer_in_flight: VecDeque::new(),
             gated_observer_dropped: 0,
             resubscribe_retry: HashSet::new(),
+            connection_generation: 0,
             backoff_step: 0,
+            retired_loss_this_conn: HashMap::new(),
+            last_close_code: None,
+            req_sent_this_conn: HashSet::new(),
+            superseded_this_conn: HashSet::new(),
         }
     }
 
@@ -1121,32 +1323,96 @@ impl BgState {
 
     /// Compute the `since` timestamp for a channel (re)subscribe.
     ///
-    /// Picks the earliest of `last_seen` and `channel_dropped_since` so
-    /// the replay window covers both successfully processed events and any
-    /// that were dropped due to queue pressure. Falls back to the per-channel
-    /// `subscribe_since` (set at first subscribe) or `startup_watermark`.
+    /// See [`resume_since`] for how `last_seen`, `channel_dropped_since` and
+    /// the per-channel `subscribe_since` / `startup_watermark` baseline combine.
     fn channel_since(&self, channel_id: &Uuid) -> Option<u64> {
-        let last_seen = self.last_seen.get(channel_id).copied();
-        let dropped = self.channel_dropped_since.get(channel_id).copied();
-        match (last_seen, dropped) {
-            (Some(l), Some(d)) => Some(l.min(d)),
-            (Some(l), None) => Some(l),
-            (None, Some(d)) => Some(d),
-            (None, None) => self
-                .subscribe_since
+        resume_since(
+            self.subscribe_since
                 .get(channel_id)
                 .copied()
                 .or(self.startup_watermark),
+            self.last_seen.get(channel_id).copied(),
+            self.channel_dropped_since.get(channel_id).copied(),
+        )
+    }
+
+    /// Compute the `since` timestamp for a membership notification (re)subscribe.
+    fn membership_since(&self) -> Option<u64> {
+        resume_since(
+            self.startup_watermark,
+            self.membership_last_seen,
+            self.membership_dropped_since,
+        )
+    }
+
+    /// `sub_id` reached EOSE on the current connection: its replay finished,
+    /// so the loss record its REQ retired is not restored on close. A
+    /// subscription whose REQ was re-sent on this connection is ignored: the
+    /// EOSE may belong to the superseded REQ, whose replacement (e.g. an
+    /// overflow-recovery replay) has not delivered its history yet.
+    fn note_eose(&mut self, sub_id: &str) {
+        if !self.superseded_this_conn.contains(sub_id) {
+            self.retired_loss_this_conn.remove(sub_id);
         }
+    }
+
+    /// A REQ was written for `sub_id`. A second REQ on the same connection
+    /// supersedes the first for the rest of that connection (see
+    /// `superseded_this_conn`). A caller that wrote a replay REQ retires the
+    /// subscription's loss record right after this, so the record is kept in
+    /// `retired_loss_this_conn` until the replay is known to have finished.
+    fn note_req_sent(&mut self, sub_id: &str) {
+        let loss = if sub_id == MEMBERSHIP_NOTIF_SUB_ID {
+            self.membership_dropped_since
+        } else {
+            channel_id_from_sub_id(sub_id)
+                .and_then(|channel_id| self.channel_dropped_since.get(&channel_id).copied())
+        };
+        if let Some(loss) = loss {
+            self.retired_loss_this_conn
+                .entry(sub_id.to_owned())
+                .and_modify(|t| *t = (*t).min(loss))
+                .or_insert(loss);
+        }
+        if !self.req_sent_this_conn.insert(sub_id.to_owned()) {
+            self.superseded_this_conn.insert(sub_id.to_owned());
+        }
+    }
+
+    /// The current connection closed: loss records retired by a replay that
+    /// never reached a counted EOSE are restored, merged by `min` with any
+    /// newer loss. Idempotent for the same outage.
+    fn note_connection_closed(&mut self) {
+        for (sub_id, loss) in std::mem::take(&mut self.retired_loss_this_conn) {
+            if sub_id == MEMBERSHIP_NOTIF_SUB_ID {
+                self.membership_dropped_since =
+                    Some(self.membership_dropped_since.map_or(loss, |d| d.min(loss)));
+            } else if let Some(channel_id) = channel_id_from_sub_id(&sub_id) {
+                self.channel_dropped_since
+                    .entry(channel_id)
+                    .and_modify(|d| *d = (*d).min(loss))
+                    .or_insert(loss);
+            }
+        }
+        self.req_sent_this_conn.clear();
+        self.superseded_this_conn.clear();
     }
 
     /// Clear all per-channel state for a channel that is being unsubscribed.
     /// Prevents stale replay on re-subscribe and avoids unbounded state growth
     /// for channels that are removed and never re-added.
     fn clear_channel_state(&mut self, channel_id: &Uuid) {
+        self.recovery
+            .last_attempt
+            .remove(&channel_sub_id(*channel_id));
         self.last_seen.remove(channel_id);
         self.subscribe_since.remove(channel_id);
         self.channel_dropped_since.remove(channel_id);
+        // `req_sent_this_conn` / `superseded_this_conn` are intentionally NOT
+        // cleared: a re-subscribe on this socket reuses the wire ID, and an EOSE
+        // for the old REQ must not count for the new one.
+        self.retired_loss_this_conn
+            .remove(&channel_sub_id(*channel_id));
         self.active_filters.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);
         self.resubscribe_retry.remove(channel_id);
@@ -1216,6 +1482,40 @@ impl BgState {
         while let Some(event) = self.observer_in_flight.pop_back() {
             self.gated_observer_pending.push_front(event);
         }
+        self.trim_gated_observer_pending();
+    }
+
+    /// Re-park a frame the relay explicitly refused, ahead of frames parked
+    /// after the gate armed.
+    ///
+    /// An `OK(id, false, …)` names the refused frame, so only that frame is
+    /// retried — frames still awaiting their own verdict stay in the
+    /// acknowledgment window. This is the correlated counterpart to
+    /// [`Self::requeue_observer_in_flight`], which must retry everything
+    /// because a NOTICE identifies nothing.
+    fn requeue_rejected_observer_frame(&mut self, event_id: &str) {
+        let Some(index) = self
+            .observer_in_flight
+            .iter()
+            .position(|event| event.id.to_hex() == event_id)
+        else {
+            return;
+        };
+        if let Some(event) = self.observer_in_flight.remove(index) {
+            if self.gated_observer_pending.len() >= GATED_OBSERVER_QUEUE_CAP {
+                self.gated_observer_pending.pop_front();
+                self.gated_observer_dropped += 1;
+                warn!(
+                    dropped_total = self.gated_observer_dropped,
+                    "gated observer queue full — dropped oldest parked frame for refused retry"
+                );
+            }
+            self.gated_observer_pending.push_front(event);
+        }
+    }
+
+    /// Enforce the parked-queue bound, counting evictions so loss stays visible.
+    fn trim_gated_observer_pending(&mut self) {
         while self.gated_observer_pending.len() > GATED_OBSERVER_QUEUE_CAP {
             self.gated_observer_pending.pop_front();
             self.gated_observer_dropped += 1;
@@ -1446,8 +1746,8 @@ async fn execute_connected_command(
                 state.membership_resub_needed = true;
                 return true;
             }
-            let since = state.membership_last_seen.or(state.startup_watermark);
-            let sent = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
+            let since = state.membership_since();
+            let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
             if sent {
                 state.membership_resub_needed = false;
                 if state.membership_last_seen.is_none() {
@@ -1638,82 +1938,6 @@ async fn run_background_task(
     let mut drain_pacing_next: Option<tokio::time::Instant> = None;
 
     loop {
-        if state.proactive_resubscribe_needed {
-            state.proactive_resubscribe_needed = false;
-            info!("proactive resubscribe triggered by backpressure event loss");
-            // Proactive resubscribe runs on the EXISTING socket — do NOT clear the
-            // rate-limit gate or pending queues.
-            match resubscribe_after_reconnect(
-                &mut ws,
-                &mut cmd_rx,
-                &mut state,
-                &agent_pubkey_hex,
-                false, // existing socket — preserve gate state
-            )
-            .await
-            {
-                ResubscribeResult::Ok => {}
-                ResubscribeResult::Shutdown => return,
-                ResubscribeResult::RetryConnection => {
-                    warn!("proactive resubscribe had failures — triggering reconnect");
-                    let _ = event_tx.try_send(None);
-                    match try_autonomous_reconnect(
-                        &mut ws,
-                        &mut cmd_rx,
-                        &mut state,
-                        &keys,
-                        &relay_url,
-                        &agent_pubkey_hex,
-                        &event_tx,
-                        &observer_control_tx,
-                        auth_tag.as_ref(),
-                    )
-                    .await
-                    {
-                        ReconnectOutcome::Ok => {
-                            if matches!(
-                                drain_post_reconnect(
-                                    &mut ws,
-                                    &mut cmd_rx,
-                                    &mut state,
-                                    &agent_pubkey_hex
-                                )
-                                .await,
-                                ReconnectOutcome::Shutdown
-                            ) {
-                                return;
-                            }
-                        }
-                        ReconnectOutcome::Shutdown => return,
-                        ReconnectOutcome::Failed => {
-                            if matches!(
-                                wait_for_reconnect(
-                                    &mut ws,
-                                    &mut cmd_rx,
-                                    &mut state,
-                                    &keys,
-                                    &relay_url,
-                                    &agent_pubkey_hex,
-                                    &event_tx,
-                                    &observer_control_tx,
-                                    true,
-                                    auth_tag.as_ref(),
-                                )
-                                .await,
-                                ReconnectOutcome::Shutdown
-                            ) {
-                                return;
-                            }
-                        }
-                    }
-                    ping_sent = false;
-                    last_pong = Instant::now();
-                    connected_since = Instant::now();
-                    stable_logged = false;
-                }
-            }
-        }
-
         // Drain pending subs, one REQ per pacing tick within the relay's
         // admission window.
         let drain_window_open = drain_pacing_next.is_none_or(|t| tokio::time::Instant::now() >= t);
@@ -1725,14 +1949,15 @@ async fn run_background_task(
             // recovery fires even when rate_limited_pending is empty.
             if state.check_rate_gate().is_none() {
                 if state.membership_resub_needed && budget > 0 {
-                    let replay_since =
-                        match (state.membership_dropped_since, state.membership_last_seen) {
-                            (Some(d), Some(l)) => Some(d.min(l)),
-                            (Some(d), None) => Some(d),
-                            (None, Some(l)) => Some(l),
-                            (None, None) => state.startup_watermark,
-                        };
-                    if send_membership_subscribe(&mut ws, &agent_pubkey_hex, replay_since).await {
+                    let replay_since = state.membership_since();
+                    if send_membership_subscribe(
+                        &mut ws,
+                        &mut state,
+                        &agent_pubkey_hex,
+                        replay_since,
+                    )
+                    .await
+                    {
                         state.membership_resub_needed = false;
                         state.membership_dropped_since = None;
                         budget = budget.saturating_sub(1);
@@ -1794,7 +2019,11 @@ async fn run_background_task(
             }
         }
 
+        let recovery_at = recovery::ready_at(&mut state);
         tokio::select! {
+                   _ = recovery::ready(&event_tx, recovery_at) => {
+                       recovery::recover_one(&mut ws, &mut state, &event_tx, &agent_pubkey_hex).await;
+                   }
                    raw = ws.next() => {
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
@@ -2079,6 +2308,36 @@ async fn handle_ws_message(
                     subscription_id,
                     event,
                 } => {
+                    // Relay and storage responses are untrusted. Verify before
+                    // any event field can affect routing, replay state, or the
+                    // harness queues.
+                    let event_id = event.id.to_hex();
+                    let event = match tokio::task::spawn_blocking(move || {
+                        buzz_core::verify_event(&event).map(|()| event)
+                    })
+                    .await
+                    {
+                        Ok(Ok(event)) => event,
+                        Ok(Err(error)) => {
+                            warn!(
+                                subscription_id,
+                                event_id,
+                                error = %error,
+                                "relay event failed NIP-01 verification — dropping"
+                            );
+                            return true;
+                        }
+                        Err(error) => {
+                            warn!(
+                                subscription_id,
+                                event_id,
+                                error = %error,
+                                "relay event verification task failed — dropping"
+                            );
+                            return true;
+                        }
+                    };
+
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
                         match observer_control_tx.try_send(*event) {
                             Ok(()) => {}
@@ -2113,6 +2372,7 @@ async fn handle_ws_message(
                         }
                         let ts = event.created_at.as_secs();
                         let buzz_event = BuzzEvent {
+                            connection_generation: state.connection_generation,
                             channel_id: channel_uuid,
                             event: *event,
                         };
@@ -2139,12 +2399,10 @@ async fn handle_ws_message(
                                 // replay starts early enough to re-deliver it.
                                 state.membership_dropped_since =
                                     Some(state.membership_dropped_since.map_or(ts, |d| d.min(ts)));
-                                // Proactively trigger resubscribe without waiting for a disconnect.
-                                state.proactive_resubscribe_needed = true;
                                 warn!(
                                     channel_id = %channel_uuid,
                                     ts,
-                                    "membership notification dropped (backpressure) — proactive resubscribe queued"
+                                    "membership notification dropped (backpressure) — targeted recovery pending"
                                 );
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
@@ -2154,6 +2412,7 @@ async fn handle_ws_message(
                         let event_id_hex = event.id.to_hex();
                         if state.record_event(channel_id, &event) {
                             let buzz_event = BuzzEvent {
+                                connection_generation: state.connection_generation,
                                 channel_id,
                                 event: *event,
                             };
@@ -2180,12 +2439,10 @@ async fn handle_ws_message(
                                         .entry(channel_id)
                                         .and_modify(|d| *d = (*d).min(ts))
                                         .or_insert(ts);
-                                    // Proactively trigger resubscribe without waiting for a disconnect.
-                                    state.proactive_resubscribe_needed = true;
                                     warn!(
                                         channel_id = %channel_id,
                                         ts,
-                                        "event channel full — dropping event for channel {channel_id} — proactive resubscribe queued"
+                                        "event channel full — dropping event for channel {channel_id} — targeted recovery pending"
                                     );
                                 }
                                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -2202,11 +2459,15 @@ async fn handle_ws_message(
                 }
                 RelayMessage::Eose { subscription_id } => {
                     debug!("EOSE for subscription {subscription_id}");
+                    state.note_eose(&subscription_id);
                 }
                 RelayMessage::Notice { message } => {
                     // Fix 4: NOTICE at warn level.
                     tracing::warn!("relay NOTICE: {message}");
-                    // The relay sends NOTICE for rate-limited EVENT/COUNT frames.
+                    // NOTICE now carries only connection-scoped refusals: an
+                    // EVENT is refused via OK and a REQ/COUNT via CLOSED. A
+                    // NOTICE names nothing, so every unacknowledged observer
+                    // write must be retried.
                     if message.starts_with("rate-limited:") {
                         let secs = parse_rate_limit_retry_secs(&message).unwrap_or(0);
                         let deadline = state.set_rate_limit_gate(secs);
@@ -2290,14 +2551,9 @@ async fn handle_ws_message(
                             return false;
                         }
                     } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
-                        let since =
-                            match (state.membership_dropped_since, state.membership_last_seen) {
-                                (Some(d), Some(l)) => Some(d.min(l)),
-                                (Some(d), None) => Some(d),
-                                (None, Some(l)) => Some(l),
-                                (None, None) => state.startup_watermark,
-                            };
-                        let sent = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
+                        let since = state.membership_since();
+                        let sent =
+                            send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
                         if sent {
                             // Success — subscription is live again.
                             state.membership_dropped_since = None;
@@ -2374,6 +2630,25 @@ async fn handle_ws_message(
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
                     }
+                    // A refused EVENT is acknowledged on its own channel, so the
+                    // backoff must arm here — not only in the NOTICE arm. Without
+                    // this the harness would publish straight back into the same
+                    // quota it was just refused on.
+                    if !accepted && message.starts_with("rate-limited:") {
+                        let secs = parse_rate_limit_retry_secs(&message).unwrap_or(0);
+                        let deadline = state.set_rate_limit_gate(secs);
+                        // The OK names the refused frame, so re-park only that
+                        // one rather than every unacknowledged frame.
+                        state.requeue_rejected_observer_frame(&event_id);
+                        warn!(
+                            "rate-limit gate armed via OK for event {event_id} until ~{:.1}s from now",
+                            deadline
+                                .checked_duration_since(tokio::time::Instant::now())
+                                .unwrap_or_default()
+                                .as_secs_f64()
+                        );
+                        return true;
+                    }
                     state.acknowledge_observer_frame(&event_id);
                     debug!("OK for event {event_id}: accepted={accepted} message={message}");
                 }
@@ -2387,8 +2662,9 @@ async fn handle_ws_message(
             }
             true
         }
-        Message::Close(_) => {
-            debug!("relay sent Close frame");
+        Message::Close(frame) => {
+            state.last_close_code = frame.as_ref().map(|f| u16::from(f.code));
+            debug!(close_code = ?state.last_close_code, "relay sent Close frame");
             false
         }
         // Binary, Pong, Frame — ignore
@@ -2507,6 +2783,11 @@ async fn resubscribe_after_reconnect(
     is_fresh_connection: bool,
 ) -> ResubscribeResult {
     if is_fresh_connection {
+        // The previous socket is gone. The reconnect entry already closed it
+        // out, but a socket that died partway through an earlier resubscribe
+        // (`RetryConnection`) did not: restore the loss records its REQs
+        // retired before any `since` is computed. Idempotent otherwise.
+        state.note_connection_closed();
         // These queues are derived from active subscription intent and rebuilt
         // below. The rate-limit gate is deliberately preserved: the relay's
         // shared admission counter survives socket replacement.
@@ -2575,13 +2856,8 @@ async fn resubscribe_after_reconnect(
             {
                 return ResubscribeResult::Shutdown;
             }
-            let replay_since = match (state.membership_dropped_since, state.membership_last_seen) {
-                (Some(d), Some(l)) => Some(d.min(l)),
-                (Some(d), None) => Some(d),
-                (None, Some(l)) => Some(l),
-                (None, None) => state.startup_watermark,
-            };
-            let sent = send_membership_subscribe(ws, agent_pubkey_hex, replay_since).await;
+            let replay_since = state.membership_since();
+            let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, replay_since).await;
             if sent {
                 state.membership_dropped_since = None;
                 state.membership_resub_needed = false;
@@ -2915,6 +3191,9 @@ async fn try_autonomous_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    if !prepare_reconnect(cmd_rx, state).await {
+        return ReconnectOutcome::Shutdown;
+    }
     // 5 attempts, up to 16s base backoff. Shares delay values with the
     // initial-connect retry in `HarnessRelay::connect()` (STARTUP_CONNECT_BACKOFFS) —
     // see its doc comment for how the two loops consume the array differently.
@@ -2937,6 +3216,7 @@ async fn try_autonomous_reconnect(
         match do_connect(relay_url, keys, auth_tag).await {
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
+                state.connection_generation = state.connection_generation.saturating_add(1);
                 info!("autonomous reconnect succeeded (attempt {})", attempt + 1);
                 let handshake_ok = process_handshake_buffer(
                     ws,
@@ -3045,6 +3325,9 @@ async fn wait_for_reconnect(
     auth_tag: Option<&nostr::Tag>,
 ) -> ReconnectOutcome {
     state.requeue_observer_in_flight();
+    if !prepare_reconnect(cmd_rx, state).await {
+        return ReconnectOutcome::Shutdown;
+    }
     if !skip_drain {
         // Drain commands until we get Reconnect (or Shutdown).
         // Other commands update state so reconnect reflects latest intent.
@@ -3075,6 +3358,7 @@ async fn wait_for_reconnect(
         match do_connect(relay_url, keys, auth_tag).await {
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
+                state.connection_generation = state.connection_generation.saturating_add(1);
                 info!("relay reconnected to {relay_url}");
                 let handshake_ok = process_handshake_buffer(
                     ws,
@@ -3172,7 +3456,7 @@ async fn wait_for_reconnect(
 /// Returns `true` if the REQ was successfully written to the WebSocket.
 async fn send_subscribe(
     ws: &mut WsStream,
-    _state: &BgState,
+    state: &mut BgState,
     channel_id: Uuid,
     agent_pubkey_hex: &str,
     since: Option<u64>,
@@ -3212,6 +3496,7 @@ async fn send_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
+                    state.note_req_sent(&sub_id);
                     debug!(
                         "subscribed to channel {channel_id}{}",
                         if since.is_some() {
@@ -3239,6 +3524,7 @@ async fn send_subscribe(
 /// Returns `true` if the REQ was successfully written to the WebSocket.
 async fn send_membership_subscribe(
     ws: &mut WsStream,
+    state: &mut BgState,
     agent_pubkey_hex: &str,
     since: Option<u64>,
 ) -> bool {
@@ -3266,6 +3552,7 @@ async fn send_membership_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
+                    state.note_req_sent(MEMBERSHIP_NOTIF_SUB_ID);
                     debug!("subscribed to membership notifications (since={since_ts})");
                     true
                 }
@@ -3345,16 +3632,76 @@ pub(crate) fn parse_rate_limit_retry_secs(msg: &str) -> Option<u64> {
     after[..len].parse::<u64>().ok()
 }
 
-/// Add ±20% jitter to a backoff duration using the nanosecond sub-second
-/// component of the system clock as a cheap entropy source (no `rand` dep).
+/// Uniform random sample in `[0, 1)` from the OS CSPRNG (via a v4 UUID, so no
+/// extra dependency). Used for reconnect jitter so concurrent agents spread out.
+fn random_unit_sample() -> f64 {
+    const MANTISSA_BITS: u32 = 53;
+    let (_, low) = Uuid::new_v4().as_u64_pair();
+    (low & ((1u64 << MANTISSA_BITS) - 1)) as f64 / (1u64 << MANTISSA_BITS) as f64
+}
+
+/// Clamp an externally supplied sample into `[0, 1]`; non-finite values fall
+/// back to the midpoint so `Duration::mul_f64` can never panic.
+fn clamp_unit_sample(sample: f64) -> f64 {
+    if sample.is_finite() {
+        sample.clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
+}
+
+/// Add symmetric ±20% jitter to a backoff duration.
 fn jittered_duration(base: Duration) -> Duration {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    // factor ∈ [0.8, 1.2)
-    let factor = 0.8 + (nanos as f64 / u32::MAX as f64) * 0.4;
-    base.mul_f64(factor)
+    jittered_duration_with(base, random_unit_sample())
+}
+
+/// Deterministic core of [`jittered_duration`]: `sample` in `[0, 1]` maps
+/// linearly onto a factor in `[0.8, 1.2]`.
+fn jittered_duration_with(base: Duration, sample: f64) -> Duration {
+    base.mul_f64(0.8 + clamp_unit_sample(sample) * 0.4)
+}
+
+/// Delay before the first reconnect attempt after a close.
+///
+/// A 1012 (Service Restart) or 1001 (Going Away) close means the relay pod is
+/// rolling; every client of that pod is being closed within the same ~10s
+/// window, so each waits a uniform random `sample * 10s` ("full jitter") to
+/// spread its arrival. Any other close (or none) reconnects immediately, as
+/// before. `sample` is in `[0, 1]` and is injected so callers can test this
+/// without sleeping.
+fn first_reconnect_delay(close_code: Option<u16>, sample: f64) -> Duration {
+    match close_code {
+        Some(CLOSE_CODE_SERVICE_RESTART | CLOSE_CODE_GOING_AWAY) => {
+            RESTART_RECONNECT_SPREAD.mul_f64(clamp_unit_sample(sample))
+        }
+        _ => Duration::ZERO,
+    }
+}
+
+/// Combine the replay inputs for one subscription into the `since` cursor
+/// handed to `send_subscribe` (which subtracts [`SINCE_SKEW_SECS`] on the wire).
+///
+/// - `base`: original replay floor (`subscribe_since` / startup watermark).
+/// - `last_seen`: newest delivered event `created_at`.
+/// - `dropped`: oldest event lost to backpressure; a recorded gap, so the
+///   result never advances past it.
+///
+/// The earlier of `last_seen` and `dropped`, else `base`.
+fn resume_since(base: Option<u64>, last_seen: Option<u64>, dropped: Option<u64>) -> Option<u64> {
+    match (last_seen, dropped) {
+        (Some(l), Some(d)) => Some(l.min(d)),
+        (Some(l), None) => Some(l),
+        (None, Some(d)) => Some(d),
+        (None, None) => base,
+    }
+}
+
+/// Bookkeeping at the top of every reconnect, returning the delay to wait
+/// before the first attempt: restores loss records whose replay never finished
+/// on the connection that just closed, and consumes its close code.
+fn begin_reconnect(state: &mut BgState, sample: f64) -> Duration {
+    state.note_connection_closed();
+    first_reconnect_delay(state.last_close_code.take(), sample)
 }
 
 /// Classify a `RelayError` as a DNS resolution failure.
@@ -3410,8 +3757,18 @@ async fn dns_flat_sleep(
     state: &mut BgState,
     duration: Duration,
 ) -> bool {
-    let jittered = jittered_duration(duration);
-    let deadline = tokio::time::Instant::now() + jittered;
+    shutdown_aware_sleep(cmd_rx, state, jittered_duration(duration)).await
+}
+
+/// Shutdown-aware sleep for exactly `duration`. Non-Shutdown commands received
+/// meanwhile are applied to state without resetting the deadline. Returns
+/// `false` if the task should shut down.
+async fn shutdown_aware_sleep(
+    cmd_rx: &mut mpsc::Receiver<RelayCommand>,
+    state: &mut BgState,
+    duration: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + duration;
     let sleep = tokio::time::sleep_until(deadline);
     tokio::pin!(sleep);
     loop {
@@ -3425,6 +3782,21 @@ async fn dns_flat_sleep(
             }
         }
     }
+}
+
+/// Reconnect entry shared by `try_autonomous_reconnect` and
+/// `wait_for_reconnect`: runs [`begin_reconnect`] with the real clock and RNG,
+/// then waits out the first-attempt delay. Returns `false` on shutdown.
+async fn prepare_reconnect(cmd_rx: &mut mpsc::Receiver<RelayCommand>, state: &mut BgState) -> bool {
+    let delay = begin_reconnect(state, random_unit_sample());
+    if delay.is_zero() {
+        return true;
+    }
+    info!(
+        "relay closed the connection for restart — waiting {:.1}s before reconnecting",
+        delay.as_secs_f64()
+    );
+    shutdown_aware_sleep(cmd_rx, state, delay).await
 }
 
 /// Extract a channel UUID from the h tag of a Nostr event.
@@ -4004,9 +4376,183 @@ async fn wait_for_any_ok(
     }
 }
 
+mod recovery;
+
+#[cfg(test)]
+mod recovery_tests;
+
+#[cfg(test)]
+mod resume_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_type_comes_from_the_first_t_tag_not_a_label() {
+        let tags = vec![
+            serde_json::json!(["d", "c"]),
+            serde_json::json!(["t", "dm"]),
+            serde_json::json!(["t", "workspace"]),
+        ];
+        assert_eq!(channel_type_from_tags(&tags), "dm");
+    }
+
+    /// Mutation: treat any `hidden` metadata as a DM → RED.
+    #[test]
+    fn hidden_means_dm_only_without_a_declared_type() {
+        let system = vec![
+            serde_json::json!(["d", "c"]),
+            serde_json::json!(["t", "system"]),
+            serde_json::json!(["private"]),
+            serde_json::json!(["hidden"]),
+        ];
+        assert_eq!(channel_type_from_tags(&system), "private");
+
+        let legacy_dm = vec![serde_json::json!(["d", "c"]), serde_json::json!(["hidden"])];
+        assert_eq!(channel_type_from_tags(&legacy_dm), "dm");
+    }
+
+    async fn nip11_test_client(
+        responses: HashMap<String, (u16, String)>,
+    ) -> (
+        RestClient,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind NIP-11 test server");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("test server address")
+        );
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0; 8192];
+                let bytes_read = socket.read(&mut request).await.unwrap_or_default();
+                let request = String::from_utf8_lossy(&request[..bytes_read]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let has_nip11_accept = request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("accept: application/nostr+json"));
+                server_requests
+                    .lock()
+                    .expect("lock recorded NIP-11 requests")
+                    .push((path.clone(), has_nip11_accept));
+
+                let (status, body) = responses
+                    .get(&path)
+                    .cloned()
+                    .unwrap_or_else(|| (404, "not found".into()));
+                let reason = if status == 200 { "OK" } else { "Not Found" };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let client = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        (client, requests, server)
+    }
+
+    #[tokio::test]
+    async fn relay_self_reads_and_normalizes_standard_root_document() {
+        let uppercase = "AB".repeat(32);
+        let responses = HashMap::from([
+            (
+                "/".to_string(),
+                (200, serde_json::json!({ "self": uppercase }).to_string()),
+            ),
+            (
+                "/info".to_string(),
+                (
+                    200,
+                    serde_json::json!({ "self": "cd".repeat(32) }).to_string(),
+                ),
+            ),
+        ]);
+        let (client, requests, server) = nip11_test_client(responses).await;
+
+        assert_eq!(
+            client.relay_self().await.expect("fetch relay self"),
+            Some("ab".repeat(32))
+        );
+        assert_eq!(
+            *requests.lock().expect("lock recorded requests"),
+            vec![("/".to_string(), true)],
+            "the standard root document should be preferred and request NIP-11 JSON"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_self_falls_back_to_info_alias() {
+        let responses = HashMap::from([
+            ("/".to_string(), (404, "not found".into())),
+            (
+                "/info".to_string(),
+                (
+                    200,
+                    serde_json::json!({ "self": "cd".repeat(32) }).to_string(),
+                ),
+            ),
+        ]);
+        let (client, requests, server) = nip11_test_client(responses).await;
+
+        assert_eq!(
+            client.relay_self().await.expect("fetch relay self"),
+            Some("cd".repeat(32))
+        );
+        assert_eq!(
+            *requests.lock().expect("lock recorded requests"),
+            vec![("/".to_string(), true), ("/info".to_string(), true)]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn relay_self_rejects_malformed_identity_at_both_endpoints() {
+        let responses = HashMap::from([
+            (
+                "/".to_string(),
+                (
+                    200,
+                    serde_json::json!({ "self": "not-a-pubkey" }).to_string(),
+                ),
+            ),
+            (
+                "/info".to_string(),
+                (200, serde_json::json!({ "self": 42 }).to_string()),
+            ),
+        ]);
+        let (client, _requests, server) = nip11_test_client(responses).await;
+
+        let error = client
+            .relay_self()
+            .await
+            .expect_err("malformed relay identities must fail closed");
+        assert!(error
+            .to_string()
+            .contains("failed to fetch a usable NIP-11 document"));
+        server.abort();
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {
@@ -4158,6 +4704,46 @@ mod tests {
         let map = merge_discovered_channels(vec![ch], &meta);
 
         assert!(map.contains_key(&ch), "archived=false is treated as live");
+    }
+
+    #[test]
+    fn merge_discovered_channels_parses_about_as_description() {
+        let ch = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(
+            ch,
+            "team",
+            &["t", "stream", "about", "Engineering discussions"]
+        )]);
+
+        let map = merge_discovered_channels(vec![ch], &meta);
+
+        assert_eq!(
+            map[&ch].description.as_deref(),
+            Some("Engineering discussions")
+        );
+    }
+
+    #[test]
+    fn merge_discovered_channels_blank_about_is_none() {
+        let ch = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(ch, "team", &["about", "   "])]);
+
+        let map = merge_discovered_channels(vec![ch], &meta);
+
+        assert_eq!(
+            map[&ch].description, None,
+            "a whitespace-only about tag is trimmed away to None"
+        );
+    }
+
+    #[test]
+    fn merge_discovered_channels_missing_about_is_none() {
+        let ch = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(ch, "team", &["t", "stream"])]);
+
+        let map = merge_discovered_channels(vec![ch], &meta);
+
+        assert_eq!(map[&ch].description, None);
     }
 
     #[test]
@@ -4350,7 +4936,7 @@ mod tests {
             .expect("signing should succeed")
     }
 
-    async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
+    pub(super) async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test websocket");
@@ -4367,7 +4953,7 @@ mod tests {
         (client, server.await.expect("join test websocket server"))
     }
 
-    async fn next_test_frame(
+    pub(super) async fn next_test_frame(
         server: &mut WebSocketStream<tokio::net::TcpStream>,
     ) -> serde_json::Value {
         let message = timeout(Duration::from_secs(1), server.next())
@@ -4379,14 +4965,245 @@ mod tests {
             .expect("parse test websocket frame")
     }
 
-    fn test_channel_filter() -> ChannelFilter {
+    fn make_signed_channel_event(keys: &Keys, content: &str, created_at_secs: u64) -> Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags([])
+            .custom_created_at(nostr::Timestamp::from(created_at_secs))
+            .sign_with_keys(keys)
+            .expect("sign channel event")
+    }
+
+    fn replace_event_field(event: &Event, field: &str, replacement: Value) -> Event {
+        let mut value = serde_json::to_value(event).expect("serialize event");
+        value[field] = replacement;
+        serde_json::from_value(value).expect("deserialize tampered event")
+    }
+
+    fn recompute_event_id(event: &Event) -> Event {
+        let id = nostr::EventId::new(
+            &event.pubkey,
+            &event.created_at,
+            &event.kind,
+            &event.tags,
+            &event.content,
+        );
+        replace_event_field(event, "id", json!(id.to_hex()))
+    }
+
+    async fn handle_test_relay_event(
+        ws: &mut WsStream,
+        event_tx: &mpsc::Sender<Option<BuzzEvent>>,
+        observer_control_tx: &mpsc::Sender<Event>,
+        state: &mut BgState,
+        subscription_id: &str,
+        event: &Event,
+    ) -> bool {
+        let keys = Keys::generate();
+        let agent_pubkey_hex = keys.public_key().to_hex();
+        let text = serde_json::to_string(&json!(["EVENT", subscription_id, event]))
+            .expect("serialize relay frame");
+        handle_ws_message(
+            Message::Text(text.into()),
+            ws,
+            event_tx,
+            observer_control_tx,
+            state,
+            &keys,
+            "wss://relay.example.com",
+            &agent_pubkey_hex,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn verified_channel_event_is_recorded_and_forwarded() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let event = make_signed_channel_event(&Keys::generate(), "hello", 2_000);
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &channel_sub_id(channel_id),
+                &event,
+            )
+            .await
+        );
+
+        let received = event_rx.try_recv().expect("verified event was forwarded");
+        let received = received.expect("event channel should not contain shutdown marker");
+        assert_eq!(received.channel_id, channel_id);
+        assert_eq!(received.event.id, event.id);
+        assert_eq!(state.last_seen.get(&channel_id), Some(&2_000));
+        assert!(state.seen_ids.contains(&event.id.to_hex()));
+        assert!(matches!(
+            observer_control_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tampered_channel_events_are_dropped_before_state_or_queue_changes() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let owner_event = make_signed_channel_event(&Keys::generate(), "status", 2_000);
+        let other_event = make_signed_channel_event(&Keys::generate(), "other", 3_000);
+        let other = serde_json::to_value(&other_event).expect("serialize other event");
+        let owner_command = recompute_event_id(&replace_event_field(
+            &owner_event,
+            "content",
+            json!("!shutdown"),
+        ));
+
+        let cases = [
+            (
+                "changed content",
+                replace_event_field(&owner_event, "content", json!("tampered")),
+            ),
+            ("forged owner command with a matching id", owner_command),
+            (
+                "changed event id",
+                replace_event_field(&owner_event, "id", other["id"].clone()),
+            ),
+            (
+                "changed signature",
+                replace_event_field(&owner_event, "sig", other["sig"].clone()),
+            ),
+            (
+                "changed author pubkey",
+                replace_event_field(&owner_event, "pubkey", other["pubkey"].clone()),
+            ),
+            (
+                "changed tags",
+                replace_event_field(
+                    &owner_event,
+                    "tags",
+                    json!([["h", Uuid::new_v4().to_string()]]),
+                ),
+            ),
+            (
+                "changed timestamp",
+                replace_event_field(&owner_event, "created_at", json!(4_000)),
+            ),
+        ];
+
+        for (case, event) in cases {
+            assert!(
+                handle_test_relay_event(
+                    &mut client,
+                    &event_tx,
+                    &observer_control_tx,
+                    &mut state,
+                    &channel_sub_id(channel_id),
+                    &event,
+                )
+                .await,
+                "{case} should not close the connection"
+            );
+            assert!(
+                matches!(event_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{case} reached the harness event queue"
+            );
+        }
+
+        assert!(state.last_seen.is_empty());
+        assert!(state.seen_ids.current.is_empty());
+        assert!(state.seen_ids.previous.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forged_membership_notification_is_dropped_before_state_or_queue_changes() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let attacker_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16),
+            "membership changed",
+        )
+        .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+        .custom_created_at(nostr::Timestamp::from(2_000))
+        .sign_with_keys(&attacker_keys)
+        .expect("sign membership event");
+        let forged = recompute_event_id(&replace_event_field(
+            &event,
+            "pubkey",
+            json!(owner_keys.public_key().to_hex()),
+        ));
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                MEMBERSHIP_NOTIF_SUB_ID,
+                &forged,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(state.membership_last_seen, None);
+        assert!(state.seen_ids.current.is_empty());
+        assert!(state.seen_ids.previous.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forged_observer_control_is_dropped_before_control_queue() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let (observer_control_tx, mut observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let event = make_signed_channel_event(&Keys::generate(), "control", 2_000);
+        let forged = recompute_event_id(&replace_event_field(
+            &event,
+            "content",
+            json!("tampered control"),
+        ));
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                OBSERVER_CONTROL_SUB_ID,
+                &forged,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            observer_control_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    pub(super) fn test_channel_filter() -> ChannelFilter {
         ChannelFilter {
             kinds: Some(vec![9]),
             require_mention: false,
         }
     }
 
-    fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
+    pub(super) fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
         apply_command_to_state(
             state,
             RelayCommand::Subscribe {
@@ -5794,6 +6611,151 @@ mod tests {
         assert_eq!(
             first_deadline, second_deadline,
             "shorter hint must not overwrite a later existing deadline"
+        );
+    }
+
+    /// A rate-limited `OK(id, false, …)` must arm the backoff gate and re-park
+    /// the refused frame, driven through the real frame dispatcher.
+    ///
+    /// This is the buzz-acp side of the relay's rejection-correlation change:
+    /// a refused EVENT is now acknowledged on its own channel instead of via
+    /// NOTICE. Reverting either the gate arming or the requeue in the `Ok` arm
+    /// must fail this test.
+    #[tokio::test]
+    async fn rate_limited_ok_arms_gate_and_reparks_refused_observer_frame() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel::<Option<BuzzEvent>>(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel::<Event>(4);
+        let keys = Keys::generate();
+        let mut state = BgState::new();
+
+        let refused = make_observer_frame(&keys);
+        let still_pending = make_observer_frame(&keys);
+        state.track_observer_in_flight(Box::new(refused.clone()));
+        state.track_observer_in_flight(Box::new(still_pending.clone()));
+        assert!(
+            state.check_rate_gate().is_none(),
+            "gate must start disarmed"
+        );
+
+        let frame = json!([
+            "OK",
+            refused.id.to_hex(),
+            false,
+            "rate-limited: retry in 5s"
+        ]);
+        let should_continue = handle_ws_message(
+            Message::Text(frame.to_string().into()),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "wss://relay.test",
+            "agent-pubkey",
+            None,
+        )
+        .await;
+
+        assert!(should_continue, "a rate-limited OK must keep the socket");
+        assert!(
+            state.check_rate_gate().is_some(),
+            "a rate-limited OK must arm the backoff gate, or the harness \
+             republishes straight into the same quota"
+        );
+        let parked: Vec<_> = state
+            .gated_observer_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(
+            parked,
+            [refused.id],
+            "the refused frame must be re-parked for redelivery, not dropped"
+        );
+        let in_flight: Vec<_> = state
+            .observer_in_flight
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(
+            in_flight,
+            [still_pending.id],
+            "frames still awaiting their own verdict must stay in flight"
+        );
+    }
+
+    #[test]
+    fn rejected_observer_frame_displaces_oldest_parked_frame_at_capacity() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let refused = make_observer_frame(&keys);
+        state.track_observer_in_flight(Box::new(refused.clone()));
+
+        let oldest = make_observer_frame(&keys);
+        state.park_gated_observer_frame(Box::new(oldest.clone()));
+        let mut survivors = Vec::with_capacity(GATED_OBSERVER_QUEUE_CAP - 1);
+        for _ in 1..GATED_OBSERVER_QUEUE_CAP {
+            let event = make_observer_frame(&keys);
+            survivors.push(event.id);
+            state.park_gated_observer_frame(Box::new(event));
+        }
+
+        state.requeue_rejected_observer_frame(&refused.id.to_hex());
+
+        let parked: Vec<_> = state
+            .gated_observer_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(parked.len(), GATED_OBSERVER_QUEUE_CAP);
+        assert_eq!(parked.first(), Some(&refused.id));
+        assert_eq!(&parked[1..], survivors.as_slice());
+        assert!(!parked.contains(&oldest.id));
+        assert_eq!(state.gated_observer_dropped, 1);
+        assert!(state.observer_in_flight.is_empty());
+    }
+
+    /// A non-rate-limit refusal is terminal: retrying would be refused
+    /// identically, so the frame is retired rather than re-parked, and the
+    /// backoff gate stays disarmed.
+    #[tokio::test]
+    async fn non_rate_limited_ok_rejection_retires_frame_without_arming_gate() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, _event_rx) = mpsc::channel::<Option<BuzzEvent>>(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel::<Event>(4);
+        let keys = Keys::generate();
+        let mut state = BgState::new();
+
+        let refused = make_observer_frame(&keys);
+        state.track_observer_in_flight(Box::new(refused.clone()));
+
+        let frame = json!(["OK", refused.id.to_hex(), false, "invalid: bad signature"]);
+        let should_continue = handle_ws_message(
+            Message::Text(frame.to_string().into()),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "wss://relay.test",
+            "agent-pubkey",
+            None,
+        )
+        .await;
+
+        assert!(should_continue, "a rejected event must not drop the socket");
+        assert!(
+            state.check_rate_gate().is_none(),
+            "only a rate-limit refusal arms the backoff gate"
+        );
+        assert!(
+            state.gated_observer_pending.is_empty(),
+            "a permanently refused frame must not be requeued into a retry loop"
+        );
+        assert!(
+            state.observer_in_flight.is_empty(),
+            "a permanently refused frame must be retired from the window"
         );
     }
 

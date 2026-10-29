@@ -104,6 +104,91 @@ test("edit's non-imeta tags are dropped (only imeta wins)", () => {
   assert.equal(out.filter((t) => t[0] === "imeta").length, 1);
 });
 
+test("edit overlays newly added mention tags without replacing original routing", () => {
+  const original = [
+    ["h", "uuid"],
+    ["p", "original-mention"],
+  ];
+  const edit = [
+    ["h", "uuid"],
+    ["e", "x"],
+    ["p", "added-mention"],
+  ];
+
+  assert.deepEqual(
+    applyEditTagOverlay(original, edit).filter((tag) => tag[0] === "p"),
+    [
+      ["p", "original-mention"],
+      ["p", "added-mention"],
+    ],
+  );
+});
+
+test("edit mention snapshot replaces original references, including removals", () => {
+  const original = [
+    ["h", "uuid"],
+    ["mention", "original-mention"],
+  ];
+  const replacement = applyEditTagOverlay(original, [
+    ["buzz:mention-snapshot"],
+    ["mention", "replacement-mention"],
+  ]);
+  assert.deepEqual(
+    replacement.filter((tag) => tag[0] === "mention"),
+    [["mention", "replacement-mention"]],
+  );
+  assert.deepEqual(
+    replacement.filter((tag) => tag[0] === "buzz:mention-snapshot"),
+    [["buzz:mention-snapshot"]],
+  );
+
+  const removed = applyEditTagOverlay(original, [["buzz:mention-snapshot"]]);
+  assert.deepEqual(
+    removed.filter((tag) => tag[0] === "mention"),
+    [],
+  );
+  assert.deepEqual(
+    removed.filter((tag) => tag[0] === "buzz:mention-snapshot"),
+    [["buzz:mention-snapshot"]],
+  );
+});
+
+test("edit mention snapshots preserve the original agent-address state", () => {
+  const original = [
+    ["h", "uuid"],
+    ["mention", "addressed-agent", "agent-address"],
+    ["mention", "old-authored-mention"],
+  ];
+  const out = applyEditTagOverlay(original, [
+    ["buzz:mention-snapshot"],
+    ["mention", "addressed-agent", "agent-address"],
+    ["mention", "new-authored-mention"],
+  ]);
+
+  assert.deepEqual(
+    out.filter((tag) => tag[0] === "mention"),
+    [
+      ["mention", "addressed-agent", "agent-address"],
+      ["mention", "new-authored-mention"],
+    ],
+  );
+});
+
+test("legacy edits preserve original mention references", () => {
+  const original = [
+    ["h", "uuid"],
+    ["mention", "original-mention"],
+  ];
+  const out = applyEditTagOverlay(original, [
+    ["h", "uuid"],
+    ["e", "x"],
+  ]);
+  assert.deepEqual(
+    out.filter((tag) => tag[0] === "mention"),
+    [["mention", "original-mention"]],
+  );
+});
+
 const EMOJI = (shortcode, url) => ["emoji", shortcode, url];
 
 test("edit replaces the original's emoji tags with the edit's set", () => {

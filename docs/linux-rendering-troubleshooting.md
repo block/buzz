@@ -7,7 +7,7 @@ This guide covers the most common rendering failures on Linux and how to resolve
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | Blank or transparent window, then `SIGABRT` with `colrv1_configure_skpaint` in the output | COLRv1 color emoji font (AppImage only) | Upgrade to the latest AppImage (v0.5.2+) |
-| Blank window on startup, no crash output | dmabuf renderer incompatibility (NVIDIA or AppImage) | `WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Buzz.AppImage` or `--safe-rendering` |
+| Blank window on startup / SIGSEGV when switching workspaces | dmabuf renderer incompatibility (NVIDIA or AppImage) | Prefer `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` (shipped automatically) or `--safe-rendering`. Do **not** set `WEBKIT_DISABLE_DMABUF_RENDERER=1` on current WebKitGTK — see [#3654](https://github.com/block/buzz/issues/3654). On Debian/Ubuntu with the proprietary NVIDIA driver the crash can persist (distro WebKit patch) — [#3654](https://github.com/block/buzz/issues/3654) stays open for that path. |
 | Blank window on any hardware, no crash output | Unknown GPU/driver combination | `--safe-rendering` flag (see below) |
 
 ---
@@ -69,9 +69,11 @@ FONTCONFIG_FILE=~/.config/buzz-fontconfig/fonts.conf ./Buzz_*.AppImage
 
 **Root cause:** WebKitGTK's dmabuf zero-copy buffer path is incompatible with some GPU/driver/compositor combinations. The WebKit child process silently fails to paint.
 
-**Fix (shipped automatically starting with the first release containing [#3271](https://github.com/block/buzz/pull/3271) (v0.5.1)):** Buzz sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` automatically before WebKit initializes when it detects an NVIDIA GPU (`/sys/class/drm` vendor ID `0x10de`) or when running as an AppImage. This restores a slightly slower shared-memory rendering path that works universally.
+**Fix (shipped automatically starting with the first release containing [#3271](https://github.com/block/buzz/pull/3271) (v0.5.1), updated for [#3654](https://github.com/block/buzz/issues/3654)):** Buzz sets `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` automatically before WebKit initializes when it detects an NVIDIA GPU (`/sys/class/drm` vendor ID `0x10de`) or when running as an AppImage. That keeps SharedMemory in WebKit's transport set while skipping the hardware dmabuf path (upstream WebKitGTK; Debian/Ubuntu's NVIDIA dmabuf patch can bypass this, so the crash can persist there — [#3654](https://github.com/block/buzz/issues/3654) stays open for that path). `WEBKIT_DMABUF_RENDERER_FORCE_SHM` exists in WebKitGTK ≥ 2.44 (absent at 2.42); on older system WebKit the export is a silent no-op.
 
-**If automatic detection doesn't help (`--safe-rendering`):** Pass `--safe-rendering` to force both `WEBKIT_DISABLE_DMABUF_RENDERER=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` for that launch:
+**Do not use `WEBKIT_DISABLE_DMABUF_RENDERER=1` on current WebKitGTK** (2.52+): that variable no longer falls back to shared memory. It empties the transport mode, `AcceleratedBackingStore::create()` returns null, and the UI SIGSEGVs the first time compositing is needed (often on workspace switch). See [#3654](https://github.com/block/buzz/issues/3654).
+
+**If automatic detection doesn't help (`--safe-rendering`):** Pass `--safe-rendering` to force both `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` for that launch:
 
 ```bash
 ./Buzz_*.AppImage --safe-rendering
@@ -83,10 +85,10 @@ buzz-desktop --safe-rendering
 
 ```bash
 # ~/.bashrc or ~/.profile
-export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export WEBKIT_DMABUF_RENDERER_FORCE_SHM=1
 ```
 
-**Conflict detection:** If you set a WebKit variable in your environment and also pass `--safe-rendering`, Buzz will refuse to start and print exactly which variable conflicts. Unset the conflicting variable or drop the flag.
+**Conflict detection:** If you set a WebKit variable in your environment and also pass `--safe-rendering`, Buzz will refuse to start and print exactly which variable conflicts. Unset the conflicting variable or drop the flag. Operators who previously exported `WEBKIT_DISABLE_DMABUF_RENDERER=0` to override the old heuristic can keep that — the module still treats that assignment as a user takeover.
 
 ---
 
@@ -96,11 +98,11 @@ export WEBKIT_DISABLE_DMABUF_RENDERER=1
 
 **Symptom:** The Buzz window is transparent or renders with graphical corruption on AMD RDNA4 hardware.
 
-**Workaround (verified by reporter):** Set these three variables before launching Buzz:
+**Workaround (recommended; FORCE_SHM swap not re-verified on RDNA4):** Set these three variables before launching Buzz. The reporter originally verified a three-var set that used `WEBKIT_DISABLE_DMABUF_RENDERER=1`; that var is the [#3654](https://github.com/block/buzz/issues/3654) crash on current WebKitGTK, so this recipe swaps in `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` instead. Please re-confirm on RDNA4 if you can.
 
 ```bash
 export GDK_BACKEND=x11
-export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export WEBKIT_DMABUF_RENDERER_FORCE_SHM=1
 export WEBKIT_SKIA_ENABLE_CPU_RENDERING=1
 ./Buzz_*.AppImage
 # or for native:
@@ -109,7 +111,7 @@ buzz-desktop
 
 - `WEBKIT_SKIA_ENABLE_CPU_RENDERING=1` forces Skia to use CPU rendering, bypassing the RDNA4 Skia/radv paint failure.
 - `GDK_BACKEND=x11` avoids the blank window that appears when running under a Plasma-Wayland compositor.
-- `WEBKIT_DISABLE_DMABUF_RENDERER=1` prevents post-first-paint transparency from the dmabuf renderer.
+- `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` keeps shared-memory transport without the #3654 empty-mode crash from `WEBKIT_DISABLE_DMABUF_RENDERER` (needs WebKitGTK ≥ 2.44).
 
 A dedicated fix for RDNA4 detection is being tracked in [#2643](https://github.com/block/buzz/issues/2643).
 

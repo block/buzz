@@ -11,6 +11,9 @@ spec:
   backoffLimit: 3
   template:
     metadata:
+      {{- with .Values.migration.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels: {{- include "push.migrationLabels" . | nindent 8 }}
     spec:
       restartPolicy: Never

@@ -77,6 +77,14 @@ and docs. We do not patch `buzz-core` / `buzz-relay` internals.
    policy that fronts Kannaka's public DVM services.
 4. **Estate deployment (planned).** A single allowlisted community, with
    backups and disk metrics from day one.
+5. **Reachable through the QuantumOS hub (landed, hub side).** Upstream's
+   agent-first `buzz` CLI (`crates/buzz-cli`, JSON in, JSON out) is an
+   entry in [QuantumOS's hub](https://github.com/kannaka-labs/QuantumOS/tree/main/tools/qos-hub)
+   (ADR-0027, one policy-gated MCP endpoint for the constellation's
+   CLIs): `channels list`, `messages get` and `messages search` are
+   allowed as reads; `messages send` asks the person first, because other
+   members read it. The identity (`BUZZ_PRIVATE_KEY`) is the hub
+   process's environment, never configuration in a repository.
 
 ## Roadmap (ADR-0045 phases)
 
@@ -94,6 +102,13 @@ and docs. We do not patch `buzz-core` / `buzz-relay` internals.
 ## Fork discipline
 
 - `upstream` = `block/buzz`. Sync monthly and on security releases.
+  Last sync: 2026-10-29, to upstream `76cd4294f` (1,040 commits; 7
+  conflicts, all in the additive surfaces: the workflow store's
+  `enabled` flag now sits inside upstream's community write
+  transaction, the relay config keeps `web_spa_full` beside upstream's
+  NIP-FI fields, the `kannaka_remember` / `kannaka_recall` actions moved
+  into upstream's restructured dispatch, and the mesh cold-fetch fix
+  re-applied in the reusable macOS desktop workflow).
 - Kannaka glue lives in additive surfaces only; if our diff ever stops
   rebasing cleanly in an afternoon, that is a defect to fix.
 - New event kinds, if ever needed, use the Buzz custom range (40000+)
