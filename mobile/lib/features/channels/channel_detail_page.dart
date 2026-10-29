@@ -20,6 +20,7 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/me/me_sync.dart';
+import '../../shared/me/default_agent.dart';
 import '../../shared/me/me_search_placement.dart';
 import 'me/me_assistant_picker.dart';
 import 'me/me_chat_assistant.dart';
@@ -362,17 +363,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         initialForcedUnreadMessageIdsRef.value;
     // Ownership comes from the signing identity, not reloadable profile metadata.
     final currentPubkey = ref.watch(currentPubkeyProvider);
-    // Me flattens replies into this timeline, so include their typing signals.
-    // Ordinary channels keep thread activity inside the thread view.
-    final typingEntries = ref
-        .watch(channelTypingProvider(channel.id))
-        .where((e) => personalChat || e.threadHeadId == null)
-        .where(
-          (e) =>
-              currentPubkey == null ||
-              e.pubkey.toLowerCase() != currentPubkey.toLowerCase(),
-        )
-        .toList();
     final baseChannel = listedChannel ?? channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;
@@ -382,6 +372,34 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         .toSet()
         .length;
     final isOneToOneDm = resolvedChannel.isDm && participantCount == 2;
+    // The direct conversation with the default agent surfaces its work here,
+    // even when the agent routes its response into a reply thread.
+    final defaultAgent = ref.watch(defaultAgentProvider);
+    final defaultAgentKey = defaultAgent.isLoading || defaultAgent.hasError
+        ? null
+        : defaultAgent.value;
+    final showsDefaultAgentThreads =
+        defaultAgentKey != null &&
+        isActiveDirectConversation(
+          resolvedChannel,
+          null,
+          currentPubkey,
+          defaultAgentKey,
+        );
+    final typingEntries = ref
+        .watch(channelTypingProvider(channel.id))
+        .where(
+          (e) =>
+              personalChat ||
+              e.threadHeadId == null ||
+              (showsDefaultAgentThreads && e.pubkey == defaultAgentKey),
+        )
+        .where(
+          (e) =>
+              currentPubkey == null ||
+              e.pubkey.toLowerCase() != currentPubkey.toLowerCase(),
+        )
+        .toList();
     final memberProfilesPreload = useMemoized(
       () => _preloadMembers(
         ref,
