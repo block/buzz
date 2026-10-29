@@ -1611,6 +1611,9 @@ impl AppState {
                     .support_invalidation_closures()
                     .build(),
             ),
+            // Readers use an entry only for `OPEN_CHANNELS_MAX_AGE`; the TTL
+            // just reclaims memory and keeps expired entries around long
+            // enough to count their misses as `expired` rather than `absent`.
             open_channels_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
