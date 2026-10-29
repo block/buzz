@@ -776,7 +776,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 75);
+        assert_eq!(migrations.len(), 76);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -2289,15 +2289,42 @@ mod postgres_tests {
         assert!(!migration.fence_attachments.is_empty());
         assert!(!migration.registry_rows.is_empty());
 
-        for (table, definition) in &migration.tables {
+        let actor_migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 76)
+            .expect("actor serving lease migration");
+        assert!(actor_migration
+            .sql
+            .as_str()
+            .contains("ALTER TABLE community_serving_write_leases ADD COLUMN actor_pubkey TEXT"));
+        let actor_surface = surface(actor_migration.sql.as_ref());
+        assert_eq!(actor_surface.indexes.len(), 1);
+        for index in &actor_surface.indexes {
+            assert!(
+                schema.indexes.contains(index),
+                "actor lease index differs: {index}"
+            );
+        }
+        for (table, original_definition) in &migration.tables {
+            // 0076 adds this nullable field; preserve parity for every other
+            // column in the original serving-lease table.
+            let definition = if table == "community_serving_write_leases" {
+                original_definition.replacen(
+                    "operation text not null, ",
+                    "operation text not null, actor_pubkey text, ",
+                    1,
+                )
+            } else {
+                original_definition.clone()
+            };
             let in_schema = schema
                 .tables
                 .get(table)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
             if table != "community_deletion_requests" && table != "community_deletion_approvals" {
                 assert_eq!(
-                    in_schema, definition,
-                    "schema.sql definition of {table} drifted from migration 0029"
+                    in_schema, &definition,
+                    "schema.sql definition of {table} drifted from its migrations"
                 );
             }
         }

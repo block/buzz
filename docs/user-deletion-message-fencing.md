@@ -47,7 +47,7 @@ A live audio session can keep its lease alive. The future deletion workflow must
 
 ## Deployment and performance
 
-Apply migration `0075_serving_write_actor.sql` before deploying code that reads/writes the new column. Desired-schema installations obtain the column and partial actor index from the table definition. Old community-only writers can leave the column NULL, but cannot protect user deletion; deploy the actor-aware code to every writer before enabling real fencing.
+Apply migration `0076_serving_write_actor.sql` before deploying code that reads/writes the new column. Desired-schema installations obtain the column and partial actor index from the table definition. Old community-only writers can leave the column NULL, but cannot protect user deletion; deploy the actor-aware code to every writer before enabling real fencing.
 
 The actor lease adds database writes and checks to serving operations, including ephemeral events. No production throughput or latency benchmark is claimed. Schema rollout and serving-path overhead need review.
 

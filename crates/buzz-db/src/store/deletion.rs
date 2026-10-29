@@ -4651,7 +4651,7 @@ mod postgres_tests {
         // include the additive serving-lease shape required by current writers.
         let mut schema_tx = db.pool.begin().await.unwrap();
         sqlx::raw_sql(include_str!(
-            "../../../../migrations/0075_serving_write_actor.sql"
+            "../../../../migrations/0076_serving_write_actor.sql"
         ))
         .execute(&mut *schema_tx)
         .await
