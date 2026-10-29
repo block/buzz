@@ -79,13 +79,31 @@ String? _withoutCode(List<String> prose) {
 
 bool _closesInline(String text) {
   bool even(Pattern pattern) => pattern.allMatches(text).length.isEven;
-  int count(String token) => token.allMatches(text).length;
   return even('**') &&
       even(RegExp(r'(?<!\*)\*(?!\*)')) &&
       even('~~') &&
       even(RegExp(r'(?<!`)`(?!`)')) &&
-      count('[') == count(']') &&
-      count(r'\(') == count(r'\)') &&
-      count('<u>') == count('</u>') &&
+      _nests(text, '[', ']') &&
+      _nests(text, r'\(', r'\)') &&
+      _nests(text, '<u>', '</u>') &&
       !text.contains('【');
+}
+
+/// Whether every [open] in [text] is closed by a later [close] and no
+/// [close] comes before its [open]. Each token is searched for once per
+/// match, so this is linear in [text].
+bool _nests(String text, String open, String close) {
+  var depth = 0;
+  var nextOpen = text.indexOf(open);
+  var nextClose = text.indexOf(close);
+  while (nextOpen >= 0 || nextClose >= 0) {
+    if (nextClose < 0 || (nextOpen >= 0 && nextOpen < nextClose)) {
+      depth++;
+      nextOpen = text.indexOf(open, nextOpen + open.length);
+    } else {
+      if (--depth < 0) return false;
+      nextClose = text.indexOf(close, nextClose + close.length);
+    }
+  }
+  return depth == 0;
 }

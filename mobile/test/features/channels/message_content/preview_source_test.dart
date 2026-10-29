@@ -147,6 +147,18 @@ void main() {
       cut: false,
     ),
     (
+      name: 'stray closer before an opener',
+      source: [
+        '</u> stray',
+        '<u>opened',
+        'still open',
+        'more',
+        'closed</u>',
+      ].join('\n'),
+      maxLines: 2,
+      cut: false,
+    ),
+    (
       name: 'unclosed fence',
       source: ['```', for (var i = 0; i < 10; i++) 'line $i'].join('\n'),
       maxLines: 2,
