@@ -1,5 +1,4 @@
 import 'package:buzz/shared/agents/remote_agents.dart';
-import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
@@ -31,31 +30,18 @@ void main() {
     }
     final list = tester.element(find.byType(AgentsSheet));
     final container = ProviderScope.containerOf(list);
-    h.relay.loseAcknowledgment = true;
-    await tester.tap(
-      find.descendant(
-        of: find.byKey(ValueKey(existing)),
-        matching: find.byType(IconButton),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.textContaining('Could not save the Bestie.'), findsOneWidget);
-    h.relay.loseAcknowledgment = false;
-    h.relay.events =
-        []; // The next attempt starts from an empty relay boundary.
-    await tester.tap(
-      find.descendant(
-        of: find.byKey(ValueKey(existing)),
-        matching: find.byType(IconButton),
-      ),
-    );
-    await tester.pumpAndSettle();
     expect(
-      decodeDefaultAgent(h.relay.events.single, container.read(meSyncProvider)),
-      existing,
+      find.text('Choose or change your Bestie on desktop.'),
+      findsOneWidget,
     );
-    expect(container.read(defaultAgentProvider).value, existing);
-    expect(find.byTooltip('Bestie'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(ValueKey(existing)),
+        matching: find.byType(IconButton),
+      ),
+      findsNothing,
+    );
+    expect(h.relay.events, isEmpty);
 
     await tester.tap(find.byKey(ValueKey(existing)));
     await tester.pump();

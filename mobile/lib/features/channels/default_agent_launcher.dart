@@ -20,7 +20,7 @@ import 'channel_detail_page.dart';
 import 'channels_provider.dart';
 import 'channel_management_provider.dart';
 
-/// Persistent shortcut to the agent chosen in Agents.
+/// Persistent shortcut to the Bestie chosen on desktop.
 class DefaultAgentLauncher extends HookConsumerWidget {
   const DefaultAgentLauncher({required this.onChooseAgent, super.key});
   final VoidCallback onChooseAgent;

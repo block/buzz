@@ -5,6 +5,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/me/default_agent.dart';
+import '../../shared/me/me_sync.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 
@@ -23,6 +25,9 @@ class DeleteAgentAction extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(controller);
     final error = useState<String?>(null);
+    final checking = useState(false);
+    final bestie = ref.watch(defaultAgentProvider);
+    final isBestie = bestie.asData?.value == pubkey;
     final community = ref.watch(activeCommunityProvider).asData?.value;
     final agent = controller.agents
         .where((row) => row['agent_pubkey'] == pubkey)
@@ -59,6 +64,45 @@ class DeleteAgentAction extends HookConsumerWidget {
       );
       if (confirmed != true || !context.mounted) return;
       error.value = null;
+      checking.value = true;
+      // Recheck the desktop-owned preference before any destructive operation.
+      // Do not use the offline cache as authorization to delete an agent.
+      final sync = ref.read(meSyncProvider);
+      try {
+        sync.check();
+        final events = await sync.session.fetchHistory(
+          NostrFilter(
+            kinds: const [30078],
+            authors: [sync.pubkey],
+            tags: {
+              '#d': [defaultAgentTag],
+            },
+            limit: 1,
+          ),
+        );
+        sync.check();
+        if (!context.mounted ||
+            ref.read(meSyncProvider) != sync ||
+            ref.read(activeCommunityProvider).asData?.value?.id !=
+                community.id) {
+          return;
+        }
+        for (final event in events) {
+          if (decodeDefaultAgent(event, sync) == pubkey) {
+            error.value =
+                'Change your Bestie on desktop before deleting this agent.';
+            return;
+          }
+        }
+      } catch (_) {
+        if (context.mounted) {
+          error.value =
+              'Could not verify your Bestie. Try again before deleting.';
+        }
+        return;
+      } finally {
+        if (context.mounted) checking.value = false;
+      }
       final success = await controller.deleteAgent(
         pubkey: pubkey,
         community: community,
@@ -82,7 +126,14 @@ class DeleteAgentAction extends HookConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           FilledButton(
-            onPressed: controller.busy ? null : remove,
+            onPressed:
+                controller.busy ||
+                    checking.value ||
+                    bestie.isLoading ||
+                    bestie.hasError ||
+                    isBestie
+                ? null
+                : remove,
             style: FilledButton.styleFrom(
               minimumSize: const Size(double.infinity, Grid.xxl),
               padding: const EdgeInsets.symmetric(
@@ -98,6 +149,15 @@ class DeleteAgentAction extends HookConsumerWidget {
             ),
             child: Text(controller.busy ? 'Working…' : 'Delete'),
           ),
+          if (isBestie)
+            const Text(
+              'Change your Bestie on desktop before deleting this agent.',
+            ),
+          if (bestie.hasError)
+            TextButton(
+              onPressed: () => ref.invalidate(defaultAgentProvider),
+              child: const Text('Retry Bestie check'),
+            ),
           if (error.value != null)
             Text(error.value!, style: TextStyle(color: context.colors.error)),
         ],

@@ -5,8 +5,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/me/default_agent.dart';
-import '../../shared/me/default_agent_writer.dart';
-import '../../shared/me/me_sync.dart';
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/hosted/hosted_flow.dart';
@@ -178,29 +176,7 @@ class AgentsSheet extends HookConsumerWidget {
     keys.sort((a, b) => names.labelFor(a).compareTo(names.labelFor(b)));
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
-    final savingDefault = useState(false);
-    final defaultAgent = ref.watch(defaultAgentProvider).value;
-    Future<void> chooseDefault(String key) async {
-      if (savingDefault.value) return;
-      savingDefault.value = true;
-      final sync = ref.read(meSyncProvider);
-      try {
-        await saveDefaultAgent(sync, key);
-        if (!context.mounted || ref.read(meSyncProvider) != sync) return;
-        ref.invalidate(defaultAgentProvider);
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Bestie saved.')));
-      } catch (error) {
-        if (context.mounted && ref.read(meSyncProvider) == sync) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Could not save the Bestie. $error')),
-          );
-        }
-      } finally {
-        if (context.mounted) savingDefault.value = false;
-      }
-    }
+    final defaultAgent = ref.watch(defaultAgentProvider).asData?.value;
 
     final failed = directory.hasError || registered.hasError;
     final loading =
@@ -262,6 +238,9 @@ class AgentsSheet extends HookConsumerWidget {
           ),
           children: [
             if (loading) const LinearProgressIndicator(),
+            const ListTile(
+              subtitle: Text('Choose or change your Bestie on desktop.'),
+            ),
             if (supportsRemoteAgents(community) &&
                 controller.account.account == null)
               ListTile(
@@ -311,17 +290,12 @@ class AgentsSheet extends HookConsumerWidget {
                   ),
                 ),
                 title: Text(names.labelFor(key)),
-                trailing: IconButton(
-                  tooltip: defaultAgent == key
-                      ? 'Bestie'
-                      : 'Use ${names.labelFor(key)} as Bestie',
-                  onPressed: savingDefault.value || defaultAgent == key
-                      ? null
-                      : () => chooseDefault(key),
-                  icon: Icon(
-                    defaultAgent == key ? Icons.star : Icons.star_border,
-                  ),
-                ),
+                trailing: defaultAgent == key
+                    ? const Tooltip(
+                        message: 'Bestie · set on desktop',
+                        child: Icon(Icons.star),
+                      )
+                    : null,
                 onTap: () => onSelect(key),
               ),
           ],
