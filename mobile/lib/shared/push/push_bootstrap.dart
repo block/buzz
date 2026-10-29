@@ -154,6 +154,47 @@ Future<int> publishBuzzPushLeaseRecoverably({
   return generation;
 }
 
+/// Restores attempted leases across enabled relay origins after token rotation.
+/// Retrying includes nonempty grants because native save precedes relay handoff.
+@visibleForTesting
+Future<int?> renewBuzzPushCommunityLeases({
+  required List<Community> Function() readCommunities,
+  required List<BuzzPushEndpointGrant> grants,
+  required Future<BuzzPushEndpointGrant> Function(Community community) publish,
+}) async {
+  Object? firstError;
+  StackTrace? firstStack;
+  int? expiresAt;
+  final origins = {for (final grant in grants) grant.relayOrigin};
+  for (final id
+      in readCommunities().map((community) => community.id).toList()) {
+    final community = readCommunities()
+        .where((value) => value.id == id)
+        .firstOrNull;
+    if (community == null ||
+        !community.pushNotificationsEnabled ||
+        community.pushSubscriptionState.desired.isEmpty ||
+        community.nsec == null ||
+        community.nsec!.isEmpty) {
+      continue;
+    }
+    try {
+      if (!origins.contains(canonicalBuzzPushRelayOrigin(community.relayUrl))) {
+        continue;
+      }
+      final grant = await publish(community);
+      if (expiresAt == null || grant.expiresAt < expiresAt) {
+        expiresAt = grant.expiresAt;
+      }
+    } catch (error, stack) {
+      firstError ??= error;
+      firstStack ??= stack;
+    }
+  }
+  if (firstError != null) Error.throwWithStackTrace(firstError, firstStack!);
+  return expiresAt;
+}
+
 typedef _PushInputs = ({
   BuzzPushLeaseRevocationOutbox revocationOutbox,
   SessionState session,
@@ -272,6 +313,9 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     useListenable(apnsDeviceToken);
     useListenable(pushEndpointGrants);
     final publicationAttempt = useMemoized(BuzzPushAttemptGate.new);
+    final publicationBusy = useRef(false);
+    final publishedGrant = useRef<BuzzPushEndpointGrant?>(null);
+    final sharedAuthority = useRef('');
     final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);
     final otherOriginsAttempt = useMemoized(BuzzPushAttemptGate.new);
     final otherOriginsBusy = useRef(false);
@@ -383,13 +427,14 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     );
 
     final token = apnsDeviceToken.value;
+    final activeSelection = ref.watch(activeCommunityProvider);
     final nativeCleanupKey = [
       for (final grant in pushEndpointGrants.value)
         '${grant.relayOrigin}|${grant.relayPubkey}|${grant.gatewayInstallationHandle}|'
             '${grant.generation}|${grant.endpointEpoch}|${grant.endpointGrant.isEmpty}|${grant.pending}',
     ].join(';');
     final allOriginsKey =
-        '$nativeCleanupKey|${[for (final value in communities) '${value.id}|${value.pushNotificationsEnabled}|'
+        '$token|$nativeCleanupKey|${activeSelection.hasValue}|${activeSelection.value?.id}|${[for (final value in communities) '${value.id}|${value.pushNotificationsEnabled}|'
               '${buzzPushSubscriptionsFingerprint(value.pushSubscriptionState.desired)}'].join(';')}';
     latestOtherOriginsAttempt.value = allOriginsKey;
     useEffect(() {
@@ -411,7 +456,46 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
             ref.read(communityListProvider).value!,
             readGrants: () async => grants,
           );
+          final expiresAt = token == null
+              ? null
+              : await renewBuzzPushCommunityLeases(
+                  readCommunities: () {
+                    if (!context.mounted) return const [];
+                    final active = ref.read(activeCommunityProvider);
+                    if (!active.hasValue) return const [];
+                    return (ref.read(communityListProvider).value ?? const [])
+                        .where((value) => value.id != active.value?.id)
+                        .toList();
+                  },
+                  grants: grants,
+                  publish: (value) {
+                    final member = value.pubkey ?? pubkeyFromNsec(value.nsec);
+                    if (member == null) {
+                      throw StateError('Push lease signing key is missing.');
+                    }
+                    return _publish(
+                      ref,
+                      RelayConfig(baseUrl: value.relayUrl, nsec: value.nsec),
+                      value,
+                      member,
+                      null,
+                    );
+                  },
+                );
           succeeded = true;
+          if (expiresAt != null && context.mounted) {
+            final renewIn =
+                expiresAt * 1000 -
+                DateTime.now().millisecondsSinceEpoch -
+                const Duration(minutes: 5).inMilliseconds;
+            otherOriginsAttempt.retryAfter(
+              allOriginsKey,
+              delay: Duration(milliseconds: renewIn > 1000 ? renewIn : 1000),
+              retry: () {
+                if (context.mounted) otherOriginsRetry.value += 1;
+              },
+            );
+          }
         } catch (error, stack) {
           if (context.mounted) {
             otherOriginsAttempt.failed(
@@ -421,7 +505,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
               },
             );
           }
-          reportPushSetupError('gateway cleanup', error, stack);
+          reportPushSetupError('relay lease renewal', error, stack);
         } finally {
           otherOriginsBusy.value = false;
           if (succeeded &&
@@ -448,7 +532,38 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
         final activeCommunity = community!;
         final activeDescriptor = descriptor!;
         final state = activeCommunity.pushSubscriptionState;
-        if (state.desired.isEmpty) return null;
+        if (state.desired.isEmpty || publicationBusy.value) return null;
+        // Compare with the last completed handoff, after coalescing notifications
+        // received during publication. Only another origin's newer authority
+        // changes the attempt; our own issuance must not trigger a renewal loop.
+        final previous = publishedGrant.value;
+        if (previous != null &&
+            previous.gatewayInstallationHandle?.isNotEmpty == true &&
+            previous.relayOrigin ==
+                canonicalBuzzPushRelayOrigin(config.baseUrl)) {
+          var newest = previous;
+          for (final candidate in pushEndpointGrants.value) {
+            if (candidate.pending ||
+                candidate.endpointGrant.isEmpty ||
+                candidate.relayOrigin == previous.relayOrigin ||
+                candidate.gatewayInstallationHandle !=
+                    previous.gatewayInstallationHandle ||
+                candidate.relayPubkey != previous.relayPubkey) {
+              continue;
+            }
+            if (candidate.endpointEpoch > newest.endpointEpoch ||
+                (candidate.endpointEpoch == newest.endpointEpoch &&
+                    candidate.generation > newest.generation)) {
+              newest = candidate;
+            }
+          }
+          if (newest.endpointEpoch != previous.endpointEpoch ||
+              newest.generation != previous.generation) {
+            sharedAuthority.value =
+                '${newest.gatewayInstallationHandle}|'
+                '${newest.relayPubkey}|${newest.endpointEpoch}|${newest.generation}';
+          }
+        }
         final publicationKey = buzzPushPublicationAttemptKey(
           communityId: activeCommunity.id,
           relayBaseUrl: config.baseUrl,
@@ -456,8 +571,10 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
           descriptor: activeDescriptor,
           subscriptions: state.desired,
         );
-        final attempt = '${enablementEpoch.value}|$publicationKey';
+        final attempt =
+            '${enablementEpoch.value}|$publicationKey|${sharedAuthority.value}';
         if (!publicationAttempt.tryBegin(attempt)) return null;
+        publicationBusy.value = true;
         final relay = SignedEventRelay(
           session: ref.read(relaySessionProvider.notifier),
           nsec: config.nsec!,
@@ -471,6 +588,8 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
               memberPubkey!,
               relay,
             );
+            if (!context.mounted) return;
+            publishedGrant.value = grant;
             final renewInMilliseconds =
                 grant.expiresAt * 1000 -
                 DateTime.now().millisecondsSinceEpoch -
@@ -500,6 +619,10 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
             );
             debugPrint('Push lease bootstrap failed: $error');
             debugPrintStack(stackTrace: stack);
+          } finally {
+            publicationBusy.value = false;
+            // Recheck inputs/authority that changed while the handoff was pending.
+            if (context.mounted) publicationRetry.value += 1;
           }
         }());
         return null;
@@ -513,6 +636,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
         memberPubkey,
         descriptor,
         token,
+        nativeCleanupKey,
         publicationRetry.value,
       ],
     );
@@ -547,7 +671,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     RelayConfig config,
     Community community,
     String memberPubkey,
-    SignedEventRelay relay,
+    SignedEventRelay? relay,
   ) async {
     final state = community.pushSubscriptionState;
     final desired = state.desired;
@@ -605,7 +729,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     await publishBuzzPushLeaseRecoverably(
       reserveGeneration: () =>
           notifier.reservePushLeaseGeneration(community.id),
-      publish: (leaseGeneration) => publishBuzzDevPushLeaseThroughRelay(
+      publish: (leaseGeneration) => publishBuzzDevPushLease(
         grant: grant,
         leaseInstallationId: community.pushLeaseInstallationId,
         leaseGeneration: leaseGeneration,
@@ -613,7 +737,17 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
         nsec: config.nsec!,
         memberPubkey: memberPubkey,
         subscriptions: desired,
-        relay: relay,
+        submit:
+            relay?.submit ??
+            ({required kind, required content, required tags, createdAt}) =>
+                submitSignedEventOnce(
+                  wsUrl: config.wsUrl,
+                  nsec: config.nsec!,
+                  kind: kind,
+                  content: content,
+                  tags: tags,
+                  createdAt: createdAt,
+                ),
       ),
       markAccepted: (leaseGeneration) => notifier.markPushLeaseAccepted(
         community.id,

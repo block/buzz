@@ -1,11 +1,133 @@
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
+import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/widgets.dart';
 
 void main() {
+  test(
+    'rotation renews both enabled origins and retries failed durable handoffs',
+    () async {
+      final communities = [
+        _acceptedCommunity('one'),
+        _acceptedCommunity('two'),
+      ];
+      final grants = [_grant('one', ''), _grant('two', '')];
+      final calls = <String>[];
+      var fail = true;
+      Future<BuzzPushEndpointGrant> publish(Community community) async {
+        calls.add(community.name);
+        // Native issuance committed before the relay handoff failed. A retry
+        // must include this now-nonempty grant as well as the other origin.
+        final index = community.name == 'one' ? 0 : 1;
+        grants[index] = _grant(community.name, 'g2_fresh');
+        if (fail && index == 0) throw StateError('relay handoff unavailable');
+        return grants[index];
+      }
+
+      await expectLater(
+        renewBuzzPushCommunityLeases(
+          readCommunities: () => communities,
+          grants: grants,
+          publish: publish,
+        ),
+        throwsStateError,
+      );
+      expect(calls, ['one', 'two']);
+      fail = false;
+      calls.clear();
+      expect(
+        await renewBuzzPushCommunityLeases(
+          readCommunities: () => communities,
+          grants: grants,
+          publish: publish,
+        ),
+        3600,
+      );
+      expect(calls, ['one', 'two']);
+    },
+  );
+
+  test(
+    'rotation rechecks opt-out and removal before each origin handoff',
+    () async {
+      var communities = [_acceptedCommunity('one'), _acceptedCommunity('two')];
+      final calls = <String>[];
+      await renewBuzzPushCommunityLeases(
+        readCommunities: () => communities,
+        grants: [_grant('one', ''), _grant('two', '')],
+        publish: (community) async {
+          calls.add(community.name);
+          communities = [
+            communities.first,
+            communities.last.copyWith(pushNotificationsEnabled: false),
+          ];
+          return _grant(community.name, 'g2_fresh');
+        },
+      );
+      expect(calls, ['one']);
+      communities = [];
+      await renewBuzzPushCommunityLeases(
+        readCommunities: () => communities,
+        grants: [_grant('one', '')],
+        publish: (_) async => throw StateError('removed community published'),
+      );
+    },
+  );
+
+  test(
+    'rotation restores only origins with native authority and desired subscriptions',
+    () async {
+      final enrolled = _acceptedCommunity('one');
+      final newCommunity = _acceptedCommunity('two').copyWith(
+        pushSubscriptionState: const BuzzPushLeaseSubscriptionState.desired(),
+      );
+      final calls = <String>[];
+      await renewBuzzPushCommunityLeases(
+        readCommunities: () => [
+          enrolled,
+          newCommunity,
+          _acceptedCommunity('three'),
+        ],
+        grants: [_grant('one', ''), _grant('two', '')],
+        publish: (community) async {
+          calls.add(community.name);
+          return _grant(community.name, 'g2_fresh');
+        },
+      );
+      expect(calls, ['one']);
+    },
+  );
+
+  test(
+    'inactive first handoff retries its durable reserved generation',
+    () async {
+      final original = _acceptedCommunity('one');
+      final pending = original.copyWith(
+        pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+          desired: original.pushSubscriptionState.desired,
+        ).withReservedGeneration(1),
+      );
+      var attempts = 0;
+      Future<BuzzPushEndpointGrant> publish(Community community) async {
+        attempts++;
+        if (attempts == 1) throw StateError('initial relay handoff lost');
+        return _grant('one', 'g2_saved');
+      }
+
+      Future<int?> retry() => renewBuzzPushCommunityLeases(
+        readCommunities: () => [pending],
+        grants: [_grant('one', 'g2_saved')],
+        publish: publish,
+      );
+      await expectLater(retry(), throwsStateError);
+      expect(await retry(), 3600);
+      expect(attempts, 2);
+    },
+  );
+
   testWidgets('first opt-in starts registration without switching community', (
     tester,
   ) async {
@@ -299,3 +421,34 @@ BuzzPushLeaseDescriptor _descriptor({
 );
 
 String _hex(String character) => List.filled(64, character).join();
+
+Community _acceptedCommunity(String name) {
+  final subscriptions = [
+    BuzzPushSubscription(
+      filter: BuzzPushFilter(kinds: const [9], pTags: [_hex('a')]),
+      notificationClass: 'default',
+    ),
+  ];
+  return Community.create(
+    name: name,
+    relayUrl: 'wss://$name.example',
+    nsec: 'test-key',
+  ).copyWith(
+    pushNotificationsEnabled: true,
+    pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+      desired: subscriptions,
+    ).withAccepted(subscriptions: subscriptions, generation: 1),
+  );
+}
+
+BuzzPushEndpointGrant _grant(String origin, String grant) =>
+    BuzzPushEndpointGrant(
+      relayOrigin: 'wss://$origin.example',
+      relayPubkey: _hex('b'),
+      installationId: '0' * 32,
+      endpointGrant: grant,
+      endpointHash: _hex('c'),
+      endpointEpoch: 2,
+      generation: 2,
+      expiresAt: 3600,
+    );
