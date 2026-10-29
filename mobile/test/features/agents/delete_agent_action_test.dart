@@ -39,8 +39,8 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Delete'), findsOneWidget);
-    await tester.tap(find.text('Delete'));
+    expect(find.byTooltip('Delete agent'), findsOneWidget);
+    await tester.tap(find.byTooltip('Delete agent'));
     await tester.pumpAndSettle();
     expect(find.text('Delete Scout?'), findsOneWidget);
     await tester.tap(find.text('Cancel'));

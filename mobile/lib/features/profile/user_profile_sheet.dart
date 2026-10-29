@@ -76,6 +76,9 @@ class UserProfileSheet extends HookConsumerWidget {
   /// Optional actions supplied by the opening surface, below the profile tiles.
   final WidgetBuilder? contextualActions;
 
+  /// Optional action opposite the sheet close control.
+  final Widget? headerLeading;
+
   /// Space before the primary profile actions.
   final double primaryActionsSpacing;
 
@@ -90,6 +93,7 @@ class UserProfileSheet extends HookConsumerWidget {
     this.agentSubtitleIcon,
     this.names,
     this.contextualActions,
+    this.headerLeading,
     this.primaryActionsSpacing = Grid.xs + Grid.half,
     this.contextualActionsSpacing = Grid.xs,
   });
@@ -362,7 +366,7 @@ class UserProfileSheet extends HookConsumerWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const BuzzSheetHeader(),
+          BuzzSheetHeader(leading: headerLeading),
           Flexible(child: SafeArea(top: false, child: content)),
         ],
       ),

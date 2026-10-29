@@ -27,6 +27,7 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/theme/buzz_icons.dart';
 import 'agent_card_grid.dart';
 import 'delete_agent_action.dart';
+import 'bestie_agent_action.dart';
 
 /// Opens the active community's full-page Agents navigation stack.
 Future<void> showAgents(BuildContext context) async {
@@ -94,7 +95,8 @@ class _AgentsNavigation extends HookConsumerWidget {
                         : 'Manage on desktop',
                     primaryActionsSpacing: Grid.md,
                     contextualActionsSpacing: Grid.xxs,
-                    contextualActions: (_) => DeleteAgentAction(
+                    contextualActions: (_) => BestieAgentAction(pubkey: pubkey),
+                    headerLeading: DeleteAgentAction(
                       controller: controller,
                       pubkey: pubkey,
                     ),
