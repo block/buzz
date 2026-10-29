@@ -23,7 +23,6 @@ class _OnboardingConnectionView extends HookWidget {
   Widget build(BuildContext context) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final ios = defaultTargetPlatform == TargetPlatform.iOS;
-    final keyboardReady = useState(false);
     final staggerEntrance = enteringLink && !ios;
     // Match the iOS return motion, starting after keyboard preparation.
     final duration = reducedMotion
@@ -35,46 +34,11 @@ class _OnboardingConnectionView extends HookWidget {
     // A new viewport (for example rotation) gets a fresh measurement.
     final viewport = MediaQuery.sizeOf(context);
     final restingHeight = useMemoized(() => <double?>[null], [viewport]);
-    final enteringLinkRef = useRef(enteringLink)..value = enteringLink;
-    useEffect(() {
-      const channel = MethodChannel('buzz/community_keyboard');
-      Timer? fallback;
-      var disposed = false;
-      void beginOpening() {
-        if (disposed || !enteringLinkRef.value || keyboardReady.value) return;
-        fallback?.cancel();
-        keyboardReady.value = true;
-      }
-
-      if (ios && enteringLink) {
-        channel.setMethodCallHandler((call) async {
-          if (call.method != 'willShow') return;
-          beginOpening();
-        });
-      }
-      if (enteringLink) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (disposed || !context.mounted || !enteringLinkRef.value) return;
-          focus.requestFocus();
-          if (!ios ||
-              reducedMotion ||
-              MediaQuery.viewInsetsOf(context).bottom > 0) {
-            beginOpening();
-          } else {
-            // Hardware keyboards and older hosts may send no show notification.
-            fallback = Timer(const Duration(milliseconds: 350), beginOpening);
-          }
-        });
-      } else {
-        focus.unfocus();
-        keyboardReady.value = false;
-      }
-      return () {
-        disposed = true;
-        fallback?.cancel();
-        if (ios && enteringLink) channel.setMethodCallHandler(null);
-      };
-    }, [enteringLink, ios, reducedMotion]);
+    final keyboardReady = useCommunityLinkFocus(
+      context,
+      enteringLink: enteringLink,
+      focus: focus,
+    );
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
@@ -105,7 +69,7 @@ class _OnboardingConnectionView extends HookWidget {
                 }
                 return TweenAnimationBuilder<double>(
                   tween: Tween(
-                    end: enteringLink && (!ios || keyboardReady.value) ? 1 : 0,
+                    end: enteringLink && (!ios || keyboardReady) ? 1 : 0,
                   ),
                   duration: duration,
                   curve: ios
@@ -355,11 +319,16 @@ class _ConnectionHeading extends StatelessWidget {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Text(title, style: context.textTheme.headlineSmall),
+      Text(
+        title,
+        style: OnboardingTypography.title.copyWith(
+          color: context.colors.onSurface,
+        ),
+      ),
       const SizedBox(height: Grid.xs),
       Text(
         subtitle,
-        style: context.textTheme.bodyLarge?.copyWith(
+        style: OnboardingTypography.subtitle.copyWith(
           color: context.colors.onSurfaceVariant,
         ),
       ),

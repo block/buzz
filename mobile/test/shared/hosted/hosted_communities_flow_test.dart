@@ -61,6 +61,9 @@ void main() {
       }
     };
     await f.flow.signInAccount();
+    expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+    expect(f.admitted, isEmpty);
+    await f.flow.addSelectedCommunities();
     expect(f.admitted, ['a-one.communities.buzz.xyz']);
     f.expired = true;
     await f.flow.retry();
@@ -80,7 +83,8 @@ void main() {
     );
     final completed = Completer<void>();
     f.flow.addListener(() {
-      if (f.flow.stage == HostedFlowStage.complete && !completed.isCompleted) {
+      if (f.flow.stage == HostedFlowStage.chooseCommunities &&
+          !completed.isCompleted) {
         completed.complete();
       }
     });
@@ -88,6 +92,7 @@ void main() {
       BrowserAuthCode('other-code', 'a' * 43, {'type': 'account'}),
     );
     await completed.future.timeout(const Duration(seconds: 2));
+    await f.flow.addSelectedCommunities();
     expect(f.admitted, [
       'a-one.communities.buzz.xyz',
       'b-one.communities.buzz.xyz',

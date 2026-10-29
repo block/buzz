@@ -77,6 +77,7 @@ class HostedFlow extends ChangeNotifier {
     required this.store,
     required this.identity,
     required this.enterCommunity,
+    this.openLandingCommunity,
     Future<bool> Function(Uri)? openWeb,
   }) : _openWeb =
            openWeb ??
@@ -86,6 +87,7 @@ class HostedFlow extends ChangeNotifier {
   final AccountIdentityStore store;
   final HostedIdentityService identity;
   final HostedCommunityAdmission enterCommunity;
+  final HostedCommunityAdmission? openLandingCommunity;
   bool get canRetry =>
       problem == null ||
       problem == HostedFlowProblem.retry ||
@@ -103,15 +105,18 @@ class HostedFlow extends ChangeNotifier {
   SensitiveActionPolicy? pairedSensitiveActionPolicy;
   List<AddCommunityDeepLink> communities = const [];
   Set<String> selectedRelays = const {};
+  String? landingRelay;
   final Set<String> _addedRelays = {};
   bool _addingCommunities = false;
+  bool _preparingAdd = false;
   String? _batchSubject;
   String? _conflictingRelay;
   bool get canChangeCommunities =>
       accountOnly &&
       account.account?.subject == _batchSubject &&
       (stage == HostedFlowStage.blocked ||
-          stage == HostedFlowStage.communityConflict) &&
+          stage == HostedFlowStage.communityConflict ||
+          (stage == HostedFlowStage.working && _addingCommunities)) &&
       communities.isNotEmpty;
   String? addingCommunityName;
   int get addedCommunityCount => _addedRelays.length;
@@ -633,16 +638,31 @@ class HostedFlow extends ChangeNotifier {
     _set(HostedFlowStage.complete);
   }
 
-  void selectCommunity(String relay, bool selected) {
+  void chooseLandingCommunity(String relay) {
     if (stage != HostedFlowStage.chooseCommunities ||
         !communities.any((item) => item.relayUrl == relay)) {
       return;
     }
-    selectedRelays = Set.unmodifiable({
-      ...selectedRelays.where((item) => item != relay),
-      if (selected) relay,
-    });
+    landingRelay = relay;
     notifyListeners();
+  }
+
+  /// Restore existing memberships before presenting a separate Add route.
+  Future<bool> prepareToAddCommunity() async {
+    if (_preparingAdd || stage != HostedFlowStage.chooseCommunities) {
+      return false;
+    }
+    _preparingAdd = true;
+    try {
+      final restoring = addSelectedCommunities();
+      final generation = _generation;
+      await restoring;
+      return !_disposed &&
+          generation == _generation &&
+          stage == HostedFlowStage.chooseCommunities;
+    } finally {
+      _preparingAdd = false;
+    }
   }
 
   Future<void> addSelectedCommunities() {
@@ -657,14 +677,10 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation));
   }
 
-  /// Keep completed additions and let the user omit a failing target.
+  /// Keep completed additions while allowing a different landing choice.
   void backToCommunityChoices() {
     if (!canChangeCommunities) return;
     _nextGeneration();
-    communities = List.unmodifiable(
-      communities.where((item) => !_addedRelays.contains(item.relayUrl)),
-    );
-    selectedRelays = Set.unmodifiable(selectedRelays.difference(_addedRelays));
     _conflictingRelay = null;
     addingCommunityName = null;
     _set(HostedFlowStage.chooseCommunities);
@@ -702,11 +718,16 @@ class HostedFlow extends ChangeNotifier {
         await leave(noCommunities: true);
         return;
       }
-      // Direct account entry imports every joined community. The existing
-      // switcher handles choosing which community to enter after admission.
-      _addingCommunities = true;
+      landingRelay = listed.first.relayUrl;
+      // Choose where to land; every membership is restored.
+      _set(HostedFlowStage.chooseCommunities);
+      return;
     }
-    for (final community in communities) {
+    final ordered = [
+      ...communities.where((item) => item.relayUrl == landingRelay),
+      ...communities.where((item) => item.relayUrl != landingRelay),
+    ];
+    for (final community in ordered) {
       if (!current()) return;
       if (!selectedRelays.contains(community.relayUrl) ||
           _addedRelays.contains(community.relayUrl)) {
@@ -734,6 +755,23 @@ class HostedFlow extends ChangeNotifier {
       await leave(noCommunities: true);
       return;
     }
+    if (_preparingAdd) {
+      _set(HostedFlowStage.chooseCommunities);
+      return;
+    }
+    final destination = _addedRelays.contains(landingRelay)
+        ? landingRelay!
+        : _addedRelays.first;
+    await openLandingCommunity?.call(
+      AddCommunityDeepLink(
+        relayUrl: destination,
+        name: Uri.parse(destination).host,
+      ),
+      subject,
+      pubkey,
+      current,
+    );
+    if (!current()) return;
     await browser.clearIntent();
     if (current()) _set(HostedFlowStage.complete);
   }
@@ -838,6 +876,7 @@ class HostedFlow extends ChangeNotifier {
     noCommunitiesToAdd = false;
     communities = const [];
     selectedRelays = const {};
+    landingRelay = null;
     _addedRelays.clear();
     _batchSubject = null;
     _conflictingRelay = null;
