@@ -29,7 +29,7 @@ class BuzzLoadingIndicator extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final animation = useAnimationController(
-      duration: const Duration(milliseconds: 500),
+      duration: const Duration(milliseconds: 450),
     );
 
     useEffect(() {
