@@ -107,12 +107,17 @@ export const infraTest = (binaryName, name) =>
 // The feature graphs the regular lanes test a package in, in order, where
 // that is not just its default graph: the Justfile's test-unit runs
 // buzz-push-gateway without and with its feature and buzz-feature-flags only
-// with LaunchDarkly, and desktop-tauri-test-mesh runs the desktop crate under
-// mesh-llm. A test behind `#[cfg(feature = …)]` is listed only in its graph.
+// with LaunchDarkly, and desktop-tauri-test-mesh runs the desktop crate's lib
+// tests (`lib`: no other target) under mesh-llm. A test behind
+// `#[cfg(feature = …)]` is listed only in its graph, and one listed in several
+// can compile differently in each (`#[cfg(not(feature = …))]` arms).
 export const rustFeatureGraphs = {
-  "buzz-feature-flags": [["launchdarkly"]],
-  "buzz-push-gateway": [[], ["personal-dev-app-attest"]],
-  "buzz-desktop": [[], ["mesh-llm"]],
+  "buzz-feature-flags": [{ features: ["launchdarkly"] }],
+  "buzz-push-gateway": [
+    { features: [] },
+    { features: ["personal-dev-app-attest"] },
+  ],
+  "buzz-desktop": [{ features: [] }, { features: ["mesh-llm"], lib: true }],
 };
 
 // Mirrors desktop/package.json "test", desktop/playwright.config.ts testDir,
@@ -897,8 +902,9 @@ export function chooseRust(tests, candidates) {
 // flags of its selected files, each whole flag once (`--test codec --test
 // connection`; merging tokens instead gave `--test codec connection`, which
 // nextest reads as a test-name filter that matches nothing), the feature
-// graphs to list them in, and the tests to list in those targets. Every entry
-// must belong to one workspace, whose runner is returned with the groups.
+// graphs to list them in with each graph's full arguments, and the tests to
+// list in those targets. Every entry must belong to one workspace, whose
+// runner is returned with the groups.
 export function rustGroups(entries) {
   const groups = new Map();
   const workspaces = new Set();
@@ -930,7 +936,16 @@ export function rustGroups(entries) {
       crate,
       ...(group.every ? [] : [...group.targets.values()].flat()),
     ];
-    group.graphs = rustFeatureGraphs[crate] ?? [[]];
+    // A lib-only graph applies only where the selection can reach the lib.
+    group.graphs = (rustFeatureGraphs[crate] ?? [{ features: [] }])
+      .filter(({ lib }) => !lib || group.every || group.targets.has("--lib"))
+      .map(({ features, lib }) => ({
+        features,
+        args: [
+          ...(lib ? ["-p", crate, "--lib"] : group.args),
+          ...(features.length ? ["--features", features.join(",")] : []),
+        ],
+      }));
   }
   return { groups, runner: [...workspaces][0] };
 }
@@ -939,11 +954,13 @@ export function rustGroups(entries) {
 // the `flake` profile (the workspace's .config/nextest.toml: no retries, JUnit
 // per run), one cargo invocation per package and feature graph so each builds
 // only the targets its files can be in. Each package's targets are listed
-// whole in its feature graphs in turn (nextest reports an ignored test as a
+// whole in each of its feature graphs (nextest reports an ignored test as a
 // filter mismatch whatever `-E` says, so a filtered listing could not tell an
 // ignored entry from an unlisted one), and every entry is narrowed with
-// chooseRust to exact (binary, test) pairs in the first graph listing it, so
-// a later graph (and its build) is reached only by tests behind its feature.
+// chooseRust to exact (binary, test) pairs in every graph listing it, as the
+// regular lanes run it in each: a `#[cfg(feature = …)]` arm inside a test
+// the default graph lists compiles only in its feature's graph. Statuses are
+// keyed per graph, so one graph's pass cannot stand for another's failure.
 // An entry standing only for ignored or infrastructure-backed tests is
 // excluded; one no graph lists (a test behind a cfg the regular lanes do not
 // build here) fails the lane rather than passing unrepeated. The Tauri
@@ -957,13 +974,8 @@ function repeatRust(entries, iterations) {
   const invocations = [];
   const unlisted = [];
   for (const [crate, group] of groups) {
-    let tests = group.tests;
-    for (const features of group.graphs) {
-      if (tests.length === 0) break;
-      const args = [
-        ...group.args,
-        ...(features.length ? ["--features", features.join(",")] : []),
-      ];
+    const missing = new Set(group.tests);
+    for (const { features, args } of group.graphs) {
       const listed = run("cargo", [
         "nextest",
         "list",
@@ -983,11 +995,14 @@ function repeatRust(entries, iterations) {
           runnable: !test.ignored && !infraTest(suite["binary-name"], name),
         })),
       );
-      const choice = chooseRust(tests, candidates);
+      const choice = chooseRust(group.tests, candidates);
+      for (const test of group.tests)
+        if (!choice.unlisted.includes(test)) missing.delete(test);
       const chosen = choice.chosen.filter((test) => test.runnable);
       if (chosen.length)
         invocations.push({
           label: [crate, ...features].join("+"),
+          tag: features.length ? ` [${features.join(",")}]` : "",
           args,
           chosen,
           filterset: chosen
@@ -996,9 +1011,8 @@ function repeatRust(entries, iterations) {
             )
             .join(" | "),
         });
-      tests = choice.unlisted;
     }
-    unlisted.push(...tests.map((test) => test.entry));
+    unlisted.push(...[...missing].map((test) => test.entry));
   }
   if (unlisted.length) {
     summarize(
@@ -1015,7 +1029,9 @@ function repeatRust(entries, iterations) {
     process.exitCode = 1;
   }
   const expected = invocations.flatMap((invocation) =>
-    invocation.chosen.map(({ binary, name }) => `${binary} ${name}`),
+    invocation.chosen.map(
+      ({ binary, name }) => `${binary} ${name}${invocation.tag}`,
+    ),
   );
   if (expected.length === 0) {
     if (!unlisted.length)
@@ -1036,7 +1052,7 @@ function repeatRust(entries, iterations) {
   for (let i = 1; i <= iterations; i += 1) {
     const statuses = new Map();
     let ok = true;
-    for (const { label, args, filterset } of invocations) {
+    for (const { label, tag, args, filterset } of invocations) {
       rmSync(junit, { force: true });
       const result = run(
         "cargo",
@@ -1055,7 +1071,7 @@ function repeatRust(entries, iterations) {
       ok &&= result.status === 0;
       try {
         for (const [test, status] of parseJunit(readFileSync(junit, "utf8")))
-          statuses.set(test, status);
+          statuses.set(`${test}${tag}`, status);
         copyFileSync(junit, `${dir}/iter-${i}-${label}.xml`);
       } catch {
         ok = false;

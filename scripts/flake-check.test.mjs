@@ -444,20 +444,33 @@ test("Rust files build only the targets they can be part of, merged per package 
     /rust entry must be/,
   );
   // Packages the regular lanes test under a feature list in those graphs, in
-  // order; the rest in their default graph alone.
+  // order; the rest in their default graph alone. The desktop crate's
+  // mesh-llm graph builds only its lib, and only for a selection reaching it.
+  const graphs = (entries) =>
+    [...rustGroups(entries).groups.values()][0].graphs.map(({ args }) =>
+      args.join(" "),
+    );
   assert.deepEqual(
     [
       "crates/buzz-feature-flags/src/launchdarkly.rs::tests::a",
       "crates/buzz-push-gateway/src/lib.rs::tests::b",
       "crates/buzz-core/src/filter.rs::tests::c",
-    ].map((entry) => [...rustGroups([entry]).groups.values()][0].graphs),
-    [[["launchdarkly"]], [[], ["personal-dev-app-attest"]], [[]]],
-  );
-  assert.deepEqual(
+      "desktop/src-tauri/src/lib.rs::tests::d",
+      "desktop/src-tauri/tests/rodio_mixer_diagnostic.rs::e",
+    ].map((entry) => graphs([entry])),
     [
-      ...rustGroups(["desktop/src-tauri/src/lib.rs::tests::d"]).groups.values(),
-    ][0].graphs,
-    [[], ["mesh-llm"]],
+      ["-p buzz-feature-flags --lib --bins --features launchdarkly"],
+      [
+        "-p buzz-push-gateway --lib --bins",
+        "-p buzz-push-gateway --lib --bins --features personal-dev-app-attest",
+      ],
+      ["-p buzz-core --lib --bins"],
+      [
+        "-p buzz-desktop --lib --bins",
+        "-p buzz-desktop --lib --features mesh-llm",
+      ],
+      ["-p buzz-desktop --test rodio_mixer_diagnostic"],
+    ],
   );
   // Postgres-backed tests are excluded by name and binary, as the postgres-ci
   // default-filter selects them.
@@ -1026,14 +1039,14 @@ test("repeat invocations mirror the lanes they stand in for", () => {
     assert.ok(read("../.config/nextest.toml").includes(predicate), predicate);
   // Feature graphs mirror the Justfile recipes the regular lanes run: every
   // package test-unit runs under a feature, in each graph it runs there, and
-  // the desktop crate's default and mesh-llm lanes.
+  // the desktop crate's default and lib-only mesh-llm lanes.
   const justfile = read("../Justfile");
   const graphs = {};
   for (const [, crate, features] of justfile.matchAll(
     /^ +cargo nextest run -p ([\w-]+)(?: --features ([\w,-]+))?$/gm,
   )) {
     graphs[crate] ??= [];
-    graphs[crate].push(features?.split(",") ?? []);
+    graphs[crate].push({ features: features?.split(",") ?? [] });
   }
   assert.ok(
     justfile.includes(
@@ -1045,12 +1058,15 @@ test("repeat invocations mirror the lanes they stand in for", () => {
       "\ndesktop-tauri-test-mesh: _ensure-sidecar-stubs\n    cargo test --manifest-path {{desktop_tauri_manifest}} --features mesh-llm --lib\n",
     ),
   );
-  graphs["buzz-desktop"] = [[], ["mesh-llm"]];
+  graphs["buzz-desktop"] = [
+    { features: [] },
+    { features: ["mesh-llm"], lib: true },
+  ];
   assert.deepEqual(
     rustFeatureGraphs,
     Object.fromEntries(
       Object.entries(graphs).filter(([, list]) =>
-        list.some((features) => features.length),
+        list.some(({ features }) => features.length),
       ),
     ),
   );
@@ -1089,8 +1105,9 @@ test("repeat invocations mirror the lanes they stand in for", () => {
 
 // The repeat, through its entry point, in a scratch tree holding the script
 // and the packages its entries name, with a fake `cargo` on PATH listing
-// `tests` ({pkg, binary, binaryName, name, feature?, ignored?}; a feature
-// test only under that feature) and passing every test a run selects.
+// `tests` ({pkg, binary, binaryName, name, feature?, ignored?, failsWith?}; a
+// feature test only under that feature) and passing every test a run selects
+// but one failing in the graph enabling its `failsWith` feature.
 function repeatWithFakeCargo(runner, entries, tests) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "flake-repeat-")));
   try {
@@ -1101,6 +1118,7 @@ function repeatWithFakeCargo(runner, entries, tests) {
     );
     for (const [crateDir, name] of [
       ["crates/buzz-feature-flags", "buzz-feature-flags"],
+      ["crates/buzz-push-gateway", "buzz-push-gateway"],
       ["desktop/src-tauri", "buzz-desktop"],
     ]) {
       mkdirSync(join(dir, crateDir, "src"), { recursive: true });
@@ -1139,7 +1157,10 @@ if (args[1] === "list") {
   );
   mkdirSync(dirname(junit), { recursive: true });
   const cases = [...value("-E").matchAll(/binary_id\\(=([^)]+)\\) & test\\(=([^)]+)\\)/g)];
-  writeFileSync(junit, "<testsuites>" + cases.map(([, binary, name]) => '<testcase name="' + name + '" classname="' + binary + '"/>').join("") + "</testsuites>");
+  const fails = ([, binary, name]) =>
+    tests.some((test) => test.binary === binary && test.name === name && features.includes(test.failsWith));
+  writeFileSync(junit, "<testsuites>" + cases.map((match) => '<testcase name="' + match[2] + '" classname="' + match[1] + '">' + (fails(match) ? "<failure/>" : "") + "</testcase>").join("") + "</testsuites>");
+  if (cases.some(fails)) process.exitCode = 100;
 }
 `,
     );
@@ -1186,12 +1207,16 @@ if (args[1] === "list") {
   }
 }
 
-test("feature-gated Rust tests repeat in the graph the regular lanes test them in, and unlisted ones fail the lane", () => {
-  // Reviewer probe on #8613: the repeat listed only the default graph, so a
+test("feature-gated Rust tests repeat in every graph the regular lanes test them in, and unlisted ones fail the lane", () => {
+  // Reviewer probes on #8613: the repeat listed only the default graph, so a
   // selected `#[cfg(feature = …)]` test was dropped and the lane passed as
-  // "nothing to repeat", or reported only its ungated neighbours.
+  // "nothing to repeat"; then it repeated each test in the first graph listing
+  // it alone, so a changed `#[cfg(feature = …)]` arm inside a test the default
+  // graph lists too was never compiled, and the lane passed.
   const features = (call) =>
     call.includes("--features") ? call[call.indexOf("--features") + 1] : "";
+  const targets = (call) =>
+    call.filter((arg) => arg === "--lib" || arg === "--bins").join(" ");
   const flags = {
     pkg: "buzz-feature-flags",
     binary: "buzz-feature-flags",
@@ -1229,17 +1254,65 @@ test("feature-gated Rust tests repeat in the graph the regular lanes test them i
   );
   assert.match(
     root.summary,
-    /\| buzz-feature-flags launchdarkly::tests::null_events \| ✅ \| ✅ \| 0\/2 \|/,
+    /\| buzz-feature-flags launchdarkly::tests::null_events \[launchdarkly\] \| ✅ \| ✅ \| 0\/2 \|/,
   );
   assert.match(
     root.summary,
-    /\| buzz-feature-flags tests::plain \| ✅ \| ✅ \| 0\/2 \|/,
+    /\| buzz-feature-flags tests::plain \[launchdarkly\] \| ✅ \| ✅ \| 0\/2 \|/,
   );
 
-  // The desktop crate is tested in its default graph, then under mesh-llm:
-  // only tests the default graph does not list reach the mesh one, a mesh
-  // test repeats there, and one no graph lists fails the lane by name while
-  // the rest still repeat. An ignored test is excluded, not unlisted.
+  // buzz-push-gateway is tested without and with personal-dev-app-attest, and
+  // config.rs's attestation_environment_is_explicit_and_build_gated asserts
+  // differently in each: it repeats in both graphs, and a change breaking only
+  // the feature's arm fails the lane on that graph's row while the default
+  // graph's row passes.
+  const gateway = {
+    pkg: "buzz-push-gateway",
+    binary: "buzz-push-gateway",
+    binaryName: "buzz_push_gateway",
+  };
+  const gated = repeatWithFakeCargo(
+    "rust",
+    [
+      "crates/buzz-push-gateway/src/config.rs::tests::attestation_environment_is_explicit_and_build_gated",
+    ],
+    [
+      {
+        ...gateway,
+        name: "config::tests::attestation_environment_is_explicit_and_build_gated",
+        failsWith: "personal-dev-app-attest",
+      },
+    ],
+  );
+  assert.equal(gated.status, 1, gated.summary);
+  assert.deepEqual(
+    gated.calls.map((call) => [call[1], features(call)]),
+    [
+      ["list", ""],
+      ["list", "personal-dev-app-attest"],
+      ["run", ""],
+      ["run", "personal-dev-app-attest"],
+      ["run", ""],
+      ["run", "personal-dev-app-attest"],
+    ],
+  );
+  assert.match(
+    gated.summary,
+    /## Flake check \(Rust\): 2 of 2 iterations failed/,
+  );
+  assert.match(
+    gated.summary,
+    /\| buzz-push-gateway config::tests::attestation_environment_is_explicit_and_build_gated \| ✅ \| ✅ \| 0\/2 \|/,
+  );
+  assert.match(
+    gated.summary,
+    /\| buzz-push-gateway config::tests::attestation_environment_is_explicit_and_build_gated \[personal-dev-app-attest\] \| ❌ \| ❌ \| 2\/2 \|/,
+  );
+
+  // The desktop crate's lib is tested in its default graph and under
+  // mesh-llm, which builds the lib alone: a lib test repeats in both, a mesh
+  // test in the mesh graph, and one no graph lists fails the lane by name
+  // while the rest still repeat. An ignored test is excluded, not unlisted.
   const desktop = {
     pkg: "buzz-desktop",
     binary: "buzz-desktop",
@@ -1252,6 +1325,12 @@ test("feature-gated Rust tests repeat in the graph the regular lanes test them i
       ...desktop,
       name: "managed_agents::relay_mesh::tests::mesh_only",
       feature: "mesh-llm",
+    },
+    {
+      ...desktop,
+      binary: "buzz-desktop::rodio_mixer_diagnostic",
+      binaryName: "rodio_mixer_diagnostic",
+      name: "mixes",
     },
   ];
   const tauri = repeatWithFakeCargo(
@@ -1266,14 +1345,14 @@ test("feature-gated Rust tests repeat in the graph the regular lanes test them i
   );
   assert.equal(tauri.status, 1, tauri.summary);
   assert.deepEqual(
-    tauri.calls.map((call) => [call[1], features(call)]),
+    tauri.calls.map((call) => [call[1], features(call), targets(call)]),
     [
-      ["list", ""],
-      ["list", "mesh-llm"],
-      ["run", ""],
-      ["run", "mesh-llm"],
-      ["run", ""],
-      ["run", "mesh-llm"],
+      ["list", "", "--lib --bins"],
+      ["list", "mesh-llm", "--lib"],
+      ["run", "", "--lib --bins"],
+      ["run", "mesh-llm", "--lib"],
+      ["run", "", "--lib --bins"],
+      ["run", "mesh-llm", "--lib"],
     ],
   );
   assert.match(
@@ -1285,13 +1364,36 @@ test("feature-gated Rust tests repeat in the graph the regular lanes test them i
     tauri.summary,
     /## Flake check \(Desktop Tauri\): 0 of 2 iterations failed/,
   );
-  assert.match(
-    tauri.summary,
-    /\| buzz-desktop managed_agents::relay_mesh::tests::mesh_only \| ✅ \| ✅ \| 0\/2 \|/,
+  for (const row of [
+    "managed_agents::relay_mesh::tests::mesh_only [mesh-llm]",
+    "tests::plain",
+    "tests::plain [mesh-llm]",
+  ])
+    assert.ok(
+      tauri.summary.includes(`| buzz-desktop ${row} | ✅ | ✅ | 0/2 |`),
+      row,
+    );
+  assert.doesNotMatch(tauri.summary, /mesh_only \|/);
+
+  // An integration test selection never reaches the lib-only mesh graph.
+  const integration = repeatWithFakeCargo(
+    "tauri",
+    ["desktop/src-tauri/tests/rodio_mixer_diagnostic.rs::mixes"],
+    tauriTests,
   );
-  assert.match(
-    tauri.summary,
-    /\| buzz-desktop tests::plain \| ✅ \| ✅ \| 0\/2 \|/,
+  assert.equal(integration.status, 0, integration.summary);
+  assert.deepEqual(
+    integration.calls.map((call) => [call[1], features(call)]),
+    [
+      ["list", ""],
+      ["run", ""],
+      ["run", ""],
+    ],
+  );
+  assert.ok(
+    integration.summary.includes(
+      "| buzz-desktop::rodio_mixer_diagnostic mixes | ✅ | ✅ | 0/2 |",
+    ),
   );
 
   // A selection of only ignored tests is excluded, and passes as such; one

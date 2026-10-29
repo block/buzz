@@ -112,9 +112,10 @@ jobs:
     needs: [flake-select]
     if: needs.flake-select.outputs.tauri != ''
     runs-on: ubuntu-latest
-    # Same bound as a Desktop Tauri lane (_ci-desktop.yml): ci-apt-retry.sh
-    # bounds the apt step at ~34m worst case and a cold build needs ~15m.
-    timeout-minutes: 55
+    # A Desktop Tauri lane's bound (_ci-desktop.yml: ci-apt-retry.sh bounds
+    # the apt step at ~34m worst case and a cold build needs ~15m), plus a
+    # second cold build: a lib selection also builds the mesh-llm graph.
+    timeout-minutes: 70
     permissions:
       contents: read
     steps:
@@ -157,10 +158,10 @@ jobs:
       - name: Create sidecar stubs
         run: just _ensure-sidecar-stubs
       # Same script as flake-rust, against the Tauri workspace's manifest and
-      # its own .config/nextest.toml `flake` profile. A selected test the
-      # default graph does not list is looked for under mesh-llm, whose
-      # dependency graph the restored desktop-core cache does not hold, so
-      # only such a selection builds it cold.
+      # its own .config/nextest.toml `flake` profile. A selected lib test also
+      # repeats under mesh-llm, as desktop-tauri-test-mesh runs it; the
+      # restored desktop-core cache does not hold that dependency graph, so a
+      # lib selection builds it cold, and an integration-test one never does.
       - name: Repeat changed desktop Tauri tests
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"

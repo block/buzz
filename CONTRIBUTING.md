@@ -322,11 +322,13 @@ are deliberately not repeated: `#[ignore]`d and Postgres-backed Rust tests,
 Playwright specs outside the `smoke` project, `*.perf.ts` measurements, and a
 selection too large for its lane (over 64 KiB of entries, or more Playwright
 journeys than ten repetitions can finish within the lane's timeout).
-A Rust test repeats in the first feature graph the regular lanes test its
+A Rust test repeats in every feature graph the regular lanes test its
 package in that lists it (LaunchDarkly, the App Attest development feature,
-the desktop crate's `mesh-llm`); a selected test that no such graph lists on
-the Linux runner, such as a macOS-only one, fails its lane by name rather
-than passing unrepeated.
+the desktop crate's lib under `mesh-llm`), since a `#[cfg(feature = …)]` arm
+compiles only in its own graph; the step summary marks a row from a feature
+graph with that feature. A selected test that no such graph lists on the
+Linux runner, such as a macOS-only one, fails its lane by name rather than
+passing unrepeated.
 The lanes skip when no test changed and are not required to merge; their
 step summaries show the selection and the test × iteration table.
 
