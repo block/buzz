@@ -9,7 +9,6 @@ use crate::{
         DELEGATE_AUDIENCE, ENROLL_AUDIENCE, REVOKE_DELEGATION_AUDIENCE,
         REVOKE_INSTALLATION_AUDIENCE, ROTATE_ENDPOINT_AUDIENCE,
     },
-    grant::GrantKeyring,
     model::*,
     token::TokenKeyring,
 };
@@ -45,7 +44,6 @@ pub struct ApplicationRuntime {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub grant_keyring: Arc<GrantKeyring>,
     pub authority: Arc<dyn AuthorityStore>,
     pub token_keyring: Arc<TokenKeyring>,
     /// Server-owned application identity and APNs transport.
@@ -417,8 +415,13 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
     {
         return e;
     }
+    let (endpoint_grant, grant_hash) = match crate::grant::issue() {
+        Ok(grant) => grant,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
+    };
     let d = Delegation {
-        id: uuid::Uuid::new_v4(),
+        id: crate::grant::id(&grant_hash),
+        grant_hash,
         installation_id: r.installation_handle,
         relay_pubkey: r.relay_pubkey.clone(),
         endpoint_epoch: r.endpoint_epoch,
@@ -430,22 +433,11 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
     if let Err(e) = s.authority.upsert_delegation(d.clone()).await {
         return authority_error(e);
     }
-    let g = EndpointGrant {
-        v: WIRE_VERSION,
-        delegation_id: d.id,
-        relay_pubkey: d.relay_pubkey,
-        endpoint_epoch: d.endpoint_epoch,
-        generation: d.generation,
-        expires_at: d.expires_at,
-    };
-    match s.grant_keyring.issue(&g) {
-        Ok(endpoint_grant) => (
-            StatusCode::CREATED,
-            Json(DelegationResponse { endpoint_grant }),
-        )
-            .into_response(),
-        Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
-    }
+    (
+        StatusCode::CREATED,
+        Json(DelegationResponse { endpoint_grant }),
+    )
+        .into_response()
 }
 
 #[derive(serde::Serialize)]
@@ -658,29 +650,16 @@ async fn deliver(
         Some(auth) => auth,
         None => return error(StatusCode::UNAUTHORIZED, "invalid_auth"),
     };
-    let grant = match s.grant_keyring.open(&r.endpoint_grant) {
-        Ok(x) => x,
+    let grant_hash = match crate::grant::hash(&r.endpoint_grant) {
+        Ok(hash) => hash,
         Err(_) => return error(StatusCode::NOT_FOUND, "invalid_grant"),
     };
     let now = (s.now)();
-    if grant.v != WIRE_VERSION
-        || !valid_relay_pubkey(&grant.relay_pubkey)
-        || grant.relay_pubkey != relay
-        || grant.endpoint_epoch < 1
-        || grant.generation < 1
-        || grant.expires_at < now
-        || r.expires_at < now
-        || r.expires_at > grant.expires_at
-    {
-        return error(StatusCode::NOT_FOUND, "invalid_grant");
-    }
     let permit = match s
         .authority
         .authorize_delivery(
-            grant.delegation_id,
+            grant_hash,
             &relay,
-            grant.endpoint_epoch,
-            grant.generation,
             &event_id,
             r.request_id,
             r.expires_at,
@@ -715,6 +694,7 @@ async fn deliver(
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
         }
     };
+    let generation = permit.authority.generation;
     let transport = Arc::clone(&s.application.transport);
     let endpoint = match s.token_keyring.open(&permit.authority.token_ciphertext) {
         Ok(token) => hex::encode(token),
@@ -758,7 +738,7 @@ async fn deliver(
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
         }
     };
-    delivery_outcome_response(outcome, grant.generation)
+    delivery_outcome_response(outcome, generation)
 }
 
 fn delivery_outcome_response(outcome: DeliveryOutcome, generation: i64) -> Response {
@@ -864,7 +844,6 @@ mod request_limit_tests {
     use super::*;
     use crate::{
         authority::MemoryAuthorityStore,
-        grant::{GrantKey, GrantKeyring},
         token::{TokenKey, TokenKeyring},
     };
     use axum::{body::Body, http::Request};
@@ -890,9 +869,6 @@ mod request_limit_tests {
         )
         .expect("pinned Apple root fixture");
         AppState {
-            grant_keyring: Arc::new(
-                GrantKeyring::new(vec![GrantKey::new("test", &[1; 32]).unwrap()]).unwrap(),
-            ),
             authority: Arc::new(MemoryAuthorityStore::default()),
             token_keyring: Arc::new(
                 TokenKeyring::new(vec![TokenKey::new("test", &[2; 32]).unwrap()]).unwrap(),

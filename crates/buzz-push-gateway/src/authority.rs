@@ -51,6 +51,7 @@ pub struct Installation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delegation {
+    pub grant_hash: [u8; 32],
     pub id: Uuid,
     pub installation_id: Uuid,
     pub relay_pubkey: String,
@@ -180,10 +181,8 @@ pub trait AuthorityStore: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     async fn authorize_delivery(
         &self,
-        delegation_id: Uuid,
+        grant_hash: [u8; 32],
         relay_pubkey: &str,
-        endpoint_epoch: i64,
-        generation: i64,
         event_id: &str,
         request_id: Uuid,
         request_expires_at: i64,
@@ -510,10 +509,8 @@ impl AuthorityStore for MemoryAuthorityStore {
 
     async fn authorize_delivery(
         &self,
-        delegation_id: Uuid,
+        grant_hash: [u8; 32],
         relay: &str,
-        epoch: i64,
-        generation: i64,
         event_id: &str,
         request_id: Uuid,
         request_expires_at: i64,
@@ -522,6 +519,7 @@ impl AuthorityStore for MemoryAuthorityStore {
         now: i64,
     ) -> Result<DeliveryPermit, AuthorityError> {
         let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
+        let delegation_id = crate::grant::id(&grant_hash);
         let key = s
             .delegation_ids
             .get(&delegation_id)
@@ -536,9 +534,8 @@ impl AuthorityStore for MemoryAuthorityStore {
             || i.revoked
             || d.id != delegation_id
             || d.relay_pubkey != relay
-            || d.endpoint_epoch != epoch
-            || d.generation != generation
-            || i.endpoint_epoch != epoch
+            || d.grant_hash != grant_hash
+            || i.endpoint_epoch != d.endpoint_epoch
             || now < d.not_before
             || now > d.expires_at
             || now > i.expires_at
@@ -553,8 +550,8 @@ impl AuthorityStore for MemoryAuthorityStore {
             relay_pubkey: relay.to_owned(),
 
             token_ciphertext: i.token_ciphertext.clone(),
-            endpoint_epoch: epoch,
-            generation,
+            endpoint_epoch: d.endpoint_epoch,
+            generation: d.generation,
             expires_at: d.expires_at,
         };
         let fingerprint = i.token_fingerprint;
@@ -619,10 +616,8 @@ mod tests {
     ) -> Result<DeliveryPermit, AuthorityError> {
         store
             .authorize_delivery(
-                Uuid::from_u128(2),
+                crate::grant::test_hash(Uuid::from_u128(2)),
                 &"11".repeat(32),
-                1,
-                1,
                 event,
                 request,
                 1_100,
@@ -655,6 +650,7 @@ mod tests {
         store
             .upsert_delegation(Delegation {
                 id: Uuid::from_u128(2),
+                grant_hash: crate::grant::test_hash(Uuid::from_u128(2)),
                 installation_id: Uuid::from_u128(1),
                 relay_pubkey: "11".repeat(32),
                 endpoint_epoch: 1,
@@ -728,6 +724,7 @@ mod tests {
         store
             .upsert_delegation(Delegation {
                 id: Uuid::from_u128(3),
+                grant_hash: crate::grant::test_hash(Uuid::from_u128(3)),
                 installation_id: Uuid::from_u128(1),
                 relay_pubkey: "11".repeat(32),
                 endpoint_epoch: 1,
@@ -751,6 +748,7 @@ mod tests {
             store
                 .upsert_delegation(Delegation {
                     id: Uuid::from_u128(4),
+                    grant_hash: crate::grant::test_hash(Uuid::from_u128(4)),
                     installation_id: Uuid::from_u128(1),
                     relay_pubkey: "11".repeat(32),
                     endpoint_epoch: 1,
@@ -798,10 +796,8 @@ mod tests {
         assert!(store.installation(Uuid::from_u128(5), 2_001).await.is_ok());
         assert!(store
             .authorize_delivery(
-                Uuid::from_u128(2),
+                crate::grant::test_hash(Uuid::from_u128(2)),
                 &"11".repeat(32),
-                1,
-                1,
                 &"77".repeat(32),
                 Uuid::new_v4(),
                 2_100,
@@ -878,6 +874,7 @@ mod tests {
 
         let replacement = |id, generation| Delegation {
             id,
+            grant_hash: crate::grant::test_hash(id),
             installation_id: Uuid::from_u128(1),
             relay_pubkey: "11".repeat(32),
             endpoint_epoch: 1,
@@ -898,10 +895,8 @@ mod tests {
             .expect("only a strictly newer generation can reactivate the delegation");
         store
             .authorize_delivery(
-                Uuid::from_u128(4),
+                crate::grant::test_hash(Uuid::from_u128(4)),
                 &"11".repeat(32),
-                1,
-                2,
                 &"66".repeat(32),
                 Uuid::new_v4(),
                 1_100,

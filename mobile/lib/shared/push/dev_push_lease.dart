@@ -17,7 +17,7 @@ const _maxSafeJsonInteger = 9007199254740991;
 const _maxLeaseLifetimeSeconds = 2592000;
 const _lowercaseHex64Pattern = r'^[0-9a-f]{64}$';
 const _installationIdPattern = r'^[0-9a-f]{32}$';
-// The gateway's `<key id>.<base64url>` grant grammar, which JSON never escapes.
+// The gateway's opaque base64url grant grammar, which JSON never escapes.
 const _endpointGrantPattern = r'^[A-Za-z0-9_.-]+$';
 
 /// Whether an active lease carrying [subscriptions] fits [descriptor]'s
