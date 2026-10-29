@@ -31,7 +31,12 @@ async function seedChannelSections(page: Page) {
 // 6px distance constraint, so a single move never starts a drag. This walks the
 // pointer down, past the activation threshold, onto the target, then releases —
 // the sequence dnd-kit needs to fire onDragEnd and commit the reorder.
-async function dragOver(page: Page, source: Locator, target: Locator) {
+async function dragOver(
+  page: Page,
+  source: Locator,
+  target: Locator,
+  targetSectionId: string,
+) {
   const from = await source.boundingBox();
   if (!from) throw new Error("drag source not laid out");
   const pointer = {
@@ -64,11 +69,13 @@ async function dragOver(page: Page, source: Locator, target: Locator) {
 
   const to = await target.boundingBox();
   if (!to) throw new Error("drag target not laid out");
+  // Aim at the target's centre, well inside its droppable rect, not 2 px
+  // above its bottom edge.
   const destination = {
     x: to.x + to.width / 2,
-    y: to.y + to.height - 2,
+    y: to.y + to.height / 2,
   };
-  await page.evaluate(async ({ x, y }) => {
+  await page.evaluate(({ x, y }) => {
     document.dispatchEvent(
       new PointerEvent("pointermove", {
         bubbles: true,
@@ -80,9 +87,18 @@ async function dragOver(page: Page, source: Locator, target: Locator) {
         pointerType: "mouse",
       }),
     );
-    await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-    });
+  }, destination);
+  // dnd-kit announces each new drop target in its live region. Release only
+  // after it names the target (its sortable row or its body), rather than
+  // after a fixed number of frames, so the drop cannot race the collision.
+  await expect(
+    page.locator('[id^="DndLiveRegion-"]').filter({
+      hasText: new RegExp(
+        `moved over droppable area (section-drop:)?${targetSectionId}\\.`,
+      ),
+    }),
+  ).toHaveCount(1);
+  await page.evaluate(({ x, y }) => {
     document.dispatchEvent(
       new PointerEvent("pointerup", {
         bubbles: true,
@@ -235,7 +251,7 @@ test.describe("list virtualization", () => {
 
     // Drag "Priority" past "Archive" — onDragEnd commits arrayMove and persists
     // the new order. The drop must land for the order to flip.
-    await dragOver(page, topHeaderButton, bottomHeader);
+    await dragOver(page, topHeaderButton, bottomHeader, SECTION_BOTTOM.id);
 
     // The drop landed: order flipped. A no-op drag would leave it unchanged.
     await expect.poll(sectionOrder).toEqual(["Archive", "Priority"]);
@@ -334,46 +350,75 @@ test.describe("list virtualization", () => {
                 }),
             )
           : Promise.resolve(false);
-      const wheelTracePromise = timeline.evaluate(async (scroller) => {
-        const s = scroller as HTMLElement;
-        let previousScrollTop = s.scrollTop;
-        let maxBoundaryRollback = 0;
-        let minScrollTop = s.scrollTop;
-        const deadline = performance.now() + 120;
-        while (performance.now() < deadline) {
-          maxBoundaryRollback = Math.max(
-            maxBoundaryRollback,
-            s.scrollTop - previousScrollTop,
-          );
-          previousScrollTop = s.scrollTop;
-          minScrollTop = Math.min(minScrollTop, s.scrollTop);
-          await new Promise((resolve) => requestAnimationFrame(resolve));
-        }
-        return { maxBoundaryRollback, minScrollTop };
-      });
+      // CDP can deliver a wheel burst late (Linux Chromium more than macOS),
+      // so a window timed from before the burst can close before the input
+      // lands. Time the 120 ms window from the first wheel the page receives
+      // and keep it open until every wheel has arrived. Stop early at the
+      // prepend commit: its anchor correction is not a boundary rollback.
+      const upDeltas = [-60, -30, -20, -15];
+      const wheelTracePromise = timeline.evaluate(
+        async (scroller, wheelCount) => {
+          const s = scroller as HTMLElement;
+          let received = 0;
+          const countWheel = (event: WheelEvent) => {
+            if (!event.ctrlKey) received += 1;
+          };
+          s.addEventListener("wheel", countWheel, { passive: true });
+          const startHeight = s.scrollHeight;
+          let previousScrollTop = s.scrollTop;
+          let maxBoundaryRollback = 0;
+          let minScrollTop = s.scrollTop;
+          let firstWheelAt: number | null = null;
+          const giveUpAt = performance.now() + 5_000;
+          while (performance.now() < giveUpAt) {
+            if (s.scrollHeight > startHeight + 800) break;
+            if (firstWheelAt === null && received > 0) {
+              firstWheelAt = performance.now();
+            }
+            maxBoundaryRollback = Math.max(
+              maxBoundaryRollback,
+              s.scrollTop - previousScrollTop,
+            );
+            previousScrollTop = s.scrollTop;
+            minScrollTop = Math.min(minScrollTop, s.scrollTop);
+            if (
+              received >= wheelCount &&
+              firstWheelAt !== null &&
+              performance.now() - firstWheelAt >= 120
+            ) {
+              break;
+            }
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+          }
+          s.removeEventListener("wheel", countWheel);
+          return { maxBoundaryRollback, minScrollTop, received };
+        },
+        upDeltas.length,
+      );
       const box = await timeline.boundingBox();
       if (!box) throw new Error("timeline has no bounding box");
       await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-      for (const deltaY of [-60, -30, -20, -15]) {
+      for (const deltaY of upDeltas) {
         await page.mouse.wheel(0, deltaY);
         await page.waitForTimeout(12);
       }
       const wheelTrace = await wheelTracePromise;
+      expect(wheelTrace.received).toBe(upDeltas.length);
       expect(wheelTrace.minScrollTop).toBeLessThanOrEqual(350);
       expect(wheelTrace.maxBoundaryRollback).toBeLessThan(5);
-      // Linux Chromium delivers CDP wheel input with more latency than macOS,
-      // so the burst's final delta can land AFTER the anchor baseline sample
-      // below. maxDrift then reports the reader's own last wheel event as
-      // anchor drift (measured exactly 15 = the -15 delta; changing the delta
-      // to -17 made the failure read 17). Gate the baseline on input settle:
-      // two consecutive frames with identical scrollTop. This tightens the
-      // assertion rather than diluting it — the baseline becomes honest and
-      // genuine post-prepend drift still reads as drift.
+      // A late final delta lands AFTER an anchor baseline taken during a
+      // pause in the burst, and maxDrift then reports the reader's own wheel
+      // as anchor drift (it once read exactly 15, the -15 delta). wheelTrace
+      // returned only after every wheel arrived; now wait for the scroll they
+      // caused to hold still for three frames. This tightens the assertion
+      // rather than diluting it — the baseline becomes honest and genuine
+      // post-prepend drift still reads as drift.
       await timeline.evaluate(async (element) => {
         let prior = element.scrollTop;
-        for (let frame = 0; frame < 30; frame += 1) {
+        let stillFrames = 0;
+        for (let frame = 0; frame < 60 && stillFrames < 3; frame += 1) {
           await new Promise((resolve) => requestAnimationFrame(resolve));
-          if (element.scrollTop === prior) break;
+          stillFrames = element.scrollTop === prior ? stillFrames + 1 : 0;
           prior = element.scrollTop;
         }
       });
@@ -444,33 +489,65 @@ test.describe("list virtualization", () => {
       // That reader intent retires Virtua's active prepend reconciliation, so
       // later row measurements must not pull the viewport back toward the
       // completed prepend before the next upward load.
-      const exitTracePromise = timeline.evaluate(async (scroller) => {
-        const s = scroller as HTMLElement;
-        const startScrollTop = s.scrollTop;
-        let previousScrollTop = startScrollTop;
-        let maxForwardTravel = 0;
-        let maxRollback = 0;
-        const deadline = performance.now() + 400;
-        while (performance.now() < deadline) {
-          const travel = s.scrollTop - startScrollTop;
-          maxForwardTravel = Math.max(maxForwardTravel, travel);
-          maxRollback = Math.max(maxRollback, previousScrollTop - s.scrollTop);
-          previousScrollTop = s.scrollTop;
-          await new Promise((resolve) => requestAnimationFrame(resolve));
-        }
-        return { maxForwardTravel, maxRollback };
-      });
+      // Same late-delivery guard as the upward burst: time the 400 ms window
+      // from the first wheel received, and close it only once every wheel has
+      // arrived and the scroll has held still for two frames.
+      const downDeltas = [120, 100, 80];
+      const exitTracePromise = timeline.evaluate(
+        async (scroller, wheelCount) => {
+          const s = scroller as HTMLElement;
+          let received = 0;
+          const countWheel = (event: WheelEvent) => {
+            if (!event.ctrlKey) received += 1;
+          };
+          s.addEventListener("wheel", countWheel, { passive: true });
+          const startScrollTop = s.scrollTop;
+          let previousScrollTop = startScrollTop;
+          let maxForwardTravel = 0;
+          let maxRollback = 0;
+          let firstWheelAt: number | null = null;
+          let stillFrames = 0;
+          const giveUpAt = performance.now() + 5_000;
+          while (performance.now() < giveUpAt) {
+            if (firstWheelAt === null && received > 0) {
+              firstWheelAt = performance.now();
+            }
+            const travel = s.scrollTop - startScrollTop;
+            maxForwardTravel = Math.max(maxForwardTravel, travel);
+            maxRollback = Math.max(
+              maxRollback,
+              previousScrollTop - s.scrollTop,
+            );
+            stillFrames =
+              s.scrollTop === previousScrollTop ? stillFrames + 1 : 0;
+            previousScrollTop = s.scrollTop;
+            if (
+              received >= wheelCount &&
+              firstWheelAt !== null &&
+              performance.now() - firstWheelAt >= 400 &&
+              stillFrames >= 2
+            ) {
+              break;
+            }
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+          }
+          s.removeEventListener("wheel", countWheel);
+          return { maxForwardTravel, maxRollback, received };
+        },
+        downDeltas.length,
+      );
       const exitBox = await timeline.boundingBox();
       if (!exitBox) throw new Error("timeline has no bounding box");
       await page.mouse.move(
         exitBox.x + exitBox.width / 2,
         exitBox.y + exitBox.height / 2,
       );
-      for (const deltaY of [120, 100, 80]) {
+      for (const deltaY of downDeltas) {
         await page.mouse.wheel(0, deltaY);
         await page.waitForTimeout(12);
       }
       const exitTrace = await exitTracePromise;
+      expect(exitTrace.received).toBe(downDeltas.length);
       expect(exitTrace.maxForwardTravel).toBeGreaterThan(200);
       expect(exitTrace.maxRollback).toBeLessThan(5);
 

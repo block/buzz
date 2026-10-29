@@ -895,18 +895,24 @@ test("inline video hover reveals a timeline without a second play control", asyn
     )
     .toBe("50%");
 
-  const restingControlsBox = await controls.boundingBox();
+  // The timeline can shift the whole row by a pixel while the pointer moves
+  // in, so measure the controls against their own player in a single frame.
+  const controlsOffset = () =>
+    controls.evaluate((element) => {
+      const playerTop = element
+        .closest('[data-testid="video-player"]')
+        ?.getBoundingClientRect().top;
+      return element.getBoundingClientRect().top - (playerTop ?? Number.NaN);
+    });
+  const restingControlsOffset = await controlsOffset();
   const restingIconTransform = await centerIcon.evaluate(
     (element) => window.getComputedStyle(element).transform,
   );
-  expect(restingControlsBox).not.toBeNull();
   await expect(controls).toHaveCSS("opacity", "0");
   await surface.hover();
   await expect(controls).toHaveCSS("opacity", "1");
-  const hoveredControlsBox = await controls.boundingBox();
-  expect(hoveredControlsBox).not.toBeNull();
   expect(
-    Math.abs((hoveredControlsBox?.y ?? 0) - (restingControlsBox?.y ?? 0)),
+    Math.abs((await controlsOffset()) - restingControlsOffset),
   ).toBeLessThan(0.5);
   await expect
     .poll(() =>
