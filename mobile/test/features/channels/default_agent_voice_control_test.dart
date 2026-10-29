@@ -52,8 +52,13 @@ class Draft extends DefaultAgentVoiceDraft {
   Draft() : super('test');
   VoiceNoteRecording? note;
   bool failSave = false;
+  bool failRead = false;
   @override
-  Future<VoiceNoteRecording?> read() async => note;
+  Future<VoiceNoteRecording?> read() async {
+    if (failRead) throw const FormatException('Truncated draft');
+    return note;
+  }
+
   @override
   Future<VoiceNoteRecording> save(VoiceNoteRecording value) async {
     if (failSave) throw FileSystemException('No space left on device');
@@ -64,6 +69,7 @@ class Draft extends DefaultAgentVoiceDraft {
   @override
   Future<void> clear() async {
     note = null;
+    failRead = false;
   }
 }
 
@@ -391,5 +397,15 @@ void main() {
     expect(draft.note, isNull);
     expect(sent, 0);
     expect(find.byTooltip('Agent'), findsOneWidget);
+    // An unreadable restored draft still exposes Discard and can unblock UI.
+    await tester.pumpWidget(const SizedBox.shrink());
+    draft.failRead = true;
+    await mount(tester);
+    await tester.pumpAndSettle();
+    expect(find.text('Could not restore voice note. Retry'), findsOneWidget);
+    await tester.tap(find.byTooltip('Discard voice note'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Agent'), findsOneWidget);
+    expect(find.text('Could not restore voice note. Retry'), findsNothing);
   });
 }

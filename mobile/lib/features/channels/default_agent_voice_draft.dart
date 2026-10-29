@@ -49,6 +49,10 @@ class DefaultAgentVoiceDraft {
 
   Future<VoiceNoteRecording> save(VoiceNoteRecording note) async {
     final manifest = await _manifest();
+    // Keep the recipient discoverable even if the manifest becomes unreadable.
+    await File(
+      '${manifest.path}.identity',
+    ).writeAsString(identity, flush: true);
     final path = '${manifest.path}.m4a';
     if (note.file.path != path) await File(note.file.path).copy(path);
     final existing = await manifest.exists()
@@ -134,11 +138,26 @@ Future<List<String>> discoverAgentVoiceRecipients(
   final recipients = <String>{};
   await for (final entry in folder.list()) {
     if (entry is! File || !entry.path.endsWith('.json')) continue;
-    final data = jsonDecode(await entry.readAsString()) as Map<String, dynamic>;
-    final index = File('${entry.path}.identity');
-    final identity =
-        data['identity'] as String? ??
-        (await index.exists() ? await index.readAsString() : null);
+    String? identity;
+    try {
+      final data = jsonDecode(await entry.readAsString());
+      if (data is Map<String, dynamic> && data['identity'] is String) {
+        identity = data['identity'] as String;
+      }
+    } on FormatException {
+      // A damaged manifest must not hide other drafts or its separate index.
+    } on FileSystemException {
+      // The audio/index may still be accessible when the manifest is not.
+    }
+    if (identity == null) {
+      try {
+        final index = File('${entry.path}.identity');
+        if (await index.exists()) identity = await index.readAsString();
+      } on FileSystemException {
+        // Preserve unidentifiable files; the current-recipient fallback below
+        // can still expose their recovery/discard control without reading them.
+      }
+    }
     if (identity != null && identity.startsWith('$scopeIdentity:')) {
       final recipient = identity.substring(scopeIdentity.length + 1);
       if (recipient.isNotEmpty && !recipient.contains(':')) {
@@ -154,10 +173,14 @@ Future<List<String>> discoverAgentVoiceRecipients(
       // Index legacy manifests separately so discovery cannot overwrite
       // a signed event being persisted concurrently for retry.
       final index = File('${legacy.path}.identity');
-      await index.writeAsString(
-        '$scopeIdentity:$currentRecipient',
-        flush: true,
-      );
+      try {
+        await index.writeAsString(
+          '$scopeIdentity:$currentRecipient',
+          flush: true,
+        );
+      } on FileSystemException {
+        // Failure to index must not prevent recovery/discard for this recipient.
+      }
       recipients.add(currentRecipient);
     }
   }

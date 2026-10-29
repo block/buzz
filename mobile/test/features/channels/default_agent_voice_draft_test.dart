@@ -39,6 +39,12 @@ void main() {
         content: 'voice',
         sig: 'c' * 128,
       );
+      expect(
+        await File(
+          '${retained.file.path.replaceFirst(RegExp(r'\.m4a$'), '')}.identity',
+        ).readAsString(),
+        'community:account:agent',
+      );
       await draft.saveEvent(event);
       await draft.save(retained);
       await source.delete();
@@ -96,6 +102,40 @@ void main() {
         isEmpty,
       );
       final relocatedAudio = (await restored.read())!.file.path;
+      // A corrupt sibling must not prevent discovery of a healthy draft.
+      final unknown = File('${manifest.parent.path}/unknown.json');
+      await unknown.writeAsString('{');
+      expect(
+        await discoverAgentVoiceRecipients(
+          'community:account',
+          directory: () async => directory,
+        ),
+        ['agent'],
+      );
+      // Separate identity metadata keeps damaged manifests discardable even
+      // after the original recipient is no longer the default.
+      for (final damaged in ['{', '[]', '{"identity":42}']) {
+        await manifest.writeAsString(damaged);
+        expect(
+          await discoverAgentVoiceRecipients(
+            'community:account',
+            directory: () async => directory,
+            currentRecipient: 'other-agent',
+          ),
+          ['agent'],
+        );
+      }
+      // A pre-index corrupt draft is still reachable by its known filename.
+      await File('${manifest.path}.identity').delete();
+      expect(
+        await discoverAgentVoiceRecipients(
+          'community:account',
+          directory: () async => directory,
+          currentRecipient: 'agent',
+        ),
+        ['agent'],
+      );
+      expect(await unknown.readAsString(), '{');
       await restored.clear();
       expect(await restored.read(), isNull);
       expect(
