@@ -14,7 +14,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'agents_harness.dart';
 
 void main() {
-  final existing = 'a' * 64;
+  final existing = existingDesktopKeys.public;
 
   testWidgets(
     'creation overlays the retained list, then failure and resume both land',

@@ -2,6 +2,7 @@ import 'package:buzz/features/agents/community_bot_profiles.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 import 'dart:async';
+import 'package:nostr/nostr.dart' as nostr;
 
 import 'package:buzz/features/agents/agents_page.dart';
 import 'package:buzz/features/agents/owned_agent_directory.dart';
@@ -22,6 +23,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/remote_agents_fixture.dart';
 
+final existingDesktopKeys = nostr.Keys('0' * 63 + '3');
+final otherAgentKeys = nostr.Keys('0' * 63 + '4');
+final otherOwnerKeys = nostr.Keys('0' * 63 + '5');
+
 /// Fakes the relay boundary: owner-attested profiles for registry agents.
 class _Relay extends FakeRelay {
   @override
@@ -34,6 +39,18 @@ class _Relay extends FakeRelay {
   }) async => filter.kinds.contains(30078)
       ? events
       : [
+          if (filter.authors?.contains(existingDesktopKeys.public) ?? false)
+            signedAgentProfile(
+              existingDesktopKeys,
+              fakeOwner,
+              content: '{"name":"My desktop agent"}',
+            ),
+          if (filter.authors?.contains(otherAgentKeys.public) ?? false)
+            signedAgentProfile(
+              otherAgentKeys,
+              otherOwnerKeys,
+              content: '{"name":"Other owner agent"}',
+            ),
           if (filter.authors?.contains(fakeAgent) ?? false)
             signedAgentProfile(
               fakeAgentKeys,

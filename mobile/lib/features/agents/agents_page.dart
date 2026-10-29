@@ -21,7 +21,6 @@ import 'create_agent_page.dart';
 import 'agent_card.dart';
 import 'remote_agent_model_control.dart';
 import 'owned_agent_directory.dart';
-import 'community_bot_profiles.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/theme/buzz_icons.dart';
@@ -106,7 +105,7 @@ class _AgentsNavigation extends HookConsumerWidget {
   }
 }
 
-/// The active community's agents, with remote-agent creation for its owner.
+/// The current user's verified agents in the active community.
 class AgentsPage extends HookConsumerWidget {
   const AgentsPage({
     required this.controller,
@@ -138,26 +137,35 @@ class AgentsPage extends HookConsumerWidget {
     final community = ref.watch(activeCommunityProvider).asData?.value;
     final directory = ref.watch(agentDirectoryProvider);
     final ownedDirectory = ref.watch(ownedAgentDirectoryProvider);
-    final communityBots = ref.watch(communityBotProfilesProvider);
-    final registryFuture = useMemoized(() async {
-      final fetch = ref.read(relaySessionProvider.notifier).fetchHistory;
-      return ownedCommunityAgents(
-        {
-          for (final agent in controller.agents)
-            agent['agent_pubkey'] as String,
-        },
+    final registryFuture = useMemoized(
+      () async {
+        final fetch = ref.read(relaySessionProvider.notifier).fetchHistory;
+        return ownedCommunityAgents(
+          {
+            if (controller.owner == community?.pubkey)
+              for (final agent in controller.agents)
+                agent['agent_pubkey'] as String,
+            for (final entry
+                in directory.asData?.value ?? <AgentDirectoryEntry>[])
+              entry.pubkey,
+          },
+          community?.pubkey,
+          fetch,
+        );
+      },
+      [
+        community?.relayUrl,
+        community?.pubkey,
+        controller.agents,
         controller.owner,
-        fetch,
-      );
-    }, [community?.relayUrl, controller.agents, controller.owner]);
+        directory.asData?.value,
+      ],
+    );
     final registered = useFuture(registryFuture, preserveState: false);
     final keys = {
       ...?registered.data,
-      ...?communityBots.asData?.value,
       for (final entry
           in ownedDirectory.asData?.value ?? <AgentDirectoryEntry>[])
-        entry.pubkey,
-      for (final entry in directory.asData?.value ?? <AgentDirectoryEntry>[])
         entry.pubkey,
     }.where((key) => !controller.deletedAgents.contains(key)).toList();
     final names = watchIdentityNames(
@@ -176,15 +184,11 @@ class AgentsPage extends HookConsumerWidget {
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
     final failed =
-        directory.hasError ||
-        registered.hasError ||
-        ownedDirectory.hasError ||
-        communityBots.hasError;
+        directory.hasError || registered.hasError || ownedDirectory.hasError;
     final loading =
         !creating.value &&
         (controller.busy ||
             directory.isLoading ||
-            communityBots.isLoading ||
             ownedDirectory.isLoading ||
             registered.connectionState != ConnectionState.done);
 
@@ -193,7 +197,6 @@ class AgentsPage extends HookConsumerWidget {
       if (context.mounted) {
         ref.invalidate(agentDirectoryProvider);
         ref.invalidate(ownedAgentDirectoryProvider);
-        ref.invalidate(communityBotProfilesProvider);
       }
     }
 
@@ -297,7 +300,7 @@ class AgentsPage extends HookConsumerWidget {
                         const Padding(
                           padding: EdgeInsets.all(Grid.sm),
                           child: Text(
-                            'No agents in this community yet.',
+                            'You haven’t added any agents yet.',
                             textAlign: TextAlign.center,
                           ),
                         ),
@@ -331,9 +334,7 @@ class AgentsPage extends HookConsumerWidget {
                               .where((entry) => entry.pubkey == key)
                               .firstOrNull
                               ?.avatarUrl,
-                      location: registered.data?.contains(key) == true
-                          ? 'Remote'
-                          : null,
+                      location: remote != null ? 'Remote' : null,
                       onOpen: () => onSelect(key),
                       footer: editable
                           ? RemoteAgentModelControl(
@@ -352,7 +353,7 @@ class AgentsPage extends HookConsumerWidget {
                           : null,
                       subtitle: editable
                           ? null
-                          : registered.data?.contains(key) == true
+                          : remote != null
                           ? 'Cloud agent'
                           : 'Desktop agent',
                     );

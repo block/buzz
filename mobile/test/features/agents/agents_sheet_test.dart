@@ -11,13 +11,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'agents_harness.dart';
 
 void main() {
-  final existing = 'a' * 64;
+  final existing = existingDesktopKeys.public;
 
   testWidgets('agent profile sheet closes back to the full-page directory', (
     tester,
   ) async {
     final h = await AgentsHarness.create();
-    await h.open(tester, directory: [], botDirectory: [existing]);
+    await h.open(
+      tester,
+      directory: [existing, otherAgentKeys.public],
+      botDirectory: ['b' * 64],
+    );
+    expect(find.byKey(ValueKey(otherAgentKeys.public)), findsNothing);
+    expect(find.byKey(ValueKey('b' * 64)), findsNothing);
     if (!supportsRemoteAgents(h.community)) {
       expect(find.text('Sign in to create an agent'), findsNothing);
       for (final button in tester.widgetList<IconButton>(
