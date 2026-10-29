@@ -12,16 +12,18 @@ class MessagesFilters extends StatelessWidget {
     required this.selected,
     required this.onSelected,
     this.hasUnreadSolo = false,
+    this.useNativeGlass = true,
   });
   final String selected;
   final ValueChanged<String> onSelected;
   final bool hasUnreadSolo;
+  final bool useNativeGlass;
 
   @override
   Widget build(BuildContext context) => SizedBox(
     width: double.infinity,
     child: FilterChipBar<String>(
-      useNativeGlass: true,
+      useNativeGlass: useNativeGlass,
       horizontalPadding: Grid.gutter,
       selected: selected,
       onSelected: (value) {

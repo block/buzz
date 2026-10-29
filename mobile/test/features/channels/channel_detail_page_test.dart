@@ -1,3 +1,4 @@
+import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/features/channels/agent_reply_handoff.dart';
@@ -240,6 +241,7 @@ Widget _buildTestable({
   bool darkTheme = false,
   String? chatColor,
   bool personalChat = false,
+  String? defaultAgent,
   required List<NostrEvent> messages,
   PresenceCacheNotifier? presenceCache,
   List<TypingEntry> typing = const [],
@@ -303,6 +305,7 @@ Widget _buildTestable({
   return ProviderScope(
     retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
+      defaultAgentProvider.overrideWith((ref) => Stream.value(defaultAgent)),
       if (sender != null) sendMessageProvider.overrideWithValue(sender),
       if (soloSender != null) ...[
         meSendMessageProvider.overrideWithValue(soloSender),
@@ -11123,14 +11126,45 @@ void main() {
       expect(findRichText('Here is the reply'), findsOneWidget);
     });
 
-    for (final personal in [true, false]) {
-      testWidgets('reply-scoped typing is visible only in flat Me: $personal', (
+    for (final scenario in [
+      (personal: true, dm: false, agent: 'alice', group: false, visible: true),
+      (
+        personal: false,
+        dm: false,
+        agent: 'alice',
+        group: false,
+        visible: false,
+      ),
+      (personal: false, dm: true, agent: 'alice', group: false, visible: true),
+      (personal: false, dm: true, agent: 'bob', group: false, visible: false),
+      (personal: false, dm: true, agent: 'alice', group: true, visible: false),
+    ]) {
+      testWidgets('reply-scoped typing follows conversation scope: $scenario', (
         tester,
       ) async {
         final typing = _FakeTypingNotifier(const []);
         await tester.pumpWidget(
           _buildTestable(
-            personalChat: personal,
+            personalChat: scenario.personal,
+            defaultAgent: scenario.agent,
+            channel: scenario.dm
+                ? Channel(
+                    id: _channelId,
+                    name: 'DM',
+                    channelType: 'dm',
+                    visibility: 'private',
+                    description: '',
+                    createdBy: 'self',
+                    createdAt: DateTime(2025),
+                    memberCount: scenario.group ? 3 : 2,
+                    participantPubkeys: [
+                      'self',
+                      'alice',
+                      if (scenario.group) 'bob',
+                    ],
+                    isMember: true,
+                  )
+                : null,
             messages: [
               _textMsg(id: 'prompt', pubkey: 'self', content: 'Hello'),
             ],
@@ -11152,7 +11186,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(
           find.byKey(const ValueKey('inline-agent-typing-alice')),
-          personal ? findsOneWidget : findsNothing,
+          scenario.visible ? findsOneWidget : findsNothing,
         );
         expect(find.text('Alice is typing…'), findsNothing);
         typing.setEntries(const []);
@@ -18115,6 +18149,7 @@ class _RecordingOrdinarySender implements SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
+    FutureOr<void> Function(NostrEvent event)? beforePublish,
   }) async {
     sent.add(content);
     channels.add(channel);

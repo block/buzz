@@ -176,6 +176,10 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
         autoGain: true,
         echoCancel: true,
         noiseSuppress: true,
+        // The recording-start pulse fires after the microphone is active.
+        iosConfig: IosRecordConfig(
+          allowHapticsAndSystemSoundsDuringRecording: true,
+        ),
       ),
       path: path,
     );

@@ -835,6 +835,41 @@ class RunnerTests: XCTestCase {
 
 
 
+  func testRecordedAACPackagesIntoPlayableVoiceNote() throws {
+    let sourceURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
+    defer { try? FileManager.default.removeItem(at: sourceURL) }
+    let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1))
+    let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44100))
+    buffer.frameLength = 44100
+    let samples = try XCTUnwrap(buffer.floatChannelData)[0]
+    for index in 0..<Int(buffer.frameLength) { samples[index] = 0 }
+    // Close the encoder before asking the production packager to read its output.
+    do {
+      let audio = try AVAudioFile(forWriting: sourceURL, settings: [
+        AVFormatIDKey: kAudioFormatMPEG4AAC,
+        AVSampleRateKey: 44100,
+        AVNumberOfChannelsKey: 1,
+        AVEncoderBitRateKey: 96000,
+      ])
+      try audio.write(from: buffer)
+    }
+    let packaged = expectation(description: "AAC voice note packaged")
+    VoiceNotePackager.package(sourcePath: sourceURL.path) { result in
+      defer { packaged.fulfill() }
+      guard let path = result as? String else {
+        XCTFail("Packaging failed: \(String(describing: result))")
+        return
+      }
+      defer { try? FileManager.default.removeItem(atPath: path) }
+      let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+      XCTAssertEqual(asset.tracks(withMediaType: .audio).count, 1)
+      XCTAssertEqual(asset.tracks(withMediaType: .video).count, 1)
+      XCTAssertEqual(asset.duration.seconds, 1, accuracy: 0.1)
+    }
+    wait(for: [packaged], timeout: 65)
+  }
+
   func testVoiceNotePackagingStagesHaveBoundedDeadlines() {
     XCTAssertEqual(VoiceNotePackager.videoEnvelopeTimeout, 30)
     XCTAssertEqual(VoiceNotePackager.exportTimeout, 30)

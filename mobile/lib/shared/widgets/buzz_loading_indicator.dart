@@ -29,7 +29,7 @@ class BuzzLoadingIndicator extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final animation = useAnimationController(
-      duration: const Duration(milliseconds: 500),
+      duration: const Duration(milliseconds: 380),
     );
 
     useEffect(() {
@@ -84,11 +84,12 @@ class _ArcSpinnerPainter extends CustomPainter {
     final arcPaint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
       ..strokeWidth = strokeWidth;
 
     canvas
       ..drawCircle(center, radius, trackPaint)
-      ..drawArc(bounds, -pi / 2, pi / 2, false, arcPaint);
+      ..drawArc(bounds, -pi / 2, 7 * pi / 12, false, arcPaint);
   }
 
   @override

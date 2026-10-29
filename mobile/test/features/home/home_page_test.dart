@@ -73,6 +73,27 @@ void main() {
     (tester) async {
       await tester.pumpWidget(await buildHome());
       await tester.pumpAndSettle();
+      final navigation = find.byType(MessagesNavigationBar);
+      final mountedNavigation = tester.element(navigation);
+      final focus = find.byKey(const ValueKey('voice-recording-focus'));
+      expect(tester.widget<BackdropFilter>(focus).enabled, isFalse);
+      tester.widget<MessagesNavigationBar>(navigation).onRecordingChanged!(
+        true,
+      );
+      await tester.pump();
+      expect(tester.widget<BackdropFilter>(focus).enabled, isTrue);
+      expect(
+        tester
+            .widget<MessagesFilters>(find.byType(MessagesFilters))
+            .useNativeGlass,
+        isFalse,
+      );
+      expect(tester.element(navigation), same(mountedNavigation));
+      tester.widget<MessagesNavigationBar>(navigation).onRecordingChanged!(
+        false,
+      );
+      await tester.pump();
+      expect(tester.widget<BackdropFilter>(focus).enabled, isFalse);
       expect(find.byTooltip('Messages'), findsNothing);
       expect(find.byTooltip('Solo'), findsNothing);
       expect(find.text('Personal workspace'), findsOneWidget);
