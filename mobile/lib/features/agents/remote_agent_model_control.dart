@@ -44,7 +44,7 @@ class RemoteAgentModelControl extends HookWidget {
         for (final model in models)
           (
             label: model.name,
-            symbol: model.id == selected?.id ? 'checkmark' : 'circle',
+            symbol: model.id == selected?.id ? 'checkmark' : '',
             onPressed: controller.busy
                 ? null
                 : () async {

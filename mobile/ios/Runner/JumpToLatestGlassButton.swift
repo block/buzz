@@ -437,7 +437,9 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
         if item["dividerBefore"] as? Bool == true, !groups[groups.count - 1].isEmpty {
           groups.append([])
         }
-        let symbol = (item["symbol"] as? String).flatMap { NativeTabler.image($0, size: 24) }
+        let symbol = (item["symbol"] as? String).flatMap {
+          $0.isEmpty ? nil : NativeTabler.image($0, size: 24)
+        }
         let action = UIAction(title: item["label"] as? String ?? "", image: symbol,
                         attributes: item["enabled"] as? Bool == true ? [] : [.disabled]) { [weak self] _ in
           self?.button.pendingMenuAction = { [weak self] in
