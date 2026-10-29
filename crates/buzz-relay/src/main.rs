@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tracing::{error, info, warn};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{fmt, prelude::*};
 
-fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
-    EnvFilter::new(rust_log.unwrap_or("buzz_relay=info"))
+fn log_filter<S>(rust_log: Option<&str>) -> telemetry::DirectiveFilter<S> {
+    telemetry::directive_filter(rust_log.unwrap_or("buzz_relay=info"))
 }
 use uuid::Uuid;
 
@@ -429,10 +429,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             fmt::layer()
                 .json()
                 .event_format(trace_context_lookup.json_formatter(otel_enabled))
-                .with_filter(log_env_filter(std::env::var("RUST_LOG").ok().as_deref())),
+                .with_filter(log_filter(std::env::var("RUST_LOG").ok().as_deref())),
         )
         .with(otel_layer.map(|layer| {
-            layer.with_filter(telemetry::otel_env_filter(
+            layer.with_filter(telemetry::otel_filter(
                 std::env::var("BUZZ_OTEL_FILTER").ok().as_deref(),
             ))
         }))
@@ -1834,46 +1834,166 @@ async fn run_jwks_refresh_supervisor<F, Fut>(
 
 #[cfg(test)]
 mod env_filter_tests {
-    use super::log_env_filter;
-    use buzz_relay::telemetry::otel_env_filter;
-    use tracing_subscriber::prelude::*;
+    use super::log_filter;
+    use buzz_relay::telemetry::{otel_filter, DirectiveFilter};
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::{fmt, prelude::*, Registry};
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// What `emit` logs through a layer that uses `filter`.
+    fn logged(filter: DirectiveFilter<Registry>, emit: impl FnOnce()) -> String {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let layer = fmt::layer()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .with_filter(filter);
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), emit);
+        let bytes = captured.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn info_from_relay_and_datastore() {
+        tracing::info!(target: "buzz_relay", "relay-info");
+        tracing::info!(target: "buzz_datastore", "datastore-info");
+    }
 
     #[test]
     fn unset_enables_datastore_only_for_otel_filter() {
-        let logs = tracing_subscriber::registry().with(log_env_filter(None));
-        tracing::subscriber::with_default(logs, || {
-            assert!(!tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
-            assert!(tracing::enabled!(target: "buzz_relay", tracing::Level::INFO));
-        });
-
-        let otel = tracing_subscriber::registry().with(otel_env_filter(None));
-        tracing::subscriber::with_default(otel, || {
-            assert!(tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
-        });
-    }
-
-    #[test]
-    fn explicit_datastore_off_is_preserved_alone() {
-        assert_eq!(
-            otel_env_filter(Some("buzz_datastore=off")).to_string(),
-            "buzz_datastore=off"
+        let logs = logged(log_filter(None), info_from_relay_and_datastore);
+        assert!(
+            logs.contains("relay-info") && !logs.contains("datastore-info"),
+            "{logs}"
+        );
+        let otel = logged(otel_filter(None), info_from_relay_and_datastore);
+        assert!(
+            otel.contains("relay-info") && otel.contains("datastore-info"),
+            "{otel}"
         );
     }
 
     #[test]
-    fn explicit_datastore_debug_is_preserved_alone() {
-        assert_eq!(
-            otel_env_filter(Some("buzz_datastore=debug")).to_string(),
-            "buzz_datastore=debug"
+    fn explicit_filters_replace_the_defaults() {
+        let off = logged(
+            otel_filter(Some("buzz_datastore=off")),
+            info_from_relay_and_datastore,
+        );
+        assert!(
+            !off.contains("relay-info") && !off.contains("datastore-info"),
+            "{off}"
+        );
+        let debug = logged(otel_filter(Some("buzz_datastore=debug")), || {
+            tracing::debug!(target: "buzz_datastore", "datastore-debug");
+        });
+        assert!(debug.contains("datastore-debug"), "{debug}");
+        let warn = logged(log_filter(Some("warn")), || {
+            tracing::info!(target: "buzz_relay", "relay-info");
+            tracing::warn!(target: "buzz_relay", "relay-warn");
+        });
+        assert!(
+            warn.contains("relay-warn") && !warn.contains("relay-info"),
+            "{warn}"
         );
     }
 
+    /// One event per target and level, each logged as `m <target> <level>`.
+    macro_rules! emit_matrix {
+        ($($target:literal),*) => {
+            /// Every marker `emit_matrix_events` logs.
+            const MATRIX: &[&str] = &[$(
+                concat!("m ", $target, " error"),
+                concat!("m ", $target, " warn"),
+                concat!("m ", $target, " info"),
+                concat!("m ", $target, " debug"),
+                concat!("m ", $target, " trace"),
+            )*];
+
+            fn emit_matrix_events() {$(
+                tracing::error!(target: $target, "{}", concat!("m ", $target, " error"));
+                tracing::warn!(target: $target, "{}", concat!("m ", $target, " warn"));
+                tracing::info!(target: $target, "{}", concat!("m ", $target, " info"));
+                tracing::debug!(target: $target, "{}", concat!("m ", $target, " debug"));
+                tracing::trace!(target: $target, "{}", concat!("m ", $target, " trace"));
+            )*}
+        };
+    }
+
+    emit_matrix!(
+        "buzz_relay",
+        "buzz_relay::state",
+        "buzz_relayx",
+        "buzz_datastore",
+        "buzz_db::store",
+        "sqlx"
+    );
+
+    /// Each directive list the fast path takes enables exactly the events
+    /// `EnvFilter` would, at every level, for nested, sibling and unnamed
+    /// targets. Lists the fast path declines go to `EnvFilter` itself.
     #[test]
-    fn log_and_otel_filters_are_configured_independently() {
-        assert_eq!(log_env_filter(Some("warn")).to_string(), "warn");
-        assert_eq!(
-            otel_env_filter(Some("buzz_relay=debug")).to_string(),
-            "buzz_relay=debug"
+    fn directive_filters_log_what_env_filter_logs() {
+        for directives in [
+            "warn",
+            "trace",
+            "off",
+            "buzz_relay",
+            "buzz_relay=",
+            "buzz_relay=info",
+            "buzz_relay=info,buzz_datastore=info",
+            "buzz_relay=info,buzz_datastore=",
+            "buzz_relay=debug,sqlx=warn",
+            "info,buzz_relay=trace",
+            "buzz_relay=off,info",
+            "buzz_relay::state=trace,buzz_relay=warn",
+            "buzz_relay=warn,buzz_relay::state=trace",
+            "warn,buzz_relay=info,buzz_relay=debug",
+            "buzz_relay=ERROR,buzz_datastore=Debug",
+            "buzz_relay=info,buzz_db::store=DEBUG,off",
+            "BUZZ_RELAY=info",
+        ] {
+            let enabled = |filter: DirectiveFilter<Registry>| {
+                let logs = logged(filter, emit_matrix_events);
+                MATRIX
+                    .iter()
+                    .filter(|marker| logs.lines().any(|line| line.ends_with(*marker)))
+                    .copied()
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                enabled(buzz_relay::telemetry::directive_filter(directives)),
+                enabled(Box::new(tracing_subscriber::EnvFilter::new(directives))),
+                "{directives}"
+            );
+        }
+    }
+
+    /// A span directive still enables events only inside the named span, as
+    /// `EnvFilter` does; `Targets` would read `[conn]` as a target name.
+    #[test]
+    fn span_directives_keep_env_filter_semantics() {
+        let logs = logged(log_filter(Some("[conn]=debug")), || {
+            tracing::debug!(target: "buzz_relay", "outside");
+            let span = tracing::info_span!(target: "buzz_relay", "conn");
+            let _entered = span.enter();
+            tracing::debug!(target: "buzz_relay", "inside");
+        });
+        assert!(
+            logs.contains("inside") && !logs.contains("outside"),
+            "{logs}"
         );
     }
 }

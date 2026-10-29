@@ -3586,7 +3586,7 @@ mod tests {
     // Arms `before_liveness_req` — the hook immediately before `acquire_effect()`
     // in the `filters_are_huddle_liveness_only` branch of `handle_req`. Dispatches
     // `handle_req` with a KIND_HUDDLE_LIVENESS filter with an authorized `#h` channel
-    // (pre-populated in accessible_channels_cache so no DB call is needed) and a live
+    // (seeded into the accessible-channel caches so no DB call is needed) and a live
     // gate. Waits for the hook, fires expiry, then releases. The handler must return
     // CLOSED "authorization denied" and the `liveness_query_counter` must remain 0 —
     // proving the permit gate stopped execution before the `huddle_started_links` DB
@@ -3658,13 +3658,11 @@ mod tests {
 
         let state = crate::state::tests::test_state().await;
 
-        // Pre-populate the accessible_channels_cache so the handle_req
+        // Seed the accessible-channel caches so the handle_req
         // membership check succeeds without a real DB connection.
         let channel_uuid = Uuid::from_u128(0xDEAD_BEEF_CAFE_1500);
         let pubkey_bytes = keys.public_key().to_bytes().to_vec();
-        state
-            .accessible_channels_cache
-            .insert((community, pubkey_bytes), vec![channel_uuid]);
+        state.seed_accessible_channels(community, pubkey_bytes, vec![channel_uuid]);
 
         // Register the liveness query counter — proves the DB call boundary.
         let query_count = crate::nip_fi_test_hooks::liveness_query_counter::register(community);
@@ -3674,7 +3672,7 @@ mod tests {
         // KIND_HUDDLE_LIVENESS with #h = channel_uuid:
         //   - `filters_are_huddle_liveness_only` → true (kind-only check)
         //   - `extract_channel_ids_from_filters_limited` → Some([channel_uuid])
-        //   - accessible_channels_cache hit → channel is authorized
+        //   - accessible-channel cache hit → channel is authorized
         //   - `authorized_requested_channels` = Some([channel_uuid]) → non-empty
         //   - handler enters the liveness branch, reaches before_liveness_req hook
         let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
@@ -3793,9 +3791,7 @@ mod tests {
             community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         });
         let state = crate::state::tests::test_state().await;
-        state
-            .accessible_channels_cache
-            .insert((community, keys.public_key().to_bytes().to_vec()), vec![]);
+        state.seed_accessible_channels(community, keys.public_key().to_bytes().to_vec(), vec![]);
 
         let mut filter = Filter::new().kind(nostr::Kind::TextNote).limit(1);
         let (arrived_rx, _release) = if search {
@@ -3936,8 +3932,9 @@ mod tests {
             community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         });
         let channels = [Uuid::new_v4(), Uuid::new_v4()];
-        state.accessible_channels_cache.insert(
-            (community, keys.public_key().to_bytes().to_vec()),
+        state.seed_accessible_channels(
+            community,
+            keys.public_key().to_bytes().to_vec(),
             channels.to_vec(),
         );
         let filters: Vec<Filter> = channels

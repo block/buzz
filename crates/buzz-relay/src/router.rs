@@ -2074,7 +2074,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(
             tracing_opentelemetry::layer()
                 .with_tracer(provider.tracer("test"))
-                .with_filter(crate::telemetry::otel_env_filter(None)),
+                .with_filter(crate::telemetry::otel_filter(None)),
         );
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
         let service = ServiceBuilder::new()
