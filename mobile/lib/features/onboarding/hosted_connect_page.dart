@@ -95,6 +95,8 @@ class _HostedSteps extends HookWidget {
     useListenable(flow);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final presentedStage = flow.stage;
+    final presentation = Object();
+    final activePresentation = useRef<Object?>(null)..value = presentation;
     // Keep an opaque surface behind the native profile presentation and its
     // dismissal. Completion retires the route only after the flow settles.
     if (flow.stage == HostedFlowStage.profile) {
@@ -136,7 +138,10 @@ class _HostedSteps extends HookWidget {
           fullScreen: true,
           onBack: () {
             // Outgoing pages remain mounted until their transition finishes.
-            if (flow.stage != presentedStage) return;
+            if (activePresentation.value != presentation ||
+                flow.stage != presentedStage) {
+              return;
+            }
             if (flow.canChangeCommunities) {
               flow.backToCommunityChoices();
             } else {

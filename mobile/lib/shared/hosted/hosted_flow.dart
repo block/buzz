@@ -111,6 +111,11 @@ class HostedFlow extends ChangeNotifier {
   bool _preparingAdd = false;
   String? _batchSubject;
   String? _conflictingRelay;
+  String? _failedRelay;
+  bool get canSkipFailedCommunity =>
+      canChangeCommunities &&
+      stage == HostedFlowStage.blocked &&
+      _failedRelay != null;
   bool get canChangeCommunities =>
       accountOnly &&
       account.account?.subject == _batchSubject &&
@@ -127,6 +132,7 @@ class HostedFlow extends ChangeNotifier {
   int _generation = 0;
 
   int _nextGeneration() {
+    _failedRelay = null;
     _cancelPolicy();
     _cancelProfile();
     return ++_generation;
@@ -686,6 +692,19 @@ class HostedFlow extends ChangeNotifier {
     _set(HostedFlowStage.chooseCommunities);
   }
 
+  /// Omit only the failed membership for this restore attempt.
+  Future<void> skipFailedCommunity() {
+    if (!canSkipFailedCommunity) return Future.value();
+    final relay = _failedRelay!;
+    selectedRelays = Set.unmodifiable(
+      selectedRelays.where((item) => item != relay),
+    );
+    _failedRelay = null;
+    final generation = _nextGeneration();
+    _set(HostedFlowStage.working);
+    return _enqueue(() => _continue(generation));
+  }
+
   Future<void> skipConflictingCommunity() {
     final relay = _conflictingRelay;
     if (stage != HostedFlowStage.communityConflict || relay == null) {
@@ -723,6 +742,7 @@ class HostedFlow extends ChangeNotifier {
       _set(HostedFlowStage.chooseCommunities);
       return;
     }
+    _failedRelay = null;
     final ordered = [
       ...communities.where((item) => item.relayUrl == landingRelay),
       ...communities.where((item) => item.relayUrl != landingRelay),
@@ -742,6 +762,9 @@ class HostedFlow extends ChangeNotifier {
         _conflictingRelay = community.relayUrl;
         _set(HostedFlowStage.communityConflict);
         return;
+      } catch (_) {
+        if (current()) _failedRelay = community.relayUrl;
+        rethrow;
       }
       if (!current()) return;
       _addedRelays.add(community.relayUrl);
@@ -877,6 +900,7 @@ class HostedFlow extends ChangeNotifier {
     communities = const [];
     selectedRelays = const {};
     landingRelay = null;
+    _failedRelay = null;
     _addedRelays.clear();
     _batchSubject = null;
     _conflictingRelay = null;

@@ -223,6 +223,11 @@ class HostedConnectSheet extends HookConsumerWidget {
           onPressed: flow.skipConflictingCommunity,
           child: const Text('Keep saved identity and skip'),
         ),
+      if (flow.canSkipFailedCommunity)
+        OutlinedButton(
+          onPressed: flow.skipFailedCommunity,
+          child: const Text('Skip this community'),
+        ),
       if (flow.canChangeCommunities)
         OutlinedButton(
           onPressed: flow.backToCommunityChoices,
@@ -279,7 +284,7 @@ class HostedConnectSheet extends HookConsumerWidget {
       HostedFlowStage.browserReturned => 'Continue in your browser',
       _ => 'Connect to Builderlab',
     };
-    if (working) return OnboardingLoadingPage(title: title);
+    if (working) return OnboardingLoadingPage(title: title, onCancel: onBack);
     bool isAction(Widget widget) => widget is ButtonStyleButton;
     return OnboardingStepPage(
       title: title,

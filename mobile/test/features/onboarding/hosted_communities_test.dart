@@ -312,6 +312,7 @@ void main() {
         }
         expect(find.text('1 community added and kept.'), findsOneWidget);
         expect(find.text('Try again').hitTestable(), findsNothing);
+        expect(find.text('Skip this community').hitTestable(), findsOneWidget);
         await tester.tap(find.text('Back to choices'));
         await tester.pumpAndSettle();
         expect(find.byType(CommunityGridOption), findsNWidgets(2));
@@ -322,6 +323,13 @@ void main() {
           ),
           findsWidgets,
         );
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Skip this community'));
+        await tester.pumpAndSettle();
+        expect(f.admitted, ['one.communities.buzz.xyz']);
+        expect(f.openedCommunity, 'wss://one.communities.buzz.xyz');
+        expect(find.byType(HostedConnectPage), findsNothing);
       }
     },
     skip: HostedEnvironment.authDomains.isEmpty,

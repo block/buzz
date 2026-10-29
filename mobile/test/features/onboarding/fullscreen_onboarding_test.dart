@@ -165,11 +165,9 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.byTooltip('Back'), findsNothing);
       expect(find.byType(BeeLoadingMark), findsOneWidget);
-      await tester.binding.handlePopRoute();
+      await tester.tap(find.text('Cancel'));
       await tester.pump();
-      expect(fixture.flow.stage, HostedFlowStage.working);
-      // External cancellation still invalidates a pending Add restoration.
-      fixture.flow.backToCommunityChoices();
+      expect(fixture.flow.stage, HostedFlowStage.chooseCommunities);
       cancelledRestore.complete();
       await tester.pumpAndSettle();
       expect(find.byType(OnboardingAppEntry), findsNothing);
@@ -196,10 +194,17 @@ void main() {
       fixture.beforeAdmission = (_) => admission.future;
       await tester.tap(find.byType(CommunityGridOption).last);
       await tester.pump();
-      // Back must be blocked even while the outgoing picker is mounted.
+      // System Back cancels even while the outgoing picker is mounted.
       await tester.binding.handlePopRoute();
       await tester.pump();
-      expect(fixture.flow.stage, HostedFlowStage.working);
+      expect(fixture.flow.stage, HostedFlowStage.chooseCommunities);
+      admission.complete();
+      await tester.pumpAndSettle();
+      expect(fixture.admitted, isEmpty);
+      final resumedAdmission = Completer<void>();
+      fixture.beforeAdmission = (_) => resumedAdmission.future;
+      await tester.tap(find.byType(CommunityGridOption).last);
+      await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.text('Home content'), findsNothing);
       expect(find.text('Joining your community'), findsOneWidget);
@@ -251,7 +256,7 @@ void main() {
       expect(fixture.admitted, isEmpty);
       final opening = Completer<void>();
       fixture.beforeOpen = () => opening.future;
-      admission.complete();
+      resumedAdmission.complete();
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.text('Home content'), findsNothing);
