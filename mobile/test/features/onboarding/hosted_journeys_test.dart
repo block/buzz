@@ -894,16 +894,26 @@ void main() {
   );
 
   journey(
-    'signed-in invite survives restart and leaving consent abandons only setup',
+    'saved pending account retains invite across retry without reopening setup',
     (tester, f) async {
       await f.initialize();
+      // /me reports stored details as pending even when legacy screening
+      // standing still says MISSING + NOT_SCREENED.
+      f.screeningPending = true;
+      // If setup is incorrectly reopened, allow its callback to finish so the
+      // no-browser assertion fails instead of cycling until the test times out.
+      f.beforeBrowserReturn = () async => f.screeningPending = false;
       await f.mount(tester);
       await f.link(tester, 'one');
+      expect(f.browserStarts, 0);
+      expect(f.sent('/claim'), isEmpty);
+      expect(await f.storage.loadAll(), isEmpty);
       expect(find.text('Accept and join').hitTestable(), findsOneWidget);
       await f.restart(tester);
       await f.tap(tester, 'Start login again');
       expect(find.text('Accept and join').hitTestable(), findsOneWidget);
       expect(f.browserStarts, 0);
+      f.screeningPending = false;
       expect(
         f.sent('/api/join-policy').last.url.host,
         'one.communities.buzz.xyz',
