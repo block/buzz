@@ -173,3 +173,47 @@ test("backoff doubles per attempt up to the cap and only reset() returns it to b
   backoff.reset();
   assert.equal(backoff.next(), 1_000);
 });
+
+test("only a connection that stays up resets the backoff; a drop before then cancels it", () => {
+  const timers = new Map();
+  let nextId = 1;
+  const originalWindow = globalThis.window;
+  globalThis.window = {
+    setTimeout(fn, ms) {
+      timers.set(nextId, { fn, ms });
+      return nextId++;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+  };
+  try {
+    const backoff = new RelayReconnectBackoff(1_000, 30_000, () => 0.5);
+    for (let i = 0; i < 3; i++) backoff.next();
+    backoff.resetWhenStable(60_000);
+    assert.equal(
+      backoff.currentMs,
+      8_000,
+      "opening a socket alone resets nothing",
+    );
+    backoff.cancelStableReset(); // dropped before it was stable
+    assert.equal(timers.size, 0);
+    assert.equal(backoff.currentMs, 8_000);
+
+    backoff.resetWhenStable(60_000);
+    backoff.resetWhenStable(60_000); // re-arming replaces, never stacks
+    assert.equal(timers.size, 1);
+    const [[id, timer]] = [...timers];
+    assert.equal(timer.ms, 60_000);
+    timers.delete(id);
+    timer.fn();
+    assert.equal(backoff.currentMs, 1_000, "stable for 60s: back to base");
+
+    backoff.next();
+    backoff.resetWhenStable(60_000);
+    backoff.reset();
+    assert.equal(timers.size, 0, "reset() also drops a pending stable reset");
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});

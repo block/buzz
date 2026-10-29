@@ -22,6 +22,7 @@
  *    keep an idle socket.
  */
 import {
+  BACKOFF_RESET_STABLE_MS,
   RECONNECT_BASE_DELAY_MS,
   RECONNECT_MAX_DELAY_MS,
 } from "@/shared/api/relayClientTimings";
@@ -96,8 +97,8 @@ export const SERVICE_RESTART_RECONNECT_SPREAD_MS = 10_000;
  * - Otherwise the delay gets symmetric +/-25% jitter, hard-capped at `maxMs`
  *   (a retry never waits longer than the cap).
  * - Every attempt, including a spread one, doubles the stored backoff; only
- *   `reset()` (called after a connection stayed up, or a community switch)
- *   returns it to the minimum. Merely opening a socket never does.
+ *   a connection that stays up (`resetWhenStable`) or `reset()` (community
+ *   switch) returns it to the minimum. Merely opening a socket never does.
  *
  * `random` is injectable for tests and must return a value in `[0, 1)`.
  */
@@ -106,6 +107,7 @@ export class RelayReconnectBackoff {
   private readonly baseMs: number;
   private readonly maxMs: number;
   private readonly random: () => number;
+  private stableTimer: number | null = null;
 
   constructor(
     baseMs = RECONNECT_BASE_DELAY_MS,
@@ -123,8 +125,26 @@ export class RelayReconnectBackoff {
     return this.backoffMs;
   }
 
+  /** Back to the minimum now, dropping any pending stable-connection reset. */
   reset(): void {
+    this.cancelStableReset();
     this.backoffMs = this.baseMs;
+  }
+
+  /** Reset once the connection that just opened has stayed up `stableMs`. */
+  resetWhenStable(stableMs = BACKOFF_RESET_STABLE_MS): void {
+    this.cancelStableReset();
+    this.stableTimer = window.setTimeout(() => {
+      this.stableTimer = null;
+      this.backoffMs = this.baseMs;
+    }, stableMs);
+  }
+
+  /** The connection dropped (or a new attempt began) before it was stable. */
+  cancelStableReset(): void {
+    if (this.stableTimer === null) return;
+    window.clearTimeout(this.stableTimer);
+    this.stableTimer = null;
   }
 
   /** Delay before the next attempt; advances the backoff. */

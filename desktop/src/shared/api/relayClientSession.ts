@@ -36,7 +36,11 @@ import {
   prepareSubscriptionEvent,
 } from "@/shared/api/relayClosedRecovery";
 import { getChannelReconnectRepairEvents } from "@/shared/api/channelReconnectRepair";
-import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
+import {
+  releaseLiveEoseWaiter,
+  replayLiveSubscriptions,
+  retireConnectionSubscriptions,
+} from "@/shared/api/relayReconnectReplay";
 import { RelayLiveReqDrain } from "./relayLiveReqDrain";
 import { RelayChannelAccessRevocations } from "./relayChannelAccessRevocations";
 import { publishSessionEvent } from "@/shared/api/relayEventPublisher";
@@ -56,12 +60,10 @@ import {
   shouldScheduleReconnect,
   shouldWaitForScheduledReconnect,
 } from "@/shared/api/relayReconnectPolicy";
-import { stampLiveUntilOnClose } from "@/shared/api/relayResumeCursor";
 import { RelayReconnectWaiters } from "@/shared/api/relayReconnectWaiters";
 import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
 import {
   AUTH_TIMEOUT_MS,
-  BACKOFF_RESET_STABLE_MS,
   EVENT_BATCH_MS,
   HISTORY_TIMEOUT_MS,
   STALL_CHECK_INTERVAL_MS,
@@ -96,9 +98,9 @@ export class RelayClient {
   private notifyReconnectListeners = false;
   private onMessageChannel: Channel<unknown> | null = null;
   private connectionGeneration = 0;
+  private lastInboundAtMs = 0; // Last peer frame (any connection); 0 = none.
   private sessionEpoch = 0;
   private liveSessionAbort = new AbortController();
-  private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
   private authOkTracker = new AuthOkTracker();
   private terminal = false;
@@ -107,9 +109,9 @@ export class RelayClient {
   private stallWatchdog = new RelayStallWatchdog({
     intervalMs: STALL_CHECK_INTERVAL_MS,
     idleTimeoutMs: STALL_IDLE_TIMEOUT_MS,
-    onStall: (error, lastInboundMs) => {
+    onStall: (error) => {
       this.connectionStateEmitter.set("stalled");
-      this.resetConnection(error, { lastInboundMs });
+      this.resetConnection(error);
     },
   });
   setVisibleChannelId(id: string | null) {
@@ -121,10 +123,6 @@ export class RelayClient {
     if (this.reconnectTimeout) {
       window.clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
-    }
-    if (this.stabilityTimer !== null) {
-      window.clearTimeout(this.stabilityTimer);
-      this.stabilityTimer = null;
     }
     this.stallWatchdog.stop();
     this.sessionEpoch++;
@@ -541,10 +539,7 @@ export class RelayClient {
   }
 
   private async connect() {
-    if (this.stabilityTimer !== null) {
-      window.clearTimeout(this.stabilityTimer);
-      this.stabilityTimer = null;
-    }
+    this.reconnectBackoff.cancelStableReset();
 
     this.connectionStateEmitter.set(
       this.hasConnectedOnce ? "reconnecting" : "connecting",
@@ -593,13 +588,12 @@ export class RelayClient {
       await Promise.race([drain, authentication, inbound.overflow]);
       await drain;
       await authentication;
-      this.stabilityTimer = window.setTimeout(() => {
-        this.stabilityTimer = null;
-        this.reconnectBackoff.reset();
-      }, BACKOFF_RESET_STABLE_MS);
+      this.reconnectBackoff.resetWhenStable();
 
       this.connectionStateEmitter.set("connected");
       await this.replayLiveSubscriptions();
+      if (generation !== this.connectionGeneration)
+        throw new Error("Relay connection attempt was superseded.");
       this.stallWatchdog.start();
       this.emitReconnectIfNeeded();
       return generation;
@@ -633,6 +627,7 @@ export class RelayClient {
       signal?.removeEventListener("abort", abort);
       sessionSignal.removeEventListener("abort", abort);
       window.clearTimeout(fallbackTimeout);
+      releaseLiveEoseWaiter(subscription);
       settleReady();
     };
     const subscription: Extract<RelaySubscription, { mode: "live" }> = {
@@ -877,7 +872,9 @@ export class RelayClient {
       this.resetConnection(new Error("Relay connection errored."));
       return;
     }
+    // Only peer frames prove liveness; Close/Error say when the loss was seen.
     this.stallWatchdog.recordInbound();
+    this.lastInboundAtMs = Date.now();
 
     const payload = getTextPayload(message);
     if (!payload) {
@@ -1119,22 +1116,18 @@ export class RelayClient {
     options?: {
       reconnect?: boolean;
       serviceRestart?: boolean;
-      lastInboundMs?: number;
     },
   ) {
     this.onMessageChannel = null;
-    stampLiveUntilOnClose(
+    retireConnectionSubscriptions(
       this.subscriptions,
       this.connectionGeneration,
-      options?.lastInboundMs ?? this.stallWatchdog.lastInboundAtMs(),
+      this.lastInboundAtMs,
     );
     this.stallWatchdog.stop();
     this.connectionGeneration++;
     this.liveReqDrain.reset();
-    if (this.stabilityTimer !== null) {
-      window.clearTimeout(this.stabilityTimer);
-      this.stabilityTimer = null;
-    }
+    this.reconnectBackoff.cancelStableReset();
     if (this.flushTimeout !== null) window.clearTimeout(this.flushTimeout);
     this.flushTimeout = null;
     this.eventBuffer = [];

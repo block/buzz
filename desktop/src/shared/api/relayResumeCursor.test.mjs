@@ -61,7 +61,7 @@ test("stampLiveUntilOnClose stamps only subscriptions that reached EOSE on the c
     ["history", history],
   ]);
 
-  stampLiveUntilOnClose(subscriptions, 7, 0, 1_234_999);
+  stampLiveUntilOnClose(subscriptions, 7, 1_234_999, 1_300_000);
 
   assert.equal(eosed.liveUntil, 1_234);
   assert.equal(
@@ -78,7 +78,12 @@ test("stampLiveUntilOnClose stamps only subscriptions that reached EOSE on the c
 
 test("stampLiveUntilOnClose never moves liveUntil backwards", () => {
   const subscription = live({ eoseGeneration: 3, liveUntil: 9_999 });
-  stampLiveUntilOnClose(new Map([["a", subscription]]), 3, 0, 5_000_000);
+  stampLiveUntilOnClose(
+    new Map([["a", subscription]]),
+    3,
+    5_000_000,
+    5_000_000,
+  );
   assert.equal(subscription.liveUntil, 9_999);
 });
 
@@ -92,4 +97,22 @@ test("stampLiveUntilOnClose caps the stamp at the last inbound frame of a stalle
     1_070_000,
   );
   assert.equal(subscription.liveUntil, 1_000);
+});
+
+test("stampLiveUntilOnClose keeps the previous stamp when no inbound frame is known", () => {
+  const stamped = live({ eoseGeneration: 3, liveUntil: 700 });
+  const fresh = live({ eoseGeneration: 3 });
+  stampLiveUntilOnClose(
+    new Map([
+      ["stamped", stamped],
+      ["fresh", fresh],
+    ]),
+    3,
+    0,
+    9_000_000,
+  );
+  assert.equal(stamped.liveUntil, 700, "never guessed from the close clock");
+  assert.equal(fresh.liveUntil, undefined);
+  assert.equal(stamped.eoseGeneration, undefined);
+  assert.equal(fresh.eoseGeneration, undefined);
 });

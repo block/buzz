@@ -16,6 +16,7 @@ import {
 import {
   computeResumeSince,
   RELAY_INGEST_FUTURE_TOLERANCE_SECS,
+  stampLiveUntilOnClose,
 } from "@/shared/api/relayResumeCursor";
 
 export { RELAY_INGEST_FUTURE_TOLERANCE_SECS };
@@ -95,26 +96,54 @@ async function runWithConcurrency<T>(
 
 /**
  * Resolves `true` once the restored live REQ reached EOSE on this replay's
- * connection, `false` on timeout. Also resolves early (`true`) when a newer
- * replay supersedes this one; callers re-check `isActive()` after waking.
+ * connection, `false` on timeout. Also resolves early (`true`) when this
+ * replay is superseded or its connection or subscription is retired; callers
+ * re-check `isActive()` and subscription identity after waking. A waiter that
+ * outlived its connection would hold `connect()` (and with it the session's
+ * `connectPromise`) for the whole timeout, stalling the scheduled reconnect.
  */
 function awaitLiveEose(
   replay: NonNullable<
     Extract<RelaySubscription, { mode: "live" }>["reconnectReplay"]
   >,
+  isActive: () => boolean,
   setTimeoutFn: (fn: () => void, ms: number) => number,
+  clearTimeoutFn: (handle: number) => void,
 ): Promise<boolean> {
-  if (replay.liveEose) return Promise.resolve(true);
+  if (replay.liveEose || !isActive()) return Promise.resolve(true);
   return new Promise<boolean>((resolve) => {
     const timer = setTimeoutFn(() => {
       replay.liveEoseWaiter = undefined;
       resolve(false);
     }, LIVE_REQ_ACK_TIMEOUT_MS);
     replay.liveEoseWaiter = () => {
-      window.clearTimeout(timer);
+      replay.liveEoseWaiter = undefined;
+      clearTimeoutFn(timer);
       resolve(true);
     };
   });
+}
+
+/** Wake a repair worker parked on this subscription's live EOSE, if any. */
+export function releaseLiveEoseWaiter(subscription: RelaySubscription) {
+  if (subscription.mode !== "live") return;
+  subscription.reconnectReplay?.liveEoseWaiter?.();
+}
+
+/**
+ * Per-subscription bookkeeping for a connection that is being torn down:
+ * stamp the resume cursor, then release every repair worker parked on that
+ * connection's EOSE so the stale `connect()` settles at once.
+ */
+export function retireConnectionSubscriptions(
+  subscriptions: Map<string, RelaySubscription>,
+  generation: number,
+  lastInboundMs: number,
+) {
+  stampLiveUntilOnClose(subscriptions, generation, lastInboundMs);
+  for (const subscription of subscriptions.values()) {
+    releaseLiveEoseWaiter(subscription);
+  }
 }
 
 export function buildReconnectReplayFilter(
@@ -227,6 +256,7 @@ export async function replayLiveSubscriptions({
   interBatchDelayMs = REPLAY_INTER_BATCH_DELAY_MS,
   setTimeoutFn = (fn: () => void, ms: number) =>
     window.setTimeout(fn, ms) as unknown as number,
+  clearTimeoutFn = (handle: number) => window.clearTimeout(handle),
   isActive = () => true,
 }: {
   subscriptions: Map<string, RelaySubscription>;
@@ -244,6 +274,8 @@ export async function replayLiveSubscriptions({
   interBatchDelayMs?: number;
   /** setTimeout implementation (injectable for tests). */
   setTimeoutFn?: (fn: () => void, ms: number) => number;
+  /** clearTimeout matching `setTimeoutFn` (injectable for tests). */
+  clearTimeoutFn?: (handle: number) => void;
   /**
    * Returns false when the connection that initiated this replay has been
    * superseded by a newer one. After the gate await resumes, a stale replay
@@ -435,8 +467,15 @@ export async function replayLiveSubscriptions({
         try {
           // Take the repair's upper bound only after the relay acknowledged
           // the live-only REQ (registered it), never before.
-          const acked = await awaitLiveEose(replay, setTimeoutFn);
-          if (!isActive() || subscriptions.get(subId) !== subscription) return;
+          const isCurrent = () =>
+            isActive() && subscriptions.get(subId) === subscription;
+          const acked = await awaitLiveEose(
+            replay,
+            isCurrent,
+            setTimeoutFn,
+            clearTimeoutFn,
+          );
+          if (!isCurrent()) return;
           if (!acked) {
             throw new Error("Live REQ was not acknowledged before repair");
           }
@@ -453,8 +492,7 @@ export async function replayLiveSubscriptions({
             // SAME subscription key and object survive in the map — identity
             // alone stays true and a stale pass could complete and clear the
             // floor the superseding connection needs.
-            isActive: () =>
-              isActive() && subscriptions.get(subId) === subscription,
+            isActive: isCurrent,
             requestRepair,
           });
           // A stale-connection abort is NOT completion: the superseding
@@ -473,6 +511,25 @@ export async function replayLiveSubscriptions({
           );
           if (attempt === PAGE_REPLAY_MAX_ATTEMPTS) {
             markReconnectRepairDone(subscription, generation);
+            // The live REQ reads no history (`limit: 0`) and the pinned floor
+            // only helps the next reconnect, so without this the missed window
+            // stays empty for the rest of a stable connection. Fall back to
+            // the pre-repair behavior: re-issue the REQ (same ID, so the relay
+            // replaces the live subscription) with the window's bounded
+            // history. The floor stays pinned for anything the cap left out.
+            if (isRateLimited()) await waitForRateLimit();
+            if (subscriptions.get(subId) === subscription && isActive()) {
+              await sendRaw([
+                "REQ",
+                subId,
+                buildReconnectReplayFilter(subscription.filter, replaySince),
+              ]).catch((sendError: unknown) => {
+                console.warn(
+                  `[reconnect replay] history fallback REQ failed for ${subId}:`,
+                  sendError,
+                );
+              });
+            }
             return;
           }
           // The failed REQ's CLOSED handler arms the rate-limit gate before

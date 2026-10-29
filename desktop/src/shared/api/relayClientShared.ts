@@ -83,8 +83,9 @@ type LiveSubscription = {
   /** Connection generation on which this subscription last reached EOSE. */
   eoseGeneration?: number;
   /**
-   * Unix seconds up to which this subscription was provably live: stamped when
-   * a connection that delivered its EOSE closes. See `relayResumeCursor.ts`.
+   * Unix seconds up to which this subscription was registered on a connection
+   * that delivered its EOSE: that connection's last inbound frame, stamped on
+   * close. Not proof of delivery; see `relayResumeCursor.ts`.
    */
   liveUntil?: number;
   /**

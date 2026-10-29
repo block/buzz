@@ -12,7 +12,10 @@ let nextTimerId = 1;
 const timers = new Map();
 const intervals = new Map();
 const writes = [];
+const dials = [];
+const repairRequests = [];
 const clients = [];
+let nextCallbackId = 1;
 globalThis.window = {
   setTimeout(fn, ms) {
     const id = nextTimerId++;
@@ -32,7 +35,16 @@ globalThis.window = {
     intervals.delete(id);
   },
   __TAURI_INTERNALS__: {
+    transformCallback: () => nextCallbackId++,
     async invoke(command, args) {
+      if (command === "plugin:websocket|connect") {
+        dials.push(now);
+        return 100 + dials.length;
+      }
+      if (command === "get_channel_reconnect_repair") {
+        // The HTTP repair stays in flight until the test settles it.
+        return new Promise((resolve) => repairRequests.push({ args, resolve }));
+      }
       if (command === "plugin:websocket|send") {
         writes.push({ socket: args.id, frame: JSON.parse(args.message.data) });
         return;
@@ -45,6 +57,7 @@ globalThis.window = {
 Date.now = () => now;
 const { RelayClient } = await import("./relayClientSession.ts");
 const { resetRateLimitGate } = await import("./relayRateLimitGate.ts");
+const { buildChannelFilter } = await import("./relayChannelFilters.ts");
 
 beforeEach(() => {
   resetRateLimitGate();
@@ -52,6 +65,8 @@ beforeEach(() => {
   timers.clear();
   intervals.clear();
   writes.length = 0;
+  dials.length = 0;
+  repairRequests.length = 0;
   Math.random = originalRandom;
 });
 afterEach(() => {
@@ -118,7 +133,7 @@ async function liveClient(filters, eosed = filters.length) {
     timer.fn();
   }
   await flush();
-  return { client, ids };
+  return { client, ids, ready };
 }
 
 const quiet = {
@@ -128,15 +143,16 @@ const quiet = {
   limit: 1000,
 };
 
-test("a close after EOSE stamps liveUntil and the replay resumes from it", async () => {
+test("a close after EOSE stamps liveUntil at the last frame and the replay resumes from it", async () => {
   now = 2_000_000;
   const { client, ids } = await liveClient([quiet]);
   const subscription = client.subscriptions.get(ids[0]);
   assert.equal(subscription.liveUntil, undefined);
 
+  // EOSE (the last frame) arrived at 2_000_250; the close is processed later.
   now = 2_050_000;
   await close(client, 1000);
-  assert.equal(subscription.liveUntil, 2_050);
+  assert.equal(subscription.liveUntil, 2_000);
   window.clearTimeout(client.reconnectTimeout);
   client.reconnectTimeout = null;
 
@@ -146,7 +162,7 @@ test("a close after EOSE stamps liveUntil and the replay resumes from it", async
   await client.replayLiveSubscriptions();
   assert.deepEqual(
     writes.map(({ frame }) => frame),
-    [["REQ", ids[0], { ...quiet, since: 2_050 - 960, limit: 1000 }]],
+    [["REQ", ids[0], { ...quiet, since: 2_000 - 960, limit: 1000 }]],
   );
 });
 
@@ -156,7 +172,7 @@ test("a subscription that never reached EOSE keeps replaying its original filter
   const { client, ids } = await liveClient([quiet, second], 1);
   now = 2_050_000;
   await close(client, 1000);
-  assert.equal(client.subscriptions.get(ids[0]).liveUntil, 2_050);
+  assert.equal(client.subscriptions.get(ids[0]).liveUntil, 2_000);
   assert.equal(client.subscriptions.get(ids[1]).liveUntil, undefined);
   window.clearTimeout(client.reconnectTimeout);
   client.reconnectTimeout = null;
@@ -165,7 +181,7 @@ test("a subscription that never reached EOSE keeps replaying its original filter
   writes.length = 0;
   await client.replayLiveSubscriptions();
   const byId = new Map(writes.map(({ frame }) => [frame[1], frame[2]]));
-  assert.equal(byId.get(ids[0]).since, 2_050 - 960);
+  assert.equal(byId.get(ids[0]).since, 2_000 - 960);
   assert.deepEqual(byId.get(ids[1]), second);
 });
 
@@ -287,4 +303,109 @@ test("an ordinary close backs off with +/-25% jitter, not the restart spread", a
   await close(client, 1000);
   assert.ok(Math.abs(reconnectDelayMs(client) - 935) < 1e-6);
   assert.equal(client.reconnectBackoff.currentMs, 2_000);
+});
+
+function fireDueTimers() {
+  for (const [id, timer] of [...timers]) {
+    if (timer.at <= now) {
+      timers.delete(id);
+      timer.fn();
+    }
+  }
+}
+
+// Drive the production reconnect: the scheduled timer dials through IPC and
+// the relay's AUTH OK settles the handshake; replay then runs for real.
+async function redial(client) {
+  now = timers.get(client.reconnectTimeout).at;
+  fireDueTimers();
+  await flush();
+  assert.ok(client.authRequest, "the redial is waiting for AUTH");
+  await deliver(client, ["OK", client.authRequest.pendingEventId, true, ""]);
+  await flush();
+}
+
+const paged = buildChannelFilter("channel-paged", 1000);
+
+test("a reset before the paged live EOSE releases connect() and the next reconnect dials on time", async () => {
+  now = 2_000_000;
+  const { client, ids } = await liveClient([paged]);
+  client.relayUrl = "ws://relay.test";
+  await close(client, 1006); // stamps liveUntil from the EOSE frame
+  await redial(client);
+  assert.equal(dials.length, 1);
+  assert.deepEqual(writes.at(-1).frame, [
+    "REQ",
+    ids[0],
+    { ...paged, limit: 0 },
+  ]);
+  assert.notEqual(client.connectPromise, null, "precondition: parked on EOSE");
+
+  // The socket drops before the live-only REQ is acknowledged.
+  await close(client, 1006);
+  await flush();
+  assert.equal(
+    client.connectPromise,
+    null,
+    "the stale attempt settled at once",
+  );
+  assert.equal(intervals.size, 0, "no watchdog for a dead generation");
+  assert.equal(repairRequests.length, 0);
+  const retryAt = timers.get(client.reconnectTimeout).at;
+  assert.ok(
+    retryAt - now < 30_000,
+    "the retry is a backoff, not the ack timeout",
+  );
+
+  await redial(client);
+  assert.equal(dials.length, 2, "the scheduled reconnect opened a new socket");
+  assert.equal(dials[1], retryAt);
+});
+
+test("a close delivered late during replay stamps the last frame, not the wake", async () => {
+  now = 2_000_000;
+  const { client, ids } = await liveClient([quiet, paged]);
+  client.relayUrl = "ws://relay.test";
+  await close(client, 1006);
+  await redial(client);
+  // The quiet channel reaches EOSE while the paged repair is still pending.
+  now = 2_100_000;
+  await deliver(client, ["EOSE", ids[0]]);
+  await deliver(client, ["EOSE", ids[1]]);
+  await flush();
+  assert.equal(repairRequests.length, 1, "precondition: repair in flight");
+  assert.equal(intervals.size, 0, "precondition: watchdog not started yet");
+
+  // An hour of sleep, then the close is delivered.
+  now = 2_100_000 + 3_600_000;
+  await close(client, 1006);
+  const subscription = client.subscriptions.get(ids[0]);
+  assert.equal(subscription.liveUntil, 2_100, "stamped at the EOSE frame");
+
+  // The in-flight HTTP page settles; the stale attempt then stands down.
+  for (const { resolve } of repairRequests.splice(0)) resolve([]);
+  await flush();
+  assert.equal(client.connectPromise, null);
+  writes.length = 0;
+  await redial(client);
+  const quietReq = writes.find(({ frame }) => frame[1] === ids[0]);
+  assert.equal(quietReq.frame[2].since, 2_100 - 960);
+});
+
+test("disposing a subscription parked on its paged live EOSE releases connect()", async () => {
+  now = 2_000_000;
+  const { client, ready } = await liveClient([paged]);
+  const dispose = await ready[0];
+  client.relayUrl = "ws://relay.test";
+  await close(client, 1006);
+  await redial(client);
+  assert.notEqual(client.connectPromise, null, "precondition: parked on EOSE");
+  await dispose();
+  await flush();
+  assert.equal(
+    client.connectPromise,
+    null,
+    "connect() settled without the 25s wait",
+  );
+  assert.equal(client.connectionStateEmitter.get(), "connected");
 });

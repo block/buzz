@@ -12,7 +12,9 @@ import {
   replayReconnectHistoryPages,
   PAGE_REPLAY_MAX_ATTEMPTS,
   replayLiveSubscriptions,
+  releaseLiveEoseWaiter,
   REPLAY_BATCH_SIZE,
+  retireConnectionSubscriptions,
   shouldPageReconnectReplay,
 } from "./relayReconnectReplay.ts";
 import { buildChannelFilter } from "./relayChannelFilters.ts";
@@ -1591,7 +1593,7 @@ test("every paged repair floor is pinned before any live-only REQ, so a queued c
   for (const subscription of subscriptions.values()) {
     subscription.eoseGeneration = 0;
   }
-  stampLiveUntilOnClose(subscriptions, 0, 0, 200_000_000);
+  stampLiveUntilOnClose(subscriptions, 0, 200_000_000, 200_000_000);
   assert.equal(queued.liveUntil, 200_000);
   firstConnectionActive = false;
 
@@ -1670,4 +1672,164 @@ test("a superseding replay releases the stale worker without a repair", async ()
 test("teardown — restore Date.now", () => {
   Date.now = origDateNow;
   assert.ok(true);
+});
+
+test("a connection reset releases repair workers parked on EOSE at once", async () => {
+  resetGate();
+  const subscriptions = new Map(
+    ["channel-1", "channel-2"].map((channelId, i) => [
+      `live-${i + 1}`,
+      liveSub(buildChannelFilter(channelId, 1000), {
+        lastSeenCreatedAt: 5_000,
+        eoseGeneration: 0,
+      }),
+    ]),
+  );
+  let active = true;
+  let settled = false;
+  const repairs = [];
+  const replay = replayLiveSubscriptions({
+    subscriptions,
+    isActive: () => active,
+    // One worker: the second channel is still queued behind the first.
+    pageReplayConcurrency: 1,
+    sendRaw: async () => {},
+    requestRepair: async (request) => {
+      repairs.push(request);
+      return [];
+    },
+  }).then(() => {
+    settled = true;
+  });
+  await drainMicrotasks();
+  assert.equal(settled, false, "precondition: parked on the live EOSE");
+
+  // The session's resetConnection: generation moves on, then retirement.
+  active = false;
+  retireConnectionSubscriptions(subscriptions, 0, 4_000_000);
+  await drainMicrotasks();
+  assert.equal(
+    settled,
+    true,
+    "connect() must not wait LIVE_REQ_ACK_TIMEOUT_MS on a dead socket",
+  );
+  await replay;
+  assert.deepEqual(
+    repairs,
+    [],
+    "neither the parked nor the queued worker repaired",
+  );
+  assert.equal(pendingTimers.size, 0, "no ack timer outlives the connection");
+  for (const subscription of subscriptions.values()) {
+    assert.equal(
+      subscription.pendingReplaySince,
+      5_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+      "the unrepaired window stays pinned",
+    );
+  }
+});
+
+test("disposing a subscription releases its parked repair worker", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const subscriptions = new Map([["live-1", subscription]]);
+  let settled = false;
+  const replay = replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async () => {},
+    requestRepair: async () => assert.fail("a disposed sub must not repair"),
+  }).then(() => {
+    settled = true;
+  });
+  await drainMicrotasks();
+  subscriptions.delete("live-1");
+  releaseLiveEoseWaiter(subscription);
+  await drainMicrotasks();
+  assert.equal(settled, true);
+  await replay;
+  assert.equal(pendingTimers.size, 0);
+});
+
+test("the EOSE wait cancels its timer through the injected clear function", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const injected = new Map();
+  const cleared = [];
+  let nextHandle = 9_000;
+  const replay = replayLiveSubscriptions({
+    subscriptions: new Map([["live-1", subscription]]),
+    sendRaw: async () => {},
+    requestRepair: async () => [],
+    setTimeoutFn: (fn, ms) => {
+      injected.set(++nextHandle, { fn, ms });
+      return nextHandle;
+    },
+    clearTimeoutFn: (handle) => {
+      cleared.push(handle);
+      injected.delete(handle);
+    },
+  });
+  await drainMicrotasks();
+  const [[handle, timer]] = [...injected];
+  assert.equal(timer.ms, LIVE_REQ_ACK_TIMEOUT_MS);
+  markReconnectLiveEose(subscription, 0);
+  await replay;
+  assert.deepEqual(cleared, [handle], "cancelled by the matching clear");
+  assert.equal(injected.size, 0);
+});
+
+test("an exhausted repair falls back to the window's bounded history on the same connection", async () => {
+  resetGate();
+  const filter = buildChannelFilter("channel-1", 1000);
+  const subscription = liveSub(filter, { lastSeenCreatedAt: 5_000 });
+  const subscriptions = new Map([["live-1", subscription]]);
+  const sent = [];
+  let attempts = 0;
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: ackingSendRaw(subscriptions, 0, sent),
+    requestRepair: async () => {
+      attempts++;
+      throw new Error("error: database error");
+    },
+  });
+  const floor = 5_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS;
+  assert.equal(attempts, PAGE_REPLAY_MAX_ATTEMPTS);
+  assert.deepEqual(sent, [
+    ["REQ", "live-1", { ...filter, limit: 0 }],
+    ["REQ", "live-1", buildReconnectReplayFilter(filter, floor)],
+  ]);
+  assert.equal(sent[1][2].since, floor, "history from the missed window");
+  assert.ok(sent[1][2].limit > 0, "the fallback reads history");
+  assert.equal(
+    subscription.pendingReplaySince,
+    floor,
+    "the floor stays pinned for anything the cap left out",
+  );
+});
+
+test("a superseded replay sends no history fallback", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const subscriptions = new Map([["live-1", subscription]]);
+  const sent = [];
+  let active = true;
+  let attempts = 0;
+  await replayLiveSubscriptions({
+    subscriptions,
+    isActive: () => active,
+    sendRaw: ackingSendRaw(subscriptions, 0, sent),
+    requestRepair: async () => {
+      if (++attempts === PAGE_REPLAY_MAX_ATTEMPTS) active = false;
+      throw new Error("error: database error");
+    },
+  });
+  assert.equal(attempts, PAGE_REPLAY_MAX_ATTEMPTS);
+  assert.equal(sent.length, 1, "only the original live-only REQ went out");
 });

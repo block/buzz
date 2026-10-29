@@ -4,11 +4,17 @@ import type { RelaySubscription } from "@/shared/api/relayClientShared";
  * Reconnect resume cursor.
  *
  * A subscription that reached EOSE on a connection was complete up to that
- * EOSE and live afterwards until the socket closed, so a quiet subscription
- * needs no history older than that close on its next reconnect. Without this,
- * a subscription that never received an event replays its ORIGINAL filter
- * (startup `since`, full `limit`) on every reconnect, which multiplies reader
- * load across the fleet during a rolling relay deploy.
+ * EOSE and subscribed afterwards until the socket's last inbound frame, so a
+ * quiet subscription needs no history older than that on its next reconnect.
+ * Without this, a subscription that never received an event replays its
+ * ORIGINAL filter (startup `since`, full `limit`) on every reconnect, which
+ * multiplies reader load across the fleet during a rolling relay deploy.
+ *
+ * Subscribed is not delivered: the relay drops fan-out frames for a client
+ * whose send buffer is full while the drop count is under its grace limit
+ * (`ConnectionState::send` in `crates/buzz-relay/src/connection.rs`), so a
+ * quiet subscription can miss its only event and still count as live. The
+ * original-filter replay healed that case; this cursor does not (known debt).
  */
 
 /** Skew below the newest event seen (matches the pre-existing replay skew). */
@@ -70,23 +76,22 @@ export function computeResumeSince({
  * their previous `liveUntil` (if any): their history was never confirmed
  * delivered on this connection.
  *
- * `lastInboundMs` caps the stamp for half-open sockets: when a stall is only
- * detected after a minute of silence, the close time overstates how long the
- * subscription was actually live.
+ * The stamp is the time of the connection's last inbound peer frame, never
+ * the close: after a sleep or a stalled socket, the close is processed long
+ * after the subscription last heard from the relay. When that time is unknown
+ * (`0`) the previous `liveUntil` is kept rather than guessed from the clock.
  */
 export function stampLiveUntilOnClose(
   subscriptions: Map<string, RelaySubscription>,
   generation: number,
-  /** Time of the last inbound frame, or 0 when unknown. */
+  /** Time of the connection's last inbound peer frame, or 0 when unknown. */
   lastInboundMs: number,
   nowMs = Date.now(),
 ) {
-  const liveUntil = Math.floor(
-    (lastInboundMs ? Math.min(nowMs, lastInboundMs) : nowMs) / 1_000,
-  );
+  const liveUntil = Math.floor(Math.min(nowMs, lastInboundMs) / 1_000);
   for (const subscription of subscriptions.values()) {
     if (subscription.mode !== "live") continue;
-    if (subscription.eoseGeneration === generation) {
+    if (subscription.eoseGeneration === generation && lastInboundMs > 0) {
       subscription.liveUntil = Math.max(subscription.liveUntil ?? 0, liveUntil);
     }
     subscription.eoseGeneration = undefined;
