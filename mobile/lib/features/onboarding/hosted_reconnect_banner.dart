@@ -21,7 +21,9 @@ class HostedReconnectBanner extends HookConsumerWidget {
     final auth = ref.watch(hostedRelayAuthProvider);
     useListenable(auth);
     final config = ref.watch(relayConfigProvider);
-    if (auth.failedRelay != config.baseUrl ||
+    // Organization relays have their own sign-in banner.
+    if (auth.organizationProtects(config) ||
+        auth.failedRelay != config.baseUrl ||
         auth.failedPubkey != pubkeyFromNsec(config.nsec) ||
         auth.failure == null) {
       return const SizedBox.shrink();

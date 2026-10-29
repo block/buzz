@@ -8,6 +8,7 @@ import '../relay/relay_provider.dart';
 import 'builderlab_account.dart';
 import 'account_identity_store.dart';
 import 'hosted_environment.dart';
+import 'organization_environment.dart';
 
 final builderlabAccountProvider = Provider<BuilderlabAccountClient>((ref) {
   final account = BuilderlabAccountClient();
@@ -15,8 +16,21 @@ final builderlabAccountProvider = Provider<BuilderlabAccountClient>((ref) {
   return account;
 });
 
+/// The organization's own account session, separate from the hosted account.
+/// Null unless this build configures [OrganizationEnvironment].
+final organizationAccountProvider = Provider<BuilderlabAccountClient?>((ref) {
+  final origin = OrganizationEnvironment.origin;
+  if (origin == null) return null;
+  final account = BuilderlabAccountClient(accountOrigin: origin);
+  ref.onDispose(account.dispose);
+  return account;
+});
+
 final hostedRelayAuthProvider = Provider<HostedRelayAuth>((ref) {
-  final auth = HostedRelayAuth(ref.watch(builderlabAccountProvider));
+  final auth = HostedRelayAuth(
+    ref.watch(builderlabAccountProvider),
+    organization: ref.watch(organizationAccountProvider),
+  );
   ref.onDispose(auth.dispose);
   return auth;
 });
@@ -28,16 +42,22 @@ final hostedHttpClientFactoryProvider = Provider<http.Client Function()>((ref) {
   return () => HostedRelayHttpClient(auth, config);
 });
 
-/// One account session, with a short-lived assertion for the current relay/key.
-/// Enable alongside backend issuance; legacy and self-hosted builds stay usable.
+/// One account session per realm, with a short-lived assertion for the current
+/// relay/key. Hosted communities use [account] when [enabled]; the build's
+/// organization relays use [organization]. Enable alongside backend issuance;
+/// legacy and self-hosted builds stay usable.
 class HostedRelayAuth extends ChangeNotifier {
   HostedRelayAuth(
     this.account, {
+    this.organization,
+    this.organizationRelay = OrganizationEnvironment.protects,
     this.enabled = const bool.fromEnvironment('BUZZ_HOSTED_RELAY_AUTH'),
     DateTime Function()? now,
   }) : _now = now ?? DateTime.now;
 
   final BuilderlabAccountClient account;
+  final BuilderlabAccountClient? organization;
+  final bool Function(Uri relay) organizationRelay;
   final bool enabled;
   final DateTime Function() _now;
   ({
@@ -54,10 +74,24 @@ class HostedRelayAuth extends ChangeNotifier {
   String? failedPubkey;
   AccountFailure? failure;
 
-  bool protects(RelayConfig config) =>
-      enabled &&
-      HostedEnvironment.requiresAuth(Uri.parse(config.baseUrl).host) &&
-      HostedEnvironment.supportsRelay(Uri.parse(config.baseUrl));
+  bool protects(RelayConfig config) => _accountFor(config) != null;
+
+  /// Whether this relay uses the organization's session, not the hosted one.
+  bool organizationProtects(RelayConfig config) =>
+      organization != null && identical(_accountFor(config), organization);
+
+  BuilderlabAccountClient? _accountFor(RelayConfig config) {
+    final relay = Uri.parse(config.baseUrl);
+    if (organization != null && organizationRelay(relay)) {
+      return organization;
+    }
+    if (enabled &&
+        HostedEnvironment.requiresAuth(relay.host) &&
+        HostedEnvironment.supportsRelay(relay)) {
+      return account;
+    }
+    return null;
+  }
 
   /// Headers for optional reads, without starting account work or changing
   /// recovery state. Null means protected metadata must wait for active auth.
@@ -76,7 +110,25 @@ class HostedRelayAuth extends ChangeNotifier {
   }
 
   Future<Map<String, String>> headers(RelayConfig config) async {
-    if (!protects(config)) return const {};
+    final client = _accountFor(config);
+    if (client == null) return const {};
+    try {
+      return await _headers(config, client);
+    } on AccountFailure catch (failure) {
+      // Without an organization session, connect as before and let the relay
+      // decide: an enforcing relay refuses, and sign-in is offered.
+      if (failure == AccountFailure.signedOut &&
+          identical(client, organization)) {
+        return const {};
+      }
+      rethrow;
+    }
+  }
+
+  Future<Map<String, String>> _headers(
+    RelayConfig config,
+    BuilderlabAccountClient client,
+  ) async {
     final relay = Uri.parse(config.wsUrl).replace(path: '').toString();
     final pubkey = pubkeyFromNsec(config.nsec);
     if (pubkey == null) throw AccountFailure.denied;
@@ -85,7 +137,7 @@ class HostedRelayAuth extends ChangeNotifier {
       if (cached != null &&
           cached.relay == relay &&
           cached.pubkey == pubkey &&
-          identical(cached.account, account.account) &&
+          identical(cached.account, client.account) &&
           cached.expiry.isAfter(_now())) {
         return {'Nostr-Federated-Identity': 'Bearer ${cached.token}'};
       }
@@ -99,7 +151,7 @@ class HostedRelayAuth extends ChangeNotifier {
         }
         continue;
       }
-      final operation = _issue(config, relay, pubkey);
+      final operation = _issue(config, client, relay, pubkey);
       _pending = operation;
       try {
         await operation;
@@ -110,19 +162,27 @@ class HostedRelayAuth extends ChangeNotifier {
     throw AccountFailure.unavailable;
   }
 
-  Future<void> _issue(RelayConfig config, String relay, String pubkey) async {
+  Future<void> _issue(
+    RelayConfig config,
+    BuilderlabAccountClient account,
+    String relay,
+    String pubkey,
+  ) async {
     try {
       if (account.account == null && await account.restore() == null) {
         throw AccountFailure.signedOut;
       }
       final session = account.account!;
-      // Issuance can create a binding. Reconnect must not silently give a
-      // different, unbound account this community's saved identity.
       final current = await account.currentIdentity();
       if (!identical(session, account.account)) throw AccountFailure.denied;
       final identity = current['identity'];
       if (current['error'] != null) throw AccountFailure.invalidResponse;
-      if (identity == null) {
+      if (identity == null && identical(account, organization)) {
+        // The organization's issuer binds the proven key on first issuance;
+        // that binding is how a member's existing key joins the organization.
+      } else if (identity == null) {
+        // Issuance can create a binding. Reconnect must not silently give a
+        // different, unbound hosted account this community's saved identity.
         final AccountIdentitySnapshot? saved;
         try {
           saved = await AccountIdentityStore()
