@@ -107,15 +107,17 @@ async fn publish_presence(
     keys: &nostr::Keys,
     status: &str,
 ) -> Result<(), relay::RelayError> {
+    publisher.publish_event(presence_event(keys, status)?).await
+}
+
+fn presence_event(keys: &nostr::Keys, status: &str) -> Result<nostr::Event, relay::RelayError> {
     use buzz_core::kind::KIND_PRESENCE_UPDATE;
     use nostr::{EventBuilder, Kind};
 
-    let event = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
+    EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
         .tags([])
         .sign_with_keys(keys)
-        .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
-    publisher.publish_event(event).await?;
-    Ok(())
+        .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))
 }
 
 fn emit_runtime_lifecycle(
@@ -4377,27 +4379,31 @@ async fn run_harness(
         h.abort();
     }
 
-    // Best-effort: set presence to offline before exiting.
+    // Best-effort: set presence to offline before closing the socket. The
+    // acknowledged shutdown owns `relay`, preventing a close from overtaking
+    // the final EVENT and revoking its auth session first.
     if config.presence_enabled {
-        match tokio::time::timeout(
-            Duration::from_secs(2),
-            publish_presence(&presence_publisher, &presence_keys, "offline"),
-        )
-        .await
-        {
-            Ok(Ok(_)) => tracing::info!("presence set to offline"),
-            Ok(Err(e)) => tracing::warn!("failed to set offline presence: {e}"),
-            Err(_) => tracing::warn!("offline presence timed out"),
+        match presence_event(&presence_keys, "offline") {
+            Ok(event) => match relay
+                .publish_event_acked_then_shutdown(event, Duration::from_secs(2))
+                .await
+            {
+                Ok(ack) if ack.accepted => tracing::info!("presence set to offline"),
+                Ok(ack) => tracing::warn!("relay refused offline presence: {}", ack.message),
+                Err(e) => tracing::warn!("failed to set offline presence: {e}"),
+            },
+            Err(e) => {
+                tracing::warn!("failed to build offline presence: {e}");
+                relay.shutdown().await;
+            }
         }
+    } else {
+        relay.shutdown().await;
     }
 
     if let Some(handle) = relay_observer_publisher_task.take() {
         handle.abort();
     }
-
-    // Graceful relay shutdown — sends WebSocket close frame and waits up to 5s
-    // for the background task to finish, rather than aborting immediately (#40).
-    relay.shutdown().await;
 
     tracing::info!("buzz-acp stopped");
     Ok(())
