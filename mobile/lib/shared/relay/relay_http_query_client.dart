@@ -1,14 +1,24 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
+
+/// The default transport. `dart:io` would inflate gzip responses on the
+/// calling isolate, so leave them compressed for the response decoder.
+http.Client _gzipPassthroughClient() =>
+    IOClient(HttpClient()..autoUncompress = false);
 
 /// Owns the reusable HTTP transport used for relay `/query` requests.
+///
+/// Requests advertise gzip. A response body may therefore come back
+/// compressed; decode it with `relayResponseText` or `decodeRelayQueryResponse`.
 class RelayHttpQueryClient {
   RelayHttpQueryClient({
     http.Client? client,
     http.Client Function()? clientFactory,
   }) : _injectedClient = client,
-       _clientFactory = clientFactory ?? (() => http.Client());
+       _clientFactory = clientFactory ?? _gzipPassthroughClient;
 
   final http.Client? _injectedClient;
   final http.Client Function() _clientFactory;
@@ -30,6 +40,7 @@ class RelayHttpQueryClient {
     try {
       final request = http.Request('POST', url)
         ..followRedirects = false
+        ..headers['Accept-Encoding'] = 'gzip'
         ..headers.addAll(headers)
         ..bodyBytes = body;
       final transport = _injectedClient ?? generation!.client;
