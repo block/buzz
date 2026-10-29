@@ -328,6 +328,20 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                       fit: StackFit.expand,
                       children: [
                         Positioned.fill(
+                          child: IgnorePointer(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: recording.value
+                                    ? context.colors.primary
+                                    : Colors.transparent,
+                                borderRadius: BorderRadius.circular(
+                                  Radii.navigationCapsule,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Positioned.fill(
                           child: !active
                               ? const SizedBox.shrink()
                               : Padding(
@@ -387,6 +401,9 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                                                     ),
                                                   )
                                                 : VoiceNoteWaveform(
+                                                    color: context
+                                                        .colors
+                                                        .onPrimary,
                                                     samples: [
                                                       ...List.filled(
                                                         41 -
