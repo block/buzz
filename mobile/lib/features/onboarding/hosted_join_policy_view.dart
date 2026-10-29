@@ -21,6 +21,10 @@ class HostedJoinPolicyView extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final ageConfirmed = useState(false);
+    final documents = [
+      if (policy.terms != null) 'terms',
+      if (policy.privacy != null) 'privacy policy',
+    ];
     final children = <Widget>[
       if (policy.terms != null)
         ExpansionTile(
@@ -70,8 +74,9 @@ class HostedJoinPolicyView extends HookWidget {
     if (fullScreen) {
       return OnboardingStepPage(
         title: 'Join your community',
-        subtitle:
-            'Review this community’s terms and privacy policy before joining.',
+        subtitle: documents.isEmpty
+            ? null
+            : 'Review this community’s ${documents.join(' and ')} before joining.',
         onBack: onBack ?? () {},
         content: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,

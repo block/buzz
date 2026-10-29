@@ -1,4 +1,6 @@
 import '../../helpers/two_finger_double_tap.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_community_connection.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/features/pairing/add_community_page.dart';
@@ -172,6 +174,29 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Select a community'), findsOneWidget);
+      for (final conflict in [false, true]) {
+        fixture.beforeAdmission = (name) async {
+          if (name == 'two.communities.buzz.xyz') {
+            if (conflict) throw const SavedCommunityIdentityConflict();
+            throw AccountFailure.unavailable;
+          }
+        };
+        await tester.tap(find.byKey(const Key('community-switcher-add')));
+        await tester.pumpAndSettle();
+        expect(find.byType(OnboardingAppEntry), findsNothing);
+        await tester.tap(
+          find.text(
+            conflict ? 'Keep saved identity and skip' : 'Skip this community',
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(OnboardingAppEntry), findsOneWidget);
+        expect(fixture.openedCommunity, isNull);
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+        expect(find.text('Select a community'), findsOneWidget);
+        fixture.admitted.clear();
+      }
       fixture.beforeAdmission = null;
       // Add restores existing memberships, stays opaque, and returns to the
       // picker on Back without the disposed Add route cancelling discovery.

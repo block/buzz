@@ -108,7 +108,7 @@ class HostedFlow extends ChangeNotifier {
   String? landingRelay;
   final Set<String> _addedRelays = {};
   bool _addingCommunities = false;
-  bool _preparingAdd = false;
+  Completer<bool>? _pendingAdd;
   String? _batchSubject;
   String? _conflictingRelay;
   String? _failedRelay;
@@ -649,26 +649,26 @@ class HostedFlow extends ChangeNotifier {
         !communities.any((item) => item.relayUrl == relay)) {
       return;
     }
+    selectedRelays = Set.unmodifiable({...selectedRelays, relay});
     landingRelay = relay;
     notifyListeners();
   }
 
   /// Restore existing memberships before presenting a separate Add route.
-  Future<bool> prepareToAddCommunity() async {
-    if (_preparingAdd || stage != HostedFlowStage.chooseCommunities) {
-      return false;
+  Future<bool> prepareToAddCommunity() {
+    if (_pendingAdd != null || stage != HostedFlowStage.chooseCommunities) {
+      return Future.value(false);
     }
-    _preparingAdd = true;
-    try {
-      final restoring = addSelectedCommunities();
-      final generation = _generation;
-      await restoring;
-      return !_disposed &&
-          generation == _generation &&
-          stage == HostedFlowStage.chooseCommunities;
-    } finally {
-      _preparingAdd = false;
-    }
+    if (selectedRelays.isEmpty) return Future.value(true);
+    final pending = _pendingAdd = Completer<bool>();
+    unawaited(addSelectedCommunities());
+    return pending.future;
+  }
+
+  void _finishPreparingAdd(bool ready) {
+    final pending = _pendingAdd;
+    _pendingAdd = null;
+    pending?.complete(ready);
   }
 
   Future<void> addSelectedCommunities() {
@@ -686,6 +686,7 @@ class HostedFlow extends ChangeNotifier {
   /// Keep completed additions while allowing a different landing choice.
   void backToCommunityChoices() {
     if (!canChangeCommunities) return;
+    _finishPreparingAdd(false);
     _nextGeneration();
     _conflictingRelay = null;
     addingCommunityName = null;
@@ -771,15 +772,16 @@ class HostedFlow extends ChangeNotifier {
     }
     if (!current()) return;
     addingCommunityName = null;
+    if (_pendingAdd != null) {
+      _set(HostedFlowStage.chooseCommunities);
+      _finishPreparingAdd(true);
+      return;
+    }
     if (_addedRelays.isEmpty) {
       communities = List.unmodifiable(
         communities.where((item) => selectedRelays.contains(item.relayUrl)),
       );
       await leave(noCommunities: true);
-      return;
-    }
-    if (_preparingAdd) {
-      _set(HostedFlowStage.chooseCommunities);
       return;
     }
     final destination = _addedRelays.contains(landingRelay)
@@ -896,6 +898,7 @@ class HostedFlow extends ChangeNotifier {
   bool noCommunitiesToAdd = false;
 
   void _clearCommunityBatch() {
+    _finishPreparingAdd(false);
     noCommunitiesToAdd = false;
     communities = const [];
     selectedRelays = const {};
@@ -972,6 +975,7 @@ class HostedFlow extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _finishPreparingAdd(false);
     _cancelPolicy();
     _cancelProfile();
     _nextGeneration();

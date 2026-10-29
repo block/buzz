@@ -71,11 +71,8 @@ void main() {
         // Account restoration may resume independently of the Add choices.
         await f.flow.signInAccount();
         await f.settle(tester);
-        if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-          expect(f.probes, isEmpty);
-          await tester.tap(find.byType(CommunityGridOption).first);
-          await f.settle(tester);
-        }
+        expect(f.flow.stage, HostedFlowStage.setupIdentity);
+        expect(f.probes, isEmpty);
         expect(find.text('Create my Buzz identity'), findsOneWidget);
         expect(find.text('Import existing identity'), findsOneWidget);
         expect(await f.store.read(), isNull);
@@ -127,11 +124,8 @@ void main() {
     // Account restoration may resume independently of the Add choices.
     await f.flow.signInAccount();
     await f.settle(tester);
-    if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-      expect(f.probes, isEmpty);
-      await tester.tap(find.byType(CommunityGridOption).first);
-      await f.settle(tester);
-    }
+    expect(f.flow.stage, HostedFlowStage.setupIdentity);
+    expect(f.probes, isEmpty);
     expect(find.text('Create my Buzz identity'), findsNothing);
     expect(find.text('Import existing identity'), findsOneWidget);
     await f.tap(tester, 'Import existing identity');
@@ -188,11 +182,10 @@ void main() {
     // Account restoration may resume independently of the Add choices.
     await f.flow.signInAccount();
     await f.settle(tester);
-    if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-      expect(f.probes, isEmpty);
-      await tester.tap(find.byType(CommunityGridOption).first);
-      await f.settle(tester);
-    }
+    expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+    expect(f.probes, isEmpty);
+    await tester.tap(find.byType(CommunityGridOption).first);
+    await f.settle(tester);
     await tester.tap(find.byTooltip('Add profile photo'));
     await f.settle(tester);
     expect(find.byType(ProfileSetupAvatarEditor), findsOneWidget);
@@ -215,11 +208,10 @@ void main() {
     // Account restoration may resume independently of the Add choices.
     await f.flow.signInAccount();
     await f.settle(tester);
-    if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-      expect(f.probes, isEmpty);
-      await tester.tap(find.byType(CommunityGridOption).first);
-      await f.settle(tester);
-    }
+    expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+    expect(f.probes, isEmpty);
+    await tester.tap(find.byType(CommunityGridOption).first);
+    await f.settle(tester);
     await tester.tap(find.byTooltip('Add profile photo'));
     await f.settle(tester);
     final url = emojiAvatarDataUrl('🐝', 0xFFFFE75C);
@@ -631,11 +623,11 @@ void main() {
         // Account restoration may resume independently of the Add choices.
         await f.flow.signInAccount();
         await f.settle(tester);
-        if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-          expect(f.probes, isEmpty);
-          await tester.tap(find.byType(CommunityGridOption).first);
-          await f.settle(tester);
-        }
+        expect(
+          f.flow.stage,
+          boundAccount ? HostedFlowStage.idle : HostedFlowStage.chooseIdentity,
+        );
+        expect(f.probes, isEmpty);
         if (!boundAccount) {
           expect(find.text('Saved identity'), findsOneWidget);
           expect(f.sent('/verify'), isEmpty);
@@ -674,11 +666,8 @@ void main() {
       // Account restoration may resume independently of the Add choices.
       await f.flow.signInAccount();
       await f.settle(tester);
-      if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-        expect(f.probes, isEmpty);
-        await tester.tap(find.byType(CommunityGridOption).first);
-        await f.settle(tester);
-      }
+      expect(f.flow.stage, HostedFlowStage.chooseIdentity);
+      expect(f.probes, isEmpty);
       expect(find.text('Use Builderlab identity'), findsNWidgets(2));
       await f.tap(tester, fullNpub(f.secondKeys.public)!);
       expect((await f.store.read())!.pubkey, f.secondKeys.public);
@@ -694,11 +683,8 @@ void main() {
       );
       f.rejectList = false;
       await f.tap(tester, 'Try again');
-      if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-        expect(f.probes, isEmpty);
-        await tester.tap(find.byType(CommunityGridOption).first);
-        await f.settle(tester);
-      }
+      expect(f.flow.stage, HostedFlowStage.idle);
+      expect(f.probes, isEmpty);
       expect(
         find.text(
           'No communities available to add. Scan a QR code or use an invite link.',
@@ -711,11 +697,10 @@ void main() {
       // Account restoration may resume independently of the Add choices.
       await f.flow.signInAccount();
       await f.settle(tester);
-      if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-        expect(f.probes, isEmpty);
-        await tester.tap(find.byType(CommunityGridOption).first);
-        await f.settle(tester);
-      }
+      expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+      expect(f.probes, isEmpty);
+      await tester.tap(find.byType(CommunityGridOption).first);
+      await f.settle(tester);
       // Continue explicitly admits the selected communities.
       expect(find.byType(CheckboxListTile).hitTestable(), findsNothing);
       expect(
@@ -776,11 +761,10 @@ void main() {
         // Account restoration may resume independently of the Add choices.
         await f.flow.signInAccount();
         await f.settle(tester);
-        if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-          expect(f.probes, isEmpty);
-          await tester.tap(find.byType(CommunityGridOption).last);
-          await f.settle(tester);
-        }
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(f.probes, isEmpty);
+        await tester.tap(find.byType(CommunityGridOption).last);
+        await f.settle(tester);
         // All memberships are restored; the second is the chosen destination.
         expect(f.profileWrites, isEmpty);
         expect(

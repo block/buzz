@@ -269,11 +269,10 @@ void main() {
         expect(find.byType(HostedConnectPage), findsNothing);
         await tester.tap(find.text('Continue with Builderlab'));
         await tester.pumpAndSettle();
-        if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-          expect(find.byType(CommunityGridOption), findsWidgets);
-          await tester.tap(find.byType(CommunityGridOption).first);
-          await tester.pumpAndSettle();
-        }
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(find.byType(CommunityGridOption), findsWidgets);
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.pumpAndSettle();
         expect(find.byType(CommunityGridOption), findsNothing);
         expect(f.admitted, [
           'one.communities.buzz.xyz',
@@ -288,11 +287,10 @@ void main() {
         };
         await tester.tap(find.text('Continue with Builderlab'));
         await tester.pumpAndSettle();
-        if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-          expect(find.byType(CommunityGridOption), findsWidgets);
-          await tester.tap(find.byType(CommunityGridOption).first);
-          await tester.pumpAndSettle();
-        }
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(find.byType(CommunityGridOption), findsWidgets);
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.pumpAndSettle();
         expect(find.text('Keep saved identity and skip'), findsOneWidget);
         expect(find.text('1 community added and kept.'), findsOneWidget);
         await tester.tap(find.text('Keep saved identity and skip'));
@@ -305,11 +303,10 @@ void main() {
         };
         await tester.tap(find.text('Continue with Builderlab'));
         await tester.pumpAndSettle();
-        if (f.flow.stage == HostedFlowStage.chooseCommunities) {
-          expect(find.byType(CommunityGridOption), findsWidgets);
-          await tester.tap(find.byType(CommunityGridOption).first);
-          await tester.pumpAndSettle();
-        }
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(find.byType(CommunityGridOption), findsWidgets);
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.pumpAndSettle();
         expect(find.text('1 community added and kept.'), findsOneWidget);
         expect(find.text('Try again').hitTestable(), findsNothing);
         expect(find.text('Skip this community').hitTestable(), findsOneWidget);

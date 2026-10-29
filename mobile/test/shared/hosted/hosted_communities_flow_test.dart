@@ -42,6 +42,33 @@ void main() {
     );
   }
 
+  test(
+    'selecting a skipped relay retries it as the landing community',
+    () async {
+      final f = await fixture();
+      f.rows = [f.row('one'), f.row('two'), f.row('three')];
+      f.beforeAdmission = (name) async {
+        if (name != 'one.communities.buzz.xyz') {
+          throw AccountFailure.unavailable;
+        }
+      };
+      await f.flow.signInAccount();
+      await f.flow.addSelectedCommunities();
+      await f.flow.skipFailedCommunity();
+      expect(f.flow.stage, HostedFlowStage.blocked);
+      f.flow.backToCommunityChoices();
+      f.flow.chooseLandingCommunity('wss://two.communities.buzz.xyz');
+      f.beforeAdmission = null;
+      await f.flow.addSelectedCommunities();
+      expect(f.admitted, [
+        'one.communities.buzz.xyz',
+        'two.communities.buzz.xyz',
+        'three.communities.buzz.xyz',
+      ]);
+      expect(f.openedCommunity, 'wss://two.communities.buzz.xyz');
+    },
+  );
+
   test('malformed list targets cannot authorize admission', () async {
     final f = await fixture();
     f.rows = [
