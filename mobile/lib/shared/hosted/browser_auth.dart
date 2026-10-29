@@ -144,11 +144,13 @@ class BrowserAuth {
       } catch (_) {
         throw BrowserAuthFailure.storage;
       }
+      // Public accounts must finish web setup before native code issuance.
+      // Organization accounts retain their existing direct CLI login.
+      final publicAccount = origin == HostedEnvironment.origin;
       return origin.replace(
-        path: '/api/goose/v1/auth/login',
+        path: publicAccount ? '/auth/native' : '/api/goose/v1/auth/login',
         queryParameters: {
-          'type': 'cli',
-          'product': 'buzz',
+          if (!publicAccount) ...{'type': 'cli', 'product': 'buzz'},
           'returnTo': callback,
           'state': state,
           'code_challenge': base64UrlEncode(
