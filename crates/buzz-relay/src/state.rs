@@ -2327,9 +2327,11 @@ impl AppState {
     /// Get accessible channel IDs with a 10-second cache. Falls back to DB on miss.
     ///
     /// The open half is shared by every reader in the community and its
-    /// cross-pod invalidation is best-effort, so it is used only for
-    /// [`OPEN_CHANNELS_MAX_AGE`] after its read began: a channel that left the
-    /// open set on another pod is granted here for at most that long.
+    /// cross-pod invalidation is best-effort, so a cached set is served only
+    /// for [`OPEN_CHANNELS_MAX_AGE`] after its read began: a channel that left
+    /// the open set on another pod is granted from the cache for at most that
+    /// long. A caller whose own read straddles a revocation gets what that
+    /// read saw, as with any uncached read.
     pub async fn get_accessible_channel_ids_cached(
         &self,
         community_id: CommunityId,
@@ -3421,19 +3423,25 @@ pub(crate) mod tests {
                 // Only the writer pod drops its caches; the reader pod never
                 // hears of it.
                 writer_pod.invalidate_all_accessible_channels_local(community);
+                let stale = reader_pod.open_channels_cache.get(&community).unwrap();
+                let restamp = |read_at: Instant| {
+                    reader_pod.open_channels_cache.insert(
+                        community,
+                        Arc::new(OpenChannels {
+                            ids: stale.ids.clone(),
+                            read_at,
+                        }),
+                    );
+                };
+                // Stamped fresh so the control holds however slowly the
+                // steps above ran.
+                restamp(Instant::now());
                 assert!(
                     grants(reader(), channel).await,
                     "control: within the max age the reader pod still uses its old open set"
                 );
 
-                let stale = reader_pod.open_channels_cache.get(&community).unwrap();
-                reader_pod.open_channels_cache.insert(
-                    community,
-                    Arc::new(OpenChannels {
-                        ids: stale.ids.clone(),
-                        read_at: stale.read_at - OPEN_CHANNELS_MAX_AGE,
-                    }),
-                );
+                restamp(Instant::now() - OPEN_CHANNELS_MAX_AGE);
                 assert!(
                     !grants(reader(), channel).await,
                     "{revoke}: a new reader was granted a revoked channel past the max age"
