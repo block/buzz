@@ -9448,12 +9448,14 @@ pub(crate) mod postgres_tests {
         fx.drop().await;
     }
 
-    /// A history read that fails with an ordinary DB error ends the REQ with a
-    /// retryable CLOSED, never EOSE: EOSE would tell a resuming client it holds
-    /// every stored event, so its next REQ would skip the history that failed.
-    /// The CLOSED also retires the subscription, and once the DB recovers a
-    /// reconnect with the same REQ replays the missed event.
-    /// Mutation: send EOSE on the non-timeout error again → RED.
+    /// A failed history read ends the REQ with CLOSED, never EOSE: EOSE would
+    /// tell a resuming client it holds every stored event, so its next REQ would
+    /// skip the history that failed. A statement timeout keeps its terminal
+    /// `query timed out` reason; any other DB error gets the retryable
+    /// `database error`. Either CLOSED retires the subscription, and once the DB
+    /// recovers a reconnect with the same REQ replays the missed event.
+    /// Mutations: send EOSE on the non-timeout error again, or map every error
+    /// to `database error` → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn failed_history_read_closes_and_reconnect_replays_the_history() {
@@ -9474,6 +9476,42 @@ pub(crate) mod postgres_tests {
         let channel: uuid::Uuid = fx.channel.parse().expect("channel uuid");
         let topic = buzz_pubsub::EventTopic::Channel(channel);
         let tenant = TenantContext::resolved(fx.community, fx.host.clone());
+        let fails_and_retires = |sub: &'static str, reason: &'static str| {
+            let state = fx.state.clone();
+            let (conn, mut rx) = fx.ws_conn();
+            let tenant = tenant.clone();
+            async move {
+                handle_req(
+                    sub.into(),
+                    vec![req()],
+                    vec![None],
+                    conn.clone(),
+                    state.clone(),
+                )
+                .await;
+                assert_eq!(
+                    frames(&mut rx),
+                    vec![format!(r#"["CLOSED","{sub}","{reason}"]"#)],
+                    "a failed history read must CLOSE with {reason:?}, not EOSE"
+                );
+                assert!(conn.subscriptions.lock().await.is_empty(), "conn map");
+                assert!(
+                    state.sub_registry.get_filters(conn.conn_id, sub).is_none(),
+                    "CLOSED must retire the fan-out registration"
+                );
+                assert_eq!(state.pubsub.topic_refcount(&tenant, topic).await, 0);
+            }
+        };
+
+        // A replica lock outlasting its 300ms `statement_timeout`: the read is
+        // cancelled with 57014, which keeps the terminal timeout reason.
+        let mut locker = fx.replica.begin().await.expect("begin locker");
+        sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locker)
+            .await
+            .expect("lock replica events");
+        fails_and_retires("t", crate::handlers::req::QUERY_TIMED_OUT_CLOSED).await;
+        locker.rollback().await.expect("unlock");
 
         // `events` gone on both pools: the history read fails with 42P01 on the
         // replica and again on the writer re-run. Not a statement timeout.
@@ -9491,33 +9529,7 @@ pub(crate) mod postgres_tests {
             }
         };
         rename("events", "events_gone").await;
-        let (conn, mut rx) = fx.ws_conn();
-        handle_req(
-            "h".into(),
-            vec![req()],
-            vec![None],
-            conn.clone(),
-            fx.state.clone(),
-        )
-        .await;
-        assert_eq!(
-            frames(&mut rx),
-            vec![format!(
-                r#"["CLOSED","h","{}"]"#,
-                crate::handlers::req::DATABASE_ERROR_CLOSED
-            )],
-            "a failed history read must CLOSE, not EOSE"
-        );
-        assert!(conn.subscriptions.lock().await.is_empty(), "conn map");
-        assert!(
-            fx.state
-                .sub_registry
-                .get_filters(conn.conn_id, "h")
-                .is_none(),
-            "CLOSED must retire the fan-out registration"
-        );
-        assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 0);
-        drop(conn);
+        fails_and_retires("h", crate::handlers::req::DATABASE_ERROR_CLOSED).await;
 
         // The DB recovers and the client reconnects with the same REQ.
         rename("events_gone", "events").await;
