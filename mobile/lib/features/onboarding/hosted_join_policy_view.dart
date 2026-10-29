@@ -24,26 +24,39 @@ class HostedJoinPolicyView extends HookWidget {
     final children = <Widget>[
       if (policy.terms != null)
         ExpansionTile(
+          tilePadding: fullScreen ? EdgeInsets.zero : null,
+          expandedCrossAxisAlignment: fullScreen
+              ? CrossAxisAlignment.stretch
+              : null,
           title: const Text('Terms of service'),
           children: [
             Padding(
-              padding: const EdgeInsets.all(Grid.sm),
+              padding: fullScreen
+                  ? const EdgeInsets.symmetric(vertical: Grid.sm)
+                  : const EdgeInsets.all(Grid.sm),
               child: SelectableText(policy.terms!),
             ),
           ],
         ),
       if (policy.privacy != null)
         ExpansionTile(
+          tilePadding: fullScreen ? EdgeInsets.zero : null,
+          expandedCrossAxisAlignment: fullScreen
+              ? CrossAxisAlignment.stretch
+              : null,
           title: const Text('Privacy policy'),
           children: [
             Padding(
-              padding: const EdgeInsets.all(Grid.sm),
+              padding: fullScreen
+                  ? const EdgeInsets.symmetric(vertical: Grid.sm)
+                  : const EdgeInsets.all(Grid.sm),
               child: SelectableText(policy.privacy!),
             ),
           ],
         ),
       if (policy.ageRequired)
         CheckboxListTile(
+          contentPadding: fullScreen ? EdgeInsets.zero : null,
           value: ageConfirmed.value,
           onChanged: (value) => ageConfirmed.value = value ?? false,
           title: const Text('I am 18 or older'),
