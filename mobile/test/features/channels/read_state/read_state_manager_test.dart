@@ -557,7 +557,53 @@ void main() {
     expect(manager.getEffectiveTimestamp('channel-1'), 300);
   });
 
-  test('a reconnect during initialize leaves one live subscription', () async {
+  test(
+    'a connect during a successful initialize does not sync again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      // First connect: initialize waits on a history REQ held for the socket
+      // while the session reports connected and the provider's listener fires.
+      final gate = Completer<void>();
+      final relay = _FakeRelaySession()..fetchGate = gate.future;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+
+      final initializing = manager.initialize();
+      final reinitializing = manager.reinitializeRemote();
+      relay.fetchGate = null;
+      gate.complete();
+      await Future.wait([initializing, reinitializing]);
+
+      expect(relay.fetchCount, 1);
+      expect(relay.subscribeCount, 1);
+      expect(relay.liveSubscriptions, 1);
+
+      // A later reconnect syncs again and still leaves one subscription.
+      await manager.reinitializeRemote();
+      expect(relay.fetchCount, 2);
+      expect(relay.subscribeCount, 2);
+      expect(relay.liveSubscriptions, 1);
+
+      manager.dispose();
+      expect(relay.liveSubscriptions, 0);
+    },
+  );
+
+  test('a connect during a failed initialize syncs again', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final keychain = nostr.Keys.generate();
@@ -565,10 +611,10 @@ void main() {
       nsec: keychain.nsec,
       pubkey: keychain.public,
     )!;
-    // First connect: initialize waits on a history REQ held for the socket
-    // while the session reports connected and the provider's listener fires.
     final gate = Completer<void>();
-    final relay = _FakeRelaySession()..fetchGate = gate.future;
+    final relay = _FakeRelaySession()
+      ..fetchGate = gate.future
+      ..failNextFetch = true;
     final manager = ReadStateManager(
       pubkey: keychain.public,
       relayUrl: _relayUrl,
@@ -587,7 +633,52 @@ void main() {
     await Future.wait([initializing, reinitializing]);
 
     // Both passes subscribed, but the later one replaced the earlier one.
+    expect(relay.fetchCount, 2);
     expect(relay.subscribeCount, 2);
+    expect(relay.liveSubscriptions, 1);
+
+    manager.dispose();
+    expect(relay.liveSubscriptions, 0);
+  });
+
+  test('reconnects during a re-sync leave one live subscription', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final relay = _FakeRelaySession();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+    await manager.initialize();
+
+    // The first re-sync holds its fetch; three more connects arrive.
+    final gate = Completer<void>();
+    relay.fetchGate = gate.future;
+    final first = manager.reinitializeRemote();
+    await Future<void>.delayed(Duration.zero);
+    final later = [
+      manager.reinitializeRemote(),
+      manager.reinitializeRemote(),
+      manager.reinitializeRemote(),
+    ];
+    relay.fetchGate = null;
+    gate.complete();
+    await Future.wait([first, ...later]);
+
+    // One initial pass, the held re-sync, and one shared re-sync after it.
+    expect(relay.fetchCount, 3);
+    expect(relay.subscribeCount, 3);
     expect(relay.liveSubscriptions, 1);
 
     manager.dispose();
@@ -779,6 +870,8 @@ NostrEvent _readStateEvent({
 class _FakeRelaySession extends RelaySessionNotifier {
   List<NostrEvent> historyEvents = [];
   Future<void>? fetchGate;
+  bool failNextFetch = false;
+  int fetchCount = 0;
   int subscribeCount = 0;
   int liveSubscriptions = 0;
 
@@ -787,7 +880,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    fetchCount++;
     await fetchGate;
+    if (failNextFetch) {
+      failNextFetch = false;
+      throw TimeoutException('history timed out');
+    }
     return historyEvents;
   }
 
