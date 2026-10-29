@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1.7
+#
+# Relay load generator image — published as ghcr.io/block/buzz-loadgen.
+# Runs `buzz-loadgen` (crates/buzz-test-client, see perf/LOADGEN.md), for
+# example as a Kubernetes Indexed Job with one `run --shard i/n` per pod.
+#
+# Multi-arch is produced by building this file on native amd64 and arm64
+# runners (see .github/workflows/loadgen-image.yml). Keep both bases pinned to
+# manifest-list digests so either architecture resolves to immutable bytes.
+FROM rust:1.98-alpine3.22@sha256:a1796ca6fa216d6727b5f61c69e4c665b120b1a4dcb969639e2f25f1ed309456 AS builder
+
+RUN apk add --no-cache \
+      build-base \
+      cmake \
+      musl-dev \
+      perl \
+      pkgconf
+WORKDIR /build
+COPY . .
+RUN cargo build --locked --release -p buzz-test-client --bin buzz-loadgen \
+    && strip target/release/buzz-loadgen
+
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+
+LABEL org.opencontainers.image.source="https://github.com/block/buzz"
+
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -H loadgen
+
+COPY --from=builder --chmod=0755 /build/target/release/buzz-loadgen /usr/local/bin/buzz-loadgen
+
+USER loadgen
+ENTRYPOINT ["/usr/local/bin/buzz-loadgen"]
