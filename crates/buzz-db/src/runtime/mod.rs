@@ -1177,11 +1177,6 @@ impl Db {
     /// pool is warm within a handful of dial times.
     const READER_WARM_CONCURRENCY: u32 = 5;
 
-    /// Bound on one warm acquire. The pool's own acquire timeout
-    /// ([`Db::READER_ACQUIRE_TIMEOUT`]) already caps a dial; this is the
-    /// explicit backstop so a warm acquire can never outlive a wave.
-    const READER_WARM_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(1);
-
     /// Connections the next warm wave should open: the remaining shortfall,
     /// at most [`Db::READER_WARM_CONCURRENCY`].
     fn reader_warm_wave_size(target: u32, held: u32) -> u32 {
@@ -1201,12 +1196,15 @@ impl Db {
         if !Self::read_pool_boot_ping_once(read_pool.clone(), aurora_identity).await {
             return None;
         }
+        let started = std::time::Instant::now();
         let report = Self::warm_read_pool(&read_pool).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         if report.held < report.target {
             tracing::warn!(
                 target = report.target,
                 opened = report.held,
                 failed = report.failed,
+                elapsed_ms,
                 "read pool warm-up opened fewer connections than its ceiling; \
                  the rest dial on demand (warm-up is best effort)"
             );
@@ -1215,6 +1213,7 @@ impl Db {
                 target = report.target,
                 opened = report.held,
                 failed = report.failed,
+                elapsed_ms,
                 "read pool warmed to its ceiling"
             );
         }
@@ -1236,10 +1235,13 @@ impl Db {
     /// with an idle connection reuses it instead of dialing) and dropped
     /// rather than `close_on_drop`ped, so they return idle. Bounded: a
     /// single pass of bounded waves of [`Db::READER_WARM_CONCURRENCY`]
-    /// dials (see [`Db::warm_toward`]), each acquire bounded by
-    /// [`Db::READER_WARM_ACQUIRE_TIMEOUT`]; a wave that opens nothing (the
-    /// reader is down or saturated) ends the pass. There is no backoff and
-    /// no second pass.
+    /// dials (see [`Db::warm_toward`]), each acquire bounded by the pool's
+    /// own acquire timeout ([`Db::READER_ACQUIRE_TIMEOUT`]). sqlx counts the
+    /// dial inside that timeout, so a dial slower than the request budget is
+    /// dropped and counts as a failed acquire, exactly as it would on the
+    /// request path. A wave that opens nothing (the reader is down,
+    /// saturated, or dialing slower than the budget) ends the pass. There is
+    /// no backoff and no second pass.
     ///
     /// Uses plain `acquire`, not the instrumented reader acquire: warm
     /// misses must not inflate the `buzz_db_reader_*` acquire-timeout
@@ -1247,18 +1249,17 @@ impl Db {
     /// (`buzz_db_read_pool_*`) show the result.
     ///
     /// Holding connections briefly lowers the capacity left for routed
-    /// reads. The window is a few dial times at boot, before the pod takes
-    /// traffic; a read that misses in it falls back to the writer as it
-    /// would on any exhausted pool.
+    /// reads: until the pass ends it holds every reader connection,
+    /// including the floor. The window is a few dial times, usually before
+    /// the pod takes traffic. Nothing orders it before serving, though:
+    /// boot-probe retries ([`Db::READER_BOOT_PROBE_BACKOFF`]) can push it
+    /// past the listener bind, so it can briefly overlap traffic. A routed
+    /// read that misses in it falls back to the writer, as it would on any
+    /// exhausted pool.
     async fn warm_read_pool(read_pool: &PgPool) -> ReaderWarmReport {
         let target = read_pool.options().get_max_connections();
-        let (held, failed) = Self::warm_toward(target, || async {
-            tokio::time::timeout(Self::READER_WARM_ACQUIRE_TIMEOUT, read_pool.acquire())
-                .await
-                .ok()
-                .and_then(std::result::Result::ok)
-        })
-        .await;
+        let (held, failed) =
+            Self::warm_toward(target, || async { read_pool.acquire().await.ok() }).await;
         let report = ReaderWarmReport {
             target,
             held: held.len() as u32,
