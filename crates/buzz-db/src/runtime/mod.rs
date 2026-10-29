@@ -1207,7 +1207,7 @@ impl Db {
         let elapsed_ms = started.elapsed().as_millis() as u64;
         if report.held < report.target {
             tracing::warn!(
-                target = report.target,
+                ceiling = report.target,
                 held = report.held,
                 failed = report.failed,
                 elapsed_ms,
@@ -1216,7 +1216,7 @@ impl Db {
             );
         } else {
             tracing::info!(
-                target = report.target,
+                ceiling = report.target,
                 held = report.held,
                 failed = report.failed,
                 elapsed_ms,
