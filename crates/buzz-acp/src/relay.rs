@@ -1307,15 +1307,17 @@ struct BgState {
     /// `last_inbound_secs`), capped at the time the close was detected. A
     /// reconnect replays from here minus `SILENT_DROP_REPAIR_WINDOW_SECS`.
     live_until: HashMap<String, u64>,
-    /// Loss records (`channel_dropped_since` / `membership_dropped_since`)
-    /// that a REQ written on the CURRENT connection retired, keyed by
-    /// subscription ID. Writing a replay REQ retires its loss record, but the
-    /// replay only finished once that REQ reaches a counted EOSE, which removes
-    /// the entry. If the connection closes first, the record is restored, so
-    /// the next replay is still held at or before the loss whatever `last_seen`
-    /// or `live_until` say. Cleared on every close; it never outlives the
-    /// connection, so on a live connection overflow recovery behaves as before.
-    retired_loss_this_conn: HashMap<String, u64>,
+    /// Replay floor of each subscription whose REQ was written on the CURRENT
+    /// connection and has not reached a counted EOSE, keyed by subscription
+    /// ID: the earliest of those REQs' `since` and any loss record
+    /// (`channel_dropped_since` / `membership_dropped_since`) a replay REQ
+    /// retired. The relay registers the live subscription before it reads
+    /// history, so live events can move `last_seen` past history that has not
+    /// arrived yet. A counted EOSE removes the entry; a CLOSED or a connection
+    /// close first restores it as a loss record, so the next REQ is still held
+    /// at or before the floor whatever `last_seen` or `live_until` say. Cleared
+    /// on every close; it never outlives the connection.
+    unconfirmed_floor_this_conn: HashMap<String, u64>,
     /// Close code of the last WebSocket Close frame received, consumed by the
     /// next reconnect to choose the first-attempt delay.
     last_close_code: Option<u16>,
@@ -1377,7 +1379,7 @@ impl BgState {
             backoff_step: 0,
             eose_this_conn: HashSet::new(),
             live_until: HashMap::new(),
-            retired_loss_this_conn: HashMap::new(),
+            unconfirmed_floor_this_conn: HashMap::new(),
             last_close_code: None,
             last_inbound_secs: None,
             now_secs: unix_now_secs,
@@ -1471,17 +1473,17 @@ impl BgState {
                 .is_some_and(|channel_id| self.active_subscriptions.contains_key(&channel_id));
         if known {
             self.eose_this_conn.insert(sub_id.to_owned());
-            self.retired_loss_this_conn.remove(sub_id);
+            self.unconfirmed_floor_this_conn.remove(sub_id);
         }
     }
 
-    /// A REQ was written for `sub_id`: it has not reached EOSE yet, and a
-    /// second REQ on the same connection supersedes the first for the rest of
-    /// that connection (see `superseded_this_conn`). A caller that wrote a
-    /// replay REQ retires the subscription's loss record right after this, so
-    /// the record is kept in `retired_loss_this_conn` until the replay is known
-    /// to have finished.
-    fn note_req_sent(&mut self, sub_id: &str) {
+    /// A REQ with `since` was written for `sub_id`: it has not reached EOSE
+    /// yet, and a second REQ on the same connection supersedes the first for
+    /// the rest of that connection (see `superseded_this_conn`). Its floor
+    /// (`since`, or an earlier loss record, which a caller that wrote a replay
+    /// REQ retires right after this) is kept in `unconfirmed_floor_this_conn`
+    /// until the history is known to have arrived.
+    fn note_req_sent(&mut self, sub_id: &str, since: Option<u64>) {
         self.eose_this_conn.remove(sub_id);
         let loss = if sub_id == MEMBERSHIP_NOTIF_SUB_ID {
             self.membership_dropped_since
@@ -1489,11 +1491,11 @@ impl BgState {
             channel_id_from_sub_id(sub_id)
                 .and_then(|channel_id| self.channel_dropped_since.get(&channel_id).copied())
         };
-        if let Some(loss) = loss {
-            self.retired_loss_this_conn
+        if let Some(floor) = since.into_iter().chain(loss).min() {
+            self.unconfirmed_floor_this_conn
                 .entry(sub_id.to_owned())
-                .and_modify(|t| *t = (*t).min(loss))
-                .or_insert(loss);
+                .and_modify(|t| *t = (*t).min(floor))
+                .or_insert(floor);
         }
         if !self.req_sent_this_conn.insert(sub_id.to_owned()) {
             self.superseded_this_conn.insert(sub_id.to_owned());
@@ -1503,12 +1505,12 @@ impl BgState {
     /// The current connection closed (detected at `now_secs`): every
     /// subscription that reached EOSE on it was live until its last inbound
     /// frame, capped at `now_secs`. Subscriptions that never reached EOSE keep
-    /// whatever cursor they already had, and loss records retired by a replay
-    /// that never reached a counted EOSE are restored. `last_inbound_secs` is
+    /// whatever cursor they already had, and the floor of each REQ that never
+    /// reached a counted EOSE is restored. `last_inbound_secs` is
     /// deliberately kept so a repeated call for the same outage stamps the
     /// same time.
     fn note_connection_closed(&mut self, now_secs: u64) {
-        for (sub_id, loss) in std::mem::take(&mut self.retired_loss_this_conn) {
+        for (sub_id, loss) in std::mem::take(&mut self.unconfirmed_floor_this_conn) {
             self.restore_loss(&sub_id, loss);
         }
         let live_until = self
@@ -1525,8 +1527,9 @@ impl BgState {
         self.reset_inbound_clock();
     }
 
-    /// Merge `loss` back into the subscription's loss record (`min` with any
-    /// newer loss), so its next replay starts at or before it again.
+    /// Merge `loss`, a floor from `unconfirmed_floor_this_conn`, into the
+    /// subscription's loss record (`min` with any newer loss), so its next
+    /// replay starts at or before it again.
     fn restore_loss(&mut self, sub_id: &str, loss: u64) {
         if sub_id == MEMBERSHIP_NOTIF_SUB_ID {
             self.membership_dropped_since =
@@ -1541,12 +1544,12 @@ impl BgState {
 
     /// The relay CLOSED `sub_id` on the current connection, so the subscription
     /// is no longer live: a later connection close must not stamp `live_until`
-    /// over the time it was closed, and a loss record its REQ retired is
-    /// restored because that replay never reached EOSE. The retry's `since` is
-    /// then never later than the closed REQ's.
+    /// over the time it was closed, and its REQ's floor is restored because
+    /// that history never reached EOSE. The retry's `since` is then never later
+    /// than the closed REQ's, even if live events moved `last_seen` past it.
     fn note_sub_closed(&mut self, sub_id: &str) {
         self.eose_this_conn.remove(sub_id);
-        if let Some(loss) = self.retired_loss_this_conn.remove(sub_id) {
+        if let Some(loss) = self.unconfirmed_floor_this_conn.remove(sub_id) {
             self.restore_loss(sub_id, loss);
         }
     }
@@ -1587,7 +1590,7 @@ impl BgState {
         // cleared: a re-subscribe on this socket reuses the wire ID, and an EOSE
         // for the old REQ must not count for the new one.
         self.live_until.remove(&sub_id);
-        self.retired_loss_this_conn.remove(&sub_id);
+        self.unconfirmed_floor_this_conn.remove(&sub_id);
         self.closed_failures.remove(&sub_id);
         self.active_filters.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);
@@ -2974,8 +2977,8 @@ async fn resubscribe_after_reconnect(
     if is_fresh_connection {
         // The previous socket is gone. The reconnect entry already closed it
         // out, but a socket that died partway through an earlier resubscribe
-        // (`RetryConnection`) did not: restore the loss records its REQs
-        // retired before any `since` is computed. Idempotent otherwise.
+        // (`RetryConnection`) did not: restore its unconfirmed REQ floors
+        // before any `since` is computed. Idempotent otherwise.
         state.note_connection_closed((state.now_secs)());
         // These queues are derived from active subscription intent and rebuilt
         // below. The rate-limit gate is deliberately preserved: the relay's
@@ -3683,7 +3686,7 @@ async fn send_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
-                    state.note_req_sent(&sub_id);
+                    state.note_req_sent(&sub_id, since);
                     debug!(
                         "subscribed to channel {channel_id}{}",
                         if since.is_some() {
@@ -3739,7 +3742,7 @@ async fn send_membership_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
-                    state.note_req_sent(MEMBERSHIP_NOTIF_SUB_ID);
+                    state.note_req_sent(MEMBERSHIP_NOTIF_SUB_ID, since);
                     debug!("subscribed to membership notifications (since={since_ts})");
                     true
                 }

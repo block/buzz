@@ -1125,7 +1125,7 @@ impl LossArm {
         }
     }
 
-    fn event(self, created_at: u64) -> Event {
+    pub(super) fn event(self, created_at: u64) -> Event {
         match self {
             Self::Channel(channel) => tagged_event(channel, created_at),
             Self::Membership => tagged_event(Uuid::nil(), created_at),

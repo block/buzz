@@ -5,8 +5,8 @@
 //! and EOSE never follows. The retry must back off, and its `since` must still
 //! cover the history that failed to arrive.
 use super::resume_tests::{
-    deliver_eose, first_replay_req, lose_connection, mock_relay, next_req, open_replay, LossArm,
-    MockCtl,
+    deliver_eose, deliver_event, first_replay_req, lose_connection, mock_relay, next_req,
+    open_replay, tagged_event, LossArm, MockCtl,
 };
 use super::tests::{seed_test_subscription, test_channel_filter, test_ws_pair};
 use super::*;
@@ -249,9 +249,74 @@ async fn closed_gap_replay_restores_its_loss_record_for_the_retry() {
     }
 }
 
+/// The relay registers the live subscription before it reads history, so a
+/// live event can arrive ahead of a history read that then fails, moving
+/// `last_seen` past history that never arrived. With no loss record in play,
+/// the REQ's own `since` must still hold the same-socket retry (after a CLOSED)
+/// and the next reconnect (socket dropped before EOSE) at or before it. A
+/// counted EOSE releases that floor.
+#[tokio::test]
+async fn live_event_before_a_failed_history_read_keeps_the_reqs_floor() {
+    const BASE: u64 = 1_000;
+    enum End {
+        Closed(&'static str),
+        Dropped,
+        EoseThenDropped,
+    }
+    for arm in LossArm::both() {
+        for end in [
+            End::Closed(DB_ERROR),
+            End::Closed("rate-limited: retry in 30s"),
+            End::Dropped,
+            End::EoseThenDropped,
+        ] {
+            let mut state = BgState::new();
+            match arm {
+                LossArm::Channel(channel) => seed_test_subscription(&mut state, channel),
+                LossArm::Membership => {
+                    state.membership_sub_active = true;
+                    state.startup_watermark = Some(BASE);
+                }
+            }
+            let sub = arm.sub();
+            let (mut client, _server, first) = open_replay(&mut state, &sub).await;
+            assert!(first <= BASE, "{sub}: first REQ since={first}");
+            let (tx, _rx) = mpsc::channel(8);
+            deliver_event(&mut client, &mut state, &tx, &sub, &arm.event(2_000)).await;
+            assert_eq!(
+                arm.since(&state),
+                Some(2_000),
+                "{sub}: the live event moved the cursor"
+            );
+
+            let since = match end {
+                End::Closed(message) => {
+                    deliver_closed(&mut client, &mut state, &sub, message).await;
+                    arm.since(&state).unwrap()
+                }
+                End::Dropped => {
+                    lose_connection(&mut state).await;
+                    first_replay_req(&mut state, &sub).await
+                }
+                End::EoseThenDropped => {
+                    deliver_eose(&mut client, &mut state, &sub).await;
+                    lose_connection(&mut state).await;
+                    assert_eq!(arm.dropped(&state), None, "{sub}: EOSE released the floor");
+                    continue;
+                }
+            };
+            assert!(
+                since <= BASE,
+                "{sub}: must still replay from {BASE}, got since={since}"
+            );
+        }
+    }
+}
+
 /// Through the real socket-owner loop: a channel REQ answered with an error
 /// CLOSED is retried after the first backoff step (2s ±20%), not before, with
-/// the same `since`. The loop has no other traffic, so only the parked-retry
+/// the same `since`, even though a live event arrived before the CLOSED.
+/// After the CLOSED the loop has no other traffic, so only the parked-retry
 /// wake can send it in time.
 #[tokio::test]
 async fn socket_owner_retries_a_closed_req_after_the_backoff() {
@@ -289,6 +354,15 @@ async fn socket_owner_retries_a_closed_req_after_the_backoff() {
         .unwrap();
     let first = next_req(&mut conn).await;
     assert_eq!(first[1], channel_sub_id(channel));
+    // The relay registers the live subscription before it reads history, so a
+    // live event can arrive ahead of the failed read.
+    conn.ctl
+        .send(MockCtl::Send(json!([
+            "EVENT",
+            first[1],
+            tagged_event(channel, 2_000)
+        ])))
+        .unwrap();
     conn.ctl
         .send(MockCtl::Send(json!(["CLOSED", first[1], DB_ERROR])))
         .unwrap();
