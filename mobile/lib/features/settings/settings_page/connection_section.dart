@@ -108,6 +108,17 @@ Future<bool> _waitForResumedFrame() async {
   return true;
 }
 
+/// The full npub for [privHex], or null when it holds no usable key. A
+/// well-formed nsec can still hold a scalar outside the curve order.
+String? _npubFor(String privHex) {
+  if (privHex.isEmpty) return null;
+  try {
+    return fullNpub(derivePublicKeyHex(privHex));
+  } on ArgumentError {
+    return null;
+  }
+}
+
 class _IdentityRow extends StatelessWidget {
   const _IdentityRow({required this.nsec});
 
@@ -115,10 +126,7 @@ class _IdentityRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final privHex = nostr.Nip19.decode(payload: nsec).data;
-    final npub = privHex.isNotEmpty
-        ? fullNpub(derivePublicKeyHex(privHex))
-        : null;
+    final npub = _npubFor(nostr.Nip19.decode(payload: nsec).data);
 
     // The full npub is the canonical copy/share form (never raw hex); an
     // invalid identity is surfaced as unavailable and never copied.
