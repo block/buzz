@@ -1415,15 +1415,20 @@ pub(crate) async fn apply_channel_metadata_event(
     // an open, unarchived channel. Decide it here, under the row lock and
     // after the archive decision, on the state this event leaves behind, so
     // one event may open a channel and flag it, and a concurrent archive
-    // cannot slip past a check made before the lock.
-    if edit.columns.auto_join == Some(true) {
+    // cannot slip past a check made before the lock. Either value needs the
+    // event to leave the channel open: the relay role that authorizes
+    // `auto_join` needs no channel membership, so a `false` on a private
+    // channel would store and fan out an event, with its mentions and
+    // notice, in a channel its sender cannot read. One refusal for both
+    // values also keeps the response from telling them apart.
+    if let Some(auto_join) = edit.columns.auto_join {
         let visibility = edit
             .columns
             .visibility
             .as_deref()
             .unwrap_or(locked.previous_visibility());
         let archived = edit.archived.unwrap_or(locked.archived());
-        if visibility != ChannelVisibility::Open.as_str() || archived {
+        if visibility != ChannelVisibility::Open.as_str() || (auto_join && archived) {
             return Err(DbError::AccessDenied(
                 "auto_join requires an open, unarchived channel".to_string(),
             ));

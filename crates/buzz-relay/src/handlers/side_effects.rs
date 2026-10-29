@@ -730,8 +730,9 @@ pub async fn validate_admin_event(
             // takes the actor's *relay* role (owner or admin), not a channel
             // role, and the actor need not be a channel member. Only a
             // stream channel can be a default channel; the open-and-
-            // unarchived requirement is decided in the write, under the
-            // channel row lock, on the state the event leaves behind.
+            // unarchived requirement (just open, for `false`) is decided in
+            // the write, under the channel row lock, on the state the event
+            // leaves behind.
             let mut sets_auto_join = false;
             for t in event.tags.iter() {
                 if t.kind().to_string() == "auto_join" {
@@ -2784,10 +2785,16 @@ pub(crate) async fn join_channel_as_self(
 /// caller. The `auto_join` tag on kind:39000 is the durable record a client
 /// reconciles against. A channel archived or made private after the list
 /// was read is one such failure: `put_member` refuses it under its locks.
+///
+/// `added_by` is the actor of a third-party add (kind:9030), `None` when the
+/// member joined by themselves (an invite claim). A third-party add first
+/// asks the member's `channel_add_policy`, once, as a kind:9000 from the same
+/// actor would; a refusal skips every default channel, logged and counted.
 pub(crate) async fn auto_join_default_channels(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     pubkey_hex: &str,
+    added_by: Option<&[u8]>,
 ) {
     let Ok(pubkey) = hex::decode(pubkey_hex) else {
         warn!(member = %pubkey_hex, "auto-join skipped: member pubkey is not hex");
@@ -2801,6 +2808,32 @@ pub(crate) async fn auto_join_default_channels(
             return;
         }
     };
+    if channels.is_empty() {
+        return;
+    }
+    if let Some(actor) = added_by.filter(|actor| *actor != pubkey.as_slice()) {
+        match state
+            .db
+            .get_agent_channel_policy(tenant.community(), &pubkey)
+            .await
+        {
+            Ok(None) => {}
+            Ok(Some((policy, owner))) => {
+                if let Err(denied) =
+                    channel_authz::decide_channel_add_policy(&policy, owner.as_deref(), actor)
+                {
+                    warn!(member = %pubkey_hex, error = %denied, "auto-join skipped: the member's channel_add_policy refuses the actor");
+                    metrics::counter!("buzz_auto_join_failures_total").increment(1);
+                    return;
+                }
+            }
+            Err(e) => {
+                warn!(member = %pubkey_hex, error = %e, "auto-join skipped: reading the member's channel_add_policy failed");
+                metrics::counter!("buzz_auto_join_failures_total").increment(1);
+                return;
+            }
+        }
+    }
     for channel in channels {
         match join_channel_as_self(tenant, state, channel.id, &pubkey).await {
             Ok(SelfJoinOutcome::Joined) => {

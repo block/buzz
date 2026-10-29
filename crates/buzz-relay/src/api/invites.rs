@@ -484,7 +484,13 @@ pub async fn claim_invite(
         if write.outcome.owner_link_created {
             state.disconnect_unowned_agent_clusterwide(&tenant, pubkey.as_bytes());
         }
-        fan_out_nip43_membership_list(&tenant, &state, write.snapshot).await;
+        // The member-added delta and the auto-join only on Joined, never on
+        // other outcomes; the membership-list fan-out on every outcome.
+        let joined = matches!(
+            write.outcome.outcome,
+            buzz_db::relay_invite::ClaimOutcome::Joined { .. }
+        );
+        finish_committed_claim(&tenant, &state, &claimer_hex, write.snapshot, joined).await;
         return match write.outcome.outcome {
             buzz_db::relay_invite::ClaimOutcome::Joined { .. } => {
                 tracing::info!(
@@ -492,13 +498,6 @@ pub async fn claim_invite(
                     member = %claimer_hex,
                     "relay member added via v2 invite"
                 );
-                // NIP-43 side effects only on Joined, never on other outcomes.
-                if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
-                    tracing::warn!(
-                        "failed to publish NIP-43 member-added delta after v2 claim: {e}"
-                    );
-                }
-                auto_join_default_channels(&tenant, &state, &claimer_hex).await;
                 Ok(Json(serde_json::json!({
                     "status": "joined",
                     "community_id": tenant.community().to_string(),
@@ -581,7 +580,7 @@ pub async fn claim_invite(
         state.disconnect_unowned_agent_clusterwide(&tenant, pubkey.as_bytes());
     }
     let was_inserted = write.outcome.inserted;
-    fan_out_nip43_membership_list(&tenant, &state, write.snapshot).await;
+    finish_committed_claim(&tenant, &state, &claimer_hex, write.snapshot, was_inserted).await;
 
     if was_inserted {
         tracing::info!(
@@ -589,10 +588,6 @@ pub async fn claim_invite(
             member = %claimer_hex,
             "relay member added via invite"
         );
-        if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
-            tracing::warn!("failed to publish NIP-43 member-added delta after claim: {e}");
-        }
-        auto_join_default_channels(&tenant, &state, &claimer_hex).await;
     }
 
     Ok(Json(serde_json::json!({
@@ -601,6 +596,42 @@ pub async fn claim_invite(
         "host": tenant.host(),
         "role": payload.r,
     })))
+}
+
+/// The follow-up of a claim whose roster write committed: the NIP-43
+/// membership-list fan-out and, when the claim added the member (`joined`),
+/// the member-added delta and the default-channel auto-join.
+///
+/// It runs on its own task, which the handler awaits, so the response still
+/// waits for the joins. A client that disconnects first makes the server
+/// drop the handler's future: that detaches the task rather than cancelling
+/// it partway, which nothing would retry, because a re-claim is
+/// `already_member`.
+async fn finish_committed_claim(
+    tenant: &buzz_core::TenantContext,
+    state: &Arc<AppState>,
+    claimer_hex: &str,
+    snapshot: Option<buzz_core::StoredEvent>,
+    joined: bool,
+) {
+    let follow_up = tokio::spawn({
+        let (tenant, state, claimer_hex) =
+            (tenant.clone(), Arc::clone(state), claimer_hex.to_owned());
+        async move {
+            fan_out_nip43_membership_list(&tenant, &state, snapshot).await;
+            if !joined {
+                return;
+            }
+            if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
+                tracing::warn!("failed to publish NIP-43 member-added delta after claim: {e}");
+            }
+            // A claimer joins for themselves: no third-party add policy.
+            auto_join_default_channels(&tenant, &state, &claimer_hex, None).await;
+        }
+    });
+    if let Err(e) = follow_up.await {
+        tracing::error!(member = %claimer_hex, error = %e, "invite claim follow-up task failed");
+    }
 }
 
 /// Fixed-window rate limit on claim attempts, keyed by community and claimer
@@ -1271,6 +1302,40 @@ mod postgres_tests {
         roles
     }
 
+    /// Wait until a session blocked by `blocker_pid` waits for the channel
+    /// row lock `put_member` takes, failing if `task` finishes first.
+    async fn wait_for_put_member_behind<T>(
+        pool: &sqlx::PgPool,
+        blocker_pid: i32,
+        task: &tokio::task::JoinHandle<T>,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' \
+                   AND $1 = ANY(pg_blocking_pids(pid)) \
+                   AND query LIKE 'SELECT archived_at FROM channels %FOR NO KEY UPDATE')",
+            )
+            .bind(blocker_pid)
+            .fetch_one(pool)
+            .await
+            .expect("read lock waiters");
+            if waiting {
+                return;
+            }
+            assert!(
+                !task.is_finished(),
+                "the join finished without waiting for the held channel row"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the join never waited for the held channel row"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Claiming an invite joins the new member to the community's effective
     /// default channels, once. Four channels flagged by the relay owner:
     /// one open, one archived after flagging, one made private after
@@ -1530,36 +1595,12 @@ mod postgres_tests {
             let state = Arc::clone(&state);
             let tenant = tenant.clone();
             let joiner_hex = joiner_hex.clone();
-            async move { auto_join_default_channels(&tenant, &state, &joiner_hex).await }
+            async move { auto_join_default_channels(&tenant, &state, &joiner_hex, None).await }
         });
         // Wait until the join is blocked on the channel row lock in
         // `put_member`, behind the archive, so it has already listed the
         // channel and passed the join body's check.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
-                 WHERE wait_event_type = 'Lock' \
-                   AND $1 = ANY(pg_blocking_pids(pid)) \
-                   AND query LIKE 'SELECT archived_at FROM channels %FOR NO KEY UPDATE')",
-            )
-            .bind(archive_pid)
-            .fetch_one(&pool)
-            .await
-            .expect("read lock waiters");
-            if waiting {
-                break;
-            }
-            assert!(
-                !auto_join.is_finished(),
-                "the auto-join finished without waiting for the archive"
-            );
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the auto-join never waited for the archive"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_for_put_member_behind(&pool, archive_pid, &auto_join).await;
         archive.commit().await.expect("commit archive");
         tokio::time::timeout(Duration::from_secs(10), auto_join)
             .await
@@ -1586,6 +1627,116 @@ mod postgres_tests {
             member_joined_notice_count(&state, community, starter, &joiner_hex).await,
             0
         );
+    }
+
+    /// A client that disconnects mid-claim does not cut the auto-join short.
+    /// The server drops the handler's future on a disconnect; the test does
+    /// the same by aborting the request while the auto-join waits in
+    /// `put_member` behind a held lock on the first default channel's row.
+    /// Once the lock is released, the claimer still joins both default
+    /// channels, for a v2 and a v1 claim. Mutation: run the follow-up inline
+    /// in the handler again → RED (the claimer joins no channel).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_follow_up_survives_a_client_disconnect() {
+        use crate::handlers::group_state_postgres_tests::{create_channel, edit_channel};
+
+        let host = format!(
+            "invites-auto-join-disconnect-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let owner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists")
+            .id;
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        state
+            .db
+            .add_relay_member(
+                community,
+                &owner.public_key().to_hex(),
+                "owner",
+                None,
+                &Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("seed owner");
+        let first = create_channel(&state, &tenant, &owner, &[]).await;
+        let second = create_channel(&state, &tenant, &owner, &[]).await;
+        for channel_id in [first, second] {
+            edit_channel(
+                &state,
+                &tenant,
+                &owner,
+                channel_id,
+                &[&["auto_join", "true"]],
+            )
+            .await
+            .expect("relay owner flags channel");
+        }
+
+        let v2_code = mint_code(
+            state.clone(),
+            &host,
+            &owner,
+            serde_json::json!({ "max_uses": 1 }),
+        )
+        .await;
+        let v1_code = forge_v1_invite_code(&state, community, unix_now() + 3600);
+        let pool = state.db.pool().clone();
+        for code in [v2_code, v1_code] {
+            let joiner = Keys::generate();
+            let joiner_hex = joiner.public_key().to_hex();
+            let mut hold = pool.begin().await.expect("begin hold");
+            let hold_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *hold)
+                .await
+                .expect("hold backend pid");
+            sqlx::query("SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 FOR UPDATE")
+                .bind(community.as_uuid())
+                .bind(first)
+                .execute(&mut *hold)
+                .await
+                .expect("hold the first default channel's row");
+
+            let claim = tokio::spawn({
+                let (state, host, joiner) = (state.clone(), host.clone(), joiner.clone());
+                let body = serde_json::json!({ "code": code }).to_string();
+                async move { post_json(state, &host, "/api/invites/claim", &joiner, body).await }
+            });
+            wait_for_put_member_behind(&pool, hold_pid, &claim).await;
+            claim.abort();
+            assert!(
+                claim
+                    .await
+                    .expect_err("the claim was still waiting")
+                    .is_cancelled(),
+                "the claim request was dropped"
+            );
+            hold.rollback().await.expect("release the held row");
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while added_notification_count(&state, community, &joiner_hex).await < 2 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the auto-join stopped with the dropped claim: {:?}",
+                    channel_roles(&state, community, &[first, second], &joiner).await
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                channel_roles(&state, community, &[first, second], &joiner).await,
+                [Some("member".to_string()), Some("member".to_string())]
+            );
+        }
     }
 
     #[tokio::test]

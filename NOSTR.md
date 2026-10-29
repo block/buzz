@@ -202,10 +202,14 @@ one the relay joins every new community member into. The setting is
   can change it, with kind:9002 `["auto_join", "true"]` or
   `["auto_join", "false"]`. The actor need not be a member of the channel.
   A missing tag means "no change".
-- It is accepted only on an open, unarchived `stream` channel. The relay
-  decides that in the same transaction as the other kind:9002 changes, so one
-  event may open a channel and flag it. Making a flagged channel private or
-  archiving it is allowed and leaves the stored value in place.
+- It is accepted only on a `stream` channel the event leaves open, and `true`
+  also needs it unarchived. `false` is refused on a private channel too: the
+  actor need not be a member, so neither value may write into a channel they
+  cannot read. The relay decides this in the same transaction as the other
+  kind:9002 changes, so one event may open a channel and flag it. Making a
+  flagged channel private or archiving it is allowed and leaves the stored
+  value in place; to take a private channel out of the defaults, clear the
+  flag before making it private or once it is open again.
 - kind:39000 carries a bare `["auto_join"]` tag only while the setting is
   effective: set, open and unarchived. What the event says is what the relay
   does, so a client never has to combine the flag with the access flags.
@@ -223,12 +227,17 @@ its `member_joined` kind:40099, kind:39002 and kind:44100. There is no cap on
 how many channels that is: whatever carries the kind:39000 tag is joined, and
 the work a new member costs grows with the number of channels an owner or
 admin flags. The relay does this once, at that moment, and never again on
-login or reconnect, so a later kind:9022 leave stands. A channel that fails
-to join is logged and counted (`buzz_auto_join_failures_total`), not retried:
-the kind:39000 tag is the record a client reconciles against. That includes a
-channel archived or made private while the join runs: the membership write
-decides both again under the channel's locks, so the member is not added and
-nothing is announced. `buzz-admin add-member` writes the roster row only and
+login or reconnect, so a later kind:9022 leave stands. A kind:9030 add is
+made by someone else, so the new member's `channel_add_policy` applies first,
+as it would to that actor's kind:9000: if it refuses them, no default channel
+is joined. The claim response waits for the joins, and a claimer who
+disconnects before it arrives does not cut them short. A channel that fails
+to join, or an add the member's policy refuses, is logged and counted
+(`buzz_auto_join_failures_total`), not retried: the kind:39000 tag is the
+record a client reconciles against. That includes a channel archived or made
+private while the join runs: the membership write decides both again under
+the channel's locks, so the member is not added and nothing is announced.
+`buzz-admin add-member` writes the roster row only and
 does not join default channels. Auto-join fires only at those roster-insert
 sites, so a community that does not require relay membership advertises the
 kind:39000 tag but auto-joins nobody; a client that wants the same result

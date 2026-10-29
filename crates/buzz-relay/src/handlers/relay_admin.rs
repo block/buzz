@@ -363,7 +363,15 @@ async fn execute_relay_admin_command(
                 if let Err(e) = publish_nip43_member_added(tenant, state, &target_hex).await {
                     warn!(error = %e, "failed to publish NIP-43 member added event");
                 }
-                auto_join_default_channels(tenant, state, &target_hex).await;
+                // The sender adds someone else, so the target's
+                // `channel_add_policy` decides whether they are auto-joined.
+                auto_join_default_channels(
+                    tenant,
+                    state,
+                    &target_hex,
+                    Some(&event.pubkey.to_bytes()),
+                )
+                .await;
             }
             fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
         }
@@ -994,8 +1002,12 @@ mod postgres_tests {
     /// effective default channels, once: the flagged open channel gains them
     /// as a member with one kind:44100; the unflagged channel does not. A
     /// kind:9022 leave followed by a repeat kind:9030 (an idempotent no-op on
-    /// the roster) does not re-add them. Mutation: delete the
-    /// `auto_join_default_channels` call → RED.
+    /// the roster) does not re-add them. An added agent's `channel_add_policy`
+    /// holds against the adder. Mutations: delete the
+    /// `auto_join_default_channels` call → RED; pass no actor, or drop the
+    /// policy check → the `nobody` agent is joined (RED); check the policy
+    /// against anyone but the adder → the owned `owner_only` agent is not
+    /// (RED).
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn adding_a_member_auto_joins_default_channels() {
@@ -1090,6 +1102,57 @@ mod postgres_tests {
             "a repeat kind:9030 must not resurrect a kind:9022 leave"
         );
         assert_eq!(added_notifications().await, 1);
+
+        // The adder acts for someone else, so the added agent's
+        // `channel_add_policy` decides, as for the same actor's kind:9000:
+        // `nobody` refuses every default channel; `owner_only` admits only
+        // the agent's owner.
+        let (refusing, owned) = (Keys::generate(), Keys::generate());
+        for keys in [&owner, &refusing, &owned] {
+            state
+                .db
+                .ensure_user(tenant.community(), &keys.public_key().to_bytes())
+                .await
+                .expect("user row");
+        }
+        for (agent, policy) in [(&refusing, "nobody"), (&owned, "owner_only")] {
+            state
+                .db
+                .set_channel_add_policy(tenant.community(), &agent.public_key().to_bytes(), policy)
+                .await
+                .expect("agent policy");
+        }
+        state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                &owned.public_key().to_bytes(),
+                &owner.public_key().to_bytes(),
+            )
+            .await
+            .expect("agent owner");
+        for (agent, expected) in [
+            (&refusing, [None, None]),
+            (&owned, [Some("member".to_string()), None]),
+        ] {
+            let add = EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
+                .tags(vec![Tag::public_key(agent.public_key())])
+                .sign_with_keys(&owner)
+                .expect("sign 9030");
+            handle_relay_admin_event(&tenant, &state, &add)
+                .await
+                .expect("owner adds agent");
+            assert!(
+                state
+                    .db
+                    .get_relay_member(tenant.community(), &agent.public_key().to_hex())
+                    .await
+                    .expect("relay member")
+                    .is_some(),
+                "the roster add stands either way"
+            );
+            assert_eq!(roles(agent).await, expected);
+        }
     }
 
     /// A pod-local root socket registered and bound to `keys`, as root AUTH

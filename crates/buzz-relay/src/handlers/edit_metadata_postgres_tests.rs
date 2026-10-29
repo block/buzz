@@ -354,9 +354,10 @@ async fn join_role_edit_is_applied_and_announced() {
 /// it, on an open, unarchived stream channel, and kind:39000 advertises it
 /// only while it is effective. Mutations: drop the relay-role tier → the
 /// channel owner's edit is accepted (RED); drop the in-transaction guard →
-/// `true` on a private or archived channel is accepted (RED); mirror the
-/// column instead of the effective state in `group_metadata_tags` → the tag
-/// survives the flip to private (RED).
+/// `true` on a private or archived channel is accepted (RED); guard only
+/// `true` again → the relay admin's `false` is stored in the private
+/// channel (RED); mirror the column instead of the effective state in
+/// `group_metadata_tags` → the tag survives the flip to private (RED).
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn auto_join_is_relay_admin_only_and_advertised_while_effective() {
@@ -487,34 +488,51 @@ async fn auto_join_is_relay_admin_only_and_advertised_while_effective() {
         .expect("list auto_join channels")
         .is_empty());
 
-    // `true` is refused on a private channel; `false` is not. Opening and
-    // flagging in one event is accepted: the guard sees the event's result.
-    // `visibility` still needs the channel owner, so that event comes from
-    // the owner once they are also on the relay roster: both tiers run.
-    // The nonce keeps this from signing the same event id as the accepted
-    // edit above, which the relay would drop as a duplicate.
-    let refused = edit_channel(
-        &state,
-        &tenant,
-        &admin,
-        channel_id,
-        &[&["auto_join", "true"], &["nonce", "private"]],
-    )
-    .await
-    .expect_err("auto_join=true on a private channel");
-    assert!(
-        refused.contains("open, unarchived"),
-        "private refusal: {refused}"
+    // Both values are refused on a private channel, the same way, and
+    // nothing of either event is stored: the relay admin is not a member,
+    // so storing even a `false` would write into a channel they cannot
+    // read. Opening and flagging in one event is accepted: the guard sees
+    // the event's result. `visibility` still needs the channel owner, so
+    // that event comes from the owner once they are also on the relay
+    // roster: both tiers run. The nonce keeps the `true` from signing the
+    // same event id as the accepted edit above, which the relay would drop
+    // as a duplicate.
+    let (events_before, notices_before) = (
+        count_kind(&state, &tenant, channel_id, 9002).await,
+        count_kind(&state, &tenant, channel_id, 40099).await,
     );
-    edit_channel(
-        &state,
-        &tenant,
-        &admin,
-        channel_id,
+    let refused_edits: [&[&[&str]]; 2] = [
+        &[&["auto_join", "true"], &["nonce", "private"]],
         &[&["auto_join", "false"]],
-    )
-    .await
-    .expect("auto_join=false on a private channel");
+    ];
+    for tags in refused_edits {
+        let refused = edit_channel(&state, &tenant, &admin, channel_id, tags)
+            .await
+            .expect_err("auto_join on a private channel");
+        assert!(
+            refused.contains("open, unarchived"),
+            "private refusal of {tags:?}: {refused}"
+        );
+    }
+    assert_eq!(
+        count_kind(&state, &tenant, channel_id, 9002).await,
+        events_before,
+        "a refused auto_join event is not stored"
+    );
+    assert_eq!(
+        count_kind(&state, &tenant, channel_id, 40099).await,
+        notices_before,
+        "a refused auto_join event announces nothing"
+    );
+    assert!(
+        state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("channel")
+            .auto_join,
+        "the refused `false` leaves the stored value in place"
+    );
     state
         .db
         .add_relay_member(
