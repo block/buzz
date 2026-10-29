@@ -61,6 +61,7 @@ void main() {
       ('underline', 'an <u>important</u> note', 'an important note'),
       ('escaped emphasis', r'\*literal\* and \_x\_', '*literal* and _x_'),
       ('escaped backslash', r'a \\ b', r'a \ b'),
+      ('escaped link opener', r'\[docs](https://x)', '[docs](https://x)'),
     ]) {
       test(name, () => expect(_text(source), expected));
     }
@@ -145,6 +146,18 @@ void main() {
         },
       );
       expect(pieces.whereType<PreviewMention>(), hasLength(2));
+    });
+
+    test('an escaped mention stays text', () {
+      expect(
+        _pieces(
+          r'hi \@alice',
+          mentionBindings: {
+            'alice': {_alice},
+          },
+        ),
+        [const PreviewText('hi @alice')],
+      );
     });
 
     test('a mention in inline code stays text', () {

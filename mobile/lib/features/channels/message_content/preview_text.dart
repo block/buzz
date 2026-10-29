@@ -225,25 +225,38 @@ final _emphasis = [
   RegExp(r'<u>(.+?)</u>', caseSensitive: false),
 ];
 
-/// Unwraps emphasis and resolves backslash escapes. An escaped character is
-/// held as a private-use stand-in while delimiters are matched, so `\*x\*`
-/// stays `*x*`.
-String _unwrapEmphasis(String text) {
-  if (!text.contains(_escapePrefix) && !_hasDelimiter.hasMatch(text)) {
-    return text;
-  }
-  var result = text.replaceAllMapped(
-    _escape,
-    (m) => String.fromCharCode(_escapeBase + m[1]!.codeUnitAt(0)),
-  );
+/// Unwraps emphasis in [shielded] text.
+String _unwrapEmphasis(String shielded) {
+  if (!_hasDelimiter.hasMatch(shielded)) return shielded;
+  var result = shielded;
   for (final pattern in _emphasis) {
     result = result.replaceAllMapped(pattern, (m) => m[1]!);
   }
-  return result.replaceAllMapped(
-    _escaped,
-    (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - _escapeBase),
-  );
+  return result;
 }
+
+/// Holds each backslash-escaped character as a private-use stand-in, so no
+/// link, emphasis, mention, emoji or channel syntax matches it: `\*x\*` stays
+/// `*x*` and `\@alice` stays text.
+String _shield(String text) => text.contains(_escapePrefix)
+    ? text.replaceAllMapped(
+        _escape,
+        (m) => String.fromCharCode(_escapeBase + m[1]!.codeUnitAt(0)),
+      )
+    : text;
+
+/// The characters [_shield] held, as displayed.
+String _unshield(String text) => text.replaceAllMapped(
+  _escaped,
+  (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - _escapeBase),
+);
+
+/// The escapes [_shield] held, back in source form, for helpers that read
+/// Markdown.
+String _reescape(String text) => text.replaceAllMapped(
+  _escaped,
+  (m) => '\\${String.fromCharCode(m[0]!.codeUnitAt(0) - _escapeBase)}',
+);
 
 const _escapePrefix = r'\';
 const _escapeBase = 0xE000;
@@ -341,14 +354,15 @@ class _PreviewBuilder {
     return end;
   }
 
-  void _inline(String source) {
+  void _inline(String text) {
+    final source = _shield(text);
     var start = 0;
     for (final match in _link.allMatches(source)) {
       _tokens(_unwrapEmphasis(source.substring(start, match.start)));
       start = match.end;
       final isImage = match[1]!.isNotEmpty;
-      final label = match[2]!;
-      final url = match[3]!;
+      final label = _reescape(match[2]!);
+      final url = _reescape(match[3]!);
       final imeta = imetaByUrl[normalizeMarkdownDestination(url)];
       final kind =
           classifyMediaUrl(url, imeta: imeta) ??
@@ -364,7 +378,9 @@ class _PreviewBuilder {
         continue;
       }
       _tokens(
-        _unwrapEmphasis(label.isEmpty ? url : decodeMarkdownLabelSyntax(label)),
+        _unwrapEmphasis(
+          _shield(label.isEmpty ? url : decodeMarkdownLabelSyntax(label)),
+        ),
       );
     }
     _tokens(_unwrapEmphasis(source.substring(start)));
@@ -377,7 +393,7 @@ class _PreviewBuilder {
     return channelId.substring(0, channelId.length < 8 ? channelId.length : 8);
   }
 
-  /// Plain text with mention, custom emoji and channel tokens.
+  /// [_shield]ed plain text with mention, custom emoji and channel tokens.
   void _tokens(String source) {
     if (source.isEmpty) return;
     final found = <({int start, int end, PreviewPiece piece})>[];
@@ -385,7 +401,7 @@ class _PreviewBuilder {
       for (final range in mentionOccurrences(source, mentionBindings.keys)) {
         final piece = _mention(
           range.label,
-          source.substring(range.start + 1, range.end),
+          _unshield(source.substring(range.start + 1, range.end)),
         );
         if (piece != null) {
           found.add((start: range.start, end: range.end, piece: piece));
@@ -417,11 +433,11 @@ class _PreviewBuilder {
     var cursor = 0;
     for (final token in found) {
       if (token.start < cursor) continue;
-      text(source.substring(cursor, token.start));
+      text(_unshield(source.substring(cursor, token.start)));
       add(token.piece);
       cursor = token.end;
     }
-    text(source.substring(cursor));
+    text(_unshield(source.substring(cursor)));
   }
 
   /// Mirrors the thread view's mention chip: an ambiguous label stays text.
