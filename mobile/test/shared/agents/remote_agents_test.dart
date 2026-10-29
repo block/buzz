@@ -485,13 +485,21 @@ void main() {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       addTearDown(() => server.close(force: true));
       final kinds = <int>[];
+      final registrations = <Map<String, dynamic>>[];
       server.listen((request) async {
         final peer = await WebSocketTransformer.upgrade(request);
         addTearDown(peer.close);
         peer.listen((frame) {
           final data = jsonDecode(frame as String) as List;
           final event = Map<String, dynamic>.from(data[1] as Map);
-          if (data.first == 'EVENT') kinds.add(event['kind'] as int);
+          if (data.first == 'EVENT') {
+            kinds.add(event['kind'] as int);
+            if (event['kind'] == 30177) {
+              registrations.add(
+                jsonDecode(event['content'] as String) as Map<String, dynamic>,
+              );
+            }
+          }
           peer.add(jsonEncode(['OK', event['id'], true, '']));
         });
         peer.add(jsonEncode(['AUTH', 'challenge']));
@@ -514,7 +522,9 @@ void main() {
       await controller.publishPolicy(relay, {
         'pubkey': fakeAgent,
         'name': 'Scout',
+        'picture': 'https://example.com/avatar.png',
       });
+      expect(registrations.single['picture'], 'https://example.com/avatar.png');
       await controller.removePolicy(relay, fakeAgent);
       expect(kinds, [30177, 5]);
     },

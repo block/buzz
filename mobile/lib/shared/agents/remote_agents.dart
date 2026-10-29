@@ -631,6 +631,7 @@ class RemoteAgentController extends ChangeNotifier {
         kind: 30177,
         content: jsonEncode({
           'name': setup['name'],
+          'picture': ?setup['picture'],
           'parallelism': 1,
           'respond_to': 'owner-only',
         }),
