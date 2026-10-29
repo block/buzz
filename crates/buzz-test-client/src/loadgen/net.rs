@@ -90,6 +90,25 @@ impl Net {
         Ok((status, response.text().await?))
     }
 
+    /// `GET {url}` with a NIP-98 header; returns status and body.
+    pub async fn get(
+        &self,
+        keys: &Keys,
+        url: &str,
+    ) -> anyhow::Result<(reqwest::StatusCode, String)> {
+        let response = self
+            .http
+            .get(url)
+            .header(
+                "Authorization",
+                identity::nip98_header(keys, "GET", url, &[]),
+            )
+            .send()
+            .await?;
+        let status = response.status();
+        Ok((status, response.text().await?))
+    }
+
     /// Submits `event` through HTTP `/events`; errors unless the relay accepted it.
     pub async fn submit(
         &self,

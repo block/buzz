@@ -85,6 +85,12 @@ or `shutdown` crosses a limit (`shutdown.abort_reason`).
 
 `seed` exits non-zero unless the relay accepted every planned post.
 
+`seed` provisions each community with `create_only`, so it never rotates the
+owner of an existing host. A host that already exists is reused only when the
+fixture owner derived from `run_id` owns it (re-running `seed` for the same
+scenario); otherwise `seed` fails. Use a fresh `run_id` or a host template
+with `{run}` to avoid colliding with another community.
+
 ## Safety
 
 The generator creates real communities, channels and events. Point it only at

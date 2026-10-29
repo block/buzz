@@ -6,18 +6,20 @@ use std::time::Instant;
 
 use futures_util::stream::{self, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, Tag};
+use reqwest::StatusCode;
 use serde_json::json;
 
 use super::identity::{self, Role};
-use super::net::{http_reason, truncate, Net};
+use super::net::{http_reason, Net};
 use super::scenario::{Community, Scenario};
 use super::stats::{Op, Snapshot, Stats};
 
 /// Content prefix of seeded thread roots; `run` finds roots by it.
 pub const ROOT_PREFIX: &str = "lg-root";
 
-/// Seeds every community. Idempotent for communities and channels; history
-/// and threads are appended on every call. Fails unless every planned post
+/// Seeds every community. Idempotent for communities this run's fixture
+/// owner owns, and for channels; history and threads are appended on every
+/// call. Fails unless every planned post
 /// was accepted.
 pub async fn seed(scenario: &Scenario, net: &Net, stats: &Arc<Stats>) -> anyhow::Result<()> {
     for community in scenario.communities() {
@@ -122,18 +124,55 @@ async fn provision(scenario: &Scenario, net: &Net, host: &str, owner: &Keys) -> 
         )
     })?;
     let operator = Keys::parse(&secret)?;
+    provision_host(net, base, &operator, host, owner).await
+}
+
+/// Creates `host` owned by `owner`. The request is `create_only`, so the relay
+/// never converges an existing host or rotates its owner. A host that already
+/// exists is reused only when `owner` owns it, e.g. when `seed` is re-run;
+/// anything else is a collision with a community this run does not own.
+async fn provision_host(
+    net: &Net,
+    base: &str,
+    operator: &Keys,
+    host: &str,
+    owner: &Keys,
+) -> anyhow::Result<()> {
+    let owner_hex = owner.public_key().to_hex();
     let body = serde_json::to_vec(&json!({
         "host": host,
-        "initial_owner_pubkey": owner.public_key().to_hex(),
+        "initial_owner_pubkey": owner_hex,
+        "create_only": true,
     }))?;
     let (status, text) = net
-        .post(&operator, base, "/operator/communities", body, None)
+        .post(operator, base, "/operator/communities", body, None)
         .await?;
-    if status.is_success() || text.contains("community already exists") {
-        Ok(())
-    } else {
-        anyhow::bail!("provision {host}: HTTP {status}: {}", truncate(&text))
+    if status.is_success() {
+        return Ok(());
     }
+    if status != StatusCode::CONFLICT || !text.contains("community already exists") {
+        anyhow::bail!("provision {host}: {}", http_reason(status, &text));
+    }
+    // The relay reports no owner for a host, but lists the hosts an owner owns.
+    let url = format!("{base}/operator/communities?owner_pubkey={owner_hex}");
+    let (status, text) = net.get(operator, &url).await?;
+    if !status.is_success() {
+        anyhow::bail!(
+            "provision {host}: it already exists and its owner could not be checked: {}",
+            http_reason(status, &text)
+        );
+    }
+    let owned: serde_json::Value = serde_json::from_str(&text)?;
+    let owns = owned["communities"]
+        .as_array()
+        .is_some_and(|list| list.iter().any(|c| c["host"] == host));
+    if !owns {
+        anyhow::bail!(
+            "provision {host}: it already exists and is not owned by this run's fixture owner \
+             {owner_hex}; use a fresh run_id or a host template that is unique per run"
+        );
+    }
+    Ok(())
 }
 
 async fn create_channels(
@@ -154,7 +193,7 @@ async fn create_channels(
                 ])
                 .sign_with_keys(owner)?;
             match net.submit(owner, community, &event, None).await {
-                Err(e) if !e.to_string().contains("exist") => Err(e),
+                Err(e) if !e.to_string().contains("already exists") => Err(e),
                 _ => Ok(()),
             }
         })
@@ -522,5 +561,130 @@ hold_secs = 1
         }
         // A reply cannot be placed without its predecessor.
         assert!(rest[0][2].build(&scenario, &known, None).is_none());
+    }
+
+    /// An operator endpoint that lists hosts by owner, as `GET
+    /// /operator/communities` does, and refuses a create that is not
+    /// `create_only` (which would converge ownership on an existing host).
+    async fn fake_operator(hosts: Vec<(String, String)>) -> String {
+        let hosts = std::sync::Mutex::new(hosts);
+        fake_http(move |method, target, body| {
+            let mut hosts = hosts.lock().unwrap();
+            if method == "GET" {
+                let owner = target.rsplit('=').next().unwrap();
+                let owned: Vec<_> = hosts
+                    .iter()
+                    .filter(|(_, o)| o == owner)
+                    .map(|(host, _)| json!({ "host": host }))
+                    .collect();
+                return (200, json!({ "communities": owned }).to_string());
+            }
+            let request: serde_json::Value = serde_json::from_slice(body).unwrap();
+            if request["create_only"] != true {
+                return (400, json!({"error": "create_only required"}).to_string());
+            }
+            let host = request["host"].as_str().unwrap().to_string();
+            if hosts.iter().any(|(h, _)| *h == host) {
+                return (
+                    409,
+                    json!({"error": "community already exists"}).to_string(),
+                );
+            }
+            let owner = request["initial_owner_pubkey"].as_str().unwrap();
+            hosts.push((host, owner.to_string()));
+            (200, json!({"status": "created"}).to_string())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn provisioning_never_takes_over_a_host_the_fixture_owner_does_not_own() {
+        let owner = identity::keys("t", Role::Owner, 0);
+        let someone_else = Keys::generate().public_key().to_hex();
+        let operator = Keys::generate();
+        let addr = fake_operator(vec![
+            ("mine.example".to_string(), owner.public_key().to_hex()),
+            ("theirs.example".to_string(), someone_else),
+        ])
+        .await;
+        let base = format!("http://{addr}");
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 1
+[population]
+humans = 1
+agents = 0
+channels_per_member = 1
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#
+        ))
+        .unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let provision = |host: &'static str| provision_host(&net, &base, &operator, host, &owner);
+
+        provision("fresh.example")
+            .await
+            .expect("a new host is created");
+        provision("fresh.example")
+            .await
+            .expect("re-running reuses a host the fixture owner owns");
+        provision("mine.example")
+            .await
+            .expect("an existing host owned by the fixture owner is reused");
+        let err = provision("theirs.example")
+            .await
+            .expect_err("another owner's host is not taken over");
+        assert!(err.to_string().contains("not owned by"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn only_already_exists_channel_errors_are_ignored() {
+        let outcome = |message: &'static str| async move {
+            let addr = fake_http(move |_, _, _| {
+                (
+                    200,
+                    json!({"accepted": false, "message": message}).to_string(),
+                )
+            })
+            .await;
+            let scenario = Scenario::parse(&format!(
+                r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 2
+[population]
+humans = 1
+agents = 0
+channels_per_member = 1
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#
+            ))
+            .unwrap();
+            let net = Net::new(&scenario).await.unwrap();
+            let community = &scenario.communities()[0];
+            let owner = identity::keys("t", Role::Owner, 0);
+            create_channels(&scenario, &net, community, &owner).await
+        };
+        outcome("duplicate: channel already exists")
+            .await
+            .expect("an existing channel is fine");
+        let err = outcome("invalid: community does not exist")
+            .await
+            .expect_err("a missing community is not an existing channel");
+        assert!(err.to_string().contains("does not exist"), "{err}");
     }
 }
