@@ -154,8 +154,10 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       completion(nil)
       return
     }
-    send(url: url, body: body, privateKey: privateKey, session: session, retryOnStaleConnection: true) {
-      data, response in
+    send(
+      url: url, body: body, privateKey: privateKey, session: session,
+      canRetry: { self.matchingPrivateKey(for: community) == privateKey }
+    ) { data, response in
       guard self.matchingPrivateKey(for: community) != nil,
         let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
         let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
@@ -179,9 +181,9 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   /// Sends one signed `/query`. A timeout or dropped connection is retried once on a new
   /// session, because the failed attempt may have used a pooled connection that went stale
   /// when the network path changed. Each attempt is signed afresh so the relay's NIP-98
-  /// replay guard accepts it.
+  /// replay guard accepts it. `canRetry` rechecks the account first; nil means no retry.
   private func send(
-    url: URL, body: Data, privateKey: String, session: URLSession, retryOnStaleConnection: Bool,
+    url: URL, body: Data, privateKey: String, session: URLSession, canRetry: (() -> Bool)?,
     completion: @escaping (Data?, URLResponse?) -> Void
   ) {
     var request = URLRequest(url: url)
@@ -199,16 +201,15 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     }
     request.setValue(auth, forHTTPHeaderField: "Authorization")
     session.dataTask(with: request) { data, response, error in
-      guard retryOnStaleConnection, let error = error as? URLError,
-        [.timedOut, .networkConnectionLost].contains(error.code)
+      guard let error = error as? URLError,
+        [.timedOut, .networkConnectionLost].contains(error.code), canRetry?() == true
       else {
         completion(data, response)
         return
       }
       let retrySession = URLSession(configuration: session.configuration)
       self.send(
-        url: url, body: body, privateKey: privateKey, session: retrySession,
-        retryOnStaleConnection: false
+        url: url, body: body, privateKey: privateKey, session: retrySession, canRetry: nil
       ) { data, response in
         retrySession.finishTasksAndInvalidate()
         completion(data, response)

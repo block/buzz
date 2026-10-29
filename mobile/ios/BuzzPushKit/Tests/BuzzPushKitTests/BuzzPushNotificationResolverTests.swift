@@ -174,6 +174,30 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(URLProtocolStub.requests.count, 2)
   }
 
+  func testResolveDoesNotRetryAfterAccountKeyChanges() throws {
+    let data = try snapshotData([community()])
+    let lock = NSLock()
+    var key = Self.privateKey
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    URLProtocolStub.handler = { _ in
+      lock.lock()
+      key = Self.profilePrivateKey
+      lock.unlock()
+      throw URLError(.timedOut)
+    }
+    let resolver = BuzzPushNotificationResolver(
+      session: URLSession(configuration: configuration), loadCommunitiesData: { data },
+      loadPrivateKey: { _ in
+        lock.lock()
+        defer { lock.unlock() }
+        return key
+      })
+
+    XCTAssertNil(resolve(resolver))
+    XCTAssertEqual(URLProtocolStub.requests.count, 1)
+  }
+
   func testResolveDoesNotRetryOtherTransportFailures() throws {
     URLProtocolStub.handler = { _ in throw URLError(.notConnectedToInternet) }
 
