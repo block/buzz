@@ -41,7 +41,52 @@
   }
 }
 
+/*
+ * The user's own message opening into the timeline as it is sent: the row
+ * grows from zero height, so a bottom-pinned timeline glides up by one row
+ * instead of jumping, while it fades in. Grid track sizing and opacity only:
+ * transforms or filters inside virtualized timeline rows leave stale paint in
+ * WKWebView. The child clips while the row grows (see SendEntrance).
+ */
+.motion-enter-send {
+  display: grid;
+  animation:
+    motion-enter-send-open var(--motion-duration-standard)
+    var(--motion-ease-standard) both,
+    motion-enter-send-fade var(--motion-duration-standard)
+    var(--motion-ease-standard) both;
+}
+
+.motion-enter-send > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@keyframes motion-enter-send-open {
+  from {
+    grid-template-rows: 0fr;
+  }
+
+  to {
+    grid-template-rows: 1fr;
+  }
+}
+
+@keyframes motion-enter-send-fade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .motion-enter-send {
+    animation: none;
+  }
+
   .motion-enter-conversation {
     animation-duration: 1ms;
   }
