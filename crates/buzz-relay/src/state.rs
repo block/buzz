@@ -19,7 +19,7 @@ use buzz_audit::AuditService;
 use buzz_auth::{AuthService, CommandReplayGuard, Nip98ReplayGuard};
 use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
-use buzz_db::channel_members::ListedOpenChannels;
+use buzz_db::channel_members::{ListedOpenChannels, MemberChannels};
 use buzz_db::Db;
 use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
@@ -1208,46 +1208,6 @@ pub const THREAD_SUMMARY_REFRESH_INTERVAL: std::time::Duration = std::time::Dura
 /// local fan-out). A hung refresh is abandoned so its root keeps emitting.
 pub const THREAD_SUMMARY_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// An open-set fill in flight. See [`AppState::open_channels_fills`].
-struct OpenChannelsFill<'a> {
-    fills: &'a DashMap<CommunityId, u64>,
-    community_id: CommunityId,
-    ticket: u64,
-}
-
-impl OpenChannelsFill<'_> {
-    /// Caches `open` if this is still the community's latest fill and no drop
-    /// came since it began. Holding the entry lock orders the check and
-    /// insert against [`AppState::drop_open_channels`]. Returns whether it
-    /// cached.
-    fn finish(
-        self,
-        cache: &moka::sync::Cache<CommunityId, Arc<ListedOpenChannels>>,
-        open: Arc<ListedOpenChannels>,
-    ) -> bool {
-        match self.fills.entry(self.community_id) {
-            dashmap::Entry::Occupied(fill) if *fill.get() == self.ticket => {
-                cache.insert(self.community_id, open);
-                fill.remove();
-                true
-            }
-            // Release the entry lock before `Drop` takes it again.
-            superseded => {
-                drop(superseded);
-                false
-            }
-        }
-    }
-}
-
-impl Drop for OpenChannelsFill<'_> {
-    /// A fill that failed or was cancelled leaves no entry behind.
-    fn drop(&mut self) {
-        self.fills
-            .remove_if(&self.community_id, |_, ticket| *ticket == self.ticket);
-    }
-}
-
 /// Shared application state, cloned cheaply via inner `Arc` fields.
 #[derive(Clone)]
 pub struct AppState {
@@ -1316,23 +1276,18 @@ pub struct AppState {
     /// Short TTL (10s) — membership changes are rare but must propagate.
     #[allow(clippy::type_complexity)]
     pub membership_cache: Arc<moka::sync::Cache<(CommunityId, Uuid, Vec<u8>), bool>>,
-    /// Member channel IDs cache: (community_id, pubkey_bytes) → the legacy-type
-    /// channels the pubkey is an active member of. Short TTL (10s) —
-    /// invalidated on membership changes and community-wide channel changes.
+    /// Member channels cache: (community_id, pubkey_bytes) → the legacy-type
+    /// channels the pubkey is an active member of, with the open-set digest
+    /// read alongside them. Short TTL (10s) — invalidated on membership
+    /// changes and community-wide channel changes.
     #[allow(clippy::type_complexity)]
-    pub member_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<Uuid>>>,
+    pub member_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Arc<MemberChannels>>>,
     /// Listed open channels per community, the half of every reader's
     /// accessible set that does not depend on the reader. Short TTL (10s) —
-    /// invalidated with the community's accessible channels, and checked
-    /// against the database on every member-half miss (see
+    /// invalidated with the community's accessible channels. A reader uses it
+    /// only at the digest its own database read returned (see
     /// [`Self::get_accessible_channel_ids_cached`]).
     pub open_channels_cache: Arc<moka::sync::Cache<CommunityId, Arc<ListedOpenChannels>>>,
-    /// The ticket of the latest open-set fill in flight, per community. A
-    /// fill caches only if its ticket is still here when it finishes; a drop
-    /// or a later fill removes or replaces it, so neither a pre-drop read nor
-    /// an older read can repopulate the set every reader in the community
-    /// shares. Entries live only while a fill is in flight.
-    pub open_channels_fills: Arc<DashMap<CommunityId, u64>>,
     /// Per-community channel visibility string, used to gate the private-channel fan-out
     /// access check so open channels stay zero-cost. Invalidated on a flip.
     pub channel_visibility_cache: Arc<moka::sync::Cache<(CommunityId, Uuid), String>>,
@@ -1649,7 +1604,6 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
-            open_channels_fills: Arc::new(DashMap::new()),
             channel_visibility_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
@@ -1903,7 +1857,7 @@ impl AppState {
 
     /// Local-only accessible-channels drop. See [`invalidate_membership_local`].
     pub(crate) fn invalidate_all_accessible_channels_local(&self, community_id: CommunityId) {
-        self.drop_open_channels(community_id);
+        self.open_channels_cache.invalidate(&community_id);
         if let Err(error) = self
             .member_channels_cache
             .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
@@ -2360,14 +2314,14 @@ impl AppState {
     /// Get accessible channel IDs with a 10-second cache. Falls back to DB on miss.
     ///
     /// The open half is shared by every reader in the community, and its
-    /// cross-pod invalidation is best-effort. So a reader with no cached
-    /// member half, the reader the database would answer directly, never
-    /// trusts it unchecked: the member read also returns the open set's
-    /// current digest, and a cached set that no longer matches is retired,
-    /// then re-read (superseding any fill in flight). Such a reader sees the
-    /// open set as of its own member read, as an uncached reader always has,
-    /// and no later read meets the stale set, even if this re-read never
-    /// publishes.
+    /// cross-pod invalidation is best-effort, so whatever set is cached may be
+    /// stale. A reader therefore uses the cached set only if its digest is the
+    /// one the reader's own member read returned with the member half it
+    /// cached. Equal digests mean equal sets, so a reader is only ever granted
+    /// open channels the database listed when it last read its member half,
+    /// the same bound as a per-reader cache, however and whenever a stale set
+    /// reached the cache. Otherwise the reader reads its member half again and
+    /// re-reads the open set if the cached one is not the database's.
     pub async fn get_accessible_channel_ids_cached(
         &self,
         community_id: CommunityId,
@@ -2375,96 +2329,45 @@ impl AppState {
     ) -> Result<Vec<Uuid>, buzz_db::DbError> {
         let key = (community_id, pubkey.to_vec());
         let cached_open = self.open_channels_cache.get(&community_id);
-        let (mut ids, open) = match self.member_channels_cache.get(&key) {
-            Some(members) => {
+        if let Some(members) = self.member_channels_cache.get(&key) {
+            if let Some(open) = cached_open
+                .as_ref()
+                .filter(|open| open.fingerprint == members.open_fingerprint)
+            {
                 metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
-                let open = match cached_open {
-                    Some(open) => {
-                        metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
-                        open
-                    }
-                    None => self.fetch_open_channels(community_id, "absent").await?,
-                };
-                (members, open)
+                metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
+                let mut ids = members.ids.clone();
+                buzz_db::channel_members::merge_channel_ids(&mut ids, &open.ids);
+                return Ok(ids);
             }
-            None => {
-                metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
-                let members = self.db.get_member_channels(community_id, pubkey).await?;
-                let open = match cached_open {
-                    Some(open) if open.fingerprint == members.open_fingerprint => {
-                        metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
-                        open
-                    }
-                    Some(stale) => {
-                        // Retire the stale set first. If this fill is then
-                        // superseded, this reader's cached member half must
-                        // not meet the stale set on its next read.
-                        self.retire_open_channels(community_id, &stale);
-                        self.fetch_open_channels(community_id, "stale").await?
-                    }
-                    None => self.fetch_open_channels(community_id, "absent").await?,
-                };
-                self.member_channels_cache.insert(key, members.ids.clone());
-                (members.ids, open)
+        }
+        metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
+        let members = Arc::new(self.db.get_member_channels(community_id, pubkey).await?);
+        let open = match cached_open {
+            Some(open) if open.fingerprint == members.open_fingerprint => {
+                metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
+                open
             }
+            Some(_) => self.fetch_open_channels(community_id, "stale").await?,
+            None => self.fetch_open_channels(community_id, "absent").await?,
         };
+        let mut ids = members.ids.clone();
+        self.member_channels_cache.insert(key, members);
         buzz_db::channel_members::merge_channel_ids(&mut ids, &open.ids);
         Ok(ids)
     }
 
-    /// Reads the community's open set and caches it unless a drop or a later
-    /// fill came first. `reason` labels the miss: no cached set, or a cached
-    /// set the database no longer matches.
+    /// Reads the community's open set and caches it. `reason` labels the
+    /// miss: no cached set, or a cached set the database no longer matches.
     async fn fetch_open_channels(
         &self,
         community_id: CommunityId,
         reason: &'static str,
     ) -> Result<Arc<ListedOpenChannels>, buzz_db::DbError> {
         metrics::counter!("buzz_open_channels_cache_misses_total", "reason" => reason).increment(1);
-        let fill = self.begin_open_channels_fill(community_id);
         let open = Arc::new(self.db.get_listed_open_channels(community_id).await?);
-        #[cfg(test)]
-        open_channels_test_hooks::before_finish();
-        fill.finish(&self.open_channels_cache, open.clone());
+        self.open_channels_cache.insert(community_id, open.clone());
         Ok(open)
-    }
-
-    /// Starts an open-set fill, superseding any fill already in flight.
-    fn begin_open_channels_fill(&self, community_id: CommunityId) -> OpenChannelsFill<'_> {
-        static NEXT_TICKET: AtomicU64 = AtomicU64::new(0);
-        let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
-        self.open_channels_fills.insert(community_id, ticket);
-        OpenChannelsFill {
-            fills: &self.open_channels_fills,
-            community_id,
-            ticket,
-        }
-    }
-
-    /// Removes `stale` from the cache if it is still the cached set, leaving
-    /// fills in flight alone. Holding the fill entry's lock orders the check
-    /// and removal against [`OpenChannelsFill::finish`], so a newer set that
-    /// a fill published meanwhile stays.
-    fn retire_open_channels(&self, community_id: CommunityId, stale: &Arc<ListedOpenChannels>) {
-        let _fill = self.open_channels_fills.entry(community_id);
-        if self
-            .open_channels_cache
-            .get(&community_id)
-            .is_some_and(|cached| Arc::ptr_eq(&cached, stale))
-        {
-            self.open_channels_cache.invalidate(&community_id);
-        }
-    }
-
-    /// Drops the community's open set and refuses every fill in flight.
-    /// Holding the fill entry's lock across the drop orders it against
-    /// [`OpenChannelsFill::finish`].
-    fn drop_open_channels(&self, community_id: CommunityId) {
-        let fill = self.open_channels_fills.entry(community_id);
-        self.open_channels_cache.invalidate(&community_id);
-        if let dashmap::Entry::Occupied(fill) = fill {
-            fill.remove();
-        }
     }
 
     /// Seeds both accessible-channel caches so `pubkey` reads exactly
@@ -2476,8 +2379,13 @@ impl AppState {
         pubkey: Vec<u8>,
         channels: Vec<Uuid>,
     ) {
-        self.member_channels_cache
-            .insert((community_id, pubkey), channels);
+        self.member_channels_cache.insert(
+            (community_id, pubkey),
+            Arc::new(MemberChannels {
+                ids: channels,
+                open_fingerprint: Vec::new(),
+            }),
+        );
         self.open_channels_cache.insert(
             community_id,
             Arc::new(ListedOpenChannels {
@@ -2675,28 +2583,6 @@ impl std::fmt::Debug for AppState {
             .field("relay_url", &self.config.relay_url)
             .field("max_connections", &self.config.max_connections)
             .finish()
-    }
-}
-
-/// Lets a test act between an open-set fill's query and its publication.
-#[cfg(test)]
-mod open_channels_test_hooks {
-    use std::cell::RefCell;
-
-    thread_local! {
-        static BEFORE_FINISH: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
-    }
-
-    /// Runs `hook` once, in the next open-set fill on this thread, after its
-    /// query and before it publishes.
-    pub(super) fn arm_before_finish(hook: impl FnOnce() + 'static) {
-        BEFORE_FINISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-    }
-
-    pub(super) fn before_finish() {
-        if let Some(hook) = BEFORE_FINISH.with(|slot| slot.borrow_mut().take()) {
-            hook();
-        }
     }
 }
 
@@ -3476,10 +3362,10 @@ pub(crate) mod tests {
         /// Cross-pod invalidation is best-effort. With it withheld, a pod that
         /// still caches a channel in the community's open set must not grant
         /// it to a reader with nothing cached once the channel left the set
-        /// on the writer, even when that reader's refresh is superseded and
-        /// its next read hits its cached member half. Once the pod has caught
-        /// the stale set, it must not grant the channel to an earlier reader
-        /// whose member half it still caches either.
+        /// on the writer. Once the pod has caught the stale set, it must not
+        /// grant the channel to an earlier reader whose member half it still
+        /// caches either, and a stale set that reaches the cache again must
+        /// not grant it to any reader that read after the revocation.
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn a_lost_open_set_invalidation_grants_no_reader_a_revoked_channel() {
@@ -3543,27 +3429,17 @@ pub(crate) mod tests {
                     "control: the reader pod still caches the old open set"
                 );
 
-                // Another fill begins while the late reader's refresh is in
-                // flight and is still in flight after it, so the refresh is
-                // superseded and never publishes.
-                let fills = reader_pod.open_channels_fills.clone();
-                open_channels_test_hooks::arm_before_finish(move || {
-                    fills.insert(community, u64::MAX);
-                });
+                let stale = reader_pod.open_channels_cache.get(&community).unwrap();
+
                 let late = reader();
-                for read in ["first", "second"] {
-                    assert!(
-                        !reader_pod
-                            .get_accessible_channel_ids_cached(community, &late)
-                            .await
-                            .unwrap()
-                            .contains(&channel),
-                        "{revoke}: a reader with nothing cached was granted a revoked channel on its {read} read"
-                    );
-                }
-                reader_pod
-                    .open_channels_fills
-                    .remove_if(&community, |_, ticket| *ticket == u64::MAX);
+                assert!(
+                    !reader_pod
+                        .get_accessible_channel_ids_cached(community, &late)
+                        .await
+                        .unwrap()
+                        .contains(&channel),
+                    "{revoke}: a reader with nothing cached was granted a revoked channel"
+                );
                 assert!(
                     !reader_pod
                         .get_accessible_channel_ids_cached(community, &early)
@@ -3571,6 +3447,22 @@ pub(crate) mod tests {
                         .unwrap()
                         .contains(&channel),
                     "{revoke}: a cached reader still had the revoked channel after the stale set was caught"
+                );
+
+                // A stale set can reach the cache again however fills
+                // interleave, e.g. one that read before the revocation
+                // publishing last. A reader that read after the revocation
+                // must not use it.
+                reader_pod
+                    .open_channels_cache
+                    .insert(community, Arc::new(ListedOpenChannels::clone(&stale)));
+                assert!(
+                    !reader_pod
+                        .get_accessible_channel_ids_cached(community, &late)
+                        .await
+                        .unwrap()
+                        .contains(&channel),
+                    "{revoke}: a reader that read after the revocation used a republished stale set"
                 );
             }
         }
@@ -3828,7 +3720,8 @@ pub(crate) mod tests {
         assert_eq!(
             state
                 .member_channels_cache
-                .get(&(community_b, pubkey.clone())),
+                .get(&(community_b, pubkey.clone()))
+                .map(|members| members.ids.clone()),
             Some(channels_b),
             "A's cache drop must not evict B's accessible-channel entry"
         );
@@ -3840,12 +3733,23 @@ pub(crate) mod tests {
         let state = test_state().await;
         let community = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
         let [member, both, open] = [1, 2, 3].map(Uuid::from_u128);
-        let reader = vec![7u8; 32];
-        state.seed_accessible_channels(community, reader.clone(), vec![member, both]);
-        state
-            .open_channels_cache
-            .insert(community, open_set(&[both, open]));
+        let open_set = Arc::new(ListedOpenChannels {
+            ids: vec![both, open],
+            fingerprint: vec![1],
+        });
+        state.open_channels_cache.insert(community, open_set);
+        let seed = |reader: &[u8], ids: Vec<Uuid>| {
+            state.member_channels_cache.insert(
+                (community, reader.to_vec()),
+                Arc::new(MemberChannels {
+                    ids,
+                    open_fingerprint: vec![1],
+                }),
+            );
+        };
 
+        let reader = vec![7u8; 32];
+        seed(&reader, vec![member, both]);
         let ids = state
             .get_accessible_channel_ids_cached(community, &reader)
             .await
@@ -3854,102 +3758,12 @@ pub(crate) mod tests {
 
         // Another reader shares the community's open half.
         let other = vec![8u8; 32];
-        state
-            .member_channels_cache
-            .insert((community, other.clone()), vec![]);
+        seed(&other, vec![]);
         let ids = state
             .get_accessible_channel_ids_cached(community, &other)
             .await
             .expect("both halves are cached");
         assert_eq!(ids, vec![both, open]);
-    }
-
-    fn open_set(ids: &[Uuid]) -> Arc<ListedOpenChannels> {
-        Arc::new(ListedOpenChannels {
-            ids: ids.to_vec(),
-            fingerprint: ids.iter().flat_map(|id| *id.as_bytes()).collect(),
-        })
-    }
-
-    /// An open-set read that started before a drop, local or received from
-    /// another pod, must not repopulate the shared set after it.
-    #[tokio::test]
-    async fn open_channels_fill_from_before_a_drop_is_discarded() {
-        let state = test_state().await;
-        let community = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
-        let stale = open_set(&[Uuid::from_u128(1)]);
-        let invalidations: [&dyn Fn(); 3] = [
-            &|| state.invalidate_all_accessible_channels_local(community),
-            &|| state.apply_cache_invalidation(community, CacheInvalidation::AccessibleAll),
-            &|| state.apply_cache_invalidation(community, CacheInvalidation::ChannelDeleted),
-        ];
-        for invalidate in invalidations {
-            let fill = state.begin_open_channels_fill(community);
-            invalidate();
-            assert!(!fill.finish(&state.open_channels_cache, stale.clone()));
-            assert!(
-                state.open_channels_cache.get(&community).is_none(),
-                "a pre-drop read must leave the next reader to re-query"
-            );
-        }
-
-        let fill = state.begin_open_channels_fill(community);
-        assert!(fill.finish(&state.open_channels_cache, stale.clone()));
-        assert_eq!(state.open_channels_cache.get(&community), Some(stale));
-        assert!(state.open_channels_fills.is_empty());
-    }
-
-    /// A read that started earlier must not cache, whether it finishes
-    /// before or after a later one, so the later read's set is what stays.
-    #[tokio::test]
-    async fn an_older_open_channels_fill_cannot_replace_a_newer_one() {
-        let state = test_state().await;
-        let community = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
-        let stale = open_set(&[Uuid::from_u128(1)]);
-        let current = open_set(&[Uuid::from_u128(2)]);
-        for older_finishes_first in [true, false] {
-            state.open_channels_cache.invalidate(&community);
-            let older = state.begin_open_channels_fill(community);
-            let newer = state.begin_open_channels_fill(community);
-            if older_finishes_first {
-                assert!(!older.finish(&state.open_channels_cache, stale.clone()));
-                assert!(newer.finish(&state.open_channels_cache, current.clone()));
-            } else {
-                assert!(newer.finish(&state.open_channels_cache, current.clone()));
-                assert!(!older.finish(&state.open_channels_cache, stale.clone()));
-            }
-            assert_eq!(
-                state.open_channels_cache.get(&community),
-                Some(current.clone()),
-                "older_finishes_first={older_finishes_first}"
-            );
-        }
-    }
-
-    /// The fill fence holds an entry only while a fill is in flight, so drops
-    /// for communities this pod never fills, and fills that fail or are
-    /// cancelled, leave nothing behind.
-    #[tokio::test]
-    async fn open_channels_fills_hold_entries_only_while_in_flight() {
-        let state = test_state().await;
-        for n in 0..100 {
-            let community = CommunityId::from_uuid(Uuid::from_u128(n));
-            state.apply_cache_invalidation(community, CacheInvalidation::AccessibleAll);
-        }
-        assert!(state.open_channels_fills.is_empty());
-
-        let community = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
-        let abandoned = state.begin_open_channels_fill(community);
-        assert_eq!(state.open_channels_fills.len(), 1);
-        drop(abandoned);
-        assert!(state.open_channels_fills.is_empty());
-
-        // Dropping a superseded fill must not end the fill that replaced it.
-        let older = state.begin_open_channels_fill(community);
-        let newer = state.begin_open_channels_fill(community);
-        drop(older);
-        assert!(newer.finish(&state.open_channels_cache, open_set(&[])));
-        assert!(state.open_channels_fills.is_empty());
     }
 
     #[tokio::test]
@@ -4000,7 +3814,8 @@ pub(crate) mod tests {
         assert_eq!(
             state
                 .member_channels_cache
-                .get(&(community_b, pubkey.clone())),
+                .get(&(community_b, pubkey.clone()))
+                .map(|members| members.ids.clone()),
             Some(vec![channel_id])
         );
         assert!(state.open_channels_cache.get(&community_b).is_some());

@@ -300,10 +300,7 @@ run_unit_tests() {
     cargo test -p buzz-relay --lib -- --exact --nocapture \
       state::tests::accessible_channel_invalidation_is_scoped_to_community \
       state::tests::accessible_channels_join_member_and_open_halves \
-      state::tests::channel_deleted_invalidation_is_scoped_to_community \
-      state::tests::open_channels_fill_from_before_a_drop_is_discarded \
-      state::tests::an_older_open_channels_fill_cannot_replace_a_newer_one \
-      state::tests::open_channels_fills_hold_entries_only_while_in_flight
+      state::tests::channel_deleted_invalidation_is_scoped_to_community
 
   run_test_step "buzz-relay admission regression test" \
     cargo test -p buzz-relay --lib state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket -- --nocapture
