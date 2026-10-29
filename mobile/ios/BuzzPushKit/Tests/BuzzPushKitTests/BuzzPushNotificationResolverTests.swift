@@ -138,6 +138,49 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(URLProtocolStub.requests.count, 1)
   }
 
+  func testResolveRetriesStaleConnectionOnceWithFreshProof() throws {
+    let event = try JSONDecoder().decode(
+      VerifiedNostrEvent.self,
+      from: Data(Self.fixtureEvent.utf8)
+    )
+    for code in [URLError.Code.timedOut, .networkConnectionLost] {
+      URLProtocolStub.reset()
+      var failed = false
+      URLProtocolStub.handler = { request in
+        if !failed {
+          failed = true
+          throw URLError(code)
+        }
+        return Self.response(request, status: 200, data: try JSONEncoder().encode([event]))
+      }
+
+      let result = try XCTUnwrap(
+        resolve(makeResolver(communitiesData: try snapshotData([community()]))), "\(code)")
+
+      XCTAssertEqual(result.body, "Hello Buzz")
+      let queries = URLProtocolStub.requests.prefix(2)
+      XCTAssertEqual(queries.map { $0.url?.path }, ["/query", "/query"])
+      XCTAssertNotEqual(
+        queries.first?.value(forHTTPHeaderField: "Authorization"),
+        queries.last?.value(forHTTPHeaderField: "Authorization"),
+        "The relay rejects a replayed NIP-98 proof.")
+    }
+  }
+
+  func testResolveRetriesStaleConnectionOnlyOnce() throws {
+    URLProtocolStub.handler = { _ in throw URLError(.timedOut) }
+
+    XCTAssertNil(resolve(makeResolver(communitiesData: try snapshotData([community()]))))
+    XCTAssertEqual(URLProtocolStub.requests.count, 2)
+  }
+
+  func testResolveDoesNotRetryOtherTransportFailures() throws {
+    URLProtocolStub.handler = { _ in throw URLError(.notConnectedToInternet) }
+
+    XCTAssertNil(resolve(makeResolver(communitiesData: try snapshotData([community()]))))
+    XCTAssertEqual(URLProtocolStub.requests.count, 1)
+  }
+
   func testResolveReturnsNilForUndecodableRelayResponse() throws {
     URLProtocolStub.handler = { request in
       Self.response(request, status: 200, data: Data("not events".utf8))

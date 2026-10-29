@@ -154,21 +154,8 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       completion(nil)
       return
     }
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.httpBody = body
-    request.timeoutInterval = 8
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    guard
-      let auth = try? NostrHTTPAuth.authorizationHeader(
-        url: url, method: "POST", body: body, privateKeyHex: privateKey
-      )
-    else {
-      completion(nil)
-      return
-    }
-    request.setValue(auth, forHTTPHeaderField: "Authorization")
-    session.dataTask(with: request) { data, response, _ in
+    send(url: url, body: body, privateKey: privateKey, session: session, retryOnStaleConnection: true) {
+      data, response in
       guard self.matchingPrivateKey(for: community) != nil,
         let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
         let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
@@ -186,6 +173,46 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         community: community
       )
       completion(candidate.map { ($0, community) })
+    }
+  }
+
+  /// Sends one signed `/query`. A timeout or dropped connection is retried once on a new
+  /// session, because the failed attempt may have used a pooled connection that went stale
+  /// when the network path changed. Each attempt is signed afresh so the relay's NIP-98
+  /// replay guard accepts it.
+  private func send(
+    url: URL, body: Data, privateKey: String, session: URLSession, retryOnStaleConnection: Bool,
+    completion: @escaping (Data?, URLResponse?) -> Void
+  ) {
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = body
+    request.timeoutInterval = 8
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    guard
+      let auth = try? NostrHTTPAuth.authorizationHeader(
+        url: url, method: "POST", body: body, privateKeyHex: privateKey
+      )
+    else {
+      completion(nil, nil)
+      return
+    }
+    request.setValue(auth, forHTTPHeaderField: "Authorization")
+    session.dataTask(with: request) { data, response, error in
+      guard retryOnStaleConnection, let error = error as? URLError,
+        [.timedOut, .networkConnectionLost].contains(error.code)
+      else {
+        completion(data, response)
+        return
+      }
+      let retrySession = URLSession(configuration: session.configuration)
+      self.send(
+        url: url, body: body, privateKey: privateKey, session: retrySession,
+        retryOnStaleConnection: false
+      ) { data, response in
+        retrySession.finishTasksAndInvalidate()
+        completion(data, response)
+      }
     }.resume()
   }
 

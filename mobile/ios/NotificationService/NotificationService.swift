@@ -34,13 +34,17 @@ final class NotificationService: UNNotificationServiceExtension {
     Bundle.main.object(
       forInfoDictionaryKey: "BuzzAppGroupIdentifier"
     ) as? String
+  // iOS creates a service instance per notification. A session per instance keeps a
+  // long-lived extension process from reusing connections that went stale when the
+  // network path changed (for example a VPN coming up or dropping).
+  private let session = URLSession(configuration: .ephemeral)
   private lazy var resolver: BuzzPushNotificationResolving = {
     let keychainAccessGroup =
       Bundle.main.object(
         forInfoDictionaryKey: "BuzzKeychainAccessGroup"
       ) as? String
     return BuzzPushNotificationResolver(
-      session: .shared,
+      session: session,
       loadCommunitiesData: { [self] in
         Self.loadPushSnapshotData(appGroupIdentifier: self.appGroupIdentifier)
       },
@@ -107,6 +111,9 @@ final class NotificationService: UNNotificationServiceExtension {
     }
     // Workaround until https://github.com/block/buzz/pull/8431 lands.
     if content.sound == nil { content.sound = .default }
+    // Shown if the relay can't be reached in time. The gateway's fixed body is meant
+    // to be replaced and reads like an instruction to the user.
+    content.body = "You have a new message."
     restrictedFallbackContent = Self.restrictedFallback(from: content)
     bestAttemptContent = content
     var cleanUserInfo = content.userInfo
@@ -161,6 +168,7 @@ final class NotificationService: UNNotificationServiceExtension {
   }
 
   private func finish(_ content: UNNotificationContent) {
+    session.finishTasksAndInvalidate()
     handoff?.finish(
       resolvedScope.map { isCurrent($0) } == false
         ? Self.restrictedFallback(from: content) : content,
