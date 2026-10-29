@@ -27,6 +27,7 @@ import '../channels/channel_detail_page.dart';
 import '../profile/user_profile_sheet.dart';
 import 'create_agent_sheet.dart';
 import 'delete_agent_action.dart';
+import 'community_bot_profiles.dart';
 
 /// Opens the active community's Agents navigation stack inside one modal.
 Future<void> showAgents(BuildContext context) async {
@@ -161,6 +162,7 @@ class AgentsSheet extends HookConsumerWidget {
     final registered = useFuture(registryFuture, preserveState: false);
     final keys = {
       ...?registered.data,
+      ...?ref.watch(communityBotProfilesProvider).asData?.value,
       for (final entry in directory.asData?.value ?? <AgentDirectoryEntry>[])
         entry.pubkey,
     }.where((key) => !controller.deletedAgents.contains(key)).toList();
