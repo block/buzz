@@ -988,9 +988,11 @@ impl ChannelSettingsWriter<'_> {
 /// 3. the channel row, `FOR NO KEY UPDATE`.
 ///
 /// Roster publication holds the membership lock and then, at commit, takes
-/// the TTL lock and updates the row. A huddle join takes the membership
-/// lock, then the TTL lock, then the row. A writer that took these locks in
-/// any other order could wait for one of them while it waits for this one.
+/// the TTL lock and updates the row. A huddle join and a `put_members`
+/// membership write take the membership lock, then the TTL lock, then the
+/// row; the row lock is what orders them against an archive, which does not
+/// take the membership lock. A writer that took these locks in any other
+/// order could wait for one of them while it waits for this one.
 ///
 /// Returns `ChannelNotFound` when the channel is missing or deleted.
 pub(crate) async fn lock_channel_for_settings_write<'tx>(

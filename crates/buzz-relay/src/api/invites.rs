@@ -1460,6 +1460,131 @@ mod postgres_tests {
         );
     }
 
+    /// A default channel archived after the auto-join listed it is skipped:
+    /// no membership row, no kind:39002 roster entry, no kind:44100 and no
+    /// `member_joined` notice. The test holds an uncommitted archive of the
+    /// listed channel, so the auto-join passes the list and the shared join
+    /// body's open/unarchived check on the committed state and then waits in
+    /// `put_member`; the archive commits and the join resumes on an archived
+    /// channel. Mutation: drop the channel row lock or the archived refusal
+    /// from `put_members` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn auto_join_skips_a_default_channel_archived_while_it_joins() {
+        use crate::handlers::group_state_postgres_tests::{
+            create_channel, edit_channel, group_state_tags,
+        };
+        use crate::handlers::side_effects::auto_join_default_channels;
+
+        let host = format!(
+            "invites-auto-join-archive-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let owner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists")
+            .id;
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        let joiner = Keys::generate();
+        let joiner_hex = joiner.public_key().to_hex();
+        for (keys, role) in [(&owner, "owner"), (&joiner, "member")] {
+            state
+                .db
+                .add_relay_member(
+                    community,
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &Keys::generate(),
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("seed relay member");
+        }
+        let starter = create_channel(&state, &tenant, &owner, &[]).await;
+        edit_channel(&state, &tenant, &owner, starter, &[&["auto_join", "true"]])
+            .await
+            .expect("relay owner flags channel");
+
+        let pool = state.db.pool().clone();
+        let mut archive = pool.begin().await.expect("begin archive");
+        let archive_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *archive)
+            .await
+            .expect("archive backend pid");
+        sqlx::query("UPDATE channels SET archived_at = NOW() WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(starter)
+            .execute(&mut *archive)
+            .await
+            .expect("archive the default channel");
+
+        let auto_join = tokio::spawn({
+            let state = Arc::clone(&state);
+            let tenant = tenant.clone();
+            let joiner_hex = joiner_hex.clone();
+            async move { auto_join_default_channels(&tenant, &state, &joiner_hex).await }
+        });
+        // Wait until the join is blocked behind the archive, so it has
+        // already listed the channel and passed the join body's check.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(archive_pid)
+            .fetch_one(&pool)
+            .await
+            .expect("read lock waiters");
+            if waiting {
+                break;
+            }
+            assert!(
+                !auto_join.is_finished(),
+                "the auto-join finished without waiting for the archive"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the auto-join never waited for the archive"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        archive.commit().await.expect("commit archive");
+        tokio::time::timeout(Duration::from_secs(10), auto_join)
+            .await
+            .expect("the auto-join returns after the archive commits")
+            .expect("auto-join task must not panic");
+
+        assert_eq!(
+            channel_roles(&state, community, &[starter], &joiner).await,
+            [None],
+            "an archived default channel must not admit the new member"
+        );
+        assert!(
+            !group_state_tags(&state, &tenant, starter, 39002)
+                .await
+                .iter()
+                .any(|tag| tag[0] == "p" && tag[1] == joiner_hex),
+            "kind:39002 must not list the new member"
+        );
+        assert_eq!(
+            added_notification_count(&state, community, &joiner_hex).await,
+            0
+        );
+        assert_eq!(
+            member_joined_notice_count(&state, community, starter, &joiner_hex).await,
+            0
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn owner_mints_and_new_pubkey_claims() {

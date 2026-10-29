@@ -226,7 +226,9 @@ admin flags. It does this once,
 at that moment, and never again on login or reconnect, so a later kind:9022
 leave stands. A channel that fails to join is logged and counted
 (`buzz_auto_join_failures_total`), not retried: the kind:39000 tag is the
-record a client reconciles against. `buzz-admin add-member` writes the
+record a client reconciles against. That includes a channel archived or made
+private while the join runs: the membership write decides both again under
+the channel's locks, so the member is not added and nothing is announced. `buzz-admin add-member` writes the
 roster row only and does not join default channels. Auto-join fires only at
 those roster-insert sites, so a community that does not require relay
 membership advertises the kind:39000 tag but auto-joins nobody; a client that

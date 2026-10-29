@@ -2731,7 +2731,10 @@ pub(crate) async fn join_channel_as_self(
 
     // A self-join gets the channel's `join_role`, read by `put_member` under
     // the membership lock: member in a normal channel, guest in an announce
-    // channel, where a member must then make them a member.
+    // channel, where a member must then make them a member. `put_member`
+    // also decides visibility and archive state again under its locks, so a
+    // channel made private or archived since the checks above is refused
+    // here, with no side effects.
     state
         .db
         .put_member(tenant.community(), channel_id, pubkey, None, None)
@@ -2779,7 +2782,8 @@ pub(crate) async fn join_channel_as_self(
 /// Best effort: the relay membership has already committed, so a channel
 /// that fails is logged and counted, never retried, and never fails the
 /// caller. The `auto_join` tag on kind:39000 is the durable record a client
-/// reconciles against.
+/// reconciles against. A channel archived or made private after the list
+/// was read is one such failure: `put_member` refuses it under its locks.
 pub(crate) async fn auto_join_default_channels(
     tenant: &TenantContext,
     state: &Arc<AppState>,
