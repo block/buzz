@@ -85,6 +85,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         .unwrap();
     let sends = Arc::new(AtomicUsize::new(0));
     let (app, _) = router(AppState {
+        trusted_proxy_cidrs: Vec::new(),
         gateway_origin: "https://push.buzz.xyz".into(),
         authority,
         token_keyring,

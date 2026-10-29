@@ -330,7 +330,17 @@
     "application": {
       "$ref": "#/$defs/application"
     },
-    "profiles": false
+    "profiles": false,
+    "trustedProxyCidrs": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "maxLength": 49
+      }
+    }
   },
   "$defs": {
     "apnsCert": {

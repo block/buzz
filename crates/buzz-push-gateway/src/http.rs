@@ -33,7 +33,6 @@ use std::{
     },
     time::Duration,
 };
-use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
 /// Verification and delivery services for this gateway's configured application.
@@ -45,6 +44,8 @@ pub struct ApplicationRuntime {
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Only these TCP peers may supply the client-address header.
+    pub trusted_proxy_cidrs: Vec<(std::net::IpAddr, u8)>,
     pub gateway_origin: String,
     pub authority: Arc<dyn AuthorityStore>,
     pub token_keyring: Arc<TokenKeyring>,
@@ -836,22 +837,51 @@ pub fn router_with_metrics(
     state: AppState,
     metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 ) -> (Router, Router) {
+    // At most 18 requests hold database work, leaving the 20-connection pool
+    // headroom. No common semaphore lets delivery/enrollment use revocation slots.
+    let enrollment_lane = crate::ingress::Lane::new(2, 20, state.trusted_proxy_cidrs.clone());
+    let management_lane = crate::ingress::Lane::new(4, 120, state.trusted_proxy_cidrs.clone());
+    let revocation_lane = crate::ingress::Lane::new(4, 120, state.trusted_proxy_cidrs.clone());
+    let delivery_lane = crate::ingress::Lane::new(8, 1200, state.trusted_proxy_cidrs.clone());
     let enrollment = Router::new()
-        .route("/v1/installations", post(enroll))
-        .layer(RequestBodyLimitLayer::new(MAX_ENROLL_REQUEST_BYTES));
-    let standard_requests = Router::new()
-        .route("/v1/installations/challenges", post(challenge))
+        .route(
+            "/v1/installations",
+            post(enroll).layer(RequestBodyLimitLayer::new(MAX_ENROLL_REQUEST_BYTES)),
+        )
+        .route(
+            "/v1/installations/challenges",
+            post(challenge).layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES)),
+        )
+        .layer(axum::middleware::from_fn(move |request, next| {
+            enrollment_lane.clone().admit(request, next)
+        }));
+    let management = Router::new()
         .route("/v1/delegations", post(delegate))
-        .route("/v1/delegations/revoke", post(revoke_delegation))
         .route("/v1/installations/endpoint", post(rotate_endpoint))
+        .layer(axum::middleware::from_fn(move |request, next| {
+            management_lane.clone().admit(request, next)
+        }));
+    let revocation = Router::new()
+        .route("/v1/delegations/revoke", post(revoke_delegation))
         .route("/v1/installations/revoke", post(revoke_installation))
-        .route(DELIVERY_PATH, post(deliver))
-        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES));
+        .layer(axum::middleware::from_fn(move |request, next| {
+            revocation_lane.clone().admit(request, next)
+        }));
+    let delivery =
+        Router::new()
+            .route(DELIVERY_PATH, post(deliver))
+            .layer(axum::middleware::from_fn(move |request, next| {
+                delivery_lane.clone().admit(request, next)
+            }));
     let public = Router::new()
         .merge(enrollment)
-        .merge(standard_requests)
+        .merge(
+            management
+                .merge(revocation)
+                .merge(delivery)
+                .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES)),
+        )
         .with_state(state.clone())
-        .layer(ConcurrencyLimitLayer::new(256))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(20),
@@ -911,6 +941,7 @@ mod request_limit_tests {
         )
         .expect("pinned Apple root fixture");
         AppState {
+            trusted_proxy_cidrs: Vec::new(),
             gateway_origin: "https://push.buzz.xyz".into(),
             authority: Arc::new(MemoryAuthorityStore::default()),
             token_keyring: Arc::new(
