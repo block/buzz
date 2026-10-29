@@ -335,7 +335,6 @@ async fn close_frame_code_is_captured_by_the_message_handler() {
             &mut state,
             &Keys::generate(),
             "ws://127.0.0.1:1",
-            "agent",
             None,
         )
         .await;
@@ -356,7 +355,7 @@ fn begin_reconnect_consumes_the_close_code() {
     assert_eq!(begin_reconnect(&mut state, 5_001, 0.5), Duration::ZERO);
 }
 
-async fn deliver_eose(client: &mut WsStream, state: &mut BgState, sub_id: &str) {
+pub(super) async fn deliver_eose(client: &mut WsStream, state: &mut BgState, sub_id: &str) {
     let (event_tx, _event_rx) = mpsc::channel(1);
     let (control_tx, _control_rx) = mpsc::channel(1);
     let alive = handle_ws_message(
@@ -367,7 +366,6 @@ async fn deliver_eose(client: &mut WsStream, state: &mut BgState, sub_id: &str) 
         state,
         &Keys::generate(),
         "ws://127.0.0.1:1",
-        "agent",
         None,
     )
     .await;
@@ -742,7 +740,7 @@ async fn second_req_on_a_connection_supersedes_the_first_for_eose() {
     assert!(state.req_sent_this_conn.is_empty() && state.superseded_this_conn.is_empty());
 }
 
-fn tagged_event(channel: Uuid, created_at: u64) -> Event {
+pub(super) fn tagged_event(channel: Uuid, created_at: u64) -> Event {
     EventBuilder::new(Kind::Custom(9), format!("e{created_at}"))
         .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
         .custom_created_at(nostr::Timestamp::from(created_at))
@@ -750,7 +748,7 @@ fn tagged_event(channel: Uuid, created_at: u64) -> Event {
         .unwrap()
 }
 
-async fn deliver_event(
+pub(super) async fn deliver_event(
     client: &mut WsStream,
     state: &mut BgState,
     tx: &mpsc::Sender<Option<BuzzEvent>>,
@@ -766,7 +764,6 @@ async fn deliver_event(
         state,
         &Keys::generate(),
         "ws://127.0.0.1:1",
-        "agent",
         None,
     )
     .await;
@@ -775,7 +772,7 @@ async fn deliver_event(
 
 /// Drop the live socket the way the production loop does: through the real
 /// autonomous reconnect entry (queued Shutdown, unreachable relay).
-async fn lose_connection(state: &mut BgState) {
+pub(super) async fn lose_connection(state: &mut BgState) {
     let (mut dead, _dead_server) = test_ws_pair().await;
     let url = refused_relay_url().await;
     ReconnectHarness::with_queued_shutdown()
@@ -785,7 +782,7 @@ async fn lose_connection(state: &mut BgState) {
 }
 
 /// Replay `state` on a fresh socket and return the `since` of the first REQ.
-async fn first_replay_req(state: &mut BgState, expected_sub: &str) -> u64 {
+pub(super) async fn first_replay_req(state: &mut BgState, expected_sub: &str) -> u64 {
     let (mut client, mut server) = test_ws_pair().await;
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     let result = resubscribe_after_reconnect(&mut client, &mut cmd_rx, state, "agent", true).await;
@@ -1094,7 +1091,7 @@ async fn overflow_recovery_below_a_retained_live_until_keeps_its_floor() {
 
 /// Write the reconnect replay on a fresh socket, leaving the connection open,
 /// and return the socket pair with the first REQ's `since`.
-async fn open_replay(
+pub(super) async fn open_replay(
     state: &mut BgState,
     sub: &str,
 ) -> (WsStream, WebSocketStream<tokio::net::TcpStream>, u64) {
@@ -1111,7 +1108,7 @@ async fn open_replay(
 /// The loss record a gap-retention test drives: a channel's or the membership
 /// subscription's.
 #[derive(Clone, Copy)]
-enum LossArm {
+pub(super) enum LossArm {
     Channel(Uuid),
     Membership,
 }
@@ -1144,7 +1141,7 @@ impl LossArm {
 
     /// Delivered progress at 4_000 and a retained `live_until` past a
     /// recorded loss at `lost`, the socket already closed.
-    async fn progress_past_a_loss(self, lost: u64) -> BgState {
+    pub(super) async fn progress_past_a_loss(self, lost: u64) -> BgState {
         let mut state = BgState::new();
         match self {
             Self::Channel(channel) => {
@@ -1286,7 +1283,7 @@ async fn a_second_replay_on_one_socket_restores_the_older_retired_loss() {
 
 // -- Silent socket death, through the real socket-owner loop ----------------
 
-enum MockFrame {
+pub(super) enum MockFrame {
     Text(Value),
     Pong,
     /// The agent's own keepalive Ping. tungstenite queues an auto-Pong for it,
@@ -1294,7 +1291,7 @@ enum MockFrame {
     Ping,
 }
 
-enum MockCtl {
+pub(super) enum MockCtl {
     Send(Value),
     Ping,
     Drop,
@@ -1302,14 +1299,14 @@ enum MockCtl {
     Close(u16),
 }
 
-struct MockConn {
-    frames: mpsc::UnboundedReceiver<MockFrame>,
-    ctl: mpsc::UnboundedSender<MockCtl>,
+pub(super) struct MockConn {
+    pub(super) frames: mpsc::UnboundedReceiver<MockFrame>,
+    pub(super) ctl: mpsc::UnboundedSender<MockCtl>,
 }
 
 /// A relay that completes NIP-42 auth on every connection, surfaces each
 /// authenticated connection to the test, and forwards its inbound frames.
-async fn mock_relay() -> (String, mpsc::UnboundedReceiver<MockConn>) {
+pub(super) async fn mock_relay() -> (String, mpsc::UnboundedReceiver<MockConn>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let (conn_tx, conn_rx) = mpsc::unbounded_channel();
@@ -1394,7 +1391,7 @@ fn fake_now() -> u64 {
     FAKE_NOW.load(Ordering::SeqCst)
 }
 
-async fn next_req(conn: &mut MockConn) -> Value {
+pub(super) async fn next_req(conn: &mut MockConn) -> Value {
     loop {
         let frame = timeout(Duration::from_secs(5), conn.frames.recv())
             .await

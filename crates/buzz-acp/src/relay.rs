@@ -148,6 +148,18 @@ const DNS_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 /// window (10 frames/s at the limit). A 48-channel reconnect spreads over ≈6 s
 /// instead of arriving as a single burst that consumes the entire budget at once.
 const REQ_PACING_INTERVAL: Duration = Duration::from_millis(125);
+
+/// First retry delay after an error CLOSED (anything not rate-limited, auth or
+/// a per-channel denial). Doubles per consecutive failure of the subscription.
+const CLOSED_RETRY_BASE: Duration = Duration::from_secs(2);
+
+/// Ceiling for the error-CLOSED retry delay. A subscription that keeps failing
+/// settles here, one REQ per ~2 minutes, rather than giving up: dropping it
+/// would leave the agent deaf in that channel after the relay recovers.
+const CLOSED_RETRY_MAX: Duration = Duration::from_secs(120);
+
+/// Delay before a parked resubscribe whose REQ write failed is tried again.
+const PARKED_SEND_FAILURE_PENALTY: Duration = Duration::from_secs(5);
 /// Maximum REQ frames sent per drain iteration (shared across rate_limited_pending,
 /// resubscribe_retry, and control-sub recovery). Keeps any single main-loop tick
 /// below the relay's 50-frames/5s budget, and ensures the select! loop is never
@@ -1239,20 +1251,24 @@ struct BgState {
     /// admission-counted frames (REQ, EVENT) are deferred or dropped.
     /// `check_rate_gate` lazily clears this to `None` once it expires.
     rate_limit_gate: Option<tokio::time::Instant>,
-    /// Channels parked because a CLOSED "rate-limited:" was received.
+    /// Channels parked by the rate-limit gate or by an error CLOSED's backoff.
     ///
-    /// Drained by the main loop when the gate clears, one REQ per
-    /// `REQ_PACING_INTERVAL` tick via the select-integrated pacing timer.
-    /// Value is the `Instant` before which the channel must not be retried.
+    /// Drained by the main loop once the deadline passes and the gate is clear,
+    /// one REQ per `REQ_PACING_INTERVAL` tick via the select-integrated pacing
+    /// timer. Value is the `Instant` before which the channel must not be
+    /// retried.
     rate_limited_pending: HashMap<Uuid, tokio::time::Instant>,
-    /// Set when a rate-limited CLOSED arrives for the membership notification
-    /// subscription. The main-loop drain re-sends the REQ once the gate clears,
-    /// even when `rate_limited_pending` is empty.
-    membership_resub_needed: bool,
-    /// Set when a rate-limited CLOSED arrives for the observer control
-    /// subscription. The main-loop drain re-sends the REQ once the gate clears,
-    /// even when `rate_limited_pending` is empty.
-    observer_resub_needed: bool,
+    /// The membership notification subscription is parked until this instant,
+    /// by the rate-limit gate or an error CLOSED's backoff. The main-loop drain
+    /// re-sends the REQ once it passes and the gate is clear.
+    membership_resub_at: Option<tokio::time::Instant>,
+    /// Like `membership_resub_at`, for the observer control subscription.
+    observer_resub_at: Option<tokio::time::Instant>,
+    /// Consecutive error CLOSEDs per owned subscription ID with no EOSE in
+    /// between; sets the backoff in [`closed_retry_delay`]. Cleared by an EOSE
+    /// for the subscription and when a channel is unsubscribed. Kept across
+    /// reconnects so a REQ that fails on every socket keeps backing off.
+    closed_failures: HashMap<String, u32>,
     /// Observer telemetry frames (kind 24200) parked while the rate-limit gate
     /// is armed. Unlike typing indicators, these frames are durable telemetry:
     /// dropping them silently loses turn history in the Desktop observer.
@@ -1350,8 +1366,9 @@ impl BgState {
             subscribe_since: HashMap::new(),
             rate_limit_gate: None,
             rate_limited_pending: HashMap::new(),
-            membership_resub_needed: false,
-            observer_resub_needed: false,
+            membership_resub_at: None,
+            observer_resub_at: None,
+            closed_failures: HashMap::new(),
             gated_observer_pending: VecDeque::new(),
             observer_in_flight: VecDeque::new(),
             gated_observer_dropped: 0,
@@ -1442,6 +1459,10 @@ impl BgState {
     /// whose replacement (e.g. an overflow-recovery replay) has not delivered
     /// its history yet.
     fn note_eose(&mut self, sub_id: &str) {
+        // Any EOSE ends an error-CLOSED streak: the relay retires a CLOSED
+        // subscription, so the EOSE belongs to the retry. Removal only, so an
+        // unknown ID cannot grow the map.
+        self.closed_failures.remove(sub_id);
         if self.superseded_this_conn.contains(sub_id) {
             return;
         }
@@ -1488,15 +1509,7 @@ impl BgState {
     /// same time.
     fn note_connection_closed(&mut self, now_secs: u64) {
         for (sub_id, loss) in std::mem::take(&mut self.retired_loss_this_conn) {
-            if sub_id == MEMBERSHIP_NOTIF_SUB_ID {
-                self.membership_dropped_since =
-                    Some(self.membership_dropped_since.map_or(loss, |d| d.min(loss)));
-            } else if let Some(channel_id) = channel_id_from_sub_id(&sub_id) {
-                self.channel_dropped_since
-                    .entry(channel_id)
-                    .and_modify(|d| *d = (*d).min(loss))
-                    .or_insert(loss);
-            }
+            self.restore_loss(&sub_id, loss);
         }
         let live_until = self
             .last_inbound_secs
@@ -1510,6 +1523,52 @@ impl BgState {
         self.req_sent_this_conn.clear();
         self.superseded_this_conn.clear();
         self.reset_inbound_clock();
+    }
+
+    /// Merge `loss` back into the subscription's loss record (`min` with any
+    /// newer loss), so its next replay starts at or before it again.
+    fn restore_loss(&mut self, sub_id: &str, loss: u64) {
+        if sub_id == MEMBERSHIP_NOTIF_SUB_ID {
+            self.membership_dropped_since =
+                Some(self.membership_dropped_since.map_or(loss, |d| d.min(loss)));
+        } else if let Some(channel_id) = channel_id_from_sub_id(sub_id) {
+            self.channel_dropped_since
+                .entry(channel_id)
+                .and_modify(|d| *d = (*d).min(loss))
+                .or_insert(loss);
+        }
+    }
+
+    /// The relay CLOSED `sub_id` on the current connection, so the subscription
+    /// is no longer live: a later connection close must not stamp `live_until`
+    /// over the time it was closed, and a loss record its REQ retired is
+    /// restored because that replay never reached EOSE. The retry's `since` is
+    /// then never later than the closed REQ's.
+    fn note_sub_closed(&mut self, sub_id: &str) {
+        self.eose_this_conn.remove(sub_id);
+        if let Some(loss) = self.retired_loss_this_conn.remove(sub_id) {
+            self.restore_loss(sub_id, loss);
+        }
+    }
+
+    /// Record an error CLOSED for an owned subscription and return when its
+    /// retry is due: [`closed_retry_delay`] for the new failure count, jittered.
+    fn note_error_closed(&mut self, sub_id: &str) -> tokio::time::Instant {
+        self.note_sub_closed(sub_id);
+        let failures = self.closed_failures.entry(sub_id.to_owned()).or_insert(0);
+        *failures = failures.saturating_add(1);
+        tokio::time::Instant::now() + jittered_duration(closed_retry_delay(*failures))
+    }
+
+    /// Earliest instant a parked resubscribe (channel, membership or observer
+    /// control) becomes due, for the main loop's wake timer.
+    fn next_parked_resubscribe_at(&self) -> Option<tokio::time::Instant> {
+        self.rate_limited_pending
+            .values()
+            .copied()
+            .chain(self.membership_resub_at)
+            .chain(self.observer_resub_at)
+            .min()
     }
 
     /// Clear all per-channel state for a channel that is being unsubscribed.
@@ -1529,6 +1588,7 @@ impl BgState {
         // for the old REQ must not count for the new one.
         self.live_until.remove(&sub_id);
         self.retired_loss_this_conn.remove(&sub_id);
+        self.closed_failures.remove(&sub_id);
         self.active_filters.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);
         self.resubscribe_retry.remove(channel_id);
@@ -1857,15 +1917,15 @@ async fn execute_connected_command(
         }
         RelayCommand::SubscribeMembership => {
             state.membership_sub_active = true;
-            if state.check_rate_gate().is_some() {
+            if let Some(retry_after) = state.check_rate_gate() {
                 debug!("rate-gated: deferring membership subscription");
-                state.membership_resub_needed = true;
+                state.membership_resub_at = Some(retry_after);
                 return true;
             }
             let since = state.membership_since();
             let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
             if sent {
-                state.membership_resub_needed = false;
+                state.membership_resub_at = None;
                 if state.membership_last_seen.is_none() {
                     state.membership_last_seen = since;
                 }
@@ -1873,24 +1933,24 @@ async fn execute_connected_command(
             } else {
                 // Send failed — record intent so reconnect restores it.
                 warn!("membership subscribe REQ failed — recording intent for reconnect");
-                state.membership_resub_needed = true;
+                state.membership_resub_at = Some(tokio::time::Instant::now());
                 false
             }
         }
         RelayCommand::SubscribeObserverControls => {
             state.observer_control_sub_active = true;
-            if state.check_rate_gate().is_some() {
+            if let Some(retry_after) = state.check_rate_gate() {
                 debug!("rate-gated: deferring observer control subscription");
-                state.observer_resub_needed = true;
+                state.observer_resub_at = Some(retry_after);
                 return true;
             }
             let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
             if sent {
-                state.observer_resub_needed = false;
+                state.observer_resub_at = None;
                 true
             } else {
                 warn!("observer control subscribe REQ failed — recording intent for reconnect");
-                state.observer_resub_needed = true;
+                state.observer_resub_at = Some(tokio::time::Instant::now());
                 false
             }
         }
@@ -2010,7 +2070,6 @@ async fn run_background_task_with_state(
         &mut state,
         &keys,
         &relay_url,
-        &agent_pubkey_hex,
         auth_tag.as_ref(),
     )
     .await;
@@ -2090,10 +2149,12 @@ async fn run_background_task_with_state(
             let mut budget = DRAIN_BUDGET_PER_ITER;
             let mut any_sent = false;
 
-            // Control subs use a flag rather than a per-channel pending entry, so
-            // recovery fires even when rate_limited_pending is empty.
+            // Control subs park in their own deadline rather than a per-channel
+            // pending entry, so recovery fires even when rate_limited_pending is
+            // empty.
             if state.check_rate_gate().is_none() {
-                if state.membership_resub_needed && budget > 0 {
+                let now = tokio::time::Instant::now();
+                if state.membership_resub_at.is_some_and(|at| now >= at) && budget > 0 {
                     let replay_since = state.membership_since();
                     if send_membership_subscribe(
                         &mut ws,
@@ -2103,25 +2164,23 @@ async fn run_background_task_with_state(
                     )
                     .await
                     {
-                        state.membership_resub_needed = false;
+                        state.membership_resub_at = None;
                         state.membership_dropped_since = None;
                         budget = budget.saturating_sub(1);
                         any_sent = true;
                     } else {
-                        warn!(
-                            "membership control resub after rate-limit failed — will retry next drain"
-                        );
+                        warn!("parked membership resub failed — retrying after a penalty");
+                        state.membership_resub_at = Some(now + PARKED_SEND_FAILURE_PENALTY);
                     }
                 }
-                if state.observer_resub_needed && budget > 0 {
+                if state.observer_resub_at.is_some_and(|at| now >= at) && budget > 0 {
                     if send_observer_control_subscribe(&mut ws, &agent_pubkey_hex).await {
-                        state.observer_resub_needed = false;
+                        state.observer_resub_at = None;
                         budget = budget.saturating_sub(1);
                         any_sent = true;
                     } else {
-                        warn!(
-                            "observer control resub after rate-limit failed — will retry next drain"
-                        );
+                        warn!("parked observer control resub failed — retrying after a penalty");
+                        state.observer_resub_at = Some(now + PARKED_SEND_FAILURE_PENALTY);
                     }
                 }
             }
@@ -2165,6 +2224,14 @@ async fn run_background_task_with_state(
         }
 
         let recovery_at = recovery::ready_at(&mut state);
+        // Wake when a parked resubscribe falls due, but never before the gate
+        // or the pacing window would let the drain send it.
+        let parked_at = state.next_parked_resubscribe_at().map(|at| {
+            [state.check_rate_gate(), drain_pacing_next]
+                .into_iter()
+                .flatten()
+                .fold(at, tokio::time::Instant::max)
+        });
         tokio::select! {
                    _ = recovery::ready(&event_tx, recovery_at) => {
                        recovery::recover_one(&mut ws, &mut state, &event_tx, &agent_pubkey_hex).await;
@@ -2194,7 +2261,6 @@ async fn run_background_task_with_state(
                                        &mut state,
                                        &keys,
                                        &relay_url,
-                                       &agent_pubkey_hex,
                                        auth_tag.as_ref(),
                                    )
                                    .await
@@ -2403,6 +2469,15 @@ async fn run_background_task_with_state(
                        }
                    }
 
+                   // Parked-resubscribe arm — wakes the loop so the drain above
+                   // runs once a backoff or gate deadline passes.
+                   _ = async {
+                       match parked_at {
+                           Some(t) => tokio::time::sleep_until(t).await,
+                           None => std::future::pending::<()>().await,
+                       }
+                   } => {}
+
                    // Pacing timer arm — wakes the loop for the next drain batch.
                    // `pending()` when no drain is in progress so this arm never
                    // fires spuriously and never blocks the other select! arms.
@@ -2443,7 +2518,6 @@ async fn handle_ws_message(
     state: &mut BgState,
     keys: &Keys,
     relay_url: &str,
-    agent_pubkey_hex: &str,
     auth_tag: Option<&nostr::Tag>,
 ) -> bool {
     match msg {
@@ -2661,14 +2735,18 @@ async fn handle_ws_message(
                                 .as_secs_f64()
                         );
                         if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
-                            state.rate_limited_pending.insert(channel_id, deadline);
+                            if state.active_subscriptions.contains_key(&channel_id) {
+                                state.note_sub_closed(&subscription_id);
+                                state.rate_limited_pending.insert(channel_id, deadline);
+                            }
                         } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
-                            // Mark membership sub for drain recovery. The relay rejected
+                            // Park membership sub for drain recovery. The relay rejected
                             // this REQ before registering it, so the sub does not exist
                             // server-side — the drain must re-send it.
-                            state.membership_resub_needed = true;
+                            state.note_sub_closed(&subscription_id);
+                            state.membership_resub_at = Some(deadline);
                         } else if subscription_id == OBSERVER_CONTROL_SUB_ID {
-                            state.observer_resub_needed = true;
+                            state.observer_resub_at = Some(deadline);
                         }
                         return true; // keep the socket
                     }
@@ -2691,76 +2769,36 @@ async fn handle_ws_message(
                         return false;
                     }
 
-                    // Attempt targeted resubscribe. State is NOT cleared before
-                    // the attempt — if the send fails and triggers reconnect,
-                    // resubscribe_after_reconnect() needs the subscription to
-                    // still be in state so it can restore it.
-                    if subscription_id == OBSERVER_CONTROL_SUB_ID {
-                        let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
-                        if sent {
-                            state.observer_control_sub_active = true;
-                        } else {
-                            warn!("observer control resubscribe failed after CLOSED — triggering reconnect");
-                            return false;
-                        }
-                    } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
-                        let since = state.membership_since();
-                        let sent =
-                            send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
-                        if sent {
-                            // Success — subscription is live again.
-                            state.membership_dropped_since = None;
-                        } else {
-                            // Resubscribe failed — likely half-dead socket.
-                            // Keep membership_sub_active = true so reconnect restores it.
-                            warn!(
-                                "membership resubscribe failed after CLOSED — triggering reconnect"
-                            );
-                            return false;
-                        }
-                    } else if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
-                        // Guard: only resubscribe if the channel is still active.
+                    // Any other CLOSED (e.g. `error: database error` after a failed
+                    // history read): park the subscription and retry it under a
+                    // per-subscription backoff. Re-sending at once would re-run the
+                    // same failing REQ in a loop bounded only by the relay's rate
+                    // limit. The subscription stays in state, so a reconnect
+                    // before the retry restores it too.
+                    let owned = subscription_id == OBSERVER_CONTROL_SUB_ID
+                        || subscription_id == MEMBERSHIP_NOTIF_SUB_ID
+                        || channel_id_from_sub_id(&subscription_id).is_some_and(|channel_id| {
+                            state.active_subscriptions.contains_key(&channel_id)
+                        });
+                    if !owned {
                         // A delayed CLOSED for an already-unsubscribed channel must
-                        // NOT resurrect the subscription (especially with a default
-                        // permissive filter, which would be a fail-open regression).
-                        if !state.active_subscriptions.contains_key(&channel_id) {
-                            debug!("ignoring CLOSED for already-unsubscribed channel {channel_id}");
-                        } else {
-                            let since = state.channel_since(&channel_id);
-                            let filter = match state.active_filters.get(&channel_id).cloned() {
-                                Some(f) => f,
-                                None => {
-                                    // Fail closed: missing filter state means the subscription
-                                    // intent is inconsistent. Trigger reconnect rather than
-                                    // resubscribing with a permissive wildcard.
-                                    warn!("missing filter for channel {channel_id} after CLOSED — triggering reconnect (fail-closed)");
-                                    return false;
-                                }
-                            };
-                            let sent = send_subscribe(
-                                ws,
-                                state,
-                                channel_id,
-                                agent_pubkey_hex,
-                                since,
-                                &filter,
-                            )
-                            .await;
-                            if sent {
-                                // Success — update subscription ID (relay may assign new one).
-                                state
-                                    .active_subscriptions
-                                    .insert(channel_id, channel_sub_id(channel_id));
-                                state.channel_dropped_since.remove(&channel_id);
-                            } else {
-                                // Resubscribe failed — likely half-dead socket.
-                                // Keep channel in active_subscriptions so reconnect restores it.
-                                warn!("channel {channel_id} resubscribe failed after CLOSED — triggering reconnect");
-                                return false;
-                            }
-                        } // end: channel is still active
-                    } else {
-                        warn!("CLOSED for unknown subscription {subscription_id} — ignoring");
+                        // NOT resurrect the subscription.
+                        debug!("ignoring CLOSED for unowned subscription {subscription_id}");
+                        return true;
+                    }
+                    let retry_at = state.note_error_closed(&subscription_id);
+                    debug!(
+                        "subscription {subscription_id}: retry in ~{:.1}s",
+                        retry_at
+                            .saturating_duration_since(tokio::time::Instant::now())
+                            .as_secs_f64()
+                    );
+                    if subscription_id == OBSERVER_CONTROL_SUB_ID {
+                        state.observer_resub_at = Some(retry_at);
+                    } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
+                        state.membership_resub_at = Some(retry_at);
+                    } else if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
+                        state.rate_limited_pending.insert(channel_id, retry_at);
                     }
                 }
                 RelayMessage::Auth { challenge } => {
@@ -2840,7 +2878,6 @@ async fn process_handshake_buffer(
     state: &mut BgState,
     keys: &Keys,
     relay_url: &str,
-    agent_pubkey_hex: &str,
     auth_tag: Option<&nostr::Tag>,
 ) -> bool {
     if buffer.is_empty() {
@@ -2883,7 +2920,6 @@ async fn process_handshake_buffer(
                 state,
                 keys,
                 relay_url,
-                agent_pubkey_hex,
                 auth_tag,
             )
             .await;
@@ -3000,9 +3036,9 @@ async fn resubscribe_after_reconnect(
     // failure breaks join notifications and agent pause/resume. A shared quota
     // gate parks their intent for the main-loop drain just like channel REQs.
     if state.membership_sub_active {
-        if state.check_rate_gate().is_some() {
+        if let Some(retry_after) = state.check_rate_gate() {
             debug!("rate-gated: parking membership resubscribe after reconnect");
-            state.membership_resub_needed = true;
+            state.membership_resub_at = Some(retry_after);
         } else {
             if !state.active_subscriptions.is_empty()
                 && !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await
@@ -3013,7 +3049,7 @@ async fn resubscribe_after_reconnect(
             let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, replay_since).await;
             if sent {
                 state.membership_dropped_since = None;
-                state.membership_resub_needed = false;
+                state.membership_resub_at = None;
             } else {
                 warn!("failed to resubscribe membership after reconnect");
                 retain_deferred_command_intent(state, &mut deferred_commands);
@@ -3023,9 +3059,9 @@ async fn resubscribe_after_reconnect(
     }
 
     if state.observer_control_sub_active {
-        if state.check_rate_gate().is_some() {
+        if let Some(retry_after) = state.check_rate_gate() {
             debug!("rate-gated: parking observer control resubscribe after reconnect");
-            state.observer_resub_needed = true;
+            state.observer_resub_at = Some(retry_after);
         } else {
             if !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await {
                 return ResubscribeResult::Shutdown;
@@ -3035,7 +3071,7 @@ async fn resubscribe_after_reconnect(
                 retain_deferred_command_intent(state, &mut deferred_commands);
                 return ResubscribeResult::RetryConnection;
             }
-            state.observer_resub_needed = false;
+            state.observer_resub_at = None;
         }
     }
 
@@ -3152,7 +3188,7 @@ async fn drain_rate_limited_pending(
         } else {
             // Socket may be dead — re-queue with +5s penalty; the next ws event
             // will detect the dead socket and trigger a full reconnect.
-            let penalty = tokio::time::Instant::now() + Duration::from_secs(5);
+            let penalty = tokio::time::Instant::now() + PARKED_SEND_FAILURE_PENALTY;
             state.rate_limited_pending.insert(channel_id, penalty);
             warn!("drain_rate_limited_pending: REQ failed for channel {channel_id} — re-queued with +5s penalty");
         }
@@ -3379,7 +3415,6 @@ async fn try_autonomous_reconnect(
                     state,
                     keys,
                     relay_url,
-                    agent_pubkey_hex,
                     auth_tag,
                 )
                 .await;
@@ -3521,7 +3556,6 @@ async fn wait_for_reconnect(
                     state,
                     keys,
                     relay_url,
-                    agent_pubkey_hex,
                     auth_tag,
                 )
                 .await;
@@ -3812,6 +3846,16 @@ fn jittered_duration(base: Duration) -> Duration {
 /// linearly onto a factor in `[0.8, 1.2]`.
 fn jittered_duration_with(base: Duration, sample: f64) -> Duration {
     base.mul_f64(0.8 + clamp_unit_sample(sample) * 0.4)
+}
+
+/// Un-jittered retry delay after a subscription's `failures`-th consecutive
+/// error CLOSED: [`CLOSED_RETRY_BASE`] doubling per failure, capped at
+/// [`CLOSED_RETRY_MAX`].
+fn closed_retry_delay(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    CLOSED_RETRY_BASE
+        .saturating_mul(1 << doublings)
+        .min(CLOSED_RETRY_MAX)
 }
 
 /// Delay before the first reconnect attempt after a close.
@@ -4559,6 +4603,9 @@ mod recovery_tests;
 mod resume_tests;
 
 #[cfg(test)]
+mod closed_retry_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -5173,7 +5220,6 @@ mod tests {
         event: &Event,
     ) -> bool {
         let keys = Keys::generate();
-        let agent_pubkey_hex = keys.public_key().to_hex();
         let text = serde_json::to_string(&json!(["EVENT", subscription_id, event]))
             .expect("serialize relay frame");
         handle_ws_message(
@@ -5184,7 +5230,6 @@ mod tests {
             state,
             &keys,
             "wss://relay.example.com",
-            &agent_pubkey_hex,
             None,
         )
         .await
@@ -6826,7 +6871,6 @@ mod tests {
             &mut state,
             &keys,
             "wss://relay.test",
-            "agent-pubkey",
             None,
         )
         .await;
@@ -6913,7 +6957,6 @@ mod tests {
             &mut state,
             &keys,
             "wss://relay.test",
-            "agent-pubkey",
             None,
         )
         .await;
@@ -7210,61 +7253,6 @@ mod tests {
         assert!(
             state.active_subscriptions.contains_key(&channel_id),
             "channel must stay in active_subscriptions so reconnect can restore it"
-        );
-    }
-
-    // ── Control-sub recovery from rate-limited CLOSED ────────────────────────
-
-    /// A rate-limited CLOSED for the membership sub sets membership_resub_needed.
-    /// After the gate expires the drain re-arms the sub and clears the flag.
-    #[tokio::test(start_paused = true)]
-    async fn membership_resub_flag_set_on_rate_limited_closed() {
-        let mut state = BgState::new();
-        state.membership_sub_active = true;
-
-        // Simulate a rate-limited CLOSED arriving for the membership sub.
-        let secs = parse_rate_limit_retry_secs("rate-limited: retry in 5s").unwrap_or(0);
-        state.set_rate_limit_gate(secs);
-        state.membership_resub_needed = true;
-
-        assert!(
-            state.membership_resub_needed,
-            "flag must be set after rate-limited CLOSED"
-        );
-        assert!(
-            state.check_rate_gate().is_some(),
-            "gate must be active while membership sub is pending"
-        );
-
-        // Advance past the gate (max jitter: 1.2 × 5s = 6s).
-        tokio::time::advance(Duration::from_secs(7)).await;
-
-        assert!(
-            state.check_rate_gate().is_none(),
-            "gate must expire so drain can fire"
-        );
-        // The drain clears membership_resub_needed after re-sending the REQ.
-        // Simulate successful re-send:
-        state.membership_resub_needed = false;
-        assert!(
-            !state.membership_resub_needed,
-            "flag must clear after drain re-sends the membership REQ"
-        );
-    }
-
-    /// A rate-limited CLOSED for the observer control sub sets observer_resub_needed.
-    #[test]
-    fn observer_resub_flag_set_on_rate_limited_closed() {
-        let mut state = BgState::new();
-        state.observer_control_sub_active = true;
-
-        // Simulate rate-limited CLOSED on observer control sub.
-        state.set_rate_limit_gate(5);
-        state.observer_resub_needed = true;
-
-        assert!(
-            state.observer_resub_needed,
-            "flag must be set after rate-limited CLOSED on observer sub"
         );
     }
 
