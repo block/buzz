@@ -465,7 +465,10 @@ async fn human(shared: Arc<Shared>, global: usize) {
                     )
                     .since(since),
             ),
-            (HUMAN_SUBS[1], mentions_filter(keys.public_key(), since)),
+            (
+                HUMAN_SUBS[1],
+                human_mentions_filter(keys.public_key(), since),
+            ),
             (
                 HUMAN_SUBS[2],
                 Filter::new().kind(kind(KIND_TYPING_INDICATOR)).custom_tags(
@@ -727,6 +730,12 @@ fn mentions_filter(me: PublicKey, since: Timestamp) -> Filter {
         ])
         .pubkey(me)
         .since(since)
+}
+
+/// Humans own the simulated agents, so their mentions also carry the
+/// owner-addressed observer frames, as desktop subscribes to them.
+fn human_mentions_filter(me: PublicKey, since: Timestamp) -> Filter {
+    mentions_filter(me, since).kind(kind(KIND_AGENT_OBSERVER_FRAME))
 }
 
 fn subscription_of(message: &RelayMessage) -> Option<&str> {
@@ -997,6 +1006,25 @@ mod tests {
             1
         );
     }
+    #[test]
+    fn human_mentions_receive_owner_observer_frames() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let frame_to = |to: &Keys| {
+            EventBuilder::new(kind(KIND_AGENT_OBSERVER_FRAME), "x")
+                .tags([tag(["p", &to.public_key().to_hex()])])
+                .sign_with_keys(&agent)
+                .unwrap()
+        };
+        let opts = nostr::filter::MatchEventOptions::default();
+        let since = Timestamp::from(0);
+        let human = human_mentions_filter(owner.public_key(), since);
+        assert!(human.match_event(&frame_to(&owner), opts));
+        assert!(!human.match_event(&frame_to(&agent), opts));
+        let agent_filter = mentions_filter(owner.public_key(), since);
+        assert!(!agent_filter.match_event(&frame_to(&owner), opts));
+    }
+
     #[test]
     fn closed_live_subscriptions_end_the_session_and_count() {
         let stats = Stats::default();
