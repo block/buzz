@@ -1258,7 +1258,7 @@ mod tests {
 
         metrics::with_local_recorder(&recorder, || {
             runtime.block_on(async {
-                let mut state = crate::state::tests::test_state_with_database_url(
+                let mut state = crate::state::tests::test_state_with_unreachable_database_url(
                     "postgres://127.0.0.1:1/buzz",
                 )
                 .await;

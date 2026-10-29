@@ -146,8 +146,10 @@ struct Pod {
 }
 
 async fn pod(store: &Arc<Bindings>, clock: &Arc<ManualClock>, mode: NipFiMode) -> Pod {
-    let base =
-        crate::state::tests::test_state_with_database_url("postgres://127.0.0.1:1/none").await;
+    let base = crate::state::tests::test_state_with_unreachable_database_url(
+        "postgres://127.0.0.1:1/none",
+    )
+    .await;
     pod_on(base, store, clock, mode).await
 }
 

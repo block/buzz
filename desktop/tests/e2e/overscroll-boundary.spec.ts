@@ -27,6 +27,23 @@ async function dispatchWheelPrevented(
   );
 }
 
+// The `message-timeline` test id first lands on the loading skeleton, which
+// does not overflow, so the lock rightly cancels a wheel there. Wait for the
+// real conversation scroller: a rendered row and content taller than the
+// viewport.
+async function waitForConversationScrollable(
+  timeline: import("@playwright/test").Locator,
+) {
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (element) => element.scrollHeight - element.clientHeight,
+      ),
+    )
+    .toBeGreaterThan(1);
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -36,7 +53,7 @@ test("locks viewport rubber-band outside conversation scrollers", async ({
 }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("message-timeline")).toBeVisible();
+  await waitForConversationScrollable(page.getByTestId("message-timeline"));
 
   await expect(
     dispatchWheelPrevented(page, '[data-testid="app-top-chrome"]', {
@@ -84,7 +101,7 @@ test("locks viewport rubber-band outside conversation scrollers", async ({
 test("locks horizontal viewport pan everywhere", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("message-timeline")).toBeVisible();
+  await waitForConversationScrollable(page.getByTestId("message-timeline"));
 
   for (const deltaX of [-120, 120]) {
     await expect(
