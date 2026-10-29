@@ -41,6 +41,7 @@ import {
   replayLiveSubscriptions,
   retireConnectionSubscriptions,
 } from "@/shared/api/relayReconnectReplay";
+import { creditInboundLiveness } from "@/shared/api/relayResumeCursor";
 import { RelayLiveReqDrain } from "./relayLiveReqDrain";
 import { RelayChannelAccessRevocations } from "./relayChannelAccessRevocations";
 import { publishSessionEvent } from "@/shared/api/relayEventPublisher";
@@ -98,7 +99,7 @@ export class RelayClient {
   private notifyReconnectListeners = false;
   private onMessageChannel: Channel<unknown> | null = null;
   private connectionGeneration = 0;
-  private lastInboundAtMs = 0; // Last peer frame (any connection); 0 = none.
+  private lastInboundAtMs = 0; // Liveness credit on this connection; 0 = none.
   private sessionEpoch = 0;
   private liveSessionAbort = new AbortController();
   private visibleChannelId: string | null = null;
@@ -545,6 +546,7 @@ export class RelayClient {
       this.hasConnectedOnce ? "reconnecting" : "connecting",
     );
     const generation = ++this.connectionGeneration;
+    this.lastInboundAtMs = 0;
     const inbound = createRelayInboundBuffer(
       async (delivery) => {
         for (const message of toRelayFrames(delivery))
@@ -591,10 +593,12 @@ export class RelayClient {
       this.reconnectBackoff.resetWhenStable();
 
       this.connectionStateEmitter.set("connected");
+      // Watch the socket during replay too: a half-open socket that never
+      // sends EOSE or a close must not hold recovery behind the EOSE waits.
+      this.stallWatchdog.start();
       await this.replayLiveSubscriptions();
       if (generation !== this.connectionGeneration)
         throw new Error("Relay connection attempt was superseded.");
-      this.stallWatchdog.start();
       this.emitReconnectIfNeeded();
       return generation;
     } catch (error) {
@@ -874,7 +878,10 @@ export class RelayClient {
     }
     // Only peer frames prove liveness; Close/Error say when the loss was seen.
     this.stallWatchdog.recordInbound();
-    this.lastInboundAtMs = Date.now();
+    this.lastInboundAtMs = creditInboundLiveness(
+      this.lastInboundAtMs,
+      Date.now(),
+    );
 
     const payload = getTextPayload(message);
     if (!payload) {

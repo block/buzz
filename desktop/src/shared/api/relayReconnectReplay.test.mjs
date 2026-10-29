@@ -1396,8 +1396,27 @@ async function replayOne(subscription, { generation = 0, repairs = [] } = {}) {
   return { sent, repairs };
 }
 
+// A clock far enough past each test's liveUntil that the silent-drop window
+// does not bind; the next test covers the window itself.
+const RESUME_NOW_MS = 200_000_000;
+
+test("a recent liveUntil resumes no later than the silent-drop window", async () => {
+  resetGate(RESUME_NOW_MS);
+  const nowSecs = RESUME_NOW_MS / 1_000;
+  const quiet = { kinds: [9], "#h": ["a", "b"], limit: 1000 };
+  const quietReplay = await replayOne(liveSub(quiet, { liveUntil: nowSecs }));
+  assert.equal(quietReplay.sent[0][2].since, nowSecs - 3_600);
+  const paged = buildChannelFilter("channel-1", 1000);
+  const { repairs } = await replayOne(liveSub(paged, { liveUntil: nowSecs }));
+  assert.equal(
+    repairs[0].since,
+    nowSecs - 3_600,
+    "a fan-out the relay dropped within the window is repaired",
+  );
+});
+
 test("quiet non-paged subscription resumes from liveUntil - 960s with its full limit", async () => {
-  resetGate();
+  resetGate(RESUME_NOW_MS); // liveUntil is older than the silent-drop window
   const filter = { kinds: [9], "#h": ["a", "b"], limit: 1000, since: 100 };
   const { sent, repairs } = await replayOne(
     liveSub(filter, { liveUntil: 10_000 }),
@@ -1445,7 +1464,7 @@ test("resume since never drops below the original filter since", async () => {
 });
 
 test("resume uses the newer of lastSeen - 5s and liveUntil - 960s and caps limit as before", async () => {
-  resetGate();
+  resetGate(RESUME_NOW_MS); // liveUntil is older than the silent-drop window
   const filter = { kinds: [9], "#h": ["a", "b"], limit: 1000 };
   for (const [lastSeen, liveUntil, since] of [
     [10_000, 9_000, 9_995],
@@ -1474,7 +1493,7 @@ test("a subscription with no cursor still replays its original filter", async ()
 });
 
 test("paged channel resumes from liveUntil with a live-only REQ and a bounded HTTP repair", async () => {
-  resetGate();
+  resetGate(RESUME_NOW_MS); // liveUntil is older than the silent-drop window
   const filter = { ...buildChannelFilter("channel-1", 1000), since: 100 };
   const { sent, repairs } = await replayOne(
     liveSub(filter, { liveUntil: 100_000 }),
@@ -1490,7 +1509,7 @@ test("paged channel resumes from liveUntil with a live-only REQ and a bounded HT
 });
 
 test("a pinned failed-backfill floor beats a newer liveUntil", async () => {
-  resetGate();
+  resetGate(RESUME_NOW_MS); // liveUntil is older than the silent-drop window
   const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
     liveUntil: 100_000,
     pendingReplaySince: 4_000,
@@ -1525,25 +1544,37 @@ test("paged repair starts only after the live-only REQ is acknowledged", async (
   assert.equal(repairs.length, 1);
 });
 
-test("an unacknowledged live REQ degrades to a pinned floor instead of repairing blind", async () => {
+test("an unacknowledged live REQ falls back after one deadline instead of repairing blind", async () => {
   resetGate();
-  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
-    lastSeenCreatedAt: 5_000,
-  });
+  const filter = buildChannelFilter("channel-1", 1000);
+  const subscription = liveSub(filter, { lastSeenCreatedAt: 5_000 });
   const repairs = [];
+  const sent = [];
   const replay = replayLiveSubscriptions({
     subscriptions: new Map([["live-1", subscription]]),
-    sendRaw: async () => {},
+    sendRaw: async (payload) => {
+      sent.push(payload);
+    },
     requestRepair: async (request) => {
       repairs.push(request);
       return [];
     },
   });
-  for (let attempt = 0; attempt < PAGE_REPLAY_MAX_ATTEMPTS; attempt++) {
-    await drainMicrotasks();
-    tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS + 1);
-  }
+  await drainMicrotasks();
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
   await replay;
+  // Waiting again on the same unchanged REQ cannot make its EOSE arrive.
+  assert.deepEqual(sent, [
+    ["REQ", "live-1", { ...filter, limit: 0 }],
+    [
+      "REQ",
+      "live-1",
+      buildReconnectReplayFilter(
+        filter,
+        5_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+      ),
+    ],
+  ]);
   assert.deepEqual(repairs, [], "bounded: never repairs without the overlap");
   assert.equal(
     subscription.pendingReplaySince,
@@ -1999,4 +2030,62 @@ test("a stale fallback release cannot clear a successor's dedupe", async () => {
   tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
   assert.equal(subscription.reconnectReplay, successor);
   assert.equal(successor.liveEoseWaiter, successorWaiter);
+});
+
+test("each EOSE deadline runs from its REQ's send, not from when a queued worker starts", async () => {
+  resetGate();
+  const subscriptions = new Map(
+    [1, 2].map((i) => [
+      `live-${i}`,
+      liveSub(buildChannelFilter(`channel-${i}`, 1000), {
+        lastSeenCreatedAt: 5_000,
+      }),
+    ]),
+  );
+  const fallbacks = [];
+  const replay = replayLiveSubscriptions({
+    subscriptions,
+    pageReplayConcurrency: 1,
+    sendRaw: async (payload) => {
+      if (payload[0] === "REQ" && payload[2].limit !== 0) {
+        fallbacks.push(payload[1]);
+      }
+    },
+    requestRepair: async () => assert.fail("never acknowledged"),
+  });
+  await drainMicrotasks();
+  // One deadline covers both: the queued second channel gets no fresh wait.
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  await drainMicrotasks();
+  tickTo(fakeNow);
+  await replay;
+  assert.deepEqual(fallbacks, ["live-1", "live-2"]);
+});
+
+test("a late original EOSE after the ack timeout does not end the fallback's dedupe", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const event = { id: "seen-live", created_at: 4_900 };
+  let dispatched = 0;
+  const deliver = () => {
+    if (shouldDispatchSubscriptionEvent(subscription, event)) dispatched++;
+  };
+  const replay = replayLiveSubscriptions({
+    subscriptions: new Map([["live-1", subscription]]),
+    sendRaw: async () => {},
+    requestRepair: async () => assert.fail("never acknowledged"),
+  });
+  await drainMicrotasks();
+  deliver(); // live delivers it while the REQ is unacknowledged
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  await replay; // the fallback REQ went out
+  markReconnectLiveEose(subscription, 0); // the original's EOSE, late
+  deliver(); // the fallback's history returns it again
+  assert.equal(dispatched, 1, "dispatched once");
+  assert.ok(subscription.reconnectReplay, "dedupe waits for the deadline");
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  assert.equal(subscription.reconnectReplay, undefined);
+  assert.equal(pendingTimers.size, 0);
 });

@@ -1,4 +1,8 @@
 import type { RelaySubscription } from "@/shared/api/relayClientShared";
+import {
+  STALL_CHECK_INTERVAL_MS,
+  STALL_IDLE_TIMEOUT_MS,
+} from "@/shared/api/relayClientTimings";
 
 /**
  * Reconnect resume cursor.
@@ -14,8 +18,16 @@ import type { RelaySubscription } from "@/shared/api/relayClientShared";
  * whose send buffer is full while the drop count is under its grace limit
  * (`ConnectionState::send` in `crates/buzz-relay/src/connection.rs`), so a
  * quiet subscription can miss its only event and still count as live. The
- * original-filter replay healed that case; this cursor does not (known debt).
+ * liveness term therefore never resumes later than
+ * `RESUME_SILENT_DROP_WINDOW_SECS` ago: a drop within that window is replayed
+ * on the next reconnect; an older one is left to the timeline's own refetch.
  */
+
+/**
+ * Every liveness-derived resume re-reads at least this much recent history,
+ * bounding how long a silently dropped fan-out frame can stay unrepaired.
+ */
+export const RESUME_SILENT_DROP_WINDOW_SECS = 3_600;
 
 /** Skew below the newest event seen (matches the pre-existing replay skew). */
 export const RESUME_LAST_SEEN_SKEW_SECS = 5;
@@ -47,27 +59,57 @@ export const RESUME_LIVE_UNTIL_SKEW_SECS =
  * no cursor at all (never saw an event and never reached EOSE on a connection
  * that has since closed) and must replay its original filter.
  *
- * `max(lastSeen - lastSeenSkew, liveUntil - liveUntilSkew)`: the callers
- * apply the original filter's own `since` as a further floor and lower it with
- * any pinned failed-backfill floor, so a recorded gap always wins.
+ * `max(lastSeen - lastSeenSkew, min(liveUntil - liveUntilSkew, now -
+ * silentDropWindow))`: the callers apply the original filter's own `since` as
+ * a further floor and lower it with any pinned failed-backfill floor, so a
+ * recorded gap always wins.
  */
 export function computeResumeSince({
   lastSeenCreatedAt,
   liveUntil,
   lastSeenSkewSecs = RESUME_LAST_SEEN_SKEW_SECS,
   liveUntilSkewSecs = RESUME_LIVE_UNTIL_SKEW_SECS,
+  nowSecs = Math.floor(Date.now() / 1_000),
 }: {
   lastSeenCreatedAt?: number;
   liveUntil?: number;
   lastSeenSkewSecs?: number;
   liveUntilSkewSecs?: number;
+  nowSecs?: number;
 }): number | undefined {
   const bounds: number[] = [];
   if (lastSeenCreatedAt !== undefined) {
     bounds.push(lastSeenCreatedAt - lastSeenSkewSecs);
   }
-  if (liveUntil !== undefined) bounds.push(liveUntil - liveUntilSkewSecs);
+  if (liveUntil !== undefined) {
+    bounds.push(
+      Math.min(
+        liveUntil - liveUntilSkewSecs,
+        nowSecs - RESUME_SILENT_DROP_WINDOW_SECS,
+      ),
+    );
+  }
   return bounds.length === 0 ? undefined : Math.max(0, ...bounds);
+}
+
+/**
+ * Longest silence a running renderer can see before the stall watchdog resets
+ * the socket. A frame processed after a longer silence may have been queued
+ * through a sleep, since frames are stamped when processed, not received.
+ */
+export const LIVENESS_MAX_GAP_MS =
+  STALL_IDLE_TIMEOUT_MS + STALL_CHECK_INTERVAL_MS;
+
+/**
+ * Next liveness credit for a connection after an inbound frame at `nowMs`.
+ * Once a gap longer than `LIVENESS_MAX_GAP_MS` is seen, credit stays at the
+ * last frame before it for the rest of the connection: whatever the relay
+ * sent (or dropped) during the gap was never confirmed.
+ */
+export function creditInboundLiveness(previousMs: number, nowMs: number) {
+  return previousMs === 0 || nowMs - previousMs <= LIVENESS_MAX_GAP_MS
+    ? nowMs
+    : previousMs;
 }
 
 /**

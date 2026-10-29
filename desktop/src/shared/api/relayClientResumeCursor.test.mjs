@@ -156,13 +156,50 @@ test("a close after EOSE stamps liveUntil at the last frame and the replay resum
   window.clearTimeout(client.reconnectTimeout);
   client.reconnectTimeout = null;
 
-  now = 2_100_000;
+  // Reconnect late enough that liveUntil, not the silent-drop window, binds.
+  now = 5_000_000;
   client.wsId = 8;
   writes.length = 0;
   await client.replayLiveSubscriptions();
   assert.deepEqual(
     writes.map(({ frame }) => frame),
     [["REQ", ids[0], { ...quiet, since: 2_000 - 960, limit: 1000 }]],
+  );
+});
+
+test("a quiet subscription whose fan-out was dropped still replays the drop on a prompt reconnect", async () => {
+  // The relay can drop a fan-out frame under backpressure and keep the socket
+  // open, so pings after the drop do not prove the subscription missed nothing.
+  now = 10_000_000;
+  const { client, ids } = await liveClient([quiet]);
+  client.stallWatchdog.start();
+  const droppedAt = 10_100; // stored, but its fan-out frame never arrived
+  for (now = 10_030_000; now <= 12_000_000; now += 30_000) {
+    await client.handleWsMessage(
+      { type: "Ping", data: [] },
+      client.connectionGeneration,
+    );
+  }
+  now -= 30_000;
+  await close(client, 1006);
+  const subscription = client.subscriptions.get(ids[0]);
+  assert.equal(subscription.liveUntil, Math.floor(now / 1_000));
+  assert.ok(
+    subscription.liveUntil - 960 > droppedAt,
+    "precondition: the lookback alone would skip the drop",
+  );
+  window.clearTimeout(client.reconnectTimeout);
+  client.reconnectTimeout = null;
+
+  now += 2_000;
+  client.wsId = 8;
+  writes.length = 0;
+  await client.replayLiveSubscriptions();
+  const { since } = writes[0].frame[2];
+  assert.equal(since, Math.floor(now / 1_000) - 3_600);
+  assert.ok(
+    droppedAt >= since,
+    `drop at ${droppedAt} must satisfy since ${since}`,
   );
 });
 
@@ -177,6 +214,7 @@ test("a subscription that never reached EOSE keeps replaying its original filter
   window.clearTimeout(client.reconnectTimeout);
   client.reconnectTimeout = null;
 
+  now = 5_000_000;
   client.wsId = 8;
   writes.length = 0;
   await client.replayLiveSubscriptions();
@@ -284,6 +322,49 @@ test("a peer Ping is liveness; the close after it is not", async () => {
   assert.equal(client.subscriptions.get(ids[0]).liveUntil, 2_060);
 });
 
+test("a frame queued through a sleep does not count as liveness", async () => {
+  now = 2_000_000;
+  const { client, ids } = await liveClient([quiet]);
+  client.stallWatchdog.start();
+  now = 2_030_000;
+  await deliver(client, ["NOTICE", "hello"]); // last frame before the sleep
+  // A ping and a NOTICE were queued just before the sleep; the renderer
+  // processes them on wake, ahead of the overdue idle tick and the close.
+  now = 2_030_000 + 3_600_000;
+  await client.handleWsMessage(
+    { type: "Ping", data: [] },
+    client.connectionGeneration,
+  );
+  now += 1_000;
+  await deliver(client, ["NOTICE", "queued"]);
+  await close(client, 1006);
+  assert.equal(
+    client.subscriptions.get(ids[0]).liveUntil,
+    2_030,
+    "stamped at the last frame before the gap, not at wake",
+  );
+});
+
+test("a new connection's liveness credit does not inherit the previous socket's", async () => {
+  now = 2_000_000;
+  const { client, ids } = await liveClient([quiet]);
+  client.relayUrl = "ws://relay.test";
+  await close(client, 1006);
+  // Reconnect well past the gap limit: the AUTH OK starts fresh credit
+  // instead of reading as a frame after a gap on the old socket's clock.
+  timers.get(client.reconnectTimeout).at += 300_000;
+  await redial(client);
+  const authAt = now;
+  now += 30_000;
+  await deliver(client, ["EOSE", ids[0]]);
+  now += 1_000;
+  await close(client, 1006);
+  assert.equal(
+    client.subscriptions.get(ids[0]).liveUntil,
+    Math.floor((authAt + 30_000) / 1_000),
+  );
+});
+
 for (const code of [1012, 1001]) {
   test(`close ${code} spreads the first reconnect over [0, 10s] and keeps the backoff escalated`, async () => {
     const { client } = await liveClient([quiet]);
@@ -369,18 +450,19 @@ test("a close delivered late during replay stamps the last frame, not the wake",
   await close(client, 1006);
   await redial(client);
   // The quiet channel reaches EOSE while the paged repair is still pending.
-  now = 2_100_000;
+  now += 30_000;
+  const eoseAt = Math.floor(now / 1_000);
   await deliver(client, ["EOSE", ids[0]]);
   await deliver(client, ["EOSE", ids[1]]);
   await flush();
   assert.equal(repairRequests.length, 1, "precondition: repair in flight");
-  assert.equal(intervals.size, 0, "precondition: watchdog not started yet");
+  assert.equal(intervals.size, 1, "the watchdog runs during replay");
 
   // An hour of sleep, then the close is delivered.
-  now = 2_100_000 + 3_600_000;
+  now += 3_600_000;
   await close(client, 1006);
   const subscription = client.subscriptions.get(ids[0]);
-  assert.equal(subscription.liveUntil, 2_100, "stamped at the EOSE frame");
+  assert.equal(subscription.liveUntil, eoseAt, "stamped at the EOSE frame");
 
   // The in-flight HTTP page settles; the stale attempt then stands down.
   for (const { resolve } of repairRequests.splice(0)) resolve([]);
@@ -389,7 +471,33 @@ test("a close delivered late during replay stamps the last frame, not the wake",
   writes.length = 0;
   await redial(client);
   const quietReq = writes.find(({ frame }) => frame[1] === ids[0]);
-  assert.equal(quietReq.frame[2].since, 2_100 - 960);
+  assert.equal(quietReq.frame[2].since, eoseAt - 960);
+});
+
+test("a half-open socket that never acknowledges replay is reset by the stall watchdog", async () => {
+  now = 2_000_000;
+  const { client, ids } = await liveClient([paged]);
+  client.relayUrl = "ws://relay.test";
+  await close(client, 1006);
+  await redial(client);
+  assert.deepEqual(writes.at(-1).frame, [
+    "REQ",
+    ids[0],
+    { ...paged, limit: 0 },
+  ]);
+  assert.notEqual(client.connectPromise, null, "precondition: parked on EOSE");
+  assert.equal(client.connectionStateEmitter.get(), "connected");
+  assert.equal(intervals.size, 1, "the watchdog is armed while parked");
+
+  // No EOSE, no close: the idle tick is what notices.
+  now += 70_000;
+  const [tick] = intervals.values();
+  tick();
+  await flush();
+  assert.equal(client.connectionStateEmitter.get(), "stalled");
+  assert.equal(client.connectPromise, null, "connect() released by the reset");
+  assert.equal(intervals.size, 0);
+  assert.equal(repairRequests.length, 0, "no blind repair");
 });
 
 test("disposing a subscription parked on its paged live EOSE releases connect()", async () => {

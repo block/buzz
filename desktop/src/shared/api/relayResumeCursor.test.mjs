@@ -2,9 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  STALL_CHECK_INTERVAL_MS,
+  STALL_IDLE_TIMEOUT_MS,
+} from "./relayClientTimings.ts";
+import {
   computeResumeSince,
+  creditInboundLiveness,
+  LIVENESS_MAX_GAP_MS,
   RESUME_LAST_SEEN_SKEW_SECS,
   RESUME_LIVE_UNTIL_SKEW_SECS,
+  RESUME_SILENT_DROP_WINDOW_SECS,
   stampLiveUntilOnClose,
 } from "./relayResumeCursor.ts";
 
@@ -13,6 +20,8 @@ test("resume skews match the shared reconnect contract", () => {
   // Relay created_at drift window (900s, pinned to ingest.rs in the replay
   // test) plus a 60s client clock margin.
   assert.equal(RESUME_LIVE_UNTIL_SKEW_SECS, 960);
+  // Matches the relay-side silent-drop repair window (one hour).
+  assert.equal(RESUME_SILENT_DROP_WINDOW_SECS, 3_600);
 });
 
 // since = max(lastSeen - 5, liveUntil - 960); the original filter's own `since`
@@ -30,6 +39,21 @@ for (const [name, input, expected] of [
   ],
   ["never negative", { lastSeenCreatedAt: 3, liveUntil: 10 }, 0],
   [
+    "the liveUntil term never resumes later than the silent-drop window",
+    { liveUntil: 10_000, nowSecs: 10_000 },
+    10_000 - RESUME_SILENT_DROP_WINDOW_SECS,
+  ],
+  [
+    "the window caps liveUntil only, never lastSeen",
+    { lastSeenCreatedAt: 10_000, liveUntil: 10_000, nowSecs: 10_000 },
+    9_995,
+  ],
+  [
+    "an old liveUntil is below the window and is used as is",
+    { liveUntil: 5_000, nowSecs: 10_000 },
+    4_040,
+  ],
+  [
     "custom skews apply to each term",
     {
       lastSeenCreatedAt: 1_000,
@@ -44,6 +68,30 @@ for (const [name, input, expected] of [
     assert.equal(computeResumeSince(input), expected);
   });
 }
+
+test("liveness credit survives only gaps the stall watchdog would have allowed", () => {
+  assert.equal(
+    LIVENESS_MAX_GAP_MS,
+    STALL_IDLE_TIMEOUT_MS + STALL_CHECK_INTERVAL_MS,
+  );
+  assert.equal(creditInboundLiveness(0, 5_000), 5_000, "first frame credits");
+  assert.equal(
+    creditInboundLiveness(5_000, 5_000 + LIVENESS_MAX_GAP_MS),
+    5_000 + LIVENESS_MAX_GAP_MS,
+    "a gap at the limit still credits",
+  );
+  assert.equal(
+    creditInboundLiveness(5_000, 5_001 + LIVENESS_MAX_GAP_MS),
+    5_000,
+    "a frame processed after a longer gap may be queued through a sleep",
+  );
+  // Credit stays at the pre-gap frame: later frames never re-arm it.
+  let credit = 5_000;
+  for (const nowMs of [3_600_000, 3_601_000, 3_602_000]) {
+    credit = creditInboundLiveness(credit, nowMs);
+  }
+  assert.equal(credit, 5_000);
+});
 
 function live(overrides = {}) {
   return { mode: "live", filter: { kinds: [9], limit: 1 }, ...overrides };

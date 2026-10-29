@@ -105,6 +105,14 @@ type LiveSubscription = {
     seenEventIds: Set<string>;
     liveEose: boolean;
     repairDone: boolean;
+    /** When the restored live REQ went out; its EOSE deadline runs from here. */
+    liveReqSentAtMs?: number;
+    /**
+     * Set when the history fallback follows an unacknowledged live REQ: a late
+     * original EOSE is then indistinguishable from the fallback's, so no EOSE
+     * ends dedupe; only the fallback's deadline or teardown does.
+     */
+    ignoreEose?: boolean;
     /**
      * Wakes the repair worker waiting for the restored live REQ's EOSE: on
      * EOSE, or when a newer replay supersedes this one.

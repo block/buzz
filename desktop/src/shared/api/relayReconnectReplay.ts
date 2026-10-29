@@ -111,11 +111,18 @@ function awaitLiveEose(
   clearTimeoutFn: (handle: number) => void,
 ): Promise<boolean> {
   if (replay.liveEose || !isActive()) return Promise.resolve(true);
+  // The deadline runs from the REQ's send, not from when a (concurrency
+  // limited) worker got here: a queued channel must not get a fresh wait.
+  const sentAtMs = replay.liveReqSentAtMs ?? Date.now();
+  const remainingMs = Math.max(
+    0,
+    sentAtMs + LIVE_REQ_ACK_TIMEOUT_MS - Date.now(),
+  );
   return new Promise<boolean>((resolve) => {
     const timer = setTimeoutFn(() => {
       replay.liveEoseWaiter = undefined;
       resolve(false);
-    }, LIVE_REQ_ACK_TIMEOUT_MS);
+    }, remainingMs);
     replay.liveEoseWaiter = () => {
       replay.liveEoseWaiter = undefined;
       clearTimeoutFn(timer);
@@ -401,11 +408,13 @@ export async function replayLiveSubscriptions({
           replaySince,
           shouldPageReplay,
           resumeLimit,
+          replay,
         }) => {
           // The subscription map may change while replay is paused behind the
           // gate or an inter-batch delay. Never resurrect a disposed entry (or
           // overwrite its replacement) with a REQ from this stale snapshot.
           if (!isActive() || subscriptions.get(subId) !== subscription) return;
+          if (replay) replay.liveReqSentAtMs = Date.now();
           await sendRaw([
             "REQ",
             subId,
@@ -459,26 +468,88 @@ export async function replayLiveSubscriptions({
       // CLOSED on a history REQ) must never escape to the session and tear
       // down the healthy, authenticated socket carrying the live REQs — that
       // is the connect→drop flap loop. Retry behind the gate a bounded number
-      // of times, then degrade to live-only for this connection.
+      // of times, then fall back to a bounded history REQ.
       //
       // The window's lower bound was pinned when the replay state was built;
       // it is cleared only on a completed pass below.
+      const isCurrent = () =>
+        isActive() && subscriptions.get(subId) === subscription;
+
+      // The live REQ reads no history (`limit: 0`) and the pinned floor only
+      // helps the next reconnect, so without this the missed window stays
+      // empty for the rest of a stable connection. Fall back to the
+      // pre-repair behavior: re-issue the REQ (same ID, so the relay replaces
+      // the live subscription) with the window's bounded history. The floor
+      // stays pinned for anything the cap left out.
+      const sendHistoryFallback = async () => {
+        // That history overlaps what live (and any completed page) already
+        // dispatched, so keep the seen IDs until the fallback's own EOSE. If
+        // the original EOSE was consumed, the next one for this generation is
+        // the fallback's; if it never came, a late one could pass for the
+        // fallback's, so only the deadline below ends dedupe.
+        replay.repairDone = true;
+        if (replay.liveEose) replay.liveEose = false;
+        else replay.ignoreEose = true;
+        if (isRateLimited()) await waitForRateLimit();
+        // Dedupe ends on that EOSE, on teardown (both call the waiter), or at
+        // the deadline: the relay may drop an EOSE without closing the
+        // socket, and the set must not grow with live traffic for the rest of
+        // the connection. Identity-fenced so a stale release cannot clear a
+        // successor's state.
+        let deadline: number | undefined;
+        const endDedupe = () => {
+          if (deadline !== undefined) clearTimeoutFn(deadline);
+          replay.liveEoseWaiter = undefined;
+          if (subscription.reconnectReplay === replay) {
+            subscription.reconnectReplay = undefined;
+          }
+        };
+        if (!isCurrent()) {
+          endDedupe();
+          return;
+        }
+        replay.liveEoseWaiter = endDedupe;
+        deadline = setTimeoutFn(endDedupe, LIVE_REQ_ACK_TIMEOUT_MS);
+        try {
+          await sendRaw([
+            "REQ",
+            subId,
+            buildReconnectReplayFilter(subscription.filter, replaySince),
+          ]);
+        } catch (sendError: unknown) {
+          endDedupe();
+          console.warn(
+            `[reconnect replay] history fallback REQ failed for ${subId}:`,
+            sendError,
+          );
+          return;
+        }
+        // Same convergence as the restored live REQ: a disposal that raced
+        // this send must still end closed on the wire.
+        if (isActive() && !subscriptions.has(subId)) {
+          await sendRaw(["CLOSE", subId]).catch(() => {});
+        }
+      };
+
+      // Take the repair's upper bound only after the relay acknowledged the
+      // live-only REQ (registered it), never before. One deadline per REQ:
+      // waiting again on the same unchanged REQ cannot make it arrive.
+      const acked = await awaitLiveEose(
+        replay,
+        isCurrent,
+        setTimeoutFn,
+        clearTimeoutFn,
+      );
+      if (!isCurrent()) return;
+      if (!acked) {
+        console.warn(
+          `[reconnect replay] live REQ for ${subId} was not acknowledged; falling back to bounded history`,
+        );
+        await sendHistoryFallback();
+        return;
+      }
       for (let attempt = 1; attempt <= PAGE_REPLAY_MAX_ATTEMPTS; attempt++) {
         try {
-          // Take the repair's upper bound only after the relay acknowledged
-          // the live-only REQ (registered it), never before.
-          const isCurrent = () =>
-            isActive() && subscriptions.get(subId) === subscription;
-          const acked = await awaitLiveEose(
-            replay,
-            isCurrent,
-            setTimeoutFn,
-            clearTimeoutFn,
-          );
-          if (!isCurrent()) return;
-          if (!acked) {
-            throw new Error("Live REQ was not acknowledged before repair");
-          }
           const completed = await replayReconnectHistoryPages({
             subscription,
             channelId,
@@ -510,65 +581,14 @@ export async function replayLiveSubscriptions({
             error,
           );
           if (attempt === PAGE_REPLAY_MAX_ATTEMPTS) {
-            // The live REQ reads no history (`limit: 0`) and the pinned floor
-            // only helps the next reconnect, so without this the missed window
-            // stays empty for the rest of a stable connection. Fall back to
-            // the pre-repair behavior: re-issue the REQ (same ID, so the relay
-            // replaces the live subscription) with the window's bounded
-            // history. The floor stays pinned for anything the cap left out.
-            //
-            // That history overlaps what live (and any completed page) already
-            // dispatched, so keep the seen IDs until the fallback's own EOSE.
-            // The restored live REQ's EOSE has already been consumed, so the
-            // next one for this generation is the fallback's.
-            replay.repairDone = true;
-            replay.liveEose = false;
-            if (isRateLimited()) await waitForRateLimit();
-            // Dedupe ends on that EOSE, on teardown (both call the waiter), or
-            // at the deadline: the relay may drop an EOSE without closing the
-            // socket, and the set must not grow with live traffic for the
-            // rest of the connection. Identity-fenced so a stale release
-            // cannot clear a successor's state.
-            let deadline: number | undefined;
-            const endDedupe = () => {
-              if (deadline !== undefined) clearTimeoutFn(deadline);
-              replay.liveEoseWaiter = undefined;
-              if (subscription.reconnectReplay === replay) {
-                subscription.reconnectReplay = undefined;
-              }
-            };
-            if (subscriptions.get(subId) !== subscription || !isActive()) {
-              endDedupe();
-              return;
-            }
-            replay.liveEoseWaiter = endDedupe;
-            deadline = setTimeoutFn(endDedupe, LIVE_REQ_ACK_TIMEOUT_MS);
-            try {
-              await sendRaw([
-                "REQ",
-                subId,
-                buildReconnectReplayFilter(subscription.filter, replaySince),
-              ]);
-            } catch (sendError: unknown) {
-              endDedupe();
-              console.warn(
-                `[reconnect replay] history fallback REQ failed for ${subId}:`,
-                sendError,
-              );
-              return;
-            }
-            // Same convergence as the restored live REQ: a disposal that
-            // raced this send must still end closed on the wire.
-            if (isActive() && !subscriptions.has(subId)) {
-              await sendRaw(["CLOSE", subId]).catch(() => {});
-            }
+            await sendHistoryFallback();
             return;
           }
           // The failed REQ's CLOSED handler arms the rate-limit gate before
           // rejecting; wait for it (no-op when the failure wasn't back-pressure)
           // and re-check that this replay's connection is still current.
           if (isRateLimited()) await waitForRateLimit();
-          if (subscriptions.get(subId) !== subscription || !isActive()) return;
+          if (!isCurrent()) return;
         }
       }
     },

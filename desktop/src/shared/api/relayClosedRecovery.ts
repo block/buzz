@@ -260,7 +260,7 @@ export function markReconnectLiveEose(
   generation: number,
 ) {
   const replay = subscription.reconnectReplay;
-  if (!replay || replay.generation !== generation) return;
+  if (!replay || replay.generation !== generation || replay.ignoreEose) return;
   replay.liveEose = true;
   replay.liveEoseWaiter?.();
   replay.liveEoseWaiter = undefined;
