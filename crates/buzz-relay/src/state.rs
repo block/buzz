@@ -3372,8 +3372,16 @@ pub(crate) mod tests {
         #[ignore = "requires Postgres"]
         async fn a_lost_open_set_invalidation_grants_a_revoked_channel_only_until_max_age() {
             let database_url = crate::test_support::database_url();
-            let writer_pod = test_state_with_database_url(&database_url).await;
-            let reader_pod = test_state_with_database_url(&database_url).await;
+            let writer_pod = test_state_with_database_url_and_pool_options(
+                &database_url,
+                sqlx::postgres::PgPoolOptions::new(),
+            )
+            .await;
+            let reader_pod = test_state_with_database_url_and_pool_options(
+                &database_url,
+                sqlx::postgres::PgPoolOptions::new(),
+            )
+            .await;
             let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
             let community = writer_pod
                 .db
