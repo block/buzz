@@ -13,6 +13,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import 'channel.dart';
 import 'default_agent_voice_control.dart';
@@ -90,9 +91,25 @@ class DefaultAgentLauncher extends HookConsumerWidget {
             )
             .firstOrNull;
         resolving.value = cached == null;
-        final channel =
-            cached ??
-            await ref.read(channelActionsProvider).openDm(pubkeys: [pubkey]);
+        final draft = ref.read(defaultAgentVoiceDraftProvider(draftIdentity));
+        final uploadService = ref.read(mediaUploadServiceProvider);
+        // Resolve the destination while packaging/uploading, with both errors
+        // observed even if one operation fails before the other completes.
+        final (channel, prepared) = await (
+          cached != null
+              ? Future.value(cached)
+              : ref.read(channelActionsProvider).openDm(pubkeys: [pubkey]),
+          () async {
+            if (recording == null) return (null, null);
+            final event = await draft.readEvent();
+            if (event != null) return (event, null);
+            final descriptor = await uploadService.uploadVoiceNote(
+              recording.file,
+              duration: recording.duration,
+            );
+            return (null, descriptor);
+          }(),
+        ).wait;
         if (context.mounted) resolving.value = false;
         if (!context.mounted) throw StateError('The conversation was closed.');
         // A community switch invalidates an in-flight destination.
@@ -103,9 +120,8 @@ class DefaultAgentLauncher extends HookConsumerWidget {
           return;
         }
         if (recording != null) {
-          final draft = ref.read(defaultAgentVoiceDraftProvider(draftIdentity));
           final session = ref.read(relaySessionProvider.notifier);
-          final previousEvent = await draft.readEvent();
+          final previousEvent = prepared.$1;
           if (previousEvent != null) {
             if (!context.mounted ||
                 ref.read(meSyncProvider) != scope ||
@@ -116,9 +132,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
             await session.publish(previousEvent);
           } else {
             final sender = ref.read(sendMessageProvider);
-            final descriptor = await ref
-                .read(mediaUploadServiceProvider)
-                .uploadVoiceNote(recording.file, duration: recording.duration);
+            final descriptor = prepared.$2!;
             if (!context.mounted ||
                 ref.read(meSyncProvider) != scope ||
                 ref.read(defaultAgentProvider).value != pubkey) {
@@ -177,7 +191,10 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       child: resolving.value
           ? const SizedBox.square(
               dimension: 22,
-              child: CircularProgressIndicator(strokeWidth: 2),
+              child: BuzzLoadingIndicator(
+                size: 22,
+                semanticLabel: 'Opening conversation',
+              ),
             )
           : pubkey == null
           ? const AgentNavigationIcon(size: 24)

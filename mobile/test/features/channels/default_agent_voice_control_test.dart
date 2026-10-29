@@ -6,6 +6,7 @@ import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -69,6 +70,7 @@ void main() {
   late int sent;
   late int taps;
   late bool fail;
+  Completer<void>? delivery;
   final haptics = <String>[];
   final recordingStates = <bool>[];
   setUp(() {
@@ -77,6 +79,7 @@ void main() {
     sent = 0;
     taps = 0;
     fail = false;
+    delivery = null;
     haptics.clear();
     recordingStates.clear();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -106,6 +109,7 @@ void main() {
                   enabled: true,
                   draftIdentity: 'test',
                   onRecorded: (_) async {
+                    if (delivery != null) await delivery!.future;
                     if (fail) throw StateError('offline');
                     sent++;
                   },
@@ -249,6 +253,46 @@ void main() {
     expect(recorder.stops, 0);
     expect(sent, 0);
   });
+  testWidgets('iPhone prewarms feedback before hold and cancel thresholds', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    const channel = MethodChannel('buzz/haptics');
+    final calls = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call.method);
+          return null;
+        });
+    addTearDown(() {
+      debugDefaultTargetPlatformOverride = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+    await mount(tester);
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byType(IconButton).last),
+    );
+    await tester.pump();
+    expect(calls, ['voicePrepareStart']);
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(calls, contains('voiceStart'));
+    await gesture.moveBy(const Offset(0, -30));
+    await tester.pump();
+    expect(calls.last, 'voicePrepareCancel');
+    await gesture.moveBy(const Offset(0, -45));
+    await tester.pump();
+    expect(calls.last, 'voiceCancel');
+    final count = calls.length;
+    await gesture.moveBy(const Offset(0, -10));
+    await tester.pump();
+    expect(calls.length, count);
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(recorder.cancelled, isTrue);
+    expect(sent, 0);
+    debugDefaultTargetPlatformOverride = null;
+  });
   testWidgets('slide up cancels and never sends', (tester) async {
     await mount(tester);
     final gesture = await hold(tester);
@@ -280,6 +324,22 @@ void main() {
     expect(recorder.cancelled, isTrue);
     expect(sent, 0);
     expect(recordingStates.last, isFalse);
+  });
+  testWidgets('release shows the avatar loader until delivery finishes', (
+    tester,
+  ) async {
+    delivery = Completer<void>();
+    await mount(tester);
+    final gesture = await hold(tester);
+    await gesture.up();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
+    expect(sent, 0);
+    delivery!.complete();
+    await tester.pumpAndSettle();
+    expect(sent, 1);
+    expect(find.byType(BuzzLoadingIndicator), findsNothing);
   });
   testWidgets('failed send retains recording and offers retry', (tester) async {
     fail = true;

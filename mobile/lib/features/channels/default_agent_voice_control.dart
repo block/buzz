@@ -8,6 +8,8 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/huddle/huddle_session.dart';
+import '../../shared/recording_haptics.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/agent_navigation_overlay.dart';
@@ -57,6 +59,7 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
     final error = useState<String?>(null);
     final elapsed = useState(Duration.zero);
     final cancelled = useState(false);
+    final cancelHapticPrepared = useRef(false);
 
     Future<void> cancel() async {
       generation.value++;
@@ -183,7 +186,8 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
       recorder.value = current;
       started.value = false;
       cancelled.value = false;
-      unawaited(HapticFeedback.mediumImpact());
+      cancelHapticPrepared.value = false;
+      unawaited(recordingHaptic());
       recording.value = true;
       samples.value = [];
       elapsed.value = Duration.zero;
@@ -309,6 +313,9 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
             }
           : null,
       child: Listener(
+        onPointerDown: (_) {
+          if (enabled && !active) unawaited(prepareRecordingHaptic());
+        },
         onPointerCancel: (_) => unawaited(cancel()),
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
@@ -316,8 +323,15 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
           onLongPressMoveUpdate: (details) {
             if (recording.value) {
               final willCancel = details.offsetFromOrigin.dy < -64;
+              if (details.offsetFromOrigin.dy < -24 &&
+                  !cancelHapticPrepared.value) {
+                cancelHapticPrepared.value = true;
+                unawaited(prepareRecordingHaptic(cancel: true));
+              } else if (details.offsetFromOrigin.dy >= -24) {
+                cancelHapticPrepared.value = false;
+              }
               if (willCancel && !cancelled.value) {
-                unawaited(HapticFeedback.selectionClick());
+                unawaited(recordingHaptic(cancel: true));
               }
               cancelled.value = willCancel;
             }
@@ -393,10 +407,10 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                                                 sending.value ||
                                                     finalizing.value
                                                 ? const Center(
-                                                    child: CircularProgressIndicator(
-                                                      semanticsLabel:
+                                                    child: BuzzLoadingIndicator(
+                                                      semanticLabel:
                                                           'Sending voice note',
-                                                      strokeWidth: 2,
+                                                      size: 28,
                                                     ),
                                                   )
                                                 : restoreFailed.value
