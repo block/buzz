@@ -704,37 +704,15 @@ fn p_tag() -> SingleLetterTag {
 const MAX_GLOBAL_SELECTOR_KEYS: usize = 4096;
 
 /// Index keys for a global subscription whose every filter is constrained to
-/// `#p` recipients, or else to authors, with or without kinds, within
-/// [`MAX_GLOBAL_SELECTOR_KEYS`]. `None` means it needs the broader
-/// kind/wildcard indexes. `#p` wins when a filter names both.
+/// `#p` recipients or to authors, with or without kinds, within
+/// [`MAX_GLOBAL_SELECTOR_KEYS`]. Each filter is keyed by its `#p` values when
+/// it names them, else by its authors. `None` means it needs the broader
+/// kind/wildcard indexes.
 fn extract_global_selector_index_keys(
     community_id: CommunityId,
     filters: &[Filter],
 ) -> Option<Vec<GlobalSelectorIndexKey>> {
     let p_tag = p_tag();
-    extract_selector_keys(community_id, filters, |filter| {
-        let values = filter.generic_tags.get(&p_tag)?;
-        Some(values.iter().cloned().map(GlobalSelector::P).collect())
-    })
-    .or_else(|| {
-        extract_selector_keys(community_id, filters, |filter| {
-            let authors = filter.authors.as_ref()?;
-            Some(
-                authors
-                    .iter()
-                    .copied()
-                    .map(GlobalSelector::Author)
-                    .collect(),
-            )
-        })
-    })
-}
-
-fn extract_selector_keys(
-    community_id: CommunityId,
-    filters: &[Filter],
-    selectors_of: impl Fn(&Filter) -> Option<Vec<GlobalSelector>>,
-) -> Option<Vec<GlobalSelectorIndexKey>> {
     let mut seen = HashSet::new();
     let mut keys = Vec::new();
     let mut budget = MAX_GLOBAL_SELECTOR_KEYS;
@@ -746,7 +724,16 @@ fn extract_selector_keys(
             None => vec![None],
         };
 
-        let selectors = selectors_of(filter)?;
+        let selectors: Vec<GlobalSelector> =
+            match (filter.generic_tags.get(&p_tag), &filter.authors) {
+                (Some(values), _) => values.iter().cloned().map(GlobalSelector::P).collect(),
+                (None, Some(authors)) => authors
+                    .iter()
+                    .copied()
+                    .map(GlobalSelector::Author)
+                    .collect(),
+                (None, None) => return None,
+            };
         if selectors.is_empty() {
             return None;
         }
@@ -774,6 +761,8 @@ fn extract_selector_keys(
 fn event_global_selectors(event: &StoredEvent) -> Vec<GlobalSelector> {
     let mut seen = HashSet::new();
     let mut selectors = Vec::new();
+    // Must read `p` tags exactly as `buzz_core::filter::filters_match` does, or
+    // fan-out silently skips subscriptions that match.
     for tag in event.event.tags.iter() {
         if tag.kind().to_string() != "p" {
             continue;
@@ -2007,6 +1996,51 @@ mod tests {
         assert!(registry
             .fan_out(&make_stored_event_by(&author, kind))
             .is_empty());
+    }
+
+    /// A set whose filters each name `#p` or authors routes by selector, each
+    /// filter by its own; a `kinds: []` filter beside them matches nothing
+    /// and needs no key.
+    #[test]
+    fn test_global_selector_index_routes_mixed_p_and_author_filters() {
+        let registry = SubscriptionRegistry::new();
+        let presence = Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16);
+        let alice = Keys::generate();
+        let p = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let conn_id = Uuid::new_v4();
+
+        registry.register(
+            conn_id,
+            "mixed".to_string(),
+            vec![
+                Filter::new().custom_tags(p_tag(), [p]),
+                Filter::new().kind(presence).author(alice.public_key()),
+                Filter::new().kinds(Vec::<Kind>::new()),
+            ],
+            None,
+        );
+        assert!(registry.global_kind_index.is_empty());
+        assert!(registry
+            .global_wildcard_index
+            .get(&test_community())
+            .is_none());
+        assert_eq!(registry.global_selector_index.len(), 2);
+
+        let delivered = vec![(conn_id, "mixed".to_string())];
+        assert_eq!(
+            registry.fan_out(&make_stored_event_with_p(Kind::TextNote, p, None)),
+            delivered
+        );
+        assert_eq!(
+            registry.fan_out(&make_stored_event_by(&alice, presence)),
+            delivered
+        );
+        assert!(registry
+            .fan_out(&make_stored_event_by(&alice, Kind::TextNote))
+            .is_empty());
+
+        registry.remove_subscription(conn_id, "mixed");
+        assert!(registry.global_selector_index.is_empty());
     }
 
     #[test]
