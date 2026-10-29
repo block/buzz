@@ -30,7 +30,10 @@ export function selectBufferedTimelineMessages<T extends { id: string }>({
   const firstFrozenIndex = messages.findIndex(
     (message) => message.id === frozenMessageIds[0],
   );
-  const prepended = messages.slice(0, firstFrozenIndex);
+  const frozenIds = new Set(frozenMessageIds);
+  const prepended = messages
+    .slice(0, firstFrozenIndex)
+    .filter((message) => !frozenIds.has(message.id));
   const frozen = frozenMessageIds.map((id) => currentById.get(id) as T);
   const buffered = [...prepended, ...frozen];
   if (
