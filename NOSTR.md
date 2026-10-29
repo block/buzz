@@ -297,6 +297,20 @@ nak req -k 44100 -k 44101 --tag "p=<your-hex-pubkey>" \
   --auth --sec <privkey> ws://localhost:3000
 ```
 
+### Workflow Owner Attribution
+
+A workflow message is a kind:9 event that the relay signs and marks with
+`["buzz:workflow", "true"]`. Its first `p` tag is `["p", <owner>, "", "owner"]`,
+which names the workflow's owner for display. This tag is attribution, not a
+mention, so `#p` filters do not match it. This is a deliberate exception to
+NIP-01, applied to live subscriptions, history and push leases alike, so a
+bounded `#p:[me]` read returns the messages that really mention you. A
+workflow that mentions its owner also carries a plain `["p", <owner>]`, which
+`#p` matches as usual. To find a workflow's messages by owner, read the tags
+of the channel's messages: `buzz:workflow-owner` also names the owner. A
+marked `p` tag on any other event, for example a kind:39002 member list role,
+matches `#p` normally. See `docs/buzz-push.md` for the push rules.
+
 ### Sending Messages
 
 ```bash
