@@ -10,6 +10,8 @@ use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
 
+mod safety_postgres_tests;
+
 struct Fixture {
     db: Db,
     community: CommunityId,

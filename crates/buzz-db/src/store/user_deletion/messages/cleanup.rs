@@ -20,7 +20,7 @@ pub(super) async fn remove(
         let dependents: Vec<(Vec<u8>, bool)> = sqlx::query_as(
             "SELECT e.id, (e.content ~* 'https?://|/media/' OR EXISTS (
            SELECT 1 FROM jsonb_array_elements(e.tags) t
-           WHERE t->>0 IN ('imeta','link-preview','url','thumb','image','x'))) AS has_media
+           WHERE t->>0 IN ('imeta','link-preview','url','thumb','image','x','emoji'))) AS has_media
          FROM events e
          CROSS JOIN LATERAL (
            SELECT decode(t->>1, 'hex') AS id

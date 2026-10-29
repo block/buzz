@@ -34,6 +34,15 @@ Active external write leases, claimed deliveries and nonterminal affected
 workflow runs prevent deletion. These checks do not recall already delivered
 messages or replace application-level drain.
 
+The caller must renew its lease before a batch and leave enough time for the
+entire transaction. The ten-second statement timeout is not a whole-batch
+deadline. The request-row lock blocks heartbeat renewal during a batch; a
+heartbeat waiting on that lock cannot revive a lease that has expired. Expiry
+rolls back the batch. If the lease has actually expired, the old worker also
+cannot save a failure: the current running stage remains durable and a new
+worker can reclaim it with a higher generation. Reduce batch size if repeated
+expiry prevents progress; this handler does not impose a new lease duration.
+
 ## What one batch removes
 
 - Authored stream messages (9, 40001, 40002), forum posts/comments (45001,
@@ -90,8 +99,9 @@ separate. This stage's result is not an assertion of complete account erasure.
 Shared physical files are not safe to delete based solely on an author's
 message. Until the media handler can prove which files remain in use, any
 selected event or dependent edit/reaction with imeta, link-preview, URL/image/
-thumbnail/hash tags or a content URL fails before deletion. This deliberately
-also blocks some ordinary links. The source events remain available for a retry
+thumbnail/hash/emoji tags or a content URL fails before deletion. NIP-30 custom
+emoji tags carry image URLs even when the content contains only a shortcode.
+This deliberately also blocks some ordinary links. The source events remain available for a retry
 once file cleanup exists; the handler never drops file references and reports
 success. This PR does not add a bypass or a pretend storage adapter.
 
@@ -109,3 +119,10 @@ shared roots and replies, edits, both directions of reactions, mentions,
 delivery records, workflow copies, failures/restart, tenant boundaries,
 trusted-relay attribution, fences and stale leases. No production connection
 or workflow integration is needed.
+
+Separate safety cases cover saved-input mismatch, live external-write leases,
+and expiry injected during count repair after admission and deletion. Each
+asserts that source/dependent records survive and retry state is saved. A
+replacement-worker case expires the lease between committed batches, reclaims
+through the real API, rejects the old worker/heartbeat, and finishes with the
+new generation. This does not simulate heartbeat contention inside a live batch.

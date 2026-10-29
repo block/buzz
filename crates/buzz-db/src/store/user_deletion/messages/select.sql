@@ -24,7 +24,7 @@ WITH authored AS (
       -- discard the only source of a blob/preview reference and claim success.
       (e.content ~* 'https?://|/media/' OR EXISTS (
         SELECT 1 FROM jsonb_array_elements(e.tags) t
-        WHERE t->>0 IN ('imeta', 'link-preview', 'url', 'thumb', 'image', 'x')
+        WHERE t->>0 IN ('imeta', 'link-preview', 'url', 'thumb', 'image', 'x', 'emoji')
       )) AS has_media
     FROM authored e
     LEFT JOIN thread_metadata tm ON tm.community_id = e.community_id
