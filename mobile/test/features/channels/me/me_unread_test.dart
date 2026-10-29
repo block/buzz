@@ -1,5 +1,5 @@
 import 'package:buzz/features/channels/default_agent_launcher.dart';
-import 'package:buzz/features/agents/agents_sheet.dart';
+import 'package:buzz/features/agents/agents_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';

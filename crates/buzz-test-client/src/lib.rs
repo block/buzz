@@ -13,6 +13,11 @@ use tracing::debug;
 use buzz_ws_client::NostrWsConnection;
 pub use buzz_ws_client::{parse_relay_message, OkResponse, RelayMessage, WsClientError};
 
+/// Scenario-driven load generator behind the `buzz-loadgen` binary.
+/// The scenario schema is documented in `perf/LOADGEN.md`.
+#[allow(missing_docs)]
+pub mod loadgen;
+
 /// Errors returned by [`BuzzTestClient`] operations.
 #[derive(Debug, Error)]
 pub enum TestClientError {

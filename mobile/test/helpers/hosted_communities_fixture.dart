@@ -59,8 +59,9 @@ class WidgetDiscoveryAccount extends BuilderlabAccountClient {
   @override
   Future<Map<String, dynamic>> post(
     String path,
-    Map<String, dynamic> body,
-  ) async {
+    Map<String, dynamic> body, {
+    String? expectedSubject,
+  }) async {
     if (path.endsWith('/current')) {
       if (fixture.rejectCurrent) throw AccountFailure.denied;
       return {

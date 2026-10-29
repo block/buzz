@@ -15,6 +15,7 @@ class IosMessageCreateButton extends HookWidget {
     super.key,
     required this.actions,
     this.label,
+    this.labelFontSize,
     this.avatarUrl,
     this.avatarInitial,
     this.dividerBefore = const {},
@@ -28,6 +29,7 @@ class IosMessageCreateButton extends HookWidget {
 
   final Set<int> dividerBefore;
   final String? label;
+  final double? labelFontSize;
   final String? avatarUrl, avatarInitial;
   final String icon;
   final String accessibilityLabel;
@@ -83,6 +85,7 @@ class IosMessageCreateButton extends HookWidget {
       'icon': icon,
       'imageBytes': ?avatar,
       'label': ?label,
+      'labelFontSize': ?labelFontSize,
       'showIconWithLabel': showIconWithLabel,
       'accessibilityLabel': accessibilityLabel,
       'menu': menu,
@@ -119,6 +122,7 @@ class IosMessageCreateButton extends HookWidget {
         avatar,
         icon,
         label,
+        labelFontSize,
         accessibilityLabel,
         ...actions.map((a) => a.onPressed != null),
         brightness,

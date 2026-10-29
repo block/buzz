@@ -7,7 +7,9 @@ import '../../shared/community/community_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
-import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../shared/widgets/buzz_navigation_metrics.dart';
+import '../../shared/theme/buzz_icons.dart';
 
 /// Confirmed deletion for the signed-in owner's remote agents only.
 class DeleteAgentAction extends HookConsumerWidget {
@@ -23,7 +25,6 @@ class DeleteAgentAction extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(controller);
-    final error = useState<String?>(null);
     final community = ref.watch(activeCommunityProvider).asData?.value;
     final agent = controller.agents
         .where((row) => row['agent_pubkey'] == pubkey)
@@ -59,7 +60,6 @@ class DeleteAgentAction extends HookConsumerWidget {
         ),
       );
       if (confirmed != true || !context.mounted) return;
-      error.value = null;
       final success = await controller.deleteAgent(
         pubkey: pubkey,
         community: community,
@@ -73,37 +73,40 @@ class DeleteAgentAction extends HookConsumerWidget {
       if (success) {
         Navigator.of(context).pop();
       } else {
-        error.value = controller.failure;
+        await showDialog<void>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Could not delete agent'),
+            content: Text(controller.failure),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
       }
     }
 
-    return Padding(
-      padding: EdgeInsets.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          FilledButton(
-            onPressed: controller.busy ? null : remove,
-            style: FilledButton.styleFrom(
-              minimumSize: const Size(double.infinity, Grid.xxl),
-              padding: const EdgeInsets.symmetric(
-                horizontal: Grid.gutter,
-                vertical: Grid.xs,
-              ),
-              backgroundColor: context.colors.surfaceContainerHighest,
-              foregroundColor: context.colors.error,
-              textStyle: context.textTheme.titleSmall,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(Radii.dialog),
-              ),
-            ),
-            child: controller.busy
-                ? BuzzLoadingIndicator(size: 18, color: context.colors.error)
-                : const Text('Delete'),
-          ),
-          if (error.value != null)
-            Text(error.value!, style: TextStyle(color: context.colors.error)),
-        ],
+    if (Theme.of(context).platform == TargetPlatform.iOS) {
+      return IosGlassNavigationButton(
+        icon: IosGlassNavigationIcon.trash,
+        semanticLabel: 'Delete agent',
+        onPressed: controller.busy ? null : remove,
+        isBusy: controller.busy,
+        width: buzzNavigationActionSize,
+        height: buzzNavigationActionSize,
+        foregroundColor: context.colors.error,
+      );
+    }
+    return SizedBox.square(
+      dimension: buzzNavigationActionSize,
+      child: IconButton(
+        tooltip: 'Delete agent',
+        onPressed: controller.busy ? null : remove,
+        color: context.colors.error,
+        icon: const Icon(BuzzIcons.trash2),
       ),
     );
   }

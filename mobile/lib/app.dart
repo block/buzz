@@ -1,5 +1,5 @@
 import 'features/channels/default_agent_launcher.dart';
-import 'features/agents/agents_sheet.dart';
+import 'features/agents/agents_page.dart';
 import 'dart:async';
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';

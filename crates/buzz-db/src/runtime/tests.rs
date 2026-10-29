@@ -1008,6 +1008,120 @@ async fn read_falls_back_to_writer_when_no_replica_configured() {
     assert!(db.read_pool_stats().is_none());
 }
 
+/// A match-nothing read is answered before any pool acquire, on every query
+/// entry point, and an invalid query that would also match nothing still
+/// returns its validation error. Replica routing is on and the fence is open,
+/// so a routed read that reached `route_read` would try the reader first. Both
+/// pools point at a closed port, and the `limit: 1` control proves that a real
+/// page does try to acquire, from the reader and then the writer.
+#[tokio::test]
+async fn match_nothing_reads_take_no_connection() {
+    use metrics_util::debugging::DebuggingRecorder;
+
+    let dead_pool = || {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused") // sadscan:disable np.postgres.1
+            .expect("lazy pool")
+    };
+    let mut db = Db::from_pools(dead_pool(), dead_pool());
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(3600)));
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    let community = CommunityId::from_uuid(Uuid::new_v4());
+    let page = |limit| {
+        let mut q = EventQuery::for_community(community);
+        q.limit = Some(limit);
+        q
+    };
+    let with = |edit: fn(&mut EventQuery)| {
+        let mut q = page(10);
+        edit(&mut q);
+        q
+    };
+    let empty_pages = [
+        ("limit 0", page(0)),
+        ("max_limit 0", with(|q| q.max_limit = Some(0))),
+        ("empty kinds", with(|q| q.kinds = Some(vec![]))),
+        ("empty authors", with(|q| q.authors = Some(vec![]))),
+        ("empty ids", with(|q| q.ids = Some(vec![]))),
+        ("empty #e", with(|q| q.e_tags = Some(vec![]))),
+    ];
+    // Validation runs before the match-nothing check, so the error wins.
+    let invalid = [
+        (
+            "before_id without until",
+            with(|q| {
+                q.limit = Some(0);
+                q.before_id = Some(vec![0; 32]);
+            }),
+        ),
+        (
+            "global_only with channel_id",
+            with(|q| {
+                q.kinds = Some(vec![]);
+                q.global_only = true;
+                q.channel_id = Some(Uuid::nil());
+            }),
+        ),
+    ];
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let acquiring_roles = || {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| key.key().name() == "buzz_db_pool_acquire_attempts_total")
+            .filter_map(|(key, _, _, _)| {
+                key.key()
+                    .labels()
+                    .find(|label| label.key() == "pool_role")
+                    .map(|label| label.value().to_owned())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    for (case, q) in &empty_pages {
+        let results = [
+            db.query_events(q).await,
+            db.query_events_routed("test", q).await,
+            db.query_events_routed_bounded("test", q).await,
+        ];
+        for (entry, result) in ["writer", "routed", "routed bounded"].iter().zip(results) {
+            let events = result.unwrap_or_else(|e| panic!("{case} via {entry}: {e}"));
+            assert!(events.is_empty(), "{case} via {entry} must match nothing");
+        }
+    }
+    for (case, q) in &invalid {
+        let results = [
+            db.query_events(q).await,
+            db.query_events_routed("test", q).await,
+            db.query_events_routed_bounded("test", q).await,
+        ];
+        for (entry, result) in ["writer", "routed", "routed bounded"].iter().zip(results) {
+            assert!(
+                matches!(result, Err(DbError::InvalidData(_))),
+                "{case} via {entry} must fail validation, got {result:?}"
+            );
+        }
+    }
+    assert!(
+        acquiring_roles().is_empty(),
+        "a match-nothing read must not try to acquire: {:?}",
+        acquiring_roles()
+    );
+
+    db.query_events_routed("test", &page(1))
+        .await
+        .expect_err("a real page needs the (unreachable) pools");
+    assert_eq!(
+        acquiring_roles(),
+        ["reader", "writer"].map(str::to_owned).into(),
+        "the control must have tried the reader, then the writer"
+    );
+}
+
 #[test]
 fn read_budget_zero_disables_and_large_values_clamp_to_staleness() {
     assert_eq!(read_budget_from_ms(0), None, "0 = bounded routing off");

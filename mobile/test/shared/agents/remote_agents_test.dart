@@ -62,6 +62,207 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
+  Future<(RelayFakeController, FakeRegistry)> editableAgent() async {
+    final registry = FakeRegistry(bound: fakeOwner.public);
+    registry.listed = [
+      {
+        'agent_pubkey': fakeAgent,
+        'agent_name': 'Scout',
+        'agent_id': 'agent',
+        'status': 2,
+        'model_id': 'old-model',
+        'reasoning_effort': 'low',
+      },
+    ];
+    final controller = await _controller(registry);
+    await controller.run(controller.refresh);
+    return (controller, registry);
+  }
+
+  Future<bool> saveModel(
+    RelayFakeController controller, {
+    String effort = 'high',
+    bool current = true,
+    String? key,
+  }) async {
+    final model = (await controller.modelCatalog()).first;
+    return controller.updateModel(
+      community: _community(),
+      pubkey: key ?? fakeAgent,
+      model: model,
+      effort: effort,
+      isCurrent: () => current,
+    );
+  }
+
+  test(
+    'model changes save model and effort and confirm server readback',
+    () async {
+      final (controller, registry) = await editableAgent();
+      expect(await saveModel(controller), isTrue);
+      expect(registry.bodies['/v3/beekeeper/update-agent'], {
+        'agent_pubkey': fakeAgent,
+        'model_id': 'test-model',
+        'reasoning_effort': 'high',
+      });
+      expect(controller.agents.single['model_id'], 'test-model');
+    },
+  );
+
+  test(
+    'rejected model writes preserve the saved model and surface failure',
+    () async {
+      final (controller, registry) = await editableAgent();
+      registry.failInstructions = true;
+      expect(await saveModel(controller), isFalse);
+      expect(controller.agents.single['model_id'], 'old-model');
+      expect(controller.failure, contains('unavailable'));
+    },
+  );
+
+  test('unconfirmed model write does not report success', () async {
+    final (controller, registry) = await editableAgent();
+    registry.ignoreModelUpdate = true;
+    expect(await saveModel(controller), isFalse);
+    expect(controller.failure, contains('not confirmed'));
+    expect(controller.agents.single['model_id'], 'old-model');
+  });
+
+  test(
+    'model writes reject stale community, foreign agent and unsupported effort',
+    () async {
+      final (controller, registry) = await editableAgent();
+      expect(await saveModel(controller, current: false), isFalse);
+      expect(await saveModel(controller, key: 'a' * 64), isFalse);
+      expect(await saveModel(controller, effort: 'invalid'), isFalse);
+      expect(registry.calls, isNot(contains('update-agent')));
+    },
+  );
+
+  test(
+    'model writes require current account binding and community owner',
+    () async {
+      final (controller, registry) = await editableAgent();
+      registry.bound = 'a' * 64;
+      expect(await saveModel(controller), isFalse);
+      expect(registry.calls, isNot(contains('update-agent')));
+    },
+  );
+
+  test('model catalog rejects malformed reasoning choices', () async {
+    final (controller, registry) = await editableAgent();
+    registry.models = [
+      {'id': 'bad', 'display_name': 'Bad', 'supported_reasoning_efforts': []},
+    ];
+    expect(controller.modelCatalog(), throwsStateError);
+  });
+
+  test(
+    'reconnect adopts only the server-bound saved community identity',
+    () async {
+      final raw = jsonEncode([
+        {'name': 'Pilot', 'nsec': fakeOwner.nsec, 'pubkey': fakeOwner.public},
+        {'name': 'Other', 'nsec': fakeAgentKeys.nsec, 'pubkey': fakeAgent},
+      ]);
+      await communitySecureStorage.write(key: 'buzz_communities', value: raw);
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = RelayFakeController(registry);
+      addTearDown(() {
+        controller.dispose();
+        controller.relayAuth.dispose();
+        registry.dispose();
+      });
+      expect(await controller.run(controller.refresh), isTrue);
+      expect(controller.owner, fakeOwner.public);
+      expect(
+        (await AccountIdentityStore().forSubject(fakeSubject).read())?.pubkey,
+        fakeOwner.public,
+      );
+      expect(await communitySecureStorage.read(key: 'buzz_communities'), raw);
+      expect(registry.calls, ['list-agents']);
+    },
+  );
+
+  test(
+    'reconnect never adopts an unrelated device key or rebinds the account',
+    () async {
+      await communitySecureStorage.write(
+        key: 'buzz_communities',
+        value: jsonEncode([
+          {'name': 'Other', 'nsec': fakeAgentKeys.nsec, 'pubkey': fakeAgent},
+        ]),
+      );
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = RelayFakeController(registry);
+      addTearDown(() {
+        controller.dispose();
+        controller.relayAuth.dispose();
+        registry.dispose();
+      });
+      expect(await controller.run(controller.refresh), isFalse);
+      expect(
+        await AccountIdentityStore().forSubject(fakeSubject).read(),
+        isNull,
+      );
+      expect(registry.calls, isEmpty);
+      expect(controller.failure, contains('absent'));
+    },
+  );
+
+  test('reconnect adopts a matching retained paired identity', () async {
+    await AccountIdentityStore()
+        .forPairing(fakeOwner.public)
+        .create(fakeOwner.nsec);
+    final registry = FakeRegistry(bound: fakeOwner.public);
+    final controller = RelayFakeController(registry);
+    addTearDown(() {
+      controller.dispose();
+      controller.relayAuth.dispose();
+      registry.dispose();
+    });
+    expect(await controller.run(controller.refresh), isTrue);
+    expect(
+      (await AccountIdentityStore().forSubject(fakeSubject).read())?.pubkey,
+      fakeOwner.public,
+    );
+    expect(
+      (await AccountIdentityStore().forPairing(fakeOwner.public).read())
+          ?.pubkey,
+      fakeOwner.public,
+    );
+  });
+
+  test(
+    'creation normalizes saved HTTPS community URLs for attestation',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = await _controller(registry);
+      final community = Community.create(
+        name: 'Pilot',
+        relayUrl: 'https://test.${HostedEnvironment.communitySuffix}',
+        pubkey: fakeOwner.public,
+        nsec: fakeOwner.nsec,
+      );
+      expect(
+        await controller.create(
+          community,
+          'Tester',
+          modelId: 'test-model',
+          reasoningEffort: 'high',
+        ),
+        isTrue,
+      );
+      expect(
+        registry.bodies['/v3/beekeeper/attest-agent']?['community_url'],
+        'wss://test.${HostedEnvironment.communitySuffix}',
+      );
+      expect(
+        registry.calls.where((call) => call == 'register-agent'),
+        hasLength(1),
+      );
+    },
+  );
+
   test('model setup requires a catalog-confirmed selection', () async {
     final registry = FakeRegistry(bound: fakeOwner.public);
     final controller = await _controller(registry);
@@ -221,6 +422,7 @@ void main() {
           modelId: 'test-model',
           reasoningEffort: 'high',
           instructions: 'Reply concisely.',
+          pictureUrl: 'https://example.com/avatar.png',
         ),
         isFalse,
       );
@@ -231,6 +433,11 @@ void main() {
         'update-agent',
       ]);
       expect(controller.pending?['pubkey'], fakeAgent);
+      expect(controller.pending?['picture'], 'https://example.com/avatar.png');
+      expect(
+        registry.bodies['/v3/beekeeper/register-agent']?['agent_picture_url'],
+        'https://example.com/avatar.png',
+      );
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('$_scope:pending'), isNotNull);
       expect(
@@ -266,6 +473,7 @@ void main() {
         registry.bodies['/v3/beekeeper/attest-agent']?['community_url'],
         community.relayUrl,
       );
+      expect(registry.calls, isNot(contains('add-buzz-subscription')));
       expect(
         registry.bodies['/v3/beekeeper/update-agent']?['model_id'],
         'test-model',
@@ -410,6 +618,7 @@ void main() {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       addTearDown(() => server.close(force: true));
       final kinds = <int>[];
+      final registrations = <Map<String, dynamic>>[];
       final published = <NostrEvent>[];
       server.listen((request) async {
         final peer = await WebSocketTransformer.upgrade(request);
@@ -419,6 +628,11 @@ void main() {
           final event = Map<String, dynamic>.from(data[1] as Map);
           if (data.first == 'EVENT') {
             kinds.add(event['kind'] as int);
+            if (event['kind'] == 30177) {
+              registrations.add(
+                jsonDecode(event['content'] as String) as Map<String, dynamic>,
+              );
+            }
             published.add(NostrEvent.fromJson(event));
           }
           peer.add(jsonEncode(['OK', event['id'], true, '']));
@@ -443,7 +657,9 @@ void main() {
       await controller.publishPolicy(relay, {
         'pubkey': fakeAgent,
         'name': 'Scout',
+        'picture': 'https://example.com/avatar.png',
       });
+      expect(registrations.single['picture'], 'https://example.com/avatar.png');
       await controller.removePolicy(relay, fakeAgent);
       expect(kinds, [30177, 5]);
     },

@@ -66,13 +66,16 @@ class BuilderlabAccountClient {
   static const _prefix = '/api/goose';
 
   /// Remote-agent registry routes, shared with desktop.
+  /// Safe request diagnostics: no headers, credentials, bodies or user data.
+  ({String path, int status})? lastRejectedRequest;
+
   static const _beekeeperRoutes = {
+    '/v3/beekeeper/get-model-catalog',
     '/v3/beekeeper/register-agent',
     '/v3/beekeeper/update-agent',
     '/v3/beekeeper/delete-agent',
     '/v3/beekeeper/attest-agent',
     '/v3/beekeeper/list-agents',
-    '/v3/beekeeper/get-model-catalog',
   };
 
   /// Sessions are scoped per origin so staging never reads production state.
@@ -244,8 +247,11 @@ class BuilderlabAccountClient {
   /// Authenticated JSON POST to a Buzz account route on the fixed origin. The
   /// credential never leaves this client. A 401 clears the stored session only
   /// when the session check also rejects it; otherwise it is [AccountFailure.denied].
-  Future<Map<String, dynamic>> post(String path, Map<String, dynamic> body) =>
-      _post(path, body);
+  Future<Map<String, dynamic>> post(
+    String path,
+    Map<String, dynamic> body, {
+    String? expectedSubject,
+  }) => _post(path, body, expectedSubject: expectedSubject);
 
   Future<Map<String, dynamic>> _post(
     String path,
@@ -360,6 +366,7 @@ class BuilderlabAccountClient {
       if (response.statusCode == 401) throw AccountFailure.signedOut;
       if (response.statusCode == 403) throw AccountFailure.denied;
       if (const {400, 404, 409, 422}.contains(response.statusCode)) {
+        lastRejectedRequest = (path: path, status: response.statusCode);
         throw AccountFailure.rejected;
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {

@@ -1,8 +1,11 @@
+import 'package:buzz/features/agents/community_bot_profiles.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 import 'dart:async';
+import 'package:nostr/nostr.dart' as nostr;
 
-import 'package:buzz/features/agents/agents_sheet.dart';
+import 'package:buzz/features/agents/agents_page.dart';
+import 'package:buzz/features/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -20,6 +23,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/remote_agents_fixture.dart';
 
+final existingDesktopKeys = nostr.Keys('0' * 63 + '3');
+final otherAgentKeys = nostr.Keys('0' * 63 + '4');
+final otherOwnerKeys = nostr.Keys('0' * 63 + '5');
+
 /// Fakes the relay boundary: owner-attested profiles for registry agents.
 class _Relay extends FakeRelay {
   _Relay(this.harness);
@@ -33,19 +40,31 @@ class _Relay extends FakeRelay {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    if (filter.kinds.contains(30078)) return events;
-    final agent = filter.authors?.contains(fakeAgent) ?? false;
-    if (agent && harness.relayDown) {
+    if ((filter.authors?.contains(fakeAgent) ?? false) && harness.relayDown) {
       throw TimeoutException('relay unavailable');
     }
-    return [
-      if (agent)
-        signedAgentProfile(
-          fakeAgentKeys,
-          fakeOwner,
-          content: '{"name":"Scout"}',
-        ),
-    ];
+    return filter.kinds.contains(30078)
+        ? events
+        : [
+            if (filter.authors?.contains(existingDesktopKeys.public) ?? false)
+              signedAgentProfile(
+                existingDesktopKeys,
+                fakeOwner,
+                content: '{"name":"My desktop agent"}',
+              ),
+            if (filter.authors?.contains(otherAgentKeys.public) ?? false)
+              signedAgentProfile(
+                otherAgentKeys,
+                otherOwnerKeys,
+                content: '{"name":"Other owner agent"}',
+              ),
+            if (filter.authors?.contains(fakeAgent) ?? false)
+              signedAgentProfile(
+                fakeAgentKeys,
+                fakeOwner,
+                content: '{"name":"Scout"}',
+              ),
+          ];
   }
 }
 
@@ -61,6 +80,7 @@ class GatedController extends RelayFakeController {
     Community community,
     String name, {
     String instructions = '',
+    String? pictureUrl,
     String? modelId,
     String? reasoningEffort,
   }) {
@@ -72,6 +92,7 @@ class GatedController extends RelayFakeController {
         community,
         name,
         instructions: instructions,
+        pictureUrl: pictureUrl,
         modelId: modelId,
         reasoningEffort: reasoningEffort,
       );
@@ -127,6 +148,7 @@ class AgentsHarness {
   Future<void> open(
     WidgetTester tester, {
     required List<String> directory,
+    List<String> botDirectory = const [],
     Widget? home,
   }) async {
     final prefs = await SharedPreferences.getInstance();
@@ -138,6 +160,10 @@ class AgentsHarness {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          communityBotProfilesProvider.overrideWith(
+            (ref) async => botDirectory,
+          ),
+          ownedAgentDirectoryProvider.overrideWith((ref) async => []),
           builderlabAccountProvider.overrideWithValue(registry),
           remoteAgentControllerProvider.overrideWithValue(controller),
           relaySessionProvider.overrideWith(() => relay),
@@ -152,6 +178,10 @@ class AgentsHarness {
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(disableAnimations: true),
+            child: child!,
+          ),
           home:
               home ??
               Builder(

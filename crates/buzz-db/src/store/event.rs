@@ -548,6 +548,9 @@ pub(crate) async fn query_events_with_operation(
     q: &EventQuery,
     operation: crate::observability::WriterOperation,
 ) -> Result<Vec<StoredEvent>> {
+    if let Some(answer) = answer_without_db(q) {
+        return answer;
+    }
     let mut conn = crate::observability::acquire_writer(pool, operation).await?;
     query_events_on(&mut conn, q).await
 }
@@ -559,32 +562,8 @@ pub(crate) async fn query_events_on(
     conn: &mut sqlx::PgConnection,
     q: &EventQuery,
 ) -> Result<Vec<StoredEvent>> {
-    // Composite cursor requires both halves.
-    if q.before_id.is_some() && q.until.is_none() {
-        return Err(DbError::InvalidData(
-            "before_id requires until to be set".to_string(),
-        ));
-    }
-
-    // global_only and channel_id are mutually exclusive.
-    if q.global_only && q.channel_id.is_some() {
-        return Err(DbError::InvalidData(
-            "global_only and channel_id are mutually exclusive".to_string(),
-        ));
-    }
-
-    // Empty list means "match nothing" — return empty immediately.
-    if q.kinds.as_deref().is_some_and(|k| k.is_empty()) {
-        return Ok(vec![]);
-    }
-    if q.authors.as_deref().is_some_and(|a| a.is_empty()) {
-        return Ok(vec![]);
-    }
-    if q.ids.as_deref().is_some_and(|i| i.is_empty()) {
-        return Ok(vec![]);
-    }
-    if q.e_tags.as_deref().is_some_and(|e| e.is_empty()) {
-        return Ok(vec![]);
+    if let Some(answer) = answer_without_db(q) {
+        return answer;
     }
 
     let mut qb = build_query_events_sql(q);
@@ -599,10 +578,44 @@ pub(crate) async fn query_events_on(
     Ok(out)
 }
 
-/// SQL for [`query_events_on`], after its match-nothing early returns.
+/// The result of `q` when its shape alone decides it: an invalid query, or one
+/// that matches nothing. Every entry point checks this before it takes a
+/// connection, so a match-nothing read (a NIP-01 `limit: 0` live REQ, say)
+/// costs no pool acquire.
+pub(crate) fn answer_without_db(q: &EventQuery) -> Option<Result<Vec<StoredEvent>>> {
+    // Composite cursor requires both halves.
+    if q.before_id.is_some() && q.until.is_none() {
+        return Some(Err(DbError::InvalidData(
+            "before_id requires until to be set".to_string(),
+        )));
+    }
+
+    // global_only and channel_id are mutually exclusive.
+    if q.global_only && q.channel_id.is_some() {
+        return Some(Err(DbError::InvalidData(
+            "global_only and channel_id are mutually exclusive".to_string(),
+        )));
+    }
+
+    // A zero page, or an empty list, means "match nothing".
+    let matches_nothing = page_limit(q) == 0
+        || q.kinds.as_deref().is_some_and(|k| k.is_empty())
+        || q.authors.as_deref().is_some_and(|a| a.is_empty())
+        || q.ids.as_deref().is_some_and(|i| i.is_empty())
+        || q.e_tags.as_deref().is_some_and(|e| e.is_empty());
+    matches_nothing.then(|| Ok(vec![]))
+}
+
+/// The `LIMIT` [`query_events_on`] applies: the requested page, clamped.
+fn page_limit(q: &EventQuery) -> i64 {
+    q.limit
+        .unwrap_or(100)
+        .min(q.max_limit.unwrap_or(DEFAULT_MAX_PAGE_LIMIT))
+}
+
+/// SQL for [`query_events_on`], after [`answer_without_db`].
 fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
-    let clamp = q.max_limit.unwrap_or(DEFAULT_MAX_PAGE_LIMIT);
-    let limit_val = q.limit.unwrap_or(100).min(clamp);
+    let limit_val = page_limit(q);
     let offset_val = q.offset.unwrap_or(0);
 
     // e-tag reads filter inside a MATERIALIZED CTE and sort/limit outside it.
@@ -2351,6 +2364,9 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if let Some(answer) = crate::event::answer_without_db(q) {
+            return answer;
+        }
         let predicate = crate::RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
         match self
             .route_read(
@@ -2411,6 +2427,9 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if let Some(answer) = crate::event::answer_without_db(q) {
+            return answer;
+        }
         match self
             .route_read(
                 path,

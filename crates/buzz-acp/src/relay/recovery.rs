@@ -44,13 +44,8 @@ pub(super) async fn recover_one(
             }
         }
     } else {
-        let since = match (state.membership_dropped_since, state.membership_last_seen) {
-            (Some(d), Some(l)) => Some(d.min(l)),
-            (Some(d), None) => Some(d),
-            (None, Some(l)) => Some(l),
-            (None, None) => state.startup_watermark,
-        };
-        if send_membership_subscribe(ws, agent_pubkey_hex, since).await {
+        let since = state.membership_since();
+        if send_membership_subscribe(ws, state, agent_pubkey_hex, since).await {
             state.membership_dropped_since = None;
         }
     }

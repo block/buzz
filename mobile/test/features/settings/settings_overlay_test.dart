@@ -1,5 +1,5 @@
 import 'package:buzz/features/channels/default_agent_launcher.dart';
-import 'package:buzz/features/agents/agents_sheet.dart';
+import 'package:buzz/features/agents/agents_page.dart';
 import 'dart:io';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'dart:ui' as ui;
