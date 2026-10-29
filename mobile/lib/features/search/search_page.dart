@@ -1,3 +1,6 @@
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import '../../shared/widgets/duo_toolbar.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -127,122 +130,139 @@ class SearchPage extends HookConsumerWidget {
       ref.read(searchProvider.notifier).search(query);
     }
 
-    return Scaffold(
-      backgroundColor: context.colors.surface,
-      resizeToAvoidBottomInset: false,
-      body: SafeArea(
-        bottom: false,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                Grid.gutter,
-                Grid.half,
-                Grid.gutter,
-                Grid.xxs,
-              ),
-              child: Row(
-                children: [
-                  if (!embedded) ...[
-                    if (nativeIos)
-                      IosGlassNavigationButton(
-                        key: const Key('search-close'),
-                        icon: IosGlassNavigationIcon.close,
-                        semanticLabel: 'Close search',
-                        onPressed: closeSearch,
-                        controlSize: 48,
-                        foregroundColor: searchPrimaryColor,
-                      )
-                    else
-                      SizedBox.square(
-                        key: const Key('search-close'),
-                        dimension: 48,
-                        child: IconButton(
-                          tooltip: 'Close search',
+    final toolbar = DuoToolbarScope.maybeOf(context);
+    final hasStrip = toolbar?.strip != null;
+    return DuoToolbarPortal(
+      strip: toolbar?.strip,
+      active:
+          !embedded &&
+          (toolbar?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true),
+      actions: [
+        IosNavigationAction(
+          label: 'Close search',
+          symbol: 'xmark',
+          onPressed: closeSearch,
+        ),
+      ],
+      child: Scaffold(
+        backgroundColor: context.colors.surface,
+        resizeToAvoidBottomInset: false,
+        body: SafeArea(
+          minimum: toolbar?.contentInsets ?? EdgeInsets.zero,
+          bottom: false,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Grid.gutter,
+                  Grid.half,
+                  Grid.gutter,
+                  Grid.xxs,
+                ),
+                child: Row(
+                  children: [
+                    if (!embedded && !hasStrip) ...[
+                      if (nativeIos)
+                        IosGlassNavigationButton(
+                          key: const Key('search-close'),
+                          icon: IosGlassNavigationIcon.close,
+                          semanticLabel: 'Close search',
                           onPressed: closeSearch,
-                          style: IconButton.styleFrom(
-                            backgroundColor: searchSurfaceColor,
-                            foregroundColor: searchPrimaryColor,
-                          ),
-                          icon: const Icon(
-                            BuzzIcons.x,
-                            size: buzzSearchControlIconSize,
+                          controlSize: 48,
+                          foregroundColor: searchPrimaryColor,
+                        )
+                      else
+                        SizedBox.square(
+                          key: const Key('search-close'),
+                          dimension: 48,
+                          child: IconButton(
+                            tooltip: 'Close search',
+                            onPressed: closeSearch,
+                            style: IconButton.styleFrom(
+                              backgroundColor: searchSurfaceColor,
+                              foregroundColor: searchPrimaryColor,
+                            ),
+                            icon: const Icon(
+                              BuzzIcons.x,
+                              size: buzzSearchControlIconSize,
+                            ),
                           ),
                         ),
-                      ),
-                    const SizedBox(width: Grid.xxs),
-                  ],
-                  Expanded(
-                    child: SizedBox(
-                      key: const Key('search-field-container'),
-                      height: fieldHeight,
-                      child: ConcentricSheetSurface(
-                        enabled: nativeIos,
-                        usesGlass: true,
-                        providesSheetSurface: false,
-                        padding: EdgeInsets.zero,
-                        color: searchSurfaceColor,
-                        minimumRadius: fieldHeight / 2,
-                        contentClipRadius: fieldHeight / 2,
-                        child: BuzzSearchField(
-                          controller: textController,
-                          focusNode: focusNode,
-                          hintText: 'Search',
-                          iconColor: searchPrimaryColor,
-                          inputColor: searchPrimaryColor,
-                          placeholderColor: searchPlaceholderColor,
-                          surfaceColor: nativeIos
-                              ? Colors.transparent
-                              : searchSurfaceColor,
-                          isEditing: false,
-                          reduceMotion: true,
-                          motionDuration: Duration.zero,
-                          onTap: activateSearch,
-                          onChanged: (value) =>
-                              ref.read(searchProvider.notifier).search(value),
-                          onSubmitted: (value) {
-                            final query = value.trim();
-                            if (query.isNotEmpty) {
-                              ref
-                                  .read(recentSearchesProvider.notifier)
-                                  .record(query);
-                            }
-                          },
+                      const SizedBox(width: Grid.xxs),
+                    ],
+                    Expanded(
+                      child: SizedBox(
+                        key: const Key('search-field-container'),
+                        height: fieldHeight,
+                        child: ConcentricSheetSurface(
+                          enabled: nativeIos,
+                          usesGlass: true,
+                          providesSheetSurface: false,
+                          padding: EdgeInsets.zero,
+                          color: searchSurfaceColor,
+                          minimumRadius: fieldHeight / 2,
+                          contentClipRadius: fieldHeight / 2,
+                          child: BuzzSearchField(
+                            controller: textController,
+                            focusNode: focusNode,
+                            hintText: 'Search',
+                            iconColor: searchPrimaryColor,
+                            inputColor: searchPrimaryColor,
+                            placeholderColor: searchPlaceholderColor,
+                            surfaceColor: nativeIos
+                                ? Colors.transparent
+                                : searchSurfaceColor,
+                            isEditing: false,
+                            reduceMotion: true,
+                            motionDuration: Duration.zero,
+                            onTap: activateSearch,
+                            onChanged: (value) =>
+                                ref.read(searchProvider.notifier).search(value),
+                            onSubmitted: (value) {
+                              final query = value.trim();
+                              if (query.isNotEmpty) {
+                                ref
+                                    .read(recentSearchesProvider.notifier)
+                                    .record(query);
+                              }
+                            },
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            SizedBox(
-              key: const ValueKey('search-header-filters'),
-              height: filtersHeight,
-              child: FilterChipBar<_SearchFilter>(
-                useNativeGlass: nativeIos,
-                expandItems: true,
-                visualDensity: const VisualDensity(horizontal: -2),
-                chipVerticalPadding: _searchFilterChipVerticalPadding,
-                barVerticalPadding: _searchFilterBarVerticalPadding,
-                selected: activeFilter.value,
-                onSelected: (filter) => activeFilter.value = filter,
-                items: [
-                  for (final filter in _SearchFilter.values)
-                    FilterChipItem(id: filter, label: filter.label),
-                ],
+              SizedBox(
+                key: const ValueKey('search-header-filters'),
+                height: filtersHeight,
+                child: FilterChipBar<_SearchFilter>(
+                  useNativeGlass: nativeIos,
+                  expandItems: true,
+                  visualDensity: const VisualDensity(horizontal: -2),
+                  chipVerticalPadding: _searchFilterChipVerticalPadding,
+                  barVerticalPadding: _searchFilterBarVerticalPadding,
+                  selected: activeFilter.value,
+                  onSelected: (filter) => activeFilter.value = filter,
+                  items: [
+                    for (final filter in _SearchFilter.values)
+                      FilterChipItem(id: filter, label: filter.label),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: Grid.xxs),
-            Expanded(
-              child: _SearchBody(
-                state: searchState,
-                filter: activeFilter.value,
-                currentPubkey: currentPubkey,
-                onRecentSearchSelected: runRecentSearch,
+              const SizedBox(height: Grid.xxs),
+              Expanded(
+                child: _SearchBody(
+                  state: searchState,
+                  filter: activeFilter.value,
+                  currentPubkey: currentPubkey,
+                  onRecentSearchSelected: runRecentSearch,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -592,12 +612,12 @@ class _PeopleSection extends ConsumerWidget {
                 .read(channelActionsProvider)
                 .openDm(pubkeys: [user.pubkey], waitForChannelList: false);
             if (!context.mounted) return;
-            await Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => ChannelDetailPage(
-                  channel: channel,
-                  placement: ChannelRoutePlacement.ordinary,
-                ),
+            await openConversationPane(
+              context,
+              channel.id,
+              (_) => ChannelDetailPage(
+                channel: channel,
+                placement: ChannelRoutePlacement.ordinary,
               ),
             );
           },
@@ -665,10 +685,10 @@ extension on _SearchFilter {
 Future<void> _openSearchChannel(BuildContext context, Channel channel) async {
   try {
     if (!context.mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ChannelDetailPage(channel: channel),
-      ),
+    await openConversationPane(
+      context,
+      channel.id,
+      (_) => ChannelDetailPage(channel: channel),
     );
   } catch (_) {
     if (!context.mounted) return;

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -262,15 +263,17 @@ class ActivityPage extends HookConsumerWidget {
           : thread.parentId;
 
       if (!context.mounted) return;
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: resolvedChannel,
-            initialMessageId: target.id,
-            initialThreadRootId: threadRootId,
-            initialThreadRouteBehavior:
-                InitialThreadRouteBehavior.replaceCurrentRoute,
-          ),
+      openConversationPane(
+        context,
+        target.id,
+        (_) => ChannelDetailPage(
+          channel: resolvedChannel,
+          initialMessageId: target.id,
+          initialThreadRootId: threadRootId,
+          initialThreadRouteBehavior:
+              ConversationPaneScope.maybeOf(context) == null
+              ? InitialThreadRouteBehavior.replaceCurrentRoute
+              : InitialThreadRouteBehavior.push,
         ),
       );
     }
@@ -285,14 +288,16 @@ class ActivityPage extends HookConsumerWidget {
         );
         return;
       }
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: channel,
-            initialThreadRootId: draft.threadHeadId,
-            initialThreadRouteBehavior:
-                InitialThreadRouteBehavior.replaceCurrentRoute,
-          ),
+      openConversationPane(
+        context,
+        'draft:${draft.channelId}:${draft.threadHeadId}',
+        (_) => ChannelDetailPage(
+          channel: channel,
+          initialThreadRootId: draft.threadHeadId,
+          initialThreadRouteBehavior:
+              ConversationPaneScope.maybeOf(context) == null
+              ? InitialThreadRouteBehavior.replaceCurrentRoute
+              : InitialThreadRouteBehavior.push,
         ),
       );
     }
@@ -316,12 +321,12 @@ class ActivityPage extends HookConsumerWidget {
         );
         return;
       }
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: channel,
-            initialMessageId: target.eventId,
-          ),
+      openConversationPane(
+        context,
+        target.eventId,
+        (_) => ChannelDetailPage(
+          channel: channel,
+          initialMessageId: target.eventId,
         ),
       );
     }
@@ -437,6 +442,7 @@ class ActivityPage extends HookConsumerWidget {
         nativeActions: [
           IosNavigationAction(
             label: 'Filter inbox',
+            keepInHeaderOnDuo: true,
             icon: BuzzIcons.filter2,
             children: [
               for (final entry in _filterLabels.entries)
@@ -449,6 +455,7 @@ class ActivityPage extends HookConsumerWidget {
           ),
           IosNavigationAction(
             label: 'Inbox options',
+            keepInHeaderOnDuo: true,
             symbol: 'ellipsis',
             children: [
               IosNavigationAction(

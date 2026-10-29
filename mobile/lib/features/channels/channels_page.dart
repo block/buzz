@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/widgets/compose_morph_icon.dart';
@@ -9,6 +10,8 @@ import 'dart:math' show max, min, pi;
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:duo_kit/duo_kit.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
@@ -269,6 +272,17 @@ class ChannelsPage extends HookConsumerWidget {
         .toList();
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
+      final pane = ConversationPaneScope.maybeOf(context);
+      if (pane != null) {
+        pane.open(
+          channel.id,
+          (_) => ChannelDetailPage(
+            channel: channel,
+            placement: ChannelRoutePlacement.ordinary,
+          ),
+        );
+        return;
+      }
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ChannelDetailPage(
@@ -456,16 +470,24 @@ class ChannelsPage extends HookConsumerWidget {
       final role = ref.read(currentCommunityRoleProvider).unwrapPrevious();
       final canInvite = role.hasError || canManageCommunityInvites(role.value);
       unawaited(HapticFeedback.selectionClick());
+      Widget menu(BuildContext _) => _CommunityMenuSheet(
+        canInvite: canInvite,
+        onSwitchCommunity: openCommunityGrid,
+        invitePageBuilder: communityInvitePageBuilder,
+        appearancePageBuilder: communityAppearancePageBuilder,
+      );
+      final window = MediaQueryData.fromView(View.of(context));
+      final bounded =
+          defaultTargetPlatform == TargetPlatform.iOS &&
+          window.size.shortestSide >= 600;
       showBuzzModalBottomSheet<void>(
         context: context,
+        useRootNavigator: true,
+        useDuoFullWidth: !bounded,
+        constraints: bounded ? const BoxConstraints(maxWidth: 480) : null,
         showCloseButton: false,
         showDragHandle: true,
-        builder: (_) => _CommunityMenuSheet(
-          canInvite: canInvite,
-          onSwitchCommunity: openCommunityGrid,
-          invitePageBuilder: communityInvitePageBuilder,
-          appearancePageBuilder: communityAppearancePageBuilder,
-        ),
+        builder: menu,
       );
     }
 

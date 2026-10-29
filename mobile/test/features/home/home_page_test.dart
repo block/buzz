@@ -1,3 +1,5 @@
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_sheet.dart';
 import 'package:buzz/features/channels/me/me_section.dart';
@@ -67,6 +69,72 @@ void main() {
       ),
     );
   }
+
+  testWidgets('Duo rail retains unified Messages selection across folds', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(466, 678);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    tester.view.padding = const FakeViewPadding(right: 76);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(await buildHome(disableAnimations: true));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<MessagesNavigationBar>(find.byType(MessagesNavigationBar))
+          .axis,
+      Axis.vertical,
+    );
+    expect(tester.getCenter(find.byTooltip('Search')).dx, greaterThan(390));
+    // Dispatch the native control callback; widget tests do not run UIKit.
+    tester
+        .widget<IosGlassNavigationButton>(
+          find.byWidgetPredicate(
+            (w) => w is IosGlassNavigationButton && w.label == 'Solo',
+          ),
+        )
+        .onPressed!();
+    await tester.pumpAndSettle();
+    expect(find.text('Personal workspace'), findsOneWidget);
+    expect(find.text('General'), findsNothing);
+    final pane = ConversationPaneScope.maybeOf(
+      tester.element(find.text('Personal workspace')),
+    )!;
+    pane.open(
+      'sample',
+      (_) => const Scaffold(body: Text('Conversation content')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Conversation content'), findsOneWidget);
+    expect(find.byType(MessagesNavigationBar), findsNothing);
+    tester.view.physicalSize = const Size(951, 669);
+    await tester.pumpAndSettle();
+    expect(find.byType(MessagesNavigationBar), findsOneWidget);
+    expect(find.text('Conversation content'), findsOneWidget);
+    expect(pane.selectedId, 'sample');
+    tester.view.physicalSize = const Size(466, 678);
+    await tester.pumpAndSettle();
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Personal workspace'), findsOneWidget);
+    expect(find.text('General'), findsNothing);
+    expect(find.byType(MessagesNavigationBar), findsOneWidget);
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+    tester.view.padding = const FakeViewPadding(bottom: 34);
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<MessagesNavigationBar>(find.byType(MessagesNavigationBar))
+          .axis,
+      Axis.horizontal,
+    );
+    expect(tester.takeException(), isNull);
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets(
     'Messages filters its inventory and opens Search and Settings above it',

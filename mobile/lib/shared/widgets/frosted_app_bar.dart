@@ -1,5 +1,8 @@
 import 'dart:ui';
 
+import 'package:duo_kit/duo_kit.dart';
+import 'duo_toolbar.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -59,6 +62,15 @@ double frostedAppBarLowerTitleHeight(
   return titleHeight > 40 ? titleHeight : 40;
 }
 
+// Duo has no top status inset in the content panes. Reserve breathing room
+// around the native 44-point controls instead of collapsing the header to them.
+double _nativeCompactHeight(BuildContext context) {
+  final scope = DuoToolbarScope.maybeOf(context);
+  final strip = scope == null ? FoldGeometry.of(context).strip : scope.strip;
+  final height = IosNavigationMetrics.of(context).compactHeight;
+  return strip == null ? height : height.clamp(44.0, double.infinity) + 24;
+}
+
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
 ///
 /// Use this to add top spacing to body content so it starts below the bar.
@@ -74,7 +86,7 @@ double frostedAppBarHeight(
 }) {
   if (useNativeNavigation && defaultTargetPlatform == TargetPlatform.iOS) {
     return MediaQuery.paddingOf(context).top +
-        IosNavigationMetrics.of(context).compactHeight +
+        _nativeCompactHeight(context) +
         (nativeLargeTitle
             ? IosNavigationMetrics.of(context).largeTitleHeight
             : 0) +
@@ -252,6 +264,36 @@ class FrostedAppBar extends StatelessWidget {
     if (useNativeNavigation &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !nativeSuppressed) {
+      final toolbarScope = DuoToolbarScope.maybeOf(context);
+      final strip = toolbarScope == null
+          ? FoldGeometry.of(context).strip
+          : toolbarScope.strip;
+      final leadingAction = nativeLeading ?? _nativeAction(leading);
+      final onBack =
+          automaticallyImplyLeading &&
+              leading == null &&
+              Navigator.canPop(context)
+          ? () {
+              Navigator.of(context).maybePop();
+            }
+          : null;
+      final trailingActions =
+          nativeActions ??
+          actions.map(_nativeAction).whereType<IosNavigationAction>().toList();
+      final stripActions = <IosNavigationAction>[
+        if (leadingAction != null && !leadingAction.keepInHeaderOnDuo)
+          leadingAction
+        else if (leadingAction == null && onBack != null)
+          IosNavigationAction(
+            label: 'Back',
+            symbol: 'chevron.backward',
+            onPressed: onBack,
+          ),
+        ...trailingActions.where((action) => !action.keepInHeaderOnDuo),
+      ];
+      final toolbarActive =
+          (toolbarScope?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true);
       final offset = IosNavigationScrollScope.maybeOf(context);
       Widget buildNative(double scrollOffset) {
         // Scrolling tracks the finger directly; only the search focus change
@@ -265,7 +307,7 @@ class FrostedAppBar extends StatelessWidget {
             : 0.0;
         final barHeight =
             MediaQuery.paddingOf(context).top +
-            IosNavigationMetrics.of(context).compactHeight +
+            _nativeCompactHeight(context) +
             extra;
         return AnimatedPositioned(
           duration: layoutDuration,
@@ -274,57 +316,105 @@ class FrostedAppBar extends StatelessWidget {
           left: 0,
           right: 0,
           height: barHeight + bottomHeight,
-          child: Stack(
-            children: [
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: barHeight,
-                child: IosNavigationBar(
-                  onReadyChanged: onNativeReadyChanged,
-                  title:
-                      nativeTitle ??
-                      (title is Text ? (title as Text).data ?? '' : ''),
-                  subtitle: nativeSubtitle,
-                  ephemeralLabel: nativeEphemeralLabel,
-                  titleAvatar: nativeTitleAvatar,
-                  titlePresenceColor: nativeTitlePresenceColor,
-                  onTitlePressed: onNativeTitlePressed,
-                  largeTitle: nativeLargeTitle,
-                  alwaysFrosted: alwaysFrosted,
-                  foregroundColor: iconColor,
-                  leading: nativeLeading ?? _nativeAction(leading),
-                  onBack:
-                      automaticallyImplyLeading &&
-                          leading == null &&
-                          Navigator.canPop(context)
-                      ? () => Navigator.of(context).maybePop()
-                      : null,
-                  actions:
-                      nativeActions ??
-                      actions
-                          .map(_nativeAction)
-                          .whereType<IosNavigationAction>()
-                          .toList(),
-                ),
-              ),
-              if (bottom != null)
-                AnimatedPositioned(
-                  duration: layoutDuration,
-                  curve: Curves.easeInOutCubic,
-                  top: barHeight - bottomOverlap,
+          child: DuoToolbarPortal(
+            strip: strip,
+            active: toolbarActive,
+            actions: stripActions,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                // UIKit materials cannot reliably sample Flutter's scene behind
+                // a platform view. Blur the scrolling pane in its own compositor
+                // while keeping the controls themselves native Liquid Glass.
+                if (strip != null && frosted)
+                  Positioned(
+                    top: 0,
+                    left: -(toolbarScope?.contentInsets.left ?? 0),
+                    right: -(toolbarScope?.contentInsets.right ?? 0),
+                    height: barHeight,
+                    child: IgnorePointer(
+                      child: ClipRect(
+                        child: BackdropFilter(
+                          key: const ValueKey('duo-navigation-backdrop'),
+                          filter: ImageFilter.blur(
+                            sigmaX: frostedBlurSigma,
+                            sigmaY: frostedBlurSigma,
+                          ),
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                stops: const [0.55, 1],
+                                colors: [
+                                  context.colors.surfaceContainerHighest
+                                      .withValues(alpha: frostedSurfaceOpacity),
+                                  context.colors.surface.withValues(alpha: 0),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                Positioned(
+                  top: 0,
                   left: 0,
                   right: 0,
-                  height: bottomHeight + bottomOverlap,
-                  child: bottomOverlap > 0 || bottom is SizedBox
-                      ? bottom!
-                      : ColoredBox(
-                          color: context.colors.surface,
-                          child: bottom!,
-                        ),
+                  height: barHeight,
+                  child: IosNavigationBar(
+                    centerTitleInPane: strip != null && !nativeLargeTitle,
+                    alignCollapsedTitleToLeading:
+                        strip != null && nativeLargeTitle,
+                    horizontalControls:
+                        strip != null &&
+                        ((leadingAction?.keepInHeaderOnDuo ?? false) ||
+                            trailingActions.any(
+                              (action) => action.keepInHeaderOnDuo,
+                            )),
+                    onReadyChanged: onNativeReadyChanged,
+                    title:
+                        nativeTitle ??
+                        (title is Text ? (title as Text).data ?? '' : ''),
+                    subtitle: nativeSubtitle,
+                    ephemeralLabel: nativeEphemeralLabel,
+                    titleAvatar: nativeTitleAvatar,
+                    titlePresenceColor: nativeTitlePresenceColor,
+                    onTitlePressed: onNativeTitlePressed,
+                    largeTitle: nativeLargeTitle,
+                    alwaysFrosted: alwaysFrosted || strip != null,
+                    foregroundColor: iconColor,
+                    leading:
+                        strip == null ||
+                            (leadingAction?.keepInHeaderOnDuo ?? false)
+                        ? leadingAction
+                        : null,
+                    onBack: strip == null ? onBack : null,
+                    actions: strip == null
+                        ? trailingActions
+                        : trailingActions
+                              .where((action) => action.keepInHeaderOnDuo)
+                              .toList(),
+                  ),
                 ),
-            ],
+                if (bottom != null)
+                  AnimatedPositioned(
+                    duration: layoutDuration,
+                    curve: Curves.easeInOutCubic,
+                    top: barHeight - bottomOverlap,
+                    left: 0,
+                    right: 0,
+                    height: bottomHeight + bottomOverlap,
+                    child: bottomOverlap > 0 || bottom is SizedBox
+                        ? bottom!
+                        : ColoredBox(
+                            color: context.colors.surface,
+                            child: bottom!,
+                          ),
+                  ),
+              ],
+            ),
           ),
         );
       }

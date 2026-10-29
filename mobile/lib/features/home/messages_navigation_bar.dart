@@ -17,14 +17,17 @@ class MessagesNavigationBar extends StatelessWidget {
     required this.onSearch,
     required this.creationActions,
     required this.agent,
+    this.axis = Axis.horizontal,
   });
+  final Axis axis;
   final VoidCallback onSearch;
   final Widget agent;
   final List<({String label, String symbol, VoidCallback? onPressed})>
   creationActions;
 
   @override
-  Widget build(BuildContext context) => Row(
+  Widget build(BuildContext context) => Flex(
+    direction: axis,
     mainAxisSize: MainAxisSize.min,
     children: [
       NavigationButtonSurface(
@@ -41,20 +44,26 @@ class MessagesNavigationBar extends StatelessWidget {
           ),
         ),
       ),
-      const SizedBox(width: Grid.xs),
+      SizedBox(
+        width: axis == Axis.horizontal ? Grid.xs : 0,
+        height: axis == Axis.vertical ? Grid.xs : 0,
+      ),
       if (defaultTargetPlatform == TargetPlatform.iOS)
         IosMessageCreateButton(
           actions: creationActions,
-          label: 'New',
-          showIconWithLabel: true,
+          label: axis == Axis.horizontal ? 'New' : null,
+          showIconWithLabel: axis == Axis.horizontal,
           accessibilityLabel: 'New',
-          width: 112,
+          width: axis == Axis.horizontal ? 112 : 56,
           height: 56,
           plain: false,
         )
       else
         AndroidExpandingMenuButton(actions: creationActions),
-      const SizedBox(width: Grid.xs),
+      SizedBox(
+        width: axis == Axis.horizontal ? Grid.xs : 0,
+        height: axis == Axis.vertical ? Grid.xs : 0,
+      ),
       agent,
     ],
   );

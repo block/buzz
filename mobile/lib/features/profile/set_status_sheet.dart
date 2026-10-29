@@ -1,4 +1,9 @@
+import 'dart:async';
+
+import 'package:duo_kit/duo_kit.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -42,14 +47,127 @@ enum _StatusDuration {
   final Duration? duration;
 }
 
-void showSetStatusSheet(BuildContext context, {UserStatus? currentStatus}) {
-  showBuzzModalBottomSheet<void>(
+bool _nativeStatusEditorOpen = false;
+
+Future<void> showSetStatusSheet(
+  BuildContext context, {
+  UserStatus? currentStatus,
+}) async {
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+    if (_nativeStatusEditorOpen) return;
+    _nativeStatusEditorOpen = true;
+    try {
+      await _showNativeStatusEditor(context, currentStatus);
+      return;
+    } on MissingPluginException {
+      // Keep the portable editor available on hosts without the iOS plugin.
+      if (!context.mounted) return;
+    } finally {
+      _nativeStatusEditorOpen = false;
+    }
+  }
+  if (!context.mounted) return;
+  await showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showCloseButton: false,
+    showRailCloseButton: true,
     showDragHandle: false,
     builder: (_) => _SetStatusSheet(currentStatus: currentStatus),
   );
+}
+
+Future<void> _showNativeStatusEditor(
+  BuildContext context,
+  UserStatus? currentStatus,
+) async {
+  const channel = MethodChannel('buzz/profile_text_editor');
+  final container = ProviderScope.containerOf(context, listen: false);
+  final notifier = container.read(userStatusProvider.notifier);
+  final sheetTheme = utilitySurfaceThemeData(Theme.of(context));
+  final currentExpiration = currentStatus?.expirationDateTime;
+  var draft = <String, dynamic>{
+    'text': currentStatus?.text ?? '',
+    'emoji': currentStatus?.emoji ?? '',
+    'duration': currentExpiration == null ? 86400 : 0,
+    'expiresAt': currentExpiration == null
+        ? null
+        : currentExpiration.millisecondsSinceEpoch / 1000,
+    'hasExistingStatus': currentStatus != null && !currentStatus.isEmpty,
+    'brightness': sheetTheme.brightness.name,
+    'pageBackgroundArgb': sheetTheme.colorScheme.surface.toARGB32(),
+    'containerBackgroundArgb': sheetTheme.colorScheme.surfaceContainerHighest
+        .toARGB32(),
+  };
+  channel.setMethodCallHandler((call) async {
+    if (call.method != 'chooseStatusEmoji' || !context.mounted) return null;
+    // Resolve the palette before opening the picker: its Flutter loading
+    // surface would otherwise sit underneath this native presentation.
+    await container.read(customEmojiPaletteProvider.future);
+    if (!context.mounted) return null;
+    final selection = Completer<String?>();
+    showEmojiPicker(
+      context: context,
+      onSelect: (emoji) {
+        if (!selection.isCompleted) selection.complete(emoji);
+      },
+      onDismiss: () {
+        if (!selection.isCompleted) selection.complete(null);
+      },
+    );
+    return selection.future;
+  });
+  try {
+    while (context.mounted) {
+      final value = await channel.invokeMapMethod<String, dynamic>(
+        'presentStatus',
+        draft,
+      );
+      if (value == null) return;
+      final expiration = _nativeStatusExpiration(value['expiresAt']);
+      if (value['clear'] != true && expiration == null) {
+        // Preserve the edit, but replace the invalid date with the default preset
+        // so pressing Set again can recover without resubmitting the bad value.
+        draft = {
+          ...draft,
+          ...value,
+          'duration': 86400,
+          'expiresAt': null,
+          'saveError': true,
+        };
+        continue;
+      }
+      try {
+        if (value['clear'] == true) {
+          await notifier.clearStatus();
+        } else {
+          await notifier.setStatus(
+            value['text'] as String,
+            value['emoji'] as String,
+            expiresAt: expiration,
+          );
+        }
+        return;
+      } catch (_) {
+        // Reopen with the exact submitted draft, just like the native text forms.
+        // The error belongs to this editor, so it remains visible above the sheet.
+        draft = {...draft, ...value, 'saveError': true};
+      }
+    }
+  } finally {
+    channel.setMethodCallHandler(null);
+  }
+}
+
+DateTime? _nativeStatusExpiration(Object? value) {
+  // Validate before multiplying or rounding untrusted method-channel input.
+  if (value is! num ||
+      !value.isFinite ||
+      value < -8640000000000 ||
+      value > 8640000000000) {
+    return null;
+  }
+  return DateTime.fromMillisecondsSinceEpoch((value * 1000).round());
 }
 
 class _SetStatusSheet extends HookConsumerWidget {
@@ -427,42 +545,49 @@ Future<DateTime?> _showNativeDateTimePicker(
 
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     var selected = safeInitial;
-    return showCupertinoModalPopup<DateTime>(
-      context: context,
-      builder: (pickerContext) => Material(
-        color: context.colors.surface,
-        child: SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.only(bottom: Grid.half),
-            child: SizedBox(
-              height: 300,
-              child: Column(
-                children: [
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton(
-                      onPressed: () =>
-                          Navigator.of(pickerContext).pop(selected),
-                      child: const Text('Done'),
-                    ),
+    Widget picker(BuildContext pickerContext) => Material(
+      color: context.colors.surface,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: Grid.half),
+          child: SizedBox(
+            height: 300,
+            child: Column(
+              children: [
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () => Navigator.of(pickerContext).pop(selected),
+                    child: const Text('Done'),
                   ),
-                  Expanded(
-                    child: CupertinoDatePicker(
-                      mode: CupertinoDatePickerMode.dateAndTime,
-                      minimumDate: minimum,
-                      initialDateTime: safeInitial,
-                      use24hFormat: MediaQuery.alwaysUse24HourFormatOf(context),
-                      onDateTimeChanged: (value) => selected = value,
-                    ),
+                ),
+                Expanded(
+                  child: CupertinoDatePicker(
+                    mode: CupertinoDatePickerMode.dateAndTime,
+                    minimumDate: minimum,
+                    initialDateTime: safeInitial,
+                    use24hFormat: MediaQuery.alwaysUse24HourFormatOf(context),
+                    onDateTimeChanged: (value) => selected = value,
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
       ),
     );
+    final strip =
+        DuoToolbarScope.maybeOf(context)?.strip ??
+        FoldGeometry.of(context).strip;
+    if (strip != null) {
+      return showBuzzModalBottomSheet<DateTime>(
+        context: context,
+        title: 'Custom expiration',
+        builder: picker,
+      );
+    }
+    return showCupertinoModalPopup<DateTime>(context: context, builder: picker);
   }
 
   final lastDate = now.add(const Duration(days: 365));

@@ -10,11 +10,13 @@ const _kQuickActionsHiddenScale = 0.8;
 /// Home opens the creation menu; Solo uses the same button for a new chat.
 class ChannelQuickActionsLauncher extends HookConsumerWidget {
   /// Whether the launcher should be visible beside the navigation bar.
+  final double controlSize;
   final bool visible;
 
   /// Reuses the plus for Solo chat creation instead of the Home menu.
   final bool newChatMode;
   final VoidCallback? onNewChat;
+  final Future<void> Function(Channel)? onOpenChannel;
 
   /// Left gutter of the navigation bar.
   final double navigationBarLeft;
@@ -34,18 +36,32 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
   /// Distance between the launcher and the right edge of the screen.
   final double rightInset;
 
+  /// Keeps navigation outside the dismiss target when sharing its overlay.
+  final EdgeInsets dismissInsets;
+
+  /// Raises the launcher above a vertical navigation group.
+  final double bottomOffset;
+
+  /// Bounds the expanded menu on wide displays.
+  final double menuMaxWidth;
+
   /// Creates a launcher aligned with the supplied navigation geometry.
   const ChannelQuickActionsLauncher({
     super.key,
     required this.visible,
+    this.controlSize = _kMorphClosedSize,
     this.newChatMode = false,
     this.onNewChat,
+    this.onOpenChannel,
     this.navigationBarLeft = Grid.gutter,
     required this.navigationBarHeight,
     required this.navigationBarBottomGap,
     required this.navigationBarWidth,
     required this.systemBottomInset,
     required this.rightInset,
+    this.dismissInsets = EdgeInsets.zero,
+    this.bottomOffset = 0,
+    this.menuMaxWidth = double.infinity,
   });
 
   @override
@@ -57,11 +73,13 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
         ? systemBottomInset
         : navigationBarBottomGap;
     final closedBottomInset =
-        navigationBottomInset + ((navigationBarHeight - _kMorphClosedSize) / 2);
+        navigationBottomInset +
+        bottomOffset +
+        ((navigationBarHeight - controlSize) / 2);
     final openLift =
         navigationBarHeight +
         Grid.xxs -
-        ((navigationBarHeight - _kMorphClosedSize) / 2);
+        ((navigationBarHeight - controlSize) / 2);
     final effectiveOpen = visible && !newChatMode && quickActionsOpen.value;
     final screenWidth = MediaQuery.sizeOf(context).width;
     final navigationBarRight = navigationBarLeft + navigationBarWidth;
@@ -78,6 +96,10 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
 
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
+      if (onOpenChannel != null) {
+        await onOpenChannel!(channel);
+        return;
+      }
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ChannelDetailPage(
@@ -129,7 +151,11 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
       clipBehavior: Clip.none,
       children: [
         if (effectiveOpen)
-          Positioned.fill(
+          Positioned(
+            left: dismissInsets.left,
+            top: dismissInsets.top,
+            right: dismissInsets.right,
+            bottom: dismissInsets.bottom,
             child: Semantics(
               button: true,
               label: 'Close quick actions',
@@ -174,8 +200,12 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
                 ),
                 child: _MorphingQuickActionsButton(
                   open: effectiveOpen,
+                  closedSize: controlSize,
                   icon: newChatMode ? BuzzIcons.edit : BuzzIcons.plus,
-                  openEdgeOffset: rightInset - Grid.gutter,
+                  openEdgeOffset:
+                      rightInset - Grid.gutter - dismissInsets.right,
+                  horizontalInset: dismissInsets.horizontal,
+                  maxOpenWidth: menuMaxWidth,
                   label: newChatMode
                       ? 'New chat'
                       : 'Create or start conversation',

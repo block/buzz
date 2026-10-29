@@ -1,3 +1,7 @@
+import 'package:duo_kit/duo_kit.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
+import '../../shared/widgets/duo_workspace_scaffold.dart';
+import '../../shared/widgets/ios_navigation_metrics.dart';
 import '../../shared/widgets/android_expanding_menu_button.dart';
 
 import 'package:flutter/material.dart';
@@ -52,6 +56,20 @@ class HomePage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final communityId = ref.watch(
+      activeCommunityProvider.select((value) => value.value?.id),
+    );
+    final conversations = useMemoized(ConversationPaneController.new, [
+      communityId,
+    ]);
+    useEffect(() => conversations.dispose, [conversations]);
+    useListenable(conversations);
+    final strip = FoldGeometry.of(context).strip;
+    final windowData = MediaQuery.of(context);
+    final wide =
+        bookDivisionOf(context) != null ||
+        windowData.size.width - (strip?.width ?? 0) >= 640;
+    final showWorkspaceNavigation = wide || conversations.selectedId == null;
     final route = ModalRoute.of(context);
     final coveringProgress = useAnimation(
       route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
@@ -73,7 +91,8 @@ class HomePage extends HookConsumerWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     void openSearch() => Navigator.of(context).push(
       BottomUpPageRoute<void>(
-        builder: (_) => const SearchPage(),
+        builder: (_) =>
+            const AdaptiveConversationDestination(child: SearchPage()),
         reducedMotion: reducedMotion,
       ),
     );
@@ -95,7 +114,8 @@ class HomePage extends HookConsumerWidget {
       hasUnreadInbox: hasUnreadInbox,
       onInbox: () => Navigator.of(context).push(
         BottomUpPageRoute<void>(
-          builder: (_) => const ActivityPage(),
+          builder: (_) =>
+              const AdaptiveConversationDestination(child: ActivityPage()),
           reducedMotion: reducedMotion,
         ),
       ),
@@ -185,80 +205,101 @@ class HomePage extends HookConsumerWidget {
         MediaQuery.viewPaddingOf(context).bottom > mobileTabBarBottomGap
         ? MediaQuery.viewPaddingOf(context).bottom
         : mobileTabBarBottomGap;
-    return Scaffold(
-      resizeToAvoidBottomInset: false,
-      body: Stack(
-        children: [
-          MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              padding: MediaQuery.paddingOf(context).copyWith(
-                bottom:
-                    MediaQuery.paddingOf(context).bottom +
-                    mobileTabBarHeight +
-                    mobileTabBarBottomGap,
+    Widget navigationBar(Axis axis) => MessagesNavigationBar(
+      axis: axis,
+      onSearch: openSearch,
+      agent: defaultAgentBuilder(context),
+      creationActions: [
+        (
+          label: 'New chat',
+          symbol: 'square.and.pencil',
+          onPressed: newChat.value,
+        ),
+        (
+          label: 'New workspace',
+          symbol: 'folder.badge.plus',
+          onPressed: newWorkspace.value,
+        ),
+        (label: 'New DM', symbol: 'bubble.left', onPressed: newDm.value),
+        (label: 'New channel', symbol: 'number', onPressed: newChannel.value),
+      ],
+    );
+    return DuoWorkspaceScaffold(
+      navigationBuilder: (context, placement) =>
+          !showWorkspaceNavigation ||
+              !nativeControlsVisible ||
+              communitySurfaceProgress.value != 0
+          ? const SizedBox.shrink()
+          : Transform.translate(
+              offset: Offset(
+                IosNavigationMetrics.of(
+                      context,
+                    ).railCenter(windowData.size, strip!.rect.center.dx) -
+                    strip.rect.center.dx,
+                0,
               ),
-              viewPadding: MediaQuery.viewPaddingOf(context).copyWith(
-                bottom:
-                    MediaQuery.viewPaddingOf(context).bottom +
-                    mobileTabBarHeight +
-                    mobileTabBarBottomGap,
+              child: SafeArea(
+                child: Center(child: navigationBar(Axis.vertical)),
               ),
             ),
-            child: Opacity(
-              key: const Key('home-community-surface-visibility'),
-              // The switcher uses a transparent route for its avatar flight.
-              // Keep Home laid out, but do not paint it through UIKit glass.
-              opacity: communitySurfaceProgress.value == 0 ? 1 : 0,
-              child: messages,
-            ),
-          ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: IgnorePointer(
-              child: MobileTabFooterBackdrop(
-                height: mobileTabFooterBackdropHeight(context),
-                tint: context.controlSurface,
+      body: Scaffold(
+        resizeToAvoidBottomInset: false,
+        body: Stack(
+          children: [
+            MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                padding: MediaQuery.paddingOf(context).copyWith(
+                  bottom:
+                      MediaQuery.paddingOf(context).bottom +
+                      (strip == null && showWorkspaceNavigation
+                          ? mobileTabBarHeight + mobileTabBarBottomGap
+                          : 0),
+                ),
+                viewPadding: MediaQuery.viewPaddingOf(context).copyWith(
+                  bottom:
+                      MediaQuery.viewPaddingOf(context).bottom +
+                      (strip == null && showWorkspaceNavigation
+                          ? mobileTabBarHeight + mobileTabBarBottomGap
+                          : 0),
+                ),
               ),
-            ),
-          ),
-          if (defaultTargetPlatform != TargetPlatform.iOS ||
-              nativeControlsVisible)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: bottom,
-              child: Center(
-                child: MessagesNavigationBar(
-                  onSearch: openSearch,
-                  agent: defaultAgentBuilder(context),
-                  creationActions: [
-                    (
-                      label: 'New chat',
-                      symbol: 'square.and.pencil',
-                      onPressed: newChat.value,
-                    ),
-                    (
-                      label: 'New workspace',
-                      symbol: 'folder.badge.plus',
-                      onPressed: newWorkspace.value,
-                    ),
-                    (
-                      label: 'New DM',
-                      symbol: 'bubble.left',
-                      onPressed: newDm.value,
-                    ),
-                    (
-                      label: 'New channel',
-                      symbol: 'number',
-                      onPressed: newChannel.value,
-                    ),
-                  ],
+              child: Opacity(
+                key: const Key('home-community-surface-visibility'),
+                // The switcher uses a transparent route for its avatar flight.
+                // Keep Home laid out, but do not paint it through UIKit glass.
+                opacity: communitySurfaceProgress.value == 0 ? 1 : 0,
+                child: AdaptiveConversationPane(
+                  key: ValueKey(communityId),
+                  controller: conversations,
+                  strip: strip,
+                  list: messages,
                 ),
               ),
             ),
-        ],
+            if (strip == null && showWorkspaceNavigation)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: IgnorePointer(
+                  child: MobileTabFooterBackdrop(
+                    height: mobileTabFooterBackdropHeight(context),
+                    tint: context.controlSurface,
+                  ),
+                ),
+              ),
+            if (strip == null &&
+                showWorkspaceNavigation &&
+                (defaultTargetPlatform != TargetPlatform.iOS ||
+                    nativeControlsVisible))
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: bottom,
+                child: Center(child: navigationBar(Axis.horizontal)),
+              ),
+          ],
+        ),
       ),
     );
   }
