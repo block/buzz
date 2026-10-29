@@ -170,7 +170,7 @@ class _MessageTile extends ConsumerWidget {
       agentMentionPubkeys: agentMentionPubkeys,
     );
 
-    return MessageContent(
+    return MessagePreview(
       key: ValueKey('search-message-body-${hit.eventId}'),
       content: hit.content,
       mentionNames: mentionNames,

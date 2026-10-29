@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:isolate';
 
-import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 import '../relay/relay.dart';
 import 'me_sync.dart';
@@ -64,7 +64,7 @@ Map<String, String> _inventoryNames(List<NostrEvent> events, String owner) {
     if (id == null || !RegExp(r'^[0-9a-f]{64}$').hasMatch(id)) continue;
     // Verify before allowing a newer tombstone or record to replace a head.
     try {
-      nostr.Event.fromJson(jsonEncode(event.toJson()));
+      verifiedNostrEventFromJson(jsonEncode(event.toJson()));
     } catch (_) {
       // A corrupt record must not hide unrelated verified agents.
       continue;

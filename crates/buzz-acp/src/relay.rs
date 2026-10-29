@@ -3785,7 +3785,7 @@ async fn shutdown_aware_sleep(
 }
 
 /// Reconnect entry shared by `try_autonomous_reconnect` and
-/// `wait_for_reconnect`: runs [`begin_reconnect`] with the real clock and RNG,
+/// `wait_for_reconnect`: runs [`begin_reconnect`] with the real RNG,
 /// then waits out the first-attempt delay. Returns `false` on shutdown.
 async fn prepare_reconnect(cmd_rx: &mut mpsc::Receiver<RelayCommand>, state: &mut BgState) -> bool {
     let delay = begin_reconnect(state, random_unit_sample());

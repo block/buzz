@@ -304,6 +304,52 @@ void main() {
     expect(feed.mentions.map((item) => item.id), ['fallback-mention']);
   });
 
+  test('a workflow owner attribution is not a mention of the owner', () async {
+    NostrEvent workflowMessage(String id, List<List<String>> mentions) =>
+        NostrEvent(
+          id: id,
+          pubkey: 'relay_pk',
+          createdAt: 1_700_000_001,
+          kind: 9,
+          tags: [
+            ['p', 'me_pk', '', 'owner'],
+            ['h', 'channel-1'],
+            ['buzz:workflow', 'true'],
+            ['buzz:workflow-owner', 'me_pk'],
+            ...mentions,
+          ],
+          content: 'workflow output',
+          sig: '',
+        );
+    final session = _RecordingSessionNotifier()
+      ..seed(
+        workflowMessage('mentions-agent', [
+          ['p', 'agent_pk'],
+        ]),
+      )
+      ..seed(
+        workflowMessage('mentions-owner', [
+          ['p', 'me_pk'],
+        ]),
+      );
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final feed = await container.read(activityProvider.future);
+
+    expect(feed.mentions.map((item) => item.id), ['mentions-owner']);
+  });
+
   test(
     'refreshes the inbox projection when addressed activity arrives',
     () async {

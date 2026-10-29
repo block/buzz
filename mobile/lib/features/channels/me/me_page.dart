@@ -83,7 +83,6 @@ class MePage extends HookConsumerWidget {
     final viewer = ref.watch(myPubkeyProvider);
     final offlineSaveFailed =
         ref.watch(meOfflineSaveWarningProvider).value ?? false;
-    final syncClosed = ref.watch(meSyncWarningProvider).value ?? false;
     final channels = ref.watch(channelsProvider);
     final unreadIds = ref.watch(meUnreadChannelIdsProvider);
     final busy = useState(false);
@@ -199,21 +198,6 @@ class MePage extends HookConsumerWidget {
               ),
               sliver: SliverList.list(
                 children: [
-                  if (syncClosed)
-                    Semantics(
-                      liveRegion: true,
-                      child: Column(
-                        children: [
-                          const Text(
-                            'Live updates stopped. Your saved chats are still available.',
-                          ),
-                          TextButton(
-                            onPressed: () => ref.invalidate(meGroupsProvider),
-                            child: const Text('Retry live updates'),
-                          ),
-                        ],
-                      ),
-                    ),
                   if (offlineSaveFailed)
                     Semantics(
                       liveRegion: true,
