@@ -1117,6 +1117,7 @@ function repeatNode(files, iterations) {
 // `<file> › <name>`. Hidden entries are the runner's own file-loading steps.
 export function parseDartReport(text, mobileRoot = `${root}mobile/`) {
   const started = new Map();
+  const suites = new Map();
   const statuses = new Map();
   for (const line of text.split("\n")) {
     let event;
@@ -1125,11 +1126,14 @@ export function parseDartReport(text, mobileRoot = `${root}mobile/`) {
     } catch {
       continue;
     }
+    if (event.type === "suite") suites.set(event.suite.id, event.suite.path);
     if (event.type === "testStart") started.set(event.test.id, event.test);
     if (event.type !== "testDone" || event.hidden) continue;
     const test = started.get(event.testID);
     if (!test) continue;
-    const file = fileURLToPath(test.url ?? "file:///").replace(mobileRoot, "");
+    const source = suites.get(test.suiteID) ??
+      (test.url?.startsWith("file:") ? fileURLToPath(test.url) : test.url ?? "unknown");
+    const file = source.replace(mobileRoot, "");
     statuses.set(
       `${file} › ${test.name}`,
       event.skipped

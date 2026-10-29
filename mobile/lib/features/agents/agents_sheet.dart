@@ -226,7 +226,7 @@ class AgentsSheet extends HookConsumerWidget {
           )
         : 0.0;
     final VoidCallback? addAgent =
-        community == null || controller.busy || creating.value
+        !supportsRemoteAgents(community) || controller.busy || creating.value
         ? null
         : () async {
             creating.value = true;
@@ -238,7 +238,7 @@ class AgentsSheet extends HookConsumerWidget {
                 showCloseButton: false,
                 builder: (_) => CreateAgentSheet(
                   controller: controller,
-                  community: community,
+                  community: community!,
                   onCreated: () => ref.invalidate(agentDirectoryProvider),
                 ),
               );
@@ -260,7 +260,8 @@ class AgentsSheet extends HookConsumerWidget {
           ),
           children: [
             if (loading) const LinearProgressIndicator(),
-            if (controller.account.account == null)
+            if (supportsRemoteAgents(community) &&
+                controller.account.account == null)
               ListTile(
                 title: const Text('Sign in to create an agent'),
                 trailing: TextButton(

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -18,6 +19,16 @@ void main() {
   ) async {
     final h = await AgentsHarness.create();
     await h.open(tester, directory: [existing]);
+    if (!supportsRemoteAgents(h.community)) {
+      expect(find.text('Sign in to create an agent'), findsNothing);
+      for (final button in tester.widgetList<IconButton>(
+        find.byWidgetPredicate(
+          (widget) => widget is IconButton && widget.tooltip == 'Add agent',
+        ),
+      )) {
+        expect(button.onPressed, isNull);
+      }
+    }
     final list = tester.element(find.byType(AgentsSheet));
     final container = ProviderScope.containerOf(list);
     h.relay.loseAcknowledgment = true;
