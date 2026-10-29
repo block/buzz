@@ -210,9 +210,11 @@ pub fn directive_filter<S>(directives: &str) -> DirectiveFilter<S> {
 fn plain_targets(directives: &str) -> Option<Targets> {
     let plain = directives.split(',').all(|directive| {
         // `Targets` reads `=debug` as an empty target prefix that matches
-        // everything; `EnvFilter` rejects it.
+        // everything; `EnvFilter` rejects it. `EnvFilter` reads an empty
+        // level (`buzz_relay=`) as TRACE; `Targets` reads it as ERROR.
         !directive.is_empty()
             && !directive.starts_with('=')
+            && !directive.ends_with('=')
             && directive
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-' | '='))
@@ -334,6 +336,8 @@ mod tests {
             "buzz_relay=loud",
             "=debug",
             "buzz_relay=info,=debug",
+            "buzz_relay=",
+            "buzz_relay=info,buzz_datastore=",
         ] {
             assert!(plain_targets(env).is_none(), "{env}");
         }

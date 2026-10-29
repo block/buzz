@@ -1910,6 +1910,77 @@ mod env_filter_tests {
         );
     }
 
+    /// One event per target and level, each logged as `m <target> <level>`.
+    macro_rules! emit_matrix {
+        ($($target:literal),*) => {
+            /// Every marker `emit_matrix_events` logs.
+            const MATRIX: &[&str] = &[$(
+                concat!("m ", $target, " error"),
+                concat!("m ", $target, " warn"),
+                concat!("m ", $target, " info"),
+                concat!("m ", $target, " debug"),
+                concat!("m ", $target, " trace"),
+            )*];
+
+            fn emit_matrix_events() {$(
+                tracing::error!(target: $target, "{}", concat!("m ", $target, " error"));
+                tracing::warn!(target: $target, "{}", concat!("m ", $target, " warn"));
+                tracing::info!(target: $target, "{}", concat!("m ", $target, " info"));
+                tracing::debug!(target: $target, "{}", concat!("m ", $target, " debug"));
+                tracing::trace!(target: $target, "{}", concat!("m ", $target, " trace"));
+            )*}
+        };
+    }
+
+    emit_matrix!(
+        "buzz_relay",
+        "buzz_relay::state",
+        "buzz_relayx",
+        "buzz_datastore",
+        "buzz_db::store",
+        "sqlx"
+    );
+
+    /// Each directive list the fast path takes enables exactly the events
+    /// `EnvFilter` would, at every level, for nested, sibling and unnamed
+    /// targets. Lists the fast path declines go to `EnvFilter` itself.
+    #[test]
+    fn directive_filters_log_what_env_filter_logs() {
+        for directives in [
+            "warn",
+            "trace",
+            "off",
+            "buzz_relay",
+            "buzz_relay=",
+            "buzz_relay=info",
+            "buzz_relay=info,buzz_datastore=info",
+            "buzz_relay=info,buzz_datastore=",
+            "buzz_relay=debug,sqlx=warn",
+            "info,buzz_relay=trace",
+            "buzz_relay=off,info",
+            "buzz_relay::state=trace,buzz_relay=warn",
+            "buzz_relay=warn,buzz_relay::state=trace",
+            "warn,buzz_relay=info,buzz_relay=debug",
+            "buzz_relay=ERROR,buzz_datastore=Debug",
+            "buzz_relay=info,buzz_db::store=DEBUG,off",
+            "BUZZ_RELAY=info",
+        ] {
+            let enabled = |filter: DirectiveFilter<Registry>| {
+                let logs = logged(filter, emit_matrix_events);
+                MATRIX
+                    .iter()
+                    .filter(|marker| logs.lines().any(|line| line.ends_with(*marker)))
+                    .copied()
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                enabled(buzz_relay::telemetry::directive_filter(directives)),
+                enabled(Box::new(tracing_subscriber::EnvFilter::new(directives))),
+                "{directives}"
+            );
+        }
+    }
+
     /// A span directive still enables events only inside the named span, as
     /// `EnvFilter` does; `Targets` would read `[conn]` as a target name.
     #[test]

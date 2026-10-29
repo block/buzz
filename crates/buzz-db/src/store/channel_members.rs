@@ -1415,19 +1415,54 @@ pub async fn get_accessible_channel_ids(
     community_id: CommunityId,
     pubkey: &[u8],
 ) -> Result<Vec<Uuid>> {
-    let mut ids = get_member_channel_ids(pool, community_id, pubkey).await?;
-    let open = get_listed_open_channel_ids(pool, community_id).await?;
-    merge_channel_ids(&mut ids, &open);
+    let mut ids = get_member_channels(pool, community_id, pubkey).await?.ids;
+    let open = get_listed_open_channels(pool, community_id).await?;
+    merge_channel_ids(&mut ids, &open.ids);
     Ok(ids)
 }
 
-/// The member half of [`get_accessible_channel_ids`]: legacy-type channels
-/// where the pubkey is an active member.
-pub async fn get_member_channel_ids(
+/// The listed open channels of legacy types in a community, the half of
+/// [`get_accessible_channel_ids`] that is the same for every reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedOpenChannels {
+    /// Channel IDs, ascending.
+    pub ids: Vec<Uuid>,
+    /// Digest of `ids` as the database read them. See [`MemberChannels`].
+    pub fingerprint: Vec<u8>,
+}
+
+/// The member half of [`get_accessible_channel_ids`], with a digest of the
+/// community's listed open channels read in the same statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberChannels {
+    /// Legacy-type channels where the pubkey is an active member.
+    pub ids: Vec<Uuid>,
+    /// Equal to a [`ListedOpenChannels::fingerprint`] exactly when that set is
+    /// still the community's listed open set, so a cached open set can be
+    /// checked against the database without re-reading it.
+    pub open_fingerprint: Vec<u8>,
+}
+
+/// `FROM` and `WHERE` of the listed open legacy-type channels in community `$1`.
+fn listed_open_channels_from() -> String {
+    format!(
+        "FROM channels \
+         WHERE community_id = $1 AND visibility = 'open' AND NOT unlisted AND deleted_at IS NULL \
+           AND {}",
+        crate::store::channel::legacy_channel_type_sql("channel_type"),
+    )
+}
+
+/// SHA-256 of the ascending IDs of the rows in scope, or empty for no rows.
+const OPEN_CHANNELS_FINGERPRINT: &str =
+    "COALESCE(sha256(string_agg(uuid_send(id), ''::bytea ORDER BY id)), ''::bytea)";
+
+/// See [`MemberChannels`].
+pub async fn get_member_channels(
     pool: &PgPool,
     community_id: CommunityId,
     pubkey: &[u8],
-) -> Result<Vec<Uuid>> {
+) -> Result<MemberChannels> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
@@ -1435,49 +1470,55 @@ pub async fn get_member_channel_ids(
     .await?;
     let sql = format!(
         r#"
-        SELECT cm.channel_id
-        FROM channel_members cm
-        JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
-        WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
-          AND {member_types}
+        SELECT
+          ARRAY(
+            SELECT cm.channel_id
+            FROM channel_members cm
+            JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
+            WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
+              AND {member_types}
+          ) AS ids,
+          (SELECT {OPEN_CHANNELS_FINGERPRINT} {open}) AS open_fingerprint
         "#,
         member_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
+        open = listed_open_channels_from(),
     );
     // Built only from the constant type list.
-    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
         .bind(pubkey)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(Into::into)
+        .fetch_one(&mut *connection)
+        .await?;
+    Ok(MemberChannels {
+        ids: row.try_get("ids")?,
+        open_fingerprint: row.try_get("open_fingerprint")?,
+    })
 }
 
-/// The open half of [`get_accessible_channel_ids`]: listed open channels of
-/// legacy types. It is the same for every reader in the community.
-pub async fn get_listed_open_channel_ids(
+/// See [`ListedOpenChannels`].
+pub async fn get_listed_open_channels(
     pool: &PgPool,
     community_id: CommunityId,
-) -> Result<Vec<Uuid>> {
+) -> Result<ListedOpenChannels> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
     let sql = format!(
-        r#"
-        SELECT id
-        FROM channels
-        WHERE community_id = $1 AND visibility = 'open' AND NOT unlisted AND deleted_at IS NULL
-          AND {open_types}
-        "#,
-        open_types = crate::store::channel::legacy_channel_type_sql("channel_type"),
+        "SELECT COALESCE(array_agg(id ORDER BY id), '{{}}') AS ids, \
+                {OPEN_CHANNELS_FINGERPRINT} AS fingerprint {}",
+        listed_open_channels_from(),
     );
     // Built only from the constant type list.
-    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(Into::into)
+        .fetch_one(&mut *connection)
+        .await?;
+    Ok(ListedOpenChannels {
+        ids: row.try_get("ids")?,
+        fingerprint: row.try_get("fingerprint")?,
+    })
 }
 
 /// Appends the channels of `more` that `ids` lacks.
@@ -2284,23 +2325,23 @@ impl Db {
         get_accessible_channel_ids(&self.pool, community_id, pubkey).await
     }
 
-    /// Channel IDs where a pubkey is an active member. See [`get_member_channel_ids`].
-    #[datastore_span(name = "get_member_channel_ids", system = "postgresql")]
-    pub async fn get_member_channel_ids(
+    /// A pubkey's member channels and the open-set digest. See [`get_member_channels`].
+    #[datastore_span(name = "get_member_channels", system = "postgresql")]
+    pub async fn get_member_channels(
         &self,
         community_id: CommunityId,
         pubkey: &[u8],
-    ) -> Result<Vec<Uuid>> {
-        get_member_channel_ids(&self.pool, community_id, pubkey).await
+    ) -> Result<MemberChannels> {
+        get_member_channels(&self.pool, community_id, pubkey).await
     }
 
-    /// A community's listed open channel IDs. See [`get_listed_open_channel_ids`].
-    #[datastore_span(name = "get_listed_open_channel_ids", system = "postgresql")]
-    pub async fn get_listed_open_channel_ids(
+    /// A community's listed open channels. See [`get_listed_open_channels`].
+    #[datastore_span(name = "get_listed_open_channels", system = "postgresql")]
+    pub async fn get_listed_open_channels(
         &self,
         community_id: CommunityId,
-    ) -> Result<Vec<Uuid>> {
-        get_listed_open_channel_ids(&self.pool, community_id).await
+    ) -> Result<ListedOpenChannels> {
+        get_listed_open_channels(&self.pool, community_id).await
     }
 
     /// The channels of non-legacy types a pubkey can read (member, or open
@@ -2655,6 +2696,93 @@ mod postgres_tests {
             .await
             .expect("load accessible channel ids");
         assert_eq!(channel_ids.len(), channel_count as usize);
+    }
+
+    /// The member read's open-set digest matches a cached open set exactly
+    /// while that set is current, and stops matching after any change to it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn open_fingerprint_tracks_every_change_to_the_listed_open_set() {
+        let database_url = crate::test_support::database_url();
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB");
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let reader = random_pubkey();
+        let open_channel = |name: &'static str| {
+            let pool = pool.clone();
+            let reader = reader.clone();
+            async move {
+                let id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
+                     VALUES ($1, $2, $3, 'stream', 'open', $4)",
+                )
+                .bind(id)
+                .bind(community_id)
+                .bind(name)
+                .bind(&reader)
+                .execute(&pool)
+                .await
+                .expect("insert open channel");
+                id
+            }
+        };
+        let fingerprint = || async {
+            get_member_channels(&pool, community, &reader)
+                .await
+                .expect("member channels")
+                .open_fingerprint
+        };
+
+        let empty = get_listed_open_channels(&pool, community)
+            .await
+            .expect("open channels");
+        assert!(empty.ids.is_empty());
+        assert_eq!(fingerprint().await, empty.fingerprint);
+
+        let a = open_channel("fp-a").await;
+        let b = open_channel("fp-b").await;
+        let open = get_listed_open_channels(&pool, community)
+            .await
+            .expect("open channels");
+        let mut both = vec![a, b];
+        both.sort();
+        assert_eq!(open.ids, both);
+        assert_eq!(open.fingerprint.len(), 32);
+        assert_eq!(fingerprint().await, open.fingerprint);
+
+        for (change, undo) in [
+            (
+                "UPDATE channels SET visibility = 'private' WHERE id = $1",
+                "UPDATE channels SET visibility = 'open' WHERE id = $1",
+            ),
+            (
+                "UPDATE channels SET unlisted = true WHERE id = $1",
+                "UPDATE channels SET unlisted = false WHERE id = $1",
+            ),
+            (
+                "UPDATE channels SET deleted_at = now() WHERE id = $1",
+                "UPDATE channels SET deleted_at = NULL WHERE id = $1",
+            ),
+            (
+                "UPDATE channels SET channel_type = 'system' WHERE id = $1",
+                "UPDATE channels SET channel_type = 'stream' WHERE id = $1",
+            ),
+        ] {
+            sqlx::query(change)
+                .bind(a)
+                .execute(&pool)
+                .await
+                .expect(change);
+            assert_ne!(fingerprint().await, open.fingerprint, "{change}");
+            sqlx::query(undo).bind(a).execute(&pool).await.expect(undo);
+            assert_eq!(fingerprint().await, open.fingerprint, "{undo}");
+        }
+
+        open_channel("fp-c").await;
+        assert_ne!(fingerprint().await, open.fingerprint, "a new open channel");
     }
 
     /// `get_members` must return the complete roster, not a truncated prefix.
