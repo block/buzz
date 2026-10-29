@@ -23,7 +23,14 @@ void main() {
       final list = tester.element(find.byType(AgentsSheet));
       if (!supportsRemoteAgents(h.community)) {
         expect(
-          tester.widget<IconButton>(find.byTooltip('Add agent')).onPressed,
+          tester
+              .widget<IconButton>(
+                find.byWidgetPredicate(
+                  (widget) =>
+                      widget is IconButton && widget.tooltip == 'Add agent',
+                ),
+              )
+              .onPressed,
           isNull,
         );
         expect(find.text('Sign in to create an agent'), findsNothing);
