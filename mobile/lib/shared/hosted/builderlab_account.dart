@@ -72,7 +72,7 @@ class BuilderlabAccountClient {
     '/v3/beekeeper/delete-agent',
     '/v3/beekeeper/attest-agent',
     '/v3/beekeeper/list-agents',
-    '/v3/beekeeper/add-buzz-subscription',
+    '/v3/beekeeper/get-model-catalog',
   };
 
   /// Sessions are scoped per origin so staging never reads production state.

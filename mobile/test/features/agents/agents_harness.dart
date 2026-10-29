@@ -22,6 +22,9 @@ import '../../helpers/remote_agents_fixture.dart';
 
 /// Fakes the relay boundary: owner-attested profiles for registry agents.
 class _Relay extends FakeRelay {
+  _Relay(this.harness);
+  final AgentsHarness harness;
+
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
@@ -29,16 +32,21 @@ class _Relay extends FakeRelay {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => filter.kinds.contains(30078)
-      ? events
-      : [
-          if (filter.authors?.contains(fakeAgent) ?? false)
-            signedAgentProfile(
-              fakeAgentKeys,
-              fakeOwner,
-              content: '{"name":"Scout"}',
-            ),
-        ];
+  }) async {
+    if (filter.kinds.contains(30078)) return events;
+    final agent = filter.authors?.contains(fakeAgent) ?? false;
+    if (agent && harness.relayDown) {
+      throw TimeoutException('relay unavailable');
+    }
+    return [
+      if (agent)
+        signedAgentProfile(
+          fakeAgentKeys,
+          fakeOwner,
+          content: '{"name":"Scout"}',
+        ),
+    ];
+  }
 }
 
 /// Holds creation open so a test can observe the in-flight state.
@@ -53,12 +61,20 @@ class GatedController extends RelayFakeController {
     Community community,
     String name, {
     String instructions = '',
+    String? modelId,
+    String? reasoningEffort,
   }) {
     submittedName = name;
     submittedInstructions = instructions;
     final gate = this.gate;
     if (gate == null) {
-      return super.create(community, name, instructions: instructions);
+      return super.create(
+        community,
+        name,
+        instructions: instructions,
+        modelId: modelId,
+        reasoningEffort: reasoningEffort,
+      );
     }
     return run(() async {
       await gate.future;
@@ -77,7 +93,10 @@ class AgentsHarness {
   final FakeRegistry registry;
   final GatedController controller;
   final Community community;
-  final relay = _Relay();
+  late final relay = _Relay(this);
+
+  /// Fails agent profile fetches until the relay recovers.
+  bool relayDown = false;
 
   static Future<AgentsHarness> create() async {
     FlutterSecureStorage.setMockInitialValues({});

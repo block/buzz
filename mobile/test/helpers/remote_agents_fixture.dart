@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/agents/remote_agents.dart';
@@ -40,6 +41,8 @@ class FakeRegistry extends BuilderlabAccountClient {
   @override
   ValueListenable<String?> get subjectChanges => _changes;
   bool failInstructions = false;
+  Completer<void>? catalogGate;
+  bool failListing = false;
   bool rejectRegistration = false;
   bool loseRegistration = false;
   bool refuseRegistration = false;
@@ -66,7 +69,24 @@ class FakeRegistry extends BuilderlabAccountClient {
     calls.add(path.split('/').last);
     bodies[path] = body;
     switch (path) {
+      case '/v3/beekeeper/get-model-catalog':
+        await catalogGate?.future;
+        return {
+          'models': [
+            {
+              'id': 'test-model',
+              'display_name': 'Test model',
+              'supported_reasoning_efforts': ['high', 'low'],
+            },
+            {
+              'id': 'other-model',
+              'display_name': 'Other model',
+              'supported_reasoning_efforts': ['max'],
+            },
+          ],
+        };
       case '/v3/beekeeper/list-agents':
+        if (failListing) throw StateError('Registry unavailable.');
         return {'status': 1, 'agents': listed};
       case '/v3/beekeeper/register-agent':
         if (refuseRegistration) throw AccountFailure.rejected;
@@ -87,8 +107,6 @@ class FakeRegistry extends BuilderlabAccountClient {
       case '/v3/beekeeper/update-agent':
         if (failInstructions) throw StateError('instructions unavailable');
         return {};
-      case '/v3/beekeeper/add-buzz-subscription':
-        return {'status': 1};
       case '/v3/beekeeper/delete-agent':
         expect(body, {'agent_id': 'remote-id'});
         return {'status': deleteStatus};

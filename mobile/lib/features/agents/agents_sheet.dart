@@ -20,6 +20,7 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/theme/buzz_icons.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
@@ -148,20 +149,31 @@ class AgentsSheet extends HookConsumerWidget {
     }, [flow.stage]);
     final community = ref.watch(activeCommunityProvider).asData?.value;
     final directory = ref.watch(agentDirectoryProvider);
+    // Builderlab sign-in gates only remote agents; community bots and other
+    // directory agents stay listed without it.
+    final remoteAgentsEnabled = ref.watch(remoteAgentsEnabledProvider);
+    final registeredKeys = {
+      for (final agent in controller.agents) agent['agent_pubkey'] as String,
+    };
+    // Key on the agents' identities, not the list instance: each refresh
+    // replaces the list, and refetching would blank the shown agents.
+    final registeredKey = (registeredKeys.toList()..sort()).join(',');
+    // Bumped by Retry and pull-to-refresh so a failed lookup runs again.
+    final attempt = useState(0);
     final registryFuture = useMemoized(() async {
       final fetch = ref.read(relaySessionProvider.notifier).fetchHistory;
-      return ownedCommunityAgents(
-        {
-          for (final agent in controller.agents)
-            agent['agent_pubkey'] as String,
-        },
-        controller.owner,
-        fetch,
-      );
-    }, [community?.relayUrl, controller.agents, controller.owner]);
+      return ownedCommunityAgents(registeredKeys, controller.owner, fetch);
+    }, [community?.relayUrl, registeredKey, controller.owner, attempt.value]);
     final registered = useFuture(registryFuture, preserveState: false);
+    // A refresh keeps showing the last owned agents for the same registry.
+    final scope = '${community?.relayUrl}|$registeredKey|${controller.owner}';
+    final lastOwned = useRef<(String, Set<String>)?>(null);
+    if (registered.data case final owned?) lastOwned.value = (scope, owned);
+    final owned =
+        registered.data ??
+        (lastOwned.value?.$1 == scope ? lastOwned.value?.$2 : null);
     final keys = {
-      ...?registered.data,
+      ...?owned,
       ...?ref.watch(communityBotProfilesProvider).asData?.value,
       for (final entry in directory.asData?.value ?? <AgentDirectoryEntry>[])
         entry.pubkey,
@@ -202,7 +214,8 @@ class AgentsSheet extends HookConsumerWidget {
       }
     }
 
-    final failed = directory.hasError || registered.hasError;
+    final failed =
+        controller.listingFailed || directory.hasError || registered.hasError;
     final loading =
         !creating.value &&
         (controller.busy ||
@@ -211,7 +224,9 @@ class AgentsSheet extends HookConsumerWidget {
 
     Future<void> refresh() async {
       await controller.run(controller.refresh);
-      if (context.mounted) ref.invalidate(agentDirectoryProvider);
+      if (!context.mounted) return;
+      attempt.value++;
+      ref.invalidate(agentDirectoryProvider);
     }
 
     final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
@@ -228,7 +243,7 @@ class AgentsSheet extends HookConsumerWidget {
           )
         : 0.0;
     final VoidCallback? addAgent =
-        !supportsRemoteAgents(community) || controller.busy || creating.value
+        !remoteAgentsEnabled || controller.busy || creating.value
         ? null
         : () async {
             creating.value = true;
@@ -261,9 +276,14 @@ class AgentsSheet extends HookConsumerWidget {
             Grid.sm,
           ),
           children: [
-            if (loading) const LinearProgressIndicator(),
-            if (supportsRemoteAgents(community) &&
-                controller.account.account == null)
+            // Refreshes stay silent once agents are listed; only an
+            // empty first load shows a spinner, where the empty state goes.
+            if (loading && keys.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(Grid.sm),
+                child: Center(child: BuzzLoadingIndicator(size: 22)),
+              ),
+            if (supportsRemoteAgents(community) && !remoteAgentsEnabled)
               ListTile(
                 title: const Text('Sign in to create an agent'),
                 trailing: TextButton(
@@ -273,11 +293,6 @@ class AgentsSheet extends HookConsumerWidget {
                   child: const Text('Sign in'),
                 ),
               ),
-            if (!controller.busy &&
-                controller.account.account != null &&
-                controller.status.isNotEmpty &&
-                !creating.value)
-              ListTile(subtitle: Text(controller.status)),
             if (failed)
               ListTile(
                 title: const Text('Could not load agents'),
