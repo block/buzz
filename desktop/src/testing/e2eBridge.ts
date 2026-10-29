@@ -557,6 +557,9 @@ type E2eConfig = {
     // snake_case wire shape the Rust backend returns so tests can drive the
     // LocalArchiveSettingsCard without a real SQLite database.
     agentMetricArchiveDefaultEnabled?: boolean;
+    // Response for `get_agent_usage_series` (camelCase `AgentUsageSeries`
+    // wire shape). Omit to get an empty, collection-enabled series.
+    agentUsageSeries?: unknown;
     saveSubscriptions?: Array<{
       scope_type: string;
       scope_value: string;
@@ -15317,6 +15320,24 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "agent_metric_archive_default_enabled":
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? true;
+      case "get_agent_usage_series":
+        return (
+          activeConfig?.mock?.agentUsageSeries ?? {
+            collectionEnabled: true,
+            buckets: [],
+            agents: [],
+            coverage: {
+              firstArchivedAt: null,
+              lastArchivedAt: null,
+              firstReportedAt: null,
+              lastReportedAt: null,
+              reportCount: 0,
+              invalidReportCount: 0,
+              hasUnknownUsage: false,
+            },
+            hasArchivedEvidence: null,
+          }
+        );
       case "set_prevent_sleep_active":
         return null;
       case "set_window_vibrancy":
