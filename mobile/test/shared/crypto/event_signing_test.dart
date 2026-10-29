@@ -107,25 +107,65 @@ void main() {
         content: 'other',
         secretKey: secretKey,
       ).sig;
-      final cases = <String, Map<String, dynamic>>{
-        'tampered content': map()..['content'] = 'hellO',
-        'wrong signature': map()..['sig'] = otherSig,
-        'other pubkey': map()..['pubkey'] = 'a' * 64,
-        'malformed sig': map()..['sig'] = 'zz' * 64,
-        'short sig': map()..['sig'] = event.sig.substring(2),
-        'zero timestamp': map()..['created_at'] = 0,
-      };
-      for (final MapEntry(key: reason, value: payload) in cases.entries) {
+      final otherPubkey = derivePublicKeyHex(_randomSecretKey(Random(4)));
+      final otherPubkeyId = nostr.Event.unsigned(
+        pubkey: otherPubkey,
+        kind: event.kind,
+        content: event.content,
+        createdAt: event.createdAt,
+        tags: event.tags,
+      ).id;
+      final cases =
+          <String, (Map<String, dynamic>, nostr.EventValidationReason)>{
+            'tampered content': (
+              map()..['content'] = 'hellO',
+              nostr.EventValidationReason.idMismatch,
+            ),
+            'wrong signature': (
+              map()..['sig'] = otherSig,
+              nostr.EventValidationReason.invalidSignature,
+            ),
+            'other pubkey': (
+              map()
+                ..['pubkey'] = otherPubkey
+                ..['id'] = otherPubkeyId,
+              nostr.EventValidationReason.invalidSignature,
+            ),
+            'malformed sig': (
+              map()..['sig'] = 'zz' * 64,
+              nostr.EventValidationReason.malformedSignature,
+            ),
+            'uppercase sig': (
+              map()..['sig'] = event.sig.toUpperCase(),
+              nostr.EventValidationReason.malformedSignature,
+            ),
+            'short sig': (
+              map()..['sig'] = event.sig.substring(2),
+              nostr.EventValidationReason.malformedSignature,
+            ),
+            'zero timestamp': (
+              map()..['created_at'] = 0,
+              nostr.EventValidationReason.invalidTimestamp,
+            ),
+          };
+      for (final MapEntry(key: name, value: (payload, reason))
+          in cases.entries) {
         final json = jsonEncode(payload);
         expect(
           () => nostr.Event.fromJson(json),
           throwsA(isA<nostr.NostrException>()),
-          reason: '$reason (pure Dart)',
+          reason: '$name (pure Dart)',
         );
         expect(
           () => verifiedNostrEventFromJson(json),
-          throwsA(isA<nostr.NostrException>()),
-          reason: reason,
+          throwsA(
+            isA<nostr.EventValidationException>().having(
+              (e) => e.reason,
+              'reason',
+              reason,
+            ),
+          ),
+          reason: name,
         );
       }
     });
