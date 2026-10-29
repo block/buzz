@@ -252,8 +252,9 @@ void main() {
               if (call.method == 'revokePushDelegation') {
                 calls++;
                 expect(call.arguments, grant.gatewayRevocationTarget);
-                if (fail && gatewayFails)
+                if (fail && gatewayFails) {
                   throw PlatformException(code: 'app_attest_unavailable');
+                }
               }
               return null;
             });
