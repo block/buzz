@@ -1,5 +1,5 @@
 -- This companion must be separately approved before core deployment and run
--- in that same controlled rollout, after schema migration 0068 and draining
+-- in that same controlled rollout, after schema migration 0075 and draining
 -- every old writer. Prevent invite mint/claim, ban lifts, and NEW timeouts/mutes
 -- throughout drain/repair. Without controls covering all writer paths, remove
 -- public traffic and stop all relay/admin/background/direct writers; run only
