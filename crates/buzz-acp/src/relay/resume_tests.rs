@@ -9,7 +9,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
 
-const SUB_FLOOR_OFFSET: u64 = RESUME_LIVE_SKEW_SECS - SINCE_SKEW_SECS;
+const SUB_FLOOR_OFFSET: u64 = RESUME_LIVE_SKEW_SECS;
+/// A `now` far enough past every `live_until` in a table that the silent-drop
+/// repair window never binds.
+const LONG_AFTER: u64 = u64::MAX;
 
 #[test]
 fn resume_since_table_over_input_combinations() {
@@ -87,7 +90,7 @@ fn resume_since_table_over_input_combinations() {
         (
             "eose, floor newer than last_seen",
             Some(1000),
-            Some(4000),
+            Some(3900),
             None,
             Some(5000),
             Some(5000 - SUB_FLOOR_OFFSET),
@@ -145,7 +148,7 @@ fn resume_since_table_over_input_combinations() {
     ];
     for (name, base, last_seen, dropped, live_until, expected) in cases {
         assert_eq!(
-            resume_since(*base, *last_seen, *dropped, *live_until),
+            resume_since(*base, *last_seen, *dropped, *live_until, LONG_AFTER),
             *expected,
             "{name}"
         );
@@ -153,25 +156,89 @@ fn resume_since_table_over_input_combinations() {
 }
 
 #[test]
-fn live_floor_is_the_relay_drift_bound_plus_margin_on_the_wire() {
-    // `send_subscribe` subtracts SINCE_SKEW_SECS, so the cursor handed to it
-    // must land exactly RESUME_LIVE_SKEW_SECS before live_until on the wire.
-    let cursor = resume_since(Some(1), None, None, Some(10_000)).unwrap();
-    assert_eq!(cursor - SINCE_SKEW_SECS, 10_000 - RESUME_LIVE_SKEW_SECS);
-    assert_eq!(RESUME_LIVE_SKEW_SECS, 960);
+fn live_floor_budgets_commit_delay_and_clock_skew_separately() {
+    // The commit-time floor (960s, which already includes 60s of commit delay
+    // on top of the 900s ingest drift) and the client clock skew (60s) are
+    // separate budgets; `send_subscribe` subtracts SINCE_SKEW_SECS on top.
+    assert_eq!(RESUME_LIVE_SKEW_SECS, 960 + 60);
+    let cursor = resume_since(Some(1), None, None, Some(10_000), LONG_AFTER).unwrap();
+    assert_eq!(cursor, 10_000 - RESUME_LIVE_SKEW_SECS);
 }
 
 #[test]
-fn backdated_event_stored_after_close_is_inside_the_replay_window() {
-    // The relay accepts created_at up to 900s from server time, so an event
-    // stored right after the disconnect can be dated up to 900s before it.
-    let close = 10_000_000;
-    let wire_since = resume_since(Some(1_000), None, None, Some(close)).unwrap() - SINCE_SKEW_SECS;
-    assert!(close - RELAY_CREATED_AT_DRIFT_SECS >= wire_since);
-    // A 60s window would have started after it.
-    assert!(close - RELAY_CREATED_AT_DRIFT_SECS < close - 60);
-    // And the window is still bounded: a month-old event is not replayed.
-    assert!(close - 30 * 86_400 < wire_since);
+fn resumed_replay_always_covers_the_silent_drop_repair_window() {
+    const NOW: u64 = 10_000_000;
+    let since = |base, last_seen, floor, live_until| {
+        resume_since(base, last_seen, floor, Some(live_until), NOW).unwrap()
+    };
+    // A short outage: live_until alone would replay ~17 minutes, but the last
+    // hour is re-read so an unsignaled live drop within it is repaired.
+    assert_eq!(
+        since(Some(1_000), None, None, NOW - 30),
+        NOW - SILENT_DROP_REPAIR_WINDOW_SECS
+    );
+    // A long outage: the live-derived floor is already older than an hour.
+    assert_eq!(
+        since(Some(1_000), None, None, NOW - 7_200),
+        NOW - 7_200 - RESUME_LIVE_SKEW_SECS
+    );
+    // Never before the original floor, which may be inside the window.
+    assert_eq!(since(Some(NOW - 600), None, None, NOW - 30), NOW - 600);
+    // Delivered progress still advances the cursor as it always did.
+    assert_eq!(since(Some(1_000), Some(NOW - 60), None, NOW - 30), NOW - 60);
+    // A recorded gap older than the window still wins.
+    assert_eq!(since(Some(1_000), None, Some(5_000), NOW - 30), 5_000);
+    // Without live_until the window plays no part: today's behavior.
+    assert_eq!(
+        resume_since(Some(1_000), None, None, None, NOW),
+        Some(1_000)
+    );
+}
+
+#[tokio::test]
+async fn quiet_subscription_resumed_now_replays_the_last_hour() {
+    let (mut client, _server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel); // base 1_000
+    deliver_eose(&mut client, &mut state, &channel_sub_id(channel)).await;
+    let before = unix_now_secs();
+    lose_connection(&mut state).await;
+    let since = first_replay_req(&mut state, &channel_sub_id(channel)).await;
+    let after = unix_now_secs();
+    let window = SILENT_DROP_REPAIR_WINDOW_SECS + SINCE_SKEW_SECS;
+    assert!(
+        (before - window..=after - window).contains(&since),
+        "since={since} must be one repair window before the REQ ({before}..={after})"
+    );
+}
+
+/// Wire `since` of the replay for a quiet subscription whose connection was
+/// last live at `live_until` on the agent's clock.
+fn wire_since_after(live_until: u64) -> u64 {
+    resume_since(Some(1_000), None, None, Some(live_until), LONG_AFTER).unwrap() - SINCE_SKEW_SECS
+}
+
+#[test]
+fn backdated_event_committed_after_close_under_clock_skew_is_replayed() {
+    // Server time T is when the relay sent its last frame.
+    const T: u64 = 10_000_000;
+    // The review's schedule: the agent clock runs +50s (inside NIP-42's ±60s),
+    // an event passes ingest at T-30 dated T-930 (inside ±900s), and commits
+    // at T+1 (inside the 960s commit floor), after the socket died.
+    let (created_at, committed_at) = (T - 930, T + 1);
+    assert!(committed_at - created_at <= RELAY_COMMIT_CREATED_AT_FLOOR_SECS);
+    assert!(wire_since_after(T + 50) <= created_at);
+
+    // The extreme of every budget at once: +60s skew, and an event dated the
+    // full commit floor before a commit at T.
+    let oldest = T - RELAY_COMMIT_CREATED_AT_FLOOR_SECS;
+    assert!(wire_since_after(T + CLIENT_CLOCK_SKEW_SECS) <= oldest);
+    // A clock running slow only widens the window.
+    assert!(wire_since_after(T - CLIENT_CLOCK_SKEW_SECS) <= oldest);
+
+    // The window is still bounded: a month-old event is not replayed.
+    assert!(T - 30 * 86_400 < wire_since_after(T));
 }
 
 #[test]
@@ -496,16 +563,6 @@ async fn counting_relay() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
     (url, accepted, task)
 }
 
-async fn resubscribe_since(state: &mut BgState, channel: Uuid) -> u64 {
-    let (mut client, mut server) = test_ws_pair().await;
-    let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
-    let result = resubscribe_after_reconnect(&mut client, &mut cmd_rx, state, "agent", true).await;
-    assert!(matches!(result, ResubscribeResult::Ok));
-    let req = next_test_frame(&mut server).await;
-    assert_eq!(req[1], channel_sub_id(channel));
-    req[2]["since"].as_u64().unwrap()
-}
-
 #[tokio::test]
 async fn autonomous_reconnect_stamps_live_until_and_replay_req_resumes_from_it() {
     let (mut live, _live_server) = test_ws_pair().await;
@@ -525,12 +582,19 @@ async fn autonomous_reconnect_stamps_live_until_and_replay_req_resumes_from_it()
 
     let live_until = state.live_until[&channel_sub_id(channel)];
     assert!((before..=after).contains(&live_until));
-    let since = resubscribe_since(&mut state, channel).await;
-    assert_eq!(since, live_until - RESUME_LIVE_SKEW_SECS);
+    let since = first_replay_req(&mut state, &channel_sub_id(channel)).await;
+    // Just reconnected, so the silent-drop repair window is the binding floor.
+    let expected = (live_until - RESUME_LIVE_SKEW_SECS)
+        .min(unix_now_secs() - SILENT_DROP_REPAIR_WINDOW_SECS)
+        - SINCE_SKEW_SECS;
+    assert!(
+        since.abs_diff(expected) <= 2,
+        "since={since} expected~{expected}"
+    );
     assert!(since > 1_000, "must not replay from the original floor");
     assert!(
-        since <= live_until - RELAY_CREATED_AT_DRIFT_SECS,
-        "a backdated event stored just after the close must be replayed"
+        since <= live_until - RELAY_COMMIT_CREATED_AT_FLOOR_SECS - CLIENT_CLOCK_SKEW_SECS,
+        "a backdated event committed just after the close must be replayed"
     );
 }
 
@@ -790,6 +854,117 @@ async fn delayed_eose_of_a_superseded_req_keeps_the_membership_overflow_floor() 
     );
 }
 
+// -- A gap replay that never reached EOSE keeps its floor -------------------
+
+/// Reconnect, write the replay REQs, and drop that socket before any EOSE.
+async fn replay_then_lose_before_eose(state: &mut BgState, sub: &str) -> u64 {
+    let since = first_replay_req(state, sub).await;
+    lose_connection(state).await;
+    since
+}
+
+/// The review's schedule: a subscription with a retained `live_until` loses an
+/// event to backpressure, the reconnect replay REQ correctly goes out below it
+/// (retiring the loss record), and that socket drops before the replay's EOSE.
+/// The next replay must still cover the lost event. Once a replay does reach
+/// EOSE, the cursor moves past the gap again.
+async fn unfinished_gap_replay_keeps_its_floor(
+    state: &mut BgState,
+    sub: &str,
+    record_loss: impl FnOnce(&mut BgState),
+    loss_recorded: impl Fn(&BgState) -> bool,
+) {
+    const LOST: u64 = 3_000;
+    let (mut live, _live_server) = test_ws_pair().await;
+    deliver_eose(&mut live, state, sub).await;
+    record_loss(state);
+    lose_connection(state).await;
+    assert!(state.live_until[sub] > LOST + RESUME_LIVE_SKEW_SECS);
+
+    let first = replay_then_lose_before_eose(state, sub).await;
+    assert!(first <= LOST, "first replay since={first}");
+    assert!(
+        !loss_recorded(state),
+        "writing the replay retires the loss record"
+    );
+
+    for attempt in 0..2 {
+        let since = replay_then_lose_before_eose(state, sub).await;
+        assert!(
+            since <= LOST,
+            "replay {attempt} after an unfinished gap replay must still cover {LOST}, got since={since}"
+        );
+    }
+
+    // This time the replay reaches EOSE before the socket drops.
+    let (mut client, mut server) = test_ws_pair().await;
+    let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
+    let result = resubscribe_after_reconnect(&mut client, &mut cmd_rx, state, "agent", true).await;
+    assert!(matches!(result, ResubscribeResult::Ok));
+    assert_eq!(next_test_frame(&mut server).await[1], sub);
+    deliver_eose(&mut client, state, sub).await;
+    lose_connection(state).await;
+    let since = first_replay_req(state, sub).await;
+    assert!(
+        since > LOST + RESUME_LIVE_SKEW_SECS,
+        "a completed replay must not keep the old floor, got since={since}"
+    );
+}
+
+#[tokio::test]
+async fn unfinished_channel_gap_replay_keeps_its_floor() {
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel); // base 1_000
+    unfinished_gap_replay_keeps_its_floor(
+        &mut state,
+        &channel_sub_id(channel),
+        |state| {
+            state.channel_dropped_since.insert(channel, 3_000);
+        },
+        |state| state.channel_dropped_since.contains_key(&channel),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn unfinished_membership_gap_replay_keeps_its_floor() {
+    let mut state = BgState::new();
+    state.membership_sub_active = true;
+    state.startup_watermark = Some(1_000);
+    state.membership_last_seen = Some(1_000);
+    unfinished_gap_replay_keeps_its_floor(
+        &mut state,
+        MEMBERSHIP_NOTIF_SUB_ID,
+        |state| state.membership_dropped_since = Some(3_000),
+        |state| state.membership_dropped_since.is_some(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn removing_a_channel_clears_its_unconfirmed_replay_floor() {
+    let (mut client, _server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel);
+    let since = state.channel_since(&channel);
+    assert!(
+        send_subscribe(
+            &mut client,
+            &mut state,
+            channel,
+            "agent",
+            since,
+            &test_channel_filter()
+        )
+        .await
+    );
+    assert_eq!(state.unconfirmed_req_since[&channel_sub_id(channel)], 1_000);
+    state.clear_channel_state(&channel);
+    assert!(state.unconfirmed_req_since.is_empty());
+}
+
 // -- Silent socket death, through the real socket-owner loop ----------------
 
 enum MockFrame {
@@ -934,12 +1109,23 @@ async fn next_reqs_and_keepalive(conn: &mut MockConn, reqs: usize) {
     }
 }
 
-/// An agent reaches EOSE, the machine sleeps for an hour while the socket
+/// An agent reaches EOSE, the machine sleeps for two hours while the socket
 /// dies, and the loss is only noticed on wake. Replay must resume from the
 /// last frame the relay actually sent, not from the wake time.
 #[tokio::test]
 async fn silent_socket_death_resumes_from_last_inbound_frame_not_detection_time() {
-    resume_after_an_hour_of_silence(MockCtl::Drop).await;
+    resume_after_a_two_hour_sleep(None, MockCtl::Drop).await;
+}
+
+/// Same outage, but a frame the relay sent just before the sleep sat in the
+/// socket buffer and is read on wake, before the loss is noticed. It proves
+/// nothing about the two hours the machine was asleep, so it must not stamp the
+/// wake time. The fake wall clock jumps two hours; the monotonic clock, like a
+/// suspended machine's, barely moves.
+#[tokio::test]
+async fn frame_buffered_across_a_sleep_does_not_stamp_wake_time() {
+    let buffered = MockCtl::Send(json!(["NOTICE", "queued before the sleep"]));
+    resume_after_a_two_hour_sleep(Some(buffered), MockCtl::Drop).await;
 }
 
 /// Same outage, but the relay's Close frame (rolling restart) sat in the
@@ -947,10 +1133,10 @@ async fn silent_socket_death_resumes_from_last_inbound_frame_not_detection_time(
 /// frame is not proof of liveness, so it must not move the stamp to wake time.
 #[tokio::test]
 async fn close_frame_read_after_a_sleep_does_not_stamp_wake_time() {
-    resume_after_an_hour_of_silence(MockCtl::Close(1012)).await;
+    resume_after_a_two_hour_sleep(None, MockCtl::Close(1012)).await;
 }
 
-async fn resume_after_an_hour_of_silence(loss: MockCtl) {
+async fn resume_after_a_two_hour_sleep(buffered: Option<MockCtl>, loss: MockCtl) {
     let _clock = FAKE_CLOCK_LOCK.lock().await;
     const T0: u64 = 1_700_000_000;
     FAKE_NOW.store(T0, Ordering::SeqCst);
@@ -1028,8 +1214,13 @@ async fn resume_after_an_hour_of_silence(loss: MockCtl) {
     let barrier_req = next_req(&mut conn0).await;
     assert_eq!(barrier_req[1], channel_sub_id(throwaway));
 
-    // One hour passes with nothing from the relay; then the loss is noticed.
-    FAKE_NOW.store(T0 + 3_600, Ordering::SeqCst);
+    // Two hours pass with nothing from the relay; then the loss is noticed.
+    // Longer than the silent-drop repair window, so the window alone cannot
+    // cover a mention stored early in the sleep.
+    FAKE_NOW.store(T0 + 7_200, Ordering::SeqCst);
+    if let Some(frame) = buffered {
+        conn0.ctl.send(frame).unwrap();
+    }
     conn0.ctl.send(loss).unwrap();
     // A 1012 close waits a random [0, 10s] before the first reconnect attempt.
     let mut conn1 = timeout(Duration::from_secs(20), conns.recv())
@@ -1050,10 +1241,12 @@ async fn resume_after_an_hour_of_silence(loss: MockCtl) {
             continue;
         }
         let since = req[2]["since"].as_u64().unwrap();
-        assert_eq!(
-            since,
-            T0 - RESUME_LIVE_SKEW_SECS,
-            "{} must resume from the last inbound frame",
+        // Inbound frames are stamped from the monotonic clock, which keeps
+        // running in real time here; allow a few seconds of test runtime.
+        let expected = T0 - RESUME_LIVE_SKEW_SECS - SINCE_SKEW_SECS;
+        assert!(
+            (expected..=expected + 5).contains(&since),
+            "{} must resume from the last inbound frame before the sleep: since={since}, expected~{expected}",
             req[1]
         );
         assert!(since <= mention_in_gap, "{} would skip the mention", req[1]);

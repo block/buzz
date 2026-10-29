@@ -57,17 +57,37 @@ const WS_SEND_TIMEOUT_SECS: u64 = 10;
 const STABLE_CONNECTION_SECS: u64 = 60;
 /// Seconds subtracted from `since` on resubscribe to tolerate clock skew.
 const SINCE_SKEW_SECS: u64 = 5;
-/// Relay bound on how far an accepted event's `created_at` may differ from
-/// server time (`MAX_TIMESTAMP_DRIFT_SECS` in `buzz-relay`'s `handlers/ingest.rs`).
-/// An event stored just after a disconnect can therefore carry a `created_at`
-/// up to this many seconds earlier than the disconnect.
-const RELAY_CREATED_AT_DRIFT_SECS: u64 = 900;
+/// How far before the relay's clock at commit a stored channel event's
+/// `created_at` may be (`CREATED_AT_FLOOR_SECS` in `buzz-db`'s
+/// `runtime/replica_fence.rs`). That floor is the ±900s ingest drift bound plus
+/// 60s for validation and persistence between ingest and commit, so it already
+/// spends its own slack: an event committed after a disconnect is dated at most
+/// this long before the disconnect, in relay time.
+const RELAY_COMMIT_CREATED_AT_FLOOR_SECS: u64 = 960;
+/// Bound on the agent clock's offset from the relay's. The relay rejects a
+/// NIP-42 AUTH event more than ±60s from its own time (`buzz-auth`'s
+/// `nip42.rs`), so an authenticated agent's clock is within this of the
+/// relay's. `live_until` is read from the agent's clock while the commit floor
+/// is in relay time, so the skew needs its own budget.
+const CLIENT_CLOCK_SKEW_SECS: u64 = 60;
 /// Margin subtracted from a connection's `live_until` when resuming a
-/// subscription that reached EOSE on it: the relay's `created_at` drift bound
-/// (900s) plus 60s of client/relay clock-skew margin. A narrower window would
-/// miss a backdated event stored just after the disconnect, which a quiet
+/// subscription that reached EOSE on it: the commit-time floor plus the client
+/// clock skew. `send_subscribe` subtracts `SINCE_SKEW_SECS` on top, which covers
+/// fan-out latency and whole-second truncation. A narrower window would miss a
+/// backdated event committed just after the disconnect, which a quiet
 /// subscription's full replay used to catch.
-const RESUME_LIVE_SKEW_SECS: u64 = RELAY_CREATED_AT_DRIFT_SECS + 60;
+const RESUME_LIVE_SKEW_SECS: u64 = RELAY_COMMIT_CREATED_AT_FLOOR_SECS + CLIENT_CLOCK_SKEW_SECS;
+/// Minimum history a resumed subscription replays, counted back from the time
+/// of the REQ, even when `live_until` would allow less. The relay's live
+/// delivery is at-most-once: it can drop an event without telling the client
+/// (full send buffer within its grace limit, cross-node fan-out lag, a Redis
+/// subscriber reconnect). A subscription that reached EOSE and stayed
+/// connected has therefore not proved it saw everything, so a reconnect still
+/// re-reads the last hour and repairs such a drop if it happened within that
+/// hour. Older silent drops are not repaired; before `live_until`, a quiet
+/// subscription repaired them by replaying from its original floor on every
+/// reconnect, at a cost that grew with process age.
+const SILENT_DROP_REPAIR_WINDOW_SECS: u64 = 3_600;
 /// WebSocket close code 1001 (Going Away): the peer is shutting down.
 const CLOSE_CODE_GOING_AWAY: u16 = 1001;
 /// WebSocket close code 1012 (Service Restart): the relay pod is rolling.
@@ -1257,23 +1277,35 @@ struct BgState {
     /// connection closes; cleared when a REQ is re-sent for the subscription
     /// because the new REQ has not reached EOSE yet.
     eose_this_conn: HashSet<String>,
-    /// Wall-clock unix seconds at which a subscription that had reached EOSE
-    /// was last known to be live (the close time of its connection). Everything
-    /// stored before EOSE was replayed and everything after was delivered live,
-    /// so a reconnect only needs to replay from here minus `RESUME_LIVE_SKEW_SECS`.
+    /// Unix seconds up to which a subscription that reached EOSE was last known
+    /// to be live: the newest non-Close frame read on that connection (see
+    /// `last_inbound_secs`), capped at the time the close was detected. A
+    /// reconnect replays from here minus `RESUME_LIVE_SKEW_SECS`.
     live_until: HashMap<String, u64>,
+    /// `since` of the newest REQ written for a subscription that has not yet
+    /// reached EOSE. Until it does, that REQ's replay may be incomplete, so the
+    /// next replay never starts after it. This keeps an overflow-recovery or
+    /// reconnect replay's floor when the socket drops before its EOSE, even
+    /// though `channel_dropped_since` / `membership_dropped_since` were
+    /// retired when the REQ was written.
+    unconfirmed_req_since: HashMap<String, u64>,
     /// Close code of the last WebSocket Close frame received, consumed by the
     /// next reconnect to choose the first-attempt delay.
     last_close_code: Option<u16>,
-    /// Wall-clock unix seconds of the newest frame (including Pong) received
-    /// from the relay on the current or most recent connection. Caps the
-    /// `live_until` stamp: when a socket dies silently (laptop sleep, dead
-    /// link) the loss is only detected later, but the subscription was only
-    /// known to be live until its last inbound frame.
+    /// Unix seconds of the newest frame (including Pong) read from the relay
+    /// on the current or most recent connection, from [`BgState::inbound_now_secs`].
+    /// Caps the `live_until` stamp: when a socket dies silently (laptop sleep,
+    /// dead link) the loss is only detected later, but the subscription was
+    /// only known to be live until its last inbound frame.
     last_inbound_secs: Option<u64>,
     /// Wall clock for inbound-frame and connection-close timestamps. Always
     /// [`unix_now_secs`] in production; replaceable so tests can move time.
     now_secs: fn() -> u64,
+    /// Wall-clock seconds and monotonic instant read together when the current
+    /// connection's bookkeeping started. Inbound frames are stamped as this
+    /// wall time plus monotonic time elapsed since, see
+    /// [`BgState::inbound_now_secs`].
+    inbound_clock_anchor: (u64, Instant),
     /// Subscription IDs a REQ was written for on the CURRENT connection.
     /// Deliberately kept across unsubscribe: the wire ID is derived from the
     /// channel, so a re-subscribe on the same socket reuses it and must count as
@@ -1317,9 +1349,11 @@ impl BgState {
             backoff_step: 0,
             eose_this_conn: HashSet::new(),
             live_until: HashMap::new(),
+            unconfirmed_req_since: HashMap::new(),
             last_close_code: None,
             last_inbound_secs: None,
             now_secs: unix_now_secs,
+            inbound_clock_anchor: (unix_now_secs(), Instant::now()),
             req_sent_this_conn: HashSet::new(),
             superseded_this_conn: HashSet::new(),
         }
@@ -1351,14 +1385,16 @@ impl BgState {
     /// per-channel `subscribe_since` / `startup_watermark` baseline, and the
     /// EOSE-derived `live_until` combine.
     fn channel_since(&self, channel_id: &Uuid) -> Option<u64> {
+        let sub_id = channel_sub_id(*channel_id);
         resume_since(
             self.subscribe_since
                 .get(channel_id)
                 .copied()
                 .or(self.startup_watermark),
             self.last_seen.get(channel_id).copied(),
-            self.channel_dropped_since.get(channel_id).copied(),
-            self.live_until.get(&channel_sub_id(*channel_id)).copied(),
+            self.replay_floor(&sub_id, self.channel_dropped_since.get(channel_id).copied()),
+            self.live_until.get(&sub_id).copied(),
+            (self.now_secs)(),
         )
     }
 
@@ -1367,9 +1403,35 @@ impl BgState {
         resume_since(
             self.startup_watermark,
             self.membership_last_seen,
-            self.membership_dropped_since,
+            self.replay_floor(MEMBERSHIP_NOTIF_SUB_ID, self.membership_dropped_since),
             self.live_until.get(MEMBERSHIP_NOTIF_SUB_ID).copied(),
+            (self.now_secs)(),
         )
+    }
+
+    /// The point a subscription's next replay must not start after: the older
+    /// of its recorded backpressure loss and the `since` of a REQ that has not
+    /// reached EOSE.
+    fn replay_floor(&self, sub_id: &str, dropped: Option<u64>) -> Option<u64> {
+        let unconfirmed = self.unconfirmed_req_since.get(sub_id).copied();
+        dropped.into_iter().chain(unconfirmed).min()
+    }
+
+    /// Unix seconds to stamp an inbound frame with: the connection's anchor
+    /// wall time plus monotonic time elapsed since. The monotonic clock does
+    /// not advance while the machine is suspended (macOS, Linux), so a frame
+    /// that sat in the socket buffer across a sleep and is read on wake is
+    /// stamped close to the time the sleep began, not the wake time. Never
+    /// later than the wall clock.
+    fn inbound_now_secs(&self) -> u64 {
+        let (wall, mono) = self.inbound_clock_anchor;
+        wall.saturating_add(mono.elapsed().as_secs())
+            .min((self.now_secs)())
+    }
+
+    /// Re-read the inbound-frame clock anchor, e.g. for a new connection.
+    fn reset_inbound_clock(&mut self) {
+        self.inbound_clock_anchor = ((self.now_secs)(), Instant::now());
     }
 
     /// Record that `sub_id` reached EOSE on the current connection. Only
@@ -1387,14 +1449,22 @@ impl BgState {
                 .is_some_and(|channel_id| self.active_subscriptions.contains_key(&channel_id));
         if known {
             self.eose_this_conn.insert(sub_id.to_owned());
+            self.unconfirmed_req_since.remove(sub_id);
         }
     }
 
-    /// A REQ was written for `sub_id`: it has not reached EOSE yet, and a
-    /// second REQ on the same connection supersedes the first for the rest of
-    /// that connection (see `superseded_this_conn`).
-    fn note_req_sent(&mut self, sub_id: &str) {
+    /// A REQ with `since` was written for `sub_id`: it has not reached EOSE
+    /// yet, so its `since` floors the next replay (see `unconfirmed_req_since`),
+    /// and a second REQ on the same connection supersedes the first for the
+    /// rest of that connection (see `superseded_this_conn`).
+    fn note_req_sent(&mut self, sub_id: &str, since: Option<u64>) {
         self.eose_this_conn.remove(sub_id);
+        if let Some(since) = since {
+            self.unconfirmed_req_since
+                .entry(sub_id.to_owned())
+                .and_modify(|floor| *floor = (*floor).min(since))
+                .or_insert(since);
+        }
         if !self.req_sent_this_conn.insert(sub_id.to_owned()) {
             self.superseded_this_conn.insert(sub_id.to_owned());
         }
@@ -1417,6 +1487,7 @@ impl BgState {
         }
         self.req_sent_this_conn.clear();
         self.superseded_this_conn.clear();
+        self.reset_inbound_clock();
     }
 
     /// Clear all per-channel state for a channel that is being unsubscribed.
@@ -1435,6 +1506,7 @@ impl BgState {
         // cleared: a re-subscribe on this socket reuses the wire ID, and an EOSE
         // for the old REQ must not count for the new one.
         self.live_until.remove(&sub_id);
+        self.unconfirmed_req_since.remove(&sub_id);
         self.active_filters.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);
         self.resubscribe_retry.remove(channel_id);
@@ -1907,6 +1979,7 @@ async fn run_background_task_with_state(
     agent_pubkey_hex: String,
     auth_tag: Option<nostr::Tag>,
 ) {
+    state.reset_inbound_clock();
     let handshake_ok = process_handshake_buffer(
         &mut ws,
         initial_handshake_buffer,
@@ -2084,7 +2157,7 @@ async fn run_background_task_with_state(
                                // teardown: it may have sat in the kernel buffer
                                // across a sleep and says nothing about liveness.
                                if !matches!(msg, Message::Close(_)) {
-                                   state.last_inbound_secs = Some((state.now_secs)());
+                                   state.last_inbound_secs = Some(state.inbound_now_secs());
                                }
                                if matches!(msg, Message::Pong(_)) {
                                    last_pong = Instant::now();
@@ -3549,7 +3622,7 @@ async fn send_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
-                    state.note_req_sent(&sub_id);
+                    state.note_req_sent(&sub_id, since);
                     debug!(
                         "subscribed to channel {channel_id}{}",
                         if since.is_some() {
@@ -3605,7 +3678,7 @@ async fn send_membership_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
-                    state.note_req_sent(MEMBERSHIP_NOTIF_SUB_ID);
+                    state.note_req_sent(MEMBERSHIP_NOTIF_SUB_ID, since);
                     debug!("subscribed to membership notifications (since={since_ts})");
                     true
                 }
@@ -3736,29 +3809,38 @@ fn first_reconnect_delay(close_code: Option<u16>, sample: f64) -> Duration {
 ///
 /// - `base`: original replay floor (`subscribe_since` / startup watermark).
 /// - `last_seen`: newest delivered event `created_at`.
-/// - `dropped`: oldest event lost to backpressure; a recorded gap, so the
+/// - `floor`: [`BgState::replay_floor`], the older of the oldest event lost to
+///   backpressure and the `since` of a REQ that has not reached EOSE; the
 ///   result never advances past it.
-/// - `live_until`: client wall clock when a connection on which the
-///   subscription had reached EOSE closed.
+/// - `live_until`: see [`BgState::live_until`].
+/// - `now`: wall-clock unix seconds, for [`SILENT_DROP_REPAIR_WINDOW_SECS`].
 ///
-/// Without `live_until` this is the pre-existing `min(last_seen, dropped)`
+/// Without `live_until` this is the pre-existing `min(last_seen, floor)`
 /// else `base`. With `live_until`, the delivered-progress cursor becomes
-/// `max(base, last_seen, live_until - RESUME_LIVE_SKEW_SECS)` (expressed here
-/// before the wire skew), then the dropped floor is applied on top.
+/// `max(base, last_seen, min(live_until - RESUME_LIVE_SKEW_SECS,
+/// now - SILENT_DROP_REPAIR_WINDOW_SECS))`, then the floor is applied on top.
 fn resume_since(
     base: Option<u64>,
     last_seen: Option<u64>,
-    dropped: Option<u64>,
+    floor: Option<u64>,
     live_until: Option<u64>,
+    now: u64,
 ) -> Option<u64> {
     let cursor = match live_until {
         Some(live_until) => {
-            let floor = live_until.saturating_sub(RESUME_LIVE_SKEW_SECS - SINCE_SKEW_SECS);
-            Some([base, last_seen, Some(floor)].into_iter().flatten().max()?)
+            let live_floor = live_until
+                .saturating_sub(RESUME_LIVE_SKEW_SECS)
+                .min(now.saturating_sub(SILENT_DROP_REPAIR_WINDOW_SECS));
+            Some(
+                [base, last_seen, Some(live_floor)]
+                    .into_iter()
+                    .flatten()
+                    .max()?,
+            )
         }
         None => last_seen,
     };
-    match (cursor, dropped) {
+    match (cursor, floor) {
         (Some(c), Some(d)) => Some(c.min(d)),
         (Some(c), None) => Some(c),
         (None, Some(d)) => Some(d),
