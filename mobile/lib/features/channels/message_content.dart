@@ -37,6 +37,7 @@ import 'message_content/link_normalizer.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
+import 'message_content/buzz_link_label.dart';
 import 'message_mention_pill.dart';
 import 'message_gallery.dart';
 import 'message_gallery_frame.dart';
@@ -612,22 +613,21 @@ class MessageContent extends HookConsumerWidget {
         buzzLink is MessageDeepLink ||
         buzzLink is EntityDeepLink;
     final isCanonicalBuzzLabel = isBuzzLink && text == url;
+    String? channelName(String id) =>
+        _channelNameForId(resolvedChannelNames, id);
+    final buzzLabel = buzzLinkLabel(buzzLink, channelName);
     final buzzPresentation = switch (buzzLink) {
-      ChannelDeepLink(:final channelId) => (
+      ChannelDeepLink() => (
         icon: BuzzIcons.hash,
-        label:
-            _channelNameForId(resolvedChannelNames, channelId) ??
-            channelId.substring(0, math.min(8, channelId.length)),
-        semanticLabel:
-            'Open channel ${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))}',
+        label: buzzLabel!,
+        semanticLabel: 'Open channel $buzzLabel',
         interactive: true,
       ),
       MessageDeepLink(:final channelId, :final messageId) => (
         icon: BuzzIcons.messageSquare,
-        label:
-            '${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))} · ${messageId.substring(0, math.min(8, messageId.length))}',
+        label: buzzLabel!,
         semanticLabel:
-            'Open message ${messageId.substring(0, math.min(8, messageId.length))} in channel ${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))}',
+            'Open message ${shortBuzzId(messageId)} in channel ${buzzChannelLabel(channelId, channelName)}',
         interactive: true,
       ),
       EntityDeepLink(:final type, :final repository, :final eventId) => (
@@ -636,14 +636,12 @@ class MessageContent extends HookConsumerWidget {
           'pr' => BuzzIcons.gitPullRequest,
           _ => BuzzIcons.circleDot,
         },
-        label: type == 'repo'
-            ? repository
-            : '$repository · ${eventId!.substring(0, 8)}',
+        label: buzzLabel!,
         semanticLabel: switch (type) {
           'repo' => 'Repository $repository',
           'pr' =>
-            'Pull request ${eventId!.substring(0, 8)} in repository $repository',
-          _ => 'Issue ${eventId!.substring(0, 8)} in repository $repository',
+            'Pull request ${shortBuzzId(eventId ?? '')} in repository $repository',
+          _ => 'Issue ${shortBuzzId(eventId ?? '')} in repository $repository',
         },
         interactive: false,
       ),

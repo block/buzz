@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../../../shared/deeplink/deep_link.dart';
 import '../../../shared/mentions/mention_bindings.dart';
 import '../message_media.dart';
+import 'buzz_link_label.dart';
 import 'link_normalizer.dart';
 
 /// One piece of a message preview: plain text or an inline token that renders
@@ -159,13 +160,19 @@ Iterable<({String text, bool code, int end})> _keptLines(
   while (start <= content.length &&
       start <= _maxScanLength &&
       kept <= maxLines) {
-    var end = content.indexOf('\n', start);
-    if (end < 0) end = content.length;
-    // A long line wraps past the visible lines well before this length.
-    var line = content
-        .substring(start, math.min(end, start + 2 * _maxLineLength))
-        .trim();
-    start = end + 1;
+    // A long line wraps past the visible lines well before this length, so
+    // reading stops there rather than at the line's real end.
+    var cap = math.min(content.length, start + 2 * _maxLineLength);
+    if (cap < content.length && _isHighSurrogate(content.codeUnitAt(cap - 1))) {
+      cap--;
+    }
+    var end = start;
+    while (end < cap && content.codeUnitAt(end) != _newline) {
+      end++;
+    }
+    final cut = end == cap && cap < content.length;
+    var line = content.substring(start, end).trim();
+    start = cut ? content.length + 1 : end + 1;
     // A fence opens at any line starting with backticks and closes only at a
     // line holding nothing else, as in gpt_markdown.
     if (!fenceOpen && line.startsWith('```') || fenceOpen && line == '```') {
@@ -189,7 +196,10 @@ Iterable<({String text, bool code, int end})> _keptLines(
 const _maxLineLength = 2000;
 const _maxScanLength = 8 * _maxLineLength;
 const _backslash = 0x5C;
+const _newline = 0x0A;
 const _backtick = 0x60;
+
+bool _isHighSurrogate(int unit) => unit >= 0xD800 && unit <= 0xDBFF;
 
 final _rule = RegExp(r'^([-*_])(?:\s*\1){2,}$');
 final _tableDivider = RegExp(r'^\|?(?:\s*:?-+:?\s*\|)+\s*:?-*:?\s*\|?$');
@@ -383,25 +393,30 @@ class _PreviewBuilder {
         continue;
       }
       final uri = Uri.tryParse(url);
-      final deepLink = uri?.scheme == 'buzz' ? parseBuzzDeepLink(uri!) : null;
+      final deepLink = uri?.scheme == 'buzz'
+          ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)
+          : null;
       if (deepLink is ChannelDeepLink) {
-        add(PreviewChannel(_channelName(deepLink.channelId)));
+        add(PreviewChannel(buzzChannelLabel(deepLink.channelId, _channelName)));
         continue;
       }
-      _tokens(
-        _unwrapEmphasis(
-          _shield(label.isEmpty ? url : decodeMarkdownLabelSyntax(label)),
-        ),
-      );
+      final shown = label.isEmpty ? url : decodeMarkdownLabelSyntax(label);
+      // As in the thread view, a link showing its own URL shows a short label.
+      final short = shown == url ? buzzLinkLabel(deepLink, _channelName) : null;
+      if (short != null) {
+        this.text(short);
+        continue;
+      }
+      _tokens(_unwrapEmphasis(_shield(shown)));
     }
     _tokens(_unwrapEmphasis(source.substring(start)));
   }
 
-  String _channelName(String channelId) {
+  String? _channelName(String channelId) {
     for (final entry in channelNames.entries) {
       if (entry.value == channelId) return entry.key;
     }
-    return channelId.substring(0, channelId.length < 8 ? channelId.length : 8);
+    return null;
   }
 
   /// [_shield]ed plain text with mention, custom emoji and channel tokens.

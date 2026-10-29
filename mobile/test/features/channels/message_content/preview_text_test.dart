@@ -109,8 +109,12 @@ void main() {
       );
     });
 
-    test('caps a very long line', () {
+    test('caps a very long line, and reads only its start', () {
       expect(_text('x' * 5000).length, 2000);
+      expect(
+        messagePreviewSource('x' * 128000, maxLines: 2).length,
+        lessThanOrEqualTo(4000),
+      );
     });
   });
 
@@ -218,6 +222,18 @@ void main() {
           channelNames: {'general': _channelId},
         ),
         [const PreviewChannel('general')],
+      );
+    });
+
+    test('message and repo links that show their URL get a short label', () {
+      final message = 'buzz://message?channel=$_channelId&id=${'ab' * 32}';
+      const repo = 'buzz://repo?owner=$_alice&d=buzz';
+      expect(
+        _pieces(
+          '[$message]($message) [$repo]($repo) [named]($message)',
+          channelNames: {'general': _channelId},
+        ),
+        [const PreviewText('general · abababab buzz named')],
       );
     });
 
