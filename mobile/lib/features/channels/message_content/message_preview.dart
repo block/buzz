@@ -37,26 +37,29 @@ class MessagePreview extends HookConsumerWidget {
     final channelNames = ref.watch(channelIdsByNameProvider);
     final palette = ref.watch(customEmojiListProvider);
     final pieces = useMemoized(
-      () => messagePreviewPieces(
-        normalizeBareLinks(content),
-        maxLines: maxLines,
-        mentionBindings: renderedMentionBindings(
-          content,
-          mentionNames,
-          mentionedPubkeysFromTags(tags),
-        ),
-        mentionNames: mentionNames,
-        mentionLabels: mentionLabels,
-        customEmoji: _referencedCustomEmoji(
-          content,
-          _mergeCustomEmoji(customEmojiFromTags(tags), palette),
-        ),
-        channelNames: channelNames,
-        imetaByUrl: {
-          for (final entry in parseImetaTags(tags).entries)
-            normalizeMarkdownDestination(entry.key): entry.value,
-        },
-      ),
+      () {
+        final source = messagePreviewSource(content, maxLines: maxLines);
+        return messagePreviewPieces(
+          normalizeBareLinks(source),
+          maxLines: maxLines,
+          mentionBindings: renderedMentionBindings(
+            source,
+            mentionNames,
+            mentionedPubkeysFromTags(tags),
+          ),
+          mentionNames: mentionNames,
+          mentionLabels: mentionLabels,
+          customEmoji: _referencedCustomEmoji(
+            source,
+            _mergeCustomEmoji(customEmojiFromTags(tags), palette),
+          ),
+          channelNames: channelNames,
+          imetaByUrl: {
+            for (final entry in parseImetaTags(tags).entries)
+              normalizeMarkdownDestination(entry.key): entry.value,
+          },
+        );
+      },
       [
         content,
         tags,

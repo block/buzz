@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 
 import '../../../shared/deeplink/deep_link.dart';
@@ -118,11 +120,48 @@ List<PreviewPiece> messagePreviewPieces(
     channelNames: channelNames,
     imetaByUrl: imetaByUrl,
   );
+  var first = true;
+  for (final line in _keptLines(content, maxLines)) {
+    if (!first) builder.text('\n');
+    first = false;
+    if (line.code) {
+      builder.text(line.text);
+    } else {
+      builder.line(line.text);
+    }
+  }
+  return builder.pieces;
+}
+
+/// The leading part of [content] that [messagePreviewPieces] reads for a
+/// [maxLines] preview, so whole-message preprocessing such as link
+/// normalization and mention binding can run on just that part.
+String messagePreviewSource(String content, {required int maxLines}) {
+  var end = 0;
+  for (final line in _keptLines(content, maxLines)) {
+    end = line.end;
+  }
+  return content.substring(0, end);
+}
+
+/// The first `maxLines + 1` lines that render, trimmed and without block
+/// syntax, read lazily so the rest of [content] is never scanned. [code] marks
+/// a line inside a fenced block, and [end] is its end offset in [content].
+Iterable<({String text, bool code, int end})> _keptLines(
+  String content,
+  int maxLines,
+) sync* {
   var kept = 0;
   var fenceOpen = false;
-  for (final source in content.split('\n')) {
-    if (kept > maxLines) break;
-    var line = source.trim();
+  var start = 0;
+  while (start <= content.length && kept <= maxLines) {
+    var end = content.indexOf('\n', start);
+    if (end < 0) end = content.length;
+    // A long line wraps past the visible lines well before this length.
+    var line = content
+        .substring(start, math.min(end, start + 2 * _maxLineLength))
+        .trim();
+    start = end + 1;
     // A fence opens at any line starting with backticks and closes only at a
     // line holding nothing else, as in gpt_markdown.
     if (!fenceOpen && line.startsWith('```') || fenceOpen && line == '```') {
@@ -135,19 +174,12 @@ List<PreviewPiece> messagePreviewPieces(
       line = _blockPrefix(line);
       if (line.isEmpty) continue;
     }
-    // A long line wraps past the visible lines well before this length.
     if (line.length > _maxLineLength) {
       line = line.substring(0, _maxLineLength);
     }
-    if (kept > 0) builder.text('\n');
     kept++;
-    if (fenceOpen) {
-      builder.text(line);
-    } else {
-      builder.line(line);
-    }
+    yield (text: line, code: fenceOpen, end: end);
   }
-  return builder.pieces;
 }
 
 const _maxLineLength = 2000;
@@ -190,15 +222,34 @@ final _emphasis = [
   RegExp(r'\*(?=\S)(.+?)(?<=\S)\*'),
   RegExp(r'(?<![A-Za-z0-9_])_(?=\S)(.+?)(?<=\S)_(?![A-Za-z0-9_])'),
   RegExp(r'~~(?=\S)(.+?)(?<=\S)~~'),
+  RegExp(r'<u>(.+?)</u>', caseSensitive: false),
 ];
 
+/// Unwraps emphasis and resolves backslash escapes. An escaped character is
+/// held as a private-use stand-in while delimiters are matched, so `\*x\*`
+/// stays `*x*`.
 String _unwrapEmphasis(String text) {
-  var result = text;
+  if (!text.contains(_escapePrefix) && !_hasDelimiter.hasMatch(text)) {
+    return text;
+  }
+  var result = text.replaceAllMapped(
+    _escape,
+    (m) => String.fromCharCode(_escapeBase + m[1]!.codeUnitAt(0)),
+  );
   for (final pattern in _emphasis) {
     result = result.replaceAllMapped(pattern, (m) => m[1]!);
   }
-  return result;
+  return result.replaceAllMapped(
+    _escaped,
+    (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - _escapeBase),
+  );
 }
+
+const _escapePrefix = r'\';
+const _escapeBase = 0xE000;
+final _hasDelimiter = RegExp(r'[*_~<]');
+final _escape = RegExp(r'\\([!-/:-@\[-`{-~])');
+final _escaped = RegExp('[\uE021-\uE07E]');
 
 // Look ahead so adjacent tokens sharing a colon are both considered.
 final _shortcode = RegExp(r'(?=:([a-z0-9_-]+):)', caseSensitive: false);

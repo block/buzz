@@ -58,6 +58,9 @@ void main() {
       ('rule', 'above\n---\nbelow', 'above\nbelow'),
       ('table', '| a | b |\n|---|:-:|\n| 1 | 2 |', 'a  b\n1  2'),
       ('blank lines', 'one\n\n\ntwo', 'one\ntwo'),
+      ('underline', 'an <u>important</u> note', 'an important note'),
+      ('escaped emphasis', r'\*literal\* and \_x\_', '*literal* and _x_'),
+      ('escaped backslash', r'a \\ b', r'a \ b'),
     ]) {
       test(name, () => expect(_text(source), expected));
     }
@@ -72,6 +75,20 @@ void main() {
   });
 
   group('line limit', () {
+    test('the source prefix ends with the last line the preview reads', () {
+      const content = '# a\n\n```\ncode\n```\nb\nc\nd\ne';
+      expect(
+        messagePreviewSource(content, maxLines: 2),
+        '# a\n\n```\ncode\n```\nb',
+      );
+      expect(_text(messagePreviewSource(content, maxLines: 2)), 'a\ncode\nb');
+    });
+
+    test('the source prefix of a short message is the message', () {
+      expect(messagePreviewSource('one\ntwo', maxLines: 2), 'one\ntwo');
+      expect(messagePreviewSource('', maxLines: 2), '');
+    });
+
     test('reads only maxLines + 1 kept lines', () {
       final content = List.generate(1000, (i) => 'line $i').join('\n');
       expect(_text(content), 'line 0\nline 1\nline 2');
