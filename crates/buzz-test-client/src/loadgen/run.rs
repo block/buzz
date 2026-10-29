@@ -98,8 +98,9 @@ async fn run_with(
     let (mut humans, mut agents) = (0usize, 0usize);
     let mut steps = Vec::new();
     let mut aborted = false;
-    // End of the last reported window; shutdown is judged from here.
+    // End of the last reported window and start of the last judged one.
     let mut reported = stats.snapshot();
+    let mut last_window = reported.clone();
 
     for (n, step) in scenario.ramp.iter().enumerate() {
         let want_humans = (pop.humans as f64 * step.users).ceil() as usize;
@@ -107,6 +108,7 @@ async fn run_with(
         // The window covers the ramp too, so connect/auth and history
         // failures from new clients count toward the abort check.
         let before = stats.snapshot();
+        last_window = before.clone();
         let ramp_start = Instant::now();
         while humans < want_humans || agents < want_agents {
             // Interleave so agents and humans arrive in proportion.
@@ -180,11 +182,13 @@ async fn run_with(
     let (panicked, cancelled) = shutdown(tasks, grace).await;
     // Operations still in flight at the stop settle now, after the last step
     // was judged: a stalled connect as a connect timeout, a cancelled client
-    // as `unfinished at stop`. Their errors count against the run.
+    // as `unfinished at stop`. They are judged together with the last step's
+    // window, not alone: work in flight at an instant is skewed toward slow
+    // operations, so on its own it would fail healthy runs on p99.
     let closing = stats.snapshot();
     let closed = closing.since(&reported);
     let shutdown_reason = abort_reason(
-        &closed,
+        &closing.since(&last_window),
         shared.scenario.abort.max_error_rate,
         shared.scenario.abort.max_p99_ms,
     );
@@ -435,6 +439,12 @@ async fn connect(
         match shared.net.connect(community, keys, auth).await {
             Ok(conn) => {
                 pending.ok();
+                // Shutdown drains work already in flight; it does not start
+                // a session for a connect that finished after the stop.
+                if stopped(shared) {
+                    let _ = conn.disconnect().await;
+                    return None;
+                }
                 return Some(conn);
             }
             Err(e) => pending.err(&e.to_string()),
@@ -546,6 +556,9 @@ async fn human(shared: Arc<Shared>, global: usize) {
         }
         if ok && profile.history_limit > 0 {
             for (n, channel) in channels.iter().enumerate() {
+                if stopped(&shared) {
+                    break;
+                }
                 let id = format!("{HISTORY_PREFIX}{n}");
                 let filter = Filter::new()
                     .kind(kind(KIND_STREAM_MESSAGE))
@@ -997,6 +1010,7 @@ async fn http(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn shards_partition_clients() {
@@ -1285,23 +1299,51 @@ hold_secs = 1
         assert!(reason.starts_with("publish_ephemeral_ok"), "{reason}");
     }
 
+    /// How [`fake_ws_relay`] answers a client.
+    #[derive(Clone, Copy)]
+    struct FakeRelay {
+        /// Delay before the AUTH challenge.
+        challenge_delay: Duration,
+        /// Delay before each EVENT's `OK`; never answered when `None`.
+        ok_delay: Option<Duration>,
+        /// Delay before the EOSE of each history REQ.
+        history_delay: Duration,
+        /// From this long after the handshake, each `OK` takes this long.
+        slow_ok: Option<(Duration, Duration)>,
+    }
+
+    impl FakeRelay {
+        const PROMPT: Self = Self {
+            challenge_delay: Duration::ZERO,
+            ok_delay: Some(Duration::ZERO),
+            history_delay: Duration::ZERO,
+            slow_ok: None,
+        };
+    }
+
     /// A loopback relay that speaks just enough NIP-42 and NIP-01 for a
-    /// client: it sends the AUTH challenge after `challenge_delay`, accepts the
-    /// AUTH event, answers every REQ with EOSE, and answers each EVENT with an
-    /// `OK` after `ok_delay`, or never when that is `None`.
-    async fn fake_ws_relay(challenge_delay: Duration, ok_delay: Option<Duration>) -> String {
+    /// client: it sends the AUTH challenge, accepts the AUTH event, answers
+    /// every REQ with EOSE and every EVENT with an `OK`, each as `relay`
+    /// says. Returns its address and what it has seen.
+    async fn fake_ws_relay(relay: FakeRelay) -> (String, Arc<Seen>) {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
+        let seen = Arc::new(Seen::default());
+        let counted = seen.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
+                let seen = counted.clone();
                 tokio::spawn(async move {
+                    // Counted on every exit, so frames read before it are final.
+                    let _closed = Closed(seen.clone());
                     let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
                         return;
                     };
-                    tokio::time::sleep(challenge_delay).await;
+                    let opened = Instant::now();
+                    tokio::time::sleep(relay.challenge_delay).await;
                     let challenge = json!(["AUTH", "challenge"]).to_string();
                     if ws.send(Message::Text(challenge.into())).await.is_err() {
                         return;
@@ -1310,9 +1352,23 @@ hold_secs = 1
                         let frame: Value = serde_json::from_str(&text).unwrap();
                         let reply = match frame[0].as_str() {
                             Some("AUTH") => json!(["OK", frame[1]["id"], true, ""]),
-                            Some("REQ") => json!(["EOSE", frame[1]]),
+                            Some("REQ") => {
+                                seen.reqs.fetch_add(1, Ordering::SeqCst);
+                                let id = frame[1].as_str().unwrap_or_default();
+                                if id.starts_with(HISTORY_PREFIX) {
+                                    tokio::time::sleep(relay.history_delay).await;
+                                }
+                                json!(["EOSE", frame[1]])
+                            }
                             Some("EVENT") => {
-                                let Some(delay) = ok_delay else { continue };
+                                let Some(mut delay) = relay.ok_delay else {
+                                    continue;
+                                };
+                                if let Some((after, slow)) = relay.slow_ok {
+                                    if opened.elapsed() >= after {
+                                        delay = slow;
+                                    }
+                                }
                                 tokio::time::sleep(delay).await;
                                 json!(["OK", frame[1]["id"], true, ""])
                             }
@@ -1329,7 +1385,37 @@ hold_secs = 1
                 });
             }
         });
-        addr
+        (addr, seen)
+    }
+
+    /// What [`fake_ws_relay`] has received.
+    #[derive(Default)]
+    struct Seen {
+        reqs: AtomicUsize,
+        closed: AtomicUsize,
+    }
+
+    impl Seen {
+        /// REQs received over `sessions` connections, once all have closed.
+        /// A client sends its REQs before it closes, so the count is final.
+        async fn reqs_after(&self, sessions: usize) -> usize {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while self.closed.load(Ordering::SeqCst) < sessions {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the client closes its connection");
+            self.reqs.load(Ordering::SeqCst)
+        }
+    }
+
+    struct Closed(Arc<Seen>);
+
+    impl Drop for Closed {
+        fn drop(&mut self) {
+            self.0.closed.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     /// One human, no agents, one `hold_secs` step, and a presence heartbeat
@@ -1376,7 +1462,11 @@ hold_secs = {hold_secs}
 
     #[tokio::test]
     async fn a_publish_that_never_gets_its_ok_is_cancelled_and_fails_the_run() {
-        let addr = fake_ws_relay(Duration::ZERO, None).await;
+        let (addr, _) = fake_ws_relay(FakeRelay {
+            ok_delay: None,
+            ..FakeRelay::PROMPT
+        })
+        .await;
         let report = run_lone_human(lone_human(&addr, 2, 0.05), Duration::from_millis(300))
             .await
             .expect_err("a relay that never acknowledges a publish fails the run");
@@ -1405,7 +1495,11 @@ hold_secs = {hold_secs}
     #[tokio::test]
     async fn a_cancelled_client_fails_the_run_even_within_the_error_limit() {
         // With the error limit lifted, only the cancellation can fail the run.
-        let addr = fake_ws_relay(Duration::ZERO, None).await;
+        let (addr, _) = fake_ws_relay(FakeRelay {
+            ok_delay: None,
+            ..FakeRelay::PROMPT
+        })
+        .await;
         let report = run_lone_human(lone_human(&addr, 2, 1.0), Duration::from_millis(300))
             .await
             .expect_err("cancelling a client fails the run");
@@ -1417,7 +1511,11 @@ hold_secs = {hold_secs}
     async fn a_publish_in_flight_at_the_snapshot_settles_and_the_run_passes() {
         // The OK takes 1.5s, so a heartbeat is awaiting it when the 2s hold
         // ends. The relay is healthy: the publish settles during shutdown.
-        let addr = fake_ws_relay(Duration::ZERO, Some(Duration::from_millis(1500))).await;
+        let (addr, _) = fake_ws_relay(FakeRelay {
+            ok_delay: Some(Duration::from_millis(1500)),
+            ..FakeRelay::PROMPT
+        })
+        .await;
         let report = run_lone_human(lone_human(&addr, 2, 0.05), Duration::from_secs(5))
             .await
             .expect("a healthy publish straddling the snapshot does not fail the run");
@@ -1434,8 +1532,13 @@ hold_secs = {hold_secs}
     #[tokio::test]
     async fn a_connect_under_way_at_the_stop_settles_and_the_run_passes() {
         // The relay takes 1.5s to challenge, so the first connect is still in
-        // flight when the 1s hold ends and the run stops. It is not abandoned.
-        let addr = fake_ws_relay(Duration::from_millis(1500), Some(Duration::ZERO)).await;
+        // flight when the 1s hold ends and the run stops. It is not abandoned,
+        // and it does not start a session: the client subscribes to nothing.
+        let (addr, seen) = fake_ws_relay(FakeRelay {
+            challenge_delay: Duration::from_millis(1500),
+            ..FakeRelay::PROMPT
+        })
+        .await;
         let report = run_lone_human(lone_human(&addr, 1, 0.05), Duration::from_secs(5))
             .await
             .expect("a healthy connect straddling the stop does not fail the run");
@@ -1449,5 +1552,103 @@ hold_secs = {hold_secs}
             (json!(1), json!(0)),
             "{report}"
         );
+        assert_eq!(seen.reqs_after(1).await, 0, "{report}");
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_history_ends_the_session_after_the_fetch_under_way() {
+        // Ten channels whose history takes 400ms each: the 1s hold ends
+        // mid-history. Fetching the rest would outlast the 2s grace and get
+        // the client cancelled; the fetch under way settles and the rest are
+        // skipped.
+        let (addr, seen) = fake_ws_relay(FakeRelay {
+            history_delay: Duration::from_millis(400),
+            ..FakeRelay::PROMPT
+        })
+        .await;
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 10
+[population]
+humans = 1
+agents = 0
+channels_per_member = 10
+[human]
+typing_per_hour = 0.0
+messages_per_hour = 0.0
+reactions_per_hour = 0.0
+history_limit = 1
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#
+        ))
+        .unwrap();
+        let report = run_lone_human(scenario, Duration::from_secs(2))
+            .await
+            .expect("a stop mid-history does not fail a healthy run");
+        assert_eq!(report["clients_cancelled"], 0, "{report}");
+        // Four live subscriptions plus the history fetched before the stop.
+        let sent = seen.reqs_after(1).await;
+        assert!((5..4 + 10).contains(&sent), "{sent} REQs: {report}");
+    }
+
+    #[tokio::test]
+    async fn one_slow_publish_in_flight_at_the_stop_is_judged_with_the_last_step() {
+        // About 200 typing indicators a second are acknowledged at once until
+        // 1.7s in; from then each OK takes 1.5s, so exactly one is in flight
+        // when the 2s hold ends. On its own, the settlement's p99 would be
+        // that one slow publish; among the step's fast ones it is not.
+        let (addr, _) = fake_ws_relay(FakeRelay {
+            slow_ok: Some((Duration::from_millis(1700), Duration::from_millis(1500))),
+            ..FakeRelay::PROMPT
+        })
+        .await;
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 1
+[population]
+humans = 1
+agents = 0
+channels_per_member = 1
+[human]
+presence_interval_secs = 3600.0
+typing_per_hour = 720000.0
+messages_per_hour = 0.0
+reactions_per_hour = 0.0
+history_limit = 1
+[abort]
+max_p99_ms = 1000.0
+[[ramp]]
+users = 1.0
+hold_secs = 2
+"#
+        ))
+        .unwrap();
+        let report = run_lone_human(scenario, Duration::from_secs(5))
+            .await
+            .expect("one slow publish among many fast ones does not fail the run");
+        let step = &report["steps"][0]["ops"]["publish_ephemeral_ok"];
+        assert!(step["count"].as_u64().unwrap() >= 100, "{report}");
+        assert_eq!(step["pending"], 1, "{report}");
+        let closing = &report["shutdown"]["ops"]["publish_ephemeral_ok"];
+        assert_eq!(
+            (closing["count"].clone(), closing["errors"].clone()),
+            (json!(1), json!(0)),
+            "{report}"
+        );
+        assert!(closing["p99_ms"].as_f64().unwrap() > 1000.0, "{report}");
     }
 }
