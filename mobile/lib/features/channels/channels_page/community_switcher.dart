@@ -1,6 +1,6 @@
 part of '../channels_page.dart';
 
-const _communityGridAvatarSize = 88.0;
+const _communityGridAvatarSize = communityGridAvatarSize;
 const _communityCenterDuration = Duration(milliseconds: 420);
 const _communityCenterCurve = Cubic(0.22, 1, 0.36, 1);
 const _communityDepartureDuration = Duration(milliseconds: 520);
@@ -338,11 +338,13 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                   ),
                 ),
                 error: (e, _) => Text('Error loading communities: $e'),
-                data: (communities) => _CommunityGrid(
+                data: (communities) => CommunityGrid(
                   children: [
                     for (final community in communities)
-                      _CommunityGridTile(
-                        community: community,
+                      CommunityGridOption(
+                        id: community.id,
+                        name: community.name,
+                        relayUrl: community.relayUrl,
                         // Keep the current-community marker stable
                         // while the selected avatar leaves the grid.
                         isActive:
@@ -350,17 +352,27 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                             (flight.value == null
                                 ? activeId
                                 : flight.value!.previousCommunityId),
-                        isEditing: isEditing.value,
+                        enabled: !isEditing.value,
                         hidden: flight.value?.community.id == community.id,
-                        onSelect: selectCommunity,
-                        onRemove: () => _confirmRemoveCommunity(
-                          context,
-                          ref,
-                          community,
-                          closeSheetAfterRemoval: community.id == activeId,
+                        onSelect: (origin) =>
+                            selectCommunity(community, origin),
+                        badge: _CommunityGridAction(
+                          community: community,
+                          isActive:
+                              community.id ==
+                              (flight.value == null
+                                  ? activeId
+                                  : flight.value!.previousCommunityId),
+                          isEditing: isEditing.value,
+                          onRemove: () => _confirmRemoveCommunity(
+                            context,
+                            ref,
+                            community,
+                            closeSheetAfterRemoval: community.id == activeId,
+                          ),
                         ),
                       ),
-                    _CommunityGridAdd(onTap: addCommunity),
+                    CommunityGridAdd(onTap: addCommunity),
                   ],
                 ),
               ),
@@ -543,163 +555,4 @@ class _CommunityFlyingAvatar extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Intrinsic-height rows keep two columns without clipping scaled labels.
-class _CommunityGrid extends StatelessWidget {
-  const _CommunityGrid({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) => Column(
-    key: const Key('community-switcher-options'),
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      for (var index = 0; index < children.length; index += 2)
-        Padding(
-          padding: const EdgeInsets.only(bottom: Grid.md),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(child: children[index]),
-              const SizedBox(width: Grid.xs),
-              Expanded(
-                child: index + 1 < children.length
-                    ? children[index + 1]
-                    : const SizedBox.shrink(),
-              ),
-            ],
-          ),
-        ),
-    ],
-  );
-}
-
-class _CommunityGridTile extends HookWidget {
-  const _CommunityGridTile({
-    required this.community,
-    required this.isActive,
-    required this.isEditing,
-    required this.hidden,
-    required this.onSelect,
-    required this.onRemove,
-  });
-
-  final Community community;
-  final bool isActive;
-  final bool isEditing;
-  final bool hidden;
-  final Future<void> Function(Community, Rect) onSelect;
-  final VoidCallback onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    final avatarKey = useMemoized(GlobalKey.new);
-    return Semantics(
-      selected: isActive,
-      child: InkWell(
-        key: Key('community-switcher-row-${community.id}'),
-        borderRadius: BorderRadius.circular(Radii.card),
-        onTap: isEditing
-            ? null
-            : () {
-                final box = avatarKey.currentContext?.findRenderObject();
-                if (box is RenderBox) {
-                  unawaited(
-                    onSelect(
-                      community,
-                      box.localToGlobal(Offset.zero) & box.size,
-                    ),
-                  );
-                }
-              },
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-          child: Column(
-            children: [
-              Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Opacity(
-                    opacity: hidden ? 0 : 1,
-                    child: SizedBox(
-                      key: avatarKey,
-                      child: CommunityAvatar(
-                        key: Key('community-switcher-avatar-${community.id}'),
-                        name: community.name,
-                        relayUrl: community.relayUrl,
-                        size: _communityGridAvatarSize,
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    right: -Grid.twelve,
-                    bottom: -Grid.twelve,
-                    child: _CommunityGridAction(
-                      community: community,
-                      isActive: isActive,
-                      isEditing: isEditing,
-                      onRemove: onRemove,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: Grid.xs),
-              Text(
-                community.name,
-                textAlign: TextAlign.center,
-                style: context.textTheme.bodyLarge?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CommunityGridAdd extends StatelessWidget {
-  const _CommunityGridAdd({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => InkWell(
-    key: const Key('community-switcher-add'),
-    borderRadius: BorderRadius.circular(Radii.card),
-    onTap: onTap,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-      child: Column(
-        children: [
-          ClipRSuperellipse(
-            borderRadius: BorderRadius.circular(
-              Radii.card * _communityGridAvatarSize / 40,
-            ),
-            child: Container(
-              width: _communityGridAvatarSize,
-              height: _communityGridAvatarSize,
-              color: context.controlSurface.withValues(alpha: 0.5),
-              child: Icon(
-                BuzzIcons.plus,
-                size: 32,
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-          ),
-          const SizedBox(height: Grid.xs),
-          Text(
-            'Add Community',
-            textAlign: TextAlign.center,
-            style: context.textTheme.bodyLarge?.copyWith(
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
 }

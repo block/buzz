@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/agents/remote_agents.dart';
@@ -47,7 +48,14 @@ class FakeRegistry extends BuilderlabAccountClient {
       'display_name': 'Test model',
       'supported_reasoning_efforts': ['low', 'high'],
     },
+    {
+      'id': 'other-model',
+      'display_name': 'Other model',
+      'supported_reasoning_efforts': ['max'],
+    },
   ];
+  Completer<void>? catalogGate;
+  bool failListing = false;
   bool rejectRegistration = false;
   bool loseRegistration = false;
   bool refuseRegistration = false;
@@ -79,8 +87,10 @@ class FakeRegistry extends BuilderlabAccountClient {
     bodies[path] = body;
     switch (path) {
       case '/v3/beekeeper/get-model-catalog':
+        await catalogGate?.future;
         return {'models': models};
       case '/v3/beekeeper/list-agents':
+        if (failListing) throw StateError('Registry unavailable.');
         return {'status': 1, 'agents': listed};
       case '/v3/beekeeper/register-agent':
         if (refuseRegistration) throw AccountFailure.rejected;

@@ -20,6 +20,7 @@ import 'relay_client.dart';
 import 'relay_closed_policy.dart';
 import 'relay_http_query_client.dart';
 import 'relay_provider.dart';
+import 'relay_query_response.dart';
 import 'relay_rate_limit_gate.dart';
 import 'relay_reconnect_policy.dart';
 import 'relay_session_types.dart';
@@ -42,6 +43,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     Future<void> Function(Duration) replayDelay = Future.delayed,
     RelayTimerFactory reconnectTimerFactory = Timer.new,
     Random? random,
+    RelayQueryDecoder queryDecoder = decodeRelayQueryResponse,
   }) : _httpQueryClient = RelayHttpQueryClient(
          client: httpClient,
          clientFactory: httpClientFactory,
@@ -52,7 +54,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
        _retryTimerFactory = retryTimerFactory,
        _replayDelay = replayDelay,
        _reconnectTimerFactory = reconnectTimerFactory,
-       _random = random ?? Random();
+       _random = random ?? Random(),
+       _queryDecoder = queryDecoder;
 
   final RelayHttpQueryClient _httpQueryClient;
   final RelaySocketFactory _socketFactory;
@@ -62,6 +65,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final Future<void> Function(Duration) _replayDelay;
   final RelayTimerFactory _reconnectTimerFactory;
   final Random _random;
+  final RelayQueryDecoder _queryDecoder;
 
   static const _baseReconnectDelayMs = relayReconnectBaseDelayMs;
   static const _maxReconnectDelayMs = relayReconnectMaxDelayMs;
@@ -232,29 +236,34 @@ class RelaySessionNotifier extends Notifier<SessionState> {
             active() && !_disposed && generation == _contextGeneration,
       ),
     );
-    if (_disposed || _ageRestricted || generation != _contextGeneration) {
+    bool retired() =>
+        _disposed || _ageRestricted || generation != _contextGeneration;
+    if (retired()) {
       throw StateError('Relay query belongs to a retired session');
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      _activateRateLimitGateFromHttpError(response.body);
-      throw RelayException(response.statusCode, response.body);
+      final body = relayResponseText(
+        response.bodyBytes,
+        response.headers['content-type'],
+      );
+      _activateRateLimitGateFromHttpError(body);
+      throw RelayException(response.statusCode, body);
     }
-    final decoded = jsonDecode(response.body);
-    if (decoded is! List) {
-      throw const FormatException('relay returned malformed query response');
-    }
+    // Decoding runs off the UI isolate, so the session can retire meanwhile.
+    // A retired session reports that, not whatever its bytes decoded to.
+    final List<NostrEvent> events;
     try {
-      return [
-        for (final eventJson in decoded)
-          if (eventJson is Map<String, dynamic>)
-            NostrEvent.fromJson(eventJson)
-          else
-            throw const FormatException('relay returned malformed query event'),
-      ];
-    } catch (error) {
-      if (error is FormatException) rethrow;
-      throw FormatException('relay returned malformed query event: $error');
+      events = await _queryDecoder(response);
+    } catch (_) {
+      if (retired()) {
+        throw StateError('Relay query belongs to a retired session');
+      }
+      rethrow;
     }
+    if (retired()) {
+      throw StateError('Relay query belongs to a retired session');
+    }
+    return events;
   }
 
   void _activateRateLimitGateFromHttpError(String body) {

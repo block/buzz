@@ -82,6 +82,8 @@ class HostedCommunitiesFixture {
   late BuilderlabAccountClient account;
   late final HostedFlow flow;
   final admitted = <String>[];
+  String? openedCommunity;
+  Future<void> Function()? beforeOpen;
   final remembered = <String>[];
   final requests = <String>[];
   List<Map<String, dynamic>> rows = [];
@@ -171,6 +173,10 @@ class HostedCommunitiesFixture {
       openWeb: (uri) async {
         opened = uri;
         return true;
+      },
+      openLandingCommunity: (link, subject, pubkey, current) async {
+        await beforeOpen?.call();
+        if (current()) openedCommunity = link.relayUrl;
       },
       enterCommunity: (link, subject, pubkey, current) async {
         final target = link as AddCommunityDeepLink;

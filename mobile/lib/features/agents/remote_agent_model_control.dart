@@ -103,7 +103,7 @@ class RemoteAgentModelControl extends HookWidget {
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
                           content: Text(
-                            saved ? 'Model updated' : controller.status,
+                            saved ? 'Model updated' : controller.failure,
                           ),
                         ),
                       );

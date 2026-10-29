@@ -1,3 +1,5 @@
+import 'community_link_focus.dart';
+import '../../shared/widgets/ios_community_link_input.dart';
 import 'dart:async';
 import '../../shared/hosted/hosted_flow_provider.dart';
 import '../../shared/hosted/hosted_flow.dart';
@@ -8,8 +10,6 @@ import 'dart:math' show sqrt2;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/cupertino.dart'
-    show CupertinoColors, CupertinoTextField;
 import 'package:flutter/foundation.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/services.dart';
@@ -31,6 +31,8 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import 'pairing_page/onboarding_wordmark.dart';
 import 'pairing_provider.dart';
+import 'add_community_page.dart';
+import '../../shared/widgets/onboarding_step_page.dart';
 import 'pairing_qr_scanner.dart';
 
 part 'pairing_page/onboarding_background.dart';
@@ -221,7 +223,7 @@ class PairingPage extends HookConsumerWidget {
                       : IconButton(
                           icon: const Icon(BuzzIcons.arrowLeft),
                           tooltip: 'Back',
-                          onPressed: () => Navigator.of(context).pop(),
+                          onPressed: () => Navigator.of(context).maybePop(),
                         ),
                   title: identityRecoveryOnly
                       ? Text(
@@ -239,6 +241,25 @@ class PairingPage extends HookConsumerWidget {
         pairingState.status == PairingStatus.storing ||
         pairingState.status == PairingStatus.success;
     final destinationRelay = pairingState.destinationRelayUrl;
+    final verificationView = _SasVerificationView(
+      key: ValueKey(pairingState.sasCode),
+      fullScreen: addingCommunity && connectionLanding,
+      sasCode: pairingState.sasCode ?? '------',
+      verifyDesktopCode: pairingState.requiresDesktopCode
+          ? ref.read(pairingProvider.notifier).verifyDesktopCode
+          : null,
+      confirmed: pairingState.userConfirmedSas,
+      sendsIdentityToDesktop: pairingState.sendsIdentityToDesktop,
+      biometricLabel: biometricProtectionLabel(
+        defaultTargetPlatform,
+        enrolledBiometrics.value ?? const [],
+      ),
+      errorMessage: pairingState.errorMessage,
+      onProtectionChanged: (value) =>
+          ref.read(pairingProvider.notifier).setProtectSensitiveActions(value),
+      onConfirm: () => ref.read(pairingProvider.notifier).confirmSas(),
+      onDeny: () => ref.read(pairingProvider.notifier).denySas(),
+    );
     final pairingScaffold = showLoading
         ? CommunityLoadingSurface(
             key: const Key('pairing-community-loading'),
@@ -248,42 +269,70 @@ class PairingPage extends HookConsumerWidget {
             relayUrl: destinationRelay,
           )
         : isVerifyingSas
-        ? AnnotatedRegion<SystemUiOverlayStyle>(
-            key: const Key('pairing-sas-system-overlay'),
-            value: onboardingSystemOverlayStyle,
-            child: _OnboardingBackground(
-              child: Scaffold(
-                resizeToAvoidBottomInset:
-                    hostedFlow?.stage != HostedFlowStage.profile,
-                backgroundColor: Colors.transparent,
-                body: SafeArea(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: Grid.sm),
-                    child: _SasVerificationView(
-                      key: ValueKey(pairingState.sasCode),
-                      sasCode: pairingState.sasCode ?? '------',
-                      verifyDesktopCode: pairingState.requiresDesktopCode
-                          ? ref.read(pairingProvider.notifier).verifyDesktopCode
-                          : null,
-                      confirmed: pairingState.userConfirmedSas,
-                      sendsIdentityToDesktop:
-                          pairingState.sendsIdentityToDesktop,
-                      biometricLabel: biometricProtectionLabel(
-                        defaultTargetPlatform,
-                        enrolledBiometrics.value ?? const [],
+        ? addingCommunity && connectionLanding
+              ? verificationView
+              : AnnotatedRegion<SystemUiOverlayStyle>(
+                  key: const Key('pairing-sas-system-overlay'),
+                  value: onboardingSystemOverlayStyle,
+                  child: _OnboardingBackground(
+                    child: Scaffold(
+                      resizeToAvoidBottomInset:
+                          hostedFlow?.stage != HostedFlowStage.profile,
+                      backgroundColor: Colors.transparent,
+                      body: SafeArea(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Grid.sm,
+                          ),
+                          child: verificationView,
+                        ),
                       ),
-                      errorMessage: pairingState.errorMessage,
-                      onProtectionChanged: (value) => ref
-                          .read(pairingProvider.notifier)
-                          .setProtectSensitiveActions(value),
-                      onConfirm: () =>
-                          ref.read(pairingProvider.notifier).confirmSas(),
-                      onDeny: () =>
-                          ref.read(pairingProvider.notifier).denySas(),
                     ),
                   ),
-                ),
-              ),
+                )
+        : addingCommunity && connectionLanding
+        ? ValueListenableBuilder<double>(
+            valueListenable: islandScannerProgress,
+            builder: (context, progress, _) => AddCommunityPage(
+              scannerProgress: progress,
+              enteringCommunityLink: enteringCommunityLink,
+              existingUser: existingUser,
+              onBack: onWelcomeBack ?? () => Navigator.of(context).pop(),
+              onCommunityLink: onCommunityLink,
+              onPairing: onAlreadyUseBuzz,
+              onScan: openScanner,
+              onOpenCommunity: (uri) {
+                ref.read(hostedInlineEntryProvider.notifier).setActive(true);
+                ref.read(pendingDeepLinkProvider.notifier).open(uri);
+              },
+              onSubmitPairing: (code) => unawaited(handleScannerResult(code)),
+              accountStatus: accountStatus,
+              busy:
+                  isBusy ||
+                  builderlabBusy ||
+                  (hostedFlow != null &&
+                      !hostedFlow.accountOnly &&
+                      (hostedFlow.stage == HostedFlowStage.working ||
+                          hostedFlow.stage == HostedFlowStage.signIn)),
+              canSubmit:
+                  hostedFlow == null ||
+                  hostedFlow.accountOnly ||
+                  hostedFlow.problem == null ||
+                  hostedFlow.canRetry,
+              errorMessage:
+                  pairingState.errorMessage ??
+                  (hostedFlow != null &&
+                          !hostedFlow.accountOnly &&
+                          hostedFlow.problem != null
+                      ? hostedFlowProblemMessage(hostedFlow.problem)
+                      : null),
+              onInputChanged: () {
+                if (hostedFlow != null &&
+                    !hostedFlow.accountOnly &&
+                    hostedFlow.problem != null) {
+                  unawaited(hostedFlow.leave());
+                }
+              },
             ),
           )
         : AnnotatedRegion<SystemUiOverlayStyle>(

@@ -498,8 +498,6 @@ const MessageTimelineBase = React.forwardRef<
     [prepareForOwnMessage, scrollToBottom, timelineVirtualizerApi],
   );
 
-  // Jump-to-message is purely DOM-based now: all loaded rows are mounted, so
-  // `scrollToMessage` always finds the target row. No virtualizer convergence.
   const jumpToMessage = React.useCallback(
     (messageId: string, options?: { behavior?: ScrollBehavior }) => {
       return scrollToMessage(messageId, { highlight: true, ...options });
@@ -542,8 +540,8 @@ const MessageTimelineBase = React.forwardRef<
 
   // Scroll to the active search match when it changes. `jumpToMessage` updates
   // the scroll anchor (so the post-commit restore won't yank the view back off
-  // the match) and, when virtualized, converges on the target through the index
-  // model — the row may be windowed out of the DOM.
+  // the match) and, when virtualized, scrolls through the index model — the row
+  // may be windowed out of the DOM.
   const prevSearchActiveRef = React.useRef<string | null>(null);
   const pendingSearchTargetRef = React.useRef<string | null>(null);
   React.useEffect(() => {
@@ -565,22 +563,10 @@ const MessageTimelineBase = React.forwardRef<
     }
   }, [jumpToMessage, searchActiveMessageId, showTimelineSkeleton]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: deferredMessages and virtualizerRenderVersion are intentional retry triggers — a search hit may be spliced into messages asynchronously, and in virtualized mode a phase-1 index jump only realizes the row; retry when the rendered range changes so the DOM-visible path can center and highlight it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deferredMessages and virtualizerRenderVersion are intentional retry triggers — a search hit may be spliced into messages asynchronously, so retry until the timeline can scroll to it.
   React.useEffect(() => {
     const target = pendingSearchTargetRef.current;
     if (!target || showTimelineSkeleton) return;
-    if (
-      useTimelineVirtualizer &&
-      !activeScrollContainerRef.current?.querySelector(
-        `[data-message-id="${CSS.escape(target)}"]`,
-      )
-    ) {
-      // Phase 1: ask the virtualizer to realize the match's index. The retry effect
-      // runs again on range change and the DOM-visible path does the actual
-      // center + highlight once the row exists.
-      void jumpToMessage(target, { behavior: "auto" });
-      return;
-    }
     if (jumpToMessage(target, { behavior: "auto" })) {
       pendingSearchTargetRef.current = null;
     }

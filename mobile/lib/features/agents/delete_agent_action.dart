@@ -7,6 +7,7 @@ import '../../shared/community/community_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 
 /// Confirmed deletion for the signed-in owner's remote agents only.
 class DeleteAgentAction extends HookConsumerWidget {
@@ -72,7 +73,7 @@ class DeleteAgentAction extends HookConsumerWidget {
       if (success) {
         Navigator.of(context).pop();
       } else {
-        error.value = controller.status;
+        error.value = controller.failure;
       }
     }
 
@@ -96,7 +97,9 @@ class DeleteAgentAction extends HookConsumerWidget {
                 borderRadius: BorderRadius.circular(Radii.dialog),
               ),
             ),
-            child: Text(controller.busy ? 'Working…' : 'Delete'),
+            child: controller.busy
+                ? BuzzLoadingIndicator(size: 18, color: context.colors.error)
+                : const Text('Delete'),
           ),
           if (error.value != null)
             Text(error.value!, style: TextStyle(color: context.colors.error)),

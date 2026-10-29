@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -360,7 +361,7 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   if (decoded.prefix != nostr.Nip19Prefix.nsec || decoded.data.length != 64) {
     throw const FormatException('Signing key must be a 32-byte nsec');
   }
-  final signingPubkey = nostr.Keys(decoded.data).public;
+  final signingPubkey = derivePublicKeyHex(decoded.data);
   if (signingPubkey != normalizedMemberPubkey) {
     throw const FormatException(
       'Authenticated signing key does not match the lease member pubkey',
@@ -466,7 +467,7 @@ Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstone({
   if (decoded.prefix != nostr.Nip19Prefix.nsec || decoded.data.length != 64) {
     throw const FormatException('Signing key must be a 32-byte nsec');
   }
-  if (nostr.Keys(decoded.data).public != normalizedMemberPubkey) {
+  if (derivePublicKeyHex(decoded.data) != normalizedMemberPubkey) {
     throw const FormatException(
       'Authenticated signing key does not match the lease member pubkey',
     );

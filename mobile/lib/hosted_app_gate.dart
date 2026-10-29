@@ -10,6 +10,7 @@ import 'features/onboarding/hosted_connect_page.dart';
 import 'features/onboarding/self_hosted_entry_sheet.dart';
 import 'shared/auth/auth.dart';
 import 'shared/theme/grid.dart';
+import 'shared/theme/theme_extensions.dart';
 import 'shared/deeplink/deep_link.dart';
 import 'shared/hosted/hosted_community_connection.dart';
 import 'shared/hosted/hosted_flow.dart';
@@ -59,13 +60,7 @@ class HostedAppGate extends HookConsumerWidget {
             (flow.accountOnly &&
                 flow.stage == HostedFlowStage.working &&
                 flow.account.account == null));
-    final inlineAccountStatus =
-        flow != null &&
-        (!authenticated || inlineEntry) &&
-        flow.accountOnly &&
-        (flow.stage == HostedFlowStage.working ||
-            (flow.stage == HostedFlowStage.blocked &&
-                !flow.canChangeCommunities));
+    final fullScreenSetup = visible && !openingSignIn;
     return DeepLinkDispatcher(
       dispatchMessageLinks: authenticated && !visible,
       onboardingHandler: (routeContext, link) async {
@@ -98,6 +93,7 @@ class HostedAppGate extends HookConsumerWidget {
                 routeContext,
                 relay: link.relayUrl,
                 name: link.name,
+                fullScreen: inlineEntry,
               );
               if (joined && context.mounted) {
                 ref.read(communityEntryCompletionProvider.notifier).complete();
@@ -134,7 +130,14 @@ class HostedAppGate extends HookConsumerWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          child,
+          ExcludeFocus(
+            excluding: fullScreenSetup,
+            child: ExcludeSemantics(
+              excluding: fullScreenSetup,
+              child: Offstage(offstage: fullScreenSetup, child: child),
+            ),
+          ),
+          if (fullScreenSetup) ColoredBox(color: context.colors.surface),
           if (flow != null) ...[
             if (authenticated && !visible) HostedReconnectBanner(flow: flow),
             if (flow.stage == HostedFlowStage.signIn &&
@@ -167,21 +170,11 @@ class HostedAppGate extends HookConsumerWidget {
                   ),
                 ),
               ),
-            if (flow.stage == HostedFlowStage.profile)
-              ProfileSetupPage(flow: flow),
-            if (visible &&
-                flow.stage != HostedFlowStage.profile &&
-                !openingSignIn &&
-                !inlineAccountStatus &&
-                (!inlineEntry ||
-                    flow.stage == HostedFlowStage.chooseIdentity ||
-                    flow.stage == HostedFlowStage.setupIdentity ||
-                    flow.stage == HostedFlowStage.chooseCommunities ||
-                    flow.stage == HostedFlowStage.communityConflict ||
-                    flow.canChangeCommunities))
+            if (fullScreenSetup)
               HostedConnectPage(
                 flow: flow,
                 onClose: () => unawaited(flow.leave()),
+                profileBuilder: (_) => ProfileSetupPage(flow: flow),
               ),
           ],
         ],

@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'agent_model_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -18,8 +19,7 @@ import '../../shared/widgets/preset_agent_avatar.dart';
 import 'agent_avatar_editor_page.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 
-/// Uses the registry's name and private-instructions contract. Runtime/model
-/// selection belongs to the remote service and is not an API option here.
+/// Collects agent details, an avatar, and a service-supported model.
 class CreateAgentPage extends HookConsumerWidget {
   const CreateAgentPage({
     required this.controller,
@@ -34,6 +34,19 @@ class CreateAgentPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(controller);
+    ref.listen(remoteAgentsEnabledProvider, (_, enabled) {
+      final route = ModalRoute.of(context);
+      if (!enabled && route != null) {
+        Navigator.of(context).removeRoute(route);
+      }
+    });
+    final (catalog, retryCatalog) = useAgentModelCatalog(controller);
+    final openingSubject = useMemoized(
+      () => controller.account.account?.subject,
+      const [],
+    );
+    final model = useState(controller.pending?['model_id'] as String?);
+    final effort = useState(controller.pending?['reasoning_effort'] as String?);
     final name = useTextEditingController(
       text: controller.pending?['name'] as String? ?? '',
     );
@@ -55,7 +68,11 @@ class CreateAgentPage extends HookConsumerWidget {
     final pending = controller.pending != null;
     final instructionsMissing =
         controller.pending?['instructionsMissing'] == true;
-    final canCreate = !busy && sameCommunity && name.text.trim().isNotEmpty;
+    final canCreate =
+        !busy &&
+        sameCommunity &&
+        name.text.trim().isNotEmpty &&
+        validAgentModelSelection(catalog, model.value, effort.value);
     InputDecoration fieldDecoration(String label, {String? hint}) =>
         InputDecoration(
           hintText: hint,
@@ -81,6 +98,11 @@ class CreateAgentPage extends HookConsumerWidget {
 
     Future<void> create() async {
       error.value = null;
+      if (controller.account.account?.subject != openingSubject) {
+        error.value =
+            'The account changed. Reopen Agents and choose a model again.';
+        return;
+      }
       if (!sameCommunity) {
         error.value = 'The active community changed. Reopen Agents.';
         return;
@@ -102,13 +124,16 @@ class CreateAgentPage extends HookConsumerWidget {
           name.text,
           instructions: instructions.text,
           pictureUrl: picture,
+          modelId: model.value,
+          reasoningEffort: effort.value,
         );
         if (!context.mounted) return;
         if (success) {
           onCreated();
           Navigator.pop(context, true);
         } else {
-          error.value = controller.status;
+          error.value = controller.failure;
+          retryCatalog();
         }
       } catch (_) {
         if (context.mounted) {
@@ -248,10 +273,21 @@ class CreateAgentPage extends HookConsumerWidget {
                     ),
                   ],
                 ),
+                const SizedBox(height: Grid.sm),
+                AgentModelPicker(
+                  controller: controller,
+                  catalog: catalog,
+                  onRetry: retryCatalog,
+                  modelId: model.value,
+                  effort: effort.value,
+                  onChanged: (id, value) {
+                    model.value = id;
+                    effort.value = value;
+                  },
+                ),
                 if (busy) ...[
                   const SizedBox(height: Grid.xs),
                   const LinearProgressIndicator(),
-                  Text(controller.status),
                 ],
                 if (error.value != null) ...[
                   const SizedBox(height: Grid.xs),
@@ -268,7 +304,7 @@ class CreateAgentPage extends HookConsumerWidget {
                         name.clear();
                         instructions.clear();
                       } else if (context.mounted) {
-                        error.value = controller.status;
+                        error.value = controller.failure;
                       }
                     },
                     child: const Text('Discard unfinished setup'),

@@ -11,6 +11,7 @@ import '../../shared/identity_transfer/native_community_entry.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/onboarding_step_page.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 
 /// Local preparation seam; the production service validates and retains keys.
@@ -23,7 +24,20 @@ Future<bool> showSelfHostedEntry(
   BuildContext context, {
   required String relay,
   required String name,
+  bool fullScreen = false,
 }) async {
+  if (fullScreen) {
+    return await Navigator.of(context, rootNavigator: true).push<bool>(
+          MaterialPageRoute(
+            builder: (_) => SelfHostedEntrySheet(
+              relay: relay,
+              name: name,
+              fullScreen: true,
+            ),
+          ),
+        ) ??
+        false;
+  }
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     final container = ProviderScope.containerOf(context);
     final service = container.read(selfHostedEntryProvider);
@@ -88,9 +102,11 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
     super.key,
     required this.relay,
     required this.name,
+    this.fullScreen = false,
   });
   final String relay;
   final String name;
+  final bool fullScreen;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -184,7 +200,7 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
 
     final saved = choices.data?.choices ?? const <DeviceIdentityChoice>[];
     final joinContent = Padding(
-      padding: const EdgeInsets.all(Grid.gutter),
+      padding: fullScreen ? EdgeInsets.zero : const EdgeInsets.all(Grid.gutter),
       child: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -228,9 +244,31 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
               button(
                 onPressed: busy.value
                     ? null
-                    : () {
-                        importFocusReady.value = false;
-                        importing.value = true;
+                    : () async {
+                        if (fullScreen) {
+                          final imported = await Navigator.of(context)
+                              .push<bool>(
+                                MaterialPageRoute(
+                                  builder: (importContext) => NsecImportSheet(
+                                    fullScreen: true,
+                                    onBack: () {
+                                      generation.value++;
+                                      busy.value = false;
+                                      error.value = null;
+                                      Navigator.of(importContext).pop(false);
+                                    },
+                                    onImport: (nsec) =>
+                                        connect(nsec: nsec, close: false),
+                                  ),
+                                ),
+                              );
+                          if (imported == true && context.mounted) {
+                            Navigator.of(context).pop(true);
+                          }
+                        } else {
+                          importFocusReady.value = false;
+                          importing.value = true;
+                        }
                       },
                 child: const Text('Import a Nostr key'),
               ),
@@ -256,6 +294,17 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
         ),
       ),
     );
+    if (fullScreen) {
+      return OnboardingStepPage(
+        title: 'Join community',
+        subtitle: 'Select an identity to use in this community.',
+        onBack: () {
+          generation.value++;
+          Navigator.of(context).pop(false);
+        },
+        content: joinContent,
+      );
+    }
     return AnimatedSize(
       duration: MediaQuery.disableAnimationsOf(context)
           ? Duration.zero

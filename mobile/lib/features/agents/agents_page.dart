@@ -144,33 +144,27 @@ class AgentsPage extends HookConsumerWidget {
     final community = ref.watch(activeCommunityProvider).asData?.value;
     final directory = ref.watch(agentDirectoryProvider);
     final ownedDirectory = ref.watch(ownedAgentDirectoryProvider);
-    final registryFuture = useMemoized(
-      () async {
-        final fetch = ref.read(relaySessionProvider.notifier).fetchHistory;
-        return ownedCommunityAgents(
-          {
-            if (controller.owner == community?.pubkey)
-              for (final agent in controller.agents)
-                agent['agent_pubkey'] as String,
-            for (final entry
-                in directory.asData?.value ?? <AgentDirectoryEntry>[])
-              entry.pubkey,
-          },
-          community?.pubkey,
-          fetch,
-        );
-      },
-      [
-        community?.relayUrl,
-        community?.pubkey,
-        controller.agents,
-        controller.owner,
-        directory.asData?.value,
-      ],
-    );
+    final candidates = {
+      if (controller.owner == community?.pubkey)
+        for (final agent in controller.agents) agent['agent_pubkey'] as String,
+      for (final entry in directory.asData?.value ?? <AgentDirectoryEntry>[])
+        entry.pubkey,
+    };
+    final candidateKey = (candidates.toList()..sort()).join(',');
+    final attempt = useState(0);
+    final registryFuture = useMemoized(() async {
+      final fetch = ref.read(relaySessionProvider.notifier).fetchHistory;
+      return ownedCommunityAgents(candidates, community?.pubkey, fetch);
+    }, [community?.relayUrl, community?.pubkey, candidateKey, attempt.value]);
     final registered = useFuture(registryFuture, preserveState: false);
+    final scope = '${community?.relayUrl}|${community?.pubkey}|$candidateKey';
+    final lastOwned = useRef<(String, Set<String>)?>(null);
+    if (registered.data case final owned?) lastOwned.value = (scope, owned);
+    final owned =
+        registered.data ??
+        (lastOwned.value?.$1 == scope ? lastOwned.value?.$2 : null);
     final keys = {
-      ...?registered.data,
+      ...?owned,
       for (final entry
           in ownedDirectory.asData?.value ?? <AgentDirectoryEntry>[])
         entry.pubkey,
@@ -191,7 +185,10 @@ class AgentsPage extends HookConsumerWidget {
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
     final failed =
-        directory.hasError || registered.hasError || ownedDirectory.hasError;
+        directory.hasError ||
+        registered.hasError ||
+        ownedDirectory.hasError ||
+        controller.listingFailed;
     final loading =
         !creating.value &&
         (controller.busy ||
@@ -202,6 +199,7 @@ class AgentsPage extends HookConsumerWidget {
     Future<void> refresh() async {
       await controller.run(controller.refresh);
       if (context.mounted) {
+        attempt.value++;
         ref.invalidate(agentDirectoryProvider);
         ref.invalidate(ownedAgentDirectoryProvider);
       }
@@ -325,7 +323,7 @@ class AgentsPage extends HookConsumerWidget {
                         community != null &&
                         supportsRemoteAgents(community) &&
                         controller.owner == community.pubkey &&
-                        registered.data?.contains(key) == true &&
+                        owned?.contains(key) == true &&
                         controller.activeAgents.contains(key) &&
                         remote != null;
                     return AgentCard(

@@ -129,6 +129,44 @@ void main() {
     expect(find.text('Public key (npub) copied'), findsOneWidget);
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
+  testWidgets('an out-of-range identity shows as unavailable', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_OutOfRangeRelayConfigNotifier.new),
+          authProvider.overrideWith(_AuthNotifier.new),
+          pairingProvider.overrideWith(
+            () => _PairingNotifier(Future<bool>.value(true)),
+          ),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.ensureVisible(find.text('Copy public key (npub)'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(
+      find.ancestor(
+        of: find.text('Copy public key (npub)'),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.value == 'Identity unavailable',
+        ),
+      ),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('waits for a resumed frame before navigating after auth', (
     tester,
   ) async {
@@ -341,6 +379,17 @@ class _RelayConfigNotifier extends RelayConfigNotifier {
   static final nsec = nostr.Keys(
     '1111111111111111111111111111111111111111111111111111111111111111',
   ).nsec;
+
+  @override
+  RelayConfig build() => RelayConfig(baseUrl: 'https://relay.test', nsec: nsec);
+}
+
+class _OutOfRangeRelayConfigNotifier extends RelayConfigNotifier {
+  // Valid bech32 and 64 hex chars, but not below the secp256k1 order.
+  static final nsec = nostr.Nip19.encode(
+    prefix: nostr.Nip19Prefix.nsec,
+    data: 'f' * 64,
+  );
 
   @override
   RelayConfig build() => RelayConfig(baseUrl: 'https://relay.test', nsec: nsec);
