@@ -199,8 +199,8 @@ struct Server {
     task: tokio::task::JoinHandle<()>,
 }
 impl Server {
-    async fn new(app: axum::Router) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    async fn new(app: axum::Router, addr: &str) -> Self {
+        let listener = TcpListener::bind(addr).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             axum::serve(
@@ -251,8 +251,10 @@ async fn delivery_cancellation_retains_capacity(h2: bool) {
         10_000, // Isolate ingress while retaining real grant/quota/replay admission.
     )
     .await;
-    let server = Server::new(app).await;
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(3));
+    let server = Server::new(app, "127.0.0.1:0").await;
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(3));
     builder = if h2 {
         builder.http2_prior_knowledge()
     } else {
@@ -369,10 +371,11 @@ async fn read_status(stream: &mut TcpStream) -> u16 {
 #[tokio::test]
 async fn one_sources_slow_revocations_leave_both_handlers_available() {
     let (app, _, _, _) = fixture().await;
-    let server = Server::new(app).await;
+    let server = Server::new(app.clone(), "127.0.0.1:0").await;
+    let other_source = Server::new(app, "[::1]:0").await;
     let paths = ["/v1/delegations/revoke", "/v1/installations/revoke"];
     let client = reqwest::Client::builder()
-        .local_address("127.0.0.2".parse::<std::net::IpAddr>().unwrap())
+        .no_proxy()
         .timeout(Duration::from_secs(3))
         .build()
         .unwrap();
@@ -384,7 +387,7 @@ async fn one_sources_slow_revocations_leave_both_handlers_available() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     for path in paths {
         let response = client
-            .post(server.url(path))
+            .post(other_source.url(path))
             .body("{}")
             .send()
             .await
@@ -395,7 +398,7 @@ async fn one_sources_slow_revocations_leave_both_handlers_available() {
             "{path} must reach its handler"
         );
         let response = client
-            .post(server.url(path))
+            .post(other_source.url(path))
             .body(vec![b' '; crate::model::MAX_REQUEST_BYTES + 1])
             .send()
             .await
@@ -411,6 +414,7 @@ async fn one_sources_slow_revocations_leave_both_handlers_available() {
     statuses.sort_unstable();
     assert_eq!(statuses, [408, 408, 429, 429]);
     let own_source = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(3))
         .build()
         .unwrap();
