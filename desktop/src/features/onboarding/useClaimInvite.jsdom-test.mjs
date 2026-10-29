@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 import {
   CommunityOnboardingProvider,
   loadCommunityOnboardingTransaction,
+  saveCommunityOnboardingTransaction,
   startCommunityOnboarding,
   useCommunityOnboarding,
 } from "./communityOnboarding.tsx";
@@ -33,15 +34,61 @@ const tauri = {
 window.__TAURI_INTERNALS__ = tauri;
 globalThis.__TAURI_INTERNALS__ = tauri;
 
-for (const configured of [true, false]) {
-  test(`receipt-less invite ${configured ? "waits for native consent" : "claims a policy-free relay"}`, async () => {
+const linkJoin = {
+  source: "deep-link-join",
+  relayUrl: "wss://relay.example",
+  inviteCode: "code",
+};
+// Anyone holding the invite code can mint a receipt, so one arriving with the
+// link (or retained from an earlier same-relay transaction) must not stand in
+// for the app's own consent stage.
+for (const [name, configured, seed] of [
+  [
+    "receipt-less invite claims a policy-free relay",
+    false,
+    () => startCommunityOnboarding(linkJoin),
+  ],
+  [
+    "receipt-less invite waits for native consent",
+    true,
+    () => startCommunityOnboarding(linkJoin),
+  ],
+  [
+    "link-supplied receipt cannot bypass native consent",
+    true,
+    () =>
+      startCommunityOnboarding({ ...linkJoin, policyReceipt: "link-receipt" }),
+  ],
+  [
+    "retained same-relay receipt cannot bypass native consent",
+    true,
+    () => {
+      const timestamp = new Date().toISOString();
+      saveCommunityOnboardingTransaction({
+        id: "retained",
+        source: "deep-link-join",
+        stage: "claiming",
+        relayUrl: "wss://relay.example",
+        inviteCode: "code",
+        communityName: "relay",
+        policyReceipt: "link-receipt",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        error: "offline",
+      });
+      startCommunityOnboarding(linkJoin);
+    },
+  ],
+]) {
+  test(name, async () => {
     localStorage.clear();
-    const requests = [];
+    const claimReceipts = [];
     const original = globalThis.fetch;
-    globalThis.fetch = async (url) => {
-      requests.push(String(url));
+    globalThis.fetch = async (url, options) => {
       if (String(url).endsWith("/api/join-policy"))
         return Response.json(configured ? { policy } : {});
+      assert.equal(url, "https://relay.example/api/invites/claim");
+      claimReceipts.push(JSON.parse(options.body).policy_receipt);
       return Response.json({
         status: "joined",
         community_id: "id",
@@ -50,11 +97,7 @@ for (const configured of [true, false]) {
       });
     };
     try {
-      startCommunityOnboarding({
-        source: "deep-link-join",
-        relayUrl: "wss://relay.example",
-        inviteCode: "code",
-      });
+      seed();
       render(
         React.createElement(
           CommunityOnboardingProvider,
@@ -68,10 +111,18 @@ for (const configured of [true, false]) {
           configured ? "invite-consent" : "connecting",
         ),
       );
-      assert.equal(
-        requests.filter((url) => url.endsWith("/claim")).length,
-        configured ? 0 : 1,
-      );
+      if (configured) {
+        assert.equal(controls.transaction.policyReceipt, undefined);
+        assert.deepEqual(claimReceipts, []);
+        // Native acceptance, as the invite-consent stage's onRedeem applies it.
+        await act(async () =>
+          controls.update({ policyReceipt: "app-receipt", stage: "claiming" }),
+        );
+        await waitFor(() =>
+          assert.equal(controls.transaction.stage, "connecting"),
+        );
+      }
+      assert.deepEqual(claimReceipts, [configured ? "app-receipt" : undefined]);
     } finally {
       cleanup();
       globalThis.fetch = original;
@@ -85,8 +136,9 @@ test("rejected receipt returns to native consent and clears the stale proof", as
   globalThis.fetch = async () =>
     Response.json({ error: "join_policy_required" }, { status: 403 });
   try {
+    // An in-app form minted this receipt; link receipts never reach a claim.
     startCommunityOnboarding({
-      source: "deep-link-join",
+      source: "add-community",
       relayUrl: "wss://relay.example",
       inviteCode: "code",
       policyReceipt: "expired",
