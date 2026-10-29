@@ -1,6 +1,7 @@
 //! Subscription registry with active WebSocket indexes for targeted fan-out.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 use dashmap::DashMap;
 use nostr::{Alphabet, Filter, Kind, PublicKey, SingleLetterTag};
@@ -589,39 +590,28 @@ impl SubscriptionRegistry {
                 let ch_id = *ch_id;
                 match extract_kinds_from_filters(filters) {
                     // None = wildcard (at least one filter had no kinds constraint).
-                    None => {
-                        // Was in wildcard index.
-                        if let Some(mut entries) =
-                            self.channel_wildcard_index.get_mut(&(community_id, ch_id))
-                        {
-                            entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                            if entries.is_empty() {
-                                drop(entries);
-                                self.channel_wildcard_index.remove(&(community_id, ch_id));
-                            }
-                        }
-                    }
+                    None => remove_index_entry(
+                        &self.channel_wildcard_index,
+                        &(community_id, ch_id),
+                        conn_id,
+                        sub_id,
+                    ),
                     Some(kinds) if kinds.is_empty() => {
                         // `kinds: []` subscriptions are never indexed (they match nothing),
                         // so there is nothing to remove here.
                     }
                     Some(kinds) => {
-                        // Was in kind-specific index.
                         for kind in kinds {
                             let key = IndexKey {
                                 channel_id: ch_id,
                                 kind,
                             };
-                            if let Some(mut entries) = self
-                                .channel_kind_index
-                                .get_mut(&(community_id, key.clone()))
-                            {
-                                entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                                if entries.is_empty() {
-                                    drop(entries);
-                                    self.channel_kind_index.remove(&(community_id, key));
-                                }
-                            }
+                            remove_index_entry(
+                                &self.channel_kind_index,
+                                &(community_id, key),
+                                conn_id,
+                                sub_id,
+                            );
                         }
                     }
                 }
@@ -630,38 +620,25 @@ impl SubscriptionRegistry {
             // Global subscription — remove from the same global index chosen at registration.
             if let Some(keys) = extract_global_selector_index_keys(community_id, filters) {
                 for key in keys {
-                    if let Some(mut entries) = self.global_selector_index.get_mut(&key) {
-                        entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                        if entries.is_empty() {
-                            drop(entries);
-                            self.global_selector_index.remove(&key);
-                        }
-                    }
+                    remove_index_entry(&self.global_selector_index, &key, conn_id, sub_id);
                 }
             } else {
                 match extract_kinds_from_filters(filters) {
-                    None => {
-                        if let Some(mut entries) = self.global_wildcard_index.get_mut(&community_id)
-                        {
-                            entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                            if entries.is_empty() {
-                                drop(entries);
-                                self.global_wildcard_index.remove(&community_id);
-                            }
-                        }
-                    }
+                    None => remove_index_entry(
+                        &self.global_wildcard_index,
+                        &community_id,
+                        conn_id,
+                        sub_id,
+                    ),
                     Some(kinds) if kinds.is_empty() => {}
                     Some(kinds) => {
                         for kind in kinds {
-                            if let Some(mut entries) =
-                                self.global_kind_index.get_mut(&(community_id, kind))
-                            {
-                                entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
-                                if entries.is_empty() {
-                                    drop(entries);
-                                    self.global_kind_index.remove(&(community_id, kind));
-                                }
-                            }
+                            remove_index_entry(
+                                &self.global_kind_index,
+                                &(community_id, kind),
+                                conn_id,
+                                sub_id,
+                            );
                         }
                     }
                 }
@@ -670,13 +647,66 @@ impl SubscriptionRegistry {
     }
 }
 
+/// Removes one subscription from an index bucket, then drops the bucket if it
+/// is still empty. The bucket guard is released between the two steps, and a
+/// registration from another connection can refill the bucket in that gap, so
+/// the drop re-checks emptiness under the shard lock.
+fn remove_index_entry<K: Eq + Hash>(
+    index: &DashMap<K, Vec<(ConnId, SubId)>>,
+    key: &K,
+    conn_id: ConnId,
+    sub_id: &str,
+) {
+    let emptied = match index.get_mut(key) {
+        Some(mut entries) => {
+            entries.retain(|(cid, sid)| !(*cid == conn_id && sid == sub_id));
+            entries.is_empty()
+        }
+        None => return,
+    };
+    if emptied {
+        #[cfg(test)]
+        test_hooks::before_empty_bucket_drop();
+        index.remove_if(key, |_, entries| entries.is_empty());
+    }
+}
+
+/// Test-only hook into the gap between emptying an index bucket and dropping it.
+#[cfg(test)]
+mod test_hooks {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static BEFORE_EMPTY_BUCKET_DROP: RefCell<Option<Box<dyn FnOnce()>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Runs `hook` once, on this thread, the next time a bucket is emptied.
+    pub(super) fn arm_before_empty_bucket_drop(hook: impl FnOnce() + 'static) {
+        BEFORE_EMPTY_BUCKET_DROP.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn before_empty_bucket_drop() {
+        if let Some(hook) = BEFORE_EMPTY_BUCKET_DROP.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+}
+
 fn p_tag() -> SingleLetterTag {
     SingleLetterTag::lowercase(Alphabet::P)
 }
 
+/// Most selector-index keys one global subscription may occupy. Keys are the
+/// product of a filter's kinds and its `#p` values or authors, so a large
+/// filter would otherwise allocate millions of them; past this budget the
+/// subscription stays on the kind/wildcard indexes instead.
+const MAX_GLOBAL_SELECTOR_KEYS: usize = 4096;
+
 /// Index keys for a global subscription whose every filter is constrained to
-/// `#p` recipients, or else to authors, with or without kinds. `None` means it
-/// needs the broader kind/wildcard indexes. `#p` wins when a filter names both.
+/// `#p` recipients, or else to authors, with or without kinds, within
+/// [`MAX_GLOBAL_SELECTOR_KEYS`]. `None` means it needs the broader
+/// kind/wildcard indexes. `#p` wins when a filter names both.
 fn extract_global_selector_index_keys(
     community_id: CommunityId,
     filters: &[Filter],
@@ -707,6 +737,7 @@ fn extract_selector_keys(
 ) -> Option<Vec<GlobalSelectorIndexKey>> {
     let mut seen = HashSet::new();
     let mut keys = Vec::new();
+    let mut budget = MAX_GLOBAL_SELECTOR_KEYS;
 
     for filter in filters {
         let kinds: Vec<Option<Kind>> = match &filter.kinds {
@@ -719,6 +750,7 @@ fn extract_selector_keys(
         if selectors.is_empty() {
             return None;
         }
+        budget = budget.checked_sub(kinds.len().saturating_mul(selectors.len()))?;
 
         for kind in kinds {
             for selector in &selectors {
@@ -1783,6 +1815,136 @@ mod tests {
         assert!(registry
             .fan_out(&make_stored_event_by(&bob, presence))
             .is_empty());
+    }
+
+    #[test]
+    fn index_cleanup_keeps_a_registration_from_another_connection() {
+        let presence = Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16);
+        let alice = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        // (case, filter, channel scope, an event the filter routes)
+        let cases = [
+            (
+                "author selector",
+                Filter::new().kind(presence).author(alice.public_key()),
+                None,
+                make_stored_event_by(&alice, presence),
+            ),
+            (
+                "global kind",
+                Filter::new().kind(Kind::TextNote),
+                None,
+                make_stored_event(Kind::TextNote, None),
+            ),
+            (
+                "global wildcard",
+                Filter::new(),
+                None,
+                make_stored_event(Kind::TextNote, None),
+            ),
+            (
+                "channel kind",
+                Filter::new().kind(Kind::TextNote),
+                Some(channel_id),
+                make_stored_event(Kind::TextNote, Some(channel_id)),
+            ),
+            (
+                "channel wildcard",
+                Filter::new(),
+                Some(channel_id),
+                make_stored_event(Kind::TextNote, Some(channel_id)),
+            ),
+        ];
+
+        for (case, filter, channel, event) in cases {
+            let registry = Arc::new(SubscriptionRegistry::new());
+            let leaving = Uuid::new_v4();
+            let joining = Uuid::new_v4();
+            registry.register(leaving, "s".to_string(), vec![filter.clone()], channel);
+
+            // The last subscriber leaves; another connection subscribes to the
+            // same bucket after it is emptied and before it is dropped.
+            let joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let registry = Arc::clone(&registry);
+                let joined = Arc::clone(&joined);
+                test_hooks::arm_before_empty_bucket_drop(move || {
+                    registry.register(joining, "s".to_string(), vec![filter], channel);
+                    joined.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
+            registry.remove_connection(leaving);
+
+            assert!(
+                joined.load(std::sync::atomic::Ordering::SeqCst),
+                "{case}: hook did not run"
+            );
+            assert_eq!(
+                registry.fan_out(&event),
+                vec![(joining, "s".to_string())],
+                "{case}: cleanup dropped the new subscriber's bucket"
+            );
+        }
+    }
+
+    #[test]
+    fn global_selector_index_falls_back_past_the_key_budget() {
+        let registry = SubscriptionRegistry::new();
+        let kinds = [Kind::Custom(20001), Kind::Custom(20002)];
+        let authors: Vec<Keys> = (0..MAX_GLOBAL_SELECTOR_KEYS)
+            .map(|_| Keys::generate())
+            .collect();
+        let pubkeys: Vec<PublicKey> = authors.iter().map(Keys::public_key).collect();
+        // One past budget across both kinds.
+        let over = MAX_GLOBAL_SELECTOR_KEYS / kinds.len() + 1;
+        let p_values: Vec<String> = pubkeys[..over].iter().map(PublicKey::to_hex).collect();
+        let conn_id = Uuid::new_v4();
+
+        // Exactly at budget: one kind per author key.
+        registry.register(
+            conn_id,
+            "at".to_string(),
+            vec![Filter::new()
+                .kind(kinds[0])
+                .authors(pubkeys.iter().copied())],
+            None,
+        );
+        assert_eq!(
+            registry.global_selector_index.len(),
+            MAX_GLOBAL_SELECTOR_KEYS
+        );
+        registry.remove_subscription(conn_id, "at");
+        assert!(registry.global_selector_index.is_empty());
+
+        // One past budget, by authors and by `#p`: the generic kind index
+        // carries them and still routes every author or recipient.
+        for filter in [
+            Filter::new()
+                .kinds(kinds)
+                .authors(pubkeys[..over].iter().copied()),
+            Filter::new()
+                .kinds(kinds)
+                .custom_tags(p_tag(), p_values.iter().cloned()),
+        ] {
+            registry.register(conn_id, "over".to_string(), vec![filter], None);
+            assert!(registry.global_selector_index.is_empty());
+            assert_eq!(registry.global_kind_index.len(), kinds.len());
+            registry.remove_connection(conn_id);
+            assert!(registry.global_kind_index.is_empty());
+        }
+
+        registry.register(
+            conn_id,
+            "over".to_string(),
+            vec![Filter::new()
+                .kinds(kinds)
+                .authors(pubkeys[..over].iter().copied())],
+            None,
+        );
+        assert_eq!(
+            registry.fan_out(&make_stored_event_by(&authors[over - 1], kinds[1])),
+            vec![(conn_id, "over".to_string())]
+        );
     }
 
     #[test]
