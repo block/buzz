@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -637,6 +638,33 @@ void main() {
         expect(gateTimers.single.duration, const Duration(seconds: 7));
       },
     );
+
+    test('keeps at most the error-text limit of a compressed error', () async {
+      final bomb = gzip.encode(
+        Uint8List(32 << 20)..fillRange(0, 32 << 20, 0x78),
+      );
+      final harness = _queryHarness(
+        client: http_testing.MockClient(
+          (_) async => http.Response.bytes(
+            bomb,
+            502,
+            headers: {'content-type': 'text/plain', 'content-encoding': 'gzip'},
+          ),
+        ),
+      );
+      addTearDown(harness.container.dispose);
+
+      await expectLater(
+        harness.session.queryRelay(const []),
+        throwsA(
+          isA<RelayException>().having(
+            (e) => e.body,
+            'body',
+            'x' * relayErrorTextLimit,
+          ),
+        ),
+      );
+    });
 
     test('malformed JSON surfaces the parser FormatException', () async {
       await expectFormat('{"oops"', isNot(startsWith('relay returned')));

@@ -242,10 +242,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       throw StateError('Relay query belongs to a retired session');
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      final body = relayResponseText(
-        response.bodyBytes,
-        response.headers['content-type'],
-      );
+      final body = await relayErrorText(response);
+      if (retired()) {
+        throw StateError('Relay query belongs to a retired session');
+      }
       _activateRateLimitGateFromHttpError(body);
       throw RelayException(response.statusCode, body);
     }

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -59,15 +60,85 @@ List<NostrEvent> parseRelayQueryEvents(Uint8List bytes, String? contentType) {
 /// passes through. JSON never starts with the gzip magic bytes, so the bytes
 /// decide, not the `Content-Encoding` header a transport may leave behind.
 /// The charset rules are those of [http.Response.body].
-String relayResponseText(Uint8List bytes, String? contentType) {
-  final inflated = _isGzip(bytes)
-      ? Uint8List.fromList(gzip.decode(bytes))
-      : bytes;
-  return http.Response.bytes(
-    inflated,
-    200,
-    headers: {'content-type': ?contentType},
-  ).body;
+String relayResponseText(Uint8List bytes, String? contentType) => _text(
+  _isGzip(bytes) ? Uint8List.fromList(gzip.decode(bytes)) : bytes,
+  contentType,
+);
+
+/// The most error-body bytes [relayErrorText] keeps after inflating.
+const relayErrorTextLimit = 64 * 1024;
+
+/// The text of a relay error response, at most [relayErrorTextLimit] bytes.
+///
+/// Error bodies are short, but a compressed one could inflate without bound,
+/// so a gzip body inflates in a short-lived isolate and stops at the limit.
+/// A cut body may end mid-character; that character decodes as U+FFFD.
+Future<String> relayErrorText(http.Response response) {
+  final bytes = response.bodyBytes;
+  final contentType = response.headers['content-type'];
+  if (!_isGzip(bytes)) {
+    return Future.value(_cappedText(bytes, contentType));
+  }
+  return Isolate.run(
+    () => _cappedText(_inflateAtMost(bytes, relayErrorTextLimit), contentType),
+  );
+}
+
+String _cappedText(Uint8List bytes, String? contentType) =>
+    bytes.length < relayErrorTextLimit
+    ? _text(bytes, contentType)
+    : utf8.decode(
+        Uint8List.sublistView(bytes, 0, relayErrorTextLimit),
+        allowMalformed: true,
+      );
+
+String _text(Uint8List bytes, String? contentType) => http.Response.bytes(
+  bytes,
+  200,
+  headers: {'content-type': ?contentType},
+).body;
+
+/// Inflates [bytes] until [limit] bytes come out. Input goes in small chunks
+/// so a highly compressible body stops early instead of inflating whole.
+Uint8List _inflateAtMost(Uint8List bytes, int limit) {
+  final kept = BytesBuilder(copy: false);
+  final input = gzip.decoder.startChunkedConversion(_CappedSink(kept, limit));
+  const chunk = 4096;
+  try {
+    for (var start = 0; start < bytes.length; start += chunk) {
+      final end = min(start + chunk, bytes.length);
+      input.add(Uint8List.sublistView(bytes, start, end));
+    }
+    input.close();
+  } on _LimitReached {
+    // The kept prefix is the answer.
+  }
+  return kept.takeBytes();
+}
+
+class _LimitReached implements Exception {
+  const _LimitReached();
+}
+
+class _CappedSink implements Sink<List<int>> {
+  _CappedSink(this._kept, this._limit);
+
+  final BytesBuilder _kept;
+  final int _limit;
+
+  @override
+  void add(List<int> data) {
+    final room = _limit - _kept.length;
+    if (data.length < room) {
+      _kept.add(data);
+      return;
+    }
+    _kept.add(data.sublist(0, room));
+    throw const _LimitReached();
+  }
+
+  @override
+  void close() {}
 }
 
 bool _isGzip(Uint8List bytes) =>
