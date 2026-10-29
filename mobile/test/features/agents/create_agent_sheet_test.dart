@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:buzz/shared/agents/remote_agents.dart';
+
 import 'package:buzz/features/agents/agents_sheet.dart';
 import 'package:buzz/features/agents/create_agent_sheet.dart';
 import 'package:flutter/material.dart';
@@ -19,6 +21,15 @@ void main() {
       final added = nostr.Keys('0' * 63 + '2').public;
       await h.open(tester, directory: [existing]);
       final list = tester.element(find.byType(AgentsSheet));
+      if (!supportsRemoteAgents(h.community)) {
+        expect(
+          tester.widget<IconButton>(find.byTooltip('Add agent')).onPressed,
+          isNull,
+        );
+        expect(find.text('Sign in to create an agent'), findsNothing);
+        expect(find.byKey(ValueKey(existing)), findsOneWidget);
+        return;
+      }
       await tester.tap(find.byTooltip('Add agent'));
       await tester.pumpAndSettle();
       expect(find.byType(BottomSheet), findsNWidgets(2));
