@@ -34,6 +34,7 @@ import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
+import 'message_content/preview_source.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
 import 'message_mention_pill.dart';
@@ -299,12 +300,19 @@ class MessageContent extends HookConsumerWidget {
         ? kEmojiOnlyCustomEmojiSize
         : kCustomEmojiInlineSize;
 
+    final renderedContent = useMemoized(
+      () => maxLines == null
+          ? markdownContent
+          : markdownPreviewSource(markdownContent, maxLines!),
+      [markdownContent, maxLines],
+    );
+
     final finalContent = useMemoized(() {
       // Replace spaces with non-breaking spaces inside known mention names
       // so the gpt_markdown combined regex can match multi-word names
       // even when caseSensitive is not preserved.
       // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = markdownContent.split('`');
+      final mentionParts = renderedContent.split('`');
       final mentionBuf = StringBuffer();
       for (var i = 0; i < mentionParts.length; i++) {
         if (i.isOdd) {
@@ -332,7 +340,7 @@ class MessageContent extends HookConsumerWidget {
         result = '\u200B$result';
       }
       return result;
-    }, [markdownContent, mentionPresentationKey]);
+    }, [renderedContent, mentionPresentationKey]);
 
     final inlineComponents = _useMessageInlineComponents(
       content: content,
