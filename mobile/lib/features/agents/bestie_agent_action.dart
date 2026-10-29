@@ -6,6 +6,7 @@ import '../../shared/me/default_agent.dart';
 import '../../shared/me/default_agent_writer.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/theme/buzz_icons.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 
 /// Saves the selected owned agent using the shared desktop/mobile preference.
@@ -43,17 +44,22 @@ class BestieAgentAction extends HookConsumerWidget {
       children: [
         Semantics(
           selected: selected,
-          child: FilledButton(
+          child: FilledButton.icon(
             onPressed: saving.value || selected ? null : choose,
             style: FilledButton.styleFrom(
+              backgroundColor: context.colors.surfaceContainerHighest,
+              foregroundColor: context.colors.onSurface,
+              disabledBackgroundColor: context.colors.surfaceContainerHighest,
+              disabledForegroundColor: context.colors.onSurface,
               minimumSize: const Size(double.infinity, Grid.xxl),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(Radii.dialog),
               ),
             ),
-            child: saving.value
+            icon: saving.value
                 ? const BuzzLoadingIndicator(size: 18)
-                : Text(selected ? 'Your Bestie' : 'Make Bestie'),
+                : const Icon(BuzzIcons.star, size: 22),
+            label: Text(selected ? 'Your Bestie' : 'Make Bestie'),
           ),
         ),
         if (error.value != null)
