@@ -2303,6 +2303,11 @@ steps:
     /// workflow whose human owner is banned, without consuming either
     /// workflow's scheduled-fire claim: once unbanned, a tick for the same
     /// instant fires them. An unbanned workflow on the same tick still fires.
+    ///
+    /// `cron_tick` scans every enabled workflow in the database. The
+    /// PostgreSQL lane gives each test process its own database
+    /// (`scripts/postgres-test-wrapper.sh`), and the assertions read only
+    /// this test's workflows, so another test's schedules cannot affect it.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cron_tick_skips_banned_owners_without_consuming_the_claim() {
