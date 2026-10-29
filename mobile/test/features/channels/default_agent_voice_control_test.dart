@@ -249,7 +249,10 @@ void main() {
     final gesture = await hold(tester);
     await gesture.moveBy(const Offset(0, -90));
     await tester.pump();
-    expect(find.bySemanticsLabel('Release to cancel'), findsOneWidget);
+    expect(
+      tester.getSemantics(find.byType(DefaultAgentVoiceControl)).value,
+      contains('Release to cancel'),
+    );
     final target = find.byKey(const ValueKey('voice-cancel-target'));
     expect(tester.widget<AnimatedScale>(target).scale, 1.15);
     expect(recordingStates.last, isTrue);

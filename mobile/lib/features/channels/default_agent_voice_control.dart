@@ -291,7 +291,9 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
     }, [active, overlay]);
     return Semantics(
       value: recording.value
-          ? 'Recording ${formatVoiceNoteDuration(elapsed.value)}'
+          ? cancelled.value
+                ? 'Release to cancel'
+                : 'Recording ${formatVoiceNoteDuration(elapsed.value)}'
           : null,
       hint: 'Hold to record a voice note. Release to send. Slide up to cancel.',
       customSemanticsActions: enabled && !active
