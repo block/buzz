@@ -426,6 +426,45 @@ async fn quiet_channel_and_membership_resume_from_live_until() {
     assert_eq!(state.membership_since(), Some(1_200));
 }
 
+/// Wire `since` of a connected `SubscribeMembership` command for a membership
+/// subscription retained live until `LIVE`, with delivered progress at 4_000.
+async fn subscribe_membership_wire_since(dropped: Option<u64>) -> u64 {
+    let (mut client, mut server) = test_ws_pair().await;
+    let mut state = BgState::new();
+    state.startup_watermark = Some(1_000);
+    state.membership_last_seen = Some(4_000);
+    state.membership_dropped_since = dropped;
+    state
+        .live_until
+        .insert(MEMBERSHIP_NOTIF_SUB_ID.to_owned(), LIVE);
+    assert!(
+        execute_connected_command(
+            &mut client,
+            &mut state,
+            "agent",
+            RelayCommand::SubscribeMembership
+        )
+        .await
+    );
+    let req = next_test_frame(&mut server).await;
+    assert_eq!(req[1], MEMBERSHIP_NOTIF_SUB_ID);
+    req[2]["since"].as_u64().unwrap()
+}
+
+#[tokio::test]
+async fn subscribe_membership_command_uses_the_membership_cursor() {
+    // A recorded gap wins over progress and live coverage.
+    assert_eq!(
+        subscribe_membership_wire_since(Some(3_000)).await,
+        3_000 - SINCE_SKEW_SECS
+    );
+    // Without one, retained live coverage beats older delivered progress.
+    assert_eq!(
+        subscribe_membership_wire_since(None).await,
+        FLOOR - SINCE_SKEW_SECS
+    );
+}
+
 #[tokio::test]
 async fn closed_connection_without_eose_keeps_the_previous_cursor() {
     let (mut client, _server) = test_ws_pair().await;
