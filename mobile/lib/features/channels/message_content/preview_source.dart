@@ -41,8 +41,8 @@ String markdownPreviewSource(String content, int maxLines) {
       if (units == maxLines + 1) {
         final kept = lines.take(i).join('\n').trimRight();
         final outsideCode = _withoutCode(prose);
-        return _closesInline(kept) &&
-                !outsideCode.contains('`') &&
+        return outsideCode != null &&
+                _closesInline(kept) &&
                 _closesInline(outsideCode)
             ? kept
             : content;
@@ -60,13 +60,22 @@ String markdownPreviewSource(String content, int maxLines) {
 // at a line holding nothing but the closing backticks.
 final _fenceOpen = RegExp(r'^ *```');
 final _fenceClose = RegExp(r'^\s*```$');
-final _inlineCode = RegExp(r'`(?!`)(.+?)(?<!`)`(?!`)');
 
 /// The prose lines without their inline code spans, since delimiters inside
-/// a span cannot pair with ones outside it. A backtick left over means a span
-/// this cannot place, and the caller keeps the whole message.
-String _withoutCode(List<String> prose) =>
-    prose.map((line) => line.replaceAll(_inlineCode, '')).join('\n');
+/// a span cannot pair with ones outside it, or null when a span cannot be
+/// placed: a run of backticks, or a line with an odd number of them. With
+/// single backticks only, gpt_markdown pairs them in order within a line, so
+/// this is one linear pass over each line.
+String? _withoutCode(List<String> prose) {
+  final kept = <String>[];
+  for (final line in prose) {
+    if (line.contains('``')) return null;
+    final parts = line.split('`');
+    if (parts.length.isEven) return null;
+    kept.add([for (var i = 0; i < parts.length; i += 2) parts[i]].join());
+  }
+  return kept.join('\n');
+}
 
 bool _closesInline(String text) {
   bool even(Pattern pattern) => pattern.allMatches(text).length.isEven;

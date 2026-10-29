@@ -141,6 +141,12 @@ void main() {
       cut: false,
     ),
     (
+      name: 'double backticks',
+      source: ['a ``b`` c', 'two', 'three', 'four'].join('\n'),
+      maxLines: 1,
+      cut: false,
+    ),
+    (
       name: 'unclosed fence',
       source: ['```', for (var i = 0; i < 10; i++) 'line $i'].join('\n'),
       maxLines: 2,
@@ -188,6 +194,14 @@ void main() {
       expect(cut, full);
     });
   }
+
+  test('a crafted run of backtick pairs is scanned in linear time', () {
+    // Quadratic matching took about 17 s on this input; linear takes ~1 ms.
+    final source = ['[x](${'``x' * 20000})', 'one', 'two', 'three'].join('\n');
+    final watch = Stopwatch()..start();
+    expect(markdownPreviewSource(source, 2), source);
+    expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+  });
 
   testWidgets('a capped message leaves out the tail it cannot show', (
     tester,
