@@ -17,6 +17,43 @@ class TypingEntry {
     this.threadHeadId,
     required this.expiresAtMs,
   });
+
+  @override
+  bool operator ==(Object other) =>
+      other is TypingEntry &&
+      other.pubkey == pubkey &&
+      other.threadHeadId == threadHeadId &&
+      other.expiresAtMs == expiresAtMs;
+
+  @override
+  int get hashCode => Object.hash(pubkey, threadHeadId, expiresAtMs);
+}
+
+/// The [TypingEntry]s other than [selfPubkey]'s that [include] keeps,
+/// compared by value, so a widget that selects them rebuilds only when
+/// they change rather than on every update to the channel's list.
+@immutable
+class VisibleTyping {
+  final List<TypingEntry> entries;
+
+  VisibleTyping(
+    List<TypingEntry> all, {
+    required String? selfPubkey,
+    required bool Function(TypingEntry entry) include,
+  }) : entries = List.unmodifiable([
+         for (final entry in all)
+           if ((selfPubkey == null ||
+                   entry.pubkey.toLowerCase() != selfPubkey.toLowerCase()) &&
+               include(entry))
+             entry,
+       ]);
+
+  @override
+  bool operator ==(Object other) =>
+      other is VisibleTyping && listEquals(other.entries, entries);
+
+  @override
+  int get hashCode => Object.hashAll(entries);
 }
 
 /// Tracks who is currently typing in a specific channel.
@@ -195,7 +232,7 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
   void _prune() {
     final now = DateTime.now().millisecondsSinceEpoch;
     _activity.removeWhere((_, value) => value.retainUntil <= now);
-    state = [
+    final next = [
       for (final entry in _activity.entries)
         if (entry.value.visibleUntil > now)
           TypingEntry(
@@ -204,6 +241,9 @@ class ChannelTypingNotifier extends Notifier<List<TypingEntry>> {
             expiresAtMs: entry.value.visibleUntil,
           ),
     ];
+    // The timer ticks every second while anyone is active. Publishing an
+    // unchanged list would rebuild every watcher, including channel pages.
+    if (!listEquals(next, state)) state = next;
     if (_activity.isEmpty) {
       _pruneTimer?.cancel();
       _pruneTimer = null;

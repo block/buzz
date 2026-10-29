@@ -3,6 +3,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+
 import '../../helpers/thread_ids.dart';
 
 class _Relay extends RelaySessionNotifier {
@@ -213,5 +214,37 @@ void main() {
       ); // Expired history is not live typing.
       expect(container.read(provider), hasLength(2));
     },
+  );
+  test(
+    'prune ticks publish only when the visible entries change',
+    () => fakeAsync((async) {
+      final relay = _Relay();
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => relay)],
+      );
+      final provider = channelTypingProvider('chat');
+      var notifications = 0;
+      container.listen(provider, (_, _) => notifications++);
+      _settle(container, async);
+      relay.receive(
+        NostrEvent(
+          id: 'typing',
+          pubkey: 'agent',
+          kind: 20002,
+          createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          content: '',
+          sig: '',
+          tags: [
+            ['h', 'chat'],
+          ],
+        ),
+      );
+      expect(container.read(provider), hasLength(1));
+      expect(notifications, 1);
+      async.elapse(const Duration(milliseconds: 5500));
+      expect(container.read(provider), hasLength(1));
+      expect(notifications, 1);
+      container.dispose();
+    }),
   );
 }
