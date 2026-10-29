@@ -165,7 +165,10 @@ class SearchPage extends HookConsumerWidget {
                             backgroundColor: searchSurfaceColor,
                             foregroundColor: searchPrimaryColor,
                           ),
-                          icon: const Icon(BuzzIcons.x),
+                          icon: const Icon(
+                            BuzzIcons.x,
+                            size: buzzSearchControlIconSize,
+                          ),
                         ),
                       ),
                     const SizedBox(width: Grid.xxs),

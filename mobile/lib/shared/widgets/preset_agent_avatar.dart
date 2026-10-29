@@ -7,6 +7,7 @@ import 'package:video_player/video_player.dart';
 
 import '../animated_avatar.dart';
 import 'avatar_image.dart';
+import 'android_transparent_avatar.dart';
 
 /// Plays the transparent video paired with a bundled character poster.
 class PresetAgentAvatar extends HookWidget {
@@ -26,10 +27,13 @@ class PresetAgentAvatar extends HookWidget {
     final poster = parseAnimatedAvatarUrl(imageUrl)?.posterUrl ?? imageUrl;
     final uri = Uri.tryParse(poster);
     final canPlay =
-        usesInsetAgentArtwork(poster) &&
+        RegExp(
+          r'^/avatars/[A-Za-z0-9_-]+/poster/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+\.png$',
+        ).hasMatch(uri?.path ?? '') &&
         uri?.host == 'dwwgwmfqqjotj.cloudfront.net' &&
         !MediaQuery.disableAnimationsOf(context);
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    final isAndroid = defaultTargetPlatform == TargetPlatform.android;
     final videoUrl = canPlay
         ? uri!.replace(
             path: uri.path
@@ -38,7 +42,7 @@ class PresetAgentAvatar extends HookWidget {
           )
         : null;
     final controller = useMemoized(
-      () => videoUrl == null
+      () => videoUrl == null || isAndroid
           ? null
           : VideoPlayerController.networkUrl(
               videoUrl,
@@ -48,7 +52,7 @@ class PresetAgentAvatar extends HookWidget {
                   : VideoViewType.textureView,
               videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
             ),
-      [videoUrl],
+      [videoUrl, isAndroid],
     );
     final ready = useState<VideoPlayerController?>(null);
     final lifecycle = useAppLifecycleState();
@@ -96,7 +100,17 @@ class PresetAgentAvatar extends HookWidget {
       dimension: size,
       child: Transform.scale(
         scale: animatedAvatarArtworkScale,
-        child: controller != null && ready.value == controller
+        child: isAndroid && videoUrl != null
+            ? AndroidTransparentAvatar(
+                key: ValueKey(videoUrl),
+                url: videoUrl,
+                playing: playing,
+                fallback: AvatarImageContent(
+                  imageUrl: poster,
+                  fallback: fallback,
+                ),
+              )
+            : controller != null && ready.value == controller
             ? VideoPlayer(controller)
             : AvatarImageContent(imageUrl: poster, fallback: fallback),
       ),

@@ -178,6 +178,9 @@ class FilterChipBar<T> extends StatelessWidget {
         : context.colors.onSurfaceVariant;
     final labelStyle = filterChipTextStyle.copyWith(
       color: fg,
+      leadingDistribution: defaultTargetPlatform == TargetPlatform.android
+          ? TextLeadingDistribution.even
+          : null,
       fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
     );
     final label = item.icon != null
@@ -213,9 +216,11 @@ class FilterChipBar<T> extends StatelessWidget {
     final chip = FilterChip(
       selected: isSelected,
       showCheckmark: false,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(Radii.lg),
-      ),
+      shape: useNativeGlass || defaultTargetPlatform == TargetPlatform.android
+          ? const StadiumBorder()
+          : RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Radii.lg),
+            ),
       side: BorderSide.none,
       label: fillWidth
           ? SizedBox(width: double.infinity, child: centeredLabel)

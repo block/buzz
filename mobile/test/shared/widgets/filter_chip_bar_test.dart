@@ -47,8 +47,11 @@ void main() {
     final chip = tester.widget<FilterChip>(
       find.widgetWithText(FilterChip, 'Everyone'),
     );
-    final shape = chip.shape! as RoundedRectangleBorder;
-    expect(shape.borderRadius, BorderRadius.circular(Radii.lg));
+    expect(chip.shape, isA<StadiumBorder>());
+    expect(
+      selectedLabel.style?.leadingDistribution,
+      TextLeadingDistribution.even,
+    );
     expect(chip.labelPadding, EdgeInsets.zero);
   });
 

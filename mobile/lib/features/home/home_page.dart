@@ -1,7 +1,6 @@
-import 'dart:async';
+import '../../shared/widgets/android_expanding_menu_button.dart';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -142,21 +141,17 @@ class HomePage extends HookConsumerWidget {
               plain: false,
             )
           else
-            PopupMenuButton<int>(
-              tooltip: 'Community menu',
-              onOpened: () => unawaited(HapticFeedback.lightImpact()),
-              icon: CommunityAvatar(
+            AndroidExpandingMenuButton(
+              label: 'Community menu',
+              actions: moreActions,
+              dividerBefore: const {1},
+              width: 48,
+              height: 48,
+              trigger: CommunityAvatar(
                 name: communityName,
                 relayUrl: community?.relayUrl,
                 size: 36,
               ),
-              onSelected: (index) => moreActions[index].onPressed(),
-              itemBuilder: (_) => [
-                for (var i = 0; i < moreActions.length; i++) ...[
-                  if (i == 1) const PopupMenuDivider(),
-                  PopupMenuItem(value: i, child: Text(moreActions[i].label)),
-                ],
-              ],
             ),
         ];
       },

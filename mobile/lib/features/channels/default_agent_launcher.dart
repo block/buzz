@@ -14,7 +14,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
-import '../../shared/widgets/concentric_sheet_surface.dart';
+import '../../shared/widgets/navigation_button_surface.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channels_provider.dart';
@@ -114,13 +114,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
     }
 
-    return ConcentricSheetSurface(
-      enabled: true,
-      usesGlass: true,
-      providesSheetSurface: false,
-      padding: EdgeInsets.zero,
-      minimumRadius: Radii.navigationCapsule,
-      contentClipRadius: Radii.navigationCapsule,
+    return NavigationButtonSurface(
       child: SizedBox.square(
         dimension: 56,
         child: IconButton(
