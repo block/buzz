@@ -6,7 +6,6 @@ import '../../shared/me/default_agent.dart';
 import '../../shared/me/default_agent_writer.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/theme/theme.dart';
-import '../../shared/theme/buzz_icons.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 
 /// Saves the selected owned agent using the shared desktop/mobile preference.
@@ -58,7 +57,9 @@ class BestieAgentAction extends HookConsumerWidget {
             ),
             icon: saving.value
                 ? const BuzzLoadingIndicator(size: 18)
-                : const Icon(BuzzIcons.star, size: 22),
+                : selected
+                ? const Icon(Icons.star, size: 22)
+                : null,
             label: Text(selected ? 'Your Bestie' : 'Make Bestie'),
           ),
         ),
