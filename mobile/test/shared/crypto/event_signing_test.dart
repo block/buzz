@@ -209,5 +209,18 @@ void main() {
       ),
       isFalse,
     );
+    final uppercase = {
+      'pubkey': (publicKey.toUpperCase(), digest, reference),
+      'message': (publicKey, digest.toUpperCase(), reference),
+      'signature': (publicKey, digest, reference.toUpperCase()),
+    };
+    for (final MapEntry(key: name, value: (key, message, sig))
+        in uppercase.entries) {
+      expect(
+        verifySchnorrHex(publicKey: key, messageHex: message, signature: sig),
+        isFalse,
+        reason: 'uppercase $name',
+      );
+    }
   });
 }
