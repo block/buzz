@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
 
-const SUB_FLOOR_OFFSET: u64 = RESUME_LIVE_SKEW_SECS;
-/// A `now` far enough past every `live_until` in a table that the silent-drop
-/// repair window never binds.
-const LONG_AFTER: u64 = u64::MAX;
+const SUB_FLOOR_OFFSET: u64 = SILENT_DROP_REPAIR_WINDOW_SECS;
+/// `live_until` used by the table, and the live floor it gives.
+const LIVE: u64 = 10_000;
+const FLOOR: u64 = LIVE - SUB_FLOOR_OFFSET;
 
 #[test]
 fn resume_since_table_over_input_combinations() {
@@ -67,41 +67,41 @@ fn resume_since_table_over_input_combinations() {
             Some(1000),
             None,
             None,
-            Some(5000),
-            Some(5000 - SUB_FLOOR_OFFSET),
+            Some(LIVE),
+            Some(FLOOR),
         ),
         (
             "eose, quiet, no baseline",
             None,
             None,
             None,
-            Some(5000),
-            Some(5000 - SUB_FLOOR_OFFSET),
+            Some(LIVE),
+            Some(FLOOR),
         ),
         // EOSE and events: newest of last_seen and the live floor wins.
         (
             "eose, last_seen newer than floor",
             Some(1000),
-            Some(4990),
+            Some(LIVE - 10),
             None,
-            Some(5000),
-            Some(4990),
+            Some(LIVE),
+            Some(LIVE - 10),
         ),
         (
             "eose, floor newer than last_seen",
             Some(1000),
-            Some(3900),
+            Some(FLOOR - 100),
             None,
-            Some(5000),
-            Some(5000 - SUB_FLOOR_OFFSET),
+            Some(LIVE),
+            Some(FLOOR),
         ),
         // Dropped / gap floor keeps precedence over the live cursor.
         (
             "eose, dropped below cursor",
             Some(1000),
-            Some(4990),
+            Some(LIVE - 10),
             Some(3000),
-            Some(5000),
+            Some(LIVE),
             Some(3000),
         ),
         (
@@ -109,16 +109,16 @@ fn resume_since_table_over_input_combinations() {
             Some(1000),
             None,
             Some(3000),
-            Some(5000),
+            Some(LIVE),
             Some(3000),
         ),
         (
             "eose, dropped above cursor",
             Some(1000),
             None,
-            Some(4990),
-            Some(5000),
-            Some(5000 - SUB_FLOOR_OFFSET),
+            Some(LIVE - 10),
+            Some(LIVE),
+            Some(FLOOR),
         ),
         // Clock-skew edges: never below the original floor, never underflow.
         (
@@ -135,7 +135,7 @@ fn resume_since_table_over_input_combinations() {
             None,
             None,
             Some(1100),
-            Some(1100 - SUB_FLOOR_OFFSET).max(Some(1000)),
+            Some(1000),
         ),
         (
             "eose, live_until underflow, no baseline",
@@ -148,7 +148,7 @@ fn resume_since_table_over_input_combinations() {
     ];
     for (name, base, last_seen, dropped, live_until, expected) in cases {
         assert_eq!(
-            resume_since(*base, *last_seen, *dropped, *live_until, LONG_AFTER),
+            resume_since(*base, *last_seen, *dropped, *live_until),
             *expected,
             "{name}"
         );
@@ -156,32 +156,39 @@ fn resume_since_table_over_input_combinations() {
 }
 
 #[test]
-fn live_floor_budgets_commit_delay_and_clock_skew_separately() {
+fn repair_window_covers_commit_delay_and_clock_skew() {
     // The commit-time floor (960s, which already includes 60s of commit delay
     // on top of the 900s ingest drift) and the client clock skew (60s) are
-    // separate budgets; `send_subscribe` subtracts SINCE_SKEW_SECS on top.
+    // separate budgets, and the repair window covers both (also asserted at
+    // compile time); `send_subscribe` subtracts SINCE_SKEW_SECS on top.
     assert_eq!(RESUME_LIVE_SKEW_SECS, 960 + 60);
-    let cursor = resume_since(Some(1), None, None, Some(10_000), LONG_AFTER).unwrap();
-    assert_eq!(cursor, 10_000 - RESUME_LIVE_SKEW_SECS);
+    let cursor = resume_since(Some(1), None, None, Some(10_000)).unwrap();
+    assert_eq!(cursor, 10_000 - SILENT_DROP_REPAIR_WINDOW_SECS);
+    assert!(10_000 - cursor >= RESUME_LIVE_SKEW_SECS);
 }
 
 #[test]
-fn live_coverage_never_advances_the_cursor_past_the_repair_window() {
+fn repair_window_counts_back_from_live_until() {
     const NOW: u64 = 10_000_000;
     let since = |base, last_seen, floor, live_until| {
-        resume_since(base, last_seen, floor, Some(live_until), NOW).unwrap()
+        resume_since(base, last_seen, floor, Some(live_until)).unwrap()
     };
-    // A short outage: live_until alone would replay ~17 minutes, but the last
-    // hour is re-read so an unsignaled live drop within it is repaired.
+    // A short outage: the hour before the subscription went offline is
+    // re-read, so an unsignaled live drop within it is repaired.
     assert_eq!(
         since(Some(1_000), None, None, NOW - 30),
-        NOW - SILENT_DROP_REPAIR_WINDOW_SECS
+        NOW - 30 - SILENT_DROP_REPAIR_WINDOW_SECS
     );
-    // A long outage: the live-derived floor is already older than an hour.
+    // A long outage (a laptop sleep): still the full hour before it went
+    // offline, not just the commit-floor margin, so a drop 30 minutes before
+    // the sleep is repaired too.
+    let live_until = NOW - 7_200;
+    let drop_before_sleep = live_until - 1_800;
     assert_eq!(
-        since(Some(1_000), None, None, NOW - 7_200),
-        NOW - 7_200 - RESUME_LIVE_SKEW_SECS
+        since(Some(1_000), None, None, live_until),
+        live_until - SILENT_DROP_REPAIR_WINDOW_SECS
     );
+    assert!(since(Some(1_000), None, None, live_until) <= drop_before_sleep);
     // Never before the original floor, which may be inside the window.
     assert_eq!(since(Some(NOW - 600), None, None, NOW - 30), NOW - 600);
     // Delivered progress still advances the cursor as it always did; the
@@ -190,10 +197,7 @@ fn live_coverage_never_advances_the_cursor_past_the_repair_window() {
     // A recorded gap older than the window still wins.
     assert_eq!(since(Some(1_000), None, Some(5_000), NOW - 30), 5_000);
     // Without live_until the window plays no part: today's behavior.
-    assert_eq!(
-        resume_since(Some(1_000), None, None, None, NOW),
-        Some(1_000)
-    );
+    assert_eq!(resume_since(Some(1_000), None, None, None), Some(1_000));
 }
 
 #[tokio::test]
@@ -217,7 +221,7 @@ async fn quiet_subscription_resumed_now_replays_the_last_hour() {
 /// Wire `since` of the replay for a quiet subscription whose connection was
 /// last live at `live_until` on the agent's clock.
 fn wire_since_after(live_until: u64) -> u64 {
-    resume_since(Some(1_000), None, None, Some(live_until), LONG_AFTER).unwrap() - SINCE_SKEW_SECS
+    resume_since(Some(1_000), None, None, Some(live_until)).unwrap() - SINCE_SKEW_SECS
 }
 
 #[test]
@@ -415,11 +419,11 @@ async fn quiet_channel_and_membership_resume_from_live_until() {
     );
     assert_eq!(state.membership_since(), Some(5_000 - SUB_FLOOR_OFFSET));
 
-    // A recorded gap still wins for both.
-    state.channel_dropped_since.insert(channel, 2_000);
-    state.membership_dropped_since = Some(2_000);
-    assert_eq!(state.channel_since(&channel), Some(2_000));
-    assert_eq!(state.membership_since(), Some(2_000));
+    // A recorded gap below the live floor still wins for both.
+    state.channel_dropped_since.insert(channel, 1_200);
+    state.membership_dropped_since = Some(1_200);
+    assert_eq!(state.channel_since(&channel), Some(1_200));
+    assert_eq!(state.membership_since(), Some(1_200));
 }
 
 #[tokio::test]
@@ -584,14 +588,8 @@ async fn autonomous_reconnect_stamps_live_until_and_replay_req_resumes_from_it()
     let live_until = state.live_until[&channel_sub_id(channel)];
     assert!((before..=after).contains(&live_until));
     let since = first_replay_req(&mut state, &channel_sub_id(channel)).await;
-    // Just reconnected, so the silent-drop repair window is the binding floor.
-    let expected = (live_until - RESUME_LIVE_SKEW_SECS)
-        .min(unix_now_secs() - SILENT_DROP_REPAIR_WINDOW_SECS)
-        - SINCE_SKEW_SECS;
-    assert!(
-        since.abs_diff(expected) <= 2,
-        "since={since} expected~{expected}"
-    );
+    let expected = live_until - SILENT_DROP_REPAIR_WINDOW_SECS - SINCE_SKEW_SECS;
+    assert_eq!(since, expected);
     assert!(since > 1_000, "must not replay from the original floor");
     assert!(
         since <= live_until - RELAY_COMMIT_CREATED_AT_FLOOR_SECS - CLIENT_CLOCK_SKEW_SECS,
@@ -1406,8 +1404,9 @@ async fn resume_after_a_two_hour_sleep(buffered: Option<MockCtl>, loss: MockCtl)
     assert_eq!(barrier_req[1], channel_sub_id(throwaway));
 
     // Two hours pass with nothing from the relay; then the loss is noticed.
-    // Longer than the silent-drop repair window, so the window alone cannot
-    // cover a mention stored early in the sleep.
+    // Longer than the silent-drop repair window, so a `live_until` stamped at
+    // the wake time would put the cursor past a mention stored early in the
+    // sleep.
     FAKE_NOW.store(T0 + 7_200, Ordering::SeqCst);
     if let Some(frame) = buffered {
         conn0.ctl.send(frame).unwrap();
@@ -1434,7 +1433,7 @@ async fn resume_after_a_two_hour_sleep(buffered: Option<MockCtl>, loss: MockCtl)
         let since = req[2]["since"].as_u64().unwrap();
         // Inbound frames are stamped from the monotonic clock, which keeps
         // running in real time here; allow a few seconds of test runtime.
-        let expected = T0 - RESUME_LIVE_SKEW_SECS - SINCE_SKEW_SECS;
+        let expected = T0 - SILENT_DROP_REPAIR_WINDOW_SECS - SINCE_SKEW_SECS;
         assert!(
             (expected..=expected + 5).contains(&since),
             "{} must resume from the last inbound frame before the sleep: since={since}, expected~{expected}",

@@ -59,10 +59,16 @@ const STABLE_CONNECTION_SECS: u64 = 60;
 const SINCE_SKEW_SECS: u64 = 5;
 /// How far before the relay's clock at commit a stored channel event's
 /// `created_at` may be (`CREATED_AT_FLOOR_SECS` in `buzz-db`'s
-/// `runtime/replica_fence.rs`). That floor is the ±900s ingest drift bound plus
-/// 60s for validation and persistence between ingest and commit, so it already
-/// spends its own slack: an event committed after a disconnect is dated at most
-/// this long before the disconnect, in relay time.
+/// `runtime/replica_fence.rs`; keep the two in step). That floor is the ±900s
+/// ingest drift bound plus 60s for validation and persistence between ingest
+/// and commit, so it already spends its own slack: an event committed after a
+/// disconnect is dated at most this long before the disconnect, in relay time.
+///
+/// Two clocks are assumed rather than budgeted: the floor is checked against
+/// the database clock, which is taken to agree with the relay pod's (both
+/// NTP-synced). Membership notices are stored without a channel, so the floor
+/// guard does not apply to them; the relay signs them as it builds them, so
+/// they are dated at relay time and stay inside the bound in practice.
 const RELAY_COMMIT_CREATED_AT_FLOOR_SECS: u64 = 960;
 /// Bound on the agent clock's offset from the relay's. The relay rejects a
 /// NIP-42 AUTH event more than ±60s from its own time (`buzz-auth`'s
@@ -70,25 +76,27 @@ const RELAY_COMMIT_CREATED_AT_FLOOR_SECS: u64 = 960;
 /// relay's. `live_until` is read from the agent's clock while the commit floor
 /// is in relay time, so the skew needs its own budget.
 const CLIENT_CLOCK_SKEW_SECS: u64 = 60;
-/// Margin subtracted from a connection's `live_until` when resuming a
-/// subscription that reached EOSE on it: the commit-time floor plus the client
-/// clock skew. `send_subscribe` subtracts `SINCE_SKEW_SECS` on top, which covers
-/// fan-out latency and whole-second truncation. A narrower window would miss a
+/// Least a resumed subscription must replay before its `live_until`: the
+/// commit-time floor plus the client clock skew. Anything narrower would miss a
 /// backdated event committed just after the disconnect, which a quiet
-/// subscription's full replay used to catch.
+/// subscription's full replay used to catch. `send_subscribe` subtracts
+/// `SINCE_SKEW_SECS` on top, which covers fan-out latency and whole-second
+/// truncation.
 const RESUME_LIVE_SKEW_SECS: u64 = RELAY_COMMIT_CREATED_AT_FLOOR_SECS + CLIENT_CLOCK_SKEW_SECS;
-/// How far back from the time of the REQ live coverage alone may leave a
-/// resumed subscription's cursor: `live_until` never advances it past this
-/// window, though delivered progress (`last_seen`) still does, as it always
-/// has. The relay's live delivery is at-most-once: it can drop an event without
-/// telling the client (full send buffer within its grace limit, cross-node
-/// fan-out lag, a Redis subscriber reconnect). A subscription that reached EOSE
-/// and stayed connected has therefore not proved it saw everything, so a quiet
-/// subscription still re-reads the last hour on reconnect and repairs such a
-/// drop if it happened within that hour. Older silent drops are not repaired;
-/// before `live_until`, a quiet subscription repaired them by replaying from
-/// its original floor on every reconnect, at a cost that grew with process age.
+/// How far before its `live_until` a resumed subscription replays. Live
+/// delivery is at-most-once: the relay can drop an event without telling the
+/// client (full send buffer within its grace limit, cross-node fan-out lag, a
+/// Redis subscriber reconnect). A subscription that reached EOSE and stayed
+/// connected has therefore not proved it saw everything, so a resume re-reads
+/// the last hour it was live and repairs such a drop if it happened in that
+/// hour, however long the outage that followed. Older silent drops are not
+/// repaired; before `live_until`, a quiet subscription repaired them by
+/// replaying from its original floor on every reconnect, at a cost that grew
+/// with process age. The window also covers [`RESUME_LIVE_SKEW_SECS`].
+/// `live_until` never advances the cursor past it, though delivered progress
+/// (`last_seen`) still does, as it always has.
 const SILENT_DROP_REPAIR_WINDOW_SECS: u64 = 3_600;
+const _: () = assert!(SILENT_DROP_REPAIR_WINDOW_SECS >= RESUME_LIVE_SKEW_SECS);
 /// WebSocket close code 1001 (Going Away): the peer is shutting down.
 const CLOSE_CODE_GOING_AWAY: u16 = 1001;
 /// WebSocket close code 1012 (Service Restart): the relay pod is rolling.
@@ -1281,7 +1289,7 @@ struct BgState {
     /// Unix seconds up to which a subscription that reached EOSE was last known
     /// to be live: the newest non-Close frame read on that connection (see
     /// `last_inbound_secs`), capped at the time the close was detected. A
-    /// reconnect replays from here minus `RESUME_LIVE_SKEW_SECS`.
+    /// reconnect replays from here minus `SILENT_DROP_REPAIR_WINDOW_SECS`.
     live_until: HashMap<String, u64>,
     /// Loss records (`channel_dropped_since` / `membership_dropped_since`)
     /// that a REQ written on the CURRENT connection retired, keyed by
@@ -1397,7 +1405,6 @@ impl BgState {
             self.last_seen.get(channel_id).copied(),
             self.channel_dropped_since.get(channel_id).copied(),
             self.live_until.get(&sub_id).copied(),
-            (self.now_secs)(),
         )
     }
 
@@ -1408,7 +1415,6 @@ impl BgState {
             self.membership_last_seen,
             self.membership_dropped_since,
             self.live_until.get(MEMBERSHIP_NOTIF_SUB_ID).copied(),
-            (self.now_secs)(),
         )
     }
 
@@ -1856,7 +1862,7 @@ async fn execute_connected_command(
                 state.membership_resub_needed = true;
                 return true;
             }
-            let since = state.membership_last_seen.or(state.startup_watermark);
+            let since = state.membership_since();
             let sent = send_membership_subscribe(ws, state, agent_pubkey_hex, since).await;
             if sent {
                 state.membership_resub_needed = false;
@@ -3833,25 +3839,20 @@ fn first_reconnect_delay(close_code: Option<u16>, sample: f64) -> Duration {
 /// - `dropped`: oldest event lost to backpressure; a recorded gap, so the
 ///   result never advances past it.
 /// - `live_until`: see [`BgState::live_until`].
-/// - `now`: wall-clock unix seconds, for [`SILENT_DROP_REPAIR_WINDOW_SECS`].
 ///
 /// Without `live_until` this is the pre-existing `min(last_seen, dropped)`
 /// else `base`. With `live_until`, the delivered-progress cursor becomes
-/// `max(base, last_seen, min(live_until - RESUME_LIVE_SKEW_SECS,
-/// now - SILENT_DROP_REPAIR_WINDOW_SECS))`, then the dropped floor is applied
-/// on top.
+/// `max(base, last_seen, live_until - SILENT_DROP_REPAIR_WINDOW_SECS)`, then
+/// the dropped floor is applied on top.
 fn resume_since(
     base: Option<u64>,
     last_seen: Option<u64>,
     dropped: Option<u64>,
     live_until: Option<u64>,
-    now: u64,
 ) -> Option<u64> {
     let cursor = match live_until {
         Some(live_until) => {
-            let live_floor = live_until
-                .saturating_sub(RESUME_LIVE_SKEW_SECS)
-                .min(now.saturating_sub(SILENT_DROP_REPAIR_WINDOW_SECS));
+            let live_floor = live_until.saturating_sub(SILENT_DROP_REPAIR_WINDOW_SECS);
             Some(
                 [base, last_seen, Some(live_floor)]
                     .into_iter()
