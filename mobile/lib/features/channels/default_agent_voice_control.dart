@@ -281,6 +281,11 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
               const CustomSemanticsAction(label: 'Record voice note'): () =>
                   unawaited(start()),
             }
+          : recording.value
+          ? {
+              const CustomSemanticsAction(label: 'Discard voice note'): () =>
+                  unawaited(cancel()),
+            }
           : null,
       child: Listener(
         onPointerCancel: (_) => unawaited(cancel()),
@@ -328,17 +333,14 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                                 maxWidth: 224 + Grid.xs * 2 - Grid.xxs * 2,
                                 child: Row(
                                   children: [
-                                    if (recording.value ||
-                                        (!sending.value &&
-                                            (pending.value != null ||
-                                                restoreFailed.value)))
+                                    if (!recording.value &&
+                                        !sending.value &&
+                                        (pending.value != null ||
+                                            restoreFailed.value))
                                       IconButton(
                                         tooltip: 'Discard voice note',
-                                        onPressed: () => unawaited(
-                                          recording.value
-                                              ? cancel()
-                                              : discardPending(),
-                                        ),
+                                        onPressed: () =>
+                                            unawaited(discardPending()),
                                         icon: const Icon(Icons.close),
                                       ),
                                     Expanded(
@@ -375,17 +377,34 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                                               'Release to cancel',
                                               maxLines: 1,
                                             )
-                                          : VoiceNoteWaveform(
-                                              samples: [
-                                                ...List.filled(
-                                                  41 - samples.value.length,
-                                                  0.0,
+                                          : Column(
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment.center,
+                                              children: [
+                                                VoiceNoteWaveform(
+                                                  samples: [
+                                                    ...List.filled(
+                                                      41 - samples.value.length,
+                                                      0.0,
+                                                    ),
+                                                    ...samples.value,
+                                                  ],
+                                                  progress: 1,
+                                                  fadeEdges: true,
+                                                  height: 20,
                                                 ),
-                                                ...samples.value,
+                                                Flexible(
+                                                  child: Text(
+                                                    'Slide up to cancel',
+                                                    style: context
+                                                        .textTheme
+                                                        .labelSmall,
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                  ),
+                                                ),
                                               ],
-                                              progress: 1,
-                                              fadeEdges: true,
-                                              height: 24,
                                             ),
                                     ),
                                     if (recording.value)
