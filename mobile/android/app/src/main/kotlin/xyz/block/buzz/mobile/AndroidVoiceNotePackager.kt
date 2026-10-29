@@ -1,6 +1,7 @@
 package xyz.block.buzz.mobile
 
 import android.media.MediaCodec
+import android.media.MediaCodecList
 import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -82,7 +83,15 @@ internal object AndroidVoiceNotePackager {
         outputFile: File,
         durationUs: Long,
     ) {
-        val codec = MediaCodec.createEncoderByType(videoMimeType)
+        // The default hardware encoder may reject our tiny envelope frames.
+        // Select an encoder that explicitly supports the requested dimensions.
+        val codecInfo = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+            .firstOrNull { info ->
+                info.isEncoder && info.supportedTypes.any { it.equals(videoMimeType, true) } &&
+                    info.getCapabilitiesForType(videoMimeType).videoCapabilities
+                        .isSizeSupported(videoWidth, videoHeight)
+            } ?: throw IllegalStateException("This device cannot create the voice note envelope.")
+        val codec = MediaCodec.createByCodecName(codecInfo.name)
         var muxer: MediaMuxer? = null
         try {
             val colorFormat = codec.codecInfo

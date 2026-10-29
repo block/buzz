@@ -196,6 +196,10 @@ void main() {
       expect(after.right, before.right);
       expect(after.width, 256);
       expect(
+        tester.getRect(find.text('Slide up to cancel')).bottom,
+        lessThan(after.top),
+      );
+      expect(
         tester
             .widget<VoiceNoteWaveform>(find.byType(VoiceNoteWaveform))
             .samples

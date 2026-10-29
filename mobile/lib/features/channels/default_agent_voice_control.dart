@@ -309,149 +309,158 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
             height: 56,
             // Keep one native glass view mounted while the finger is down.
             // Replacing its UIKit subtree cancels the active iOS touch.
-            child: ConcentricSheetSurface(
-              enabled: true,
-              usesGlass: true,
-              providesSheetSurface: false,
-              padding: EdgeInsets.zero,
-              minimumRadius: Radii.navigationCapsule,
-              contentClipRadius: Radii.navigationCapsule,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Positioned.fill(
-                    child: !active
-                        ? const SizedBox.shrink()
-                        : Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Grid.xxs,
-                            ),
-                            child: ClipRect(
-                              child: OverflowBox(
-                                alignment: Alignment.centerRight,
-                                minWidth: 224 + Grid.xs * 2 - Grid.xxs * 2,
-                                maxWidth: 224 + Grid.xs * 2 - Grid.xxs * 2,
-                                child: Row(
-                                  children: [
-                                    if (!recording.value &&
-                                        !sending.value &&
-                                        (pending.value != null ||
-                                            restoreFailed.value))
-                                      IconButton(
-                                        tooltip: 'Discard voice note',
-                                        onPressed: () =>
-                                            unawaited(discardPending()),
-                                        icon: const Icon(Icons.close),
-                                      ),
-                                    Expanded(
-                                      child: sending.value || finalizing.value
-                                          ? const Center(
-                                              child: CircularProgressIndicator(
-                                                semanticsLabel:
-                                                    'Sending voice note',
-                                                strokeWidth: 2,
-                                              ),
-                                            )
-                                          : restoreFailed.value
-                                          ? TextButton(
-                                              onPressed: restoring.value
-                                                  ? null
-                                                  : () => unawaited(restore()),
-                                              child: Text(
-                                                error.value!,
-                                                maxLines: 2,
-                                              ),
-                                            )
-                                          : pending.value != null
-                                          ? TextButton(
-                                              onPressed: () => unawaited(
-                                                send(pending.value!),
-                                              ),
-                                              child: Text(
-                                                error.value ??
-                                                    'Retry voice note',
-                                              ),
-                                            )
-                                          : cancelled.value
-                                          ? const Text(
-                                              'Release to cancel',
-                                              maxLines: 1,
-                                            )
-                                          : Column(
-                                              mainAxisAlignment:
-                                                  MainAxisAlignment.center,
-                                              children: [
-                                                VoiceNoteWaveform(
-                                                  samples: [
-                                                    ...List.filled(
-                                                      41 - samples.value.length,
-                                                      0.0,
-                                                    ),
-                                                    ...samples.value,
-                                                  ],
-                                                  progress: 1,
-                                                  fadeEdges: true,
-                                                  height: 20,
-                                                ),
-                                                Flexible(
-                                                  child: Text(
-                                                    'Slide up to cancel',
-                                                    style: context
-                                                        .textTheme
-                                                        .labelSmall,
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                  ),
-                                                ),
-                                              ],
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Positioned.fill(
+                  child: ConcentricSheetSurface(
+                    enabled: true,
+                    usesGlass: true,
+                    providesSheetSurface: false,
+                    padding: EdgeInsets.zero,
+                    minimumRadius: Radii.navigationCapsule,
+                    contentClipRadius: Radii.navigationCapsule,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Positioned.fill(
+                          child: !active
+                              ? const SizedBox.shrink()
+                              : Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: Grid.xxs,
+                                  ),
+                                  child: ClipRect(
+                                    child: OverflowBox(
+                                      alignment: Alignment.centerRight,
+                                      minWidth:
+                                          224 + Grid.xs * 2 - Grid.xxs * 2,
+                                      maxWidth:
+                                          224 + Grid.xs * 2 - Grid.xxs * 2,
+                                      child: Row(
+                                        children: [
+                                          if (!recording.value &&
+                                              !sending.value &&
+                                              (pending.value != null ||
+                                                  restoreFailed.value))
+                                            IconButton(
+                                              tooltip: 'Discard voice note',
+                                              onPressed: () =>
+                                                  unawaited(discardPending()),
+                                              icon: const Icon(Icons.close),
                                             ),
+                                          Expanded(
+                                            child:
+                                                sending.value ||
+                                                    finalizing.value
+                                                ? const Center(
+                                                    child: CircularProgressIndicator(
+                                                      semanticsLabel:
+                                                          'Sending voice note',
+                                                      strokeWidth: 2,
+                                                    ),
+                                                  )
+                                                : restoreFailed.value
+                                                ? TextButton(
+                                                    onPressed: restoring.value
+                                                        ? null
+                                                        : () => unawaited(
+                                                            restore(),
+                                                          ),
+                                                    child: Text(
+                                                      error.value!,
+                                                      maxLines: 2,
+                                                    ),
+                                                  )
+                                                : pending.value != null
+                                                ? TextButton(
+                                                    onPressed: () => unawaited(
+                                                      send(pending.value!),
+                                                    ),
+                                                    child: Text(
+                                                      error.value ??
+                                                          'Retry voice note',
+                                                    ),
+                                                  )
+                                                : VoiceNoteWaveform(
+                                                    samples: [
+                                                      ...List.filled(
+                                                        41 -
+                                                            samples
+                                                                .value
+                                                                .length,
+                                                        0.0,
+                                                      ),
+                                                      ...samples.value,
+                                                    ],
+                                                    progress: 1,
+                                                    fadeEdges: true,
+                                                    height: 32,
+                                                  ),
+                                          ),
+                                          if (recording.value)
+                                            const SizedBox(width: 48),
+                                        ],
+                                      ),
                                     ),
-                                    if (recording.value)
-                                      const SizedBox(width: 48),
-                                  ],
+                                  ),
+                                ),
+                        ),
+                        // The avatar can itself own an iOS video platform view.
+                        // Keep it mounted at the same location throughout the hold.
+                        Positioned(
+                          right: 0,
+                          top: 0,
+                          width: 56,
+                          height: 56,
+                          child: ExcludeSemantics(
+                            excluding: active,
+                            child: IgnorePointer(
+                              ignoring: active,
+                              child: Opacity(
+                                opacity: !active || recording.value ? 1 : 0,
+                                child: TooltipTheme(
+                                  data: TooltipTheme.of(context).copyWith(
+                                    triggerMode: TooltipTriggerMode.manual,
+                                  ),
+                                  child: child,
                                 ),
                               ),
                             ),
                           ),
-                  ),
-                  // The avatar can itself own an iOS video platform view.
-                  // Keep it mounted at the same location throughout the hold.
-                  Positioned(
-                    right: 0,
-                    top: 0,
-                    width: 56,
-                    height: 56,
-                    child: ExcludeSemantics(
-                      excluding: active,
-                      child: IgnorePointer(
-                        ignoring: active,
-                        child: Opacity(
-                          opacity: !active || recording.value ? 1 : 0,
-                          child: TooltipTheme(
-                            data: TooltipTheme.of(
-                              context,
-                            ).copyWith(triggerMode: TooltipTriggerMode.manual),
-                            child: child,
-                          ),
                         ),
+                        if (recording.value)
+                          Positioned(
+                            right: 0,
+                            top: 0,
+                            width: 56,
+                            height: 56,
+                            child: IconButton(
+                              tooltip: 'Send voice note',
+                              onPressed: () => unawaited(finish()),
+                              icon: const SizedBox.square(dimension: 48),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                if (recording.value)
+                  Positioned(
+                    bottom: 56 + Grid.xs,
+                    left: 0,
+                    right: 0,
+                    child: IgnorePointer(
+                      child: Text(
+                        cancelled.value
+                            ? 'Release to cancel'
+                            : 'Slide up to cancel',
+                        textAlign: TextAlign.center,
+                        style: context.textTheme.labelSmall,
                       ),
                     ),
                   ),
-                  if (recording.value)
-                    Positioned(
-                      right: 0,
-                      top: 0,
-                      width: 56,
-                      height: 56,
-                      child: IconButton(
-                        tooltip: 'Send voice note',
-                        onPressed: () => unawaited(finish()),
-                        icon: const SizedBox.square(dimension: 48),
-                      ),
-                    ),
-                ],
-              ),
+              ],
             ),
           ),
         ),

@@ -191,12 +191,11 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
     _amplitudeSubscription = _recorder
         .onAmplitudeChanged(const Duration(milliseconds: 80))
         .listen((amplitude) {
-          final normalized =
-              (math
-                          .pow(10, amplitude.current.clamp(-60.0, 0.0) / 20)
-                          .toDouble() *
-                      4)
-                  .clamp(0.04, 1.0);
+          // Keep quiet speech visible: linear amplitude collapses values
+          // below -40 dB to the same near-flat bar height.
+          final normalized = amplitude.current.isFinite
+              ? ((amplitude.current + 60) / 60).clamp(0.0, 1.0)
+              : 0.0;
           _samples.add(normalized);
           if (!_levels.isClosed) _levels.add(normalized);
         });
