@@ -9448,6 +9448,100 @@ pub(crate) mod postgres_tests {
         fx.drop().await;
     }
 
+    /// A history read that fails with an ordinary DB error ends the REQ with a
+    /// retryable CLOSED, never EOSE: EOSE would tell a resuming client it holds
+    /// every stored event, so its next REQ would skip the history that failed.
+    /// The CLOSED also retires the subscription, and once the DB recovers a
+    /// reconnect with the same REQ replays the missed event.
+    /// Mutation: send EOSE on the non-timeout error again → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn failed_history_read_closes_and_reconnect_replays_the_history() {
+        use crate::handlers::req::handle_req;
+        let fx = cancel_fixture().await;
+        let frames = |rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|msg| match msg {
+                    axum::extract::ws::Message::Text(t) => t.to_string(),
+                    other => panic!("expected text frame, got {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let req = || -> nostr::Filter {
+            serde_json::from_value(serde_json::json!({"kinds": [9], "#h": [&fx.channel]}))
+                .expect("history filter")
+        };
+        let channel: uuid::Uuid = fx.channel.parse().expect("channel uuid");
+        let topic = buzz_pubsub::EventTopic::Channel(channel);
+        let tenant = TenantContext::resolved(fx.community, fx.host.clone());
+
+        // `events` gone on both pools: the history read fails with 42P01 on the
+        // replica and again on the writer re-run. Not a statement timeout.
+        let rename = |from: &'static str, to: &'static str| {
+            let pools = [fx.writer.clone(), fx.replica.clone()];
+            async move {
+                for pool in pools {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "ALTER TABLE {from} RENAME TO {to}"
+                    )))
+                    .execute(&pool)
+                    .await
+                    .expect("rename events");
+                }
+            }
+        };
+        rename("events", "events_gone").await;
+        let (conn, mut rx) = fx.ws_conn();
+        handle_req(
+            "h".into(),
+            vec![req()],
+            vec![None],
+            conn.clone(),
+            fx.state.clone(),
+        )
+        .await;
+        assert_eq!(
+            frames(&mut rx),
+            vec![format!(
+                r#"["CLOSED","h","{}"]"#,
+                crate::handlers::req::DATABASE_ERROR_CLOSED
+            )],
+            "a failed history read must CLOSE, not EOSE"
+        );
+        assert!(conn.subscriptions.lock().await.is_empty(), "conn map");
+        assert!(
+            fx.state
+                .sub_registry
+                .get_filters(conn.conn_id, "h")
+                .is_none(),
+            "CLOSED must retire the fan-out registration"
+        );
+        assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 0);
+        drop(conn);
+
+        // The DB recovers and the client reconnects with the same REQ.
+        rename("events_gone", "events").await;
+        let (conn, mut rx) = fx.ws_conn();
+        handle_req(
+            "h".into(),
+            vec![req()],
+            vec![None],
+            conn.clone(),
+            fx.state.clone(),
+        )
+        .await;
+        let replay = frames(&mut rx);
+        assert_eq!(replay.len(), 2, "event then EOSE: {replay:?}");
+        assert!(
+            replay[0].starts_with(r#"["EVENT","h","#) && replay[0].contains(&fx.root),
+            "the reconnect must replay the missed event: {replay:?}"
+        );
+        assert_eq!(replay[1], r#"["EOSE","h"]"#);
+
+        drop(conn);
+        fx.drop().await;
+    }
+
     /// HTTP agents reach `materialize_nip_oa_owner` on every request. Once the
     /// owner link is confirmed in `observer_owner_cache` the call writes
     /// nothing: the link is set once and never cleared.
