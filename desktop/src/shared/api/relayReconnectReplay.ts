@@ -510,25 +510,47 @@ export async function replayLiveSubscriptions({
             error,
           );
           if (attempt === PAGE_REPLAY_MAX_ATTEMPTS) {
-            markReconnectRepairDone(subscription, generation);
             // The live REQ reads no history (`limit: 0`) and the pinned floor
             // only helps the next reconnect, so without this the missed window
             // stays empty for the rest of a stable connection. Fall back to
             // the pre-repair behavior: re-issue the REQ (same ID, so the relay
             // replaces the live subscription) with the window's bounded
             // history. The floor stays pinned for anything the cap left out.
+            //
+            // That history overlaps what live (and any completed page) already
+            // dispatched, so keep the seen IDs until the fallback's own EOSE.
+            // The restored live REQ's EOSE has already been consumed, so the
+            // next one for this generation is the fallback's.
+            replay.repairDone = true;
+            replay.liveEose = false;
+            const endDedupe = () => {
+              if (subscription.reconnectReplay === replay) {
+                subscription.reconnectReplay = undefined;
+              }
+            };
             if (isRateLimited()) await waitForRateLimit();
-            if (subscriptions.get(subId) === subscription && isActive()) {
+            if (subscriptions.get(subId) !== subscription || !isActive()) {
+              endDedupe();
+              return;
+            }
+            try {
               await sendRaw([
                 "REQ",
                 subId,
                 buildReconnectReplayFilter(subscription.filter, replaySince),
-              ]).catch((sendError: unknown) => {
-                console.warn(
-                  `[reconnect replay] history fallback REQ failed for ${subId}:`,
-                  sendError,
-                );
-              });
+              ]);
+            } catch (sendError: unknown) {
+              endDedupe();
+              console.warn(
+                `[reconnect replay] history fallback REQ failed for ${subId}:`,
+                sendError,
+              );
+              return;
+            }
+            // Same convergence as the restored live REQ: a disposal that
+            // raced this send must still end closed on the wire.
+            if (isActive() && !subscriptions.has(subId)) {
+              await sendRaw(["CLOSE", subId]).catch(() => {});
             }
             return;
           }

@@ -1833,3 +1833,104 @@ test("a superseded replay sends no history fallback", async () => {
   assert.equal(attempts, PAGE_REPLAY_MAX_ATTEMPTS);
   assert.equal(sent.length, 1, "only the original live-only REQ went out");
 });
+
+test("the exhausted-repair fallback keeps dedupe until its own EOSE", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const subscriptions = new Map([["live-1", subscription]]);
+  const event = { id: "seen-live", created_at: 4_900 };
+  let dispatched = 0;
+  let dedupeDuringFallback;
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      if (payload[0] !== "REQ") return;
+      const fallback = payload[2].limit !== 0;
+      queueMicrotask(() => {
+        if (fallback) dedupeDuringFallback = !!subscription.reconnectReplay;
+        // Live delivers it first; the fallback's history returns it again.
+        if (shouldDispatchSubscriptionEvent(subscription, event)) dispatched++;
+        markReconnectLiveEose(subscription, 0);
+      });
+    },
+    requestRepair: async () => {
+      throw new Error("error: database error");
+    },
+  });
+  await drainMicrotasks();
+  assert.equal(dedupeDuringFallback, true);
+  assert.equal(dispatched, 1, "the fallback must not redeliver a live event");
+  assert.equal(
+    subscription.reconnectReplay,
+    undefined,
+    "the fallback's own EOSE ends dedupe",
+  );
+});
+
+test("a failed fallback REQ ends dedupe", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  const subscriptions = new Map([["live-1", subscription]]);
+  const acking = ackingSendRaw(subscriptions);
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      if (payload[0] === "REQ" && payload[2].limit !== 0) {
+        throw new Error("socket closed");
+      }
+      await acking(payload);
+    },
+    requestRepair: async () => {
+      throw new Error("error: database error");
+    },
+  });
+  assert.equal(subscription.reconnectReplay, undefined);
+});
+
+for (const replaced of [false, true]) {
+  test(`a ${replaced ? "replacement" : "disposal"} racing the fallback REQ ${replaced ? "is left open" : "is closed again"}`, async () => {
+    resetGate();
+    const filter = buildChannelFilter("channel-1", 1000);
+    const subscription = liveSub(filter, { lastSeenCreatedAt: 5_000 });
+    const subscriptions = new Map([["live-1", subscription]]);
+    const sent = [];
+    let markStarted;
+    const started = new Promise((resolve) => {
+      markStarted = resolve;
+    });
+    let release;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    const run = replayLiveSubscriptions({
+      subscriptions,
+      sendRaw: async (payload) => {
+        sent.push(payload);
+        if (payload[0] !== "REQ") return;
+        if (payload[2].limit === 0) {
+          queueMicrotask(() => markReconnectLiveEose(subscription, 0));
+          return;
+        }
+        markStarted();
+        await held;
+      },
+      requestRepair: async () => {
+        throw new Error("error: database error");
+      },
+    });
+    await started;
+    subscriptions.delete("live-1");
+    if (replaced) subscriptions.set("live-1", liveSub(filter));
+    release();
+    await run;
+    assert.deepEqual(
+      sent.map((frame) => frame[0]),
+      replaced ? ["REQ", "REQ"] : ["REQ", "REQ", "CLOSE"],
+    );
+    if (!replaced) assert.deepEqual(sent[2], ["CLOSE", "live-1"]);
+  });
+}
