@@ -56,8 +56,12 @@ void main() {
 
   test('text without an @ has no occurrences, with an @ is unchanged', () {
     final labels = ['Alice', 'a.b', 'Scout (${'a' * 64})'];
-    expect(mentionOccurrences('plain prose, no mention', labels), isEmpty);
-    expect(mentionOccurrences('', labels), isEmpty);
+    // Without an @ the labels are never walked, so no per-label pattern runs.
+    final untouched = labels.map<String>(
+      (_) => fail('labels walked for text without an @'),
+    );
+    expect(mentionOccurrences('plain prose, no mention', untouched), isEmpty);
+    expect(mentionOccurrences('', untouched), isEmpty);
     expect(
       mentionOccurrences('hi @alice and @ALICE', labels).map((o) => o.start),
       [3, 14],
