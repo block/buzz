@@ -53,4 +53,17 @@ void main() {
       {second},
     );
   });
+
+  test('text without an @ has no occurrences, with an @ is unchanged', () {
+    final labels = ['Alice', 'a.b', 'Scout (${'a' * 64})'];
+    expect(mentionOccurrences('plain prose, no mention', labels), isEmpty);
+    expect(mentionOccurrences('', labels), isEmpty);
+    expect(
+      mentionOccurrences('hi @alice and @ALICE', labels).map((o) => o.start),
+      [3, 14],
+    );
+    expect(mentionOccurrences('hi @a.b', labels).single.label, 'a.b');
+    expect(mentionOccurrences('hi @axb', labels), isEmpty);
+    expect(mentionOccurrences('@x mail me', labels), isEmpty);
+  });
 }

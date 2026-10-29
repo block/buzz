@@ -48,24 +48,32 @@ List<MarkdownComponent> _useMessageInlineComponents({
 
   // gpt_markdown compares components by identity. Recreating them on every
   // parent rebuild reparses unchanged message bodies on the UI isolate.
+  //
+  // gpt_markdown folds every component's pattern into one regex that it runs
+  // over each text segment, and the mention and channel patterns enumerate
+  // every known name. A token only exists behind its literal prefix, so text
+  // without `@` or `#` leaves the component out entirely: most messages then
+  // neither build nor scan those large alternations.
   return useMemoized(
     () => [
-      _MentionMd(
-        mentionNames: inputs.mentionNames,
-        mentionLabels: inputs.mentionLabels,
-        bindings: inputs.bindings,
-        displayLabels: {
-          for (final range in mentionOccurrences(content, bindings.keys))
-            range.label: content.substring(range.start + 1, range.end),
-        },
-        agentMentionPubkeys: inputs.agentPubkeys,
-        onMentionTap: inputs.hasMentionHandler ? mentionTap : null,
-      ),
+      if (finalContent.contains('@'))
+        _MentionMd(
+          mentionNames: inputs.mentionNames,
+          mentionLabels: inputs.mentionLabels,
+          bindings: inputs.bindings,
+          displayLabels: {
+            for (final range in mentionOccurrences(content, bindings.keys))
+              range.label: content.substring(range.start + 1, range.end),
+          },
+          agentMentionPubkeys: inputs.agentPubkeys,
+          onMentionTap: inputs.hasMentionHandler ? mentionTap : null,
+        ),
       CustomEmojiMd(inputs.customEmoji, content: finalContent, size: emojiSize),
-      _ChannelLinkMd(
-        channelNames: inputs.channelNames,
-        onChannelTap: channelTap,
-      ),
+      if (finalContent.contains('#'))
+        _ChannelLinkMd(
+          channelNames: inputs.channelNames,
+          onChannelTap: channelTap,
+        ),
       _MarkdownLabelEntityMd(),
       for (final component in MarkdownComponent.inlineComponents)
         component is ATagMd ? _MessageLinkMd() : component,

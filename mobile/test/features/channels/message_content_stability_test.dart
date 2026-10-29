@@ -288,4 +288,37 @@ void main() {
       'https://relay.example/tag.png',
     );
   });
+
+  // gpt_markdown joins every component's pattern into one regex per text
+  // segment. The mention and channel patterns enumerate every known name, so
+  // they must only be present for text that can contain their prefix.
+  Set<String> componentTypes(WidgetTester tester) =>
+      _components(tester).map((c) => c.runtimeType.toString()).toSet();
+
+  testWidgets('mention and channel patterns join only text with their prefix', (
+    tester,
+  ) async {
+    final fixture = _Fixture()..content = 'No tokens here, just prose.';
+    addTearDown(fixture.revision.dispose);
+    await tester.pumpWidget(fixture.build());
+    expect(componentTypes(tester), isNot(contains('_MentionMd')));
+    expect(componentTypes(tester), isNot(contains('_ChannelLinkMd')));
+    expect(
+      find.text('No tokens here, just prose.', findRichText: true),
+      findsOne,
+    );
+
+    fixture.content = 'Hello @Alice';
+    await fixture.refresh(tester);
+    expect(componentTypes(tester), contains('_MentionMd'));
+    expect(componentTypes(tester), isNot(contains('_ChannelLinkMd')));
+    expect(find.text('Alice', findRichText: true), findsOneWidget);
+
+    fixture.content = 'See #sample';
+    await fixture.refresh(tester);
+    expect(componentTypes(tester), isNot(contains('_MentionMd')));
+    expect(componentTypes(tester), contains('_ChannelLinkMd'));
+    await tester.tap(find.text('sample', findRichText: true));
+    expect(fixture.tappedId, 'channel-one');
+  });
 }

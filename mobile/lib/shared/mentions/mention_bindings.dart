@@ -26,6 +26,10 @@ List<({int start, int end, String label})> mentionOccurrences(
   String text,
   Iterable<String> labels,
 ) {
+  // Every occurrence is a literal `@label`, so text without an @ has none.
+  // Most messages mention nobody; skip compiling and running a pattern per
+  // known label for them.
+  if (!text.contains('@')) return const [];
   final matches = <int, ({int start, int end, String label})>{};
   for (final label in labels) {
     if (label.isEmpty) continue;
