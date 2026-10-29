@@ -58,22 +58,17 @@ configuration.
 ## Usage delivery
 
 Set `BUZZ_STORAGE_USAGE_URL` to push each new snapshot's per-community totals
-to an operator endpoint, for example one that forwards usage to a billing
-system. Unset, nothing is sent. Every five minutes, one relay pod (elected by a
-PostgreSQL session advisory lock) compares the stored snapshot's
-`completed_at` with the last one it handled and, when it is new, POSTs it in
-batches of at most 500 communities:
+to an operator endpoint. kgoose's `POST {prefix}/v1/buzz/storage-usage/record`
+receives them and bills sponsored communities in Orb. Unset, nothing is sent.
+Every five minutes, one relay pod (elected by a PostgreSQL session advisory
+lock) compares the stored snapshot's `completed_at` with the last one it
+handled and, when it is new, POSTs it in batches of at most 500 communities:
 
 ```json
 {
-  "v": 1,
-  "snapshot_completed_at": 1730257452,
-  "batch": 0,
-  "batches": 2,
+  "measured_at": "2026-10-30T03:04:12Z",
   "communities": [
     {
-      "idempotency_key": "<community-uuid>:1730257452",
-      "community_id": "<community-uuid>",
       "community_host": "acme.communities.buzz.xyz",
       "storage_bytes": 123456789,
       "storage_objects": 412
@@ -82,22 +77,27 @@ batches of at most 500 communities:
 }
 ```
 
+- `measured_at` is the snapshot's completion time in RFC 3339, the same for
+  every batch of a snapshot. Each batch is an independent request.
 - Each request carries a NIP-98 `Authorization` header signed by the relay
   key, binding the URL and body, as operator-listener mention notifications
-  do.
+  do. kgoose authenticates the relay by its `buzz` mesh service identity
+  instead, so the relay needs mesh egress to kgoose-builderbot.
 - `storage_bytes` and `storage_objects` are the logical per-community values
   described above: a blob bound to several communities counts in full for
   each.
-- Every snapshot community is sent, including archived or deleting ones that
-  still hold bytes. An active community absent from the snapshot is sent with
-  zero, so a receiver keeping the latest value never retains a stale one.
-  `community_host` is `null` when no community row matches.
+- Every snapshot community with a community row is sent, including archived
+  or deleting ones that still hold bytes. An active community absent from the
+  snapshot is sent with zero, so a receiver keeping the latest value never
+  retains a stale one. A snapshot community with no community row has no host
+  and is skipped with a warning.
 - A 2xx accepts a batch. A 408, 429, 5xx, or transport error stops the run and
   re-sends the whole snapshot on the next check. Any other status abandons
   that snapshot; the next worker run is delivered normally.
 - Which snapshot was handled is kept in memory, so a restart or leader change
-  re-sends the latest snapshot. Receivers MUST treat a repeated
-  `idempotency_key` as already accepted.
+  re-sends the latest snapshot. Receivers MUST treat a repeated community and
+  `measured_at` as already recorded; kgoose bills only a community's first
+  report for each UTC day.
 - A snapshot replaced before it was delivered is never sent. Alert on
   `time() - buzz_storage_usage_delivered_snapshot_timestamp_seconds` alongside
   snapshot age; `buzz_storage_usage_deliveries_total{outcome}` counts

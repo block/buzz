@@ -3,19 +3,19 @@
 //! `buzz-admin storage-snapshot` replaces one durable snapshot row per run.
 //! When `BUZZ_STORAGE_USAGE_URL` is set, one relay pod (a session advisory
 //! lock) checks that row every few minutes and, when its `completed_at` is
-//! new, POSTs the per-community totals in batches, NIP-98 signed with the
-//! relay key exactly as operator-listener mention notifications are.
+//! new, POSTs the per-community totals in batches, in the request shape of
+//! kgoose's `POST /v1/buzz/storage-usage/record`. Each batch is NIP-98 signed
+//! with the relay key, as operator-listener mention notifications are.
 //!
 //! The snapshot row is the retry record: it stays until the next worker run
 //! replaces it, and an undelivered snapshot is re-sent on every check. Which
 //! snapshot was delivered is remembered only in memory, so a restart or
-//! leader change re-sends the latest one. Every record carries an idempotency
-//! key derived from the community and the snapshot time, so receivers must
-//! treat a repeated key as already accepted.
+//! leader change re-sends the latest one. Receivers must treat a repeated
+//! community and `measured_at` as already recorded.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use reqwest::StatusCode;
 use serde::Serialize;
 use tracing::{error, info, warn};
@@ -30,7 +30,7 @@ use crate::{nip98::nip98_header, state::AppState};
 const STORAGE_USAGE_DELIVERY_LOCK_KEY: i64 = 0x4255_5A5A_5553_4744;
 const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Communities per POST, bounding each request body.
+/// Communities per POST, bounding each request body (kgoose accepts 1000).
 const BATCH_SIZE: usize = 500;
 
 /// Parse `BUZZ_STORAGE_USAGE_URL`: an HTTP(S) URL without credentials, query,
@@ -53,50 +53,51 @@ pub fn parse_delivery_url(raw: &str) -> Result<url::Url, String> {
     Ok(url)
 }
 
-/// One POST body. `batch` is zero-based; a snapshot is complete once every
-/// batch in `0..batches` has been accepted.
+/// One POST body: kgoose's `RecordBuzzStorageUsageRequest`. Batches are
+/// independent requests sharing `measured_at`, the snapshot's RFC 3339
+/// completion time.
 #[derive(Debug, Serialize)]
-struct StorageUsageBatch<'a> {
-    v: u8,
-    snapshot_completed_at: i64,
-    batch: usize,
-    batches: usize,
+struct RecordStorageUsageRequest<'a> {
+    measured_at: &'a str,
     communities: &'a [CommunityUsage],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct CommunityUsage {
-    idempotency_key: String,
-    community_id: Uuid,
-    community_host: Option<String>,
+    community_host: String,
     storage_bytes: u64,
     storage_objects: u64,
 }
 
 /// Every snapshot community with its bytes, plus an explicit zero for each
 /// active community the snapshot does not mention, so a receiver keeping the
-/// latest value per community never keeps a stale nonzero one. Sorted by id
-/// so batch boundaries are stable across re-sends.
+/// latest value per community never keeps a stale nonzero one. A snapshot
+/// community with no community row has no host to report and is skipped.
+/// Hosts are unique, so sorting by host keeps batch boundaries stable across
+/// re-sends.
 fn usage_records(
     snapshot: &BucketSnapshot,
-    completed_at: i64,
     communities: &[StorageUsageCommunity],
 ) -> Vec<CommunityUsage> {
     let hosts: HashMap<Uuid, &str> = communities
         .iter()
         .map(|community| (community.id, community.host.as_str()))
         .collect();
-    let record = |community_id: Uuid, storage_bytes: u64, storage_objects: u64| CommunityUsage {
-        idempotency_key: format!("{community_id}:{completed_at}"),
-        community_id,
-        community_host: hosts.get(&community_id).map(|host| (*host).to_string()),
-        storage_bytes,
-        storage_objects,
-    };
+    let mut unmatched = 0usize;
     let mut records: Vec<CommunityUsage> = snapshot
         .per_community
         .iter()
-        .map(|(id, storage)| record(*id, storage.bytes, storage.objects))
+        .filter_map(|(id, storage)| {
+            let Some(host) = hosts.get(id) else {
+                unmatched += 1;
+                return None;
+            };
+            Some(CommunityUsage {
+                community_host: (*host).to_string(),
+                storage_bytes: storage.bytes,
+                storage_objects: storage.objects,
+            })
+        })
         .collect();
     records.extend(
         communities
@@ -104,9 +105,19 @@ fn usage_records(
             .filter(|community| {
                 community.active && !snapshot.per_community.contains_key(&community.id)
             })
-            .map(|community| record(community.id, 0, 0)),
+            .map(|community| CommunityUsage {
+                community_host: community.host.clone(),
+                storage_bytes: 0,
+                storage_objects: 0,
+            }),
     );
-    records.sort_by_key(|record| record.community_id);
+    if unmatched > 0 {
+        warn!(
+            unmatched,
+            "storage snapshot communities without a community row were not reported"
+        );
+    }
+    records.sort_by(|a, b| a.community_host.cmp(&b.community_host));
     records
 }
 
@@ -257,15 +268,13 @@ async fn check_once<S: UsageSource, T: DeliveryTransport>(
         }
     };
 
-    let completed_at = stored.completed_at.timestamp();
-    let records = usage_records(&snapshot, completed_at, &communities);
-    let batches: Vec<&[CommunityUsage]> = records.chunks(BATCH_SIZE).collect();
-    for (index, communities) in batches.iter().enumerate() {
-        let body = match serde_json::to_vec(&StorageUsageBatch {
-            v: 1,
-            snapshot_completed_at: completed_at,
-            batch: index,
-            batches: batches.len(),
+    let measured_at = stored
+        .completed_at
+        .to_rfc3339_opts(SecondsFormat::Secs, true);
+    let records = usage_records(&snapshot, &communities);
+    for (index, communities) in records.chunks(BATCH_SIZE).enumerate() {
+        let body = match serde_json::to_vec(&RecordStorageUsageRequest {
+            measured_at: &measured_at,
             communities,
         }) {
             Ok(body) => body,
@@ -305,9 +314,9 @@ async fn check_once<S: UsageSource, T: DeliveryTransport>(
     }
     *handled = Some(stored.completed_at);
     metrics::gauge!("buzz_storage_usage_delivered_snapshot_timestamp_seconds")
-        .set(completed_at as f64);
+        .set(stored.completed_at.timestamp() as f64);
     info!(
-        snapshot_completed_at = completed_at,
+        %measured_at,
         communities = records.len(),
         "storage-usage snapshot delivered"
     );

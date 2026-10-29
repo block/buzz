@@ -136,34 +136,44 @@ fn endpoint() -> url::Url {
 fn three_batch_source(completed_at: i64) -> MockSource {
     let count = 2 * BATCH_SIZE + 1;
     let mut per_community = HashMap::new();
+    let mut communities = Vec::new();
     for index in 0..count {
+        let id = Uuid::from_u128(index as u128 + 1);
         per_community.insert(
-            Uuid::from_u128(index as u128 + 1),
+            id,
             CommunityStorage {
                 bytes: 10,
                 objects: 1,
             },
         );
+        communities.push(StorageUsageCommunity {
+            id,
+            host: format!("c{index}.example"),
+            active: true,
+        });
     }
     let snapshot = BucketSnapshot {
         per_community,
         ..Default::default()
     };
-    MockSource::new(Some(stored(&snapshot, completed_at)), Vec::new())
+    MockSource::new(Some(stored(&snapshot, completed_at)), communities)
 }
 
-fn batch_shape(bodies: &[serde_json::Value]) -> Vec<(u64, u64, usize)> {
+/// Each body's `measured_at` and community count.
+fn batch_shape(bodies: &[serde_json::Value]) -> Vec<(&str, usize)> {
     bodies
         .iter()
         .map(|body| {
             (
-                body["batch"].as_u64().expect("batch"),
-                body["batches"].as_u64().expect("batches"),
+                body["measured_at"].as_str().expect("measured_at"),
                 body["communities"].as_array().expect("communities").len(),
             )
         })
         .collect()
 }
+
+/// RFC 3339 form of the 1_700_000_000 test snapshot time.
+const MEASURED_AT: &str = "2023-11-14T22:13:20Z";
 
 #[test]
 fn delivery_url_accepts_plain_http_endpoints_only() {
@@ -191,7 +201,7 @@ fn records_cover_snapshot_communities_and_zero_absent_active_ones() {
     let snapshot = snapshot_of(&[
         (1, 100, 2), // active, stored
         (2, 50, 1),  // archived but still storing bytes
-        (5, 7, 1),   // no community row
+        (5, 7, 1),   // no community row: no host to report
     ]);
     let communities = vec![
         community(1, true),
@@ -200,22 +210,19 @@ fn records_cover_snapshot_communities_and_zero_absent_active_ones() {
         community(4, false), // inactive, nothing stored: omitted
     ];
 
-    let records = usage_records(&snapshot, 1_700_000_000, &communities);
+    let records = usage_records(&snapshot, &communities);
 
-    let record = |byte: u8, host: Option<&str>, bytes: u64, objects: u64| CommunityUsage {
-        idempotency_key: format!("{}:1700000000", id(byte)),
-        community_id: id(byte),
-        community_host: host.map(str::to_string),
+    let record = |host: &str, bytes: u64, objects: u64| CommunityUsage {
+        community_host: host.to_string(),
         storage_bytes: bytes,
         storage_objects: objects,
     };
     assert_eq!(
         records,
         vec![
-            record(1, Some("c1.example"), 100, 2),
-            record(2, Some("c2.example"), 50, 1),
-            record(3, Some("c3.example"), 0, 0),
-            record(5, None, 7, 1),
+            record("c1.example", 100, 2),
+            record("c2.example", 50, 1),
+            record("c3.example", 0, 0),
         ]
     );
 }
@@ -239,11 +246,12 @@ async fn new_snapshot_is_delivered_once_in_bounded_batches() {
     let bodies = transport.take_bodies();
     assert_eq!(
         batch_shape(&bodies),
-        vec![(0, 3, BATCH_SIZE), (1, 3, BATCH_SIZE), (2, 3, 1)]
+        vec![
+            (MEASURED_AT, BATCH_SIZE),
+            (MEASURED_AT, BATCH_SIZE),
+            (MEASURED_AT, 1)
+        ]
     );
-    assert!(bodies
-        .iter()
-        .all(|body| body["v"] == 1 && body["snapshot_completed_at"] == 1_700_000_000));
 
     let outcome = check_once(
         &source,
@@ -270,8 +278,8 @@ async fn new_snapshot_is_delivered_once_in_bounded_batches() {
     .await;
     assert_eq!(outcome, CheckOutcome::Delivered);
     let bodies = transport.take_bodies();
-    assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0]["snapshot_completed_at"], 1_700_086_400);
+    assert_eq!(bodies.len(), 3, "every active community is reported");
+    assert_eq!(bodies[0]["measured_at"], "2023-11-15T22:13:20Z");
 }
 
 #[tokio::test]
@@ -309,7 +317,11 @@ async fn retryable_failures_resend_the_whole_snapshot_next_check() {
         assert_eq!(outcome, CheckOutcome::Delivered, "{failure:?}");
         assert_eq!(
             batch_shape(&transport.take_bodies()),
-            vec![(0, 3, BATCH_SIZE), (1, 3, BATCH_SIZE), (2, 3, 1)],
+            vec![
+                (MEASURED_AT, BATCH_SIZE),
+                (MEASURED_AT, BATCH_SIZE),
+                (MEASURED_AT, 1)
+            ],
             "{failure:?}"
         );
     }
@@ -458,13 +470,14 @@ async fn http_delivery_is_signed_by_the_relay_key() {
     assert_eq!(signer, relay_keypair.public_key());
     let payload: serde_json::Value = serde_json::from_slice(&body).expect("batch JSON");
     assert_eq!(
-        payload["communities"][0],
+        payload,
         serde_json::json!({
-            "idempotency_key": format!("{}:1700000000", id(1)),
-            "community_id": id(1),
-            "community_host": "c1.example",
-            "storage_bytes": 100,
-            "storage_objects": 2,
+            "measured_at": MEASURED_AT,
+            "communities": [{
+                "community_host": "c1.example",
+                "storage_bytes": 100,
+                "storage_objects": 2,
+            }],
         })
     );
 }
