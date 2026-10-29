@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'dart:io';
+
+import 'push_relay_fixture.dart';
 
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -140,8 +143,10 @@ void main() {
             remainingCommunities: [sibling],
           );
           expect(
-            (await storage.loadAll()).single.gatewayRevocation,
-            shared ? isNull : grant.gatewayRevocationTarget,
+            (await storage.loadAll())
+                .where((record) => record.gatewayOnly)
+                .map((record) => record.gatewayRevocation),
+            shared ? isEmpty : [grant.gatewayRevocationTarget],
           );
           await storage.replaceAll([]);
           await communities.save(removed);
@@ -151,7 +156,150 @@ void main() {
           await container
               .read(communityListProvider.notifier)
               .setPushNotificationsEnabled(removed.id, false);
+          await outbox.trigger();
           expect(revoked, shared ? isEmpty : [grant.gatewayRevocationTarget]);
+        },
+      );
+    }
+
+    test(
+      'opt-out reaches relay while gateway cleanup remains durable',
+      () async {
+        await HttpOverrides.runWithHttpOverrides(() async {
+          final relay = await PushRelayFixture.start();
+          addTearDown(relay.close);
+          final communities = CommunityStorage(secure: secure);
+          final subscriptions = [
+            BuzzPushSubscription(
+              filter: BuzzPushFilter(kinds: [9], pTags: [keys.public]),
+              notificationClass: 'default',
+            ),
+          ];
+          final community =
+              Community.create(
+                name: 'Team',
+                relayUrl: relay.httpUrl,
+                nsec: keys.nsec,
+                pubkey: keys.public,
+              ).copyWith(
+                pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+                  desired: subscriptions,
+                ).withAccepted(subscriptions: subscriptions, generation: 7),
+              );
+          await communities.save(community);
+          final grant = _nativeGrant(
+            _grant(
+              expiresAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,
+            ),
+          )..['relayOrigin'] = relay.wsUrl;
+          var calls = 0;
+          messenger.setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'endpointGrants') return [grant];
+            if (call.method == 'revokePushDelegation') {
+              calls++;
+              grant['endpointGrant'] = '';
+              throw PlatformException(code: 'app_attest_unavailable');
+            }
+            return null;
+          });
+          final container = ProviderContainer(
+            overrides: [
+              communityStorageProvider.overrideWithValue(communities),
+              communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+              buzzPushLeaseRevocationStorageProvider.overrideWithValue(storage),
+            ],
+          );
+          await container.read(communityListProvider.future);
+          await container
+              .read(communityListProvider.notifier)
+              .setPushNotificationsEnabled(community.id, false);
+          await container.read(buzzPushLeaseRevocationOutboxProvider).trigger();
+          expect(calls, 1);
+          expect(relay.leases.single['active'], isFalse);
+          expect(relay.leases.single['generation'], 8);
+          final disabled = (await communities.loadAll()).single;
+          expect(disabled.pushNotificationsEnabled, isFalse);
+          expect(
+            disabled.pushSubscriptionState.pendingTombstoneGeneration,
+            isNull,
+          );
+          final pending = (await storage.loadAll()).single;
+          expect(pending.gatewayOnly, isTrue);
+          expect(
+            pending.gatewayRevocation?['installationHandle'],
+            grant['gatewayInstallationHandle'],
+          );
+          container.dispose();
+        }, DirectPushHttp());
+      },
+    );
+
+    for (final gatewayFails in [true, false]) {
+      test(
+        'independent cleanup survives restart: gateway fails=$gatewayFails',
+        () async {
+          await HttpOverrides.runWithHttpOverrides(() async {
+            final relay = await PushRelayFixture.start(
+              failMetadata: !gatewayFails,
+            );
+            addTearDown(relay.close);
+            var fail = true;
+            var calls = 0;
+            final grant = _grant(
+              expiresAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,
+            );
+            messenger.setMockMethodCallHandler(channel, (call) async {
+              if (call.method == 'revokePushDelegation') {
+                calls++;
+                expect(call.arguments, grant.gatewayRevocationTarget);
+                if (fail && gatewayFails)
+                  throw PlatformException(code: 'app_attest_unavailable');
+              }
+              return null;
+            });
+            clock.seconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+            BuzzPushLeaseRevocationOutbox makeOutbox() => _outbox(
+              storage: storage,
+              clock: clock,
+              scheduler: scheduler,
+              publisher: publishBuzzPushLeaseRevocation,
+            );
+            var outbox = makeOutbox();
+            await outbox.enqueue(
+              BuzzPushLeaseRevocationRecord(
+                relayUrl: relay.httpUrl,
+                relayOrigin: relay.wsUrl,
+                memberPubkey: keys.public,
+                nsec: keys.nsec,
+                installationId: '0' * 32,
+                generation: 8,
+                expiresAt: grant.expiresAt,
+                attemptCount: 0,
+                nextAttemptAt: clock.seconds,
+                gatewayRevocation: grant.gatewayRevocationTarget,
+              ),
+            );
+            await outbox.trigger();
+            outbox.dispose();
+            outbox = makeOutbox();
+            for (var retry = 0; retry < 2; retry++) {
+              clock.seconds += 300;
+              await outbox.trigger();
+            }
+            expect(calls, gatewayFails ? 3 : 1);
+            expect(relay.leases.length, gatewayFails ? 1 : 0);
+            final unfinished = (await storage.loadAll()).single;
+            expect(unfinished.gatewayOnly, gatewayFails);
+            if (gatewayFails) expect(relay.leases.single['active'], isFalse);
+            fail = false;
+            relay.failMetadata = false;
+            clock.seconds += 300;
+            await outbox.trigger();
+            expect(await storage.loadAll(), isEmpty);
+            expect(calls, gatewayFails ? 4 : 1);
+            expect(relay.leases.single['active'], isFalse);
+            outbox.dispose();
+          }, DirectPushHttp());
         },
       );
     }
@@ -226,14 +374,15 @@ void main() {
     await outbox.enqueueCommunity(community, readGrants: () async => [grant]);
 
     final records = await storage.loadAll();
-    expect(records, hasLength(1));
+    expect(records, hasLength(2));
+    final relay = records.singleWhere((record) => !record.gatewayOnly);
     expect(
-      records.single.leaseAddress,
+      relay.leaseAddress,
       '${keys.public}|wss://relay.example|${community.pushLeaseInstallationId}',
     );
-    expect(records.single.generation, 6);
-    expect(records.single.expiresAt, grant.expiresAt);
-    expect(records.single.relayUrl, 'https://relay.example/');
+    expect(relay.generation, 6);
+    expect(relay.expiresAt, grant.expiresAt);
+    expect(relay.relayUrl, 'https://relay.example/');
   });
 
   test(
@@ -259,14 +408,21 @@ void main() {
         publisher: (_) async => throw StateError('gateway response lost'),
       );
       await outbox.enqueueCommunity(community, readGrants: () async => [grant]);
-      final before = (await storage.loadAll()).single.gatewayRevocation;
+      final before = (await storage.loadAll())
+          .singleWhere((record) => record.gatewayOnly)
+          .gatewayRevocation;
       expect(before?['generation'], 1);
       expect(
         before?['installationHandle'],
         '22222222-2222-4222-8222-222222222222',
       );
       await outbox.trigger();
-      expect((await storage.loadAll()).single.gatewayRevocation, before);
+      expect(
+        (await storage.loadAll())
+            .singleWhere((record) => record.gatewayOnly)
+            .gatewayRevocation,
+        before,
+      );
       await storage.replaceAll([]);
       final sibling = Community.create(
         name: 'Second',
@@ -411,7 +567,9 @@ void main() {
     await outbox.enqueueCommunity(community, readGrants: () async => [grant]);
 
     expect(
-      (await storage.loadAll()).single.leaseAddress,
+      (await storage.loadAll())
+          .singleWhere((record) => !record.gatewayOnly)
+          .leaseAddress,
       '${keys.public}|wss://relay.example|${grant.installationId}',
     );
   });
