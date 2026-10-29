@@ -366,12 +366,10 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     // Ordinary channels keep thread activity inside the thread view.
     final typingEntries = ref
         .watch(
-          channelTypingProvider(channel.id).select(
-            (all) => VisibleTyping(
-              all,
-              selfPubkey: currentPubkey,
-              include: (e) => personalChat || e.threadHeadId == null,
-            ),
+          visibleTypingProvider(
+            channel.id,
+            selfPubkey: currentPubkey,
+            include: (e) => personalChat || e.threadHeadId == null,
           ),
         )
         .entries;

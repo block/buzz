@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show ProviderListenable;
 
 import '../../shared/relay/relay.dart';
 
@@ -55,6 +56,17 @@ class VisibleTyping {
   @override
   int get hashCode => Object.hashAll(entries);
 }
+
+/// What a page watches to show typing in [channelId]: everyone but
+/// [selfPubkey], filtered by [include]. The user's own echoed indicator
+/// refreshes its expiry every few seconds, and this skips those updates.
+ProviderListenable<VisibleTyping> visibleTypingProvider(
+  String channelId, {
+  required String? selfPubkey,
+  required bool Function(TypingEntry entry) include,
+}) => channelTypingProvider(
+  channelId,
+).select((all) => VisibleTyping(all, selfPubkey: selfPubkey, include: include));
 
 /// Tracks who is currently typing in a specific channel.
 ///

@@ -247,4 +247,47 @@ void main() {
       container.dispose();
     }),
   );
+  test(
+    'pages ignore the user\'s own typing echo but see others',
+    () => fakeAsync((async) {
+      final relay = _Relay();
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => relay)],
+      );
+      final seen = <List<String>>[];
+      container.listen(
+        visibleTypingProvider(
+          'chat',
+          selfPubkey: 'ME',
+          include: (e) => e.threadHeadId == null,
+        ),
+        (_, next) => seen.add([for (final e in next.entries) e.pubkey]),
+      );
+      _settle(container, async);
+      void typing(String id, String pubkey) => relay.receive(
+        NostrEvent(
+          id: id,
+          pubkey: pubkey,
+          kind: 20002,
+          createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          content: '',
+          sig: '',
+          tags: [
+            ['h', 'chat'],
+          ],
+        ),
+      );
+      for (var i = 0; i < 3; i++) {
+        typing('self-$i', 'me');
+        async.elapse(const Duration(seconds: 3));
+      }
+      expect(container.read(channelTypingProvider('chat')), hasLength(1));
+      expect(seen, isEmpty);
+      typing('other', 'agent');
+      expect(seen, [
+        ['agent'],
+      ]);
+      container.dispose();
+    }),
+  );
 }

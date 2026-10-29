@@ -786,12 +786,10 @@ class ThreadDetailPage extends HookConsumerWidget {
     // Thread-scoped typing indicators (exclude self).
     final threadTyping = ref
         .watch(
-          channelTypingProvider(channelId).select(
-            (all) => VisibleTyping(
-              all,
-              selfPubkey: currentPubkey,
-              include: (e) => e.threadHeadId == threadHead.id,
-            ),
+          visibleTypingProvider(
+            channelId,
+            selfPubkey: currentPubkey,
+            include: (e) => e.threadHeadId == threadHead.id,
           ),
         )
         .entries;
