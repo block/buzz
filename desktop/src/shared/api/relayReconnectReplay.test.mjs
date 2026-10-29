@@ -2058,8 +2058,9 @@ test("each EOSE deadline runs from its REQ's send, not from when a queued worker
   tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
   await drainMicrotasks();
   tickTo(fakeNow);
-  await replay;
+  await drainMicrotasks();
   assert.deepEqual(fallbacks, ["live-1", "live-2"]);
+  await replay;
 });
 
 test("a late original EOSE after the ack timeout does not end the fallback's dedupe", async () => {
