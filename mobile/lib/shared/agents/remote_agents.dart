@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -848,7 +849,7 @@ List<String> signOwnerAuthorization(nostr.Keys owner, String agent) {
     'auth',
     owner.public,
     '',
-    nostr.Schnorr.sign(secretKey: owner.secret, message: digest),
+    signSchnorrHex(secretKey: owner.secret, messageHex: digest),
   ];
 }
 

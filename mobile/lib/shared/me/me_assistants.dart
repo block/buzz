@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:isolate';
 
-import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../crypto/nip_oa.dart';
@@ -105,7 +105,7 @@ List<AgentDirectoryEntry> _verifiedProfiles(
   final latest = <String, NostrEvent>{};
   for (final event in events) {
     try {
-      nostr.Event.fromJson(jsonEncode(event.toJson()));
+      verifiedNostrEventFromJson(jsonEncode(event.toJson()));
     } catch (_) {
       continue;
     }
