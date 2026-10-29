@@ -703,7 +703,10 @@ async fn unfinished_membership_gap_replay_keeps_its_floor() {
 }
 /// Write the reconnect replay on a fresh socket, leaving the connection open,
 /// and return the socket pair with the first REQ's `since`.
-async fn open_replay(state: &mut BgState, sub: &str) -> (WsStream, impl Sized, u64) {
+async fn open_replay(
+    state: &mut BgState,
+    sub: &str,
+) -> (WsStream, WebSocketStream<tokio::net::TcpStream>, u64) {
     let (mut client, mut server) = test_ws_pair().await;
     let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
     let result = resubscribe_after_reconnect(&mut client, &mut cmd_rx, state, "agent", true).await;
@@ -714,17 +717,75 @@ async fn open_replay(state: &mut BgState, sub: &str) -> (WsStream, impl Sized, u
     (client, server, since)
 }
 
-/// A channel with delivered progress past a recorded loss at `lost`, its socket
-/// already closed.
-async fn channel_with_progress_past_a_loss(lost: u64) -> (BgState, Uuid, String) {
-    let mut state = BgState::new();
-    let channel = Uuid::new_v4();
-    seed_test_subscription(&mut state, channel); // base 1_000
-    let sub = channel_sub_id(channel);
-    state.last_seen.insert(channel, 4_000);
-    state.channel_dropped_since.insert(channel, lost);
-    lose_connection(&mut state).await;
-    (state, channel, sub)
+/// The loss record a gap-retention test drives: a channel's or the membership
+/// subscription's.
+#[derive(Clone, Copy)]
+enum LossArm {
+    Channel(Uuid),
+    Membership,
+}
+
+impl LossArm {
+    fn both() -> [Self; 2] {
+        [Self::Channel(Uuid::new_v4()), Self::Membership]
+    }
+
+    fn sub(self) -> String {
+        match self {
+            Self::Channel(channel) => channel_sub_id(channel),
+            Self::Membership => MEMBERSHIP_NOTIF_SUB_ID.to_owned(),
+        }
+    }
+
+    fn event(self, created_at: u64) -> Event {
+        match self {
+            Self::Channel(channel) => tagged_event(channel, created_at),
+            Self::Membership => tagged_event(Uuid::nil(), created_at),
+        }
+    }
+
+    fn dropped(self, state: &BgState) -> Option<u64> {
+        match self {
+            Self::Channel(channel) => state.channel_dropped_since.get(&channel).copied(),
+            Self::Membership => state.membership_dropped_since,
+        }
+    }
+
+    /// Delivered progress at 4_000 past a recorded loss at `lost`, the socket
+    /// already closed.
+    async fn progress_past_a_loss(self, lost: u64) -> BgState {
+        let mut state = BgState::new();
+        match self {
+            Self::Channel(channel) => {
+                seed_test_subscription(&mut state, channel); // base 1_000
+                state.last_seen.insert(channel, 4_000);
+                state.channel_dropped_since.insert(channel, lost);
+            }
+            Self::Membership => {
+                state.membership_sub_active = true;
+                state.startup_watermark = Some(1_000);
+                state.membership_last_seen = Some(4_000);
+                state.membership_dropped_since = Some(lost);
+            }
+        }
+        lose_connection(&mut state).await;
+        state
+    }
+
+    /// Deliver `overflow` on `client` into `tx`, a consumer with room for two
+    /// events: the last one is dropped and recorded as a loss.
+    async fn overflow(
+        self,
+        client: &mut WsStream,
+        state: &mut BgState,
+        tx: &mpsc::Sender<Option<BuzzEvent>>,
+        overflow: [u64; 3],
+    ) {
+        for ts in overflow {
+            deliver_event(client, state, tx, &self.sub(), &self.event(ts)).await;
+        }
+        assert_eq!(self.dropped(state), Some(overflow[2]));
+    }
 }
 
 /// A socket that dies partway through a resubscribe (`RetryConnection`) is
@@ -734,11 +795,13 @@ async fn channel_with_progress_past_a_loss(lost: u64) -> (BgState, Uuid, String)
 #[tokio::test]
 async fn redial_after_a_failed_resubscribe_keeps_the_floor() {
     const LOST: u64 = 3_000;
-    let (mut state, channel, sub) = channel_with_progress_past_a_loss(LOST).await;
+    let arm = LossArm::Channel(Uuid::new_v4());
+    let mut state = arm.progress_past_a_loss(LOST).await;
+    let sub = arm.sub();
 
     let (_dead, _dead_server, first) = open_replay(&mut state, &sub).await;
     assert!(first <= LOST, "first replay since={first}");
-    assert!(!state.channel_dropped_since.contains_key(&channel));
+    assert_eq!(arm.dropped(&state), None);
 
     // That socket dies before EOSE and the loop redials straight into another
     // resubscribe.
@@ -760,39 +823,62 @@ async fn redial_after_a_failed_resubscribe_keeps_the_floor() {
 #[tokio::test]
 async fn loss_during_an_unfinished_replay_merges_with_the_restored_floor() {
     const LOST: u64 = 3_000;
-    // Overflowing deliveries on the replay socket; the last one is dropped.
-    for (overflow, expected) in [
-        ([3_400, 3_450, 3_500], LOST),
-        ([2_400, 2_450, 2_500], 2_500),
-    ] {
-        let (mut state, channel, sub) = channel_with_progress_past_a_loss(LOST).await;
-        let (mut client, _server, since) = open_replay(&mut state, &sub).await;
-        assert!(since <= LOST);
+    for arm in LossArm::both() {
+        for (overflow, expected) in [
+            ([3_400, 3_450, 3_500], LOST),
+            ([2_400, 2_450, 2_500], 2_500),
+        ] {
+            let mut state = arm.progress_past_a_loss(LOST).await;
+            let sub = arm.sub();
+            let (mut client, _server, since) = open_replay(&mut state, &sub).await;
+            assert!(since <= LOST);
+            let (tx, _rx) = mpsc::channel(2);
+            arm.overflow(&mut client, &mut state, &tx, overflow).await;
 
-        let (tx, _rx) = mpsc::channel(2);
-        for ts in overflow {
-            deliver_event(
-                &mut client,
-                &mut state,
-                &tx,
-                &sub,
-                &tagged_event(channel, ts),
-            )
-            .await;
+            lose_connection(&mut state).await;
+            assert_eq!(arm.dropped(&state), Some(expected));
+
+            // A repeated close for the same outage is a no-op.
+            begin_reconnect(&mut state, 0.0);
+            assert_eq!(arm.dropped(&state), Some(expected));
+
+            let since = first_replay_req(&mut state, &sub).await;
+            assert!(
+                since <= expected,
+                "replay must cover the earliest loss {expected}, got since={since}"
+            );
         }
-        assert_eq!(state.channel_dropped_since[&channel], overflow[2]);
+    }
+}
+
+/// History replays newest first, so a loss recorded during the reconnect
+/// replay can be older than the loss that replay retired. Overflow recovery's
+/// second REQ on the same socket retires it too; if the socket drops before
+/// EOSE, the older of the two retired losses is restored.
+#[tokio::test]
+async fn a_second_replay_on_one_socket_restores_the_older_retired_loss() {
+    const LOST: u64 = 3_000;
+    const OLDER: u64 = 2_500;
+    for arm in LossArm::both() {
+        let mut state = arm.progress_past_a_loss(LOST).await;
+        let sub = arm.sub();
+        let (mut client, mut server, since) = open_replay(&mut state, &sub).await;
+        assert!(since <= LOST);
+        let (tx, mut rx) = mpsc::channel(2);
+        arm.overflow(&mut client, &mut state, &tx, [2_400, 2_450, OLDER])
+            .await;
+        while rx.try_recv().is_ok() {}
+
+        // Overflow recovery writes REQ #2 and retires the older loss on the write.
+        recovery::recover_one(&mut client, &mut state, &tx, "agent").await;
+        assert_eq!(next_test_frame(&mut server).await[1], sub.as_str());
+        assert_eq!(arm.dropped(&state), None);
 
         lose_connection(&mut state).await;
-        assert_eq!(state.channel_dropped_since[&channel], expected);
-
-        // A repeated close for the same outage is a no-op.
-        begin_reconnect(&mut state, 0.0);
-        assert_eq!(state.channel_dropped_since[&channel], expected);
-
-        let since = first_replay_req(&mut state, &sub).await;
-        assert!(
-            since <= expected,
-            "replay must cover the earliest loss {expected}, got since={since}"
+        assert_eq!(arm.dropped(&state), Some(OLDER));
+        assert_eq!(
+            first_replay_req(&mut state, &sub).await,
+            OLDER - SINCE_SKEW_SECS
         );
     }
 }
