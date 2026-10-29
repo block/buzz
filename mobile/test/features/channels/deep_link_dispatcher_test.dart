@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -56,6 +57,109 @@ void main() {
     expect(find.widgetWithText(FilledButton, 'Join'), findsOneWidget);
     expect(find.text('Cancel'), findsOneWidget);
   });
+
+  for (final policy in [
+    {
+      'version': 'v1',
+      'terms_markdown': 'Terms',
+      'age_attestation_required': true,
+    },
+    null,
+  ]) {
+    testWidgets('opens the invite sheet before a suspended join policy '
+        '${policy == null ? 'confirms absence' : 'resolves'}', (tester) async {
+      const link = InviteDeepLink(
+        relayUrl: 'wss://relay.example.com',
+        code: 'code',
+      );
+      final discovery = Completer<http.Response>();
+      var policyReads = 0;
+      final claims = <Object?>[];
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(
+            CommunityStorage(secure: FakeSecureStorage()),
+          ),
+          pendingDeepLinkProvider.overrideWith(
+            () => _FakePendingDeepLinkNotifier(link),
+          ),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            MockClient((request) async {
+              switch (request.url.path) {
+                case '/api/join-policy':
+                  // Only discovery hangs; the claim's own read answers.
+                  if (policyReads++ == 0) return discovery.future;
+                  return http.Response(jsonEncode({'policy': policy}), 200);
+                case '/api/invites/accept-policy':
+                  return http.Response('{"receipt":"fresh"}', 200);
+                default:
+                  claims.add(jsonDecode(request.body));
+                  return http.Response('{"error":"invite_invalid"}', 400);
+              }
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            home: DeepLinkDispatcher(child: Scaffold(body: SizedBox())),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(discovery.isCompleted, isFalse);
+      expect(policyReads, 1);
+      expect(find.text('relay.example.com'), findsOneWidget);
+      expect(find.text('Loading community policy…'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(RegExp('Loading community policy')),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.widgetWithText(OutlinedButton, 'Cancel'),
+            )
+            .onPressed,
+        isNotNull,
+      );
+      expect(
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, 'Join'))
+            .onPressed,
+        isNull,
+      );
+
+      discovery.complete(http.Response(jsonEncode({'policy': policy}), 200));
+      await tester.pumpAndSettle();
+      expect(find.text('Loading community policy…'), findsNothing);
+      expect(claims, isEmpty);
+
+      if (policy == null) {
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+      } else {
+        final accept = find.widgetWithText(FilledButton, 'Accept and join');
+        expect(find.widgetWithText(FilledButton, 'Join'), findsNothing);
+        expect(tester.widget<FilledButton>(accept).onPressed, isNull);
+        await tester.ensureVisible(find.byType(CheckboxListTile));
+        await tester.tap(find.byType(CheckboxListTile));
+        await tester.pump();
+        await tester.ensureVisible(accept);
+        await tester.tap(accept);
+      }
+      await tester.pumpAndSettle();
+      expect(claims, [
+        {'code': 'code', if (policy != null) 'policy_receipt': 'fresh'},
+      ]);
+      semantics.dispose();
+    });
+  }
 
   for (final outcome in ['handled', 'declined', 'failed']) {
     testWidgets('hosted handler drains queued links after $outcome setup', (

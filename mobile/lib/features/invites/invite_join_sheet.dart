@@ -180,6 +180,29 @@ class InviteJoinSheet extends ConsumerWidget {
                 ),
               ),
             ],
+            if (state.isLoadingJoinPolicy) ...[
+              const SizedBox(height: Grid.sm),
+              Row(
+                children: [
+                  const BuzzLoadingIndicator(
+                    size: 16,
+                    semanticLabel: 'Loading community policy',
+                  ),
+                  const SizedBox(width: Grid.xs),
+                  Expanded(
+                    // The indicator owns the announcement.
+                    child: ExcludeSemantics(
+                      child: Text(
+                        'Loading community policy…',
+                        style: context.textTheme.bodyMedium?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: Grid.lg),
             if (state.joinPolicy != null &&
                 !state.requiresFreshInvite &&
@@ -210,7 +233,10 @@ class InviteJoinSheet extends ConsumerWidget {
                     isClaiming)
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: isClaiming || state.requiresFreshInvite
+                      onPressed:
+                          isClaiming ||
+                              state.requiresFreshInvite ||
+                              state.isLoadingJoinPolicy
                           ? null
                           : () async => ref
                                 .read(inviteJoinProvider.notifier)

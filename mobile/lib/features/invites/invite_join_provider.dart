@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -78,6 +79,9 @@ class InviteJoinState {
   final String? focusChannelId;
   final HostedJoinPolicy? joinPolicy;
 
+  /// Whether the sheet is still discovering the relay's join policy.
+  final bool isLoadingJoinPolicy;
+
   const InviteJoinState({
     this.status = InviteJoinStatus.idle,
     this.invite,
@@ -88,6 +92,7 @@ class InviteJoinState {
     this.isStarterSetupRecovery = false,
     this.focusChannelId,
     this.joinPolicy,
+    this.isLoadingJoinPolicy = false,
   });
 
   InviteJoinState copyWith({
@@ -100,6 +105,7 @@ class InviteJoinState {
     bool? isStarterSetupRecovery,
     Object? focusChannelId = _unset,
     Object? joinPolicy = _unset,
+    bool? isLoadingJoinPolicy,
   }) => InviteJoinState(
     joinPolicy: identical(joinPolicy, _unset)
         ? this.joinPolicy
@@ -117,17 +123,22 @@ class InviteJoinState {
     focusChannelId: identical(focusChannelId, _unset)
         ? this.focusChannelId
         : focusChannelId as String?,
+    isLoadingJoinPolicy: isLoadingJoinPolicy ?? this.isLoadingJoinPolicy,
   );
 }
 
 class InviteJoinNotifier extends Notifier<InviteJoinState> {
   Community? _pendingStarterSetupCommunity;
   Future<void>? _starterSetupInFlight;
+  Object? _joinPolicyLoad;
 
   @override
   InviteJoinState build() => const InviteJoinState();
 
+  /// Establishes the pending invite so its sheet can open at once; a new
+  /// community's join policy then loads in the background.
   Future<void> prepare(InviteDeepLink invite) async {
+    _joinPolicyLoad = null;
     validateInviteRelayUri(Uri.parse(invite.relayUrl));
     final communities = await ref.read(communityListProvider.future);
     final existing = _existingCommunity(communities, invite.relayUrl);
@@ -157,12 +168,20 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
     }
 
     _pendingStarterSetupCommunity = null;
+    final load = _joinPolicyLoad = Object();
     state = InviteJoinState(
       status: InviteJoinStatus.confirming,
       invite: invite,
       host: _hostFromRelay(invite.relayUrl),
       communityName: Community.nameFromUrl(invite.relayUrl),
+      isLoadingJoinPolicy: true,
     );
+    unawaited(_loadJoinPolicy(invite, load));
+  }
+
+  /// Loads the policy to show; [confirmJoin] re-reads it before any claim.
+  Future<void> _loadJoinPolicy(InviteDeepLink invite, Object load) async {
+    bool current() => ref.mounted && identical(_joinPolicyLoad, load);
     try {
       CommunityEntryRequirements.requireSelfHosted(invite.relayUrl);
       final policy = await loadJoinPolicy(
@@ -170,13 +189,14 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         origin: Uri.parse(invite.relayUrl),
         allowLegacyRelay: true,
       );
-      if (!ref.mounted || state.invite != invite) return;
-      state = state.copyWith(joinPolicy: policy);
+      if (!current()) return;
+      state = state.copyWith(joinPolicy: policy, isLoadingJoinPolicy: false);
     } catch (error) {
-      if (!ref.mounted || state.invite != invite) return;
+      if (!current()) return;
       state = state.copyWith(
         status: InviteJoinStatus.error,
         errorMessage: _friendlyInviteError(error),
+        isLoadingJoinPolicy: false,
       );
     }
   }
@@ -190,10 +210,13 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       return;
     }
 
+    // The claim re-reads the policy itself, superseding any load in flight.
+    _joinPolicyLoad = null;
     state = state.copyWith(
       status: InviteJoinStatus.claiming,
       errorMessage: null,
       requiresFreshInvite: false,
+      isLoadingJoinPolicy: false,
     );
     try {
       CommunityEntryRequirements.requireSelfHosted(invite.relayUrl);
@@ -388,6 +411,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
 
   void reset() {
     _pendingStarterSetupCommunity = null;
+    _joinPolicyLoad = null;
     state = const InviteJoinState();
   }
 }

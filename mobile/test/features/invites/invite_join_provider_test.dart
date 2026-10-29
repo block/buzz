@@ -76,6 +76,7 @@ void main() {
           policyReceipt: 'untrusted-browser-receipt',
         ),
       );
+      await _joinPolicySettled(container);
       expect(container.read(inviteJoinProvider).joinPolicy?.version, 'v1');
       await notifier.confirmJoin();
       expect(requests.where((path) => path != '/api/join-policy'), isEmpty);
@@ -200,6 +201,8 @@ void main() {
     () async {
       final keys = nostr.Keys.generate();
       http.Request? capturedRequest;
+      final discovery = Completer<http.Response>();
+      var policyReads = 0;
       final storage = CommunityStorage(secure: FakeSecureStorage());
       final auth = _RecordingAuthNotifier();
       final container = ProviderContainer(
@@ -211,7 +214,12 @@ void main() {
             (_) => _successfulRecovery(),
           ),
           inviteJoinHttpClientProvider.overrideWithValue(
-            _policyFreeClient((request) async {
+            http_testing.MockClient((request) async {
+              if (request.url.path == '/api/join-policy') {
+                // iOS native Join can claim while sheet discovery still hangs.
+                if (policyReads++ == 0) return discovery.future;
+                return http.Response('{}', 200);
+              }
               capturedRequest = request;
               return http.Response(
                 jsonEncode({
@@ -246,6 +254,12 @@ void main() {
       final state = container.read(inviteJoinProvider);
       expect(state.status, InviteJoinStatus.success);
       expect(state.focusChannelId, 'welcome-everyone-id');
+      discovery.complete(http.Response('{}', 503));
+      await pumpEventQueue();
+      expect(
+        container.read(inviteJoinProvider).status,
+        InviteJoinStatus.success,
+      );
       expect(capturedRequest, isNotNull);
       expect(
         capturedRequest!.url.toString(),
@@ -944,6 +958,14 @@ class _RecordingAuthNotifier extends AuthNotifier {
       AuthState(status: AuthStatus.authenticated, community: community),
     );
   }
+}
+
+Future<void> _joinPolicySettled(ProviderContainer container) {
+  final settled = Completer<void>();
+  final subscription = container.listen(inviteJoinProvider, (_, next) {
+    if (!next.isLoadingJoinPolicy && !settled.isCompleted) settled.complete();
+  }, fireImmediately: true);
+  return settled.future.whenComplete(subscription.close);
 }
 
 http.Client _policyFreeClient(
