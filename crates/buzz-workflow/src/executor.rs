@@ -740,7 +740,7 @@ pub async fn dispatch_action(
                     );
 
                     let token = generate_approval_token(run_id, step_id);
-                    let expires_in_secs = parse_duration_secs(timeout_str).unwrap_or(86_400);
+                    let expires_in_secs = parse_duration_secs(timeout_str)?;
 
                     Ok(StepResult::Suspended {
                         approval_token: token,
@@ -799,11 +799,19 @@ fn generate_approval_token(_run_id: Uuid, _step_id: &str) -> String {
     Uuid::new_v4().to_string()
 }
 
-/// Parse a duration string like "5m", "1h", "30s" into seconds.
+/// Parse a duration string like "5m", "1h", "7d", "30s" into seconds.
 ///
 /// Exposed as `pub(crate)` so `schema.rs` can use it for interval validation.
 pub(crate) fn parse_duration_secs(duration: &str) -> Result<u64, WorkflowError> {
     let duration = duration.trim();
+    if let Some(n) = duration.strip_suffix('d') {
+        let days: u64 = n.trim().parse().map_err(|_| {
+            WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"))
+        })?;
+        return days.checked_mul(86_400).ok_or_else(|| {
+            WorkflowError::InvalidDefinition(format!("duration overflow: {duration}"))
+        });
+    }
     if let Some(n) = duration.strip_suffix('h') {
         let hours: u64 = n.trim().parse().map_err(|_| {
             WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"))
@@ -1603,8 +1611,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_duration_days() {
+        assert_eq!(parse_duration_secs("1d").unwrap(), 86_400);
+        assert_eq!(parse_duration_secs("7d").unwrap(), 7 * 86_400);
+        assert_eq!(parse_duration_secs(" 2d ").unwrap(), 2 * 86_400);
+    }
+
+    #[test]
+    fn parse_duration_overflow() {
+        assert!(parse_duration_secs("99999999999999999999d").is_err());
+        assert!(parse_duration_secs("99999999999999999999h").is_err());
+    }
+
+    #[test]
     fn parse_duration_invalid() {
         assert!(parse_duration_secs("not-a-duration").is_err());
+        assert!(parse_duration_secs("").is_err());
+        assert!(parse_duration_secs("h").is_err());
+        assert!(parse_duration_secs("1x").is_err());
+        assert!(parse_duration_secs("1.5h").is_err());
     }
 
     #[test]
