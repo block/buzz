@@ -102,7 +102,16 @@ pub struct WorkflowEngine {
     /// `buzz-relay`).
     pub(crate) workflow_cache:
         moka::sync::Cache<(CommunityId, Uuid), Arc<Vec<buzz_db::workflow::WorkflowRecord>>>,
+    /// Workflows whose ban denial was logged at WARN within the last
+    /// [`BAN_DENIAL_WARN_INTERVAL`], keyed `(community_id, workflow_id)`. A
+    /// banned owner's workflow is denied on every matching event and every
+    /// cron tick; this keeps that expected denial from flooding the log.
+    pub(crate) ban_denial_warned: moka::sync::Cache<(CommunityId, Uuid), ()>,
 }
+
+/// How often a banned owner's workflow denial is logged at WARN. Denials in
+/// between log at DEBUG. Other authority failures always log at WARN.
+const BAN_DENIAL_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl WorkflowEngine {
     /// Create a new `WorkflowEngine`.
@@ -119,6 +128,7 @@ impl WorkflowEngine {
                 .max_capacity(10_000)
                 .time_to_live(std::time::Duration::from_secs(10))
                 .build(),
+            ban_denial_warned: ban_denial_warn_cache(BAN_DENIAL_WARN_INTERVAL),
         }
     }
 
@@ -142,10 +152,15 @@ impl WorkflowEngine {
     ///   in a role that can write (a guest cannot);
     /// - if the definition contains an exfiltration-capable action
     ///   (`call_webhook`), the owner must currently hold the `owner` or
-    ///   `admin` role.
+    ///   `admin` role;
+    /// - the owner, or the human owner of an agent owner, must not be banned
+    ///   from the community. Bans leave channel membership in place, so the
+    ///   role check alone would keep a banned owner's workflows running.
     ///
     /// Any lookup error denies (fail-closed): a removed owner must never keep
     /// exfiltration authority because a membership read happened to fail.
+    /// This is a point-in-time check: it does not cancel runs that already
+    /// exist, and a ban that commits after it can race with run creation.
     pub async fn check_owner_authority(
         &self,
         community_id: CommunityId,
@@ -162,12 +177,49 @@ impl WorkflowEngine {
                     "owner authority lookup failed (fail-closed): {e}"
                 ))
             })?;
-        if owner_authority_allows(role.as_deref(), def.requires_elevated_authority()) {
-            Ok(())
-        } else {
-            Err(WorkflowError::Unauthorized(
+        if !owner_authority_allows(role.as_deref(), def.requires_elevated_authority()) {
+            return Err(WorkflowError::Unauthorized(
                 "workflow owner lacks current channel authority".into(),
-            ))
+            ));
+        }
+        let restrictions = self
+            .db
+            .moderation_restriction_state(community_id, owner_pubkey)
+            .await
+            .map_err(|e| {
+                WorkflowError::Unauthorized(format!(
+                    "owner restriction lookup failed (fail-closed): {e}"
+                ))
+            })?;
+        if restrictions.banned {
+            return Err(WorkflowError::OwnerBanned);
+        }
+        Ok(())
+    }
+
+    /// Log a [`check_owner_authority`](Self::check_owner_authority) denial
+    /// that skipped a run. A ban denial logs at WARN at most once per
+    /// workflow per [`BAN_DENIAL_WARN_INTERVAL`], and at DEBUG otherwise;
+    /// every other denial, including a failed lookup, logs at WARN.
+    fn log_owner_denial(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        trigger: &'static str,
+        err: &WorkflowError,
+    ) {
+        if should_warn_owner_denial(&self.ban_denial_warned, community_id, workflow_id, err) {
+            tracing::warn!(
+                workflow_id = %workflow_id,
+                trigger,
+                "Skipping workflow — owner authority check failed: {err}"
+            );
+        } else {
+            tracing::debug!(
+                workflow_id = %workflow_id,
+                trigger,
+                "Skipping workflow — owner authority check failed: {err}"
+            );
         }
     }
 
@@ -395,10 +447,7 @@ impl WorkflowEngine {
                 .check_owner_authority(community_id, channel_id, &workflow.owner_pubkey, &def)
                 .await
             {
-                tracing::warn!(
-                    workflow_id = %workflow.id,
-                    "Skipping workflow — owner authority check failed: {e}"
-                );
+                self.log_owner_denial(community_id, workflow.id, "event", &e);
                 continue;
             }
 
@@ -493,261 +542,287 @@ impl WorkflowEngine {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
-            let now = Utc::now();
+            self.cron_tick(Utc::now()).await;
+        }
+    }
 
-            let workflows = match self.db.list_all_enabled_workflows().await {
-                Ok(wf) => wf,
+    /// One pass of the cron loop at `now`: fire every enabled schedule
+    /// workflow that is due, then prune the interval clock.
+    pub(crate) async fn cron_tick(self: &Arc<Self>, now: DateTime<Utc>) {
+        let workflows = match self.db.list_all_enabled_workflows().await {
+            Ok(wf) => wf,
+            Err(e) => {
+                tracing::error!("Cron tick: failed to load workflows: {e}");
+                return;
+            }
+        };
+
+        for workflow in &workflows {
+            // The same workflow UUID may exist in another community; carry
+            // the row's owning community through fire-tracking, run creation,
+            // and execution so a fire/run never crosses tenants.
+            let community_id = workflow.community_id;
+            let def: schema::WorkflowDef = match serde_json::from_value(workflow.definition.clone())
+            {
+                Ok(d) => d,
                 Err(e) => {
-                    tracing::error!("Cron tick: failed to load workflows: {e}");
+                    tracing::warn!(
+                        workflow_id = %workflow.id,
+                        "Cron tick: failed to parse workflow definition: {e}"
+                    );
                     continue;
                 }
             };
 
-            for workflow in &workflows {
-                // The same workflow UUID may exist in another community; carry
-                // the row's owning community through fire-tracking, run creation,
-                // and execution so a fire/run never crosses tenants.
-                let community_id = workflow.community_id;
-                let def: schema::WorkflowDef =
-                    match serde_json::from_value(workflow.definition.clone()) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            tracing::warn!(
-                                workflow_id = %workflow.id,
-                                "Cron tick: failed to parse workflow definition: {e}"
-                            );
-                            continue;
-                        }
-                    };
-
-                if !def.enabled {
-                    continue;
-                }
-
-                // Fix 2: skip workflows with no channel_id — an empty channel_id
-                // causes silent downstream failures when the run tries to act on a channel.
-                let Some(channel_id) = workflow.channel_id else {
-                    tracing::warn!(
-                        workflow_id = %workflow.id,
-                        "Cron tick: skipping schedule workflow with no channel_id"
-                    );
-                    continue;
-                };
-
-                // Resolve the *deterministic* schedule instant this tick is
-                // firing for. `scheduled_for` is computed identically on every
-                // pod (cron's own scheduled time, or the interval bucket
-                // boundary) so all pods collide on a single durable claim —
-                // never `now`, which is per-pod and would let every pod fire.
-                let (scheduled_for, trigger_type) = match &def.trigger {
-                    schema::TriggerDef::Schedule {
-                        cron: Some(expr),
-                        interval: None,
-                    } => match cron_fire_instant(expr, now, 60, workflow.id) {
-                        Some(instant) => (instant, "cron"),
-                        None => continue,
-                    },
-                    schema::TriggerDef::Schedule {
-                        cron: None,
-                        interval: Some(dur),
-                    } => {
-                        // Cheap pre-filter: skip the claim attempt when the
-                        // in-memory clock says we're clearly mid-interval. The
-                        // durable claim below is the real at-most-once boundary;
-                        // this only avoids a DB write every tick. Seed the
-                        // anchor from the DB on the first tick after restart so
-                        // a process bounce can't double-fire within an interval.
-                        let last = match self.last_fired.get(&(community_id, workflow.id)) {
-                            Some(t) => Some(*t),
-                            None => match self
-                                .db
-                                .latest_scheduled_workflow_fire(community_id, workflow.id)
-                                .await
-                            {
-                                Ok(anchor) => anchor,
-                                Err(e) => {
-                                    // Fail closed: a missing anchor reads as
-                                    // last_fired = now in interval_should_fire,
-                                    // so this tick is suppressed and the next
-                                    // tick retries. Surface the read failure so
-                                    // a persistently-unreadable anchor is visible
-                                    // rather than silently stalling the schedule.
-                                    tracing::warn!(
-                                        community_id = %community_id,
-                                        workflow_id = %workflow.id,
-                                        "Cron tick: failed to read interval restart anchor, \
-                                         suppressing this tick: {e}"
-                                    );
-                                    None
-                                }
-                            },
-                        };
-                        if !self.interval_prefilter_should_fire(
-                            community_id,
-                            workflow.id,
-                            dur,
-                            last,
-                            now,
-                        ) {
-                            continue;
-                        }
-                        match interval_fire_instant(dur, now, workflow.id) {
-                            Some(instant) => (instant, "interval"),
-                            None => continue,
-                        }
-                    }
-                    _ => continue, // Non-schedule triggers handled by on_event()
-                };
-
-                // SEC-006: recheck the owner's current channel authority
-                // BEFORE the durable claim. Placing the gate after the claim
-                // would let a revoked owner's workflow consume the
-                // at-most-once fire slot (claims are never re-fired), turning
-                // revocation into a denial-of-fire for a later re-enable.
-                if let Err(e) = self
-                    .check_owner_authority(community_id, channel_id, &workflow.owner_pubkey, &def)
-                    .await
-                {
-                    tracing::warn!(
-                        workflow_id = %workflow.id,
-                        "Cron tick: skipping workflow — owner authority check failed: {e}"
-                    );
-                    continue;
-                }
-
-                // Durable at-most-once claim — the cross-pod fire boundary.
-                // The loser receives `None` and skips BEFORE any run creation or
-                // side effect. `community_id` is the workflow row's own
-                // community (server provenance from the scan), never client
-                // input; the claim binds `(community_id, workflow_id,
-                // scheduled_for)` so a duplicate workflow UUID in another
-                // community claims independently.
-                match self
-                    .db
-                    .claim_scheduled_workflow_fire(community_id, workflow.id, scheduled_for)
-                    .await
-                {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        // Another pod (or an earlier tick this pod) already
-                        // claimed this instant. Still advance the in-memory
-                        // interval clock so we don't re-attempt the claim every
-                        // tick for the rest of the interval.
-                        if trigger_type == "interval" {
-                            self.last_fired.insert((community_id, workflow.id), now);
-                        }
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            workflow_id = %workflow.id,
-                            "Cron tick: scheduled-fire claim failed: {e}"
-                        );
-                        continue;
-                    }
-                }
-
-                // Fix 5: handle serialization errors explicitly rather than silently
-                // dropping the trigger context with .ok().
-                let trigger_ctx = executor::TriggerContext {
-                    channel_id: channel_id.to_string(),
-                    timestamp: now.timestamp().to_string(),
-                    ..Default::default()
-                };
-                let trigger_ctx_json = match serde_json::to_value(&trigger_ctx) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        tracing::error!(
-                            workflow_id = %workflow.id,
-                            "Cron tick: failed to serialize trigger context: {e}"
-                        );
-                        continue;
-                    }
-                };
-
-                let run_id = match self
-                    .db
-                    .create_workflow_run(
-                        community_id,
-                        workflow.id,
-                        None, // no trigger event for cron
-                        trigger_ctx_json.as_ref(),
-                    )
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
-                        tracing::error!(
-                            workflow_id = %workflow.id,
-                            "Cron tick: failed to create workflow run: {e}"
-                        );
-                        // The claim is held but the run failed to create. The
-                        // claim row intentionally stays (its `workflow_run_id`
-                        // NULL) so this instant is not re-fired: at-most-once is
-                        // preserved over exactly-once on transient run-insert
-                        // failures.
-                        continue;
-                    }
-                };
-
-                // Link the won claim to its run for ops/audit forensics. The
-                // claim row already guarantees dedupe; this is best-effort.
-                if let Err(e) = self
-                    .db
-                    .attach_scheduled_workflow_run(community_id, workflow.id, scheduled_for, run_id)
-                    .await
-                {
-                    tracing::warn!(
-                        workflow_id = %workflow.id,
-                        run_id = %run_id,
-                        "Cron tick: failed to attach run to scheduled-fire claim: {e}"
-                    );
-                }
-
-                // Update last_fired AFTER a successful claim+insert so that a
-                // failure doesn't suppress the next tick for the full interval.
-                // Only needed for interval triggers — cron uses window-based
-                // matching which already prevents double-fire within the same
-                // minute, and the durable claim backstops both.
-                if trigger_type == "interval" {
-                    self.last_fired.insert((community_id, workflow.id), now);
-                }
-
-                // Fix 6: log the specific trigger type (cron vs interval).
-                tracing::info!(
-                    workflow_id = %workflow.id,
-                    run_id = %run_id,
-                    trigger = trigger_type,
-                    "Cron trigger fired"
-                );
-
-                let engine = Arc::clone(self);
-                let def_clone = def.clone();
-                let ctx_clone = trigger_ctx.clone();
-                tokio::spawn(async move {
-                    let result = executor::execute_run(
-                        &engine,
-                        community_id,
-                        run_id,
-                        &def_clone,
-                        &ctx_clone,
-                    )
-                    .await;
-                    engine
-                        .finalize_run(community_id, run_id, result, None)
-                        .await;
-                });
+            if !def.enabled {
+                continue;
             }
 
-            // Fix 1: prune stale last_fired entries for workflows that are no longer
-            // active/enabled. Without this the DashMap grows monotonically as
-            // workflows are deleted or disabled. Keyed by `(community_id, id)` so
-            // entries are matched to the same scope they were inserted under.
-            let active_ids: std::collections::HashSet<(CommunityId, Uuid)> =
-                workflows.iter().map(|w| (w.community_id, w.id)).collect();
-            self.last_fired.retain(|key, _| active_ids.contains(key));
+            // Fix 2: skip workflows with no channel_id — an empty channel_id
+            // causes silent downstream failures when the run tries to act on a channel.
+            let Some(channel_id) = workflow.channel_id else {
+                tracing::warn!(
+                    workflow_id = %workflow.id,
+                    "Cron tick: skipping schedule workflow with no channel_id"
+                );
+                continue;
+            };
+
+            // Resolve the *deterministic* schedule instant this tick is
+            // firing for. `scheduled_for` is computed identically on every
+            // pod (cron's own scheduled time, or the interval bucket
+            // boundary) so all pods collide on a single durable claim —
+            // never `now`, which is per-pod and would let every pod fire.
+            let (scheduled_for, trigger_type) = match &def.trigger {
+                schema::TriggerDef::Schedule {
+                    cron: Some(expr),
+                    interval: None,
+                } => match cron_fire_instant(expr, now, 60, workflow.id) {
+                    Some(instant) => (instant, "cron"),
+                    None => continue,
+                },
+                schema::TriggerDef::Schedule {
+                    cron: None,
+                    interval: Some(dur),
+                } => {
+                    // Cheap pre-filter: skip the claim attempt when the
+                    // in-memory clock says we're clearly mid-interval. The
+                    // durable claim below is the real at-most-once boundary;
+                    // this only avoids a DB write every tick. Seed the
+                    // anchor from the DB on the first tick after restart so
+                    // a process bounce can't double-fire within an interval.
+                    let last = match self.last_fired.get(&(community_id, workflow.id)) {
+                        Some(t) => Some(*t),
+                        None => match self
+                            .db
+                            .latest_scheduled_workflow_fire(community_id, workflow.id)
+                            .await
+                        {
+                            Ok(anchor) => anchor,
+                            Err(e) => {
+                                // Fail closed: a missing anchor reads as
+                                // last_fired = now in interval_should_fire,
+                                // so this tick is suppressed and the next
+                                // tick retries. Surface the read failure so
+                                // a persistently-unreadable anchor is visible
+                                // rather than silently stalling the schedule.
+                                tracing::warn!(
+                                    community_id = %community_id,
+                                    workflow_id = %workflow.id,
+                                    "Cron tick: failed to read interval restart anchor, \
+                                     suppressing this tick: {e}"
+                                );
+                                None
+                            }
+                        },
+                    };
+                    if !self.interval_prefilter_should_fire(
+                        community_id,
+                        workflow.id,
+                        dur,
+                        last,
+                        now,
+                    ) {
+                        continue;
+                    }
+                    match interval_fire_instant(dur, now, workflow.id) {
+                        Some(instant) => (instant, "interval"),
+                        None => continue,
+                    }
+                }
+                _ => continue, // Non-schedule triggers handled by on_event()
+            };
+
+            // SEC-006: recheck the owner's current channel authority
+            // BEFORE the durable claim. Placing the gate after the claim
+            // would let a revoked owner's workflow consume the
+            // at-most-once fire slot (claims are never re-fired), turning
+            // revocation into a denial-of-fire for a later re-enable.
+            if let Err(e) = self
+                .check_owner_authority(community_id, channel_id, &workflow.owner_pubkey, &def)
+                .await
+            {
+                self.log_owner_denial(community_id, workflow.id, trigger_type, &e);
+                continue;
+            }
+
+            // Durable at-most-once claim — the cross-pod fire boundary.
+            // The loser receives `None` and skips BEFORE any run creation or
+            // side effect. `community_id` is the workflow row's own
+            // community (server provenance from the scan), never client
+            // input; the claim binds `(community_id, workflow_id,
+            // scheduled_for)` so a duplicate workflow UUID in another
+            // community claims independently.
+            match self
+                .db
+                .claim_scheduled_workflow_fire(community_id, workflow.id, scheduled_for)
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    // Another pod (or an earlier tick this pod) already
+                    // claimed this instant. Still advance the in-memory
+                    // interval clock so we don't re-attempt the claim every
+                    // tick for the rest of the interval.
+                    if trigger_type == "interval" {
+                        self.last_fired.insert((community_id, workflow.id), now);
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        workflow_id = %workflow.id,
+                        "Cron tick: scheduled-fire claim failed: {e}"
+                    );
+                    continue;
+                }
+            }
+
+            // Fix 5: handle serialization errors explicitly rather than silently
+            // dropping the trigger context with .ok().
+            let trigger_ctx = executor::TriggerContext {
+                channel_id: channel_id.to_string(),
+                timestamp: now.timestamp().to_string(),
+                ..Default::default()
+            };
+            let trigger_ctx_json = match serde_json::to_value(&trigger_ctx) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::error!(
+                        workflow_id = %workflow.id,
+                        "Cron tick: failed to serialize trigger context: {e}"
+                    );
+                    continue;
+                }
+            };
+
+            let run_id = match self
+                .db
+                .create_workflow_run(
+                    community_id,
+                    workflow.id,
+                    None, // no trigger event for cron
+                    trigger_ctx_json.as_ref(),
+                )
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!(
+                        workflow_id = %workflow.id,
+                        "Cron tick: failed to create workflow run: {e}"
+                    );
+                    // The claim is held but the run failed to create. The
+                    // claim row intentionally stays (its `workflow_run_id`
+                    // NULL) so this instant is not re-fired: at-most-once is
+                    // preserved over exactly-once on transient run-insert
+                    // failures.
+                    continue;
+                }
+            };
+
+            // Link the won claim to its run for ops/audit forensics. The
+            // claim row already guarantees dedupe; this is best-effort.
+            if let Err(e) = self
+                .db
+                .attach_scheduled_workflow_run(community_id, workflow.id, scheduled_for, run_id)
+                .await
+            {
+                tracing::warn!(
+                    workflow_id = %workflow.id,
+                    run_id = %run_id,
+                    "Cron tick: failed to attach run to scheduled-fire claim: {e}"
+                );
+            }
+
+            // Update last_fired AFTER a successful claim+insert so that a
+            // failure doesn't suppress the next tick for the full interval.
+            // Only needed for interval triggers — cron uses window-based
+            // matching which already prevents double-fire within the same
+            // minute, and the durable claim backstops both.
+            if trigger_type == "interval" {
+                self.last_fired.insert((community_id, workflow.id), now);
+            }
+
+            // Fix 6: log the specific trigger type (cron vs interval).
+            tracing::info!(
+                workflow_id = %workflow.id,
+                run_id = %run_id,
+                trigger = trigger_type,
+                "Cron trigger fired"
+            );
+
+            let engine = Arc::clone(self);
+            let def_clone = def.clone();
+            let ctx_clone = trigger_ctx.clone();
+            tokio::spawn(async move {
+                let result =
+                    executor::execute_run(&engine, community_id, run_id, &def_clone, &ctx_clone)
+                        .await;
+                engine
+                    .finalize_run(community_id, run_id, result, None)
+                    .await;
+            });
         }
+
+        // Fix 1: prune stale last_fired entries for workflows that are no longer
+        // active/enabled. Without this the DashMap grows monotonically as
+        // workflows are deleted or disabled. Keyed by `(community_id, id)` so
+        // entries are matched to the same scope they were inserted under.
+        let active_ids: std::collections::HashSet<(CommunityId, Uuid)> =
+            workflows.iter().map(|w| (w.community_id, w.id)).collect();
+        self.last_fired.retain(|key, _| active_ids.contains(key));
     }
+}
+
+/// The cache behind [`WorkflowEngine::ban_denial_warned`]: an entry expires
+/// `warn_interval` after the WARN that inserted it, so the next ban denial
+/// for that workflow warns again.
+fn ban_denial_warn_cache(
+    warn_interval: std::time::Duration,
+) -> moka::sync::Cache<(CommunityId, Uuid), ()> {
+    moka::sync::Cache::builder()
+        .max_capacity(10_000)
+        .time_to_live(warn_interval)
+        .build()
+}
+
+/// Whether an owner-authority denial for this workflow logs at WARN. A ban
+/// denial warns only when no warning for the same workflow is still inside
+/// `warned`'s TTL; every other denial always warns.
+fn should_warn_owner_denial(
+    warned: &moka::sync::Cache<(CommunityId, Uuid), ()>,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    err: &WorkflowError,
+) -> bool {
+    if !matches!(err, WorkflowError::OwnerBanned) {
+        return true;
+    }
+    warned
+        .entry((community_id, workflow_id))
+        .or_insert(())
+        .is_fresh()
 }
 
 /// Find the cron schedule instant that fired within the `window_secs`-wide
@@ -1904,16 +1979,19 @@ steps:
 
     // -- SEC-006: event-path regression (requires Postgres) ----------------
 
-    async fn setup_db() -> buzz_db::Db {
-        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+    fn test_database_url() -> String {
+        std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             // Local-only test default; this is not a production credential.
             .unwrap_or_else(|_| {
                 let local_test_database = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
                 local_test_database.to_owned()
-            });
+            })
+    }
+
+    async fn setup_db() -> buzz_db::Db {
         buzz_db::Db::new(&buzz_db::DbConfig {
-            database_url,
+            database_url: test_database_url(),
             ..Default::default()
         })
         .await
@@ -2037,6 +2115,72 @@ steps:
         );
     }
 
+    /// A ban leaves the owner's channel membership in place, so the event
+    /// path must still stop creating runs while the owner is banned, and
+    /// resume once the ban is lifted. Cron and webhook runs pass through the
+    /// same `check_owner_authority` gate.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn on_event_denies_run_while_owner_banned() {
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &member).await;
+
+        let def_json = serde_json::json!({
+            "name": "ban-event",
+            "trigger": {"on": "message_posted"},
+            "steps": [{"id": "s1", "action": "send_message", "text": "hi"}],
+            "enabled": true,
+        })
+        .to_string();
+        let workflow_id = db
+            .create_workflow(
+                community,
+                Some(channel_id),
+                &member,
+                "ban-event",
+                &def_json,
+                &[0u8; 32],
+            )
+            .await
+            .expect("create workflow");
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        let run_count = || async {
+            db.list_workflow_runs(community, workflow_id, 10)
+                .await
+                .expect("list runs")
+                .len()
+        };
+
+        db.ban_community_member(community, &member, &creator, None, None)
+            .await
+            .expect("ban owner");
+        engine
+            .on_event(community, &message_event(channel_id))
+            .await
+            .expect("on_event while banned");
+        assert_eq!(
+            run_count().await,
+            0,
+            "a banned owner's workflow must not fire"
+        );
+
+        assert!(db
+            .unban_community_member(community, &member, &creator)
+            .await
+            .expect("unban owner"));
+        engine
+            .on_event(community, &message_event(channel_id))
+            .await
+            .expect("on_event after unban");
+        assert_eq!(
+            run_count().await,
+            1,
+            "an unbanned owner's workflow fires again"
+        );
+    }
+
     /// Exfiltration-capable definitions (call_webhook) require the owner to
     /// currently hold an elevated role — a plain member's workflow must not
     /// fire even though the owner is still an active channel member.
@@ -2103,5 +2247,249 @@ steps:
             1,
             "channel owner's call_webhook workflow fires"
         );
+    }
+
+    #[test]
+    fn ban_denial_warns_once_per_interval_while_other_denials_always_warn() {
+        let interval = std::time::Duration::from_millis(500);
+        let warned = ban_denial_warn_cache(interval);
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let (wf_a, wf_b) = (Uuid::new_v4(), Uuid::new_v4());
+        let banned = WorkflowError::OwnerBanned;
+        let lookup_failed = WorkflowError::Unauthorized(
+            "owner restriction lookup failed (fail-closed): boom".into(),
+        );
+
+        assert!(should_warn_owner_denial(&warned, community, wf_a, &banned));
+        assert!(
+            !should_warn_owner_denial(&warned, community, wf_a, &banned),
+            "a repeated ban denial inside the interval logs below WARN"
+        );
+        assert!(
+            should_warn_owner_denial(&warned, community, wf_b, &banned),
+            "each workflow gets its own first warning"
+        );
+        assert!(
+            should_warn_owner_denial(&warned, community, wf_a, &lookup_failed),
+            "a failed lookup always warns"
+        );
+        assert!(
+            should_warn_owner_denial(&warned, community, wf_a, &lookup_failed),
+            "a failed lookup is never rate-limited"
+        );
+
+        std::thread::sleep(interval * 2);
+        assert!(
+            should_warn_owner_denial(&warned, community, wf_a, &banned),
+            "a ban denial warns again once the interval has passed"
+        );
+        assert!(
+            !should_warn_owner_denial(&warned, community, wf_a, &banned),
+            "and is suppressed again for the next interval"
+        );
+    }
+
+    fn schedule_def(name: &str) -> String {
+        serde_json::json!({
+            "name": name,
+            "trigger": {"on": "schedule", "cron": "* * * * *"},
+            "steps": [{"id": "s1", "action": "send_message", "text": "tick"}],
+            "enabled": true,
+        })
+        .to_string()
+    }
+
+    /// A cron tick must skip a banned owner's workflow and an agent-owned
+    /// workflow whose human owner is banned, without consuming either
+    /// workflow's scheduled-fire claim: once unbanned, a tick for the same
+    /// instant fires them. An unbanned workflow on the same tick still fires.
+    ///
+    /// `cron_tick` scans every enabled workflow in the database. The
+    /// PostgreSQL lane gives each test process its own database
+    /// (`scripts/postgres-test-wrapper.sh`), and the assertions read only
+    /// this test's workflows, so another test's schedules cannot affect it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cron_tick_skips_banned_owners_without_consuming_the_claim() {
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &member).await;
+
+        let human = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let agent = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        db.ensure_user(community, &human).await.expect("human user");
+        db.ensure_user(community, &agent).await.expect("agent user");
+        assert!(db
+            .set_agent_owner(community, &agent, &human)
+            .await
+            .expect("set agent owner"));
+        db.add_member(
+            community,
+            channel_id,
+            &agent,
+            buzz_db::channel::MemberRole::Member,
+            Some(&creator),
+        )
+        .await
+        .expect("add agent member");
+
+        let mut workflows = Vec::new();
+        for (owner, name, secret) in [
+            (&member, "cron-banned-owner", [0u8; 32]),
+            (&agent, "cron-banned-agent-owner", [1u8; 32]),
+            (&creator, "cron-control", [2u8; 32]),
+        ] {
+            let id = db
+                .create_workflow(
+                    community,
+                    Some(channel_id),
+                    owner,
+                    name,
+                    &schedule_def(name),
+                    &secret,
+                )
+                .await
+                .expect("create workflow");
+            workflows.push(id);
+        }
+        let [banned_wf, agent_wf, control_wf] =
+            <[Uuid; 3]>::try_from(workflows).expect("three workflows created");
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        let run_count = |workflow_id| {
+            let db = db.clone();
+            async move {
+                db.list_workflow_runs(community, workflow_id, 10)
+                    .await
+                    .expect("list runs")
+                    .len()
+            }
+        };
+
+        db.ban_community_member(community, &member, &creator, None, None)
+            .await
+            .expect("ban owner");
+        db.ban_community_member(community, &human, &creator, None, None)
+            .await
+            .expect("ban agent's human owner");
+        let now = Utc::now();
+        engine.cron_tick(now).await;
+        assert_eq!(run_count(banned_wf).await, 0, "banned owner must not fire");
+        assert_eq!(
+            run_count(agent_wf).await,
+            0,
+            "an agent whose human owner is banned must not fire"
+        );
+        assert_eq!(
+            run_count(control_wf).await,
+            1,
+            "an unbanned workflow on the same tick still fires"
+        );
+
+        for pubkey in [&member, &human] {
+            assert!(db
+                .unban_community_member(community, pubkey, &creator)
+                .await
+                .expect("unban"));
+        }
+        engine.cron_tick(now).await;
+        assert_eq!(
+            run_count(banned_wf).await,
+            1,
+            "the denied tick must not have consumed the owner's claim"
+        );
+        assert_eq!(
+            run_count(agent_wf).await,
+            1,
+            "the denied tick must not have consumed the agent's claim"
+        );
+        assert_eq!(
+            run_count(control_wf).await,
+            1,
+            "the control's claim for this instant is already taken"
+        );
+    }
+
+    /// The event path fails closed when the owner's restriction state cannot
+    /// be read, and the same event fires once the read succeeds.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn on_event_denies_run_when_restriction_lookup_fails() {
+        use sqlx::postgres::PgConnectOptions;
+
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &creator, &member).await;
+        let def_json = serde_json::json!({
+            "name": "lookup-fails",
+            "trigger": {"on": "message_posted"},
+            "steps": [{"id": "s1", "action": "send_message", "text": "hi"}],
+            "enabled": true,
+        })
+        .to_string();
+        let workflow_id = db
+            .create_workflow(
+                community,
+                Some(channel_id),
+                &member,
+                "lookup-fails",
+                &def_json,
+                &[0u8; 32],
+            )
+            .await
+            .expect("create workflow");
+
+        // Shadow `community_bans` with a view that errors on read; every
+        // other table still resolves to `public`.
+        let schema = format!("ban_lookup_fails_{}", Uuid::new_v4().simple());
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE SCHEMA {schema}; \
+             CREATE VIEW {schema}.community_bans AS \
+             SELECT * FROM public.community_bans WHERE 1 / (SELECT count(*) * 0 FROM public.communities) = 1;"
+        )))
+        .execute(db.pool())
+        .await
+        .expect("create failing restriction schema");
+        let options = test_database_url()
+            .parse::<PgConnectOptions>()
+            .expect("database url")
+            .options([("search_path", format!("{schema}, public"))]);
+        let failing_pool = sqlx::PgPool::connect_with(options)
+            .await
+            .expect("failing restriction pool");
+        let failing_engine = Arc::new(WorkflowEngine::new(
+            buzz_db::Db::from_pool(failing_pool.clone()),
+            WorkflowConfig::default(),
+        ));
+        let run_count = || async {
+            db.list_workflow_runs(community, workflow_id, 10)
+                .await
+                .expect("list runs")
+                .len()
+        };
+
+        failing_engine
+            .on_event(community, &message_event(channel_id))
+            .await
+            .expect("on_event with failing lookup");
+        assert_eq!(
+            run_count().await,
+            0,
+            "a failed restriction lookup must not create a run"
+        );
+
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        engine
+            .on_event(community, &message_event(channel_id))
+            .await
+            .expect("on_event with healthy lookup");
+        assert_eq!(run_count().await, 1, "a readable, unbanned owner fires");
+
+        failing_pool.close().await;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(db.pool())
+            .await
+            .expect("drop failing restriction schema");
     }
 }

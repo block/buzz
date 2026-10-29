@@ -51,7 +51,6 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
     } catch (error, stack) {
       if (!disposed) {
         syncFailed = true;
-        service.syncClosed.value = true;
         if (!hasSnapshot) controller.addError(error, stack);
       }
     }
@@ -78,7 +77,6 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
     } catch (error, stack) {
       if (!disposed) {
         syncFailed = true;
-        service.syncClosed.value = true;
         if (!hasSnapshot) controller.addError(error, stack);
       }
     }
@@ -106,7 +104,6 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
         onClosed: (_) {
           if (disposed) return;
           subscriptionClosed = true;
-          service.syncClosed.value = true;
           if (!hasSnapshot) {
             controller.addError(
               StateError('Couldn’t sync Solo. Reconnect and try again.'),
@@ -119,20 +116,23 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
         return;
       }
       await refresh();
-      if (!disposed && !subscriptionClosed && !syncFailed) {
-        service.syncClosed.value = false;
-      }
     } catch (error, stack) {
       if (!disposed) {
         syncFailed = true;
-        service.syncClosed.value = true;
         if (!hasSnapshot) controller.addError(error, stack);
       }
     }
   }
 
   ref.listen(appLifecycleProvider, (_, next) {
-    if (next == AppLifecycleState.resumed) unawaited(refresh());
+    if (next != AppLifecycleState.resumed) return;
+    // Recover an interrupted reader by resubscribing instead of asking the user.
+    // Before reconnecting, leave recovery to the reconnect listener above.
+    if (subscriptionClosed || syncFailed) {
+      if (service.connected) ref.invalidateSelf();
+    } else {
+      unawaited(refresh());
+    }
   });
   ref.onDispose(() {
     disposed = true;
@@ -152,20 +152,6 @@ final meOfflineSaveWarningProvider = StreamProvider<bool>((ref) {
   changed();
   ref.onDispose(() {
     service.cacheWriteFailed.removeListener(changed);
-    unawaited(controller.close());
-  });
-  return controller.stream;
-});
-
-/// Retryable live-sync interruption without hiding cached organization.
-final meSyncWarningProvider = StreamProvider<bool>((ref) {
-  final service = ref.watch(meSyncProvider);
-  final controller = StreamController<bool>();
-  void changed() => controller.add(service.syncClosed.value);
-  service.syncClosed.addListener(changed);
-  changed();
-  ref.onDispose(() {
-    service.syncClosed.removeListener(changed);
     unawaited(controller.close());
   });
   return controller.stream;
@@ -246,9 +232,6 @@ class MeSync {
 
   /// False only after the newest candidate is durably written.
   final cacheWriteFailed = ValueNotifier(false);
-
-  /// A terminal close or invalid relay head requires explicit reader recovery.
-  final syncClosed = ValueNotifier(false);
 
   /// Serialize writes and report failures so callers can expose a retry.
   Future<void> cache(NostrEvent? event) {
@@ -348,7 +331,7 @@ class MeSync {
         )) {
       throw const FormatException('Invalid Solo record');
     }
-    nostr.Event.fromJson(jsonEncode(event.toJson()));
+    verifiedNostrEventFromJson(jsonEncode(event.toJson()));
     return MeGroups.decode(nip44Decrypt(key, event.content), community);
   }
 
