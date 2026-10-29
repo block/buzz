@@ -303,90 +303,103 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
             curve: Curves.easeInOutCubic,
             width: active ? 224 + Grid.xs * 2 : 56,
             height: 56,
-            child: !active
-                ? TooltipTheme(
-                    data: TooltipTheme.of(
-                      context,
-                    ).copyWith(triggerMode: TooltipTriggerMode.manual),
-                    child: child,
-                  )
-                : ConcentricSheetSurface(
-                    enabled: true,
-                    usesGlass: true,
-                    providesSheetSurface: false,
-                    padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
-                    minimumRadius: Radii.navigationCapsule,
-                    contentClipRadius: Radii.navigationCapsule,
-                    child: ClipRect(
-                      child: OverflowBox(
-                        alignment: Alignment.centerRight,
-                        minWidth: 224 + Grid.xs * 2 - Grid.xxs * 2,
-                        maxWidth: 224 + Grid.xs * 2 - Grid.xxs * 2,
-                        child: Row(
-                          children: [
-                            if (recording.value ||
-                                (!sending.value &&
-                                    (pending.value != null ||
-                                        restoreFailed.value)))
-                              IconButton(
-                                tooltip: 'Discard voice note',
-                                onPressed: () => unawaited(
-                                  recording.value ? cancel() : discardPending(),
+            // Keep one native glass view mounted while the finger is down.
+            // Replacing its UIKit subtree cancels the active iOS touch.
+            child: ConcentricSheetSurface(
+              enabled: true,
+              usesGlass: true,
+              providesSheetSurface: false,
+              padding: EdgeInsets.zero,
+              minimumRadius: Radii.navigationCapsule,
+              contentClipRadius: Radii.navigationCapsule,
+              child: !active
+                  ? Align(
+                      alignment: Alignment.centerRight,
+                      child: TooltipTheme(
+                        data: TooltipTheme.of(
+                          context,
+                        ).copyWith(triggerMode: TooltipTriggerMode.manual),
+                        child: child,
+                      ),
+                    )
+                  : Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
+                      child: ClipRect(
+                        child: OverflowBox(
+                          alignment: Alignment.centerRight,
+                          minWidth: 224 + Grid.xs * 2 - Grid.xxs * 2,
+                          maxWidth: 224 + Grid.xs * 2 - Grid.xxs * 2,
+                          child: Row(
+                            children: [
+                              if (recording.value ||
+                                  (!sending.value &&
+                                      (pending.value != null ||
+                                          restoreFailed.value)))
+                                IconButton(
+                                  tooltip: 'Discard voice note',
+                                  onPressed: () => unawaited(
+                                    recording.value
+                                        ? cancel()
+                                        : discardPending(),
+                                  ),
+                                  icon: const Icon(Icons.close),
                                 ),
-                                icon: const Icon(Icons.close),
-                              ),
-                            Expanded(
-                              child: sending.value || finalizing.value
-                                  ? const Center(
-                                      child: CircularProgressIndicator(
-                                        semanticsLabel: 'Sending voice note',
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : restoreFailed.value
-                                  ? TextButton(
-                                      onPressed: restoring.value
-                                          ? null
-                                          : () => unawaited(restore()),
-                                      child: Text(error.value!, maxLines: 2),
-                                    )
-                                  : pending.value != null
-                                  ? TextButton(
-                                      onPressed: () =>
-                                          unawaited(send(pending.value!)),
-                                      child: Text(
-                                        error.value ?? 'Retry voice note',
-                                      ),
-                                    )
-                                  : cancelled.value
-                                  ? const Text('Release to cancel', maxLines: 1)
-                                  : VoiceNoteWaveform(
-                                      samples: [
-                                        ...List.filled(
-                                          41 - samples.value.length,
-                                          0.0,
+                              Expanded(
+                                child: sending.value || finalizing.value
+                                    ? const Center(
+                                        child: CircularProgressIndicator(
+                                          semanticsLabel: 'Sending voice note',
+                                          strokeWidth: 2,
                                         ),
-                                        ...samples.value,
-                                      ],
-                                      progress: 1,
-                                      fadeEdges: true,
-                                      height: 24,
-                                    ),
-                            ),
-                            if (recording.value)
-                              IconButton(
-                                tooltip: 'Send voice note',
-                                onPressed: () => unawaited(finish()),
-                                padding: EdgeInsets.zero,
-                                icon:
-                                    recordingAvatar ??
-                                    const Icon(Icons.arrow_upward),
+                                      )
+                                    : restoreFailed.value
+                                    ? TextButton(
+                                        onPressed: restoring.value
+                                            ? null
+                                            : () => unawaited(restore()),
+                                        child: Text(error.value!, maxLines: 2),
+                                      )
+                                    : pending.value != null
+                                    ? TextButton(
+                                        onPressed: () =>
+                                            unawaited(send(pending.value!)),
+                                        child: Text(
+                                          error.value ?? 'Retry voice note',
+                                        ),
+                                      )
+                                    : cancelled.value
+                                    ? const Text(
+                                        'Release to cancel',
+                                        maxLines: 1,
+                                      )
+                                    : VoiceNoteWaveform(
+                                        samples: [
+                                          ...List.filled(
+                                            41 - samples.value.length,
+                                            0.0,
+                                          ),
+                                          ...samples.value,
+                                        ],
+                                        progress: 1,
+                                        fadeEdges: true,
+                                        height: 24,
+                                      ),
                               ),
-                          ],
+                              if (recording.value)
+                                IconButton(
+                                  tooltip: 'Send voice note',
+                                  onPressed: () => unawaited(finish()),
+                                  padding: EdgeInsets.zero,
+                                  icon:
+                                      recordingAvatar ??
+                                      const Icon(Icons.arrow_upward),
+                                ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
+            ),
           ),
         ),
       ),

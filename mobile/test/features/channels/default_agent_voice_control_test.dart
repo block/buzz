@@ -7,6 +7,8 @@ import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -122,6 +124,48 @@ void main() {
     return gesture;
   }
 
+  testWidgets('iOS keeps the touched native surface through recording', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final messenger = tester.binding.defaultBinaryMessenger;
+    const support = MethodChannel('buzz/concentric_sheet_surface');
+    final disposed = <int>[];
+    messenger.setMockMethodCallHandler(support, (_) async => true);
+    messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+      call,
+    ) async {
+      if (call.method == 'dispose') disposed.add(call.arguments as int);
+      return null;
+    });
+    addTearDown(() {
+      debugDefaultTargetPlatformOverride = null;
+      messenger.setMockMethodCallHandler(support, null);
+      messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
+    });
+    await mount(tester);
+    await tester.pumpAndSettle();
+    final surface = find.descendant(
+      of: find.byType(DefaultAgentVoiceControl),
+      matching: find.byType(UiKitView),
+    );
+    expect(surface, findsOneWidget);
+    final touchedSurface = tester.element(surface);
+    final gesture = await hold(tester);
+    expect(tester.element(surface), same(touchedSurface));
+    expect(disposed, isEmpty);
+    expect(find.byType(VoiceNoteWaveform), findsOneWidget);
+    await gesture.moveBy(const Offset(0, -90));
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(tester.element(surface), same(touchedSurface));
+    expect(disposed, isEmpty);
+    expect(recorder.cancelled, isTrue);
+    expect(sent, 0);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    debugDefaultTargetPlatformOverride = null;
+  });
   testWidgets(
     'tap opens chat; hold expands left with real levels and release sends once',
     (tester) async {

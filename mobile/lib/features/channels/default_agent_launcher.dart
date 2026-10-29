@@ -14,7 +14,6 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
-import '../../shared/widgets/navigation_button_surface.dart';
 import 'channel.dart';
 import 'default_agent_voice_control.dart';
 import 'default_agent_voice_draft.dart';
@@ -24,7 +23,7 @@ import 'channel_detail_page.dart';
 import 'channels_provider.dart';
 import 'channel_management_provider.dart';
 
-/// Persistent shortcut to the agent chosen in Agents.
+/// Persistent chat and voice shortcut to the agent chosen in Agents.
 class DefaultAgentLauncher extends HookConsumerWidget {
   const DefaultAgentLauncher({required this.onChooseAgent, super.key});
   final VoidCallback onChooseAgent;
@@ -202,15 +201,13 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       enabled: pubkey != null && !opening.value && !preference.isLoading,
       onRecorded: (recording) => open(recording: recording),
       recordingAvatar: avatar,
-      child: NavigationButtonSurface(
-        child: SizedBox.square(
-          dimension: 56,
-          child: IconButton(
-            tooltip: label,
-            padding: EdgeInsets.zero,
-            onPressed: opening.value || preference.isLoading ? null : open,
-            icon: avatar,
-          ),
+      child: SizedBox.square(
+        dimension: 56,
+        child: IconButton(
+          tooltip: label,
+          padding: EdgeInsets.zero,
+          onPressed: opening.value || preference.isLoading ? null : open,
+          icon: avatar,
         ),
       ),
     );
