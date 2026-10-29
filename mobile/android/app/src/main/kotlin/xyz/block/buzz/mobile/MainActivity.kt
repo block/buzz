@@ -137,6 +137,10 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        flutterEngine.platformViewsController.registry.registerViewFactory(
+            "buzz/transparent-avatar",
+            TransparentAvatarViewFactory(flutterEngine.dartExecutor.binaryMessenger),
+        )
         hostedHpkePlugin = HostedHpkePlugin(flutterEngine.dartExecutor.binaryMessenger)
         identityFilePlugin = IdentityFilePlugin(this, flutterEngine.dartExecutor.binaryMessenger)
         hapticsPlugin = HapticsPlugin(this, flutterEngine.dartExecutor.binaryMessenger)

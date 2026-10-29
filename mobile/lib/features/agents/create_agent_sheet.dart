@@ -7,6 +7,7 @@ import '../../shared/community/community.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 
 /// Uses the registry's name and private-instructions contract. Runtime/model
 /// selection belongs to the remote service and is not an API option here.
@@ -47,10 +48,8 @@ class CreateAgentSheet extends HookConsumerWidget {
     );
     InputDecoration fieldDecoration(String label, {String? hint}) =>
         InputDecoration(
-          labelText: label,
-          floatingLabelBehavior: FloatingLabelBehavior.always,
           hintText: hint,
-          filled: true,
+          filled: false,
           fillColor: context.colors.surfaceContainerHighest,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: Grid.xs,
@@ -126,26 +125,44 @@ class CreateAgentSheet extends HookConsumerWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                TextField(
-                  controller: name,
-                  autofocus: true,
-                  enabled: !controller.busy && !pending,
-                  textCapitalization: TextCapitalization.words,
-                  decoration: fieldDecoration('Name'),
+                SheetActionSection(
+                  label: 'Name',
+                  children: [
+                    Semantics(
+                      label: 'Name',
+                      child: TextField(
+                        controller: name,
+                        autofocus: true,
+                        enabled: !controller.busy && !pending,
+                        textCapitalization: TextCapitalization.words,
+                        decoration: fieldDecoration('Name'),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: Grid.sm),
-                TextField(
-                  controller: instructions,
-                  enabled:
-                      !controller.busy && (!pending || instructionsMissing),
-                  minLines: 4,
-                  maxLines: 6,
-                  textCapitalization: TextCapitalization.sentences,
-                  textInputAction: TextInputAction.newline,
-                  decoration: fieldDecoration(
-                    'Instructions',
-                    hint: 'Describe what this agent should do (optional).',
-                  ),
+                SheetActionSection(
+                  label: 'Instructions',
+                  children: [
+                    Semantics(
+                      label: 'Instructions',
+                      child: TextField(
+                        controller: instructions,
+                        enabled:
+                            !controller.busy &&
+                            (!pending || instructionsMissing),
+                        minLines: 4,
+                        maxLines: 6,
+                        textCapitalization: TextCapitalization.sentences,
+                        textInputAction: TextInputAction.newline,
+                        decoration: fieldDecoration(
+                          'Instructions',
+                          hint:
+                              'Describe what this agent should do (optional).',
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 if (controller.busy) ...[
                   const SizedBox(height: Grid.xs),
