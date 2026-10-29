@@ -953,6 +953,15 @@ test("reports give per-test statuses per iteration", () => {
           type: "testStart",
           test: { id: 4, name: "later", url: "file:///m/test/b_test.dart" },
         }),
+        event({
+          type: "testStart",
+          test: {
+            id: 5,
+            name: "widget renders",
+            url: "package:flutter_test/src/widget_tester.dart",
+            root_url: "file:///m/test/b_test.dart",
+          },
+        }),
         "not json",
         event({
           type: "testDone",
@@ -975,6 +984,13 @@ test("reports give per-test statuses per iteration", () => {
           hidden: false,
           skipped: true,
         }),
+        event({
+          type: "testDone",
+          testID: 5,
+          result: "success",
+          hidden: false,
+          skipped: false,
+        }),
         event({ type: "done", success: false }),
       ].join("\n"),
       "/m/",
@@ -983,6 +999,7 @@ test("reports give per-test statuses per iteration", () => {
       ["test/a_test.dart › group renders", "passed"],
       ["test/a_test.dart › group fails", "failed"],
       ["test/b_test.dart › later", "skipped"],
+      ["test/b_test.dart › widget renders", "passed"],
     ]),
   );
   // Playwright lists a --repeat-each journey once per repetition, in order.
