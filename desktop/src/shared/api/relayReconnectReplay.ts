@@ -523,16 +523,26 @@ export async function replayLiveSubscriptions({
             // next one for this generation is the fallback's.
             replay.repairDone = true;
             replay.liveEose = false;
+            if (isRateLimited()) await waitForRateLimit();
+            // Dedupe ends on that EOSE, on teardown (both call the waiter), or
+            // at the deadline: the relay may drop an EOSE without closing the
+            // socket, and the set must not grow with live traffic for the
+            // rest of the connection. Identity-fenced so a stale release
+            // cannot clear a successor's state.
+            let deadline: number | undefined;
             const endDedupe = () => {
+              if (deadline !== undefined) clearTimeoutFn(deadline);
+              replay.liveEoseWaiter = undefined;
               if (subscription.reconnectReplay === replay) {
                 subscription.reconnectReplay = undefined;
               }
             };
-            if (isRateLimited()) await waitForRateLimit();
             if (subscriptions.get(subId) !== subscription || !isActive()) {
               endDedupe();
               return;
             }
+            replay.liveEoseWaiter = endDedupe;
+            deadline = setTimeoutFn(endDedupe, LIVE_REQ_ACK_TIMEOUT_MS);
             try {
               await sendRaw([
                 "REQ",

@@ -1550,7 +1550,11 @@ test("an unacknowledged live REQ degrades to a pinned floor instead of repairing
     5_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
     "the window stays pinned for the next reconnect",
   );
-  assert.equal(pendingTimers.size, 0, "no ack timer is left armed");
+  // Only the history fallback's dedupe deadline remains; it releases the set.
+  assert.equal(pendingTimers.size, 1, "no ack timer is left armed");
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  assert.equal(subscription.reconnectReplay, undefined);
+  assert.equal(pendingTimers.size, 0);
 });
 
 test("every paged repair floor is pinned before any live-only REQ, so a queued channel survives a second disconnect", async () => {
@@ -1867,6 +1871,7 @@ test("the exhausted-repair fallback keeps dedupe until its own EOSE", async () =
     undefined,
     "the fallback's own EOSE ends dedupe",
   );
+  assert.equal(pendingTimers.size, 0, "and cancels the dedupe deadline");
 });
 
 test("a failed fallback REQ ends dedupe", async () => {
@@ -1934,3 +1939,64 @@ for (const replaced of [false, true]) {
     if (!replaced) assert.deepEqual(sent[2], ["CLOSE", "live-1"]);
   });
 }
+
+async function exhaustWithLostFallbackEose(subscription) {
+  const subscriptions = new Map([["live-1", subscription]]);
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      // The relay acknowledges the restored live REQ but drops the
+      // fallback's EOSE while the socket stays up.
+      if (payload[0] !== "REQ" || payload[2].limit !== 0) return;
+      queueMicrotask(() => markReconnectLiveEose(subscription, 0));
+    },
+    requestRepair: async () => {
+      throw new Error("error: database error");
+    },
+  });
+  await drainMicrotasks();
+}
+
+test("a lost fallback EOSE releases dedupe at the deadline", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  await exhaustWithLostFallbackEose(subscription);
+  const retained = subscription.reconnectReplay;
+  assert.ok(retained, "precondition: dedupe waits for the fallback's EOSE");
+  for (let i = 0; i < 50; i++) {
+    shouldDispatchSubscriptionEvent(subscription, event(`live-${i}`, 5_100));
+  }
+  assert.equal(retained.seenEventIds.size, 50, "live traffic grows the set");
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  assert.equal(subscription.reconnectReplay, undefined, "released");
+  assert.equal(pendingTimers.size, 0);
+  assert.equal(
+    subscription.pendingReplaySince,
+    5_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+    "the unrepaired window stays pinned",
+  );
+});
+
+test("a stale fallback release cannot clear a successor's dedupe", async () => {
+  resetGate();
+  const subscription = liveSub(buildChannelFilter("channel-1", 1000), {
+    lastSeenCreatedAt: 5_000,
+  });
+  await exhaustWithLostFallbackEose(subscription);
+  const staleRelease = subscription.reconnectReplay.liveEoseWaiter;
+  const successorWaiter = () => {};
+  const successor = {
+    generation: 1,
+    seenEventIds: new Set(["next"]),
+    liveEose: false,
+    repairDone: false,
+    liveEoseWaiter: successorWaiter,
+  };
+  subscription.reconnectReplay = successor;
+  staleRelease();
+  tickTo(fakeNow + LIVE_REQ_ACK_TIMEOUT_MS);
+  assert.equal(subscription.reconnectReplay, successor);
+  assert.equal(successor.liveEoseWaiter, successorWaiter);
+});
