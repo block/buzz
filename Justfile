@@ -429,6 +429,9 @@ test-unit:
         # invocation hits. Enumerated explicitly because nothing in CI runs
         # `cargo test --workspace` — membership buys clippy/check, not tests.
         cargo nextest run -p buzz-sdk --lib
+        # buzz-workflow parser, cron, condition and denial-logging unit tests
+        # (infra-free). Its ignored Postgres cases run in the PostgreSQL lane.
+        cargo nextest run -p buzz-workflow --lib
         # buzz-acp owns the relay-to-agent trust boundary. Run its tests here so
         # forged relay events cannot regain a path into agent routing unnoticed.
         cargo nextest run -p buzz-acp
