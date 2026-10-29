@@ -66,6 +66,7 @@ class UserProfileSheet extends HookConsumerWidget {
   /// Agent artwork treatment within the profile sheet.
   final bool agentPresentation;
   final String? agentSubtitle;
+  final Widget? agentSubtitleIcon;
 
   /// The opening surface's comparison context. The sheet watches it, so its
   /// title follows profile and context changes while it is open. The caller
@@ -86,6 +87,7 @@ class UserProfileSheet extends HookConsumerWidget {
     required this.pubkey,
     this.agentPresentation = false,
     this.agentSubtitle,
+    this.agentSubtitleIcon,
     this.names,
     this.contextualActions,
     this.primaryActionsSpacing = Grid.xs + Grid.half,
@@ -236,11 +238,27 @@ class UserProfileSheet extends HookConsumerWidget {
                     if (agentSubtitle != null) ...[
                       const SizedBox(height: Grid.xxs),
                       Center(
-                        child: Text(
-                          agentSubtitle!,
-                          style: context.textTheme.bodySmall?.copyWith(
-                            color: context.colors.onSurfaceVariant,
-                          ),
+                        child: Wrap(
+                          alignment: WrapAlignment.center,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: Grid.half,
+                          children: [
+                            if (agentSubtitleIcon != null)
+                              ExcludeSemantics(
+                                child: IconTheme(
+                                  data: IconThemeData(
+                                    color: context.colors.onSurfaceVariant,
+                                  ),
+                                  child: agentSubtitleIcon!,
+                                ),
+                              ),
+                            Text(
+                              agentSubtitle!,
+                              style: context.textTheme.bodySmall?.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ],

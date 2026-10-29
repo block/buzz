@@ -6,7 +6,7 @@ import '../../shared/theme/theme.dart';
 class AgentModelInfo extends StatelessWidget {
   const AgentModelInfo({
     required this.model,
-    this.managementLabel = 'Desktop agent',
+    this.managementLabel = 'Manage on desktop',
     super.key,
   });
   final String? model;

@@ -14,6 +14,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/agent_navigation_icon.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../profile/user_profile_sheet.dart';
@@ -79,12 +80,18 @@ class _AgentsNavigation extends HookConsumerWidget {
                   builder: (_) => UserProfileSheet(
                     pubkey: pubkey,
                     agentPresentation: true,
+                    agentSubtitleIcon:
+                        controller.agents.any(
+                          (agent) => agent['agent_pubkey'] == pubkey,
+                        )
+                        ? const AgentNavigationIcon(size: 16)
+                        : null,
                     agentSubtitle:
                         controller.agents.any(
                           (agent) => agent['agent_pubkey'] == pubkey,
                         )
-                        ? 'Cloud agent'
-                        : 'Desktop agent',
+                        ? 'Builderbot agent'
+                        : 'Manage on desktop',
                     primaryActionsSpacing: Grid.md,
                     contextualActionsSpacing: Grid.xxs,
                     contextualActions: (_) => DeleteAgentAction(
@@ -354,8 +361,8 @@ class AgentsPage extends HookConsumerWidget {
                       subtitle: editable
                           ? null
                           : remote != null
-                          ? 'Cloud agent'
-                          : 'Desktop agent',
+                          ? 'Builderbot agent'
+                          : 'Manage on desktop',
                     );
                   },
                 ),

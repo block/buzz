@@ -45,7 +45,7 @@ void main() {
     expect(find.text('Set as default'), findsNothing);
     expect(find.text('Model not shared'), findsNothing);
     expect(find.byIcon(Icons.star), findsNothing);
-    expect(find.text('Desktop agent'), findsOneWidget);
+    expect(find.text('Manage on desktop'), findsOneWidget);
     expect(find.byIcon(Icons.keyboard_arrow_down), findsNothing);
 
     await tester.tap(find.byKey(ValueKey(existing)));
