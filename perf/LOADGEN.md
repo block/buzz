@@ -83,22 +83,32 @@ hold, the run stops if any operation's p99 (publish→delivery included)
 exceeds `abort.max_p99_ms`, if any operation other than delivery has an
 error rate above `abort.max_error_rate`, or if a client exited unexpectedly.
 An operation still in flight when the hold ends is reported as `pending`
-and counts as an error, so a relay that never answers fails the step
-instead of leaving it empty. A relay `CLOSED` on a live subscription counts
-as a `subscribe_eose` error and ends that client's session. Each connect
-plus authentication must finish within `target.connect_timeout_secs`
-(default 10). Quota rejections, meaning an HTTP 429 or the relay's
+but not judged: it has not failed yet. A relay `CLOSED` on a live
+subscription counts as a `subscribe_eose` error and ends that client's
+session. Each connect plus authentication must finish within
+`target.connect_timeout_secs` (default 10). Quota rejections, meaning an HTTP 429 or the relay's
 `rate-limited: quota exceeded` text, are reported as `throttled`, not errors.
 Every other rejection, including `rate-limited: shared admission unavailable`
 (the relay's admission store is down), counts as an error.
 Ramp steps must increase `users`, since clients are only ever added.
 
-When the run stops, clients get 15 seconds to finish before they are
-cancelled. Operations abandoned by the stop or the cancellation are recorded
-as `unfinished at stop` errors in the report's `shutdown` object, which lists
-its `ops` and `failures` and is judged by the same limits. The process exits
-non-zero when a step aborts, a client panics, a client had to be cancelled,
-or `shutdown` crosses a limit (`shutdown.abort_reason`).
+When the run stops, clients get 15 seconds to settle what they have in flight
+and disconnect. An operation already under way runs to its own deadline
+instead of being abandoned: a connect attempt finishes within
+`target.connect_timeout_secs`, and a publish waits at most 30 seconds for its
+`OK`. A stalled connect therefore ends as a `connect timeout` error and a
+healthy one as a success. What settles after the last step is reported in the
+`shutdown` object (`ops`, `failures`, `abort_reason`) and judged by the same
+limits as a step, so a connect that never completes fails the run there. A client
+still busy when the grace period ends is cancelled; its in-flight operations
+are recorded as `unfinished at stop` errors, and the cancellation fails the run
+whatever the limits. Keep `target.connect_timeout_secs` below 15, or a stalled
+connect is cancelled instead of timing out. Publishes, history fetches and
+HTTP requests can outlast the grace period (30 s, 30 s and 60 s deadlines), in
+which case the client is cancelled and the run fails.
+
+The process exits non-zero when a step aborts, a client panics, a client had to
+be cancelled, or `shutdown.abort_reason` is set.
 
 `seed` exits non-zero unless the relay accepted every planned post.
 

@@ -26,7 +26,8 @@ use super::stats::{abort_reason, ops_json, Op, Stats};
 const TIMED_PREFIX: &str = "lg:";
 /// Longest an idle client blocks on its socket before rechecking the stop flag.
 const MAX_IDLE: Duration = Duration::from_secs(1);
-/// How long stopped clients get to disconnect before they are cancelled.
+/// How long stopped clients get to settle what they have in flight and
+/// disconnect before they are cancelled.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 /// Live subscriptions every human opens after connecting.
 const HUMAN_SUBS: [&str; 4] = ["live", "mentions", "typing", "presence"];
@@ -68,6 +69,17 @@ struct Shared {
 
 /// Runs every ramp step and returns the JSON report; `Err` when a step aborted.
 pub async fn run(scenario: Scenario, net: Net, shard: Shard) -> Result<Value, Value> {
+    run_with(scenario, net, shard, SHUTDOWN_GRACE).await
+}
+
+/// [`run`] with the shutdown grace period given, so tests need not wait out
+/// [`SHUTDOWN_GRACE`] for a client that never settles.
+async fn run_with(
+    scenario: Scenario,
+    net: Net,
+    shard: Shard,
+    grace: Duration,
+) -> Result<Value, Value> {
     let stats = Arc::new(Stats::default());
     let (stop_tx, stop) = watch::channel(false);
     let shared = Arc::new(Shared {
@@ -165,9 +177,10 @@ pub async fn run(scenario: Scenario, net: Net, shard: Shard) -> Result<Value, Va
 
     let _ = stop_tx.send(true);
     let shutdown_start = Instant::now();
-    let (panicked, cancelled) = shutdown(tasks, SHUTDOWN_GRACE).await;
-    // Operations abandoned by the stop or by cancellation record their errors
-    // after the last step was judged; they count against the run.
+    let (panicked, cancelled) = shutdown(tasks, grace).await;
+    // Operations still in flight at the stop settle now, after the last step
+    // was judged: a stalled connect as a connect timeout, a cancelled client
+    // as `unfinished at stop`. Their errors count against the run.
     let closing = stats.snapshot();
     let closed = closing.since(&reported);
     let shutdown_reason = abort_reason(
@@ -199,7 +212,8 @@ pub async fn run(scenario: Scenario, net: Net, shard: Shard) -> Result<Value, Va
 }
 
 /// A run fails when a step aborted, a client panicked, shutdown had to cancel
-/// a client, or the operations abandoned at shutdown crossed the abort limits.
+/// a client, or the operations that settled during shutdown crossed the abort
+/// limits.
 fn failed(aborted: bool, panicked: usize, cancelled: usize, shutdown: Option<&str>) -> bool {
     aborted || panicked > 0 || cancelled > 0 || shutdown.is_some()
 }
@@ -403,7 +417,8 @@ async fn publish(
 }
 
 /// Connects with retry until connected or stopped. Each attempt is bounded
-/// by the connect deadline and abandoned as soon as the run stops.
+/// by the connect deadline, which should be shorter than [`SHUTDOWN_GRACE`]
+/// so an attempt under way at the stop settles before clients are cancelled.
 async fn connect(
     shared: &Shared,
     community: &Community,
@@ -413,13 +428,11 @@ async fn connect(
     backoff: &mut Backoff,
 ) -> Option<NostrWsConnection> {
     while !stopped(shared) {
-        // Abandoning the attempt on stop drops the guard, which records it.
+        // An attempt already under way runs to its connect deadline even when
+        // the run stops, so it settles as a success or an error rather than
+        // vanishing; the loop then ends instead of starting another.
         let pending = shared.stats.begin(Op::WsConnect);
-        let attempt = tokio::select! {
-            attempt = shared.net.connect(community, keys, auth) => attempt,
-            _ = stopping(shared) => return None,
-        };
-        match attempt {
+        match shared.net.connect(community, keys, auth).await {
             Ok(conn) => {
                 pending.ok();
                 return Some(conn);
@@ -1156,9 +1169,10 @@ hold_secs = 1
     }
 
     #[tokio::test]
-    async fn stalled_connects_inside_the_hold_fail_the_run_at_the_default_deadline() {
-        // The connect deadline (default 10s) outlasts the 1s hold, so no
-        // attempt has finished when the step is judged.
+    async fn stalled_connects_still_under_way_at_the_stop_settle_and_fail_the_run() {
+        // The 2s connect deadline outlasts the 1s hold, so every attempt is
+        // still in flight when the step is judged: the step passes, the stop
+        // lets the attempts run to their deadline, and they fail the run.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let held = tokio::spawn(async move {
@@ -1173,6 +1187,7 @@ run_id = "t"
 [target]
 ws_url = "ws://{addr}"
 http_url = "http://{addr}"
+connect_timeout_secs = 2.0
 [shape]
 communities = 1
 channels_per_community = 1
@@ -1187,7 +1202,6 @@ hold_secs = 1
 "#
         ))
         .unwrap();
-        assert_eq!(scenario.target.connect_timeout_secs, 10.0);
         let net = Net::new(&scenario).await.unwrap();
         let started = Instant::now();
         let report = tokio::time::timeout(
@@ -1195,19 +1209,26 @@ hold_secs = 1
             run(scenario, net, Shard { index: 0, count: 1 }),
         )
         .await
-        .expect("stopping abandons the stalled connects")
+        .expect("the stalled connects settle at their deadline")
         .expect_err("clients that never connected fail the run");
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(started.elapsed() >= Duration::from_secs(2), "{report}");
         let step = &report["steps"][0];
-        assert_eq!(step["aborted"], true, "{report}");
+        assert_eq!(step["aborted"], false, "{report}");
         assert_eq!(step["ops"]["ws_connect_auth"]["pending"], 4, "{report}");
         assert_eq!(step["ops"]["ws_connect_auth"]["errors"], 0, "{report}");
-        // The attempts abandoned by the stop are reported after the step.
-        assert_eq!(
-            report["shutdown"]["ops"]["ws_connect_auth"]["errors"], 4,
+        // The attempts finish as connect timeouts, not as abandoned ones.
+        let closing = &report["shutdown"];
+        assert_eq!(closing["ops"]["ws_connect_auth"]["errors"], 4, "{report}");
+        let reasons = closing["failures"].to_string();
+        assert!(reasons.contains("connect timeout"), "{report}");
+        assert!(!reasons.contains("unfinished at stop"), "{report}");
+        assert!(
+            closing["abort_reason"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("ws_connect_auth error rate 1.000")),
             "{report}"
         );
-        assert_eq!(report["clients_cancelled"], 0);
+        assert_eq!(report["clients_cancelled"], 0, "{report}");
         held.abort();
     }
 

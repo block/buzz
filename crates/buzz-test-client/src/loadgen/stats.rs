@@ -51,9 +51,10 @@ impl Op {
 
 /// Why a step crossed the abort thresholds, if it did. Every operation but
 /// seeding counts toward the latency limit; delivery has no error signal of
-/// its own, so it is left out of the error-rate limit. Operations still in
-/// flight count as errors, so a step whose clients never connected or never
-/// got an answer cannot pass for lack of samples.
+/// its own, so it is left out of the error-rate limit. Operations in flight
+/// when the window ends are reported but not judged: they have not failed
+/// yet. The run stops and each one settles, so a stalled operation shows up
+/// as an error in the shutdown window.
 pub fn abort_reason(
     summaries: &[(Op, OpSummary)],
     max_error_rate: f64,
@@ -61,7 +62,7 @@ pub fn abort_reason(
 ) -> Option<String> {
     summaries
         .iter()
-        .filter(|(op, s)| *op != Op::Seed && s.count + s.errors + s.pending > 0)
+        .filter(|(op, s)| *op != Op::Seed && s.count + s.errors > 0)
         .find_map(|(op, s)| {
             if *op != Op::Deliver && s.error_rate() > max_error_rate {
                 Some(format!(
@@ -141,8 +142,8 @@ impl Stats {
     }
 
     /// Starts timing an operation. The guard counts as in flight until it is
-    /// finished; one dropped unfinished, because the run stopped or the client
-    /// was cancelled, records an error.
+    /// finished; one dropped unfinished, which only happens when its client is
+    /// cancelled, records an error.
     pub fn begin(&self, op: Op) -> Pending<'_> {
         self.op(op).in_flight.fetch_add(1, Ordering::Relaxed);
         Pending {
@@ -302,14 +303,12 @@ pub struct OpSummary {
 }
 
 impl OpSummary {
-    /// Failed share of the operations that finished or are still in flight.
     pub fn error_rate(&self) -> f64 {
-        let failed = self.errors + self.pending;
-        let total = self.count + failed;
+        let total = self.count + self.errors;
         if total == 0 {
             0.0
         } else {
-            failed as f64 / total as f64
+            self.errors as f64 / total as f64
         }
     }
 }
@@ -520,8 +519,8 @@ mod tests {
         let s = summary(&stats, Op::WsConnect);
         assert_eq!((s.count, s.errors, s.pending), (1, 1, 1));
 
-        // A guard dropped unfinished, as when a `select!` abandons it or its
-        // task is aborted, is an error, not a vanished sample.
+        // A guard dropped unfinished, as when its task is aborted, is an
+        // error, not a vanished sample.
         drop(waiting);
         let s = summary(&stats, Op::WsConnect);
         assert_eq!((s.count, s.errors, s.pending), (1, 2, 0));
@@ -532,25 +531,23 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_operations_fail_a_step_that_has_no_samples() {
+    fn in_flight_operations_are_reported_but_not_judged() {
         let stats = Stats::default();
-        let stalled = stats.begin(Op::PublishEphemeral);
+        let straddling = stats.begin(Op::PublishEphemeral);
         let window = stats.snapshot().since(&Snapshot::default());
-        let reason = abort_reason(&window, 0.05, 5_000.0).expect("a pending operation aborts");
+        // One healthy operation still in flight is not a 100% error rate.
+        assert_eq!(abort_reason(&window, 0.0, 5_000.0), None);
+        assert_eq!(summary(&stats, Op::PublishEphemeral).error_rate(), 0.0);
+        assert_eq!(ops_json(&window, 1.0)["publish_ephemeral_ok"]["pending"], 1);
+
+        // Once it settles as a failure, it counts.
+        straddling.err("OK timeout");
+        let window = stats.snapshot().since(&Snapshot::default());
+        let reason = abort_reason(&window, 0.05, 5_000.0).expect("a settled error aborts");
         assert!(
             reason.starts_with("publish_ephemeral_ok error rate 1.000"),
             "{reason}"
         );
-        let json = ops_json(&window, 1.0);
-        assert_eq!(json["publish_ephemeral_ok"]["pending"], 1);
-
-        // Pending counts toward the rate: 1 of 21 stays under a 10% limit.
-        for _ in 0..20 {
-            stats.ok(Op::PublishEphemeral, Duration::from_millis(1));
-        }
-        let window = stats.snapshot().since(&Snapshot::default());
-        assert_eq!(abort_reason(&window, 0.10, 5_000.0), None);
-        drop(stalled);
     }
 
     #[test]
