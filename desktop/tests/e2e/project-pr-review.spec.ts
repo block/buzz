@@ -3529,6 +3529,11 @@ test("project task can be created with a category from the tasks header", async 
     .getByTestId("project-section-header")
     .getByRole("button", { name: "Create task" })
     .click();
+  // The dialog focuses the title field from a timer after opening. Filling
+  // before then lets that focus move land mid-fill and type the body into the
+  // title. The category select comes first, so the dialog's own autofocus
+  // never lands on the title and this waits for the timer, whatever its delay.
+  await expect(page.getByTestId("create-issue-title")).toBeFocused();
   await page
     .getByTestId("create-issue-category")
     .selectOption("change-request");

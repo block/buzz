@@ -3,6 +3,7 @@ use crate::{relay_members, thread};
 use buzz_core::CommunityId;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use sqlx::{Connection, PgPool};
+use std::time::Instant;
 use uuid::Uuid;
 
 const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
@@ -360,11 +361,34 @@ async fn readiness_check_cancellation_balances_waiter_and_inflight_connection() 
         querying_db
             .readiness_check_sql(
                 tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-                "SELECT pg_sleep(5)",
+                "SELECT pg_sleep(1)",
             )
             .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    // Abort only once the server is running the query. sqlx's release ping
+    // waits for it to finish, so the connection returns about 1 s later,
+    // well inside the 5 s recovery bound below.
+    let observer = PgPool::connect(&database_url)
+        .await
+        .expect("connect activity observer");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let running: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND state = 'active' \
+                   AND query = 'SELECT pg_sleep(1)')",
+            )
+            .fetch_one(&observer)
+            .await
+            .expect("inspect readiness query");
+            if running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("readiness query reached the server");
     querying.abort();
     assert!(querying
         .await
@@ -3216,6 +3240,22 @@ fn writer_statement_timeout_is_always_bounded() {
     assert_eq!(MAX_STATEMENT_TIMEOUT_MS, 300_000);
 }
 
+/// Poll until the reader pool holds exactly `target` connections, all idle.
+/// Returned and floor-maintenance connections land asynchronously, from
+/// tasks sqlx spawns on drop.
+async fn await_idle_floor(read_pool: &PgPool, target: u32) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while read_pool.size() != target || read_pool.num_idle() != target as usize {
+        assert!(
+            Instant::now() < deadline,
+            "reader pool never settled at {target} idle; size={} idle={}",
+            read_pool.size(),
+            read_pool.num_idle()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Through the production constructors, every writer session carries the
 /// clamped statement timeout and every replica session the 20 s read
 /// deadline. Mutation oracles: dropping the clamp leaves `0`/`10min` on the
@@ -3245,7 +3285,11 @@ async fn session_statement_timeouts_bound_writer_and_reader_sessions() {
             .await
             .expect("writer timeout");
         assert_eq!(writer, writer_expected, "writer, configured {configured}");
+        // Warm the reader the way the relay boots it: the routed-read acquire
+        // budget is 150 ms, and a cold dial on a busy server can exceed it.
         let reader_pool = db.read_pool.clone().expect("reader configured");
+        db.read_pool_boot_ping_for_tests().await;
+        await_idle_floor(&reader_pool, 1).await;
         let reader: String = sqlx::query_scalar("SHOW statement_timeout")
             .fetch_one(&reader_pool)
             .await
@@ -3519,7 +3563,7 @@ async fn replica_floor_writer_transaction_holds_shared_lock() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn replica_floor_probe_waits_for_shared_writer_and_records_after_release() {
+async fn cluster_global_replica_floor_probe_waits_for_shared_writer_and_records_after_release() {
     let admin = PgPool::connect(&admin_url().await)
         .await
         .expect("connect admin");
