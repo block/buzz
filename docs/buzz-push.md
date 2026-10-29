@@ -38,3 +38,15 @@ The gateway reserves four relay shares within each destination delivery budget.
 Each approved relay can admit at most one quarter of the configured cap per window;
 renewing a grant does not reset usage. Quota exhaustion returns 429 and Retry-After,
 and the relay keeps its durable request ID when rescheduling.
+
+## Workflow owner attribution
+
+The relay signs workflow messages. Their first `p` tag,
+`["p", <owner>, "", "owner"]`, names the workflow owner so clients can show
+who owns the message. On an event marked `["buzz:workflow", "true"]` that tag
+is attribution, not a mention: `#p` filters (live, history through the mention
+index, and push leases), operator listeners and the push hellthread gate all
+skip it, so the owner is not notified by every run of their workflow. When a
+workflow mentions its owner, the relay adds a plain `["p", <owner>]`, which
+notifies them like any mention. Mobile's Activity feed, unread mention priority
+and in-app notification rule apply the same rule.

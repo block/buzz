@@ -160,6 +160,14 @@ jobs:
       - name: Test mobile recipe argument forwarding
         if: matrix.lane == 'checks'
         run: /bin/bash scripts/test-mobile-gateway-recipes.sh
+      # ubuntu-latest (26.04) defaults to JDK 25, which Gradle 8.14 does not
+      # support. Pin the JDK 17 the 24.04 image used.
+      - name: Set up JDK 17
+        if: matrix.lane == 'android'
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "17"
       - name: Restore Gradle cache
         if: matrix.lane == 'android'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5

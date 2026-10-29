@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:nostr/nostr.dart' as nostr;
 
+import '../crypto/event_signing.dart';
 import '../crypto/nip44.dart';
 import '../relay/relay.dart';
 import 'me_sync.dart';
@@ -22,7 +22,7 @@ String? decodeDefaultAgent(NostrEvent event, MeSync sync) {
       event.getTagValue('d') != defaultAgentTag) {
     throw const FormatException('Invalid Bestie preference');
   }
-  nostr.Event.fromJson(jsonEncode(event.toJson()));
+  verifiedNostrEventFromJson(jsonEncode(event.toJson()));
   final raw = jsonDecode(nip44Decrypt(sync.key, event.content));
   if (raw is! Map<String, dynamic> ||
       raw.length != 2 ||

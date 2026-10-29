@@ -784,15 +784,15 @@ class ThreadDetailPage extends HookConsumerWidget {
     );
 
     // Thread-scoped typing indicators (exclude self).
-    final allTyping = ref.watch(channelTypingProvider(channelId));
-    final threadTyping = allTyping
-        .where((e) => e.threadHeadId == threadHead.id)
-        .where(
-          (e) =>
-              currentPubkey == null ||
-              e.pubkey.toLowerCase() != currentPubkey.toLowerCase(),
+    final threadTyping = ref
+        .watch(
+          visibleTypingProvider(
+            channelId,
+            selfPubkey: currentPubkey,
+            include: (e) => e.threadHeadId == threadHead.id,
+          ),
         )
-        .toList();
+        .entries;
 
     // The root of the entire thread chain. If the current thread head is
     // itself a root message its rootId is null, so fall back to its own id.

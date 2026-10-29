@@ -7,6 +7,22 @@ use nostr::Filter;
 use crate::channel::LEGACY_CHANNEL_TYPES;
 use crate::event::StoredEvent;
 
+/// Whether `tag` attributes a workflow message to its owner instead of
+/// mentioning them: `["p", <owner>, "", "owner"]` on an event marked
+/// `["buzz:workflow", "true"]`. The relay names the owner that way so clients
+/// can show who owns the message, and adds a plain `p` tag when the workflow
+/// does mention its owner. `#p` matching, the mention index and other mention
+/// consumers skip the attribution. The workflow marker keeps the rule off
+/// other `p` tags with a fourth field, such as NIP-29 roster roles. An author
+/// who marks a tag only withholds a mention they could have left out.
+pub fn is_workflow_owner_attribution(event: &nostr::Event, tag: &nostr::Tag) -> bool {
+    matches!(tag.as_slice(), [name, _, _, marker, ..] if name == "p" && marker == "owner")
+        && event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz:workflow", "true"])
+}
+
 /// Returns `true` if the event matches any of the provided NIP-01 filters.
 pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
     filters.iter().any(|f| filter_match_one(f, event))
@@ -138,7 +154,10 @@ fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
             ev.event
                 .tags
                 .iter()
-                .filter(|t| t.kind().to_string() == tag_key_str)
+                .filter(|t| {
+                    t.kind().to_string() == tag_key_str
+                        && !is_workflow_owner_attribution(&ev.event, t)
+                })
                 .filter_map(|t| t.content())
                 .any(|event_val| event_val == filter_val.as_str())
         });
@@ -184,6 +203,39 @@ mod tests {
             .sign_with_keys(&keys)
             .expect("sign");
         StoredEvent::with_received_at(event, Utc::now(), None, true)
+    }
+
+    #[test]
+    fn a_workflow_owner_attribution_does_not_match_p_filters() {
+        let owner = Keys::generate().public_key().to_hex();
+        let by_p: Filter = serde_json::from_value(serde_json::json!({"#p": [owner]})).unwrap();
+        let attribution: &[&str] = &["p", &owner, "", "owner"];
+        let workflow: &[&str] = &["buzz:workflow", "true"];
+        let mention: &[&str] = &["p", &owner];
+        // (tags, matches `#p: [owner]`)
+        let cases: [(&[&[&str]], bool); 4] = [
+            (&[attribution, workflow], false),
+            (&[attribution, workflow, mention], true),
+            // Without the workflow marker the fourth field is something
+            // else, such as a NIP-29 roster role, and the tag still matches.
+            (&[attribution], true),
+            (&[mention], true),
+        ];
+        for (tags, matches) in cases {
+            let event = EventBuilder::new(Kind::Custom(9), "run")
+                .tags(
+                    tags.iter()
+                        .map(|tag| Tag::parse(tag.iter().copied()).unwrap()),
+                )
+                .sign_with_keys(&Keys::generate())
+                .expect("sign");
+            let stored = StoredEvent::with_received_at(event, Utc::now(), None, true);
+            assert_eq!(
+                filters_match(std::slice::from_ref(&by_p), &stored),
+                matches,
+                "{tags:?}"
+            );
+        }
     }
 
     #[test]
