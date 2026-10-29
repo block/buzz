@@ -1284,4 +1284,170 @@ hold_secs = 1
         let reason = abort_reason(&closed, 0.05, 5_000.0).expect("the straggler fails the run");
         assert!(reason.starts_with("publish_ephemeral_ok"), "{reason}");
     }
+
+    /// A loopback relay that speaks just enough NIP-42 and NIP-01 for a
+    /// client: it sends the AUTH challenge after `challenge_delay`, accepts the
+    /// AUTH event, answers every REQ with EOSE, and answers each EVENT with an
+    /// `OK` after `ok_delay`, or never when that is `None`.
+    async fn fake_ws_relay(challenge_delay: Duration, ok_delay: Option<Duration>) -> String {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
+                    tokio::time::sleep(challenge_delay).await;
+                    let challenge = json!(["AUTH", "challenge"]).to_string();
+                    if ws.send(Message::Text(challenge.into())).await.is_err() {
+                        return;
+                    }
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let frame: Value = serde_json::from_str(&text).unwrap();
+                        let reply = match frame[0].as_str() {
+                            Some("AUTH") => json!(["OK", frame[1]["id"], true, ""]),
+                            Some("REQ") => json!(["EOSE", frame[1]]),
+                            Some("EVENT") => {
+                                let Some(delay) = ok_delay else { continue };
+                                tokio::time::sleep(delay).await;
+                                json!(["OK", frame[1]["id"], true, ""])
+                            }
+                            _ => continue,
+                        };
+                        if ws
+                            .send(Message::Text(reply.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// One human, no agents, one `hold_secs` step, and a presence heartbeat
+    /// every second; other traffic is off so the heartbeat is the only publish.
+    fn lone_human(addr: &str, hold_secs: u64, max_error_rate: f64) -> Scenario {
+        Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 1
+[population]
+humans = 1
+agents = 0
+channels_per_member = 1
+[human]
+presence_interval_secs = 1.0
+typing_per_hour = 0.0
+messages_per_hour = 0.0
+reactions_per_hour = 0.0
+history_limit = 1
+[abort]
+max_error_rate = {max_error_rate}
+[[ramp]]
+users = 1.0
+hold_secs = {hold_secs}
+"#
+        ))
+        .unwrap()
+    }
+
+    async fn run_lone_human(scenario: Scenario, grace: Duration) -> Result<Value, Value> {
+        let net = Net::new(&scenario).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with(scenario, net, Shard { index: 0, count: 1 }, grace),
+        )
+        .await
+        .expect("the run returns")
+    }
+
+    #[tokio::test]
+    async fn a_publish_that_never_gets_its_ok_is_cancelled_and_fails_the_run() {
+        let addr = fake_ws_relay(Duration::ZERO, None).await;
+        let report = run_lone_human(lone_human(&addr, 2, 0.05), Duration::from_millis(300))
+            .await
+            .expect_err("a relay that never acknowledges a publish fails the run");
+        // The heartbeat is still waiting for its OK, which is not judged yet,
+        // but the client cannot settle it within the grace period.
+        let step = &report["steps"][0];
+        assert_eq!(step["aborted"], false, "{report}");
+        assert_eq!(
+            step["ops"]["publish_ephemeral_ok"]["pending"], 1,
+            "{report}"
+        );
+        assert_eq!(report["clients_cancelled"], 1, "{report}");
+        let closing = &report["shutdown"];
+        assert_eq!(
+            closing["ops"]["publish_ephemeral_ok"]["errors"], 1,
+            "{report}"
+        );
+        assert!(
+            closing["failures"]
+                .to_string()
+                .contains("unfinished at stop"),
+            "{report}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_client_fails_the_run_even_within_the_error_limit() {
+        // With the error limit lifted, only the cancellation can fail the run.
+        let addr = fake_ws_relay(Duration::ZERO, None).await;
+        let report = run_lone_human(lone_human(&addr, 2, 1.0), Duration::from_millis(300))
+            .await
+            .expect_err("cancelling a client fails the run");
+        assert_eq!(report["clients_cancelled"], 1, "{report}");
+        assert!(report["shutdown"]["abort_reason"].is_null(), "{report}");
+    }
+
+    #[tokio::test]
+    async fn a_publish_in_flight_at_the_snapshot_settles_and_the_run_passes() {
+        // The OK takes 1.5s, so a heartbeat is awaiting it when the 2s hold
+        // ends. The relay is healthy: the publish settles during shutdown.
+        let addr = fake_ws_relay(Duration::ZERO, Some(Duration::from_millis(1500))).await;
+        let report = run_lone_human(lone_human(&addr, 2, 0.05), Duration::from_secs(5))
+            .await
+            .expect("a healthy publish straddling the snapshot does not fail the run");
+        assert_eq!(
+            report["steps"][0]["ops"]["publish_ephemeral_ok"]["pending"], 1,
+            "{report}"
+        );
+        let closing = &report["shutdown"]["ops"]["publish_ephemeral_ok"];
+        assert!(closing["count"].as_u64().unwrap() >= 1, "{report}");
+        assert_eq!(closing["errors"], 0, "{report}");
+        assert_eq!(report["clients_cancelled"], 0, "{report}");
+    }
+
+    #[tokio::test]
+    async fn a_connect_under_way_at_the_stop_settles_and_the_run_passes() {
+        // The relay takes 1.5s to challenge, so the first connect is still in
+        // flight when the 1s hold ends and the run stops. It is not abandoned.
+        let addr = fake_ws_relay(Duration::from_millis(1500), Some(Duration::ZERO)).await;
+        let report = run_lone_human(lone_human(&addr, 1, 0.05), Duration::from_secs(5))
+            .await
+            .expect("a healthy connect straddling the stop does not fail the run");
+        assert_eq!(
+            report["steps"][0]["ops"]["ws_connect_auth"]["pending"], 1,
+            "{report}"
+        );
+        let closing = &report["shutdown"]["ops"]["ws_connect_auth"];
+        assert_eq!(
+            (closing["count"].clone(), closing["errors"].clone()),
+            (json!(1), json!(0)),
+            "{report}"
+        );
+    }
 }
