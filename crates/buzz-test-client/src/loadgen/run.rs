@@ -86,6 +86,8 @@ pub async fn run(scenario: Scenario, net: Net, shard: Shard) -> Result<Value, Va
     let (mut humans, mut agents) = (0usize, 0usize);
     let mut steps = Vec::new();
     let mut aborted = false;
+    // End of the last reported window; shutdown is judged from here.
+    let mut reported = stats.snapshot();
 
     for (n, step) in scenario.ramp.iter().enumerate() {
         let want_humans = (pop.humans as f64 * step.users).ceil() as usize;
@@ -154,6 +156,7 @@ pub async fn run(scenario: Scenario, net: Net, shard: Shard) -> Result<Value, Va
         });
         eprintln!("{report}");
         steps.push(report);
+        reported = after;
         if reason.is_some() {
             aborted = true;
             break;
@@ -161,24 +164,51 @@ pub async fn run(scenario: Scenario, net: Net, shard: Shard) -> Result<Value, Va
     }
 
     let _ = stop_tx.send(true);
-    let (panicked, cancelled) = shutdown(tasks).await;
+    let shutdown_start = Instant::now();
+    let (panicked, cancelled) = shutdown(tasks, SHUTDOWN_GRACE).await;
+    // Operations abandoned by the stop or by cancellation record their errors
+    // after the last step was judged; they count against the run.
+    let closing = stats.snapshot();
+    let closed = closing.since(&reported);
+    let shutdown_reason = abort_reason(
+        &closed,
+        shared.scenario.abort.max_error_rate,
+        shared.scenario.abort.max_p99_ms,
+    );
     let report = json!({
         "run_id": shared.scenario.run_id,
         "steps": steps,
+        "shutdown": {
+            "secs": (shutdown_start.elapsed().as_secs_f64() * 10.0).round() / 10.0,
+            "ops": ops_json(&closed, shutdown_start.elapsed().as_secs_f64()),
+            "failures": closing
+                .reasons_since(&reported, 10)
+                .into_iter()
+                .map(|(reason, count)| json!({"reason": reason, "count": count}))
+                .collect::<Vec<_>>(),
+            "abort_reason": shutdown_reason,
+        },
         "clients_panicked": panicked,
         "clients_cancelled": cancelled,
     });
-    if aborted || panicked > 0 {
+    if failed(aborted, panicked, cancelled, shutdown_reason.as_deref()) {
         Err(report)
     } else {
         Ok(report)
     }
 }
 
-/// Waits up to [`SHUTDOWN_GRACE`] for stopped clients, then cancels the
-/// rest. Returns how many panicked and how many were cancelled.
-async fn shutdown(tasks: Vec<tokio::task::JoinHandle<()>>) -> (usize, usize) {
-    let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+/// A run fails when a step aborted, a client panicked, shutdown had to cancel
+/// a client, or the operations abandoned at shutdown crossed the abort limits.
+fn failed(aborted: bool, panicked: usize, cancelled: usize, shutdown: Option<&str>) -> bool {
+    aborted || panicked > 0 || cancelled > 0 || shutdown.is_some()
+}
+
+/// Waits up to `grace` for stopped clients, then cancels the rest and waits
+/// for their futures to drop. Returns how many panicked and how many were
+/// cancelled.
+async fn shutdown(tasks: Vec<tokio::task::JoinHandle<()>>, grace: Duration) -> (usize, usize) {
+    let deadline = tokio::time::Instant::now() + grace;
     let (mut panicked, mut cancelled) = (0, 0);
     for mut task in tasks {
         match tokio::time::timeout_at(deadline, &mut task).await {
@@ -186,6 +216,8 @@ async fn shutdown(tasks: Vec<tokio::task::JoinHandle<()>>) -> (usize, usize) {
             Ok(Err(e)) => panicked += usize::from(e.is_panic()),
             Err(_) => {
                 task.abort();
+                // Dropping the future records what the client left in flight.
+                let _ = task.await;
                 cancelled += 1;
             }
         }
@@ -356,12 +388,16 @@ async fn publish(
     op: Op,
     event: Event,
 ) -> Result<(), WsClientError> {
-    let t0 = Instant::now();
+    let pending = stats.begin(op);
     match conn.send_event(event).await {
-        Ok(ok) if ok.accepted => stats.ok(op, t0.elapsed()),
-        Ok(ok) => stats.err(op, &ok.message),
-        Err(WsClientError::Timeout) => stats.err(op, "OK timeout"),
-        Err(e) => return Err(e),
+        Ok(ok) if ok.accepted => pending.ok(),
+        Ok(ok) => pending.err(&ok.message),
+        Err(WsClientError::Timeout) => pending.err("OK timeout"),
+        Err(e) => {
+            // The caller records the broken socket.
+            pending.forget();
+            return Err(e);
+        }
     }
     Ok(())
 }
@@ -377,24 +413,26 @@ async fn connect(
     backoff: &mut Backoff,
 ) -> Option<NostrWsConnection> {
     while !stopped(shared) {
-        let t0 = Instant::now();
+        // Abandoning the attempt on stop drops the guard, which records it.
+        let pending = shared.stats.begin(Op::WsConnect);
         let attempt = tokio::select! {
             attempt = shared.net.connect(community, keys, auth) => attempt,
             _ = stopping(shared) => return None,
         };
         match attempt {
             Ok(conn) => {
-                shared.stats.ok(Op::WsConnect, t0.elapsed());
+                pending.ok();
                 return Some(conn);
             }
-            Err(e) => shared.stats.err(Op::WsConnect, &e.to_string()),
+            Err(e) => pending.err(&e.to_string()),
         }
         backoff.wait(shared, rng).await;
     }
     None
 }
 
-/// Thread roots of `channel`, queried once per shard.
+/// Thread roots of `channel`, cached once found. Concurrent first callers may
+/// each query; a failed query is not cached, so a later reply retries it.
 async fn roots(
     shared: &Shared,
     community: &Community,
@@ -405,15 +443,15 @@ async fn roots(
         return found.clone();
     }
     let owner = identity::keys(&shared.scenario.run_id, Role::Owner, community.index);
-    let t0 = Instant::now();
+    let pending = shared.stats.begin(Op::HttpQuery);
     let found = match find_roots(&shared.net, community, reader, &owner, channel).await {
         Ok(found) => {
-            shared.stats.ok(Op::HttpQuery, t0.elapsed());
+            pending.ok();
             found
         }
         Err(e) => {
-            shared.stats.err(Op::HttpQuery, &e.to_string());
-            Vec::new()
+            pending.err(&e.to_string());
+            return Arc::new(Vec::new());
         }
     };
     let found = Arc::new(found);
@@ -683,21 +721,24 @@ async fn history(
     subscribed: Instant,
     last_message: &mut Option<Seen>,
 ) -> Result<(), HistoryError> {
-    let t0 = Instant::now();
-    send_req(conn, id, filter).await?;
-    let deadline = t0 + Duration::from_secs(30);
+    let pending = stats.begin(Op::History);
+    if let Err(e) = send_req(conn, id, filter).await {
+        pending.forget();
+        return Err(e.into());
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match conn.next_event(remaining).await {
             Ok(RelayMessage::Eose { subscription_id }) if subscription_id == id => {
-                stats.ok(Op::History, t0.elapsed());
+                pending.ok();
                 break;
             }
             Ok(RelayMessage::Closed {
                 subscription_id,
                 message,
             }) if subscription_id == id => {
-                stats.err(Op::History, &message);
+                pending.err(&message);
                 return Ok(());
             }
             Ok(message) if subscription_of(&message) == Some(id) => {
@@ -707,14 +748,18 @@ async fn history(
             }
             Ok(message) => {
                 if live(stats, &message, subscribed, last_message).is_err() {
+                    pending.forget();
                     return Err(HistoryError::LiveClosed);
                 }
             }
             Err(WsClientError::Timeout) => {
-                stats.err(Op::History, "EOSE timeout");
+                pending.err("EOSE timeout");
                 break;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                pending.forget();
+                return Err(e.into());
+            }
         }
     }
     Ok(conn.send_raw(&json!(["CLOSE", id])).await?)
@@ -856,14 +901,14 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 .sign_with_keys(&keys);
                 match event {
                     Ok(event) => {
-                        let t0 = Instant::now();
+                        let pending = shared.stats.begin(Op::HttpEvents);
                         match shared
                             .net
                             .submit(&keys, community, &event, Some(&auth))
                             .await
                         {
-                            Ok(()) => shared.stats.ok(Op::HttpEvents, t0.elapsed()),
-                            Err(e) => shared.stats.err(Op::HttpEvents, &e.to_string()),
+                            Ok(()) => pending.ok(),
+                            Err(e) => pending.err(&e.to_string()),
                         }
                     }
                     Err(e) => shared.stats.err(Op::HttpEvents, &format!("sign: {e}")),
@@ -923,18 +968,16 @@ async fn http(
     body: &Value,
     auth: &Tag,
 ) {
-    let t0 = Instant::now();
+    let pending = shared.stats.begin(op);
     let body = serde_json::to_vec(body).expect("serialize JSON body");
     match shared
         .net
         .post(keys, &community.http_url, path, body, Some(auth))
         .await
     {
-        Ok((status, _)) if status.is_success() => shared.stats.ok(op, t0.elapsed()),
-        Ok((status, text)) => shared
-            .stats
-            .err(op, &format!("HTTP {status}: {}", truncate(&text))),
-        Err(e) => shared.stats.err(op, &e.to_string()),
+        Ok((status, _)) if status.is_success() => pending.ok(),
+        Ok((status, text)) => pending.err(&format!("HTTP {status}: {}", truncate(&text))),
+        Err(e) => pending.err(&e.to_string()),
     }
 }
 
@@ -1110,5 +1153,114 @@ hold_secs = 1
         assert!(errors >= 4, "{report}");
         assert_eq!(report["clients_cancelled"], 0);
         held.abort();
+    }
+
+    #[tokio::test]
+    async fn stalled_connects_inside_the_hold_fail_the_run_at_the_default_deadline() {
+        // The connect deadline (default 10s) outlasts the 1s hold, so no
+        // attempt has finished when the step is judged.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                open.push(socket);
+            }
+        });
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 1
+[population]
+humans = 3
+agents = 1
+channels_per_member = 1
+connect_rate_per_sec = 100.0
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#
+        ))
+        .unwrap();
+        assert_eq!(scenario.target.connect_timeout_secs, 10.0);
+        let net = Net::new(&scenario).await.unwrap();
+        let started = Instant::now();
+        let report = tokio::time::timeout(
+            Duration::from_secs(10),
+            run(scenario, net, Shard { index: 0, count: 1 }),
+        )
+        .await
+        .expect("stopping abandons the stalled connects")
+        .expect_err("clients that never connected fail the run");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let step = &report["steps"][0];
+        assert_eq!(step["aborted"], true, "{report}");
+        assert_eq!(step["ops"]["ws_connect_auth"]["pending"], 4, "{report}");
+        assert_eq!(step["ops"]["ws_connect_auth"]["errors"], 0, "{report}");
+        // The attempts abandoned by the stop are reported after the step.
+        assert_eq!(
+            report["shutdown"]["ops"]["ws_connect_auth"]["errors"], 4,
+            "{report}"
+        );
+        assert_eq!(report["clients_cancelled"], 0);
+        held.abort();
+    }
+
+    #[test]
+    fn a_run_fails_unless_every_step_and_the_shutdown_were_clean() {
+        let reason = Some("publish_ephemeral_ok error rate 1.000 > 0.05");
+        // (aborted, panicked, cancelled, shutdown) -> failed
+        let cases = [
+            ((false, 0, 0, None), false),
+            ((true, 0, 0, None), true),
+            ((false, 1, 0, None), true),
+            ((false, 0, 1, None), true),
+            ((false, 0, 0, reason), true),
+        ];
+        for ((aborted, panicked, cancelled, shutdown), expected) in cases {
+            assert_eq!(
+                failed(aborted, panicked, cancelled, shutdown),
+                expected,
+                "{aborted} {panicked} {cancelled} {shutdown:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_stragglers_and_counts_what_they_left_in_flight() {
+        let stats = Arc::new(Stats::default());
+        let before = stats.snapshot();
+        let stuck = {
+            let stats = stats.clone();
+            tokio::spawn(async move {
+                // A publish that never gets its OK.
+                let _pending = stats.begin(Op::PublishEphemeral);
+                std::future::pending::<()>().await;
+            })
+        };
+        let finished = tokio::spawn(async {});
+        // Let the straggler register as in flight before shutting down.
+        while stats
+            .snapshot()
+            .since(&before)
+            .iter()
+            .all(|(_, s)| s.pending == 0)
+        {
+            tokio::task::yield_now().await;
+        }
+        let (panicked, cancelled) =
+            shutdown(vec![stuck, finished], Duration::from_millis(100)).await;
+        assert_eq!((panicked, cancelled), (0, 1));
+        let closed = stats.snapshot().since(&before);
+        let publish = closed.iter().find(|(op, _)| *op == Op::PublishEphemeral);
+        let publish = publish.unwrap().1;
+        assert_eq!((publish.errors, publish.pending), (1, 0));
+        let reason = abort_reason(&closed, 0.05, 5_000.0).expect("the straggler fails the run");
+        assert!(reason.starts_with("publish_ephemeral_ok"), "{reason}");
     }
 }

@@ -60,12 +60,20 @@ its hold, so connection failures during the ramp count. At the end of the
 hold, the run stops if any operation's p99 (publish→delivery included)
 exceeds `abort.max_p99_ms`, if any operation other than delivery has an
 error rate above `abort.max_error_rate`, or if a client exited unexpectedly.
-A relay `CLOSED` on a live subscription counts as a `subscribe_eose` error
-and ends that client's session. Each connect plus authentication must finish
-within `target.connect_timeout_secs` (default 10). Rate-limit rejections are
-reported as `throttled`, not errors. Ramp steps must increase `users`, since
-clients are only ever added. The process exits non-zero when a step aborts
-or a client panics.
+An operation still in flight when the hold ends is reported as `pending`
+and counts as an error, so a relay that never answers fails the step
+instead of leaving it empty. A relay `CLOSED` on a live subscription counts
+as a `subscribe_eose` error and ends that client's session. Each connect
+plus authentication must finish within `target.connect_timeout_secs`
+(default 10). Rate-limit rejections are reported as `throttled`, not errors.
+Ramp steps must increase `users`, since clients are only ever added.
+
+When the run stops, clients get 15 seconds to finish before they are
+cancelled. Operations abandoned by the stop or the cancellation are recorded
+as `unfinished at stop` errors in the report's `shutdown` object, which lists
+its `ops` and `failures` and is judged by the same limits. The process exits
+non-zero when a step aborts, a client panics, a client had to be cancelled,
+or `shutdown` crosses a limit (`shutdown.abort_reason`).
 
 `seed` exits non-zero unless the relay accepted every planned post.
 

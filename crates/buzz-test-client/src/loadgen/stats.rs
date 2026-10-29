@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
@@ -51,7 +51,9 @@ impl Op {
 
 /// Why a step crossed the abort thresholds, if it did. Every operation but
 /// seeding counts toward the latency limit; delivery has no error signal of
-/// its own, so it is left out of the error-rate limit.
+/// its own, so it is left out of the error-rate limit. Operations still in
+/// flight count as errors, so a step whose clients never connected or never
+/// got an answer cannot pass for lack of samples.
 pub fn abort_reason(
     summaries: &[(Op, OpSummary)],
     max_error_rate: f64,
@@ -59,7 +61,7 @@ pub fn abort_reason(
 ) -> Option<String> {
     summaries
         .iter()
-        .filter(|(op, s)| *op != Op::Seed && s.count + s.errors > 0)
+        .filter(|(op, s)| *op != Op::Seed && s.count + s.errors + s.pending > 0)
         .find_map(|(op, s)| {
             if *op != Op::Deliver && s.error_rate() > max_error_rate {
                 Some(format!(
@@ -96,6 +98,8 @@ struct OpStats {
     buckets: Vec<AtomicU64>,
     errors: AtomicU64,
     throttled: AtomicU64,
+    /// Operations begun with [`Stats::begin`] and not yet finished.
+    in_flight: AtomicU64,
 }
 
 impl OpStats {
@@ -104,6 +108,7 @@ impl OpStats {
             buckets: (0..BUCKETS).map(|_| AtomicU64::new(0)).collect(),
             errors: AtomicU64::new(0),
             throttled: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
         }
     }
 }
@@ -133,6 +138,19 @@ impl Stats {
 
     pub fn ok(&self, op: Op, latency: Duration) {
         self.op(op).buckets[bucket(latency)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Starts timing an operation. The guard counts as in flight until it is
+    /// finished; one dropped unfinished, because the run stopped or the client
+    /// was cancelled, records an error.
+    pub fn begin(&self, op: Op) -> Pending<'_> {
+        self.op(op).in_flight.fetch_add(1, Ordering::Relaxed);
+        Pending {
+            stats: self,
+            op,
+            start: Instant::now(),
+            finished: false,
+        }
     }
 
     /// Records a failure. Rate-limit rejections count as throttled, not errors,
@@ -167,9 +185,58 @@ impl Stats {
                         .collect(),
                     errors: s.errors.load(Ordering::Relaxed),
                     throttled: s.throttled.load(Ordering::Relaxed),
+                    in_flight: s.in_flight.load(Ordering::Relaxed),
                 })
                 .collect(),
             reasons: self.reasons.lock().expect("reasons lock").clone(),
+        }
+    }
+}
+
+/// An operation started with [`Stats::begin`].
+#[must_use = "an unfinished guard records an error when dropped"]
+pub struct Pending<'a> {
+    stats: &'a Stats,
+    op: Op,
+    start: Instant,
+    finished: bool,
+}
+
+impl Pending<'_> {
+    /// Records success with the latency since [`Stats::begin`].
+    pub fn ok(mut self) {
+        self.stats.ok(self.op, self.start.elapsed());
+        self.finish();
+    }
+
+    /// Records a failure.
+    pub fn err(mut self, reason: &str) {
+        self.stats.err(self.op, reason);
+        self.finish();
+    }
+
+    /// Ends the operation without recording it, for a failure the caller
+    /// accounts for elsewhere.
+    pub fn forget(mut self) {
+        self.finish();
+    }
+
+    /// Leaves the in-flight gauge after the outcome is recorded, so a
+    /// snapshot between the two sees the operation twice, never not at all.
+    fn finish(&mut self) {
+        self.finished = true;
+        self.stats
+            .op(self.op)
+            .in_flight
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.stats.err(self.op, "unfinished at stop");
+            self.finish();
         }
     }
 }
@@ -203,6 +270,7 @@ struct OpSnapshot {
     buckets: Vec<u64>,
     errors: u64,
     throttled: u64,
+    in_flight: u64,
 }
 
 /// Point-in-time copy of [`Stats`]; subtract two to report one interval.
@@ -218,6 +286,8 @@ pub struct OpSummary {
     pub count: u64,
     pub errors: u64,
     pub throttled: u64,
+    /// Operations in flight when the interval ended.
+    pub pending: u64,
     pub p50_ms: f64,
     pub p90_ms: f64,
     pub p99_ms: f64,
@@ -225,12 +295,14 @@ pub struct OpSummary {
 }
 
 impl OpSummary {
+    /// Failed share of the operations that finished or are still in flight.
     pub fn error_rate(&self) -> f64 {
-        let total = self.count + self.errors;
+        let failed = self.errors + self.pending;
+        let total = self.count + failed;
         if total == 0 {
             0.0
         } else {
-            self.errors as f64 / total as f64
+            failed as f64 / total as f64
         }
     }
 }
@@ -256,6 +328,7 @@ impl Snapshot {
                         &buckets,
                         now.errors - then.errors,
                         now.throttled - then.throttled,
+                        now.in_flight,
                     ),
                 )
             })
@@ -276,7 +349,7 @@ impl Snapshot {
     }
 }
 
-fn summarize(buckets: &[u64], errors: u64, throttled: u64) -> OpSummary {
+fn summarize(buckets: &[u64], errors: u64, throttled: u64, pending: u64) -> OpSummary {
     let count: u64 = buckets.iter().sum();
     let pct = |q: f64| {
         if count == 0 {
@@ -296,6 +369,7 @@ fn summarize(buckets: &[u64], errors: u64, throttled: u64) -> OpSummary {
         count,
         errors,
         throttled,
+        pending,
         p50_ms: pct(0.50),
         p90_ms: pct(0.90),
         p99_ms: pct(0.99),
@@ -311,7 +385,7 @@ fn summarize(buckets: &[u64], errors: u64, throttled: u64) -> OpSummary {
 pub fn ops_json(summaries: &[(Op, OpSummary)], secs: f64) -> Value {
     let mut map = Map::new();
     for (op, s) in summaries {
-        if s.count + s.errors + s.throttled == 0 {
+        if s.count + s.errors + s.throttled + s.pending == 0 {
             continue;
         }
         map.insert(
@@ -320,6 +394,7 @@ pub fn ops_json(summaries: &[(Op, OpSummary)], secs: f64) -> Value {
                 "count": s.count,
                 "errors": s.errors,
                 "throttled": s.throttled,
+                "pending": s.pending,
                 "per_sec": round(s.count as f64 / secs.max(1e-9)),
                 "p50_ms": round(s.p50_ms),
                 "p90_ms": round(s.p90_ms),
@@ -413,5 +488,58 @@ mod tests {
             abort_reason(&seeding.snapshot().since(&base), 0.05, 1.0),
             None
         );
+    }
+
+    fn summary(stats: &Stats, op: Op) -> OpSummary {
+        let window = stats.snapshot().since(&Snapshot::default());
+        window.iter().find(|(o, _)| *o == op).unwrap().1
+    }
+
+    #[test]
+    fn begun_operations_count_in_flight_until_finished_and_unfinished_drops_are_errors() {
+        let stats = Stats::default();
+        let waiting = stats.begin(Op::WsConnect);
+        let succeeds = stats.begin(Op::WsConnect);
+        let fails = stats.begin(Op::WsConnect);
+        let handled_elsewhere = stats.begin(Op::WsConnect);
+        assert_eq!(summary(&stats, Op::WsConnect).pending, 4);
+
+        succeeds.ok();
+        fails.err("connect timeout");
+        handled_elsewhere.forget();
+        let s = summary(&stats, Op::WsConnect);
+        assert_eq!((s.count, s.errors, s.pending), (1, 1, 1));
+
+        // A guard dropped unfinished, as when a `select!` abandons it or its
+        // task is aborted, is an error, not a vanished sample.
+        drop(waiting);
+        let s = summary(&stats, Op::WsConnect);
+        assert_eq!((s.count, s.errors, s.pending), (1, 2, 0));
+        let reasons = stats.snapshot().reasons_since(&Snapshot::default(), 10);
+        assert!(reasons
+            .iter()
+            .any(|(r, n)| r == "ws_connect_auth: unfinished at stop" && *n == 1));
+    }
+
+    #[test]
+    fn in_flight_operations_fail_a_step_that_has_no_samples() {
+        let stats = Stats::default();
+        let stalled = stats.begin(Op::PublishEphemeral);
+        let window = stats.snapshot().since(&Snapshot::default());
+        let reason = abort_reason(&window, 0.05, 5_000.0).expect("a pending operation aborts");
+        assert!(
+            reason.starts_with("publish_ephemeral_ok error rate 1.000"),
+            "{reason}"
+        );
+        let json = ops_json(&window, 1.0);
+        assert_eq!(json["publish_ephemeral_ok"]["pending"], 1);
+
+        // Pending counts toward the rate: 1 of 21 stays under a 10% limit.
+        for _ in 0..20 {
+            stats.ok(Op::PublishEphemeral, Duration::from_millis(1));
+        }
+        let window = stats.snapshot().since(&Snapshot::default());
+        assert_eq!(abort_reason(&window, 0.10, 5_000.0), None);
+        drop(stalled);
     }
 }
