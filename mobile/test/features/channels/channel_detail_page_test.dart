@@ -90,6 +90,7 @@ import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
+import '../../helpers/widget_helpers.dart';
 
 part 'thread_reply_refresh_cases.dart';
 part 'thread_title_capsule_cases.dart';
@@ -10119,17 +10120,13 @@ void main() {
         );
 
         animationResponse.complete(http.Response.bytes(_transparentPng, 200));
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        final animationReady = find.byKey(
+          const ValueKey('progressive-animated-avatar-animation-ready'),
         );
+        await WidgetHelpers.pumpUntilFound(tester, animationReady);
         await tester.pumpAndSettle();
 
-        expect(
-          find.byKey(
-            const ValueKey('progressive-animated-avatar-animation-ready'),
-          ),
-          findsOneWidget,
-        );
+        expect(animationReady, findsOneWidget);
         expect(
           find.byKey(const ValueKey('progressive-animated-avatar-poster')),
           findsNothing,
