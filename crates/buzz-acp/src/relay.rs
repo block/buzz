@@ -77,16 +77,17 @@ const CLIENT_CLOCK_SKEW_SECS: u64 = 60;
 /// backdated event committed just after the disconnect, which a quiet
 /// subscription's full replay used to catch.
 const RESUME_LIVE_SKEW_SECS: u64 = RELAY_COMMIT_CREATED_AT_FLOOR_SECS + CLIENT_CLOCK_SKEW_SECS;
-/// Minimum history a resumed subscription replays, counted back from the time
-/// of the REQ, even when `live_until` would allow less. The relay's live
-/// delivery is at-most-once: it can drop an event without telling the client
-/// (full send buffer within its grace limit, cross-node fan-out lag, a Redis
-/// subscriber reconnect). A subscription that reached EOSE and stayed
-/// connected has therefore not proved it saw everything, so a reconnect still
-/// re-reads the last hour and repairs such a drop if it happened within that
-/// hour. Older silent drops are not repaired; before `live_until`, a quiet
-/// subscription repaired them by replaying from its original floor on every
-/// reconnect, at a cost that grew with process age.
+/// How far back from the time of the REQ live coverage alone may leave a
+/// resumed subscription's cursor: `live_until` never advances it past this
+/// window, though delivered progress (`last_seen`) still does, as it always
+/// has. The relay's live delivery is at-most-once: it can drop an event without
+/// telling the client (full send buffer within its grace limit, cross-node
+/// fan-out lag, a Redis subscriber reconnect). A subscription that reached EOSE
+/// and stayed connected has therefore not proved it saw everything, so a quiet
+/// subscription still re-reads the last hour on reconnect and repairs such a
+/// drop if it happened within that hour. Older silent drops are not repaired;
+/// before `live_until`, a quiet subscription repaired them by replaying from
+/// its original floor on every reconnect, at a cost that grew with process age.
 const SILENT_DROP_REPAIR_WINDOW_SECS: u64 = 3_600;
 /// WebSocket close code 1001 (Going Away): the peer is shutting down.
 const CLOSE_CODE_GOING_AWAY: u16 = 1001;
@@ -1280,9 +1281,17 @@ struct BgState {
     /// Unix seconds up to which a subscription that reached EOSE was last known
     /// to be live: the newest non-Close frame read on that connection (see
     /// `last_inbound_secs`), capped at the time the close was detected. A
-    /// reconnect replays from here minus `RESUME_LIVE_SKEW_SECS`. Lowered when
-    /// a REQ is written with an older `since` (see [`BgState::note_req_sent`]).
+    /// reconnect replays from here minus `RESUME_LIVE_SKEW_SECS`.
     live_until: HashMap<String, u64>,
+    /// Loss records (`channel_dropped_since` / `membership_dropped_since`)
+    /// that a REQ written on the CURRENT connection retired, keyed by
+    /// subscription ID. Writing a replay REQ retires its loss record, but the
+    /// replay only finished once that REQ reaches a counted EOSE, which removes
+    /// the entry. If the connection closes first, the record is restored, so
+    /// the next replay is still held at or before the loss whatever `last_seen`
+    /// or `live_until` say. Cleared on every close; it never outlives the
+    /// connection, so on a live connection overflow recovery behaves as before.
+    retired_loss_this_conn: HashMap<String, u64>,
     /// Close code of the last WebSocket Close frame received, consumed by the
     /// next reconnect to choose the first-attempt delay.
     last_close_code: Option<u16>,
@@ -1343,6 +1352,7 @@ impl BgState {
             backoff_step: 0,
             eose_this_conn: HashSet::new(),
             live_until: HashMap::new(),
+            retired_loss_this_conn: HashMap::new(),
             last_close_code: None,
             last_inbound_secs: None,
             now_secs: unix_now_secs,
@@ -1434,23 +1444,29 @@ impl BgState {
                 .is_some_and(|channel_id| self.active_subscriptions.contains_key(&channel_id));
         if known {
             self.eose_this_conn.insert(sub_id.to_owned());
+            self.retired_loss_this_conn.remove(sub_id);
         }
     }
 
-    /// A REQ with `since` was written for `sub_id`: it has not reached EOSE
-    /// yet, and a second REQ on the same connection supersedes the first for
-    /// the rest of that connection (see `superseded_this_conn`).
-    ///
-    /// Its replay may never finish (the socket can drop first), so retained
-    /// live coverage is lowered to resume no later than this `since`. A gap
-    /// replay below `live_until` (overflow recovery, or a reconnect whose
-    /// `since` was held back by `channel_dropped_since`) therefore keeps its
-    /// floor even though writing the REQ retired the loss record. A counted
-    /// EOSE followed by a close restamps `live_until` as usual.
-    fn note_req_sent(&mut self, sub_id: &str, since: Option<u64>) {
+    /// A REQ was written for `sub_id`: it has not reached EOSE yet, and a
+    /// second REQ on the same connection supersedes the first for the rest of
+    /// that connection (see `superseded_this_conn`). A caller that wrote a
+    /// replay REQ retires the subscription's loss record right after this, so
+    /// the record is kept in `retired_loss_this_conn` until the replay is known
+    /// to have finished.
+    fn note_req_sent(&mut self, sub_id: &str) {
         self.eose_this_conn.remove(sub_id);
-        if let (Some(since), Some(live_until)) = (since, self.live_until.get_mut(sub_id)) {
-            *live_until = (*live_until).min(since.saturating_add(RESUME_LIVE_SKEW_SECS));
+        let loss = if sub_id == MEMBERSHIP_NOTIF_SUB_ID {
+            self.membership_dropped_since
+        } else {
+            channel_id_from_sub_id(sub_id)
+                .and_then(|channel_id| self.channel_dropped_since.get(&channel_id).copied())
+        };
+        if let Some(loss) = loss {
+            self.retired_loss_this_conn
+                .entry(sub_id.to_owned())
+                .and_modify(|t| *t = (*t).min(loss))
+                .or_insert(loss);
         }
         if !self.req_sent_this_conn.insert(sub_id.to_owned()) {
             self.superseded_this_conn.insert(sub_id.to_owned());
@@ -1460,9 +1476,22 @@ impl BgState {
     /// The current connection closed (detected at `now_secs`): every
     /// subscription that reached EOSE on it was live until its last inbound
     /// frame, capped at `now_secs`. Subscriptions that never reached EOSE keep
-    /// whatever cursor they already had. `last_inbound_secs` is deliberately
-    /// kept so a repeated call for the same outage stamps the same time.
+    /// whatever cursor they already had, and loss records retired by a replay
+    /// that never reached a counted EOSE are restored. `last_inbound_secs` is
+    /// deliberately kept so a repeated call for the same outage stamps the
+    /// same time.
     fn note_connection_closed(&mut self, now_secs: u64) {
+        for (sub_id, loss) in std::mem::take(&mut self.retired_loss_this_conn) {
+            if sub_id == MEMBERSHIP_NOTIF_SUB_ID {
+                self.membership_dropped_since =
+                    Some(self.membership_dropped_since.map_or(loss, |d| d.min(loss)));
+            } else if let Some(channel_id) = channel_id_from_sub_id(&sub_id) {
+                self.channel_dropped_since
+                    .entry(channel_id)
+                    .and_modify(|d| *d = (*d).min(loss))
+                    .or_insert(loss);
+            }
+        }
         let live_until = self
             .last_inbound_secs
             .map_or(now_secs, |inbound| inbound.min(now_secs));
@@ -1493,6 +1522,7 @@ impl BgState {
         // cleared: a re-subscribe on this socket reuses the wire ID, and an EOSE
         // for the old REQ must not count for the new one.
         self.live_until.remove(&sub_id);
+        self.retired_loss_this_conn.remove(&sub_id);
         self.active_filters.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);
         self.resubscribe_retry.remove(channel_id);
@@ -2900,6 +2930,11 @@ async fn resubscribe_after_reconnect(
     is_fresh_connection: bool,
 ) -> ResubscribeResult {
     if is_fresh_connection {
+        // The previous socket is gone. The reconnect entry already closed it
+        // out, but a socket that died partway through an earlier resubscribe
+        // (`RetryConnection`) did not: restore the loss records its REQs
+        // retired before any `since` is computed. Idempotent otherwise.
+        state.note_connection_closed((state.now_secs)());
         // These queues are derived from active subscription intent and rebuilt
         // below. The rate-limit gate is deliberately preserved: the relay's
         // shared admission counter survives socket replacement.
@@ -3608,7 +3643,7 @@ async fn send_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
-                    state.note_req_sent(&sub_id, since);
+                    state.note_req_sent(&sub_id);
                     debug!(
                         "subscribed to channel {channel_id}{}",
                         if since.is_some() {
@@ -3664,7 +3699,7 @@ async fn send_membership_subscribe(
         Ok(text) => {
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
-                    state.note_req_sent(MEMBERSHIP_NOTIF_SUB_ID, since);
+                    state.note_req_sent(MEMBERSHIP_NOTIF_SUB_ID);
                     debug!("subscribed to membership notifications (since={since_ts})");
                     true
                 }

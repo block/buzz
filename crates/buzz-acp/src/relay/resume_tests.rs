@@ -166,7 +166,7 @@ fn live_floor_budgets_commit_delay_and_clock_skew_separately() {
 }
 
 #[test]
-fn resumed_replay_always_covers_the_silent_drop_repair_window() {
+fn live_coverage_never_advances_the_cursor_past_the_repair_window() {
     const NOW: u64 = 10_000_000;
     let since = |base, last_seen, floor, live_until| {
         resume_since(base, last_seen, floor, Some(live_until), NOW).unwrap()
@@ -184,7 +184,8 @@ fn resumed_replay_always_covers_the_silent_drop_repair_window() {
     );
     // Never before the original floor, which may be inside the window.
     assert_eq!(since(Some(NOW - 600), None, None, NOW - 30), NOW - 600);
-    // Delivered progress still advances the cursor as it always did.
+    // Delivered progress still advances the cursor as it always did; the
+    // window only bounds the live-derived term.
     assert_eq!(since(Some(1_000), Some(NOW - 60), None, NOW - 30), NOW - 60);
     // A recorded gap older than the window still wins.
     assert_eq!(since(Some(1_000), None, Some(5_000), NOW - 30), 5_000);
@@ -856,40 +857,70 @@ async fn delayed_eose_of_a_superseded_req_keeps_the_membership_overflow_floor() 
 
 // -- A gap replay that never reached EOSE keeps its floor -------------------
 
-/// Reconnect, write the replay REQs, and drop that socket before any EOSE.
-async fn replay_then_lose_before_eose(state: &mut BgState, sub: &str) -> u64 {
-    let since = first_replay_req(state, sub).await;
+/// Reconnect, write the replay REQs, optionally deliver `newer` on that socket
+/// (a partial replay), and drop the socket before any EOSE.
+async fn replay_then_lose_before_eose(
+    state: &mut BgState,
+    sub: &str,
+    newer: Option<&Event>,
+) -> u64 {
+    let (mut client, mut server) = test_ws_pair().await;
+    let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
+    let result = resubscribe_after_reconnect(&mut client, &mut cmd_rx, state, "agent", true).await;
+    assert!(matches!(result, ResubscribeResult::Ok));
+    let req = next_test_frame(&mut server).await;
+    assert_eq!(req[1], sub);
+    if let Some(event) = newer {
+        let (tx, _rx) = mpsc::channel(8);
+        deliver_event(&mut client, state, &tx, sub, event).await;
+    }
     lose_connection(state).await;
-    since
+    req[2]["since"].as_u64().unwrap()
+}
+
+/// How a newer delivered event (`last_seen` past the loss) is mixed into
+/// [`unfinished_gap_replay_keeps_its_floor`].
+#[derive(Clone, Copy)]
+enum NewerEvent {
+    None,
+    /// Delivered before the loss is replayed: `last_seen` is already ahead.
+    BeforeReplay,
+    /// Delivered on the replay socket before it drops: a partial replay.
+    DuringReplay,
 }
 
 /// The review's schedule: a subscription with a retained `live_until` loses an
 /// event to backpressure, the reconnect replay REQ correctly goes out below it
 /// (retiring the loss record), and that socket drops before the replay's EOSE.
-/// The retained `live_until` must not skip the lost event on the next replay.
-/// Once a replay does reach EOSE, the cursor moves past the gap again.
+/// Neither the retained `live_until` nor a newer `last_seen` may skip the lost
+/// event on the next replay. Once a replay does reach EOSE, the cursor moves
+/// past the gap again.
 async fn unfinished_gap_replay_keeps_its_floor(
     state: &mut BgState,
     sub: &str,
+    channel: Uuid,
+    newer: NewerEvent,
     record_loss: impl FnOnce(&mut BgState),
     loss_recorded: impl Fn(&BgState) -> bool,
 ) {
     const LOST: u64 = 3_000;
+    let newer_event = tagged_event(channel, 4_000);
     let (mut live, _live_server) = test_ws_pair().await;
     deliver_eose(&mut live, state, sub).await;
     record_loss(state);
+    if matches!(newer, NewerEvent::BeforeReplay) {
+        let (tx, _rx) = mpsc::channel(8);
+        deliver_event(&mut live, state, &tx, sub, &newer_event).await;
+    }
     lose_connection(state).await;
     assert!(state.live_until[sub] > LOST + RESUME_LIVE_SKEW_SECS);
 
-    let first = replay_then_lose_before_eose(state, sub).await;
+    let during = matches!(newer, NewerEvent::DuringReplay).then_some(&newer_event);
+    let first = replay_then_lose_before_eose(state, sub, during).await;
     assert!(first <= LOST, "first replay since={first}");
-    assert!(
-        !loss_recorded(state),
-        "writing the replay retires the loss record"
-    );
 
     for attempt in 0..2 {
-        let since = replay_then_lose_before_eose(state, sub).await;
+        let since = replay_then_lose_before_eose(state, sub, during).await;
         assert!(
             since <= LOST,
             "replay {attempt} after an unfinished gap replay must still cover {LOST}, got since={since}"
@@ -902,8 +933,13 @@ async fn unfinished_gap_replay_keeps_its_floor(
     let result = resubscribe_after_reconnect(&mut client, &mut cmd_rx, state, "agent", true).await;
     assert!(matches!(result, ResubscribeResult::Ok));
     assert_eq!(next_test_frame(&mut server).await[1], sub);
+    assert!(
+        !loss_recorded(state),
+        "writing the replay retires the loss record"
+    );
     deliver_eose(&mut client, state, sub).await;
     lose_connection(state).await;
+    assert!(!loss_recorded(state), "a finished replay is not restored");
     let since = first_replay_req(state, sub).await;
     assert!(
         since > LOST + RESUME_LIVE_SKEW_SECS,
@@ -911,41 +947,56 @@ async fn unfinished_gap_replay_keeps_its_floor(
     );
 }
 
+const NEWER_EVENT_CASES: [NewerEvent; 3] = [
+    NewerEvent::None,
+    NewerEvent::BeforeReplay,
+    NewerEvent::DuringReplay,
+];
+
 #[tokio::test]
 async fn unfinished_channel_gap_replay_keeps_its_floor() {
-    let mut state = BgState::new();
-    let channel = Uuid::new_v4();
-    seed_test_subscription(&mut state, channel); // base 1_000
-    unfinished_gap_replay_keeps_its_floor(
-        &mut state,
-        &channel_sub_id(channel),
-        |state| {
-            state.channel_dropped_since.insert(channel, 3_000);
-        },
-        |state| state.channel_dropped_since.contains_key(&channel),
-    )
-    .await;
+    for newer in NEWER_EVENT_CASES {
+        let mut state = BgState::new();
+        let channel = Uuid::new_v4();
+        seed_test_subscription(&mut state, channel); // base 1_000
+        unfinished_gap_replay_keeps_its_floor(
+            &mut state,
+            &channel_sub_id(channel),
+            channel,
+            newer,
+            |state| {
+                state.channel_dropped_since.insert(channel, 3_000);
+            },
+            |state| state.channel_dropped_since.contains_key(&channel),
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
 async fn unfinished_membership_gap_replay_keeps_its_floor() {
-    let mut state = BgState::new();
-    state.membership_sub_active = true;
-    state.startup_watermark = Some(1_000);
-    state.membership_last_seen = Some(1_000);
-    unfinished_gap_replay_keeps_its_floor(
-        &mut state,
-        MEMBERSHIP_NOTIF_SUB_ID,
-        |state| state.membership_dropped_since = Some(3_000),
-        |state| state.membership_dropped_since.is_some(),
-    )
-    .await;
+    for newer in NEWER_EVENT_CASES {
+        let mut state = BgState::new();
+        state.membership_sub_active = true;
+        state.startup_watermark = Some(1_000);
+        state.membership_last_seen = Some(1_000);
+        unfinished_gap_replay_keeps_its_floor(
+            &mut state,
+            MEMBERSHIP_NOTIF_SUB_ID,
+            Uuid::new_v4(),
+            newer,
+            |state| state.membership_dropped_since = Some(3_000),
+            |state| state.membership_dropped_since.is_some(),
+        )
+        .await;
+    }
 }
 
 /// Overflow recovery on a connection whose subscription already has a retained
 /// `live_until`: the recovery REQ retires the loss record when written, and the
 /// socket drops before its replay finishes. The next replay must still cover
-/// the lost event rather than resume from the retained live coverage.
+/// the lost event rather than resume from the retained live coverage or the
+/// newer `last_seen`.
 #[tokio::test]
 async fn overflow_recovery_below_a_retained_live_until_keeps_its_floor() {
     let mut state = BgState::new();
@@ -980,6 +1031,17 @@ async fn overflow_recovery_below_a_retained_live_until_keeps_its_floor() {
     }
     assert_eq!(state.channel_dropped_since[&channel], 1_100);
     while rx.try_recv().is_ok() {}
+    // A newer event is delivered after the loss, so `last_seen` passes it.
+    deliver_event(
+        &mut client,
+        &mut state,
+        &tx,
+        &sub,
+        &tagged_event(channel, 1_200),
+    )
+    .await;
+    assert_eq!(state.last_seen[&channel], 1_200);
+    while rx.try_recv().is_ok() {}
 
     recovery::recover_one(&mut client, &mut state, &tx, "agent").await;
     assert_eq!(next_test_frame(&mut server).await[0], "REQ");
@@ -991,6 +1053,107 @@ async fn overflow_recovery_below_a_retained_live_until_keeps_its_floor() {
         since <= 1_100,
         "replay must still cover the dropped event at 1100, got since={since}"
     );
+}
+
+/// Write the reconnect replay on a fresh socket, leaving the connection open,
+/// and return the socket pair with the first REQ's `since`.
+async fn open_replay(state: &mut BgState, sub: &str) -> (WsStream, impl Sized, u64) {
+    let (mut client, mut server) = test_ws_pair().await;
+    let (_cmd_tx, mut cmd_rx) = mpsc::channel(1);
+    let result = resubscribe_after_reconnect(&mut client, &mut cmd_rx, state, "agent", true).await;
+    assert!(matches!(result, ResubscribeResult::Ok));
+    let req = next_test_frame(&mut server).await;
+    assert_eq!(req[1], sub);
+    let since = req[2]["since"].as_u64().unwrap();
+    (client, server, since)
+}
+
+/// A channel with a retained `live_until` and a recorded loss at `lost`, its
+/// socket already closed.
+async fn channel_with_retained_live_until_and_loss(lost: u64) -> (BgState, Uuid, String) {
+    let mut state = BgState::new();
+    let channel = Uuid::new_v4();
+    seed_test_subscription(&mut state, channel); // base 1_000
+    let sub = channel_sub_id(channel);
+    let (mut live, _live_server) = test_ws_pair().await;
+    deliver_eose(&mut live, &mut state, &sub).await;
+    state.channel_dropped_since.insert(channel, lost);
+    lose_connection(&mut state).await;
+    assert!(state.live_until[&sub] > lost + RESUME_LIVE_SKEW_SECS);
+    (state, channel, sub)
+}
+
+/// A socket that dies partway through a resubscribe (`RetryConnection`) is
+/// redialed by the reconnect loop without going back through the reconnect
+/// entry. The next resubscribe must still restore the loss record the dead
+/// socket's REQ retired, and that socket's first REQ must count its EOSE.
+#[tokio::test]
+async fn redial_after_a_failed_resubscribe_keeps_the_floor() {
+    const LOST: u64 = 3_000;
+    let (mut state, channel, sub) = channel_with_retained_live_until_and_loss(LOST).await;
+
+    let (_dead, _dead_server, first) = open_replay(&mut state, &sub).await;
+    assert!(first <= LOST, "first replay since={first}");
+    assert!(!state.channel_dropped_since.contains_key(&channel));
+
+    // That socket dies before EOSE and the loop redials straight into another
+    // resubscribe.
+    let (mut client, _server, second) = open_replay(&mut state, &sub).await;
+    assert!(
+        second <= LOST,
+        "redial after a failed resubscribe must still cover {LOST}, got since={second}"
+    );
+    deliver_eose(&mut client, &mut state, &sub).await;
+    assert!(
+        state.eose_this_conn.contains(&sub),
+        "the redialed socket's REQ is not superseded by the dead socket's"
+    );
+}
+
+/// A new loss recorded while an unfinished replay is in flight merges with
+/// the restored floor by `min`, and closing the same outage again changes
+/// nothing.
+#[tokio::test]
+async fn loss_during_an_unfinished_replay_merges_with_the_restored_floor() {
+    const LOST: u64 = 3_000;
+    // Overflowing deliveries on the replay socket; the last one is dropped.
+    for (overflow, expected) in [
+        ([3_400, 3_450, 3_500], LOST),
+        ([2_400, 2_450, 2_500], 2_500),
+    ] {
+        let (mut state, channel, sub) = channel_with_retained_live_until_and_loss(LOST).await;
+        let (mut client, _server, since) = open_replay(&mut state, &sub).await;
+        assert!(since <= LOST);
+
+        let (tx, _rx) = mpsc::channel(2);
+        for ts in overflow {
+            deliver_event(
+                &mut client,
+                &mut state,
+                &tx,
+                &sub,
+                &tagged_event(channel, ts),
+            )
+            .await;
+        }
+        assert_eq!(state.channel_dropped_since[&channel], overflow[2]);
+
+        lose_connection(&mut state).await;
+        assert_eq!(state.channel_dropped_since[&channel], expected);
+        let live_until = state.live_until[&sub];
+
+        // A repeated close for the same outage is a no-op.
+        let now = (state.now_secs)();
+        begin_reconnect(&mut state, now, 0.0);
+        assert_eq!(state.channel_dropped_since[&channel], expected);
+        assert_eq!(state.live_until[&sub], live_until);
+
+        let since = first_replay_req(&mut state, &sub).await;
+        assert!(
+            since <= expected,
+            "replay must cover the earliest loss {expected}, got since={since}"
+        );
+    }
 }
 
 // -- Silent socket death, through the real socket-owner loop ----------------
