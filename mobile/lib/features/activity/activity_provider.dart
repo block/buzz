@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
@@ -500,12 +501,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
 
     bool isFromOther(NostrEvent e) =>
         e.pubkey.toLowerCase() != myPk.toLowerCase();
-    bool isAddressedToMe(NostrEvent event) => event.tags.any(
-      (tag) =>
-          tag.length > 1 &&
-          tag[0] == 'p' &&
-          tag[1].toLowerCase() == myPk.toLowerCase(),
-    );
+    bool isAddressedToMe(NostrEvent event) => tagsAddress(event.tags, myPk);
 
     const mentionKinds = {9, 40002, 1, 45001, 45003};
     const needsActionKinds = {46010, 46011, 46012};

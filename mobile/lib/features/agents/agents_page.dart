@@ -190,7 +190,8 @@ class AgentsPage extends HookConsumerWidget {
         directory.hasError ||
         registered.hasError ||
         ownedDirectory.hasError ||
-        controller.listingFailed;
+        // Remote listing failures matter only where remote agents are shown.
+        (supportsRemoteAgents(community) && controller.listingFailed);
     final loading =
         !creating.value &&
         (controller.busy ||

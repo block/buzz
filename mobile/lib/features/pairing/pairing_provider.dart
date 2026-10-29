@@ -526,7 +526,7 @@ class PairingNotifier extends Notifier<PairingState> {
       // NIP-AB §Event Validation: verify event signature (NIP-01).
       // The nostr package's Event.fromJson verifies id + sig on construction.
       try {
-        final event = nostr.Event.fromJson(jsonEncode(eventJson));
+        final event = verifiedNostrEventFromJson(jsonEncode(eventJson));
         if (event.id != eventId) return; // id mismatch
       } catch (_) {
         return; // invalid signature or malformed event

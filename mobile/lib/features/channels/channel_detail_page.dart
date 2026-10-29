@@ -365,14 +365,14 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     // Me flattens replies into this timeline, so include their typing signals.
     // Ordinary channels keep thread activity inside the thread view.
     final typingEntries = ref
-        .watch(channelTypingProvider(channel.id))
-        .where((e) => personalChat || e.threadHeadId == null)
-        .where(
-          (e) =>
-              currentPubkey == null ||
-              e.pubkey.toLowerCase() != currentPubkey.toLowerCase(),
+        .watch(
+          visibleTypingProvider(
+            channel.id,
+            selfPubkey: currentPubkey,
+            include: (e) => personalChat || e.threadHeadId == null,
+          ),
         )
-        .toList();
+        .entries;
     final baseChannel = listedChannel ?? channel;
     final resolvedChannel =
         detailsAsync.whenData(baseChannel.mergeDetails).value ?? baseChannel;

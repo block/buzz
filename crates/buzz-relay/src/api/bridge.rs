@@ -28,6 +28,10 @@ use super::{api_error, db_read_error, internal_error, not_found, parse_query_or_
 mod thread_roots;
 mod thread_window;
 
+#[cfg(test)]
+#[path = "bridge/workflow_webhook_postgres_tests.rs"]
+mod workflow_webhook_postgres_tests;
+
 /// Authenticate a relay-owned JSON `POST` endpoint for a community member.
 ///
 /// Binds the community from the request host, runs NIP-FI admission over a
@@ -2642,7 +2646,9 @@ pub struct WebhookQuery {
 /// Webhook trigger endpoint. No user auth — the webhook secret authenticates the caller.
 ///
 /// Prefers `X-Webhook-Secret` header over `?secret=` query param (headers aren't logged
-/// by most proxies). Returns 202 Accepted; execution is async.
+/// by most proxies). Returns 202 Accepted; execution is async. Immediately
+/// before the `workflow_runs` insert, the owner authority gate also rejects an
+/// owner banned from the host-bound community.
 pub async fn workflow_webhook(
     State(state): State<Arc<AppState>>,
     Path(id_str): Path<String>,
@@ -2736,9 +2742,10 @@ pub async fn workflow_webhook(
     // executes with the workflow **owner's** standing authority — so the
     // secret alone is insufficient. Immediately before run creation, reject
     // disabled/inactive workflows and recheck the owner's current channel
-    // membership (and role, for exfiltration-capable definitions). Fail
-    // closed with the same generic 404 as the lookups above so a
-    // revoked-owner workflow is indistinguishable from a nonexistent one.
+    // membership (and role, for exfiltration-capable definitions) and that
+    // the owner is not banned. Fail closed with the same generic 404 as the
+    // lookups above so a revoked-owner workflow is indistinguishable from a
+    // nonexistent one.
     if !workflow.enabled || workflow.status != buzz_db::workflow::WorkflowStatus::Active {
         return Err(not_found("workflow not found"));
     }
@@ -9443,6 +9450,112 @@ pub(crate) mod postgres_tests {
             "fan-out registration must be retired"
         );
         assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 0);
+
+        drop(conn);
+        fx.drop().await;
+    }
+
+    /// A failed history read ends the REQ with CLOSED, never EOSE: EOSE would
+    /// tell a resuming client it holds every stored event, so its next REQ would
+    /// skip the history that failed. A statement timeout keeps its terminal
+    /// `query timed out` reason; any other DB error gets the retryable
+    /// `database error`. Either CLOSED retires the subscription, and once the DB
+    /// recovers a reconnect with the same REQ replays the missed event.
+    /// Mutations: send EOSE on the non-timeout error again, or map every error
+    /// to `database error` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn failed_history_read_closes_and_reconnect_replays_the_history() {
+        use crate::handlers::req::handle_req;
+        let fx = cancel_fixture().await;
+        let frames = |rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|msg| match msg {
+                    axum::extract::ws::Message::Text(t) => t.to_string(),
+                    other => panic!("expected text frame, got {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let req = || -> nostr::Filter {
+            serde_json::from_value(serde_json::json!({"kinds": [9], "#h": [&fx.channel]}))
+                .expect("history filter")
+        };
+        let channel: uuid::Uuid = fx.channel.parse().expect("channel uuid");
+        let topic = buzz_pubsub::EventTopic::Channel(channel);
+        let tenant = TenantContext::resolved(fx.community, fx.host.clone());
+        let fails_and_retires = |sub: &'static str, reason: &'static str| {
+            let state = fx.state.clone();
+            let (conn, mut rx) = fx.ws_conn();
+            let tenant = tenant.clone();
+            async move {
+                handle_req(
+                    sub.into(),
+                    vec![req()],
+                    vec![None],
+                    conn.clone(),
+                    state.clone(),
+                )
+                .await;
+                assert_eq!(
+                    frames(&mut rx),
+                    vec![format!(r#"["CLOSED","{sub}","{reason}"]"#)],
+                    "a failed history read must CLOSE with {reason:?}, not EOSE"
+                );
+                assert!(conn.subscriptions.lock().await.is_empty(), "conn map");
+                assert!(
+                    state.sub_registry.get_filters(conn.conn_id, sub).is_none(),
+                    "CLOSED must retire the fan-out registration"
+                );
+                assert_eq!(state.pubsub.topic_refcount(&tenant, topic).await, 0);
+            }
+        };
+
+        // A replica lock outlasting its 300ms `statement_timeout`: the read is
+        // cancelled with 57014, which keeps the terminal timeout reason.
+        let mut locker = fx.replica.begin().await.expect("begin locker");
+        sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locker)
+            .await
+            .expect("lock replica events");
+        fails_and_retires("t", crate::handlers::req::QUERY_TIMED_OUT_CLOSED).await;
+        locker.rollback().await.expect("unlock");
+
+        // `events` gone on both pools: the history read fails with 42P01 on the
+        // replica and again on the writer re-run. Not a statement timeout.
+        let rename = |from: &'static str, to: &'static str| {
+            let pools = [fx.writer.clone(), fx.replica.clone()];
+            async move {
+                for pool in pools {
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "ALTER TABLE {from} RENAME TO {to}"
+                    )))
+                    .execute(&pool)
+                    .await
+                    .expect("rename events");
+                }
+            }
+        };
+        rename("events", "events_gone").await;
+        fails_and_retires("h", crate::handlers::req::DATABASE_ERROR_CLOSED).await;
+
+        // The DB recovers and the client reconnects with the same REQ.
+        rename("events_gone", "events").await;
+        let (conn, mut rx) = fx.ws_conn();
+        handle_req(
+            "h".into(),
+            vec![req()],
+            vec![None],
+            conn.clone(),
+            fx.state.clone(),
+        )
+        .await;
+        let replay = frames(&mut rx);
+        assert_eq!(replay.len(), 2, "event then EOSE: {replay:?}");
+        assert!(
+            replay[0].starts_with(r#"["EVENT","h","#) && replay[0].contains(&fx.root),
+            "the reconnect must replay the missed event: {replay:?}"
+        );
+        assert_eq!(replay[1], r#"["EOSE","h"]"#);
 
         drop(conn);
         fx.drop().await;

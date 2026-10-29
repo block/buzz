@@ -685,7 +685,11 @@ class ChannelsPage extends HookConsumerWidget {
         topSectionHeight: topSectionHeight,
         usesPinnedGradient: usesPinnedGradient,
         scrollController: channelsScrollController,
-        onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
+        onRefresh: () {
+          // Solo has no banner, so pulling must also restart its reader.
+          if (soloSliver != null) ref.invalidate(meGroupsProvider);
+          return ref.read(channelsProvider.notifier).refresh();
+        },
         onSelectChannel: openChannel,
       ),
     );
