@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:buzz/features/channels/default_agent_voice_draft.dart';
 import 'package:buzz/features/channels/voice_note_recording.dart';
@@ -54,9 +55,56 @@ void main() {
         directory: () async => directory,
       );
       expect(await other.read(), isNull);
+      // Upgrade a pre-index manifest while its original recipient is selected.
+      final manifest = File(
+        (await restored.read())!.file.path.replaceFirst(RegExp(r'\.m4a$'), ''),
+      );
+      final legacy =
+          jsonDecode(await manifest.readAsString()) as Map<String, dynamic>;
+      legacy.remove('identity');
+      await manifest.writeAsString(jsonEncode(legacy));
+      expect(
+        await discoverAgentVoiceRecipients(
+          'community:account',
+          directory: () async => directory,
+          currentRecipient: 'agent',
+        ),
+        ['agent'],
+      );
+      expect((await restored.readEvent())!.toJson(), event.toJson());
+      // A remote default change or deleted agent must not hide this draft.
+      expect(
+        await discoverAgentVoiceRecipients(
+          'community:account',
+          directory: () async => directory,
+          currentRecipient: 'other-agent',
+        ),
+        ['agent'],
+      );
+      expect(
+        await discoverAgentVoiceRecipients(
+          'other:account',
+          directory: () async => directory,
+        ),
+        isEmpty,
+      );
+      expect(
+        await discoverAgentVoiceRecipients(
+          'community:other-account',
+          directory: () async => directory,
+        ),
+        isEmpty,
+      );
       final relocatedAudio = (await restored.read())!.file.path;
       await restored.clear();
       expect(await restored.read(), isNull);
+      expect(
+        await discoverAgentVoiceRecipients(
+          'community:account',
+          directory: () async => directory,
+        ),
+        isEmpty,
+      );
       expect(await File(relocatedAudio).exists(), isFalse);
     },
   );

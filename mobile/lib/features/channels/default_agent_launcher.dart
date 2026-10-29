@@ -32,7 +32,14 @@ class DefaultAgentLauncher extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final preference = ref.watch(defaultAgentProvider);
     final scope = ref.watch(meSyncProvider);
-    final pubkey = preference.isLoading ? null : preference.value;
+    final scopeIdentity =
+        '${scope.community}:${ref.watch(myPubkeyProvider) ?? 'signed-out'}';
+    final savedRecipients = ref.watch(
+      pendingAgentVoiceRecipientsProvider(scopeIdentity),
+    );
+    final savedRecipient = savedRecipients.value?.firstOrNull;
+    final pubkey =
+        savedRecipient ?? (preference.isLoading ? null : preference.value);
     final profiles = ref.watch(userCacheProvider);
     final profile = profiles[pubkey];
     final opening = useState(false);
@@ -43,27 +50,27 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
       return null;
     }, [pubkey]);
-    final draftIdentity =
-        '${scope.community}:${ref.watch(myPubkeyProvider) ?? 'signed-out'}:$pubkey';
+    final draftIdentity = '$scopeIdentity:$pubkey';
     final label = pubkey != null
         ? 'Chat with ${profile?.label ?? 'your Bestie'}'
         : preference.hasError
         ? 'Retry Bestie'
         : 'Bestie';
     Future<void> open({VoiceNoteRecording? recording}) async {
-      final currentPreference = ref.read(defaultAgentProvider);
-      if (opening.value ||
-          currentPreference.isLoading ||
-          ref.read(meSyncProvider) != scope ||
-          currentPreference.value != pubkey) {
+      bool destinationIsCurrent() {
+        if (ref.read(meSyncProvider) != scope) return false;
+        // An explicit retry keeps the recipient captured with the draft.
+        if (recording != null) return true;
+        final current = ref.read(defaultAgentProvider);
+        return !current.isLoading && current.value == pubkey;
+      }
+
+      if (opening.value || !destinationIsCurrent()) {
         if (recording != null) throw StateError('The agent is unavailable.');
         return;
       }
       unawaited(HapticFeedback.lightImpact());
-      if (preference.hasError) {
-        if (recording != null) {
-          throw StateError('Default agent is unavailable.');
-        }
+      if (preference.hasError && recording == null) {
         ref.invalidate(defaultAgentProvider);
         return;
       }
@@ -113,9 +120,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         if (context.mounted) resolving.value = false;
         if (!context.mounted) throw StateError('The conversation was closed.');
         // A community switch invalidates an in-flight destination.
-        if (ref.read(meSyncProvider) != scope ||
-            ref.read(defaultAgentProvider).isLoading ||
-            ref.read(defaultAgentProvider).value != pubkey) {
+        if (!destinationIsCurrent()) {
           if (recording != null) throw StateError('The agent changed.');
           return;
         }
@@ -123,19 +128,14 @@ class DefaultAgentLauncher extends HookConsumerWidget {
           final session = ref.read(relaySessionProvider.notifier);
           final previousEvent = prepared.$1;
           if (previousEvent != null) {
-            if (!context.mounted ||
-                ref.read(meSyncProvider) != scope ||
-                ref.read(defaultAgentProvider).isLoading ||
-                ref.read(defaultAgentProvider).value != pubkey) {
+            if (!context.mounted || !destinationIsCurrent()) {
               throw StateError('The community changed.');
             }
             await session.publish(previousEvent);
           } else {
             final sender = ref.read(sendMessageProvider);
             final descriptor = prepared.$2!;
-            if (!context.mounted ||
-                ref.read(meSyncProvider) != scope ||
-                ref.read(defaultAgentProvider).value != pubkey) {
+            if (!context.mounted || !destinationIsCurrent()) {
               throw StateError('The agent or community changed.');
             }
             await sender.call(
@@ -145,9 +145,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
               mentionPubkeys: [pubkey],
               mediaTags: [descriptor.toImetaTag()],
               beforePublish: (event) async {
-                if (!context.mounted ||
-                    ref.read(meSyncProvider) != scope ||
-                    ref.read(defaultAgentProvider).value != pubkey) {
+                if (!context.mounted || !destinationIsCurrent()) {
                   throw StateError('The agent or community changed.');
                 }
                 await draft.saveEvent(event);
@@ -156,9 +154,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
           }
           if (!context.mounted) return;
         }
-        if (!context.mounted ||
-            ref.read(meSyncProvider) != scope ||
-            ref.read(defaultAgentProvider).value != pubkey) {
+        if (!context.mounted || !destinationIsCurrent()) {
           return;
         }
         unawaited(
@@ -212,10 +208,23 @@ class DefaultAgentLauncher extends HookConsumerWidget {
               fallback: Center(child: Text(profile?.initial ?? 'A')),
             ),
     );
+    if (savedRecipients.hasError) {
+      return IconButton(
+        tooltip: 'Retry saved voice notes',
+        onPressed: () =>
+            ref.invalidate(pendingAgentVoiceRecipientsProvider(scopeIdentity)),
+        icon: const Icon(Icons.refresh),
+      );
+    }
     return DefaultAgentVoiceControl(
       key: ValueKey((scope, pubkey)),
       draftIdentity: draftIdentity,
-      enabled: pubkey != null && !opening.value && !preference.isLoading,
+      enabled:
+          pubkey != null &&
+          !opening.value &&
+          !preference.isLoading &&
+          !savedRecipients.isLoading &&
+          savedRecipient == null,
       onRecorded: (recording) => open(recording: recording),
       child: SizedBox.square(
         dimension: 56,

@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/channels/default_agent_voice_control.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:buzz/features/channels/default_agent_voice_draft.dart';
 import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/shared/me/default_agent.dart';
@@ -21,7 +23,115 @@ class _EmptyVoiceDraft extends DefaultAgentVoiceDraft {
   Future<VoiceNoteRecording?> read() async => null;
 }
 
+class _SavedDraft extends DefaultAgentVoiceDraft {
+  _SavedDraft(super.identity, this.notes, {super.onChanged});
+  final Map<String, VoiceNoteRecording> notes;
+  @override
+  Future<VoiceNoteRecording?> read() async => notes[identity];
+  @override
+  Future<void> clear() async {
+    notes.remove(identity);
+    onChanged?.call();
+  }
+}
+
 void main() {
+  testWidgets(
+    'saved recording survives changed or cleared default and restart',
+    (tester) async {
+      final relay = FakeRelay();
+      final scope = MeSync(
+        relay,
+        RelayConfig(
+          baseUrl: 'https://draft.test',
+          nsec: nostr.Nip19.encode(
+            prefix: nostr.Nip19Prefix.nsec,
+            data: '0' * 63 + '1',
+          ),
+        ),
+      );
+      final agent = 'a' * 64;
+      final other = 'b' * 64;
+      final identity = '${scope.community}:account:$agent';
+      final notes = <String, VoiceNoteRecording>{
+        identity: VoiceNoteRecording(
+          file: XFile('/tmp/retained-note.m4a'),
+          duration: const Duration(seconds: 2),
+          waveform: const [.2],
+        ),
+      };
+      var selected = agent as String?;
+      final preferences = StreamController<String?>.broadcast(sync: true);
+      addTearDown(preferences.close);
+      Widget app() => ProviderScope(
+        overrides: [
+          defaultAgentProvider.overrideWith((ref) async* {
+            yield selected;
+            yield* preferences.stream;
+          }),
+          meSyncProvider.overrideWithValue(scope),
+          myPubkeyProvider.overrideWithValue('account'),
+          relaySessionProvider.overrideWith(() => relay),
+          defaultAgentVoiceDraftProvider.overrideWith(
+            (ref, identity) => _SavedDraft(
+              identity,
+              notes,
+              onChanged: () =>
+                  ref.invalidate(pendingAgentVoiceRecipientsProvider),
+            ),
+          ),
+          pendingAgentVoiceRecipientsProvider.overrideWith((
+            ref,
+            scopeIdentity,
+          ) async {
+            ref.watch(defaultAgentProvider);
+            return notes.keys
+                .where((key) => key.startsWith('$scopeIdentity:'))
+                .map((key) => key.substring(scopeIdentity.length + 1))
+                .toList();
+          }),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(body: DefaultAgentLauncher(onChooseAgent: () {})),
+        ),
+      );
+      await tester.pumpWidget(app());
+      await tester.pumpAndSettle();
+      expect(find.text('Retry voice note'), findsOneWidget);
+      selected = other;
+      preferences.add(selected);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<DefaultAgentVoiceControl>(
+              find.byType(DefaultAgentVoiceControl),
+            )
+            .draftIdentity,
+        identity,
+      );
+      expect(find.byTooltip('Discard voice note'), findsOneWidget);
+      selected = null;
+      preferences.add(selected);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(app());
+      await tester.pumpAndSettle();
+      expect(find.text('Retry voice note'), findsOneWidget);
+      expect(
+        tester
+            .widget<DefaultAgentVoiceControl>(
+              find.byType(DefaultAgentVoiceControl),
+            )
+            .draftIdentity,
+        identity,
+      );
+      await tester.tap(find.byTooltip('Discard voice note'));
+      await tester.pumpAndSettle();
+      expect(notes, isEmpty);
+      expect(find.text('Retry voice note'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
   testWidgets(
     'community switch cannot launch a retained default while loading',
     (tester) async {
@@ -49,6 +159,9 @@ void main() {
         overrides: [
           defaultAgentVoiceDraftProvider.overrideWith(
             (ref, identity) => _EmptyVoiceDraft(identity),
+          ),
+          pendingAgentVoiceRecipientsProvider.overrideWith(
+            (ref, scope) async => [],
           ),
           meSyncProvider.overrideWithValue(scope),
           relaySessionProvider.overrideWith(() => relayA),
