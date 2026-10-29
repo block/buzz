@@ -70,6 +70,7 @@ void main() {
   late int taps;
   late bool fail;
   final haptics = <String>[];
+  final recordingStates = <bool>[];
   setUp(() {
     recorder = Recorder();
     draft = Draft();
@@ -77,6 +78,7 @@ void main() {
     taps = 0;
     fail = false;
     haptics.clear();
+    recordingStates.clear();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, (call) async {
           if (call.method == 'HapticFeedback.vibrate') {
@@ -98,6 +100,7 @@ void main() {
             body: Center(
               child: MessagesNavigationBar(
                 onSearch: () {},
+                onRecordingChanged: recordingStates.add,
                 creationActions: const [],
                 agent: DefaultAgentVoiceControl(
                   enabled: true,
@@ -205,7 +208,9 @@ void main() {
       expect(after.right, before.right);
       expect(after.width, 256);
       expect(
-        tester.getRect(find.text('Slide up to cancel')).bottom,
+        tester
+            .getRect(find.byKey(const ValueKey('voice-cancel-target')))
+            .bottom,
         lessThan(after.top),
       );
       expect(
@@ -244,7 +249,17 @@ void main() {
     final gesture = await hold(tester);
     await gesture.moveBy(const Offset(0, -90));
     await tester.pump();
-    expect(find.text('Release to cancel'), findsOneWidget);
+    expect(find.bySemanticsLabel('Release to cancel'), findsOneWidget);
+    final target = find.byKey(const ValueKey('voice-cancel-target'));
+    expect(tester.widget<AnimatedScale>(target).scale, 1.15);
+    expect(recordingStates.last, isTrue);
+    final targetContainer = tester.widget<AnimatedContainer>(
+      find.descendant(of: target, matching: find.byType(AnimatedContainer)),
+    );
+    expect(
+      (targetContainer.decoration! as BoxDecoration).color,
+      AppTheme.light().colorScheme.error,
+    );
     expect(haptics, [
       'HapticFeedbackType.mediumImpact',
       'HapticFeedbackType.selectionClick',
@@ -256,6 +271,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(recorder.cancelled, isTrue);
     expect(sent, 0);
+    expect(recordingStates.last, isFalse);
   });
   testWidgets('failed send retains recording and offers retry', (tester) async {
     fail = true;

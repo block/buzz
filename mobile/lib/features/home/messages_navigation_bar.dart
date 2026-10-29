@@ -19,9 +19,11 @@ class MessagesNavigationBar extends HookWidget {
     required this.onSearch,
     required this.creationActions,
     required this.agent,
+    this.onRecordingChanged,
   });
   final VoidCallback onSearch;
   final Widget agent;
+  final ValueChanged<bool>? onRecordingChanged;
   final List<({String label, String symbol, VoidCallback? onPressed})>
   creationActions;
 
@@ -30,6 +32,7 @@ class MessagesNavigationBar extends HookWidget {
     final overlay = useState(false);
     return AgentNavigationOverlay(
       active: overlay,
+      onRecordingChanged: onRecordingChanged,
       child: SizedBox(
         width: 224 + Grid.xs * 2,
         height: 56,

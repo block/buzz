@@ -5,9 +5,16 @@ class AgentNavigationOverlay extends InheritedWidget {
   const AgentNavigationOverlay({
     super.key,
     required this.active,
+    this.onRecordingChanged,
     required super.child,
   });
   final ValueNotifier<bool> active;
+  final ValueChanged<bool>? onRecordingChanged;
+
+  static ValueChanged<bool>? recordingCallbackOf(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<AgentNavigationOverlay>()
+          ?.onRecordingChanged;
 
   static ValueNotifier<bool>? maybeOf(BuildContext context) => context
       .dependOnInheritedWidgetOfExactType<AgentNavigationOverlay>()
@@ -15,5 +22,6 @@ class AgentNavigationOverlay extends InheritedWidget {
 
   @override
   bool updateShouldNotify(AgentNavigationOverlay oldWidget) =>
-      active != oldWidget.active;
+      active != oldWidget.active ||
+      onRecordingChanged != oldWidget.onRecordingChanged;
 }

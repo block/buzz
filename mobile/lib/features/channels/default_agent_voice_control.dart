@@ -264,6 +264,24 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
         sending.value ||
         pending.value != null ||
         restoreFailed.value;
+    final recordingCallback = AgentNavigationOverlay.recordingCallbackOf(
+      context,
+    );
+    useEffect(() {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (alive.value && context.mounted) {
+          recordingCallback?.call(recording.value);
+        }
+      });
+      return null;
+    }, [recording.value, recordingCallback]);
+    useEffect(() {
+      return () {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          recordingCallback?.call(false);
+        });
+      };
+    }, [recordingCallback]);
     final overlay = AgentNavigationOverlay.maybeOf(context);
     useEffect(() {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -471,13 +489,40 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                     bottom: 56 + Grid.xs,
                     width: 224 + Grid.xs * 2,
                     right: 0,
-                    child: IgnorePointer(
-                      child: Text(
-                        cancelled.value
+                    child: Center(
+                      child: Semantics(
+                        label: cancelled.value
                             ? 'Release to cancel'
                             : 'Slide up to cancel',
-                        textAlign: TextAlign.center,
-                        style: context.textTheme.labelMedium,
+                        child: IgnorePointer(
+                          child: AnimatedScale(
+                            key: const ValueKey('voice-cancel-target'),
+                            scale: cancelled.value ? 1.15 : 1,
+                            duration: MediaQuery.disableAnimationsOf(context)
+                                ? Duration.zero
+                                : const Duration(milliseconds: 220),
+                            curve: Curves.easeOutBack,
+                            child: AnimatedContainer(
+                              duration: MediaQuery.disableAnimationsOf(context)
+                                  ? Duration.zero
+                                  : const Duration(milliseconds: 140),
+                              width: 48,
+                              height: 48,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: cancelled.value
+                                    ? context.colors.error
+                                    : context.colors.surfaceContainerHighest,
+                              ),
+                              child: Icon(
+                                Icons.close,
+                                color: cancelled.value
+                                    ? context.colors.onError
+                                    : context.colors.onSurface,
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   ),
