@@ -664,6 +664,30 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
     }
 }
 
+/// Structural validation for agent job lifecycle events (#644).
+///
+/// Kinds 43002–43006 are meaningless without the 43001 request that opened
+/// the job, but ingest never enforced the link — consumers were left to
+/// guess (the hive bridge falls back to "first `e` tag, else job_id: null",
+/// and its HIVE panel renders uncorrelated events in a dimmed "unlinked"
+/// group). Enforce the structure at the door: every lifecycle event must
+/// reference its request via EXACTLY one `e` tag. 43001 opens a job and
+/// references nothing — unchanged.
+fn validate_job_event(kind: u32, event: &Event) -> Result<(), &'static str> {
+    let is_lifecycle = matches!(
+        kind,
+        KIND_JOB_ACCEPTED | KIND_JOB_PROGRESS | KIND_JOB_RESULT | KIND_JOB_CANCEL | KIND_JOB_ERROR
+    );
+    if !is_lifecycle {
+        return Ok(());
+    }
+    match count_e_tags(event) {
+        1 => Ok(()),
+        0 => Err("invalid: job event must reference its 43001 request via an e tag"),
+        _ => Err("invalid: job event must carry exactly one e tag (multiple found)"),
+    }
+}
+
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
 pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
     for tag in event.tags.iter() {
@@ -2674,6 +2698,11 @@ async fn ingest_event_inner(
         Ok(scope) => scope,
         Err(msg) => return Err(IngestError::Rejected(msg.into())),
     };
+    // #644: job lifecycle events must be structurally linked to their
+    // 43001 request before they are stored or fanned out.
+    if let Err(msg) = validate_job_event(kind_u32, &event) {
+        return Err(IngestError::Rejected(msg.into()));
+    }
     // NIP-43: relay admin commands are global — channel-scoped tokens cannot
     // issue them even if the event has no `h` tag (is_global_only_kind strips
     // channel_id, but we still need to reject the token itself).
@@ -4493,6 +4522,49 @@ mod postgres_tests {
                 "kind {kind} should be in the allowlist"
             );
         }
+    }
+
+    /// #644: lifecycle events (43002-43006) must carry exactly one `e` tag
+    /// referencing their 43001 request; 43001 itself references nothing.
+    #[test]
+    fn job_lifecycle_events_require_exactly_one_e_tag() {
+        let lifecycle = [
+            KIND_JOB_ACCEPTED,
+            KIND_JOB_PROGRESS,
+            KIND_JOB_RESULT,
+            KIND_JOB_CANCEL,
+            KIND_JOB_ERROR,
+        ];
+        let req_id = "5c1f4b7e9d2a4c8f9e1b3d5a7c9e1f2b5c1f4b7e9d2a4c8f9e1b3d5a7c9e1f2b";
+
+        for kind in lifecycle {
+            let none = make_event_with_tags(kind, "{}", &[&["h", "chan"]]);
+            assert_eq!(
+                validate_job_event(kind, &none),
+                Err("invalid: job event must reference its 43001 request via an e tag"),
+                "kind {kind} without an e tag must be rejected"
+            );
+
+            let one = make_event_with_tags(kind, "{}", &[&["e", req_id]]);
+            assert_eq!(
+                validate_job_event(kind, &one),
+                Ok(()),
+                "kind {kind} with one e tag passes"
+            );
+
+            let two = make_event_with_tags(kind, "{}", &[&["e", req_id], &["e", req_id]]);
+            assert_eq!(
+                validate_job_event(kind, &two),
+                Err("invalid: job event must carry exactly one e tag (multiple found)"),
+                "kind {kind} with two e tags must be rejected with the distinct message"
+            );
+        }
+
+        // 43001 opens a job and references nothing — always structurally valid.
+        let request = make_event_with_tags(KIND_JOB_REQUEST, "{}", &[&["h", "chan"]]);
+        assert_eq!(validate_job_event(KIND_JOB_REQUEST, &request), Ok(()));
+        // Non-job kinds are untouched by this validator.
+        assert_eq!(validate_job_event(9, &make_dummy_event()), Ok(()));
     }
 
     #[test]

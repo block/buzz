@@ -32,6 +32,9 @@ CREATE TABLE channels (
     participant_hash BYTEA,
     ttl_seconds     INT,
     ttl_deadline    TIMESTAMPTZ,
+    -- #645: export policy — kind:39000 carries a no-bridge tag when set;
+    -- off-relay replicators (kannaka-hive-bridge) fail closed on it.
+    no_bridge       BOOLEAN NOT NULL DEFAULT FALSE,
     -- Labels, published as ["t", <label>] after the channel type tag on the
     -- relay-signed group-state events. The relay validates their shape.
     labels          TEXT[] NOT NULL DEFAULT '{}'

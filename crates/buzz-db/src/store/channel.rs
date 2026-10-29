@@ -63,6 +63,11 @@ pub struct ChannelRecord {
     pub topic_required: bool,
     /// Optional cap on the number of members.
     pub max_members: Option<i32>,
+    /// #645: export policy — when true, this channel's events must not be
+    /// replicated off this relay (published as a `no-bridge` tag on the
+    /// relay-signed kind:39000 metadata; kannaka-hive-bridge fails closed on
+    /// it). Owner/admin-tier edit via kind:9002.
+    pub no_bridge: bool,
     /// Current channel topic (short, visible in header).
     pub topic: Option<String>,
     /// Compressed public key bytes of the user who last set the topic.
@@ -182,7 +187,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, no_bridge
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -245,7 +250,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, no_bridge
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -488,7 +493,7 @@ async fn get_channel_with_operation(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, no_bridge
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -577,7 +582,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, no_bridge
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -597,7 +602,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, no_bridge
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -653,6 +658,8 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         nip29_group_id: row.try_get("nip29_group_id")?,
         topic_required,
         max_members: row.try_get("max_members")?,
+        // #645: a SELECT that predates the column reads as the safe default.
+        no_bridge: row.try_get("no_bridge").unwrap_or(false),
         topic,
         topic_set_by,
         topic_set_at,
@@ -757,6 +764,11 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
     if channel.archived_at.is_some() {
         tags.push(tag(&["archived", "true"]));
     }
+    // #645: export policy — consumers that replicate events off-relay
+    // (kannaka-hive-bridge) fail closed on this tag.
+    if channel.no_bridge {
+        tags.push(tag(&["no-bridge"]));
+    }
     // Ephemeral channel TTL — clients use this to show countdown timers.
     if let Some(ttl) = channel.ttl_seconds {
         tags.push(tag(&["ttl", &ttl.to_string()]));
@@ -789,6 +801,9 @@ pub struct ChannelUpdate {
     /// New unlisted flag, or `None` to leave unchanged. It decides listing,
     /// not admission, so it does not take the membership lock.
     pub unlisted: Option<bool>,
+    /// #645: new export policy, or `None` to leave unchanged. Like `unlisted`
+    /// it decides nothing about admission.
+    pub no_bridge: Option<bool>,
 }
 
 impl ChannelUpdate {
@@ -801,6 +816,7 @@ impl ChannelUpdate {
             && self.labels.is_none()
             && self.join_role.is_none()
             && self.unlisted.is_none()
+            && self.no_bridge.is_none()
     }
 
     /// True when the update changes a setting that decides admission:
@@ -1041,6 +1057,10 @@ async fn update_channel_on(
         set_parts.push(format!("unlisted = ${param_idx}"));
         param_idx += 1;
     }
+    if updates.no_bridge.is_some() {
+        set_parts.push(format!("no_bridge = ${param_idx}"));
+        param_idx += 1;
+    }
     if let Some(ref ttl) = updates.ttl_seconds {
         // Set ttl_seconds, then reset the deadline from now (or clear both).
         set_parts.push(format!("ttl_seconds = ${param_idx}"));
@@ -1078,6 +1098,9 @@ async fn update_channel_on(
     }
     if let Some(unlisted) = updates.unlisted {
         q = q.bind(unlisted);
+    }
+    if let Some(no_bridge) = updates.no_bridge {
+        q = q.bind(no_bridge);
     }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
@@ -1820,6 +1843,7 @@ mod group_metadata_tag_tests {
             labels: Vec::new(),
             join_role: join_role.into(),
             unlisted: false,
+            no_bridge: false,
         }
     }
 

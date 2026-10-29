@@ -754,8 +754,8 @@ pub async fn validate_admin_event(
                 labels.map_err(|e| anyhow::anyhow!("{e}"))?;
             }
 
-            // name/about/archived/visibility/ttl/labels/join_role/unlisted
-            // require owner/admin;
+            // name/about/archived/visibility/ttl/labels/join_role/unlisted/
+            // no-bridge require owner/admin;
             // topic/purpose allow any member who may post.
             let has_privileged_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
@@ -767,6 +767,8 @@ pub async fn validate_admin_event(
                     || k == "t"
                     || k == "join_role"
                     || k == "unlisted"
+                    // #645: export control is owner/admin, never the casual tier.
+                    || k == "no-bridge"
             });
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
@@ -2076,6 +2078,22 @@ pub(crate) async fn persist_edit_metadata(
                     "true" => true,
                     "false" => false,
                     _ => return Err(anyhow::anyhow!("invalid unlisted value: {val}")),
+                });
+            }
+            "no-bridge" => {
+                // #645: per-channel export policy. Owner/admin tier (see the
+                // kind:9002 validator): export control is not a casual edit.
+                // Published on the next kind:39000 as a `no-bridge` tag so
+                // off-relay replicators (kannaka-hive-bridge fails closed on
+                // it) honor it without out-of-band configuration.
+                edit.columns.no_bridge = Some(match val {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "invalid no-bridge value: {val} (must be true or false)"
+                        ))
+                    }
                 });
             }
             _ => {}

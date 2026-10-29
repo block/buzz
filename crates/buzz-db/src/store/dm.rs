@@ -514,6 +514,9 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         name: row.try_get("name")?,
         channel_type: row.try_get("channel_type")?,
         visibility: row.try_get("visibility")?,
+        // #645: DM rows never carry the export-policy column in their SELECT;
+        // the safe default matches row_to_channel_record's fallback.
+        no_bridge: row.try_get("no_bridge").unwrap_or(false),
         description: row.try_get("description")?,
         canvas: row.try_get("canvas")?,
         created_by: row.try_get("created_by")?,

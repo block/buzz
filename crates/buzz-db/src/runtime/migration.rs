@@ -776,7 +776,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 75);
+        assert_eq!(migrations.len(), 76);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -808,6 +808,11 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE TABLE community_nip_fi_issuers"));
         assert_eq!(migrations[74].version, 75);
+        // Kannaka fork (#645): 0076 adds the per-channel export policy column.
+        assert_eq!(migrations[75].version, 76);
+        let no_bridge = strip_sql_comments(migrations[75].sql.as_str());
+        assert!(no_bridge.contains("ADD COLUMN no_bridge BOOLEAN NOT NULL DEFAULT FALSE"));
+        assert!(desired_schema.contains("no_bridge       BOOLEAN NOT NULL DEFAULT FALSE"));
         let invite_migration = strip_sql_comments(migrations[74].sql.as_str());
         assert!(invite_migration.contains("SET LOCAL lock_timeout = '5s'"));
         assert!(invite_migration.contains("SET LOCAL statement_timeout = '30s'"));
