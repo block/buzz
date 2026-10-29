@@ -25,9 +25,20 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+        Self::configured(false).await
+    }
+
+    async fn configured(strict: bool) -> Self {
+        let mut state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
             .await
             .expect("Postgres and Redis");
+        if strict {
+            let state = Arc::make_mut(&mut state);
+            let config = Arc::make_mut(&mut state.config);
+            config.require_auth_token = true;
+            config.require_relay_membership = true;
+            config.allow_nip_oa_auth = true;
+        }
         let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
             .await
             .unwrap();
@@ -99,6 +110,10 @@ impl Fixture {
     }
 
     async fn fence(&self) {
+        self.pending_fence().await.commit().await.unwrap();
+    }
+
+    async fn pending_fence(&self) -> sqlx::Transaction<'static, sqlx::Postgres> {
         let request = self
             .state
             .db
@@ -131,7 +146,7 @@ impl Fixture {
         fences::insert(&mut tx, agent, &lease, Some(self.user.public_key()))
             .await
             .unwrap();
-        tx.commit().await.unwrap();
+        tx
     }
 
     async fn send(&self, key: &Keys, event: &Event, websocket: bool) -> (bool, String) {
@@ -140,7 +155,7 @@ impl Fixture {
             if let crate::connection::AuthState::Authenticated(ctx) =
                 &mut *conn.auth_state.lock().unwrap()
             {
-                ctx.scopes = vec![buzz_auth::Scope::MessagesWrite];
+                ctx.scopes = buzz_auth::Scope::all_known();
                 // Intentionally no cached owner: the write must use PostgreSQL.
                 ctx.agent_owner_pubkey = None;
             }
@@ -233,3 +248,6 @@ async fn http_and_websocket_messages_honor_user_and_agent_fences() {
         );
     }
 }
+
+#[path = "user_deletion_expanded_postgres_tests.rs"]
+mod expanded_postgres_tests;

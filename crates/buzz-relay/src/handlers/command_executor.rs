@@ -184,7 +184,10 @@ async fn persist_command_event(
 
     let (_, was_inserted) = buzz_db::event::insert_event_in_transaction(&mut tx, event, channel_id)
         .await
-        .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
+        .map_err(|e| match e {
+            buzz_db::DbError::UserDeletionRestricted => super::ingest::event_write_error(e),
+            _ => IngestError::Internal(format!("error: insert event: {e}")),
+        })?;
     if was_inserted {
         Ok(PersistResult::Inserted(tx))
     } else {

@@ -1,6 +1,6 @@
-//! Operator-global restriction storage and identity locks. New stream/forum
-//! messages and agent-owner assignment consult these through the write guard.
-//! Other serving paths and the real fencing worker are not integrated yet.
+//! Operator-global restriction storage and identity locks. Shared persistent-event
+//! insertion paths and agent-owner assignment consult these through the write guard.
+//! Actor leases also protect external effects; the real fencing worker is not integrated yet.
 //!
 //! Callers use a writer-pool READ COMMITTED transaction. Acquire existing
 //! community guards first, then `lock_request` for the worker, then all human
@@ -221,6 +221,23 @@ pub async fn insert(
     lock_request(tx, lease).await?;
     let request_id = lease.request_id;
     lock_exclusive(tx, &[identity]).await?;
+    // Actor leases are registered under these same shared identity locks.
+    // Refuse completion while admitted external or multi-transaction work runs;
+    // the executor retries after it finishes, rather than holding locks to poll.
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM community_serving_write_leases
+         WHERE actor_pubkey = $1 AND ($2::uuid IS NULL OR community_id = $2)
+           AND lease_until >= clock_timestamp())",
+    )
+    .bind(identity.pubkey.to_hex())
+    .bind(identity.scope_id())
+    .fetch_one(&mut **tx)
+    .await?;
+    if active {
+        return Err(DbError::AccessDenied(
+            "identity writes are still in flight; retry fencing".into(),
+        ));
+    }
     let owner = source_owner.map(|key| key.to_hex());
     sqlx::query(
         "INSERT INTO user_deletion_fences (pubkey, scope_community_id, request_id, source_owner_pubkey)

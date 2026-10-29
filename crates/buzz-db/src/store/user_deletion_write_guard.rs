@@ -1,30 +1,27 @@
-//! First serving integration: new stream/forum messages and agent ownership.
+//! Guard shared persistent-event insertion paths and agent ownership.
 //! Other writes are not fenced here; real deletion must remain disabled until
 //! every serving path and external-work drain has been integrated.
 
-use buzz_core::{kind, CommunityId};
+use buzz_core::CommunityId;
 use nostr::{Event, PublicKey};
 use sqlx::{Postgres, Transaction};
 
 use super::user_deletion_fences::{lock_exclusive, lock_shared, read_locked, FenceIdentity};
 use crate::{DbError, Result};
 
-pub(crate) async fn guard_message(
+pub(crate) async fn guard_event_author(
     tx: &mut Transaction<'_, Postgres>,
     community: CommunityId,
     event: &Event,
 ) -> Result<()> {
-    if !matches!(
-        u32::from(event.kind.as_u16()),
-        kind::KIND_STREAM_MESSAGE
-            | kind::KIND_STREAM_MESSAGE_V2
-            | kind::KIND_FORUM_POST
-            | kind::KIND_FORUM_COMMENT
-    ) {
-        return Ok(());
-    }
+    guard_identity(tx, community, event.pubkey).await
+}
 
-    let signer = event.pubkey;
+pub(crate) async fn guard_identity(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    signer: PublicKey,
+) -> Result<()> {
     let owner = owner(tx, community, signer).await?;
     let mut identities = vec![
         FenceIdentity::user(signer),

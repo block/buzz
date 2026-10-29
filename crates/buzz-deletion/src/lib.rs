@@ -182,20 +182,59 @@ pub async fn acquire_serving_write(
     community: buzz_core::CommunityId,
     operation: &str,
 ) -> Result<ServingWriteGuard> {
-    acquire_serving_write_with_heartbeat(db, community, operation, heartbeat_interval()).await
+    acquire_serving_write_for_actor(db, community, operation, heartbeat_interval(), None).await
 }
 
+/// Acquire the existing durable serving lease with authenticated actor fencing.
+/// No pool connection is held during the external operation. A live actor lease
+/// prevents that actor's fence from committing until the operation releases it.
+pub async fn acquire_actor_serving_write(
+    db: &Db,
+    community: buzz_core::CommunityId,
+    operation: &str,
+    actor: nostr::PublicKey,
+) -> Result<ServingWriteGuard> {
+    acquire_serving_write_for_actor(db, community, operation, heartbeat_interval(), Some(actor))
+        .await
+}
+
+#[cfg(test)]
 async fn acquire_serving_write_with_heartbeat(
     db: &Db,
     community: buzz_core::CommunityId,
     operation: &str,
     heartbeat_period: Duration,
 ) -> Result<ServingWriteGuard> {
+    acquire_serving_write_for_actor(db, community, operation, heartbeat_period, None).await
+}
+
+async fn acquire_serving_write_for_actor(
+    db: &Db,
+    community: buzz_core::CommunityId,
+    operation: &str,
+    heartbeat_period: Duration,
+    actor: Option<nostr::PublicKey>,
+) -> Result<ServingWriteGuard> {
     let store = store(db);
     let owner = default_executor_id();
-    let lease = store
-        .acquire_serving_write_lease(community, operation, &owner, DEFAULT_LEASE_DURATION)
-        .await?;
+    let lease = match actor {
+        Some(actor) => {
+            store
+                .acquire_actor_serving_write_lease(
+                    community,
+                    operation,
+                    &owner,
+                    DEFAULT_LEASE_DURATION,
+                    actor,
+                )
+                .await?
+        }
+        None => {
+            store
+                .acquire_serving_write_lease(community, operation, &owner, DEFAULT_LEASE_DURATION)
+                .await?
+        }
+    };
     let heartbeat_store = store.clone();
     let mut heartbeat_lease = lease.clone();
     let cancel = CancellationToken::new();

@@ -109,6 +109,7 @@ async fn replace_parameterized_event_in_transaction_impl(
     channel_id: Option<Uuid>,
     precondition: ParameterizedReplacePrecondition<'_>,
 ) -> Result<ParameterizedReplaceResult> {
+    tx.guard_event_author(event).await?;
     let community_id = tx.community();
     let kind_i32 = buzz_core::kind::event_kind_i32(event);
     let pubkey_bytes = event.pubkey.to_bytes();
@@ -431,6 +432,7 @@ impl Db {
         )
         .await?;
         tx.set_push_enqueue(self.push_enqueue.clone());
+        tx.guard_event_author(event).await?;
         let transaction_timer = observability::TransactionTimer::start(
             observability::TransactionOperation::ReplaceAddressableEvent,
         );

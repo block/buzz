@@ -237,6 +237,7 @@ impl Db {
         )
         .await?;
         deadlines(tx.conn()).await?;
+        tx.guard_identity(*actor).await?;
         let actor = actor.to_bytes();
         lock_account(&mut tx, community, &actor).await?;
         let outcome = apply(&mut tx, community, &actor, intent).await?;

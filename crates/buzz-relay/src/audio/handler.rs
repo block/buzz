@@ -946,6 +946,51 @@ async fn run_active_audio_connection(
             return;
         }
     };
+    // Audio is a long-lived write, including binary frames that never reach
+    // event ingestion. Keep one actor lease for the session, not one per packet.
+    // The deletion worker must disconnect/drain the session before fencing can
+    // complete. Losing this proof cancels the existing admission and I/O loops.
+    let _actor_write = match buzz_deletion::acquire_actor_serving_write(
+        &state.db,
+        tenant.community(),
+        "huddle_audio",
+        pubkey,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            let restricted = matches!(
+                error.downcast_ref::<buzz_db::DbError>(),
+                Some(buzz_db::DbError::UserDeletionRestricted)
+            );
+            exit_authorization_refusal(
+                &mut ws_send,
+                &control,
+                &mut terminal_ctrl_rx,
+                nip_fi_assertion.is_some(),
+                if restricted {
+                    buzz_auth::DenialClass::AuthorizationDenied
+                } else {
+                    buzz_auth::DenialClass::AuthorizationUnavailable
+                },
+                serde_json::json!({"type":"error", "message": if restricted {
+                    "restricted: identity is restricted for user deletion"
+                } else { "identity write lease unavailable" }}),
+            )
+            .await;
+            return;
+        }
+    };
+    let actor_lost = _actor_write.lost();
+    let actor_cancel = cancel.clone();
+    let _actor_watcher = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        tokio::select! {
+            _ = actor_lost.cancelled() => actor_cancel.cancel(),
+            _ = actor_cancel.cancelled() => {},
+        }
+    }));
+
     // Derive parent_id_for_event from the membership admission result.
     // This is the channel ID that lifecycle events (48101/48102/48103) belong to.
     let parent_id_for_event = match &membership_admission {
@@ -13317,7 +13362,7 @@ mod tests {
             let mut blocker = pool.begin().await.expect("blocker tx");
             let locked: Vec<uuid::Uuid> = sqlx::query_scalar(
                 "SELECT id FROM community_serving_write_leases \
-                 WHERE community_id = $1 FOR UPDATE",
+                 WHERE community_id = $1 AND actor_pubkey IS NULL FOR UPDATE",
             )
             .bind(community.as_uuid())
             .fetch_all(&mut *blocker)
@@ -15398,6 +15443,98 @@ mod tests {
                 })
                 .to_string()]
             );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and Redis"]
+        async fn user_deletion_fence_waits_for_audio_disconnect_then_refuses_rejoin() {
+            use buzz_db::user_deletion_fences::{self as fences, FenceIdentity};
+            let state = audio_test_state_real_db().await.unwrap();
+            let (tenant, channel, key) = seed_audio_fixture(state.db.pool()).await;
+            let (mut client, server) =
+                open_admitted_audio_socket(&state, tenant.clone(), channel, &key, None).await;
+            let request = state
+                .db
+                .user_deletion_store()
+                .submit(&format!("demo:{}", uuid::Uuid::new_v4()), "operator", None)
+                .await
+                .unwrap();
+            let store = state.db.entity_deletion_store();
+            store
+                .approve(
+                    request.id,
+                    "reviewer",
+                    request.inventory_digest.as_deref().unwrap(),
+                )
+                .await
+                .unwrap();
+            let lease = store
+                .claim(request.id, "worker", std::time::Duration::from_secs(60))
+                .await
+                .unwrap()
+                .unwrap();
+            let identity = FenceIdentity::user(key.public_key());
+            let mut tx = state.db.pool().begin().await.unwrap();
+            let error = fences::insert(&mut tx, identity, &lease, None)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("still in flight"), "{error}");
+            tx.rollback().await.unwrap();
+            client.close(None).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let count: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM community_serving_write_leases WHERE actor_pubkey=$1",
+                    )
+                    .bind(key.public_key().to_hex())
+                    .fetch_one(state.db.pool())
+                    .await
+                    .unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            // The last participant leaving auto-archives the old huddle.
+            // Use a fresh open channel so membership/archive refusal cannot
+            // conceal a missing user-deletion guard on the next join.
+            let next_channel = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
+                 VALUES ($1, $2, 'next-huddle', 'stream', 'open', $3)",
+            )
+            .bind(next_channel)
+            .bind(tenant.community().as_uuid())
+            .bind(key.public_key().as_bytes())
+            .execute(state.db.pool())
+            .await
+            .unwrap();
+            check_membership_for_admission(
+                &state,
+                &tenant,
+                next_channel,
+                key.public_key().as_bytes(),
+                None,
+            )
+            .await
+            .expect("fresh channel must pass the pre-fence membership check");
+            let mut tx = state.db.pool().begin().await.unwrap();
+            fences::insert(&mut tx, identity, &lease, None)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let (frames, _) =
+                run_audio_auth_in(state, tenant, next_channel, None, &key, true).await;
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.contains("restricted for user deletion")),
+                "{frames:?}"
+            );
+            server.abort();
         }
 
         /// A ban closes a live audio socket: admission binds the socket to its

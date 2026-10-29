@@ -472,6 +472,16 @@ pub enum BanRefusal {
     Unavailable,
 }
 
+/// Keep durable identity restrictions as client refusals on every insert path.
+pub(crate) fn event_write_error(error: buzz_db::DbError) -> IngestError {
+    match error {
+        buzz_db::DbError::UserDeletionRestricted => {
+            IngestError::Rejected("restricted: identity is restricted for user deletion".into())
+        }
+        other => IngestError::Internal(format!("error: {other}")),
+    }
+}
+
 impl IngestError {
     /// A ban refusal answered with `legacy` outside NIP-FI agent HTTP.
     pub(crate) fn ban(refusal: BanRefusal, legacy: IngestError) -> Self {
@@ -2691,6 +2701,30 @@ async fn ingest_event_inner(
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
 
+    super::identity_write::run(
+        state,
+        tenant,
+        *auth.pubkey(),
+        "event_ingest",
+        Box::pin(ingest_verified_event(
+            state, tracer, tenant, event, auth, now,
+        )),
+    )
+    .await
+}
+
+async fn ingest_verified_event(
+    state: &Arc<AppState>,
+    tracer: &Arc<dyn buzz_conformance::Tracer>,
+    tenant: &TenantContext,
+    event: Event,
+    auth: IngestAuth,
+    now: i64,
+) -> Result<IngestResult, IngestError> {
+    let event_id_hex = event.id.to_hex();
+    let kind_u32 = event_kind_u32(&event);
+    let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
+
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
@@ -3466,7 +3500,7 @@ async fn ingest_event_inner(
                 emoji,
             )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(event_write_error)?
         {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
                 return Err(IngestError::Rejected(format!(
@@ -3558,7 +3592,7 @@ async fn ingest_event_inner(
             .db
             .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(event_write_error)?
         {
             buzz_db::channel::ChannelCreate::Created(stored) => {
                 metrics::counter!(
@@ -3590,7 +3624,12 @@ async fn ingest_event_inner(
         // divide insertion and repair ownership between two relay workers.
         crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+            .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
+                Some(buzz_db::DbError::UserDeletionRestricted) => {
+                    event_write_error(buzz_db::DbError::UserDeletionRestricted)
+                }
+                _ => IngestError::Internal(format!("error: workflow deletion failed: {e}")),
+            })?
     } else if let Some(plan) = put_user {
         // One commit stores the event and applies its membership changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3606,6 +3645,9 @@ async fn ingest_event_inner(
         )
         .await
         .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
+            Some(buzz_db::DbError::UserDeletionRestricted) => {
+                event_write_error(buzz_db::DbError::UserDeletionRestricted)
+            }
             Some(buzz_db::DbError::AccessDenied(reason)) => {
                 IngestError::Rejected(format!("invalid: {reason}"))
             }
@@ -3621,6 +3663,9 @@ async fn ingest_event_inner(
         crate::handlers::side_effects::persist_edit_metadata(tenant, &event, state)
             .await
             .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
+                Some(buzz_db::DbError::UserDeletionRestricted) => {
+                    event_write_error(buzz_db::DbError::UserDeletionRestricted)
+                }
                 Some(buzz_db::DbError::AccessDenied(reason)) => {
                     IngestError::Rejected(format!("invalid: {reason}"))
                 }
@@ -3633,7 +3678,7 @@ async fn ingest_event_inner(
             .db
             .replace_addressable_event(tenant.community(), &event, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(event_write_error)?
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
@@ -3648,7 +3693,7 @@ async fn ingest_event_inner(
             .db
             .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(event_write_error)?
     } else if let Some(spec) = canvas_revision_spec.as_ref() {
         // Canvas write carrying an optimistic-concurrency precondition. Plain
         // canvas writes (no `expected-revision` tag) fall through to the generic
@@ -3665,7 +3710,7 @@ async fn ingest_event_inner(
             .db
             .insert_canvas_head_checked(tenant.community(), &event, channel, precondition)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+            .map_err(event_write_error)?;
         match status {
             buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
                 return Err(IngestError::CanvasConflict(

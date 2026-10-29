@@ -46,7 +46,7 @@ pub(crate) async fn accept(
             &state.relay_keypair,
         )
         .await
-        .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?;
+        .map_err(super::ingest::event_write_error)?;
     match outcome {
         ArtifactOutcome::Accepted(events) => {
             for stored in &events {

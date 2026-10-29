@@ -167,7 +167,9 @@ async fn message_writers_enforce_global_and_scoped_fences_even_without_profiles(
     }
     f.fence(&user, None).await;
     f.fence(&agent, Some(&user)).await;
-    for kind in [9, 40002, 45001, 45003] {
+    for kind in [
+        9, 40002, 45001, 45003, 7, 40003, 45002, 9007, 9000, 9002, 40100, 5, 45010, 1234,
+    ] {
         for keys in [&user, &agent] {
             restricted(
                 f.db.insert_event(f.community, &message(keys, kind), None)
@@ -432,3 +434,9 @@ async fn first_owner_assignment_waits_for_messages_and_rejects_restricted_owners
     .unwrap();
     assert!(saved.is_none());
 }
+
+#[path = "user_deletion_lock_order_postgres_tests.rs"]
+mod lock_order_postgres_tests;
+
+#[path = "user_deletion_actor_lease_postgres_tests.rs"]
+mod actor_lease_postgres_tests;
