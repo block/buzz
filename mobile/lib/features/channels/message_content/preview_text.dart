@@ -151,6 +151,7 @@ List<PreviewPiece> messagePreviewPieces(
 }
 
 const _maxLineLength = 2000;
+const _backtick = 0x60;
 
 final _rule = RegExp(r'^([-*_])(?:\s*\1){2,}$');
 final _tableDivider = RegExp(r'^\|?(?:\s*:?-+:?\s*\|)+\s*:?-*:?\s*\|?$');
@@ -236,20 +237,57 @@ class _PreviewBuilder {
       piece is PreviewText ? text(piece.text) : pieces.add(piece);
 
   /// One line of prose: inline code is literal, everything else is inline
-  /// Markdown.
+  /// Markdown. A code span opens at a run of backticks and closes at the next
+  /// run of the same length; a run with no match is literal.
   void line(String line) {
-    final parts = line.split('`');
-    // An unpaired backtick is literal.
-    if (parts.length.isEven) {
-      parts[parts.length - 2] += '`${parts.removeLast()}';
-    }
-    for (var i = 0; i < parts.length; i++) {
-      if (i.isOdd) {
-        text(parts[i]);
-      } else {
-        _inline(parts[i]);
+    var prose = 0;
+    var cursor = 0;
+    while (cursor < line.length) {
+      if (line.codeUnitAt(cursor) != _backtick) {
+        cursor++;
+        continue;
       }
+      final open = cursor;
+      final openEnd = _runEnd(line, open);
+      final run = openEnd - open;
+      int? close;
+      var scan = openEnd;
+      while (scan < line.length) {
+        if (line.codeUnitAt(scan) != _backtick) {
+          scan++;
+          continue;
+        }
+        final end = _runEnd(line, scan);
+        if (end - scan == run) {
+          close = scan;
+          break;
+        }
+        scan = end;
+      }
+      if (close == null) {
+        cursor = openEnd;
+        continue;
+      }
+      _inline(line.substring(prose, open));
+      var code = line.substring(openEnd, close);
+      if (code.length > 2 &&
+          code.startsWith(' ') &&
+          code.endsWith(' ') &&
+          code.trim().isNotEmpty) {
+        code = code.substring(1, code.length - 1);
+      }
+      text(code);
+      cursor = prose = close + run;
     }
+    _inline(line.substring(prose));
+  }
+
+  static int _runEnd(String line, int start) {
+    var end = start;
+    while (end < line.length && line.codeUnitAt(end) == _backtick) {
+      end++;
+    }
+    return end;
   }
 
   void _inline(String source) {
@@ -274,7 +312,9 @@ class _PreviewBuilder {
         add(PreviewChannel(_channelName(deepLink.channelId)));
         continue;
       }
-      _tokens(_unwrapEmphasis(label.isEmpty ? url : label));
+      _tokens(
+        _unwrapEmphasis(label.isEmpty ? url : decodeMarkdownLabelSyntax(label)),
+      );
     }
     _tokens(_unwrapEmphasis(source.substring(start)));
   }
