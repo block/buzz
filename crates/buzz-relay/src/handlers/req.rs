@@ -122,7 +122,7 @@ pub async fn handle_req(
             Ok(ids) => ids,
             Err(e) => {
                 warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
                 return;
             }
         }
@@ -146,7 +146,7 @@ pub async fn handle_req(
         Ok(ids) => ids,
         Err(e) => {
             warn!(conn_id = %conn_id, "Failed to get readable named-only channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
             return;
         }
     };
@@ -185,7 +185,7 @@ pub async fn handle_req(
             Ok(confirmed) => confirmed,
             Err(e) => {
                 warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
                 return;
             }
         };
@@ -204,7 +204,7 @@ pub async fn handle_req(
         .await
         {
             warn!(conn_id = %conn_id, "Failed to classify repaired channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
             return;
         }
     }
@@ -401,8 +401,9 @@ pub async fn handle_req(
     // Registration above is one uncancellable unit; the history read below is
     // read-only delivery and races gate cancellation, so expiry drops it and
     // releases the permit without sending another EVENT or EOSE. It returns
-    // whether a statement timeout ended it: retirement then runs after the
-    // race, because a dropped retirement would leak its unreleased topics.
+    // the CLOSED reason when a failed read ended it: retirement then runs
+    // after the race, because a dropped retirement would leak its unreleased
+    // topics.
     let history = async {
         #[cfg(test)]
         crate::nip_fi_test_hooks::before_req_history(conn.tenant.community()).await;
@@ -489,11 +490,9 @@ pub async fn handle_req(
                 Ok(evs) => evs,
                 Err(e) => {
                     warn!(conn_id = %conn_id, sub_id = %sub_id, "Historical query failed: {e}");
-                    if e.is_statement_cancelled() {
-                        return true;
-                    }
-                    conn.send(RelayMessage::eose(&sub_id));
-                    return false;
+                    // CLOSED, never EOSE: EOSE tells the client it has every
+                    // stored event, so a resuming client would skip this history.
+                    return Some(history_read_closed_reason(&e));
                 }
             };
 
@@ -570,7 +569,7 @@ pub async fn handle_req(
 
                 let msg = RelayMessage::event(&sub_id, &stored.event);
                 if !conn.send(msg) {
-                    return false;
+                    return None;
                 }
                 total_sent += 1;
                 if total_sent.is_multiple_of(100) {
@@ -587,13 +586,15 @@ pub async fn handle_req(
             count = total_sent,
             "EOSE sent after historical delivery"
         );
-        false
+        None
     };
     let outcome = unless_cancelled(&conn, history).await;
     drop(_req_permit);
     match outcome {
-        Some(false) => {}
-        Some(true) => close_timed_out_subscription(&sub_id, owner, &conn, &state).await,
+        Some(None) => {}
+        Some(Some(reason)) => {
+            super::close::close_if_owner(&sub_id, owner, Some(reason), &conn, &state).await;
+        }
         None => {
             super::close::close_if_owner(&sub_id, owner, None, &conn, &state).await;
         }
@@ -875,8 +876,19 @@ async fn handle_search_req(
             let search_result = match state.search.search(&search_query).await {
                 Ok(r) => r,
                 Err(e) => {
+                    // CLOSED, not EOSE: an empty EOSE would read as "no
+                    // matches". Stop the whole REQ so later filters do not
+                    // each wait out the search pool's acquire timeout too.
                     warn!(sub_id = %sub_id, "NIP-50 search failed: {e}");
-                    break;
+                    super::close::close_if_owner(
+                        sub_id,
+                        owner,
+                        Some(SEARCH_FAILED_CLOSED),
+                        conn,
+                        state,
+                    )
+                    .await;
+                    return;
                 }
             };
 
@@ -1439,7 +1451,7 @@ async fn handle_huddle_liveness_req(
         Ok(links) => links,
         Err(error) => {
             warn!("Huddle liveness linkage batch failed: {error}");
-            conn.send(RelayMessage::closed(sub_id, "error: database error"));
+            conn.send(RelayMessage::closed(sub_id, DATABASE_ERROR_CLOSED));
             return;
         }
     };
@@ -1599,6 +1611,23 @@ async fn close_timed_out_subscription(
 /// Stable CLOSED reason for a read cancelled by its server statement deadline.
 /// Clients match it to skip retrying the same expensive query.
 pub(crate) const QUERY_TIMED_OUT_CLOSED: &str = "error: query timed out";
+
+/// CLOSED reason for any other failed DB read. Generic on purpose: the raw
+/// error stays in the relay log, and clients treat it as retryable.
+pub(crate) const DATABASE_ERROR_CLOSED: &str = "error: database error";
+
+/// CLOSED reason for a failed REQ history read.
+fn history_read_closed_reason(e: &buzz_db::DbError) -> &'static str {
+    if e.is_statement_cancelled() {
+        QUERY_TIMED_OUT_CLOSED
+    } else {
+        DATABASE_ERROR_CLOSED
+    }
+}
+
+/// CLOSED reason for a NIP-50 search the search service could not answer
+/// (e.g. the read replica it queries is down).
+pub(crate) const SEARCH_FAILED_CLOSED: &str = "error: search failed";
 
 /// CLOSED reason for a failed one-shot DB read (COUNT): a statement cancel gets
 /// the stable timeout reason; anything else keeps the raw error.
@@ -2035,6 +2064,63 @@ mod tests {
         assert!(registered(&state, &conn, "x"));
         assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 1);
         assert!(closed_frames(&mut send_rx).is_empty());
+    }
+
+    /// A NIP-50 search the search pool cannot serve (its reader is down) ends
+    /// the REQ with a CLOSED error, never an EOSE that reads as "no matches",
+    /// and the REQ's later search filters never wait on the pool.
+    #[tokio::test]
+    async fn failed_search_closes_without_eose_or_trying_later_filters() {
+        const ACQUIRE: std::time::Duration = std::time::Duration::from_millis(500);
+        let state = crate::state::tests::test_state_with_database_url_and_pool_options(
+            "postgres://127.0.0.1:1/none",
+            sqlx::postgres::PgPoolOptions::new().acquire_timeout(ACQUIRE),
+        )
+        .await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let owner = claim_search_subscription("s", &conn, &state)
+            .await
+            .expect("claim");
+        let filters: Vec<Filter> = (0..4)
+            .map(|i| {
+                Filter::new()
+                    .kind(nostr::Kind::TextNote)
+                    .search(format!("needle{i}"))
+            })
+            .collect();
+
+        let started = std::time::Instant::now();
+        handle_search_req(
+            "s",
+            owner,
+            &filters,
+            &[],
+            &super::super::system_channels::NamedOnlyChannels::default(),
+            true,
+            &conn.tenant,
+            &[0; 32],
+            &conn,
+            &state,
+            None,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            closed_frames(&mut send_rx),
+            vec![format!(r#"["CLOSED","s","{SEARCH_FAILED_CLOSED}"]"#)],
+            "exactly one CLOSED error and no EOSE"
+        );
+        assert!(
+            conn.subscriptions.lock().await.is_empty(),
+            "the failed search must release its ID"
+        );
+        // Each filter that reaches the pool waits out ACQUIRE on the dead port.
+        assert!(
+            elapsed < ACQUIRE * 3,
+            "later filters must not try the pool: took {elapsed:?} for {} filters",
+            filters.len()
+        );
     }
 
     /// Concurrent same-ID claims and stale teardowns: whichever claim lands
@@ -3572,7 +3658,7 @@ mod tests {
     // Arms `before_liveness_req` — the hook immediately before `acquire_effect()`
     // in the `filters_are_huddle_liveness_only` branch of `handle_req`. Dispatches
     // `handle_req` with a KIND_HUDDLE_LIVENESS filter with an authorized `#h` channel
-    // (pre-populated in accessible_channels_cache so no DB call is needed) and a live
+    // (seeded into the accessible-channel caches so no DB call is needed) and a live
     // gate. Waits for the hook, fires expiry, then releases. The handler must return
     // CLOSED "authorization denied" and the `liveness_query_counter` must remain 0 —
     // proving the permit gate stopped execution before the `huddle_started_links` DB
@@ -3644,13 +3730,11 @@ mod tests {
 
         let state = crate::state::tests::test_state().await;
 
-        // Pre-populate the accessible_channels_cache so the handle_req
+        // Seed the accessible-channel caches so the handle_req
         // membership check succeeds without a real DB connection.
         let channel_uuid = Uuid::from_u128(0xDEAD_BEEF_CAFE_1500);
         let pubkey_bytes = keys.public_key().to_bytes().to_vec();
-        state
-            .accessible_channels_cache
-            .insert((community, pubkey_bytes), vec![channel_uuid]);
+        state.seed_accessible_channels(community, pubkey_bytes, vec![channel_uuid]);
 
         // Register the liveness query counter — proves the DB call boundary.
         let query_count = crate::nip_fi_test_hooks::liveness_query_counter::register(community);
@@ -3660,7 +3744,7 @@ mod tests {
         // KIND_HUDDLE_LIVENESS with #h = channel_uuid:
         //   - `filters_are_huddle_liveness_only` → true (kind-only check)
         //   - `extract_channel_ids_from_filters_limited` → Some([channel_uuid])
-        //   - accessible_channels_cache hit → channel is authorized
+        //   - accessible-channel cache hit → channel is authorized
         //   - `authorized_requested_channels` = Some([channel_uuid]) → non-empty
         //   - handler enters the liveness branch, reaches before_liveness_req hook
         let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
@@ -3779,9 +3863,7 @@ mod tests {
             community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         });
         let state = crate::state::tests::test_state().await;
-        state
-            .accessible_channels_cache
-            .insert((community, keys.public_key().to_bytes().to_vec()), vec![]);
+        state.seed_accessible_channels(community, keys.public_key().to_bytes().to_vec(), vec![]);
 
         let mut filter = Filter::new().kind(nostr::Kind::TextNote).limit(1);
         let (arrived_rx, _release) = if search {
@@ -3922,8 +4004,9 @@ mod tests {
             community_control: crate::state::CommunityConnectionControl::new(cancel.clone()),
         });
         let channels = [Uuid::new_v4(), Uuid::new_v4()];
-        state.accessible_channels_cache.insert(
-            (community, keys.public_key().to_bytes().to_vec()),
+        state.seed_accessible_channels(
+            community,
+            keys.public_key().to_bytes().to_vec(),
             channels.to_vec(),
         );
         let filters: Vec<Filter> = channels

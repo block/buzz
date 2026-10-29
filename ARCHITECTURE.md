@@ -378,7 +378,7 @@ This prevents a race where a non-member receives live fan-out events from a priv
 
 ### Historical Query (EOSE)
 
-After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
+After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path. For an ordinary (non-search) REQ, EOSE marks a successful bounded history query, so a failed history read never ends in EOSE: it retires the subscription with `["CLOSED", sub_id, "error: query timed out"]` for a statement timeout or `"error: database error"` for anything else.
 
 **Client consumption invariant.** A client rebuilding channel state must
 open its live subscription before (or overlapping) the finite history

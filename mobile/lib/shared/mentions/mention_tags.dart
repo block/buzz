@@ -13,6 +13,26 @@ final _key = RegExp(r'^[0-9a-f]{64}$');
 /// Whether [key] is a lowercase 64-hex public key.
 bool isMentionKey(String key) => _key.hasMatch(key);
 
+/// Whether [tags] address [pubkey] through a `p` tag. A workflow message's
+/// owner attribution, `["p", <owner>, "", "owner"]` beside
+/// `["buzz:workflow", "true"]`, names who owns the message rather than whom it
+/// addresses, so it does not count. The relay adds a plain `p` tag when a
+/// workflow does mention its owner. This matches the relay's
+/// `is_workflow_owner_attribution`.
+bool tagsAddress(Iterable<List<String>> tags, String pubkey) {
+  final normalized = pubkey.toLowerCase();
+  final workflow = tags.any(
+    (tag) => tag.length == 2 && tag[0] == 'buzz:workflow' && tag[1] == 'true',
+  );
+  return tags.any(
+    (tag) =>
+        tag.length >= 2 &&
+        tag[0] == 'p' &&
+        tag[1].toLowerCase() == normalized &&
+        !(workflow && tag.length >= 4 && tag[3] == 'owner'),
+  );
+}
+
 /// Why a writer refused a message's mention tags.
 enum MentionTagError { notMember, invalid, tooMany }
 
