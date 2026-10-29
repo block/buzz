@@ -89,6 +89,26 @@ void main() {
       maxLines: 2,
       cut: true,
     ),
+    (
+      name: 'backticks inside a fence',
+      source: [
+        '```dart',
+        "final fence = '```';",
+        'final x = 1;',
+        '```',
+        'One.',
+        'Two.',
+        'Three.',
+      ].join('\n'),
+      maxLines: 2,
+      cut: true,
+    ),
+    (
+      name: 'inline code beside bold',
+      source: ['`a` **b** `c`', 'two', 'three', 'four'].join('\n'),
+      maxLines: 1,
+      cut: true,
+    ),
     (name: 'short', source: 'One.\n\nTwo.\n\nThree.', maxLines: 2, cut: false),
     (
       name: 'bold closing in the tail',
@@ -106,6 +126,18 @@ void main() {
       name: 'link closing in the tail',
       source: ['[opened', 'two', 'three', 'four', 'x](https://x.y)'].join('\n'),
       maxLines: 2,
+      cut: false,
+    ),
+    (
+      name: 'bold marker inside inline code',
+      source: ['`**` **opened', 'two', 'three', 'closed**'].join('\n'),
+      maxLines: 1,
+      cut: false,
+    ),
+    (
+      name: 'backticks inside a line',
+      source: ['use ```x``` here', 'two', 'three', 'four'].join('\n'),
+      maxLines: 1,
       cut: false,
     ),
     (
