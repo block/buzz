@@ -384,19 +384,22 @@ class BuzzPushLeaseRevocationOutbox {
       return true;
     }
     final nsec = community.nsec;
-    if (nsec == null || nsec.isEmpty) {
+    if (!gatewayOnly && (nsec == null || nsec.isEmpty)) {
       throw StateError(
         'Push lease revocation requires a community signing key.',
       );
     }
-    final decoded = nostr.Nip19.decode(payload: nsec);
-    final memberPubkey = community.pubkey ?? derivePublicKeyHex(decoded.data);
+    final memberPubkey = gatewayOnly
+        ? '0' * 64
+        : community.pubkey ??
+              derivePublicKeyHex(nostr.Nip19.decode(payload: nsec!).data);
     final relayUrl = canonicalBuzzPushRelayHttpUrl(community.relayUrl);
     final relayOrigin = canonicalBuzzPushRelayOrigin(relayUrl);
     final grants = await (readGrants ?? readBuzzPushEndpointGrants)();
     final matching = grants
         .where((grant) => grant.relayOrigin == relayOrigin)
         .toList();
+    if (gatewayOnly && matching.isEmpty) return false;
     if (matching.length != 1) {
       throw StateError(
         'Expected exactly one endpoint grant for push lease revocation.',
@@ -431,7 +434,7 @@ class BuzzPushLeaseRevocationOutbox {
         relayUrl: relayUrl,
         relayOrigin: relayOrigin,
         memberPubkey: memberPubkey,
-        nsec: nsec,
+        nsec: gatewayOnly ? '' : nsec!,
         installationId:
             community.pushLeaseInstallationId ?? grant.installationId,
         generation: highestGeneration + 2,
