@@ -250,6 +250,9 @@ run_unit_tests() {
   run_test_step "buzz-relay mesh boot tests" \
     cargo test -p buzz-relay --lib mesh_boot::tests:: -- --nocapture
 
+  run_test_step "buzz-relay subscription registry tests" \
+    cargo test -p buzz-relay --lib subscription::tests:: -- --nocapture
+
   # telemetry and config tests mutate process env. libtest runs one process
   # with many threads (nextest, used by `just test-unit`, isolates each test),
   # so run them single-threaded here. `--skip` keeps the substring filter
