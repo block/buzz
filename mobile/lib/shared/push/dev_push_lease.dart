@@ -16,6 +16,51 @@ const _maxSafeJsonInteger = 9007199254740991;
 const _maxLeaseLifetimeSeconds = 2592000;
 const _lowercaseHex64Pattern = r'^[0-9a-f]{64}$';
 const _installationIdPattern = r'^[0-9a-f]{32}$';
+// The gateway's `<key id>.<base64url>` grant grammar, which JSON never escapes.
+const _endpointGrantPattern = r'^[A-Za-z0-9_.-]+$';
+
+/// Whether an active lease carrying [subscriptions] fits [descriptor]'s
+/// plaintext and content limits with any endpoint grant and generation it
+/// accepts. Sizes are computed, not built, since the limits come from the relay.
+bool buzzPushSubscriptionsFitLease(
+  BuzzPushLeaseDescriptor descriptor,
+  List<BuzzPushSubscription> subscriptions,
+) {
+  final withoutEndpoint = utf8
+      .encode(
+        _activeLeasePlaintext(
+          descriptor: descriptor,
+          endpoint: '',
+          generation: _maxSafeJsonInteger,
+          subscriptions: subscriptions,
+        ),
+      )
+      .length;
+  // Publication accepts only grants JSON never escapes, so one at the endpoint
+  // limit adds exactly it.
+  final plaintext = withoutEndpoint + descriptor.maxEndpointLength;
+  final content = nip44PayloadLength(plaintext);
+  return plaintext <= descriptor.maxPlaintextLength &&
+      content != null &&
+      content <= descriptor.maxContentLength;
+}
+
+String _activeLeasePlaintext({
+  required BuzzPushLeaseDescriptor descriptor,
+  required String endpoint,
+  required int generation,
+  required List<BuzzPushSubscription> subscriptions,
+}) => jsonEncode(<String, dynamic>{
+  'v': 1,
+  'origin': descriptor.origin,
+  'transport': descriptor.transport,
+  'endpoint': endpoint,
+  'generation': generation,
+  'active': true,
+  'subscriptions': [
+    for (final subscription in subscriptions) subscription.toJson(),
+  ],
+});
 
 class BuzzPushLeaseDescriptor {
   final String origin;
@@ -331,18 +376,12 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
     throw const FormatException('Endpoint grant is already expired');
   }
 
-  final plaintextMap = <String, dynamic>{
-    'v': 1,
-    'origin': descriptor.origin,
-    'transport': descriptor.transport,
-    'endpoint': grant.endpointGrant,
-    'generation': effectiveLeaseGeneration,
-    'active': true,
-    'subscriptions': [
-      for (final subscription in subscriptions) subscription.toJson(),
-    ],
-  };
-  final plaintext = jsonEncode(plaintextMap);
+  final plaintext = _activeLeasePlaintext(
+    descriptor: descriptor,
+    endpoint: grant.endpointGrant,
+    generation: effectiveLeaseGeneration,
+    subscriptions: subscriptions,
+  );
   if (utf8.encode(plaintext).length > descriptor.maxPlaintextLength) {
     throw const FormatException('lease plaintext exceeds the advertised limit');
   }
@@ -512,6 +551,9 @@ void _validateGrant(
     throw const FormatException(
       'Endpoint grant violates the advertised endpoint limit',
     );
+  }
+  if (!RegExp(_endpointGrantPattern).hasMatch(grant.endpointGrant)) {
+    throw const FormatException('Endpoint grant is not a gateway grant');
   }
   if (grant.endpointEpoch <= 0) {
     throw const FormatException('Endpoint grant epoch is invalid');

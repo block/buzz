@@ -45,6 +45,9 @@ enum NativeTabler {
     "face.smiling": 0xeaf7, // mood-smile
     "person": 0xeb4d, // user
     "person.crop.circle": 0xeb4d, // user
+    "arrow.left.arrow.right": 0xf1f4, // arrows-left-right
+    "person.badge.plus": 0xeb4b, // user-plus
+    "gearshape": 0xeb20, // settings
     "person.2": 0xebf2, // users
     "rectangle.stack": 0xeb0a, // photo
     "crop": 0xea85, // crop
@@ -86,6 +89,7 @@ enum NativeTabler {
     "checkmark": 0xea5e, // check
     "checkmark.circle": 0xea67, // circle-check
     "bell.slash": 0xece9, // bell-off
+    "number": 0xeabc, // hash — matches BuzzIcons.hash
     "bubble.left": 0xeaef, // message
     "bubble.left.and.bubble.right": 0xeb6c, // messages
     "arrow.uturn.backward": 0xeb77, // arrow-back-up

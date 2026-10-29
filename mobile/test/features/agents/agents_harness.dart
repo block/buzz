@@ -1,3 +1,5 @@
+import 'package:buzz/shared/me/me_sync.dart';
+import '../../shared/me/me_sync_test.dart' show FakeRelay;
 import 'dart:async';
 
 import 'package:buzz/features/agents/agents_sheet.dart';
@@ -19,7 +21,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../helpers/remote_agents_fixture.dart';
 
 /// Fakes the relay boundary: owner-attested profiles for registry agents.
-class _Relay extends RelaySessionNotifier {
+class _Relay extends FakeRelay {
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
@@ -27,10 +29,16 @@ class _Relay extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [
-    if (filter.authors?.contains(fakeAgent) ?? false)
-      signedAgentProfile(fakeAgentKeys, fakeOwner, content: '{"name":"Scout"}'),
-  ];
+  }) async => filter.kinds.contains(30078)
+      ? events
+      : [
+          if (filter.authors?.contains(fakeAgent) ?? false)
+            signedAgentProfile(
+              fakeAgentKeys,
+              fakeOwner,
+              content: '{"name":"Scout"}',
+            ),
+        ];
 }
 
 /// Holds creation open so a test can observe the in-flight state.
@@ -69,6 +77,7 @@ class AgentsHarness {
   final FakeRegistry registry;
   final GatedController controller;
   final Community community;
+  final relay = _Relay();
 
   static Future<AgentsHarness> create() async {
     FlutterSecureStorage.setMockInitialValues({});
@@ -99,13 +108,21 @@ class AgentsHarness {
   Future<void> open(
     WidgetTester tester, {
     required List<String> directory,
+    Widget? home,
   }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final sync = MeSync(
+      relay,
+      RelayConfig(baseUrl: 'https://test', nsec: fakeOwner.nsec),
+      prefs: prefs,
+    );
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           builderlabAccountProvider.overrideWithValue(registry),
           remoteAgentControllerProvider.overrideWithValue(controller),
-          relaySessionProvider.overrideWith(_Relay.new),
+          relaySessionProvider.overrideWith(() => relay),
+          meSyncProvider.overrideWithValue(sync),
           activeCommunityProvider.overrideWith((ref) async => community),
           agentDirectoryProvider.overrideWith(
             (ref) async => [
@@ -116,19 +133,23 @@ class AgentsHarness {
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: TextButton(
-                onPressed: () => showAgents(context),
-                child: const Text('Open Agents'),
+          home:
+              home ??
+              Builder(
+                builder: (context) => Scaffold(
+                  body: TextButton(
+                    onPressed: () => showAgents(context),
+                    child: const Text('Open Agents'),
+                  ),
+                ),
               ),
-            ),
-          ),
         ),
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Open Agents'));
-    await tester.pumpAndSettle();
+    if (home == null) {
+      await tester.tap(find.text('Open Agents'));
+      await tester.pumpAndSettle();
+    }
   }
 }

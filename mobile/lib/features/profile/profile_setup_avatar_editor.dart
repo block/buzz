@@ -1,4 +1,8 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
+
+import '../../shared/emoji/emoji_avatar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -50,14 +54,23 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
       });
       return null;
     }, const []);
-    final draft = useState(initialDraft);
-    final mode = useState(switch (initialDraft) {
+    final openingDraft = useMemoized(
+      () =>
+          initialDraft ??
+          ProfileUrlAvatarDraft(
+            emojiAvatarDataUrl('😊', emojiAvatarColors[Random().nextInt(18)]),
+          ),
+      const [],
+    );
+    final draft = useState<ProfileAvatarDraft?>(openingDraft);
+    final mode = useState(switch (openingDraft) {
       ProfileUrlAvatarDraft() => ProfileAvatarMode.emoji,
       ProfileAnimatedAvatarDraft() => ProfileAvatarMode.animated,
       _ => ProfileAvatarMode.image,
     });
     final prepare = useState<Future<ProfileAvatarDraft?> Function()?>(null);
     final busy = useState(false);
+    final returningToEmpty = useState(false);
     final error = useState(false);
     final transition = useAnimationController(
       initialValue: anchoredPreview == null ? 1 : 0,
@@ -67,6 +80,7 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
         ? null
         : () {
             if (onFinished != null) {
+              returningToEmpty.value = initialDraft == null;
               onFinished!(null);
             } else {
               Navigator.of(context).pop();
@@ -166,9 +180,8 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
       return Theme(
         data: utilitySurfaceThemeData(Theme.of(context)),
         child: Scaffold(
-          backgroundColor: utilitySurfaceThemeData(
-            Theme.of(context),
-          ).colorScheme.surface,
+          // Native profile chrome returns underneath the exiting controls.
+          backgroundColor: Colors.transparent,
           resizeToAvoidBottomInset: false,
           body: Column(
             children: [
@@ -186,6 +199,7 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
                         : null,
                     fallbackInitial: '+',
                     emptyPreview: const ProfileSetupEmptyAvatar(),
+                    returningToEmpty: returningToEmpty.value,
                     draft: draft.value,
                     mode: mode.value,
                     transition: transition,

@@ -88,6 +88,15 @@ String nip44Decrypt(Uint8List conversationKey, String payloadBase64) {
   return _unpad(padded);
 }
 
+/// Length of the base64 payload [nip44Encrypt] returns for a plaintext of
+/// [plaintextBytes] UTF-8 bytes, or null when NIP-44 cannot encrypt it.
+int? nip44PayloadLength(int plaintextBytes) {
+  if (plaintextBytes < 1 || plaintextBytes > 65535) return null;
+  // version(1) || nonce(32) || length(2) || padded || mac(32)
+  final payload = 1 + 32 + 2 + _calcPaddedLen(plaintextBytes) + 32;
+  return 4 * ((payload + 2) ~/ 3);
+}
+
 // ── Padding ─────────────────────────────────────────────────────────────────
 
 int _calcPaddedLen(int unpaddedLen) {

@@ -40,7 +40,6 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
               let controller = self.navigation?.viewControllers.first as? NativeProfileSetupController else { result(nil); return }
         self.navigation?.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
         controller.updateAppearance(args)
-        self.avatarController?.view.backgroundColor = controller.view.backgroundColor
         self.updateEditorAppearance(controller)
         result(nil); return
       }
@@ -136,6 +135,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
         return
       }
       if call.method == "controls", let state = call.arguments as? [String: Any] {
+        guard !finishing else { result(nil); return }
         self.editorCanDone = state["canDone"] as? Bool ?? false
         self.editorBusy = state["busy"] as? Bool ?? false
         let fullScreen = state["fullScreen"] as? Bool == true
@@ -152,6 +152,11 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
       let draft = call.arguments as? [String: Any]
       func returnToProfile() {
         controller.navigationItem.setRightBarButton(nil, animated: false)
+        // Restore the native chrome alongside Flutter's exit. The transparent
+        // editor reveals it during the animation; the final handoff must not
+        // restart it or allow another navigation action mid-transition.
+        controller.view.isUserInteractionEnabled = false
+        controller.navigationItem.leftBarButtonItem?.isEnabled = false
         controller.setEditorVisible(false)
         let frame = controller.editorFrame
         let rect = controller.avatarFrame(in: controller.view).offsetBy(dx: -frame.minX, dy: -frame.minY)
@@ -180,7 +185,8 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     let editor = FlutterViewController(engine: engine, nibName: nil, bundle: nil)
     avatarController = editor
     engine.registrar(forPlugin: "BuzzIosNavigationBar")?.register(IosNavigationBarFactory(messenger: messenger, parent: editor), withId: "buzz/ios_navigation_bar")
-    editor.view.backgroundColor = controller.view.backgroundColor
+    editor.isViewOpaque = false
+    editor.view.backgroundColor = .clear
     controller.addChild(editor)
     editor.view.frame = editorFrame
     editor.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -229,6 +235,8 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     if let enabled = previousInteractivePopEnabled { navigation?.interactivePopGestureRecognizer?.isEnabled = enabled }
     previousInteractivePopEnabled = nil
     disabledSheetPans.forEach { $0.isEnabled = true }; disabledSheetPans.removeAll()
+    controller?.view.isUserInteractionEnabled = true
+    controller?.navigationItem.leftBarButtonItem?.isEnabled = true
     controller?.setEditorVisible(false)
     controller?.setAvatarHidden(false)
     controller?.avatarReady()
@@ -422,6 +430,7 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     return CGRect(x: 0, y: top, width: view.bounds.width, height: max(0, view.safeAreaLayoutGuide.layoutFrame.maxY - top))
   }
   func setEditorVisible(_ visible: Bool) {
+    guard editingAvatar != visible else { return }
     editingAvatar = visible
     heading.accessibilityElementsHidden = visible
     explanationRow.accessibilityElementsHidden = visible

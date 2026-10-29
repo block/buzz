@@ -423,8 +423,9 @@ const _descriptor = BuzzPushLeaseDescriptor(
   executorPubkey: 'pubkey',
   transport: 'apns',
   maxLeaseTtlSeconds: 3600,
-  maxContentLength: 4096,
-  maxPlaintextLength: 4096,
+  // The relay's NIP-11 limits, which fit a DM lease at the endpoint limit.
+  maxContentLength: 65536,
+  maxPlaintextLength: 32768,
   maxEndpointLength: 2048,
   maxStringLength: 512,
 );

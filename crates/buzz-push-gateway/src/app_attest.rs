@@ -177,7 +177,7 @@ fn verification_error(operation: &'static str, error: error::AppAttestError) -> 
         E::ResourceLimit => "capacity",
         E::InvalidBase64 => "encoding",
         E::InvalidCbor | E::InvalidFormat | E::AuthenticatorDataTooShort => "structure",
-        E::InvalidCertificate => "certificate",
+        E::InvalidCertificate(_) => "certificate",
         E::InvalidNonce | E::InvalidSignature => "signature",
         E::InvalidCounter => "counter",
         E::InvalidAppID | E::InvalidAAGUID | E::InvalidCredentialID | E::InvalidPublicKey => {

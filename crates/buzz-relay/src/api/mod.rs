@@ -510,6 +510,9 @@ pub mod relay_members {
     /// Both principals are ensured first because `agent_owner_pubkey` has a
     /// community-scoped foreign key. The mapping is first-write-wins; an
     /// existing mapping is accepted only when it names the same owner.
+    /// Returns `true` only when the link is recorded; an owner conflict and a
+    /// storage failure both return `false`. Callers that must tell denial
+    /// from unavailability use `link_agent_owner` directly.
     ///
     /// A mapping already confirmed in `observer_owner_cache` returns early:
     /// `agent_owner_pubkey` is set once and never cleared, so the writes

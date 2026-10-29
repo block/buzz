@@ -6,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../../shared/relay/relay.dart';
 import 'user_status.dart';
 import 'user_status_cache_provider.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// Manages the current user's own NIP-38 status (kind:30315, d=general).
 ///
@@ -94,12 +95,11 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     }
 
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    final event = nostr.Event.from(
+    final event = signNostrEvent(
       kind: EventKind.userStatus,
       content: trimmed,
       tags: tags,
       secretKey: privkeyHex,
-      verify: false,
     );
 
     final session = ref.read(relaySessionProvider.notifier);

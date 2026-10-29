@@ -1,27 +1,32 @@
-import 'dart:async';
-import 'dart:ui';
+import '../../shared/widgets/android_expanding_menu_button.dart';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/community/community_membership_provider.dart';
+import '../../shared/community/community_provider.dart';
+import '../../shared/community/community_icon_provider.dart';
+import '../../shared/community/community_avatar.dart';
+import '../../shared/widgets/ios_message_create_button.dart';
 import '../../shared/widgets/bottom_up_page_route.dart';
-import '../../shared/widgets/concentric_sheet_surface.dart';
-import '../../shared/widgets/directional_transition_scope.dart';
 import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../activity/activity_page.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
+import 'messages_filters.dart';
+import 'messages_navigation_bar.dart';
 
 class HomePage extends HookConsumerWidget {
   const HomePage({
     required this.settingsPageBuilder,
+    required this.onAgents,
+    required this.defaultAgentBuilder,
     this.communityInvitePageBuilder,
     this.mePageBuilder,
+    this.profilePageBuilder,
     this.communityAppearancePageBuilder,
     required this.hasUnreadInbox,
     this.hasUnreadSolo = false,
@@ -29,549 +34,231 @@ class HomePage extends HookConsumerWidget {
   });
 
   final WidgetBuilder settingsPageBuilder;
+  final ValueChanged<BuildContext> onAgents;
+  final WidgetBuilder defaultAgentBuilder;
+  final WidgetBuilder? profilePageBuilder;
 
-  /// Personal chat workspace supplied by the app composition root.
-  final Widget Function(BuildContext, ValueNotifier<VoidCallback?>)?
+  /// Builds a sliver inventory and publishes its two creation actions.
+  final Widget Function(
+    BuildContext,
+    ValueNotifier<VoidCallback?>,
+    ValueNotifier<VoidCallback?>,
+  )?
   mePageBuilder;
-
-  /// Builds the invite destination opened from the community sheet.
   final WidgetBuilder? communityInvitePageBuilder;
-
-  /// Builds the appearance destination opened from the community sheet.
   final WidgetBuilder? communityAppearancePageBuilder;
   final bool hasUnreadInbox;
-
-  /// Whether a visible Solo chat has unread activity.
   final bool hasUnreadSolo;
-
-  static const double _tabBarHeight = mobileTabBarHeight;
-  static const double _tabBarRadius = _tabBarHeight / 2;
-  static const double _tabBarInnerInset = Grid.half;
-  static const double _selectedTabRadius =
-      (_tabBarHeight - (_tabBarInnerInset * 2)) / 2;
-  static const double _tabBarBottomGap = mobileTabBarBottomGap;
-  static const double _tabBarHorizontalMargin = Grid.gutter;
-  static const double _tabDestinationHorizontalPadding = Grid.sm;
-  static const double _tabIconSize = 22;
-  static const double _fabClearance = _tabBarHeight + _tabBarBottomGap;
-  static const Duration _tabIconWeightDuration = Duration(milliseconds: 120);
-  static const Duration _tabUnreadBadgeDuration = Duration(milliseconds: 220);
-  static const double _settingsBackgroundScale = 0.97;
-  static const Duration _tabContentTransitionDuration = Duration(
-    milliseconds: 240,
-  );
-  static const Curve _tabContentTransitionCurve = Cubic(0.22, 1, 0.36, 1);
-  static const double _tabContentTransitionDistance = 24;
-
-  static const _destinations = [
-    _HomeDestination(
-      icon: BuzzIcons.house300,
-      selectedIcon: BuzzIcons.house500,
-      label: 'Home',
-    ),
-    _HomeDestination(
-      icon: BuzzIcons.messageSquare,
-      selectedIcon: BuzzIcons.messageSquare,
-      label: 'Solo',
-    ),
-  ];
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final tabIndex = useState(0);
-    final visitedTabs = useRef(<int>{0});
-    final tabContentTransitionDirection = useRef(1.0);
-    final tabContentTransitionController = useAnimationController(
-      duration: _tabContentTransitionDuration,
-      initialValue: 1,
+    final route = ModalRoute.of(context);
+    final coveringProgress = useAnimation(
+      route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
     );
-    final tabContentTransitionValue = useAnimation(
-      tabContentTransitionController,
+    final nativeControlsVisible =
+        (route?.isCurrent ?? true) && coveringProgress == 0;
+
+    final communitySurfaceProgress = useState(0.0);
+    final filter = useState('All');
+    final reselect = useValueNotifier(0);
+    final newChat = useValueNotifier<VoidCallback?>(null);
+    final newWorkspace = useValueNotifier<VoidCallback?>(null);
+    final newChannel = useValueNotifier<VoidCallback?>(null);
+    final newDm = useValueNotifier<VoidCallback?>(null);
+    useListenable(newChat);
+    useListenable(newWorkspace);
+    useListenable(newChannel);
+    useListenable(newDm);
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    void openSearch() => Navigator.of(context).push(
+      BottomUpPageRoute<void>(
+        builder: (_) => const SearchPage(),
+        reducedMotion: reducedMotion,
+      ),
     );
-    final homeReselection = useValueNotifier(0);
-    final newChatAction = useValueNotifier<VoidCallback?>(null);
-    final settingsTransitionProgress = useValueNotifier(0.0);
-    final reducedMotion = MediaQuery.of(context).disableAnimations;
-    final tabContentTransitionProgress = reducedMotion
-        ? 1.0
-        : _tabContentTransitionCurve.transform(tabContentTransitionValue);
-    // Keyboard dismissal must not retarget the floating compose animation.
-    final systemBottomInset = MediaQuery.viewPaddingOf(context).bottom;
-    final navigationBarWidth = _floatingTabBarWidth(
-      MediaQuery.sizeOf(context).width,
-      _destinations.length,
-    );
-    final pages = [
-      ChannelsPage(
-        settingsPageBuilder: settingsPageBuilder,
-        hasUnreadInbox: hasUnreadInbox,
-        onInbox: () => Navigator.of(context).push(
-          BottomUpPageRoute<void>(
-            builder: (_) => const ActivityPage(),
-            reducedMotion: reducedMotion,
-          ),
+    void openSettings() => Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: settingsPageBuilder));
+    final community = ref.watch(activeCommunityProvider).unwrapPrevious().value;
+    final communityName = community?.name.trim() ?? '';
+    final communityIcon = community == null
+        ? null
+        : ref.watch(communityIconPresentationProvider(community.relayUrl));
+    final role = ref.watch(currentCommunityRoleProvider).unwrapPrevious();
+    final canInvite = role.hasError || canManageCommunityInvites(role.value);
+    void openPage(WidgetBuilder builder) =>
+        Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
+    final solo = mePageBuilder?.call(context, newChat, newWorkspace);
+    final messages = ChannelsPage(
+      settingsPageBuilder: settingsPageBuilder,
+      hasUnreadInbox: hasUnreadInbox,
+      onInbox: () => Navigator.of(context).push(
+        BottomUpPageRoute<void>(
+          builder: (_) => const ActivityPage(),
+          reducedMotion: reducedMotion,
         ),
-        onSearch: () => Navigator.of(context).push(
-          BottomUpPageRoute<void>(
-            builder: (_) => const SearchPage(),
-            reducedMotion: reducedMotion,
+      ),
+      messagesActionsBuilder: (openSwitcher) {
+        final moreActions = [
+          (
+            label: 'Switch workspace',
+            symbol: 'arrow.left.arrow.right',
+            onPressed: openSwitcher,
           ),
-        ),
-        communityInvitePageBuilder: communityInvitePageBuilder,
-        communityAppearancePageBuilder: communityAppearancePageBuilder,
-        tabReselection: homeReselection,
-        onSettingsTransitionProgress: (progress) {
-          if (settingsTransitionProgress.value != progress) {
-            settingsTransitionProgress.value = progress;
-          }
+          if (canInvite && communityInvitePageBuilder != null)
+            (
+              label: 'Invite',
+              symbol: 'person.badge.plus',
+              onPressed: () => openPage(communityInvitePageBuilder!),
+            ),
+          if (communityAppearancePageBuilder != null)
+            (
+              label: 'Appearance',
+              symbol: 'circle.lefthalf.filled',
+              onPressed: () => openPage(communityAppearancePageBuilder!),
+            ),
+          (
+            label: 'Agents',
+            symbol: 'person.2',
+            onPressed: () => onAgents(context),
+          ),
+          (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
+        ];
+        return [
+          if (defaultTargetPlatform == TargetPlatform.iOS)
+            IosMessageCreateButton(
+              actions: moreActions,
+              dividerBefore: const {1},
+              icon: 'more',
+              avatarUrl: communityIcon,
+              avatarInitial: communityName.isEmpty
+                  ? '?'
+                  : communityName.characters.first.toUpperCase(),
+              accessibilityLabel: 'Community menu',
+              width: 44,
+              height: 44,
+              plain: false,
+            )
+          else
+            AndroidExpandingMenuButton(
+              label: 'Community menu',
+              actions: moreActions,
+              dividerBefore: const {1},
+              width: 48,
+              height: 48,
+              trigger: CommunityAvatar(
+                name: communityName,
+                relayUrl: community?.relayUrl,
+                size: 36,
+              ),
+            ),
+        ];
+      },
+      messagesFilters: MessagesFilters(
+        hasUnreadSolo: hasUnreadSolo,
+        selected: filter.value,
+        onSelected: (value) {
+          filter.value = value;
+          reselect.value++;
         },
       ),
-      if (visitedTabs.value.contains(1))
-        mePageBuilder?.call(context, newChatAction) ?? const SizedBox.shrink()
-      else
-        const SizedBox.shrink(),
-    ];
-
-    final settingsTransitionGradient = tabIndex.value == 0
-        ? context.appColors.topSectionGradient
-        : null;
-
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Positioned.fill(
-          child: DecoratedBox(
-            key: const ValueKey('home-settings-transition-backdrop'),
-            decoration: BoxDecoration(
-              color: settingsTransitionGradient == null
-                  ? context.colors.surface
-                  : null,
-              gradient: settingsTransitionGradient,
+      soloSliver: solo == null
+          ? null
+          : SliverOffstage(
+              key: const ValueKey('messages-solo-inventory'),
+              offstage: filter.value == 'Team',
+              sliver: solo,
+            ),
+      showTeam: filter.value != 'Solo',
+      showTeamHeading: filter.value == 'All',
+      newChannelAction: newChannel,
+      newDmAction: newDm,
+      communityInvitePageBuilder: communityInvitePageBuilder,
+      communityAppearancePageBuilder: communityAppearancePageBuilder,
+      tabReselection: reselect,
+      onSettingsTransitionProgress: (progress) {
+        communitySurfaceProgress.value = progress;
+      },
+    );
+    final bottom =
+        MediaQuery.viewPaddingOf(context).bottom > mobileTabBarBottomGap
+        ? MediaQuery.viewPaddingOf(context).bottom
+        : mobileTabBarBottomGap;
+    return Scaffold(
+      resizeToAvoidBottomInset: false,
+      body: Stack(
+        children: [
+          MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              padding: MediaQuery.paddingOf(context).copyWith(
+                bottom:
+                    MediaQuery.paddingOf(context).bottom +
+                    mobileTabBarHeight +
+                    mobileTabBarBottomGap,
+              ),
+              viewPadding: MediaQuery.viewPaddingOf(context).copyWith(
+                bottom:
+                    MediaQuery.viewPaddingOf(context).bottom +
+                    mobileTabBarHeight +
+                    mobileTabBarBottomGap,
+              ),
+            ),
+            child: Opacity(
+              key: const Key('home-community-surface-visibility'),
+              // The switcher uses a transparent route for its avatar flight.
+              // Keep Home laid out, but do not paint it through UIKit glass.
+              opacity: communitySurfaceProgress.value == 0 ? 1 : 0,
+              child: messages,
             ),
           ),
-        ),
-        ValueListenableBuilder<double>(
-          key: const ValueKey('home-settings-transition-progress'),
-          // Keep one stable listenable for Home. Swapping in the route's
-          // animation can briefly rebuild with its completed value before the
-          // new controller starts, which makes the background scale twice.
-          valueListenable: settingsTransitionProgress,
-          child: Scaffold(
-            backgroundColor: Colors.transparent,
-            // Keep the floating navigation and Home quick actions anchored while the
-            // keyboard is visible on any tab.
-            resizeToAvoidBottomInset: false,
-            extendBody: true,
-            body: SizedBox.expand(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Positioned.fill(
-                    child: ColoredBox(color: context.colors.surface),
-                  ),
-                  Positioned.fill(
-                    child: MediaQuery(
-                      data: _mediaQueryWithFloatingTabBarClearance(
-                        context,
-                        HomePage._fabClearance,
-                      ),
-                      child: DirectionalTransitionScope(
-                        horizontalOffset:
-                            tabContentTransitionDirection.value *
-                            _tabContentTransitionDistance *
-                            (1 - tabContentTransitionProgress),
-                        opacity: tabContentTransitionProgress,
-                        child: ClipRect(
-                          child: IndexedStack(
-                            index: tabIndex.value,
-                            children: pages,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  Align(
-                    alignment: Alignment.bottomCenter,
-                    child: IgnorePointer(
-                      child: MobileTabFooterBackdrop(
-                        height: mobileTabFooterBackdropHeight(context),
-                        tint: context.controlSurface,
-                      ),
-                    ),
-                  ),
-                  Positioned.fill(
-                    child: ValueListenableBuilder<VoidCallback?>(
-                      valueListenable: newChatAction,
-                      builder: (context, onNewChat, _) =>
-                          ChannelQuickActionsLauncher(
-                            visible: true,
-                            newChatMode: tabIndex.value == 1,
-                            onNewChat: onNewChat,
-                            navigationBarHeight: HomePage._tabBarHeight,
-                            navigationBarBottomGap: HomePage._tabBarBottomGap,
-                            navigationBarWidth: navigationBarWidth,
-                            systemBottomInset: systemBottomInset,
-                            rightInset: Grid.gutter,
-                            navigationBarLeft: Grid.gutter,
-                          ),
-                    ),
-                  ),
-                ],
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: IgnorePointer(
+              child: MobileTabFooterBackdrop(
+                height: mobileTabFooterBackdropHeight(context),
+                tint: context.controlSurface,
               ),
-            ),
-            bottomNavigationBar: _FloatingTabBar(
-              selectedIndex: tabIndex.value,
-              hasUnreadSolo: hasUnreadSolo,
-              onDestinationSelected: (i) {
-                if (i == tabIndex.value) {
-                  if (i == 0) homeReselection.value++;
-                  return;
-                }
-                tabContentTransitionDirection.value = i > tabIndex.value
-                    ? 1
-                    : -1;
-                unawaited(HapticFeedback.selectionClick());
-                visitedTabs.value.add(i);
-                tabIndex.value = i;
-                if (reducedMotion) {
-                  tabContentTransitionController.value = 1;
-                } else {
-                  unawaited(tabContentTransitionController.forward(from: 0));
-                }
-              },
-              destinations: _destinations,
             ),
           ),
-          builder: (context, progress, child) {
-            final curvedProgress = reducedMotion
-                ? 0.0
-                : Curves.easeOutCubic.transform(progress);
-            return Opacity(
-              key: const ValueKey('home-settings-transition-opacity'),
-              // Settings supplies the crossfade. Keeping Home opaque beneath
-              // it prevents the bare backdrop showing through two partially
-              // transparent layers.
-              opacity: 1,
-              child: Transform.scale(
-                key: const ValueKey('home-settings-transition-scale'),
-                scale: lerpDouble(1, _settingsBackgroundScale, curvedProgress),
-                alignment: Alignment.center,
-                child: child,
-              ),
-            );
-          },
-        ),
-      ],
-    );
-  }
-}
-
-double _floatingTabDestinationWidth(double screenWidth, int destinationCount) {
-  final preferredDestinationWidth =
-      HomePage._tabIconSize + (HomePage._tabDestinationHorizontalPadding * 2);
-  final availableInnerWidth =
-      screenWidth -
-      (HomePage._tabBarHorizontalMargin * 2) -
-      (HomePage._tabBarInnerInset * 2);
-  return preferredDestinationWidth
-      .clamp(0.0, availableInnerWidth / destinationCount)
-      .toDouble();
-}
-
-double _floatingTabBarWidth(double screenWidth, int destinationCount) {
-  if (destinationCount <= 0) return 0;
-  return (_floatingTabDestinationWidth(screenWidth, destinationCount) *
-          destinationCount) +
-      (HomePage._tabBarInnerInset * 2);
-}
-
-MediaQueryData _mediaQueryWithFloatingTabBarClearance(
-  BuildContext context,
-  double clearance,
-) {
-  final mediaQuery = MediaQuery.of(context);
-  return mediaQuery.copyWith(
-    padding: mediaQuery.padding.copyWith(
-      bottom: mediaQuery.padding.bottom + clearance,
-    ),
-    viewPadding: mediaQuery.viewPadding.copyWith(
-      bottom: mediaQuery.viewPadding.bottom + clearance,
-    ),
-  );
-}
-
-class _HomeDestination {
-  final IconData icon;
-  final IconData selectedIcon;
-  final String label;
-
-  const _HomeDestination({
-    required this.icon,
-    required this.selectedIcon,
-    required this.label,
-  });
-}
-
-class _FloatingTabBar extends StatelessWidget {
-  final int selectedIndex;
-  final bool hasUnreadSolo;
-  final ValueChanged<int> onDestinationSelected;
-  final List<_HomeDestination> destinations;
-
-  const _FloatingTabBar({
-    required this.selectedIndex,
-    this.hasUnreadSolo = false,
-    required this.onDestinationSelected,
-    required this.destinations,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = context.colors;
-    final isDark = context.theme.brightness == Brightness.dark;
-    final reducedMotion = MediaQuery.of(context).disableAnimations;
-    if (destinations.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    final destinationCount = destinations.length;
-    final safeSelectedIndex = selectedIndex
-        .clamp(0, destinationCount - 1)
-        .toInt();
-    final selectedAlignment = destinationCount <= 1
-        ? Alignment.center
-        : Alignment(-1 + (2 * safeSelectedIndex / (destinationCount - 1)), 0);
-
-    final destinationWidth = _floatingTabDestinationWidth(
-      MediaQuery.sizeOf(context).width,
-      destinationCount,
-    );
-
-    final content = Padding(
-      padding: const EdgeInsets.all(HomePage._tabBarInnerInset),
-      child: SizedBox(
-        height: HomePage._tabBarHeight - (HomePage._tabBarInnerInset * 2),
-        width: destinationWidth * destinationCount,
-        child: Stack(
-          children: [
-            AnimatedAlign(
-              alignment: selectedAlignment,
-              duration: reducedMotion
-                  ? Duration.zero
-                  : const Duration(milliseconds: 180),
-              curve: Curves.easeOutCubic,
-              child: SizedBox(
-                width: destinationWidth,
-                height: double.infinity,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: defaultTargetPlatform == TargetPlatform.iOS
-                        ? Color.alphaBlend(
-                            Colors.black.withValues(alpha: 0.05),
-                            context.controlSurface,
-                          )
-                        : context.controlSurface,
-                    borderRadius: BorderRadius.circular(
-                      HomePage._selectedTabRadius,
+          if (defaultTargetPlatform != TargetPlatform.iOS ||
+              nativeControlsVisible)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: bottom,
+              child: Center(
+                child: MessagesNavigationBar(
+                  onSearch: openSearch,
+                  agent: defaultAgentBuilder(context),
+                  creationActions: [
+                    (
+                      label: 'New chat',
+                      symbol: 'square.and.pencil',
+                      onPressed: newChat.value,
                     ),
-                  ),
-                ),
-              ),
-            ),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                for (var i = 0; i < destinations.length; i++)
-                  SizedBox(
-                    width: destinationWidth,
-                    child: _FloatingTabDestination(
-                      destination: destinations[i],
-                      selected: i == safeSelectedIndex,
-                      showUnreadBadge: i == 1 && hasUnreadSolo,
-                      onTap: () => onDestinationSelected(i),
+                    (
+                      label: 'New workspace',
+                      symbol: 'folder.badge.plus',
+                      onPressed: newWorkspace.value,
                     ),
-                  ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-
-    final surface = defaultTargetPlatform == TargetPlatform.iOS
-        ? ConcentricSheetSurface(
-            key: const ValueKey('home-ios-glass-tabs'),
-            color: Colors.transparent,
-            enabled: true,
-            usesGlass: true,
-            providesSheetSurface: false,
-            padding: EdgeInsets.zero,
-            minimumRadius: HomePage._tabBarRadius,
-            contentClipRadius: HomePage._tabBarRadius,
-            child: content,
-          )
-        : ClipRRect(
-            borderRadius: BorderRadius.circular(HomePage._tabBarRadius),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(HomePage._tabBarRadius),
-                  color: isDark
-                      ? colorScheme.surfaceContainerHighest.withValues(
-                          alpha: 0.72,
-                        )
-                      : colorScheme.surface,
-                  border: Border.all(
-                    color: colorScheme.outlineVariant.withValues(
-                      alpha: isDark ? 0.20 : 0.38,
+                    (
+                      label: 'New DM',
+                      symbol: 'bubble.left',
+                      onPressed: newDm.value,
                     ),
-                  ),
-                ),
-                child: content,
-              ),
-            ),
-          );
-
-    return SafeArea(
-      maintainBottomViewPadding: true,
-      minimum: const EdgeInsets.fromLTRB(
-        HomePage._tabBarHorizontalMargin,
-        0,
-        HomePage._tabBarHorizontalMargin,
-        HomePage._tabBarBottomGap,
-      ),
-      child: Align(
-        alignment: Alignment.bottomLeft,
-        heightFactor: 1,
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(HomePage._tabBarRadius),
-            boxShadow: [
-              BoxShadow(
-                color: colorScheme.shadow.withValues(alpha: 0.10),
-                blurRadius: 20,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: surface,
-        ),
-      ),
-    );
-  }
-}
-
-class _FloatingTabDestination extends StatelessWidget {
-  final _HomeDestination destination;
-  final bool selected;
-  final bool showUnreadBadge;
-  final VoidCallback onTap;
-
-  const _FloatingTabDestination({
-    required this.destination,
-    required this.selected,
-    required this.showUnreadBadge,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = context.colors;
-    final isDark = context.theme.brightness == Brightness.dark;
-    final reducedMotion = MediaQuery.of(context).disableAnimations;
-    final foregroundColor = selected
-        ? colorScheme.onPrimaryContainer
-        : colorScheme.onSurfaceVariant;
-    final icon = selected ? destination.selectedIcon : destination.icon;
-    final badgeOutlineColor = selected
-        ? colorScheme.primaryContainer
-        : (isDark ? colorScheme.surfaceContainerHighest : colorScheme.surface);
-
-    final showVisibleUnreadBadge = showUnreadBadge && !selected;
-
-    return Semantics(
-      button: true,
-      selected: selected,
-      label: showVisibleUnreadBadge
-          ? '${destination.label}, unread'
-          : destination.label,
-      child: Tooltip(
-        message: destination.label,
-        excludeFromSemantics: true,
-        child: Material(
-          color: Colors.transparent,
-          clipBehavior: Clip.antiAlias,
-          borderRadius: BorderRadius.circular(HomePage._selectedTabRadius),
-          child: InkWell(
-            onTap: onTap,
-            overlayColor: const WidgetStatePropertyAll<Color>(
-              Colors.transparent,
-            ),
-            borderRadius: BorderRadius.circular(HomePage._selectedTabRadius),
-            child: Center(
-              child: SizedBox(
-                width: HomePage._tabIconSize + 8,
-                height: HomePage._tabIconSize + 8,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    Center(
-                      child: AnimatedSwitcher(
-                        duration: reducedMotion
-                            ? Duration.zero
-                            : HomePage._tabIconWeightDuration,
-                        switchInCurve: Curves.easeOutCubic,
-                        switchOutCurve: Curves.easeOutCubic,
-                        transitionBuilder: (child, animation) =>
-                            FadeTransition(opacity: animation, child: child),
-                        child: Icon(
-                          icon,
-                          key: ValueKey('${destination.label}-$icon'),
-                          color: foregroundColor,
-                          size: HomePage._tabIconSize,
-                        ),
-                      ),
+                    (
+                      label: 'New channel',
+                      symbol: 'number',
+                      onPressed: newChannel.value,
                     ),
-                    if (showUnreadBadge)
-                      Positioned(
-                        top: 0,
-                        right: 0,
-                        child: AnimatedScale(
-                          key: ValueKey(
-                            '${destination.label.toLowerCase()}-tab-unread-dot-scale',
-                          ),
-                          scale: selected ? 0 : 1,
-                          alignment: const Alignment(-0.5, 0.5),
-                          duration: reducedMotion
-                              ? Duration.zero
-                              : HomePage._tabUnreadBadgeDuration,
-                          curve: Curves.easeOutCubic,
-                          child: Container(
-                            key: ValueKey(
-                              '${destination.label.toLowerCase()}-tab-unread-dot',
-                            ),
-                            width: 12,
-                            height: 12,
-                            padding: const EdgeInsets.all(2),
-                            decoration: BoxDecoration(
-                              color: badgeOutlineColor,
-                              shape: BoxShape.circle,
-                            ),
-                            child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                color: colorScheme.primary,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
                   ],
                 ),
               ),
             ),
-          ),
-        ),
+        ],
       ),
     );
   }

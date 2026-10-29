@@ -934,6 +934,68 @@ void main() {
     },
   );
 
+  for (final (sentinel, guidance, retryable) in [
+    (
+      'invite_restricted',
+      'This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.',
+      true,
+    ),
+    (
+      'invite_owner_mismatch',
+      'This account does not match its recorded owner. Use the correct account or owner identity to join this community.',
+      false,
+    ),
+  ]) {
+    journey('$sentinel is rendered without discarding the hosted invite', (
+      tester,
+      f,
+    ) async {
+      await f.initialize();
+      f.offerProfile = false;
+      f.claimError = sentinel;
+      // Even recorded membership must not turn a current explicit denial
+      // into successful admission through lost-response reconciliation.
+      f.rows.add(f.row('one'));
+      await f.mount(tester);
+      await f.link(tester, 'one');
+      await tester.tap(find.byType(CheckboxListTile));
+      await f.settle(tester);
+      await f.tap(tester, 'Accept and join');
+      expect(find.text(guidance), findsOneWidget);
+      expect(await f.storage.loadAll(), isEmpty);
+      expect(f.probes, isEmpty);
+      expect(f.sent('/claim'), hasLength(1));
+      expect(f.sent('/communities/joined'), isEmpty);
+      expect(
+        find.text('Try again').hitTestable(),
+        retryable ? findsOneWidget : findsNothing,
+      );
+      await f.settle(tester);
+      expect(f.sent('/claim'), hasLength(1));
+      expect((await f.flow.browser.retainedIntent())!['code'], 'invite-one');
+      f.claimError = null;
+      if (retryable) {
+        await f.tap(tester, 'Try again');
+      } else {
+        // Owner mismatch requires the correct identity, not an automatic
+        // retry. Explicitly abandon setup, then reopen the same link after
+        // the server-side owner conflict has been corrected.
+        await f.tap(tester, 'Leave setup');
+        expect((await f.store.read())!.pubkey, f.keys.public);
+        await f.link(tester, 'one');
+      }
+      await tester.tap(find.byType(CheckboxListTile));
+      await f.settle(tester);
+      await f.tap(tester, 'Accept and join');
+      expect(f.sent('/claim'), hasLength(2));
+      for (final request in f.sent('/claim')) {
+        expect(jsonDecode(request.body)['code'], 'invite-one');
+      }
+      expect((await f.storage.loadAll()).single.pubkey, f.keys.public);
+      expect(find.text('Community home').hitTestable(), findsOneWidget);
+    }, requiresAuthDomain: true);
+  }
+
   journey(
     'second invitation replaces pending consent and only joins the newer community',
     (tester, f) async {

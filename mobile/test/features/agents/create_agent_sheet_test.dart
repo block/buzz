@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:buzz/shared/agents/remote_agents.dart';
+
 import 'package:buzz/features/agents/agents_sheet.dart';
 import 'package:buzz/features/agents/create_agent_sheet.dart';
 import 'package:flutter/material.dart';
@@ -19,6 +21,22 @@ void main() {
       final added = nostr.Keys('0' * 63 + '2').public;
       await h.open(tester, directory: [existing]);
       final list = tester.element(find.byType(AgentsSheet));
+      if (!supportsRemoteAgents(h.community)) {
+        expect(
+          tester
+              .widget<IconButton>(
+                find.byWidgetPredicate(
+                  (widget) =>
+                      widget is IconButton && widget.tooltip == 'Add agent',
+                ),
+              )
+              .onPressed,
+          isNull,
+        );
+        expect(find.text('Sign in to create an agent'), findsNothing);
+        expect(find.byKey(ValueKey(existing)), findsOneWidget);
+        return;
+      }
       await tester.tap(find.byTooltip('Add agent'));
       await tester.pumpAndSettle();
       expect(find.byType(BottomSheet), findsNWidgets(2));
@@ -26,9 +44,25 @@ void main() {
       expect(Navigator.of(list), isNot(Navigator.of(createContext)));
 
       controller.gate = Completer<void>();
-      await tester.enterText(find.widgetWithText(TextField, 'Name'), 'Scout');
       await tester.enterText(
-        find.widgetWithText(TextField, 'Instructions'),
+        find.descendant(
+          of: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.label == 'Name',
+          ),
+          matching: find.byType(TextField),
+        ),
+        'Scout',
+      );
+      await tester.enterText(
+        find.descendant(
+          of: find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label == 'Instructions',
+          ),
+          matching: find.byType(TextField),
+        ),
         'Reply concisely.',
       );
       await tester.pump();
