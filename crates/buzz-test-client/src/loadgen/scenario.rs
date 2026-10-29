@@ -199,6 +199,10 @@ impl Scenario {
         if self.shape.communities == 0 || self.shape.channels_per_community == 0 {
             return Err("shape needs at least one community and one channel".into());
         }
+        // `buffer_unordered(0)` never polls its input, so seeding would hang.
+        if self.shape.seed_concurrency == 0 {
+            return Err("shape.seed_concurrency must be at least 1".into());
+        }
         if self.shape.communities > 1 && self.target.community_host_template.is_none() {
             return Err("more than one community needs target.community_host_template".into());
         }
@@ -207,6 +211,20 @@ impl Scenario {
             return Err(format!(
                 "shape.thread_depth must be at most {MAX_THREAD_DEPTH}"
             ));
+        }
+        // The HTTP override resolves a bare hostname, so a host with a port
+        // would reach `connect_addr` over WebSocket but not over HTTP.
+        if self.target.connect_addr.is_some()
+            && self
+                .target
+                .community_host_template
+                .as_deref()
+                .is_some_and(|template| template.contains(':'))
+        {
+            return Err(
+                "target.community_host_template must not include a port when target.connect_addr is set"
+                    .into(),
+            );
         }
         if self.population.channels_per_member == 0
             || self.population.channels_per_member > self.shape.channels_per_community
@@ -234,7 +252,6 @@ impl Scenario {
                 "population.connect_rate_per_sec",
                 self.population.connect_rate_per_sec,
             ),
-            ("human.presence_interval_secs", h.presence_interval_secs),
             ("agent.query_interval_secs", a.query_interval_secs),
             ("abort.max_p99_ms", self.abort.max_p99_ms),
         ];
@@ -242,6 +259,10 @@ impl Scenario {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("{name} must be a finite number > 0"));
             }
+        }
+        // Presence heartbeats are never sent more often than once a second.
+        if !h.presence_interval_secs.is_finite() || h.presence_interval_secs < 1.0 {
+            return Err("human.presence_interval_secs must be a finite number >= 1".into());
         }
         let non_negative = [
             ("human.typing_per_hour", h.typing_per_hour),
@@ -382,6 +403,7 @@ hold_secs = 10
             "[human]\ntyping_per_hour = inf\n",
             "[human]\nreactions_per_hour = -1.0\n",
             "[human]\npresence_interval_secs = 0.0\n",
+            "[human]\npresence_interval_secs = 0.5\n",
             "[human]\nthread_reply_fraction = 1.5\n",
             "[agent]\nquery_interval_secs = nan\n",
             "[agent]\nobserver_frames_per_hour = inf\n",
@@ -403,6 +425,63 @@ hold_secs = 10
         assert!(Scenario::parse(&text).is_err());
         let up = format!("{MINIMAL}[[ramp]]\nusers = 2.0\nhold_secs = 10\n");
         assert!(Scenario::parse(&up).is_ok());
+    }
+
+    #[test]
+    fn shipped_scenarios_validate() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../perf/scenarios");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "toml") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                Scenario::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn presence_interval_of_one_second_is_the_minimum() {
+        let with = |secs: &str| format!("{MINIMAL}[human]\npresence_interval_secs = {secs}\n");
+        assert!(Scenario::parse(&with("1.0")).is_ok());
+        assert!(Scenario::parse(&with("0.99")).is_err());
+    }
+
+    #[test]
+    fn zero_seed_concurrency_is_rejected() {
+        let with = |n: usize| {
+            MINIMAL.replace(
+                "channels_per_community = 4",
+                &format!("channels_per_community = 4\nseed_concurrency = {n}"),
+            )
+        };
+        assert!(Scenario::parse(&with(1)).is_ok());
+        let err = Scenario::parse(&with(0)).unwrap_err();
+        assert!(err.contains("seed_concurrency"), "{err}");
+    }
+
+    #[test]
+    fn host_template_ports_conflict_with_connect_addr() {
+        let with = |template: &str, connect_addr: Option<&str>| {
+            let connect = connect_addr
+                .map(|a| format!("\nconnect_addr = \"{a}\""))
+                .unwrap_or_default();
+            MINIMAL.replace(
+                "http_url = \"http://localhost:3000\"",
+                &format!(
+                    "http_url = \"http://localhost:3000\"\ncommunity_host_template = \"{template}\"{connect}"
+                ),
+            )
+        };
+        // A port is fine while hosts resolve normally, and so is an override
+        // for a portless host.
+        assert!(Scenario::parse(&with("lg-{run}-{i}.example:8443", None)).is_ok());
+        assert!(Scenario::parse(&with("lg-{run}-{i}.example", Some("10.0.0.1:8080"))).is_ok());
+        let err =
+            Scenario::parse(&with("lg-{run}-{i}.example:8443", Some("10.0.0.1:8080"))).unwrap_err();
+        assert!(err.contains("port"), "{err}");
     }
 
     #[test]

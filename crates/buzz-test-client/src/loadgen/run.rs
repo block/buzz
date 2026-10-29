@@ -562,7 +562,7 @@ async fn human(shared: Arc<Shared>, global: usize) {
             }
         }
 
-        let interval = profile.presence_interval_secs.max(1.0);
+        let interval = profile.presence_interval_secs;
         let mut next_presence =
             Some(Instant::now() + Duration::from_secs_f64(interval * rng.unit()));
         let mut next_typing = rng.after(profile.typing_per_hour);

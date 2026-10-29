@@ -27,6 +27,11 @@ cargo run --release -p buzz-test-client --bin buzz-loadgen -- run perf/scenarios
 rejects depths above 100, so scenarios do too. Threads are seeded in parallel
 with each other.
 
+A scenario that cannot be scheduled is rejected when it is parsed: for
+example `seed_concurrency` of 0, `human.presence_interval_secs` below 1, or a
+`community_host_template` with a port while `target.connect_addr` is set (the
+override maps hostnames, so HTTP would ignore it).
+
 ## What each client does
 
 - **Human**: authenticates over WebSocket and subscribes to its channels'
