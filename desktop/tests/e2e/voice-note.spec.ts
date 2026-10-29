@@ -277,8 +277,18 @@ test("surfaces waveform and playback failures with retry", async ({ page }) => {
   await page.addInitScript(() => {
     AudioContext.prototype.decodeAudioData = () =>
       Promise.reject(new DOMException("corrupt audio", "EncodingError"));
-    HTMLMediaElement.prototype.play = () =>
-      Promise.reject(new DOMException("playback denied", "NotAllowedError"));
+    // First attempt fails the way a source the element cannot decode does; the
+    // retry is a fresh playback request and must be allowed to succeed.
+    let playCalls = 0;
+    HTMLMediaElement.prototype.play = function play(this: HTMLMediaElement) {
+      playCalls += 1;
+      if (playCalls === 1) {
+        return Promise.reject(
+          new DOMException("unsupported source", "NotSupportedError"),
+        );
+      }
+      return Promise.resolve();
+    };
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -330,18 +340,28 @@ test("surfaces waveform and playback failures with retry", async ({ page }) => {
   await expect(card.getByRole("alert")).toContainText("Audio unavailable");
 });
 
-test("resumes a Play click that landed before the source finished loading", async ({
-  page,
-}) => {
-  let releaseFetch: (() => void) | undefined;
-  const fetchGate = new Promise<void>((resolve) => {
-    releaseFetch = resolve;
-  });
-  // Gate the media fetch so the received card has no playback source when the
-  // user first clicks Play.
-  await page.route(AUDIO_URL, async (route) => {
-    await fetchGate;
-    await route.continue();
+test("starts playback inside the click gesture", async ({ page }) => {
+  // The card streams its source itself, so one click must start playback. A
+  // play() issued from a fetch continuation carries no user activation and is
+  // rejected with NotAllowedError, which showed up as extra clicks before audio
+  // started (or as "Audio unavailable" before that was guarded).
+  await page.addInitScript(() => {
+    const calls: Array<{ active: boolean | null; src: string }> = [];
+    (
+      window as Window & {
+        __BUZZ_E2E_AUDIO_PLAY_CALLS__?: typeof calls;
+      }
+    ).__BUZZ_E2E_AUDIO_PLAY_CALLS__ = calls;
+    const original = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function play(
+      this: HTMLMediaElement,
+    ): Promise<void> {
+      calls.push({
+        active: navigator.userActivation?.isActive ?? null,
+        src: this.currentSrc || this.src,
+      });
+      return original.call(this);
+    };
   });
 
   await page.goto("/");
@@ -379,19 +399,30 @@ test("resumes a Play click that landed before the source finished loading", asyn
   const card = page.getByTestId("audio-message-attachment").last();
   await expect(card).toBeVisible();
 
-  // Click Play while the fetch is still held: the intent must be remembered and
-  // surfaced as a loading state, not silently dropped.
   await card.getByRole("button", { name: "Play voice note" }).click();
-  await expect(
-    card.getByRole("button", { name: "Loading voice note" }),
-  ).toBeVisible();
-
-  // Releasing the fetch resolves the source; playback starts without a second
-  // click.
-  releaseFetch?.();
   await expect(
     card.getByRole("button", { name: "Pause voice note" }),
   ).toBeVisible();
+
+  const calls = await page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __BUZZ_E2E_AUDIO_PLAY_CALLS__?: Array<{
+            active: boolean | null;
+            src: string;
+          }>;
+        }
+      ).__BUZZ_E2E_AUDIO_PLAY_CALLS__ ?? [],
+  );
+  const voiceNoteCalls = calls.filter(({ src }) => src.includes("ping.mp3"));
+  expect(voiceNoteCalls.length).toBeGreaterThan(0);
+  // Every playback request for this card must run while the click's user
+  // activation is still active. Falsifiable: loading bytes first and resuming
+  // from the fetch continuation records `active: false` here.
+  expect(voiceNoteCalls.map(({ active }) => active)).toEqual(
+    voiceNoteCalls.map(() => true),
+  );
 });
 
 test("generic audio retains the relay-native download action", async ({
@@ -948,12 +979,21 @@ test("starting a duplicate voice-note player pauses the other instance", async (
   await cards.locator("audio").evaluateAll((audios) => {
     for (const audio of audios) (audio as HTMLAudioElement).loop = true;
   });
-  const firstAudio = cards.nth(0).locator("audio");
-  const secondAudio = cards.nth(1).locator("audio");
+  // The two cards share a timestamp and the timeline can remount or reorder
+  // them, so assert on the live media elements instead of element handles or
+  // list positions: exactly one may be playing at a time.
+  const playingCount = () =>
+    page
+      .locator("audio")
+      .evaluateAll(
+        (audios) =>
+          audios.filter((audio) => !(audio as HTMLAudioElement).paused).length,
+      );
 
   await cards.nth(0).getByRole("button", { name: "Play voice note" }).click();
-  await expect(firstAudio).toHaveJSProperty("paused", false);
+  await expect.poll(playingCount).toBe(1);
   await cards.nth(1).getByRole("button", { name: "Play voice note" }).click();
-  await expect(firstAudio).toHaveJSProperty("paused", true);
-  await expect(secondAudio).toHaveJSProperty("paused", false);
+  // Starting the second player must have paused the first, so the count stays
+  // at one rather than growing to two.
+  await expect.poll(playingCount).toBe(1);
 });

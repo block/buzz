@@ -59,6 +59,38 @@ export function resolveAudioAttachment(
   };
 }
 
+/**
+ * Whether a rejected `play()` means the attachment itself is unusable.
+ *
+ * WebKit and Chromium refuse playback started outside a user gesture, and they
+ * reject a play() whose load was interrupted before playback started. A click
+ * that lands while the bytes are still loading used to resume from the fetch
+ * continuation (no gesture) or get aborted by a retry, so neither rejection
+ * says anything about the audio. Reporting them as broken showed "Audio
+ * unavailable" on relay voice notes whose bytes were fine, and the retry button
+ * re-armed the same race.
+ */
+export function shouldReportPlaybackError(error: unknown): boolean {
+  const name = (error as { name?: unknown } | null | undefined)?.name;
+  return name !== "NotAllowedError" && name !== "AbortError";
+}
+
+// HTMLMediaElement error codes. ABORTED and NETWORK are transient; DECODE and
+// SRC_NOT_SUPPORTED are terminal. The raw numbers are stable IDL constants.
+const MEDIA_ERR_ABORTED = 1;
+const MEDIA_ERR_NETWORK = 2;
+
+/**
+ * Whether a media element's `MediaError.code` is terminal for this attachment.
+ * MEDIA_ERR_ABORTED (1) and MEDIA_ERR_NETWORK (2) are transient and recoverable
+ * by a retry, so they must not put the card in its unavailable state. An error
+ * the element cannot classify is treated as terminal so the user still gets the
+ * retry affordance instead of a card that silently does nothing.
+ */
+export function isTerminalMediaError(code: number | undefined): boolean {
+  return code !== MEDIA_ERR_ABORTED && code !== MEDIA_ERR_NETWORK;
+}
+
 export function formatVoiceNoteDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
   const rounded = Math.floor(seconds);
