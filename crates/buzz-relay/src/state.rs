@@ -2363,10 +2363,11 @@ impl AppState {
     /// cross-pod invalidation is best-effort. So a reader with no cached
     /// member half, the reader the database would answer directly, never
     /// trusts it unchecked: the member read also returns the open set's
-    /// current digest, and a cached set that no longer matches is re-read
-    /// (superseding any fill in flight) and replaces it. Such a reader sees
-    /// the open set as of its own member read, as an uncached reader always
-    /// has.
+    /// current digest, and a cached set that no longer matches is retired,
+    /// then re-read (superseding any fill in flight). Such a reader sees the
+    /// open set as of its own member read, as an uncached reader always has,
+    /// and no later read meets the stale set, even if this re-read never
+    /// publishes.
     pub async fn get_accessible_channel_ids_cached(
         &self,
         community_id: CommunityId,
@@ -2394,7 +2395,13 @@ impl AppState {
                         metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
                         open
                     }
-                    Some(_) => self.fetch_open_channels(community_id, "stale").await?,
+                    Some(stale) => {
+                        // Retire the stale set first. If this fill is then
+                        // superseded, this reader's cached member half must
+                        // not meet the stale set on its next read.
+                        self.retire_open_channels(community_id, &stale);
+                        self.fetch_open_channels(community_id, "stale").await?
+                    }
                     None => self.fetch_open_channels(community_id, "absent").await?,
                 };
                 self.member_channels_cache.insert(key, members.ids.clone());
@@ -2416,6 +2423,8 @@ impl AppState {
         metrics::counter!("buzz_open_channels_cache_misses_total", "reason" => reason).increment(1);
         let fill = self.begin_open_channels_fill(community_id);
         let open = Arc::new(self.db.get_listed_open_channels(community_id).await?);
+        #[cfg(test)]
+        open_channels_test_hooks::before_finish();
         fill.finish(&self.open_channels_cache, open.clone());
         Ok(open)
     }
@@ -2429,6 +2438,21 @@ impl AppState {
             fills: &self.open_channels_fills,
             community_id,
             ticket,
+        }
+    }
+
+    /// Removes `stale` from the cache if it is still the cached set, leaving
+    /// fills in flight alone. Holding the fill entry's lock orders the check
+    /// and removal against [`OpenChannelsFill::finish`], so a newer set that
+    /// a fill published meanwhile stays.
+    fn retire_open_channels(&self, community_id: CommunityId, stale: &Arc<ListedOpenChannels>) {
+        let _fill = self.open_channels_fills.entry(community_id);
+        if self
+            .open_channels_cache
+            .get(&community_id)
+            .is_some_and(|cached| Arc::ptr_eq(&cached, stale))
+        {
+            self.open_channels_cache.invalidate(&community_id);
         }
     }
 
@@ -2651,6 +2675,28 @@ impl std::fmt::Debug for AppState {
             .field("relay_url", &self.config.relay_url)
             .field("max_connections", &self.config.max_connections)
             .finish()
+    }
+}
+
+/// Lets a test act between an open-set fill's query and its publication.
+#[cfg(test)]
+mod open_channels_test_hooks {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static BEFORE_FINISH: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `hook` once, in the next open-set fill on this thread, after its
+    /// query and before it publishes.
+    pub(super) fn arm_before_finish(hook: impl FnOnce() + 'static) {
+        BEFORE_FINISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn before_finish() {
+        if let Some(hook) = BEFORE_FINISH.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
     }
 }
 
@@ -3430,8 +3476,10 @@ pub(crate) mod tests {
         /// Cross-pod invalidation is best-effort. With it withheld, a pod that
         /// still caches a channel in the community's open set must not grant
         /// it to a reader with nothing cached once the channel left the set
-        /// on the writer, and, once it has caught the stale set, must not
-        /// grant it to a reader whose member half it still caches either.
+        /// on the writer, even when that reader's refresh is superseded and
+        /// its next read hits its cached member half. Once the pod has caught
+        /// the stale set, it must not grant the channel to an earlier reader
+        /// whose member half it still caches either.
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn a_lost_open_set_invalidation_grants_no_reader_a_revoked_channel() {
@@ -3495,15 +3543,27 @@ pub(crate) mod tests {
                     "control: the reader pod still caches the old open set"
                 );
 
+                // Another fill begins while the late reader's refresh is in
+                // flight and is still in flight after it, so the refresh is
+                // superseded and never publishes.
+                let fills = reader_pod.open_channels_fills.clone();
+                open_channels_test_hooks::arm_before_finish(move || {
+                    fills.insert(community, u64::MAX);
+                });
                 let late = reader();
-                assert!(
-                    !reader_pod
-                        .get_accessible_channel_ids_cached(community, &late)
-                        .await
-                        .unwrap()
-                        .contains(&channel),
-                    "{revoke}: a reader with nothing cached was granted a revoked channel"
-                );
+                for read in ["first", "second"] {
+                    assert!(
+                        !reader_pod
+                            .get_accessible_channel_ids_cached(community, &late)
+                            .await
+                            .unwrap()
+                            .contains(&channel),
+                        "{revoke}: a reader with nothing cached was granted a revoked channel on its {read} read"
+                    );
+                }
+                reader_pod
+                    .open_channels_fills
+                    .remove_if(&community, |_, ticket| *ticket == u64::MAX);
                 assert!(
                     !reader_pod
                         .get_accessible_channel_ids_cached(community, &early)
