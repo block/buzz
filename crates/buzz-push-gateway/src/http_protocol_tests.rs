@@ -249,6 +249,24 @@ async fn management_binds_parameters_versions_expiry_and_commits_counter_with_pe
             .status(),
         StatusCode::OK
     );
+    let body = delivery_body(token, Uuid::new_v4());
+    assert_eq!(
+        delivery(&app, body.clone(), &auth(&keys, &body))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let body = delivery_body(token, Uuid::new_v4());
+    let signed = auth(&keys, &body);
+    let limited = delivery(&app, body.clone(), &signed).await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.headers()["retry-after"], "60");
+    NOW.fetch_add(60, Ordering::SeqCst);
+    assert_eq!(
+        delivery(&app, body, &signed).await.status(),
+        StatusCode::OK,
+        "quota rejection consumes neither request ID nor auth event ID"
+    );
     let (status, conflict) = delegate_request(&app, id, &relay, 0, 2, 2).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(conflict["current_generation"], 1);

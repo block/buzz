@@ -6,6 +6,7 @@ mod management_postgres_tests {
             previous,
             next,
             expected_generation: expected,
+            quota_window_seconds: 60,
             now,
         }
     }
@@ -139,6 +140,111 @@ mod management_postgres_tests {
                 .await,
             Err(AuthorityError::StaleGeneration(i64::MAX))
         );
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn fixed_relay_shares_survive_renewal_and_leave_quota_rejections_unconsumed() {
+        let (pool, schema) = full_schema(4).await;
+        install_authority(&pool).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let now = Utc::now().timestamp();
+        let first = delegation([1; 32], RELAY_HEX, 2, now);
+        let second = delegation([2; 32], &"22".repeat(32), 1, now);
+        store
+            .upsert_delegation(first.clone(), assertion(0, 1, Some(1), now))
+            .await
+            .unwrap();
+        store
+            .upsert_delegation(second.clone(), assertion(1, 2, Some(0), now))
+            .await
+            .unwrap();
+        for event in [1, 2] {
+            deliver(&store, &first, event, Uuid::new_v4(), 8, now)
+                .await
+                .unwrap();
+        }
+        let request = Uuid::new_v4();
+        assert!(matches!(
+            deliver(&store, &first, 3, request, 8, now).await,
+            Err(AuthorityError::DeliveryRateLimited(1..=60))
+        ));
+        deliver(&store, &second, 4, Uuid::new_v4(), 8, now)
+            .await
+            .unwrap();
+        let renewed = delegation([3; 32], RELAY_HEX, 3, now);
+        store
+            .upsert_delegation(renewed.clone(), assertion(2, 3, Some(2), now))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                deliver(&store, &renewed, 3, request, 8, now).await,
+                Err(AuthorityError::DeliveryRateLimited(1..=60))
+            ),
+            "renewing a capability does not reset quota"
+        );
+        deliver(&store, &renewed, 3, request, 8, now + 60)
+            .await
+            .unwrap();
+        // A quota rejection reserved neither replay identifier.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM push_gateway_delivery_auth_replays WHERE auth_event_id=$1",
+        )
+        .bind(vec![3_u8; 32])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn consumed_revoked_slots_cannot_be_reallocated_within_the_window() {
+        let (pool, schema) = full_schema(4).await;
+        install_authority(&pool).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let now = Utc::now().timestamp();
+        let first = delegation([1; 32], RELAY_HEX, 2, now);
+        store
+            .upsert_delegation(first.clone(), assertion(0, 1, Some(1), now))
+            .await
+            .unwrap();
+        deliver(&store, &first, 1, Uuid::new_v4(), 8, now)
+            .await
+            .unwrap();
+        for key in 2..5 {
+            store
+                .upsert_delegation(
+                    delegation([key; 32], &hex::encode([key; 32]), 1, now),
+                    assertion(key as u32 - 1, key as u32, Some(0), now),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .revoke_delegation(
+                first.installation_id,
+                RELAY_HEX,
+                2,
+                assertion(4, 5, None, now),
+            )
+            .await
+            .unwrap();
+        let fifth = delegation([5; 32], &"55".repeat(32), 1, now);
+        assert_eq!(
+            store
+                .upsert_delegation(fifth.clone(), assertion(5, 6, Some(0), now))
+                .await,
+            Err(AuthorityError::DeliveryRateLimited(60))
+        );
+        store
+            .upsert_delegation(fifth, assertion(5, 7, Some(0), now + 60))
+            .await
+            .unwrap();
         pool.close().await;
         drop_schema(&schema).await;
     }

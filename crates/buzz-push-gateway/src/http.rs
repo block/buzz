@@ -126,11 +126,23 @@ fn authority_error(e: AuthorityError) -> Response {
         AuthorityError::StaleGeneration(current_generation) => (StatusCode::CONFLICT, Json(serde_json::json!({"error":"stale_generation", "current_generation": current_generation}))).into_response(),
         AuthorityError::Rejected => error(StatusCode::NOT_FOUND, "not_authorized"),
         AuthorityError::Conflict => installation_conflict(),
-        AuthorityError::RateLimited => error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+        AuthorityError::RateLimited => throttled(60),
+        AuthorityError::DeliveryRateLimited(seconds) => throttled(seconds),
         AuthorityError::Unavailable => {
             error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
         }
     }
+}
+pub(crate) fn throttled(seconds: i64) -> Response {
+    let seconds = seconds.max(1);
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, seconds.to_string())],
+        Json(DeliveryResponse::Retry {
+            retry_after_seconds: Some(seconds),
+        }),
+    )
+        .into_response()
 }
 fn installation_conflict() -> Response {
     error(StatusCode::CONFLICT, "installation_conflict")
@@ -359,6 +371,7 @@ async fn verify_installation_assertion<T: serde::Serialize>(
         previous: installation.assertion_counter,
         next: verified.counter,
         expected_generation: request.expected_generation,
+        quota_window_seconds: s.endpoint_quota_window_seconds,
         now,
     })
 }
@@ -711,6 +724,7 @@ async fn deliver(
             crate::metrics::record_delivery_error("invalid_grant");
             return error(StatusCode::NOT_FOUND, "invalid_grant");
         }
+        Err(AuthorityError::DeliveryRateLimited(seconds)) => return throttled(seconds),
         Err(AuthorityError::RateLimited) => {
             crate::metrics::record_admission(crate::metrics::Admission::Rejected);
             crate::metrics::record_delivery_error("rate_limited");

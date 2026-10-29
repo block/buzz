@@ -176,3 +176,123 @@ async fn delivery_worker_reaches_later_pages_before_revisiting_busy_communities(
         started.elapsed()
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn quota_retry_preserves_request_id_and_honors_retry_after() {
+    use axum::{
+        extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router,
+    };
+    use std::future::IntoFuture;
+    use tokio::sync::Mutex;
+
+    async fn quota(
+        State(seen): State<Arc<Mutex<Vec<uuid::Uuid>>>>,
+        Json(body): Json<serde_json::Value>,
+    ) -> axum::response::Response {
+        let mut seen = seen.lock().await;
+        seen.push(body["request_id"].as_str().unwrap().parse().unwrap());
+        if seen.len() == 1 {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("Retry-After", "7")],
+                Json(serde_json::json!({"status":"retry","retry_after_seconds":7})),
+            )
+                .into_response()
+        } else {
+            Json(serde_json::json!({"status":"accepted"})).into_response()
+        }
+    }
+
+    let pool = sqlx::PgPool::connect(&std::env::var("BUZZ_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let community: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO communities (host) VALUES ('quota-retry.example') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for statement in [
+        "INSERT INTO push_leases (community_id, author, installation_id, source_event_id, source_created_at, generation, active, endpoint_hash, endpoint_grant, max_class, subscriptions, expires_at) VALUES ($1, decode(repeat('21',32),'hex'), 'install', decode(repeat('22',32),'hex'), 1, 1, true, decode(repeat('23',32),'hex'), 'opaque-grant', 'default', '[]', 4102444800)",
+        "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) VALUES ($1, decode(repeat('25',32),'hex'), decode(repeat('21',32),'hex'), now(), 9, '[]', '', decode(repeat('24',64),'hex'))",
+        "INSERT INTO push_wake_outbox (community_id, author, installation_id, lease_generation, endpoint_hash, event_id, class, expires_at) VALUES ($1, decode(repeat('21',32),'hex'), 'install', 1, decode(repeat('23',32),'hex'), decode(repeat('25',32),'hex'), 'default', 4102444800)",
+    ] {
+        sqlx::query(statement).bind(community).execute(&pool).await.unwrap();
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/deliver", post(quota))
+                .with_state(seen.clone()),
+        )
+        .into_future(),
+    );
+    let mut state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+    let config = Arc::get_mut(&mut Arc::get_mut(&mut state).unwrap().config).unwrap();
+    config.push_enabled = true;
+    config.push_gateway_delivery_url = Some(format!("http://{address}/deliver").parse().unwrap());
+    let community = buzz_core::CommunityId::from_uuid(community);
+    let http = reqwest::Client::new();
+    let wake = state
+        .db
+        .claim_due_push_wakes(community, 1, Utc::now() + TimeDelta::seconds(30))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let request_id = wake.id;
+    let started = Utc::now();
+    deliver_one(&state, &http, wake).await;
+    let (status, next): (String, chrono::DateTime<Utc>) = sqlx::query_as(
+        "SELECT state, next_attempt_at FROM push_wake_outbox WHERE community_id=$1 AND id=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(request_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "pending");
+    assert!(
+        (next - started).num_milliseconds() >= 7_000,
+        "gateway quota delay must reach the durable schedule"
+    );
+    assert!(state
+        .db
+        .claim_due_push_wakes(community, 1, Utc::now() + TimeDelta::seconds(30))
+        .await
+        .unwrap()
+        .is_empty());
+    sqlx::query(
+        "UPDATE push_wake_outbox SET next_attempt_at=now() WHERE community_id=$1 AND id=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(request_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let retry = state
+        .db
+        .claim_due_push_wakes(community, 1, Utc::now() + TimeDelta::seconds(30))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(retry.id, request_id);
+    deliver_one(&state, &http, retry).await;
+    let status: String =
+        sqlx::query_scalar("SELECT state FROM push_wake_outbox WHERE community_id=$1 AND id=$2")
+            .bind(community.as_uuid())
+            .bind(request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "delivered");
+    assert_eq!(*seen.lock().await, [request_id, request_id]);
+    state.begin_shutdown();
+    server.abort();
+}
