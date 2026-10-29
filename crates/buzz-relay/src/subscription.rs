@@ -2056,8 +2056,8 @@ mod tests {
     }
 
     /// Indexed global fan-out delivers to exactly the subscriptions a full
-    /// `filters_match` scan selects, across random filter sets and `p`-tag
-    /// shapes, so the index's tag reading can't drift from the matcher's.
+    /// `filters_match` scan selects, once each, across random filter sets,
+    /// `p`-tag shapes and connections holding several subscriptions.
     #[test]
     fn global_fan_out_matches_a_full_filter_scan() {
         // xorshift64*, seeded, so a failing case reproduces.
@@ -2076,6 +2076,7 @@ mod tests {
         let authors: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
         let author_keys: Vec<PublicKey> = authors.iter().map(Keys::public_key).collect();
         let p_values = ["a".repeat(64), "b".repeat(64), "not-hex".to_string()];
+        let conn_ids: Vec<ConnId> = (0..8).map(|_| Uuid::new_v4()).collect();
 
         let registry = SubscriptionRegistry::new();
         let mut subscriptions = Vec::new();
@@ -2095,7 +2096,7 @@ mod tests {
                     filter
                 })
                 .collect();
-            let (conn_id, sub_id) = (Uuid::new_v4(), format!("sub-{i}"));
+            let (conn_id, sub_id) = (conn_ids[next(conn_ids.len())], format!("sub-{i}"));
             registry.register(conn_id, sub_id.clone(), filters.clone(), None);
             subscriptions.push((conn_id, sub_id, filters));
         }
