@@ -145,11 +145,15 @@ void main() {
     final messenger = tester.binding.defaultBinaryMessenger;
     const support = MethodChannel('buzz/concentric_sheet_surface');
     final disposed = <int>[];
+    final created = <int>[];
     messenger.setMockMethodCallHandler(support, (_) async => true);
     messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
       call,
     ) async {
       if (call.method == 'dispose') disposed.add(call.arguments as int);
+      if (call.method == 'create') {
+        created.add((call.arguments as Map)['id'] as int);
+      }
       return null;
     });
     addTearDown(() {
@@ -168,22 +172,23 @@ void main() {
       ),
     );
     expect(surface, findsOneWidget);
-    final touchedSurface = tester.element(surface);
+    final touchedSurface = tester.element(surface.first);
     final avatar = find.byWidgetPredicate(
       (widget) => widget is UiKitView && widget.viewType == 'test/agent-video',
     );
     final touchedAvatar = tester.element(avatar);
+    final retainedIds = created.toSet();
     final gesture = await hold(tester);
-    expect(tester.element(surface), same(touchedSurface));
+    expect(tester.element(surface.first), same(touchedSurface));
     expect(tester.element(avatar), same(touchedAvatar));
-    expect(disposed, isEmpty);
+    expect(disposed.where(retainedIds.contains), isEmpty);
     expect(find.byType(VoiceNoteWaveform), findsOneWidget);
     await gesture.moveBy(const Offset(0, -90));
     await gesture.up();
     await tester.pumpAndSettle();
-    expect(tester.element(surface), same(touchedSurface));
+    expect(tester.element(surface.first), same(touchedSurface));
     expect(tester.element(avatar), same(touchedAvatar));
-    expect(disposed, isEmpty);
+    expect(disposed.where(retainedIds.contains), isEmpty);
     expect(recorder.cancelled, isTrue);
     expect(sent, 0);
     await tester.pumpWidget(const SizedBox.shrink());

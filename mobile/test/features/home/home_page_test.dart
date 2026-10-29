@@ -82,6 +82,12 @@ void main() {
       );
       await tester.pump();
       expect(tester.widget<BackdropFilter>(focus).enabled, isTrue);
+      expect(
+        tester
+            .widget<MessagesFilters>(find.byType(MessagesFilters))
+            .useNativeGlass,
+        isFalse,
+      );
       expect(tester.element(navigation), same(mountedNavigation));
       tester.widget<MessagesNavigationBar>(navigation).onRecordingChanged!(
         false,

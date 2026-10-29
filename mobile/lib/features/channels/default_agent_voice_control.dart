@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -504,23 +505,42 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                                 ? Duration.zero
                                 : const Duration(milliseconds: 220),
                             curve: Curves.easeOutBack,
-                            child: AnimatedContainer(
-                              duration: MediaQuery.disableAnimationsOf(context)
-                                  ? Duration.zero
-                                  : const Duration(milliseconds: 140),
-                              width: 48,
-                              height: 48,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: cancelled.value
-                                    ? context.colors.error
-                                    : context.colors.surfaceContainerHighest,
-                              ),
-                              child: Icon(
-                                Icons.close,
-                                color: cancelled.value
-                                    ? context.colors.onError
-                                    : context.colors.onSurface,
+                            child: ConcentricSheetSurface(
+                              enabled: true,
+                              usesGlass: true,
+                              providesSheetSurface: false,
+                              padding: EdgeInsets.zero,
+                              minimumRadius: 24,
+                              contentClipRadius: 24,
+                              color: cancelled.value
+                                  ? context.colors.error
+                                  : context.colors.surfaceContainerHighest,
+                              glassTintColor: cancelled.value
+                                  ? context.colors.error
+                                  : null,
+                              child: AnimatedContainer(
+                                duration:
+                                    MediaQuery.disableAnimationsOf(context)
+                                    ? Duration.zero
+                                    : const Duration(milliseconds: 140),
+                                width: 48,
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color:
+                                      defaultTargetPlatform ==
+                                          TargetPlatform.iOS
+                                      ? Colors.transparent
+                                      : cancelled.value
+                                      ? context.colors.error
+                                      : context.colors.surfaceContainerHighest,
+                                ),
+                                child: Icon(
+                                  Icons.close,
+                                  color: cancelled.value
+                                      ? context.colors.onError
+                                      : context.colors.onSurface,
+                                ),
                               ),
                             ),
                           ),

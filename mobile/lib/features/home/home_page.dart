@@ -133,7 +133,8 @@ class HomePage extends HookConsumerWidget {
           (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
         ];
         return [
-          if (defaultTargetPlatform == TargetPlatform.iOS)
+          if (defaultTargetPlatform == TargetPlatform.iOS &&
+              !recordingFocus.value)
             IosMessageCreateButton(
               actions: moreActions,
               dividerBefore: const {1},
@@ -163,6 +164,7 @@ class HomePage extends HookConsumerWidget {
         ];
       },
       messagesFilters: MessagesFilters(
+        useNativeGlass: !recordingFocus.value,
         hasUnreadSolo: hasUnreadSolo,
         selected: filter.value,
         onSelected: (value) {
