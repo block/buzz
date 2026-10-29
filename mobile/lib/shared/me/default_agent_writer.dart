@@ -36,12 +36,7 @@ Future<void> saveDefaultAgent(MeSync sync, String? pubkey) async {
       kind: 30078,
       content: nip44Encrypt(
         sync.key,
-        jsonEncode({
-          'version': 1,
-          'community': sync.community,
-          'deleted': false,
-          'value': {'type': 'default-agent', 'id': 'me', 'pubkey': pubkey},
-        }),
+        jsonEncode({'version': 1, 'agent': pubkey}),
       ),
       secretKey: sync.privateHex,
       createdAt: now,
@@ -57,14 +52,14 @@ Future<void> saveDefaultAgent(MeSync sync, String? pubkey) async {
   final confirmed = await sync.session.fetchHistory(filter);
   sync.check();
   if (confirmed.isEmpty || confirmed.first.id != event.id) {
-    throw StateError('The default agent changed on another device. Try again.');
+    throw StateError('The Bestie changed on another device. Try again.');
   }
   final prefs = sync.prefs;
   if (prefs != null &&
       !await prefs.setString(
-        'default-agent:${sync.community}:${sync.pubkey}',
+        'main-agent:${sync.community}:${sync.pubkey}',
         jsonEncode(event.toJson()),
       )) {
-    throw StateError('Default saved, but offline storage failed. Try again.');
+    throw StateError('Bestie saved, but offline storage failed. Try again.');
   }
 }

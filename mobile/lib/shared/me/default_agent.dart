@@ -8,43 +8,32 @@ import '../crypto/nip44.dart';
 import '../relay/relay.dart';
 import 'me_sync.dart';
 
-const defaultAgentTag = 'buzz-default-agent-v1';
-String defaultAgentCoordinate(String community) =>
-    '$defaultAgentTag:${Uri.encodeComponent(community)}:default-agent:me';
+// Shared with buzz-app's native-sidebar mainAgent record (PR #1665).
+// The relay scopes the wire record; the local cache also includes the account.
+const defaultAgentTag = 'main-agent';
+String defaultAgentCoordinate(String community) => defaultAgentTag;
 
-/// Reads the owner's signed, self-encrypted default-agent preference.
+/// Reads the owner's signed, self-encrypted desktop/mobile Bestie selection.
 String? decodeDefaultAgent(NostrEvent event, MeSync sync) {
   if (event.kind != 30078 ||
       event.pubkey != sync.pubkey ||
       event.content.length > 4096 ||
       event.tags.where((t) => t.isNotEmpty && t[0] == 'd').length != 1 ||
-      event.getTagValue('d') != defaultAgentCoordinate(sync.community) ||
-      event.getTagValue('t') != defaultAgentTag) {
-    throw const FormatException('Invalid default agent preference');
+      event.getTagValue('d') != defaultAgentTag) {
+    throw const FormatException('Invalid Bestie preference');
   }
   nostr.Event.fromJson(jsonEncode(event.toJson()));
   final raw = jsonDecode(nip44Decrypt(sync.key, event.content));
   if (raw is! Map<String, dynamic> ||
-      raw.length != 4 ||
+      raw.length != 2 ||
       raw['version'] != 1 ||
-      raw['community'] != sync.community ||
-      raw['deleted'] != false) {
-    throw const FormatException('Invalid default agent preference');
+      !raw.containsKey('agent') ||
+      (raw['agent'] != null &&
+          (raw['agent'] is! String ||
+              !RegExp(r'^[0-9a-f]{64}$').hasMatch(raw['agent'] as String)))) {
+    throw const FormatException('Invalid Bestie preference');
   }
-  final value = raw['value'];
-  if (value is! Map<String, dynamic> ||
-      value.length != 3 ||
-      !value.containsKey('pubkey') ||
-      value['type'] != 'default-agent' ||
-      value['id'] != 'me' ||
-      (value['pubkey'] != null &&
-          (value['pubkey'] is! String ||
-              !RegExp(
-                r'^[0-9a-f]{64}$',
-              ).hasMatch(value['pubkey'] as String)))) {
-    throw const FormatException('Invalid default agent preference');
-  }
-  return value['pubkey'] as String?;
+  return raw['agent'] as String?;
 }
 
 /// A cached choice remains available offline; account/community changes reset it.
@@ -56,7 +45,7 @@ final defaultAgentProvider = StreamProvider<String?>((ref) {
     }
   });
   final output = StreamController<String?>();
-  final cacheKey = 'default-agent:${sync.community}:${sync.pubkey}';
+  final cacheKey = 'main-agent:${sync.community}:${sync.pubkey}';
   final filter = NostrFilter(
     kinds: const [30078],
     authors: [sync.pubkey],
@@ -81,9 +70,7 @@ final defaultAgentProvider = StreamProvider<String?>((ref) {
             final prefs = sync.prefs;
             if (prefs != null &&
                 !await prefs.setString(cacheKey, jsonEncode(event.toJson()))) {
-              throw StateError(
-                'Could not save the default agent for offline use.',
-              );
+              throw StateError('Could not save the Bestie for offline use.');
             }
           })
           .catchError((Object error, StackTrace stack) {
@@ -116,7 +103,7 @@ final defaultAgentProvider = StreamProvider<String?>((ref) {
         onClosed: (_) {
           if (!disposed) {
             output.addError(
-              StateError('Default agent sync stopped. Retry to reconnect.'),
+              StateError('Bestie sync stopped. Retry to reconnect.'),
             );
           }
         },

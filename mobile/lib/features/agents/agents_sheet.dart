@@ -188,11 +188,11 @@ class AgentsSheet extends HookConsumerWidget {
         ref.invalidate(defaultAgentProvider);
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('Default agent saved.')));
+        ).showSnackBar(const SnackBar(content: Text('Bestie saved.')));
       } catch (error) {
         if (context.mounted && ref.read(meSyncProvider) == sync) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Could not save the default agent. $error')),
+            SnackBar(content: Text('Could not save the Bestie. $error')),
           );
         }
       } finally {
@@ -311,8 +311,8 @@ class AgentsSheet extends HookConsumerWidget {
                 title: Text(names.labelFor(key)),
                 trailing: IconButton(
                   tooltip: defaultAgent == key
-                      ? 'Default agent'
-                      : 'Use ${names.labelFor(key)} as default agent',
+                      ? 'Bestie'
+                      : 'Use ${names.labelFor(key)} as Bestie',
                   onPressed: savingDefault.value || defaultAgent == key
                       ? null
                       : () => chooseDefault(key),

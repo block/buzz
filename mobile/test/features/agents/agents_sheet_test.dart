@@ -39,10 +39,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(
-      find.textContaining('Could not save the default agent.'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('Could not save the Bestie.'), findsOneWidget);
     h.relay.loseAcknowledgment = false;
     h.relay.events =
         []; // The next attempt starts from an empty relay boundary.
@@ -58,7 +55,7 @@ void main() {
       existing,
     );
     expect(container.read(defaultAgentProvider).value, existing);
-    expect(find.byTooltip('Default agent'), findsOneWidget);
+    expect(find.byTooltip('Bestie'), findsOneWidget);
 
     await tester.tap(find.byKey(ValueKey(existing)));
     await tester.pump();
@@ -83,7 +80,7 @@ void main() {
     expect(find.byType(BottomSheet), findsNothing);
     h.relay.events = [];
     final sync = container.read(meSyncProvider);
-    await sync.prefs!.remove('default-agent:${sync.community}:${sync.pubkey}');
+    await sync.prefs!.remove('main-agent:${sync.community}:${sync.pubkey}');
     await h.open(
       tester,
       directory: [existing],
@@ -97,7 +94,7 @@ void main() {
             const SliverToBoxAdapter(child: Text('Solo workspace')),
       ),
     );
-    await tester.tap(find.byTooltip('Default agent'));
+    await tester.tap(find.byTooltip('Bestie'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(ValueKey(existing)));
     await tester.pumpAndSettle();
