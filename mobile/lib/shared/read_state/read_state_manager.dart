@@ -77,13 +77,13 @@ class ReadStateManager {
   int _maxFetchedCreatedAt = 0;
   final Map<String, int> _contextSourceCreatedAt = {};
   final Set<String> _pendingSyncedAdvances = {};
-  // Events already decoded and merged, by id, with a fingerprint of what was
-  // merged. Re-delivery of the same event (the live subscription replays the
-  // stored events the history fetch already took in, and again after a
-  // reconnect) cannot change state, so it is not decrypted. The id is not
-  // verified, so a different payload under a seen id is still decoded.
-  // Kept in arrival order, oldest dropped first.
-  final Map<String, int> _appliedEvents = {};
+  // Events already decoded and merged, by id. Re-delivery of the same event
+  // (the live subscription replays the stored events the history fetch
+  // already took in, and again after a reconnect) cannot change state, so it
+  // is not decrypted. The id is not verified, so an event under a seen id is
+  // skipped only when every field matches. Kept in arrival order, oldest
+  // dropped first.
+  final Map<String, NostrEvent> _appliedEvents = {};
 
   ReadStateManager({
     required this.pubkey,
@@ -409,15 +409,34 @@ class ReadStateManager {
     }
   }
 
-  static int _fingerprint(NostrEvent event) =>
-      Object.hash(event.createdAt, event.content);
+  bool _wasApplied(NostrEvent event) {
+    final seen = _appliedEvents[event.id];
+    return seen != null && _sameEvent(seen, event);
+  }
 
-  bool _wasApplied(NostrEvent event) =>
-      _appliedEvents[event.id] == _fingerprint(event);
+  static bool _sameEvent(NostrEvent a, NostrEvent b) {
+    if (a.pubkey != b.pubkey ||
+        a.createdAt != b.createdAt ||
+        a.kind != b.kind ||
+        a.sig != b.sig ||
+        a.content != b.content ||
+        a.tags.length != b.tags.length) {
+      return false;
+    }
+    for (var i = 0; i < a.tags.length; i++) {
+      final x = a.tags[i];
+      final y = b.tags[i];
+      if (x.length != y.length) return false;
+      for (var j = 0; j < x.length; j++) {
+        if (x[j] != y[j]) return false;
+      }
+    }
+    return true;
+  }
 
   void _rememberApplied(NostrEvent event) {
     _appliedEvents.remove(event.id);
-    _appliedEvents[event.id] = _fingerprint(event);
+    _appliedEvents[event.id] = event;
     if (_appliedEvents.length > _maxAppliedEventIds) {
       _appliedEvents.remove(_appliedEvents.keys.first);
     }

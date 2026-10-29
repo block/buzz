@@ -733,6 +733,33 @@ void main() {
         expect(h.manager.getEffectiveTimestamp('channel-2'), 20);
       },
     );
+
+    test('a seen id with different tags is still merged', () async {
+      final h = await start(
+        (h) => [
+          h.event(slot: 'a', createdAt: 100, contexts: {'channel-1': 10}),
+        ],
+      );
+      final seen = h.relay.historyEvents.single;
+
+      // Same id, timestamp and content, but a rewritten d tag.
+      h.relay.deliver(
+        NostrEvent(
+          id: seen.id,
+          pubkey: seen.pubkey,
+          createdAt: seen.createdAt,
+          kind: seen.kind,
+          tags: [
+            for (final tag in seen.tags)
+              tag.first == 'd' ? ['d', 'read-state:b'] : tag,
+          ],
+          content: seen.content,
+          sig: seen.sig,
+        ),
+      );
+
+      expect(h.counting.decryptCount, 2);
+    });
   });
 }
 
