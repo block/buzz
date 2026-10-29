@@ -146,10 +146,9 @@ export function sortEvents(events: RelayEvent[]) {
     if (left.created_at !== right.created_at) {
       return left.created_at - right.created_at;
     }
-    // Same (created_at, id) tiebreak as the cache sort (sortMessages) so a
-    // history REQ resolves same-second events in a stable, relay-matching
-    // order. Currently every consumer re-sorts downstream, but keeping the
-    // two sorts on one invariant avoids a latent ordering drift.
+    // Tiebreak same-second events on ascending id so a history REQ resolves
+    // in a stable order; project issues replay assignment operations in it.
+    // Timeline consumers re-sort with compareChronologicalOrder.
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
   });
 }

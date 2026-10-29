@@ -64,15 +64,20 @@ function emitMockMessage(
   page: Page,
   channelName: string,
   content: string,
-  options: { extraTags?: string[][]; parentEventId?: string } = {},
+  options: {
+    createdAt?: number;
+    extraTags?: string[][];
+    parentEventId?: string;
+  } = {},
 ) {
   return page.evaluate(
-    ({ channelName, content, extraTags, parentEventId }) => {
+    ({ channelName, content, createdAt, extraTags, parentEventId }) => {
       const emit = (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
             channelName: string;
             content: string;
+            createdAt?: number;
             extraTags?: string[][];
             parentEventId?: string;
           }) => unknown;
@@ -81,11 +86,18 @@ function emitMockMessage(
       if (!emit) {
         throw new Error("Mock message emitter is unavailable.");
       }
-      return emit({ channelName, content, extraTags, parentEventId });
+      return emit({
+        channelName,
+        content,
+        createdAt,
+        extraTags,
+        parentEventId,
+      });
     },
     {
       channelName,
       content,
+      createdAt: options.createdAt,
       extraTags: options.extraTags,
       parentEventId: options.parentEventId,
     },
@@ -1453,9 +1465,15 @@ test("dark accent uses a contrast-safe review foreground", async ({ page }) => {
 // player and, for the relay case, a resolvable download URL.
 function emitVideoMessage(
   page: Page,
-  { url, sha, filename }: { url: string; sha: string; filename: string },
+  {
+    url,
+    sha,
+    filename,
+    createdAt,
+  }: { url: string; sha: string; filename: string; createdAt?: number },
 ) {
   return emitMockMessage(page, "general", `![video](${url})`, {
+    createdAt,
     extraTags: [
       [
         "imeta",
@@ -1481,12 +1499,15 @@ test("right-click menus expose distinct selectors for links, relay video, and of
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
+  // One second per message keeps the three rows in a fixed order.
+  const createdAt = Math.floor(Date.now() / 1000);
 
   // ── Link menu: Open link + Copy link, never image/video attributes ────────
   await emitMockMessage(
     page,
     "general",
     "Docs at https://example.com/handbook",
+    { createdAt },
   );
   const link = page.getByRole("link", { name: "https://example.com/handbook" });
   await expect(link).toBeVisible();
@@ -1523,6 +1544,7 @@ test("right-click menus expose distinct selectors for links, relay video, and of
     url: MENU_RELAY_VIDEO_URL,
     sha: MENU_RELAY_VIDEO_SHA,
     filename: "relay-clip.mp4",
+    createdAt: createdAt + 1,
   })) as { id: string };
   const relayPlayer = page
     .locator(`[data-message-id="${relayMessage.id}"]`)
@@ -1571,6 +1593,7 @@ test("right-click menus expose distinct selectors for links, relay video, and of
     url: MENU_OFF_RELAY_VIDEO_URL,
     sha: MENU_OFF_RELAY_VIDEO_SHA,
     filename: "external-clip.mp4",
+    createdAt: createdAt + 2,
   })) as { id: string };
   const offRelayPlayer = page
     .locator(`[data-message-id="${offRelayMessage.id}"]`)

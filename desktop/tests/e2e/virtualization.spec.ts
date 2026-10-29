@@ -1004,6 +1004,76 @@ test("live tail arrivals stay buffered while reading and release on jump", async
   await expect(page.getByText("buffered live tail sentinel")).toBeVisible();
 });
 
+test("deleting a row while reading keeps live arrivals counted", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  const newestSeedId = await page.evaluate(() => {
+    let newest = "";
+    for (let index = 0; index < 20; index += 1) {
+      newest =
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "general",
+          content: `delete-while-reading seed ${index}\nsecond line ${index}`,
+          createdAt: 1_700_000_000 + index,
+        })?.id ?? "";
+    }
+    return newest;
+  });
+  await page.getByTestId("channel-general").click();
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText("delete-while-reading seed 19");
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (element) =>
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+
+  await timeline.evaluate((element) => {
+    element.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
+    element.scrollTop -= 300;
+  });
+  const pill = page.getByTestId("message-scroll-to-latest");
+  await expect(pill).toBeVisible();
+
+  // Removing a frozen row used to drop the whole freeze, so the next arrival
+  // joined the tail uncounted and the pill read "Jump to latest".
+  await page.evaluate((target) => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: "",
+      kind: 5,
+      extraTags: [["e", target]],
+    });
+  }, newestSeedId);
+  await expect(page.locator(`[data-message-id="${newestSeedId}"]`)).toHaveCount(
+    0,
+  );
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: "delete-while-reading live sentinel",
+      createdAt: 1_800_000_000,
+    });
+  });
+
+  await expect(pill).toContainText("1 new message");
+  await expect(
+    page.getByText("delete-while-reading live sentinel"),
+  ).toHaveCount(0);
+  await pill.click();
+  await expect(
+    page.getByText("delete-while-reading live sentinel"),
+  ).toBeVisible();
+});
+
 test("a single scroll back to the bottom releases the live tail", async ({
   page,
 }) => {

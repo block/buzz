@@ -1,7 +1,7 @@
 import type { RelayEvent } from "@/shared/api/types";
 import { CHANNEL_TIMELINE_CONTENT_KINDS } from "@/shared/constants/kinds";
+import { compareChronologicalOrder } from "@/shared/lib/eventOrder";
 import {
-  compareRelayOrder,
   flattenChannelWindowEvents,
   type ChannelWindowStore,
 } from "./channelWindowStore";
@@ -38,7 +38,7 @@ export function reconcileChannelWindowMessages(
     for (const event of windowEvents) {
       merged = reconcileIncomingMessage(merged, event);
     }
-    return [...merged].sort((left, right) => compareRelayOrder(right, left));
+    return [...merged].sort(compareChronologicalOrder);
   }
   const authoritativeIds = new Set(windowEvents.map((event) => event.id));
   const retained = retainRefetchReconciliationEvents(messages).filter(
@@ -64,9 +64,7 @@ function mergeChronologicalMessages(
   cacheOnly: RelayEvent[],
   authoritative: RelayEvent[],
 ) {
-  const retained = [...cacheOnly].sort((left, right) =>
-    compareRelayOrder(right, left),
-  );
+  const retained = [...cacheOnly].sort(compareChronologicalOrder);
   const merged: RelayEvent[] = [];
   let retainedIndex = 0;
   let authoritativeIndex = 0;
@@ -77,7 +75,7 @@ function mergeChronologicalMessages(
   ) {
     const retainedEvent = retained[retainedIndex];
     const authoritativeEvent = authoritative[authoritativeIndex];
-    if (compareRelayOrder(retainedEvent, authoritativeEvent) > 0) {
+    if (compareChronologicalOrder(retainedEvent, authoritativeEvent) < 0) {
       merged.push(retainedEvent);
       retainedIndex += 1;
     } else {

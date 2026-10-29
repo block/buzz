@@ -696,13 +696,19 @@ export function useMentions(
         cursorPosition,
         searchableNamesLowerRef.current,
       );
+      if (debounceTimerRef.current !== null) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
       if (activeInlineMention) {
         mentionPickerOriginRef.current = "inline";
       } else if (mentionPickerOriginRef.current === "inline") {
+        // The typed `@` trigger is gone: close now. An Enter inside the
+        // debounce would otherwise pick a stale suggestion instead of
+        // submitting. A picker opened explicitly has no trigger to lose.
         mentionPickerOriginRef.current = null;
-      }
-      if (debounceTimerRef.current !== null) {
-        clearTimeout(debounceTimerRef.current);
+        setMentionQuery(null);
+        return;
       }
       debounceTimerRef.current = setTimeout(() => {
         debounceTimerRef.current = null;

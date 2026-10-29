@@ -122,6 +122,22 @@ export function useChannelLinks() {
 
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      // Debounce only while a query is being typed. Once the trigger is gone,
+      // close now: an Enter inside the debounce would otherwise pick a stale
+      // suggestion instead of submitting.
+      if (
+        !detectPrefixQuery(
+          "#",
+          value,
+          cursorPosition,
+          knownNamesLowerRef.current,
+        )
+      ) {
+        setChannelQuery(null);
+        return;
       }
 
       debounceTimerRef.current = setTimeout(() => {

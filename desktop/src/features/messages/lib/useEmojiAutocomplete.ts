@@ -185,6 +185,13 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
 
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      // Debounce only while a shortcode is being typed; see useChannelLinks.
+      if (!detectEmojiQuery(value, cursorPosition)) {
+        setEmojiQuery(null);
+        return;
       }
 
       debounceTimerRef.current = setTimeout(() => {
