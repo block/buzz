@@ -19,6 +19,8 @@ use uuid::Uuid;
 use crate::error::{DbError, Result};
 use crate::Db;
 
+mod lookup;
+
 /// Default PostgreSQL lease duration for one claimed deletion request.
 pub const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(60);
 /// Durable name of the schema manifest's PostgreSQL component.
@@ -845,22 +847,58 @@ impl DeletionStore {
     /// Persist a request. Only active non-tombstone communities may be submitted.
     ///
     /// `requested_by` is recorded on a new row and is also the convergence key
-    /// when a `submitted` request already exists. Owner provenance pins an
-    /// owner-origin request's `requested_by` to its `owner_pubkey`, so taking
-    /// one over manually means passing that owner pubkey; the operator's own
-    /// pubkey conflicts with the existing request instead of converging.
+    /// when a `submitted` request already exists. With `expected_community`,
+    /// admission is create-only and pinned to that ID (and host, if supplied);
+    /// existing requests, including aborted ones, are left for the caller to read.
+    /// Owner provenance pins an owner-origin request's `requested_by` to its
+    /// `owner_pubkey`. Manual takeover must pass that owner pubkey; the operator's
+    /// own pubkey conflicts with the existing request instead of converging.
     pub async fn submit(
         &self,
-        community_host: &str,
+        community_host: Option<&str>,
         requested_by: &str,
         reason: Option<&str>,
+        expected_community: Option<CommunityId>,
     ) -> Result<DeletionRequest> {
+        if community_host.is_none() && expected_community.is_none() {
+            return Err(DbError::DeletionSafety(
+                "community host or ID is required".into(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        // Keep resolution and admission together, including when a caller pins
+        // the immutable ID. NO KEY UPDATE permits the legacy request FK check.
+        let target: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM communities
+             WHERE ($1::text IS NULL OR lower(host) = lower($1))
+               AND ($2::uuid IS NULL OR id = $2)
+             FOR NO KEY UPDATE",
+        )
+        .bind(community_host)
+        .bind(expected_community.map(|id| *id.as_uuid()))
+        .fetch_optional(&mut *tx)
+        .await?;
+        if expected_community.is_some() {
+            // Parent workflows only create when absent. In particular, never
+            // replace an aborted child. The caller can read the existing row.
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM community_deletion_requests WHERE community_id = $1)",
+            )
+            .bind(target)
+            .fetch_one(&mut *tx)
+            .await?;
+            if exists {
+                return Err(DbError::DeletionSafety(
+                    "community deletion already requested".into(),
+                ));
+            }
+        }
         let row = sqlx::query(
             r#"
             WITH target AS (
                 SELECT id, host
                 FROM communities
-                WHERE lower(host) = lower($1)
+                WHERE id = $1
                   AND deletion_state = 'active'
                   AND deleted_at IS NULL
             ), inserted AS (
@@ -881,15 +919,21 @@ impl DeletionStore {
             LIMIT 1
             "#,
         )
-        .bind(community_host)
+        .bind(target)
         .bind(requested_by)
         .bind(reason)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        tx.commit().await?;
+        let target_label = community_host.map(str::to_owned).unwrap_or_else(|| {
+            expected_community
+                .map(|id| id.as_uuid().to_string())
+                .unwrap_or_default()
+        });
         match row {
             Some(row) => row_to_request(row),
             None => Err(DbError::DeletionSafety(format!(
-                "community {community_host:?} is missing, already requested, fenced, or tombstoned"
+                "community {target_label} is missing, already requested, fenced, or tombstoned"
             ))),
         }
     }
@@ -4695,7 +4739,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .await
             .expect("create community");
         let submitted = store
-            .submit(&host, "test-operator", Some("test deletion"))
+            .submit(Some(&host), "test-operator", Some("test deletion"), None)
             .await
             .expect("submit");
         assert_eq!(submitted.community_id, community.id);
@@ -5814,7 +5858,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .await
             .expect("create operator community");
         let operator_request = store
-            .submit(&operator_host, "manual-operator", None)
+            .submit(Some(&operator_host), "manual-operator", None, None)
             .await
             .expect("submit manual request");
 
@@ -7019,9 +7063,10 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
 
         let replacement = store
             .submit(
-                &request.community_host,
+                Some(&request.community_host),
                 "second-operator",
                 Some("fresh review"),
+                None,
             )
             .await
             .expect("submit replacement request");
@@ -7682,7 +7727,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .await
             .expect("create community");
         let submitted = store
-            .submit(&host, "test-operator", Some("test deletion"))
+            .submit(Some(&host), "test-operator", Some("test deletion"), None)
             .await
             .expect("submit");
         let schema = run_behind_events_lock_past_cap(
