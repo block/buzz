@@ -3798,8 +3798,11 @@ pub(crate) mod terminal_close_delivery_tests {
         #[ignore = "requires Postgres"]
         async fn upgrade_would_deny_line_is_written_at_auth_while_open() {
             let log = crate::nip_fi_shadow::tests::WouldDenyLog::capture();
-            let state = crate::state::tests::test_state_with_database_url(
+            // sqlx's default acquire timeout: a first connect to a busy CI
+            // database can outlast the unreachable-target helper's 100 ms.
+            let state = crate::state::tests::test_state_with_database_url_and_pool_options(
                 &crate::test_support::database_url(),
+                sqlx::postgres::PgPoolOptions::new(),
             )
             .await;
             let community = Uuid::new_v4();
@@ -4158,7 +4161,7 @@ pub(crate) mod terminal_close_delivery_tests {
             .unwrap();
         let ((), lines) = crate::nip_fi_shadow::tests::would_deny_lines(|| {
             rt.block_on(async {
-                let state = crate::state::tests::test_state_with_database_url(
+                let state = crate::state::tests::test_state_with_unreachable_database_url(
                     "postgres://127.0.0.1:1/none",
                 )
                 .await;
