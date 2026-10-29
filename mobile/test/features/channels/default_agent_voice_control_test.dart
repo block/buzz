@@ -270,8 +270,9 @@ void main() {
           .setMockMethodCallHandler(channel, null);
     });
     await mount(tester);
+    await tester.pumpAndSettle();
     final gesture = await tester.startGesture(
-      tester.getCenter(find.byType(IconButton).last),
+      tester.getCenter(find.byTooltip('Agent')),
     );
     await tester.pump();
     expect(calls, ['voicePrepareStart']);
