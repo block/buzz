@@ -24,10 +24,12 @@ FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc
 
 LABEL org.opencontainers.image.source="https://github.com/block/buzz"
 
+# Numeric UID/GID so Kubernetes runAsNonRoot can verify the user.
 RUN apk add --no-cache ca-certificates \
-    && adduser -D -H loadgen
+    && addgroup -g 10001 loadgen \
+    && adduser -D -H -u 10001 -G loadgen loadgen
 
 COPY --from=builder --chmod=0755 /build/target/release/buzz-loadgen /usr/local/bin/buzz-loadgen
 
-USER loadgen
+USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/buzz-loadgen"]
