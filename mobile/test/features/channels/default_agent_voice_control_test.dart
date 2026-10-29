@@ -76,7 +76,7 @@ void main() {
     taps = 0;
     fail = false;
   });
-  Future<void> mount(WidgetTester tester) async {
+  Future<void> mount(WidgetTester tester, {bool nativeAvatar = false}) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -102,7 +102,9 @@ void main() {
                     child: IconButton(
                       tooltip: 'Agent',
                       onPressed: () => taps++,
-                      icon: const Icon(Icons.person),
+                      icon: nativeAvatar
+                          ? const UiKitView(viewType: 'test/agent-video')
+                          : const Icon(Icons.person),
                     ),
                   ),
                 ),
@@ -143,22 +145,32 @@ void main() {
       messenger.setMockMethodCallHandler(support, null);
       messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
     });
-    await mount(tester);
+    await mount(tester, nativeAvatar: true);
     await tester.pumpAndSettle();
     final surface = find.descendant(
       of: find.byType(DefaultAgentVoiceControl),
-      matching: find.byType(UiKitView),
+      matching: find.byWidgetPredicate(
+        (widget) =>
+            widget is UiKitView &&
+            widget.viewType == 'buzz/concentric_sheet_surface',
+      ),
     );
     expect(surface, findsOneWidget);
     final touchedSurface = tester.element(surface);
+    final avatar = find.byWidgetPredicate(
+      (widget) => widget is UiKitView && widget.viewType == 'test/agent-video',
+    );
+    final touchedAvatar = tester.element(avatar);
     final gesture = await hold(tester);
     expect(tester.element(surface), same(touchedSurface));
+    expect(tester.element(avatar), same(touchedAvatar));
     expect(disposed, isEmpty);
     expect(find.byType(VoiceNoteWaveform), findsOneWidget);
     await gesture.moveBy(const Offset(0, -90));
     await gesture.up();
     await tester.pumpAndSettle();
     expect(tester.element(surface), same(touchedSurface));
+    expect(tester.element(avatar), same(touchedAvatar));
     expect(disposed, isEmpty);
     expect(recorder.cancelled, isTrue);
     expect(sent, 0);

@@ -200,7 +200,6 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       draftIdentity: draftIdentity,
       enabled: pubkey != null && !opening.value && !preference.isLoading,
       onRecorded: (recording) => open(recording: recording),
-      recordingAvatar: avatar,
       child: SizedBox.square(
         dimension: 56,
         child: IconButton(
