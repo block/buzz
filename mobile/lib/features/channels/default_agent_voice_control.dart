@@ -1,3 +1,4 @@
+import '../../shared/widgets/navigation_button_surface.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -352,13 +353,7 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
               clipBehavior: Clip.none,
               children: [
                 Positioned.fill(
-                  child: ConcentricSheetSurface(
-                    enabled: true,
-                    usesGlass: true,
-                    providesSheetSurface: false,
-                    padding: EdgeInsets.zero,
-                    minimumRadius: Radii.navigationCapsule,
-                    contentClipRadius: Radii.navigationCapsule,
+                  child: NavigationButtonSurface(
                     child: Stack(
                       fit: StackFit.expand,
                       children: [

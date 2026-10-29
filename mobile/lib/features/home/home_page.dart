@@ -1,8 +1,6 @@
 import '../../shared/widgets/android_expanding_menu_button.dart';
 import 'dart:ui' as ui;
 
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';

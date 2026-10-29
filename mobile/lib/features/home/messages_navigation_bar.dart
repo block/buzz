@@ -49,7 +49,7 @@ class MessagesNavigationBar extends HookWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       NavigationButtonSurface(
-                         child: SizedBox.square(
+                        child: SizedBox.square(
                           dimension: 56,
                           child: IconButton(
                             tooltip: 'Search',
@@ -75,7 +75,7 @@ class MessagesNavigationBar extends HookWidget {
                         )
                       else
                         AndroidExpandingMenuButton(actions: creationActions),
-                       const SizedBox(width: Grid.xs),
+                      const SizedBox(width: Grid.xs),
                       const SizedBox.square(dimension: 56),
                     ],
                   ),
