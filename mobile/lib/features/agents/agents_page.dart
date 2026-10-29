@@ -17,7 +17,7 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../profile/user_profile_sheet.dart';
-import 'create_agent_sheet.dart';
+import 'create_agent_page.dart';
 import 'agent_card.dart';
 import 'remote_agent_model_control.dart';
 import 'owned_agent_directory.dart';
@@ -207,15 +207,13 @@ class AgentsPage extends HookConsumerWidget {
             }
             creating.value = true;
             try {
-              await showBuzzModalBottomSheet<bool>(
-                context: context,
-                useRootNavigator: true,
-                isScrollControlled: true,
-                showCloseButton: false,
-                builder: (_) => CreateAgentSheet(
-                  controller: controller,
-                  community: community,
-                  onCreated: () => ref.invalidate(agentDirectoryProvider),
+              await Navigator.of(context).push<bool>(
+                MaterialPageRoute(
+                  builder: (_) => CreateAgentPage(
+                    controller: controller,
+                    community: community,
+                    onCreated: () => ref.invalidate(agentDirectoryProvider),
+                  ),
                 ),
               );
             } finally {

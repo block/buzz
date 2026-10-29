@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -9,13 +10,16 @@ import 'agent_avatar_picker.dart';
 import '../../shared/community/community.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/theme/theme.dart';
-import '../../shared/widgets/buzz_titled_sheet_layout.dart';
+import '../../shared/widgets/frosted_app_bar.dart';
+import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/preset_agent_avatar.dart';
+import 'agent_avatar_editor_page.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 
 /// Uses the registry's name and private-instructions contract. Runtime/model
 /// selection belongs to the remote service and is not an API option here.
-class CreateAgentSheet extends HookConsumerWidget {
-  const CreateAgentSheet({
+class CreateAgentPage extends HookConsumerWidget {
+  const CreateAgentPage({
     required this.controller,
     required this.community,
     required this.onCreated,
@@ -39,24 +43,17 @@ class CreateAgentSheet extends HookConsumerWidget {
     final avatar = useState(
       AgentAvatarSelection.url(
         controller.pending?['picture'] as String? ??
-            agentAvatarCatalog.first.url,
+            agentAvatarCatalog[Random().nextInt(agentAvatarCatalog.length)].url,
       ),
     );
     final preparing = useState(false);
-    final choosingAvatar = useState(false);
-    final busy = controller.busy || preparing.value || choosingAvatar.value;
+    final busy = controller.busy || preparing.value;
     final active = ref.watch(activeCommunityProvider).asData?.value;
     final sameCommunity = active?.id == community.id;
     final pending = controller.pending != null;
     final instructionsMissing =
         controller.pending?['instructionsMissing'] == true;
     final canCreate = !busy && sameCommunity && name.text.trim().isNotEmpty;
-    final actionStyle = IconButton.styleFrom(
-      minimumSize: const Size.square(44),
-      backgroundColor: context.colors.surfaceContainerHighest,
-      side: BorderSide(color: context.colors.outlineVariant),
-      shape: const CircleBorder(),
-    );
     InputDecoration fieldDecoration(String label, {String? hint}) =>
         InputDecoration(
           hintText: hint,
@@ -122,49 +119,97 @@ class CreateAgentSheet extends HookConsumerWidget {
 
     return PopScope(
       canPop: !busy,
-      child: Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.viewInsetsOf(context).bottom,
-        ),
-        child: BuzzTitledSheetLayout(
-          title: 'Create agent',
+      child: FrostedScaffold(
+        appBar: FrostedAppBar(
+          nativeTitle: 'Create agent',
+          title: const Text('Create agent'),
+          automaticallyImplyLeading: false,
+          nativeLeading: IosNavigationAction(
+            label: 'Cancel',
+            symbol: 'xmark',
+            onPressed: busy ? null : () => Navigator.pop(context),
+          ),
+          nativeActions: [
+            IosNavigationAction(
+              label: pending ? 'Resume' : 'Create',
+              symbol: 'checkmark',
+              onPressed: canCreate ? create : null,
+            ),
+          ],
           leading: IconButton(
             tooltip: 'Cancel',
-            style: actionStyle,
             onPressed: busy ? null : () => Navigator.pop(context),
             icon: const Icon(Icons.close),
           ),
-          trailing: IconButton(
-            tooltip: pending ? 'Resume' : 'Create',
-            style: actionStyle.copyWith(
-              backgroundColor: WidgetStatePropertyAll(
-                canCreate
-                    ? context.colors.primary
-                    : context.colors.surfaceContainerHighest,
-              ),
-              foregroundColor: WidgetStatePropertyAll(
-                canCreate
-                    ? context.colors.onPrimary
-                    : context.colors.onSurfaceVariant,
-              ),
+          actions: [
+            IconButton(
+              tooltip: pending ? 'Resume' : 'Create',
+              onPressed: canCreate ? create : null,
+              icon: const Icon(Icons.check),
             ),
-            onPressed: canCreate ? create : null,
-            icon: const Icon(Icons.check),
-          ),
+          ],
+        ),
+        body: SafeArea(
+          top: false,
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(Grid.gutter),
+            padding: EdgeInsets.fromLTRB(
+              Grid.gutter,
+              frostedAppBarHeight(context) + Grid.md,
+              Grid.gutter,
+              Grid.md,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (!pending) ...[
-                  AgentAvatarPicker(
-                    selection: avatar.value,
-                    onChanged: (value) => avatar.value = value,
-                    disabled: controller.busy || preparing.value,
-                    onBusyChanged: (value) => choosingAvatar.value = value,
+                Center(
+                  child: Column(
+                    children: [
+                      Semantics(
+                        label: 'Agent avatar',
+                        image: true,
+                        child: SizedBox.square(
+                          dimension: 160,
+                          child: avatar.value.bytes != null
+                              ? ClipOval(
+                                  child: Image.memory(
+                                    avatar.value.bytes!,
+                                    fit: BoxFit.cover,
+                                  ),
+                                )
+                              : PresetAgentAvatar(
+                                  imageUrl: avatar.value.url!,
+                                  size: 160,
+                                  fallback: const Icon(
+                                    Icons.smart_toy_outlined,
+                                    size: 80,
+                                  ),
+                                ),
+                        ),
+                      ),
+                      if (!pending)
+                        TextButton(
+                          onPressed: busy
+                              ? null
+                              : () async {
+                                  FocusScope.of(context).unfocus();
+                                  final result = await Navigator.of(context)
+                                      .push<AgentAvatarSelection>(
+                                        MaterialPageRoute(
+                                          builder: (_) => AgentAvatarEditorPage(
+                                            initialSelection: avatar.value,
+                                          ),
+                                        ),
+                                      );
+                                  if (context.mounted && result != null) {
+                                    avatar.value = result;
+                                  }
+                                },
+                          child: const Text('Choose avatar'),
+                        ),
+                    ],
                   ),
-                  const SizedBox(height: Grid.sm),
-                ],
+                ),
+                const SizedBox(height: Grid.md),
                 SheetActionSection(
                   label: 'Name',
                   children: [

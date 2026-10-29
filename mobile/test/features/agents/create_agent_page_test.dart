@@ -1,9 +1,12 @@
+import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
+import 'package:buzz/shared/agents/agent_avatar_catalog.dart';
+import 'package:buzz/features/agents/agent_avatar_editor_page.dart';
 import 'dart:async';
 
 import 'package:buzz/shared/agents/remote_agents.dart';
 
 import 'package:buzz/features/agents/agents_page.dart';
-import 'package:buzz/features/agents/create_agent_sheet.dart';
+import 'package:buzz/features/agents/create_agent_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -29,9 +32,9 @@ void main() {
       }
       await tester.tap(find.byTooltip('Add agent'));
       await tester.pumpAndSettle();
-      expect(find.byType(BottomSheet), findsOneWidget);
-      final createContext = tester.element(find.byType(CreateAgentSheet));
-      expect(Navigator.of(list), isNot(Navigator.of(createContext)));
+      expect(find.byType(CreateAgentPage), findsOneWidget);
+      final createContext = tester.element(find.byType(CreateAgentPage));
+      expect(Navigator.of(list), same(Navigator.of(createContext)));
 
       controller.gate = Completer<void>();
       await tester.enterText(
@@ -56,12 +59,47 @@ void main() {
         'Reply concisely.',
       );
       await tester.pump();
+      final originalAvatar = tester
+          .widget<PresetAgentAvatar>(find.byType(PresetAgentAvatar))
+          .imageUrl;
+      final direction = originalAvatar == agentAvatarCatalog.first.url
+          ? -190.0
+          : 190.0;
+      await tester.ensureVisible(find.text('Choose avatar'));
+      await tester.tap(find.text('Choose avatar'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AgentAvatarEditorPage), findsOneWidget);
+      expect(find.text('Instructions'), findsNothing);
+      await tester.drag(find.byType(PageView), Offset(direction, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<PresetAgentAvatar>(find.byType(PresetAgentAvatar))
+            .imageUrl,
+        originalAvatar,
+      );
+      await tester.tap(find.text('Choose avatar'));
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(PageView), Offset(direction, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Done'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<PresetAgentAvatar>(find.byType(PresetAgentAvatar))
+            .imageUrl,
+        isNot(originalAvatar),
+      );
+      expect(find.text('Scout'), findsOneWidget);
+      expect(find.text('Reply concisely.'), findsOneWidget);
       await tester.tap(find.byTooltip('Create'));
       await tester.pump(const Duration(milliseconds: 100));
       expect(controller.busy, isTrue);
       expect(
         find.descendant(
-          of: find.byType(CreateAgentSheet),
+          of: find.byType(CreateAgentPage),
           matching: find.byType(LinearProgressIndicator),
         ),
         findsOneWidget,
@@ -74,7 +112,7 @@ void main() {
       );
       controller.gate!.complete();
       await tester.pumpAndSettle();
-      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(find.byType(CreateAgentPage), findsOneWidget);
       expect(find.text('Creation failed. Retry.'), findsOneWidget);
       expect(controller.submittedName, 'Scout');
       expect(controller.submittedInstructions, 'Reply concisely.');

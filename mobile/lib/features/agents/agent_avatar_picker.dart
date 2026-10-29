@@ -1,7 +1,8 @@
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import '../../shared/widgets/ios_native_segmented_control.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -16,8 +17,14 @@ import '../../shared/widgets/profile_avatar_crop_page.dart';
 
 /// An avatar kept locally until creation uploads it to the selected community.
 class AgentAvatarSelection {
-  AgentAvatarSelection.url(this.url) : bytes = null;
-  AgentAvatarSelection.image(this.bytes) : url = null;
+  AgentAvatarSelection.url(this.url) : bytes = null, emoji = null, color = null;
+  AgentAvatarSelection.image(this.bytes)
+    : url = null,
+      emoji = null,
+      color = null;
+  AgentAvatarSelection.emoji(this.bytes, this.emoji, this.color) : url = null;
+  final String? emoji;
+  final int? color;
   final String? url;
   final Uint8List? bytes;
   Future<String>? _uploaded;
@@ -57,14 +64,31 @@ class AgentAvatarPicker extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final mode = useState(0);
-    final index = useState(0);
-    final emoji = useState('😊');
-    final color = useState(emojiAvatarColors.first);
-    final image = useState<AgentAvatarSelection?>(null);
+    final mode = useState(
+      selection.url != null
+          ? 0
+          : selection.emoji != null
+          ? 1
+          : 2,
+    );
+    final initialIndex = useMemoized(() {
+      final found = agentAvatarCatalog.indexWhere(
+        (item) => item.url == selection.url,
+      );
+      return found < 0 ? 0 : found;
+    }, const []);
+    final index = useState(initialIndex);
+    final emoji = useState(selection.emoji ?? '😊');
+    final color = useState(selection.color ?? emojiAvatarColors.first);
+    final image = useState<AgentAvatarSelection?>(
+      selection.bytes != null && selection.emoji == null ? selection : null,
+    );
     final error = useState<String?>(null);
     final busy = useState(false);
-    final pages = usePageController(viewportFraction: .23);
+    final pages = usePageController(
+      initialPage: initialIndex,
+      viewportFraction: .23,
+    );
     final search = useState('');
     final dataset = ref.watch(emojiDatasetProvider);
     final locked = disabled || busy.value;
@@ -92,7 +116,13 @@ class AgentAvatarPicker extends HookConsumerWidget {
       raster.dispose();
       picture.dispose();
       if (context.mounted && data != null) {
-        onChanged(AgentAvatarSelection.image(data.buffer.asUint8List()));
+        onChanged(
+          AgentAvatarSelection.emoji(
+            data.buffer.asUint8List(),
+            emoji.value,
+            color.value,
+          ),
+        );
       }
     }
 
@@ -155,50 +185,57 @@ class AgentAvatarPicker extends HookConsumerWidget {
       }
     }
 
+    Future<void> selectMode(int next) async {
+      if (locked) return;
+      if (next == 2 && image.value == null) {
+        await pickImage();
+        return;
+      }
+      mode.value = next;
+      error.value = null;
+      if (next == 0) {
+        onChanged(
+          AgentAvatarSelection.url(agentAvatarCatalog[index.value].url),
+        );
+      }
+      if (next == 1) await renderEmoji();
+      if (next == 2) onChanged(image.value!);
+    }
+
     return Column(
       children: [
-        SegmentedButton<int>(
-          segments: const [
-            ButtonSegment(value: 0, label: Text('Gloopies')),
-            ButtonSegment(value: 1, label: Text('Emoji')),
-            ButtonSegment(value: 2, label: Text('Image')),
-          ],
-          selected: {mode.value},
-          showSelectedIcon: false,
-          onSelectionChanged: locked
-              ? null
-              : (values) async {
-                  final next = values.first;
-                  if (next == 2 && image.value == null) {
-                    await pickImage();
-                    return;
-                  }
-                  mode.value = next;
-                  error.value = null;
-                  if (next == 0) {
-                    onChanged(
-                      AgentAvatarSelection.url(
-                        agentAvatarCatalog[index.value].url,
-                      ),
-                    );
-                  }
-                  if (next == 1) await renderEmoji();
-                  if (next == 2) onChanged(image.value!);
-                },
-        ),
+        if (defaultTargetPlatform == TargetPlatform.iOS)
+          IosNativeSegmentedControl(
+            items: const ['Gloopies', 'Emoji', 'Image'],
+            selectedIndex: mode.value,
+            onChanged: locked ? null : selectMode,
+          )
+        else
+          SegmentedButton<int>(
+            segments: const [
+              ButtonSegment(value: 0, label: Text('Gloopies')),
+              ButtonSegment(value: 1, label: Text('Emoji')),
+              ButtonSegment(value: 2, label: Text('Image')),
+            ],
+            selected: {mode.value},
+            showSelectedIcon: false,
+            onSelectionChanged: locked
+                ? null
+                : (values) => selectMode(values.first),
+          ),
         const SizedBox(height: Grid.sm),
         Semantics(
           label: 'Selected agent avatar',
           image: true,
           child: SizedBox.square(
-            dimension: 160,
+            dimension: 220,
             child: selection.bytes != null
                 ? ClipOval(
                     child: Image.memory(selection.bytes!, fit: BoxFit.cover),
                   )
                 : PresetAgentAvatar(
                     imageUrl: selection.url!,
-                    size: 160,
+                    size: 220,
                     fallback: const Icon(Icons.smart_toy_outlined, size: 80),
                   ),
           ),
