@@ -1,12 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community.dart';
 import 'agent_model_menu.dart';
 
+// Share one request/result while controls are mounted. Account transitions
+// discard the old catalog; save-time validation still fetches a fresh catalog.
+final _modelCatalogProvider = FutureProvider.autoDispose
+    .family<List<RemoteAgentModel>, RemoteAgentController>((ref, controller) {
+      final subject = controller.account.subjectChanges;
+      void changed() => ref.invalidateSelf();
+      subject.addListener(changed);
+      ref.onDispose(() => subject.removeListener(changed));
+      return controller.modelCatalog();
+    }, retry: (_, _) => null);
+
 /// An authenticated model menu with explicit reasoning effort confirmation.
-class RemoteAgentModelControl extends HookWidget {
+class RemoteAgentModelControl extends HookConsumerWidget {
   const RemoteAgentModelControl({
     required this.controller,
     required this.agent,
@@ -20,19 +32,21 @@ class RemoteAgentModelControl extends HookWidget {
   final bool Function() isCurrent;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     useListenable(controller);
-    final retry = useState(0);
     final subject = controller.account.account?.subject;
-    final future = useMemoized(controller.modelCatalog, [subject, retry.value]);
-    final catalog = useFuture(future, preserveState: false);
+    final provider = _modelCatalogProvider(controller);
+    final catalog = ref.watch(provider);
+    if (catalog.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
     if (catalog.hasError) {
       return TextButton(
-        onPressed: () => retry.value++,
+        onPressed: () => ref.invalidate(provider),
         child: const Text('Retry models'),
       );
     }
-    final models = catalog.data;
+    final models = catalog.asData?.value;
     if (models == null) return const Center(child: CircularProgressIndicator());
     if (models.isEmpty) return const Center(child: Text('No models available'));
     final selected = models
