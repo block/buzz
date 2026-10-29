@@ -34,6 +34,7 @@ import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
+import 'message_content/link_reference_definitions.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
 import 'message_mention_pill.dart';
@@ -259,9 +260,10 @@ class MessageContent extends HookConsumerWidget {
       for (final entry in parseImetaTags(tags).entries)
         normalizeMarkdownDestination(entry.key): entry.value,
     };
-    final normalizedContent = useMemoized(() => normalizeBareLinks(content), [
-      content,
-    ]);
+    final normalizedContent = useMemoized(
+      () => normalizeBareLinks(stripUnusedLinkReferenceDefinitions(content)),
+      [content],
+    );
     final trailingGallery = maxLines == null
         ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
         : null;
