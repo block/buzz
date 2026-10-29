@@ -2043,6 +2043,100 @@ mod tests {
         assert!(registry.global_selector_index.is_empty());
     }
 
+    /// `None`, an empty list, or a random subset of `pool`.
+    fn random_constraint<T: Clone>(
+        next: &mut impl FnMut(usize) -> usize,
+        pool: &[T],
+    ) -> Option<Vec<T>> {
+        match next(4) {
+            0 => None,
+            1 => Some(Vec::new()),
+            _ => Some(pool.iter().filter(|_| next(2) == 0).cloned().collect()),
+        }
+    }
+
+    /// Indexed global fan-out delivers to exactly the subscriptions a full
+    /// `filters_match` scan selects, across random filter sets and `p`-tag
+    /// shapes, so the index's tag reading can't drift from the matcher's.
+    #[test]
+    fn global_fan_out_matches_a_full_filter_scan() {
+        // xorshift64*, seeded, so a failing case reproduces.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move |n: usize| -> usize {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as usize % n
+        };
+        let kinds = [
+            Kind::TextNote,
+            Kind::Reaction,
+            Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16),
+        ];
+        let authors: Vec<Keys> = (0..3).map(|_| Keys::generate()).collect();
+        let author_keys: Vec<PublicKey> = authors.iter().map(Keys::public_key).collect();
+        let p_values = ["a".repeat(64), "b".repeat(64), "not-hex".to_string()];
+
+        let registry = SubscriptionRegistry::new();
+        let mut subscriptions = Vec::new();
+        for i in 0..60 {
+            let filters: Vec<Filter> = (0..=next(3))
+                .map(|_| {
+                    let mut filter = Filter::new();
+                    if let Some(kinds) = random_constraint(&mut next, &kinds) {
+                        filter = filter.kinds(kinds);
+                    }
+                    if let Some(authors) = random_constraint(&mut next, &author_keys) {
+                        filter = filter.authors(authors);
+                    }
+                    if let Some(values) = random_constraint(&mut next, &p_values) {
+                        filter = filter.custom_tags(p_tag(), values);
+                    }
+                    filter
+                })
+                .collect();
+            let (conn_id, sub_id) = (Uuid::new_v4(), format!("sub-{i}"));
+            registry.register(conn_id, sub_id.clone(), filters.clone(), None);
+            subscriptions.push((conn_id, sub_id, filters));
+        }
+        assert!(!registry.global_selector_index.is_empty());
+
+        for _ in 0..2_000 {
+            let tags: Vec<Tag> = (0..next(4))
+                .map(|_| {
+                    let value = p_values[next(p_values.len())].as_str();
+                    let parts = match next(5) {
+                        0 => vec!["p", value],
+                        1 => vec!["p", value, "wss://relay.example"],
+                        2 => vec!["P", value],
+                        3 => vec!["p"],
+                        _ => vec!["e", value],
+                    };
+                    Tag::parse(parts).expect("valid tag")
+                })
+                .collect();
+            let event = EventBuilder::new(kinds[next(kinds.len())], "x")
+                .tags(tags)
+                .sign_with_keys(&authors[next(authors.len())])
+                .expect("sign");
+            let event = StoredEvent::with_received_at(event, Utc::now(), None, true);
+
+            let expected: HashSet<(ConnId, SubId)> = subscriptions
+                .iter()
+                .filter(|(_, _, filters)| filters_match(filters, &event))
+                .map(|(conn_id, sub_id, _)| (*conn_id, sub_id.clone()))
+                .collect();
+            let delivered = registry.fan_out(&event);
+            let delivered_set: HashSet<_> = delivered.iter().cloned().collect();
+            assert_eq!(delivered.len(), delivered_set.len(), "duplicate delivery");
+            assert_eq!(
+                delivered_set, expected,
+                "kind {:?}, tags {:?}",
+                event.event.kind, event.event.tags
+            );
+        }
+    }
+
     #[test]
     fn test_global_selector_index_kindless_filters_skip_wildcard_scan() {
         let registry = SubscriptionRegistry::new();
