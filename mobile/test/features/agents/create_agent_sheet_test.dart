@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:buzz/shared/agents/remote_agents.dart';
 
-import 'package:buzz/features/agents/agents_sheet.dart';
+import 'package:buzz/features/agents/agents_page.dart';
 import 'package:buzz/features/agents/create_agent_sheet.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -20,26 +20,16 @@ void main() {
       final controller = h.controller;
       final added = nostr.Keys('0' * 63 + '2').public;
       await h.open(tester, directory: [existing]);
-      final list = tester.element(find.byType(AgentsSheet));
+      final list = tester.element(find.byType(AgentsPage));
       if (!supportsRemoteAgents(h.community)) {
-        expect(
-          tester
-              .widget<IconButton>(
-                find.byWidgetPredicate(
-                  (widget) =>
-                      widget is IconButton && widget.tooltip == 'Add agent',
-                ),
-              )
-              .onPressed,
-          isNull,
-        );
+        expect(find.byTooltip('Add agent'), findsNothing);
         expect(find.text('Sign in to create an agent'), findsNothing);
         expect(find.byKey(ValueKey(existing)), findsOneWidget);
         return;
       }
       await tester.tap(find.byTooltip('Add agent'));
       await tester.pumpAndSettle();
-      expect(find.byType(BottomSheet), findsNWidgets(2));
+      expect(find.byType(BottomSheet), findsOneWidget);
       final createContext = tester.element(find.byType(CreateAgentSheet));
       expect(Navigator.of(list), isNot(Navigator.of(createContext)));
 
@@ -84,7 +74,7 @@ void main() {
       );
       controller.gate!.complete();
       await tester.pumpAndSettle();
-      expect(find.byType(BottomSheet), findsNWidgets(2));
+      expect(find.byType(BottomSheet), findsOneWidget);
       expect(find.text('Creation failed. Retry.'), findsOneWidget);
       expect(controller.submittedName, 'Scout');
       expect(controller.submittedInstructions, 'Reply concisely.');
@@ -93,8 +83,8 @@ void main() {
       controller.gate = null;
       await tester.tap(find.byTooltip('Create'));
       await tester.pumpAndSettle();
-      expect(find.byType(BottomSheet), findsOneWidget);
-      expect(tester.element(find.byType(AgentsSheet)), same(list));
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(tester.element(find.byType(AgentsPage)), same(list));
       expect(find.byKey(ValueKey(added)), findsOneWidget);
       expect(h.registry.calls, contains('publish-policy'));
     },

@@ -1,8 +1,10 @@
+import 'package:buzz/features/agents/community_bot_profiles.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 import 'dart:async';
 
-import 'package:buzz/features/agents/agents_sheet.dart';
+import 'package:buzz/features/agents/agents_page.dart';
+import 'package:buzz/features/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -53,12 +55,18 @@ class GatedController extends RelayFakeController {
     Community community,
     String name, {
     String instructions = '',
+    String? pictureUrl,
   }) {
     submittedName = name;
     submittedInstructions = instructions;
     final gate = this.gate;
     if (gate == null) {
-      return super.create(community, name, instructions: instructions);
+      return super.create(
+        community,
+        name,
+        instructions: instructions,
+        pictureUrl: pictureUrl,
+      );
     }
     return run(() async {
       await gate.future;
@@ -108,6 +116,7 @@ class AgentsHarness {
   Future<void> open(
     WidgetTester tester, {
     required List<String> directory,
+    List<String> botDirectory = const [],
     Widget? home,
   }) async {
     final prefs = await SharedPreferences.getInstance();
@@ -119,6 +128,10 @@ class AgentsHarness {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          communityBotProfilesProvider.overrideWith(
+            (ref) async => botDirectory,
+          ),
+          ownedAgentDirectoryProvider.overrideWith((ref) async => []),
           builderlabAccountProvider.overrideWithValue(registry),
           remoteAgentControllerProvider.overrideWithValue(controller),
           relaySessionProvider.overrideWith(() => relay),
@@ -133,6 +146,10 @@ class AgentsHarness {
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(disableAnimations: true),
+            child: child!,
+          ),
           home:
               home ??
               Builder(

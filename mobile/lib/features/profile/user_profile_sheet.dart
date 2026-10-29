@@ -14,6 +14,8 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/agent_artwork_panel.dart';
+import '../../shared/widgets/buzz_sheet_header.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
@@ -61,6 +63,10 @@ void showUserProfileSheet(
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
 
+  /// Agent artwork treatment within the profile sheet.
+  final bool agentPresentation;
+  final String? agentSubtitle;
+
   /// The opening surface's comparison context. The sheet watches it, so its
   /// title follows profile and context changes while it is open. The caller
   /// owns the context, so this sheet depends on no other feature's state.
@@ -78,6 +84,8 @@ class UserProfileSheet extends HookConsumerWidget {
   const UserProfileSheet({
     super.key,
     required this.pubkey,
+    this.agentPresentation = false,
+    this.agentSubtitle,
     this.names,
     this.contextualActions,
     this.primaryActionsSpacing = Grid.xs + Grid.half,
@@ -166,7 +174,7 @@ class UserProfileSheet extends HookConsumerWidget {
       }
     }
 
-    return ConstrainedBox(
+    final content = ConstrainedBox(
       constraints: BoxConstraints(
         maxHeight: MediaQuery.sizeOf(context).height * 0.7,
       ),
@@ -225,6 +233,17 @@ class UserProfileSheet extends HookConsumerWidget {
                         ),
                       ),
                     ),
+                    if (agentSubtitle != null) ...[
+                      const SizedBox(height: Grid.xxs),
+                      Center(
+                        child: Text(
+                          agentSubtitle!,
+                          style: context.textTheme.bodySmall?.copyWith(
+                            color: context.colors.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
                     if (about.trim().isNotEmpty) ...[
                       const SizedBox(height: Grid.xxs),
                       SizedBox(
@@ -315,6 +334,18 @@ class UserProfileSheet extends HookConsumerWidget {
               ),
             ),
           ),
+        ],
+      ),
+    );
+    if (!agentPresentation) return content;
+    return AgentArtworkPanel(
+      imageUrl: avatarUrl,
+      borderRadius: BorderRadius.zero,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const BuzzSheetHeader(),
+          Flexible(child: SafeArea(top: false, child: content)),
         ],
       ),
     );

@@ -264,6 +264,16 @@ class _CreateMenuRoute extends PopupRoute<int> {
                                                   children: [
                                                     Icon(switch (actions[i]
                                                         .symbol) {
+                                                      '' => null,
+                                                      'checkmark' =>
+                                                        BuzzIcons.check,
+                                                      'star' =>
+                                                        Icons.star_border,
+                                                      'info.circle' =>
+                                                        Icons.info_outline,
+                                                      'desktopcomputer' =>
+                                                        Icons
+                                                            .desktop_windows_outlined,
                                                       'square.and.pencil' =>
                                                         BuzzIcons.edit,
                                                       'folder.badge.plus' =>

@@ -3,6 +3,9 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/remote_agents.dart';
+import '../../shared/agents/agent_avatar_catalog.dart';
+import '../../shared/relay/relay.dart';
+import 'agent_avatar_picker.dart';
 import '../../shared/community/community.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/theme/theme.dart';
@@ -33,13 +36,21 @@ class CreateAgentSheet extends HookConsumerWidget {
     );
     useListenable(name);
     final error = useState<String?>(null);
+    final avatar = useState(
+      AgentAvatarSelection.url(
+        controller.pending?['picture'] as String? ??
+            agentAvatarCatalog.first.url,
+      ),
+    );
+    final preparing = useState(false);
+    final choosingAvatar = useState(false);
+    final busy = controller.busy || preparing.value || choosingAvatar.value;
     final active = ref.watch(activeCommunityProvider).asData?.value;
     final sameCommunity = active?.id == community.id;
     final pending = controller.pending != null;
     final instructionsMissing =
         controller.pending?['instructionsMissing'] == true;
-    final canCreate =
-        !controller.busy && sameCommunity && name.text.trim().isNotEmpty;
+    final canCreate = !busy && sameCommunity && name.text.trim().isNotEmpty;
     final actionStyle = IconButton.styleFrom(
       minimumSize: const Size.square(44),
       backgroundColor: context.colors.surfaceContainerHighest,
@@ -75,22 +86,42 @@ class CreateAgentSheet extends HookConsumerWidget {
         error.value = 'The active community changed. Reopen Agents.';
         return;
       }
-      final success = await controller.create(
-        community,
-        name.text,
-        instructions: instructions.text,
-      );
-      if (!context.mounted) return;
-      if (success) {
-        onCreated();
-        Navigator.pop(context, true);
-      } else {
-        error.value = controller.status;
+      preparing.value = true;
+      try {
+        final subject = controller.account.account?.subject;
+        final service = ref.read(mediaUploadServiceProvider);
+        final picture = pending ? null : await avatar.value.prepare(service);
+        if (!context.mounted) return;
+        if (ref.read(activeCommunityProvider).asData?.value?.id !=
+                community.id ||
+            controller.account.account?.subject != subject) {
+          error.value = 'The account or community changed. Reopen Agents.';
+          return;
+        }
+        final success = await controller.create(
+          community,
+          name.text,
+          instructions: instructions.text,
+          pictureUrl: picture,
+        );
+        if (!context.mounted) return;
+        if (success) {
+          onCreated();
+          Navigator.pop(context, true);
+        } else {
+          error.value = controller.status;
+        }
+      } catch (_) {
+        if (context.mounted) {
+          error.value = 'Could not upload the avatar. Try again.';
+        }
+      } finally {
+        if (context.mounted) preparing.value = false;
       }
     }
 
     return PopScope(
-      canPop: !controller.busy,
+      canPop: !busy,
       child: Padding(
         padding: EdgeInsets.only(
           bottom: MediaQuery.viewInsetsOf(context).bottom,
@@ -100,7 +131,7 @@ class CreateAgentSheet extends HookConsumerWidget {
           leading: IconButton(
             tooltip: 'Cancel',
             style: actionStyle,
-            onPressed: controller.busy ? null : () => Navigator.pop(context),
+            onPressed: busy ? null : () => Navigator.pop(context),
             icon: const Icon(Icons.close),
           ),
           trailing: IconButton(
@@ -125,6 +156,15 @@ class CreateAgentSheet extends HookConsumerWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (!pending) ...[
+                  AgentAvatarPicker(
+                    selection: avatar.value,
+                    onChanged: (value) => avatar.value = value,
+                    disabled: controller.busy || preparing.value,
+                    onBusyChanged: (value) => choosingAvatar.value = value,
+                  ),
+                  const SizedBox(height: Grid.sm),
+                ],
                 SheetActionSection(
                   label: 'Name',
                   children: [
@@ -132,8 +172,8 @@ class CreateAgentSheet extends HookConsumerWidget {
                       label: 'Name',
                       child: TextField(
                         controller: name,
-                        autofocus: true,
-                        enabled: !controller.busy && !pending,
+                        autofocus: false,
+                        enabled: !busy && !pending,
                         textCapitalization: TextCapitalization.words,
                         decoration: fieldDecoration('Name'),
                       ),
@@ -148,9 +188,7 @@ class CreateAgentSheet extends HookConsumerWidget {
                       label: 'Instructions',
                       child: TextField(
                         controller: instructions,
-                        enabled:
-                            !controller.busy &&
-                            (!pending || instructionsMissing),
+                        enabled: !busy && (!pending || instructionsMissing),
                         minLines: 4,
                         maxLines: 6,
                         textCapitalization: TextCapitalization.sentences,
@@ -164,7 +202,7 @@ class CreateAgentSheet extends HookConsumerWidget {
                     ),
                   ],
                 ),
-                if (controller.busy) ...[
+                if (busy) ...[
                   const SizedBox(height: Grid.xs),
                   const LinearProgressIndicator(),
                   Text(controller.status),
@@ -176,7 +214,7 @@ class CreateAgentSheet extends HookConsumerWidget {
                     style: TextStyle(color: context.colors.error),
                   ),
                 ],
-                if (controller.canDiscardPending && !controller.busy)
+                if (controller.canDiscardPending && !busy)
                   TextButton(
                     onPressed: () async {
                       error.value = null;

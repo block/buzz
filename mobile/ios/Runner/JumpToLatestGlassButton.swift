@@ -199,6 +199,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let swatchView = UIView()
   private var labelForegroundColor: UIColor?
   private var showIconWithLabel = false
+  private var labelFontSize: CGFloat?
   private var buttonLabel: String?
   private var buttonIconName = "chevron.backward"
   private var contentIcon = "back"
@@ -424,6 +425,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let icon = arguments?["icon"] as? String
     contentIcon = icon ?? "back"
     buttonLabel = arguments?["label"] as? String
+    labelFontSize = (arguments?["labelFontSize"] as? NSNumber).map { CGFloat(truncating: $0) }
     showIconWithLabel = arguments?["showIconWithLabel"] as? Bool == true
     button.configuration?.imagePadding = showIconWithLabel ? 8 : 0
     if let accessibilityLabel = arguments?["accessibilityLabel"] as? String {
@@ -484,7 +486,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
           }
           let preferred = UIFont.preferredFont(forTextStyle: .subheadline)
           outgoing.font = UIFont.systemFont(
-            ofSize: preferred.pointSize,
+            ofSize: self?.labelFontSize.map { UIFontMetrics(forTextStyle: .subheadline).scaledValue(for: $0) } ?? preferred.pointSize,
             weight: .semibold
           )
           return outgoing
