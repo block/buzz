@@ -54,6 +54,18 @@ results as the scenario's rates. Then a ramp step's `users` reads as a
 multiple of that deployment's population. Keep such scenarios with that
 deployment's own configuration.
 
+## Targeting and membership
+
+`target.connect_addr` (`host:port`) applies only together with
+`target.community_host_template`: it then replaces host resolution for the
+community hosts, over both WebSocket and HTTP, while TLS names, `Host` headers
+and the NIP-42 relay tag still name the community. Without a host
+template, the generator connects to `ws_url` and `http_url` as written and
+`connect_addr` has no effect.
+
+Seeded identities do not join communities or channels. A relay that requires
+membership rejects both `seed` and `run`.
+
 ## Sharding
 
 `run --shard i/n` runs the clients whose global index `g` satisfies
