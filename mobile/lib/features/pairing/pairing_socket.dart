@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../shared/relay/nostr_models.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 const _desktopPairingAuthChallengeGrace = Duration(seconds: 3);
 const _pairingAuthOkTimeout = Duration(seconds: 8);
@@ -212,7 +212,7 @@ class PairingSocket {
         ['challenge', challenge],
       ];
 
-      final event = nostr.Event.from(
+      final event = signNostrEvent(
         kind: EventKind.auth,
         content: '',
         tags: tags,

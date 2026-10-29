@@ -3053,7 +3053,7 @@ async fn ingest_event_inner(
     validate_huddle_lifecycle_event(tenant, state, &event, kind_u32).await?;
 
     // kind:9000 is checked person by person; the plan carries each result
-    // through storage to `apply_put_user`.
+    // to `persist_put_user`, which stores the event and applies it.
     let put_user = if kind_u32 == KIND_NIP29_PUT_USER {
         Some(
             crate::handlers::side_effects::validate_put_user(tenant, &event, state)
@@ -3540,6 +3540,7 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
+    let mut message = String::new();
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();
         let channel = buzz_db::channel::NewChannel {
@@ -3590,6 +3591,28 @@ async fn ingest_event_inner(
         crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
             .await
             .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+    } else if let Some(plan) = put_user {
+        // One commit stores the event and applies its membership changes. A
+        // failure stores nothing, so the client is told and can resend it.
+        // Refusing everyone under the membership lock is the client's error;
+        // anything else is ours.
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        let (stored, inserted, ok_message) = crate::handlers::side_effects::persist_put_user(
+            tenant,
+            &event,
+            state,
+            plan,
+            thread_params,
+        )
+        .await
+        .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
+            Some(buzz_db::DbError::AccessDenied(reason)) => {
+                IngestError::Rejected(format!("invalid: {reason}"))
+            }
+            _ => IngestError::Internal(format!("error: membership write failed: {e}")),
+        })?;
+        message = ok_message;
+        (stored, inserted)
     } else if kind_u32 == KIND_NIP29_EDIT_METADATA {
         // One commit stores the event and applies its channel changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3694,14 +3717,12 @@ async fn ingest_event_inner(
         });
     }
 
-    // Workflow deletion and kind:9002 applied their changes in the insert's
-    // own transaction above.
-    let persisted_atomically = workflow_deletion || kind_u32 == KIND_NIP29_EDIT_METADATA;
-    let mut message = String::new();
-    if let Some(plan) = put_user {
-        message = crate::handlers::side_effects::apply_put_user(tenant, &event, state, plan).await;
-    } else if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32)
-    {
+    // Workflow deletion, kind:9000 and kind:9002 applied their changes in the
+    // insert's own transaction above.
+    let persisted_atomically = workflow_deletion
+        || kind_u32 == KIND_NIP29_PUT_USER
+        || kind_u32 == KIND_NIP29_EDIT_METADATA;
+    if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
                 .await
@@ -7730,9 +7751,8 @@ mod postgres_tests {
         use sqlx::postgres::PgConnectOptions;
         use tokio_util::sync::CancellationToken;
 
-        // A schema with bans but no `users` table: the ban commits, and only
-        // the owned-agent lookup fails. It carries `communities` and the
-        // deletion lock key so the ban passes community write admission.
+        // A supported ban writer commits before the users table is taken away:
+        // only the subsequent owned-agent lookup fails.
         let db_url = crate::test_support::database_url();
         let admin = sqlx::PgPool::connect(&db_url)
             .await
@@ -7740,6 +7760,8 @@ mod postgres_tests {
         let schema = format!("revoke_owner_{}", Uuid::new_v4().simple());
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "CREATE SCHEMA {schema}; \
+             CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
+             CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
              CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
              CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
              CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
@@ -7821,6 +7843,10 @@ mod postgres_tests {
             )
             .await
             .expect("ban commits");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TABLE {schema}.users")))
+            .execute(&admin)
+            .await
+            .expect("break only the post-commit owner lookup");
         let revoked = state
             .revoke_live_access(
                 &tenant,

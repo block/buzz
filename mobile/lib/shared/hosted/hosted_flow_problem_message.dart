@@ -17,6 +17,10 @@ String hostedFlowProblemMessage(
     'This invite has no uses left. Ask for a new invite link.',
   HostedFlowProblem.inviteInvalid =>
     'This invite is not valid. Ask for a new invite link.',
+  HostedFlowProblem.inviteRestricted =>
+    'This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.',
+  HostedFlowProblem.inviteOwnerMismatch =>
+    'This account does not match its recorded owner. Use the correct account or owner identity to join this community.',
   HostedFlowProblem.denied => 'This account does not have access.',
   HostedFlowProblem.differentAccount =>
     'Your browser signed in to a different account. Sign in to your original account on the web, then reopen setup. Your saved account and keys have been kept.',

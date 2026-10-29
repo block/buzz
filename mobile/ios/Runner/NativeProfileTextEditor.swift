@@ -28,6 +28,17 @@ final class NativeProfileTextEditorCoordinator: NSObject,
     _ call: FlutterMethodCall,
     result: @escaping FlutterResult
   ) {
+    if call.method == "updateChatAssistants" {
+      DispatchQueue.main.async { [weak self] in
+        if let arguments = call.arguments as? [String: Any],
+           let navigation = self?.presentedController as? UINavigationController,
+           let editor = navigation.viewControllers.first as? NativeProfileTextEditorViewController {
+          editor.updateChatAssistants(arguments)
+        }
+        result(nil)
+      }
+      return
+    }
     guard call.method == "present" || call.method == "presentChannel" || call.method == "presentChat" || call.method == "presentProject" else {
       result(FlutterMethodNotImplemented)
       return
@@ -241,7 +252,7 @@ private final class NativeProfileTextEditorViewController:
   private var hasCanvas: Bool {
     canvasLoaded && !canvasContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
-  private let chatOptions: [String: Any]?
+  private var chatOptions: [String: Any]?
   private var hasFocusedEditor = false
   private var selectedAssistantAvatar: UIImage?
   private var selectedAssistant: String?
@@ -254,6 +265,8 @@ private final class NativeProfileTextEditorViewController:
   private var assistants: [[String: String]] {
     chatOptions?["assistants"] as? [[String: String]] ?? []
   }
+  // Keep decoded artwork while switching between the form and its agent list.
+  private let assistantAvatars = MeAvatarLoader()
   private var fieldsLocked: Bool { chatOptions?["fieldsLocked"] as? Bool ?? false }
   private var isChannelEditor: Bool { channelDescription != nil }
 
@@ -426,13 +439,30 @@ private final class NativeProfileTextEditorViewController:
     updateNavigation()
   }
 
+  func updateChatAssistants(_ arguments: [String: Any]) {
+    guard let token = arguments["presentationId"] as? String,
+          token == chatOptions?["presentationId"] as? String else { return }
+    chatOptions?["assistants"] = arguments["assistants"]
+    chatOptions?["assistantsLoading"] = false
+    chatOptions?["assistantError"] = arguments["assistantError"]
+    tableView.reloadSections(IndexSet(integer: 2), with: .none)
+    updateNavigation()
+  }
+
+  // A durable retry keeps its saved recipient even if discovery hides it.
+  // Flutter revalidates ownership before any creation writes.
+  private var canSubmitAssistant: Bool {
+    guard let selectedAssistant else { return false }
+    return fieldsLocked || assistants.contains { $0["id"] == selectedAssistant }
+  }
+
   private func updateNavigation() {
     navigationItem.rightBarButtonItem?.isEnabled = canEditDetails && hasUnsavedChanges
       && (!isChannelEditor || !canonicalChannelName.isEmpty)
       && (!isChatEditor || (
         !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
           && currentValue.count <= 120
-          && (isProjectEditor || assistants.contains { $0["id"] == selectedAssistant })
+          && (isProjectEditor || canSubmitAssistant)
       ))
     navigationController?.isModalInPresentation = hasUnsavedChanges
     placeholderLabel.isHidden = !textView.text.isEmpty
@@ -474,7 +504,7 @@ private final class NativeProfileTextEditorViewController:
       onSet(name)
     } else if isChatEditor {
       guard let selectedAssistant,
-            assistants.contains(where: { $0["id"] == selectedAssistant }),
+            canSubmitAssistant,
             !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             currentValue.count <= 120 else { return }
       onSet(["name": currentValue, "assistant": selectedAssistant, "project": selectedProject ?? ""])
@@ -511,7 +541,7 @@ private final class NativeProfileTextEditorViewController:
     if isChatEditor && indexPath.section == 2 {
       guard !fieldsLocked && !assistants.isEmpty else { return }
       view.endEditing(true)
-      let picker = MeAssistantListController(assistants: assistants, selected: selectedAssistant, pageColor: pageBackgroundColor, rowColor: containerBackgroundColor) { [weak self] id, avatar in
+      let picker = MeAssistantListController(assistants: assistants, selected: selectedAssistant, pageColor: pageBackgroundColor, rowColor: containerBackgroundColor, avatars: assistantAvatars) { [weak self] id, avatar in
         self?.selectedAssistantAvatar = avatar
         self?.selectedAssistant = id
         self?.tableView.reloadSections(IndexSet(integer: 2), with: .none)
@@ -538,6 +568,8 @@ private final class NativeProfileTextEditorViewController:
 
   override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
     guard isChatEditor && section == 2 else { return nil }
+    if chatOptions?["assistantsLoading"] as? Bool == true { return "Loading agents…" }
+    if let error = chatOptions?["assistantError"] as? String { return error }
     if let error = chatOptions?["error"] as? String { return error }
     return assistants.isEmpty
       ? "No agents are available for this account. Connect an agent on desktop, then try again."
@@ -600,8 +632,13 @@ private final class NativeProfileTextEditorViewController:
       cell.accessoryView = button
     } else if isChatEditor && indexPath.section == 2 {
       var content = cell.defaultContentConfiguration()
-      let selected = assistants.first { $0["id"] == selectedAssistant }
+      let saved = chatOptions?["savedAssistant"] as? [String: String]
+      let fallback = fieldsLocked ? selectedAssistant.map {
+        saved.flatMap { $0["id"] == selectedAssistant ? $0 : nil } ?? ["id": $0, "name": $0]
+      } : nil
+      let selected = assistants.first { $0["id"] == selectedAssistant } ?? fallback
       content.text = selected?["name"] ?? "Choose an agent"
+      content.textProperties.numberOfLines = 0
       if let selected {
         content.image = selectedAssistantAvatar ?? MeAssistantListController.avatarImage(selected, photo: nil)
       }

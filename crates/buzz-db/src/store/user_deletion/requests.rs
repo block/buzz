@@ -1,30 +1,34 @@
-//! Submit a user request and its dummy inventory in one transaction.
-use super::{
-    inventory::{demo_inventory, validate_submission},
-    UserDeletionStore,
-};
+//! Submit a user request and its discovered inventory in one transaction.
+use super::{discovery::normalize_target, UserDeletionStore};
 use crate::entity_deletion::EntityRequest;
-use crate::store::entity_deletion::requests::{inventory_digest, REQUEST_COLUMNS};
+use crate::store::entity_deletion::requests::{
+    inventory_digest, validate_operator, REQUEST_COLUMNS,
+};
 use crate::{DbError, Result};
 impl UserDeletionStore {
     /// Save a request or return an identical previous submission.
     ///
     /// A conflicting operator or reason returns an error without changing the
     /// existing request. Concurrent identical submissions converge on one row.
-    /// Legacy submitted rows acquire their demo inventory on matching resubmission.
+    /// Legacy submitted rows acquire their inventory on matching resubmission.
+    /// Hex and npub inputs normalize to the same target; saved inventories are not refreshed.
     pub async fn submit(
         &self,
         target: &str,
         requested_by: &str,
         reason: Option<&str>,
     ) -> Result<EntityRequest> {
-        validate_submission(target, requested_by, reason)?;
+        let target = normalize_target(target)?;
+        validate_operator(requested_by)?;
+        if reason.is_some_and(|r| r.len() > 4096) {
+            return Err(DbError::DeletionSafety("reason exceeds 4096 bytes".into()));
+        }
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO entity_deletion_requests (target, requested_by, reason)
              VALUES ($1, $2, $3) ON CONFLICT (entity_type, target) DO NOTHING",
         )
-        .bind(target)
+        .bind(&target)
         .bind(requested_by)
         .bind(reason)
         .execute(&mut *tx)
@@ -33,7 +37,7 @@ impl UserDeletionStore {
             "SELECT {REQUEST_COLUMNS}
              FROM entity_deletion_requests WHERE entity_type = 'user' AND target = $1 FOR UPDATE",
         )))
-        .bind(target)
+        .bind(&target)
         .fetch_one(&mut *tx)
         .await?;
         if request.requested_by != requested_by || request.reason.as_deref() != reason {
@@ -43,7 +47,7 @@ impl UserDeletionStore {
             )));
         }
         if request.status == "submitted" {
-            let inventory = demo_inventory(target);
+            let inventory = super::discovery::generate_inventory_on(&mut tx, &target).await?;
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "UPDATE entity_deletion_requests
@@ -57,6 +61,9 @@ impl UserDeletionStore {
             .bind(digest)
             .fetch_one(&mut *tx)
             .await?;
+            // Use the approval validator before committing either the request
+            // or inventory, so unsupported scopes leave no new request behind.
+            super::UserDeletionInventory::read(&request)?;
         }
         tx.commit().await?;
         Ok(request)

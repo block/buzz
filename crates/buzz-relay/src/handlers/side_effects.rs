@@ -335,9 +335,9 @@ pub async fn handle_side_effects(
     match kind {
         0 => handle_kind0_profile(tenant, event, state).await,
         5 => handle_standard_deletion_event(tenant, event, state).await,
-        // kind:9000 belongs to the put-user path in ingest, which reports
-        // each person's result.
-        9000 => Err(anyhow::anyhow!("kind:9000 requires apply_put_user")),
+        // kind:9000 belongs to the atomic put-user path in ingest, which
+        // reports each person's result.
+        9000 => Err(anyhow::anyhow!("kind:9000 requires persist_put_user")),
         9001 => handle_remove_user(tenant, event, state).await,
         // kind:9002 belongs to the atomic persistence path in ingest.
         9002 => Err(anyhow::anyhow!("kind:9002 requires atomic persistence")),
@@ -597,7 +597,7 @@ pub async fn validate_admin_event(
 
     match kind {
         // Ingest validates kind:9000 with `validate_put_user`, which keeps
-        // each person's result for `apply_put_user`.
+        // each person's result for `persist_put_user`.
         9000 => Err(anyhow::anyhow!("kind:9000 requires validate_put_user")),
         9001 => {
             // REMOVE_USER: self-remove allowed unless actor is the last owner; removing others requires owner/admin
@@ -981,6 +981,11 @@ async fn fan_out_system_message(
 /// incremented, so the emitted summary is exact even under concurrent
 /// replies/deletes (newest `created_at` wins client-side).
 ///
+/// Coalesced per root through [`AppState::thread_summary_refresh`]: a quiet
+/// thread emits at once, while a busy one emits at most once per
+/// [`crate::state::THREAD_SUMMARY_REFRESH_INTERVAL`] per pod, with a trailing
+/// emit that reads state committed after the last mutation in the burst.
+///
 /// Spawned: runs after the triggering write committed and must not add
 /// latency to the ingest acknowledgement, mirroring
 /// `dispatch_persistent_event`.
@@ -990,86 +995,97 @@ pub fn emit_live_thread_summary(
     channel_id: Uuid,
     root_id: Vec<u8>,
 ) {
+    let key = (tenant.community(), root_id.clone());
     let tenant = tenant.clone();
-    let state = Arc::clone(state);
-    tokio::spawn(async move {
-        let summary = match state
-            .db
-            .get_thread_summary(tenant.community(), &root_id)
-            .await
-        {
-            Ok(Some(summary)) => summary,
-            // Root has no thread row — nothing to summarize (e.g., the root
-            // itself was just deleted).
-            Ok(None) => return,
-            Err(e) => {
-                warn!(
-                    root = %hex::encode(&root_id),
-                    "live thread summary lookup failed: {e}"
-                );
-                return;
-            }
-        };
-
-        let root_hex = hex::encode(&root_id);
-        // Same tags/content shape as the channel-window page overlay in
-        // `api/bridge.rs` — one contract, two delivery doors.
-        let content = serde_json::json!({
-            "reply_count": summary.reply_count,
-            "descendant_count": summary.descendant_count,
-            "last_reply_at": summary.last_reply_at.map(|t| t.timestamp()),
-            "participants": summary.participants.iter().map(hex::encode).collect::<Vec<_>>(),
-        });
-        let tags = [
-            Tag::parse(["e", &root_hex]),
-            Tag::parse(["d", &root_hex]),
-            Tag::parse(["h", &channel_id.to_string()]),
-        ];
-        let mut parsed = Vec::with_capacity(tags.len());
-        for tag in tags {
-            match tag {
-                Ok(tag) => parsed.push(tag),
-                Err(e) => {
-                    warn!(root = %root_hex, "live thread summary tag failed: {e}");
-                    return;
-                }
-            }
-        }
-        let event = match EventBuilder::new(
-            Kind::Custom(KIND_THREAD_SUMMARY as u16),
-            content.to_string(),
+    let task_state = Arc::clone(state);
+    state.thread_summary_refresh.request(key, move || {
+        publish_live_thread_summary(
+            tenant.clone(),
+            Arc::clone(&task_state),
+            channel_id,
+            root_id.clone(),
         )
-        .tags(parsed)
-        .sign_with_keys(&state.relay_keypair)
-        {
-            Ok(event) => event,
-            Err(e) => {
-                warn!(root = %root_hex, "live thread summary sign failed: {e}");
-                return;
-            }
-        };
-
-        // Redis before local fan-out so subscribers on other relay pods
-        // receive it too, matching `dispatch_persistent_event`.
-        state.mark_local_event(tenant.community(), &event.id);
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&tenant, EventTopic::Channel(channel_id), &event)
-            .await
-        {
-            state
-                .local_event_ids
-                .invalidate(&(tenant.community(), event.id.to_bytes()));
-            warn!(root = %root_hex, "live thread summary Redis publish failed: {e}");
-        }
-        let stored = StoredEvent::new(event, Some(channel_id));
-        crate::handlers::event::fan_out_event_to_local_subscribers(
-            &state,
-            tenant.community(),
-            &stored,
-        )
-        .await;
     });
+}
+
+async fn publish_live_thread_summary(
+    tenant: TenantContext,
+    state: Arc<AppState>,
+    channel_id: Uuid,
+    root_id: Vec<u8>,
+) {
+    let summary = match state
+        .db
+        .get_thread_summary(tenant.community(), &root_id)
+        .await
+    {
+        Ok(Some(summary)) => summary,
+        // Root has no thread row — nothing to summarize (e.g., the root
+        // itself was just deleted).
+        Ok(None) => return,
+        Err(e) => {
+            warn!(
+                root = %hex::encode(&root_id),
+                "live thread summary lookup failed: {e}"
+            );
+            return;
+        }
+    };
+
+    let root_hex = hex::encode(&root_id);
+    // Same tags/content shape as the channel-window page overlay in
+    // `api/bridge.rs` — one contract, two delivery doors.
+    let content = serde_json::json!({
+        "reply_count": summary.reply_count,
+        "descendant_count": summary.descendant_count,
+        "last_reply_at": summary.last_reply_at.map(|t| t.timestamp()),
+        "participants": summary.participants.iter().map(hex::encode).collect::<Vec<_>>(),
+    });
+    let tags = [
+        Tag::parse(["e", &root_hex]),
+        Tag::parse(["d", &root_hex]),
+        Tag::parse(["h", &channel_id.to_string()]),
+    ];
+    let mut parsed = Vec::with_capacity(tags.len());
+    for tag in tags {
+        match tag {
+            Ok(tag) => parsed.push(tag),
+            Err(e) => {
+                warn!(root = %root_hex, "live thread summary tag failed: {e}");
+                return;
+            }
+        }
+    }
+    let event = match EventBuilder::new(
+        Kind::Custom(KIND_THREAD_SUMMARY as u16),
+        content.to_string(),
+    )
+    .tags(parsed)
+    .sign_with_keys(&state.relay_keypair)
+    {
+        Ok(event) => event,
+        Err(e) => {
+            warn!(root = %root_hex, "live thread summary sign failed: {e}");
+            return;
+        }
+    };
+
+    // Redis before local fan-out so subscribers on other relay pods
+    // receive it too, matching `dispatch_persistent_event`.
+    state.mark_local_event(tenant.community(), &event.id);
+    if let Err(e) = state
+        .pubsub
+        .publish_event(&tenant, EventTopic::Channel(channel_id), &event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(root = %root_hex, "live thread summary Redis publish failed: {e}");
+    }
+    let stored = StoredEvent::new(event, Some(channel_id));
+    crate::handlers::event::fan_out_event_to_local_subscribers(&state, tenant.community(), &stored)
+        .await;
 }
 
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).
@@ -1760,17 +1776,27 @@ impl PutUserReport {
     }
 }
 
-/// Apply a stored kind:9000 and return its OK message. An event naming
-/// several people reports each person's result; one naming a single person
-/// keeps the empty message a single add has always had. `put_member` decides
-/// every admission rule again under the channel's membership lock, so a person
-/// validation allowed can still be refused here.
-pub(crate) async fn apply_put_user(
+/// Store a validated kind:9000 and apply it, returning the stored event,
+/// whether it was new, and its OK message.
+///
+/// One transaction stores the event and writes every allowed person. If it
+/// fails, nothing is stored and the client is told, so it can resend the same
+/// event. `put_members_with_event` decides every admission rule again under
+/// the channel's membership lock, so a person validation allowed can still be
+/// refused there; when everyone is refused, nothing is stored and the error is
+/// a [`buzz_db::DbError::AccessDenied`] with the same text validation gives.
+///
+/// An event naming several people reports each person's result; one naming a
+/// single person keeps the empty message a single add has always had. Live
+/// effects (cache invalidation, notices, discovery events) run only after the
+/// commit.
+pub(crate) async fn persist_put_user(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
     plan: PutUserPlan,
-) -> String {
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> anyhow::Result<(buzz_core::StoredEvent, bool, String)> {
     let channel_id = plan.channel_id;
     let batch = plan.targets.len() > 1;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
@@ -1790,21 +1816,30 @@ pub(crate) async fn apply_put_user(
             requested: target.role,
         })
         .collect();
-    let results = match state
+    let (stored, results) = match state
         .db
-        .put_members(tenant.community(), channel_id, &puts, Some(&actor_bytes))
-        .await
+        .put_members_with_event(tenant.community(), channel_id, event, &puts, thread_meta)
+        .await?
     {
-        Ok(results) => results,
-        // Nothing was written.
-        Err(e) => {
-            error!(channel = %channel_id, error = %e, "NIP-29 PUT_USER write failed");
-            for target in &allowed {
-                report.reject(&target.pubkey, "error: membership write failed".into());
+        buzz_db::channel_members::MemberPutEventWrite::Applied { stored, results } => {
+            (stored, results)
+        }
+        buzz_db::channel_members::MemberPutEventWrite::Duplicate(stored) => {
+            return Ok((stored, false, String::new()));
+        }
+        buzz_db::channel_members::MemberPutEventWrite::Refused(errors) => {
+            for (target, error) in allowed.iter().zip(errors) {
+                report.reject(&target.pubkey, put_refusal_reason(error));
             }
-            Vec::new()
+            let message = match report.rejected.as_slice() {
+                // One person keeps the single-add error text.
+                [(reason, _)] if !batch => reason.clone(),
+                _ => report.message(),
+            };
+            return Err(buzz_db::DbError::AccessDenied(message).into());
         }
     };
+
     // Every person's notification is tagged with the channel's type: read it
     // once. No channel row means no type to tag, so no notifications.
     let channel_type = if results.iter().any(Result::is_ok) {
@@ -1830,13 +1865,8 @@ pub(crate) async fn apply_put_user(
     for (target, result) in allowed.iter().zip(results) {
         let put = match result {
             Ok(put) => put,
-            Err(buzz_db::DbError::AccessDenied(reason)) => {
-                report.reject(&target.pubkey, reason);
-                continue;
-            }
-            Err(e) => {
-                error!(channel = %channel_id, error = %e, "NIP-29 PUT_USER write failed");
-                report.reject(&target.pubkey, "error: membership write failed".into());
+            Err(error) => {
+                report.reject(&target.pubkey, put_refusal_reason(error));
                 continue;
             }
         };
@@ -1901,10 +1931,19 @@ pub(crate) async fn apply_put_user(
         rejected = report.rejected.iter().map(|(_, pubkeys)| pubkeys.len()).sum::<usize>(),
         "NIP-29 PUT_USER processed"
     );
-    if batch {
+    let message = if batch {
         report.message()
     } else {
         String::new()
+    };
+    Ok((stored, true, message))
+}
+
+/// The reported reason a person was refused under the membership lock.
+fn put_refusal_reason(error: buzz_db::DbError) -> String {
+    match error {
+        buzz_db::DbError::AccessDenied(reason) => reason,
+        other => other.to_string(),
     }
 }
 

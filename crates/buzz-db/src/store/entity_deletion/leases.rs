@@ -1,4 +1,4 @@
-//! Parent-request ownership and stage attempts for the synthetic workflow.
+//! Parent-request ownership and stage attempts for deletion workflows.
 
 use std::time::Duration;
 
@@ -35,7 +35,7 @@ pub struct EntityExecution {
     pub next_attempt_at: Option<DateTime<Utc>>,
     /// Last recorded stage failure.
     pub last_error: Option<String>,
-    /// Time all synthetic stages completed.
+    /// Time the workflow completed.
     pub completed_at: Option<DateTime<Utc>>,
 }
 
@@ -140,7 +140,10 @@ impl EntityDeletionStore {
     }
 }
 
-pub(super) async fn lock_owned(tx: &mut Tx<'_>, lease: &EntityLease) -> Result<EntityRequest> {
+pub(in crate::store) async fn lock_owned(
+    tx: &mut Tx<'_>,
+    lease: &EntityLease,
+) -> Result<EntityRequest> {
     // Lock by id first, then check expiry after any wait for that lock. An old
     // snapshot/transaction start time must not extend a worker's authority.
     let request: EntityRequest = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -167,7 +170,7 @@ pub(super) async fn lock_owned(tx: &mut Tx<'_>, lease: &EntityLease) -> Result<E
     Ok(request)
 }
 
-pub(super) async fn validate_approved_inventory(
+pub(in crate::store) async fn validate_approved_inventory(
     tx: &mut Tx<'_>,
     request: &EntityRequest,
 ) -> Result<()> {

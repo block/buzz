@@ -108,6 +108,8 @@ pub(crate) struct CommunityConnectionControl {
     owner: Arc<std::sync::OnceLock<[u8; 32]>>,
     /// Shadow-mode observation of this socket; no enforce path reads it.
     nip_fi_shadow: Arc<std::sync::OnceLock<Arc<crate::nip_fi_shadow_session::ShadowSession>>>,
+    /// A shadow upgrade would-deny's line, owned by the connection task.
+    nip_fi_line: Arc<std::sync::OnceLock<std::sync::Weak<crate::nip_fi_shadow::PendingLine>>>,
 }
 
 impl CommunityConnectionControl {
@@ -121,6 +123,7 @@ impl CommunityConnectionControl {
             pubkey: Arc::default(),
             owner: Arc::default(),
             nip_fi_shadow: Arc::default(),
+            nip_fi_line: Arc::default(),
         }
     }
 
@@ -133,6 +136,30 @@ impl CommunityConnectionControl {
         if let Some(session) = session {
             session.fence(self.cancel.clone());
             let _ = self.nip_fi_shadow.set(session);
+        }
+    }
+
+    /// Lets the socket's AUTH write its shadow upgrade would-deny line, which
+    /// the connection task owns.
+    pub(crate) fn attach_nip_fi_line(&self, line: Option<&Arc<crate::nip_fi_shadow::PendingLine>>) {
+        if let Some(line) = line {
+            let _ = self.nip_fi_line.set(Arc::downgrade(line));
+        }
+    }
+
+    /// Writes the socket's shadow upgrade would-deny line, if any, for
+    /// `pubkey`, which a NIP-42 AUTH just verified.
+    pub(crate) fn prove_nip_fi_line(&self, pubkey: nostr::PublicKey) {
+        if let Some(line) = self.nip_fi_line.get().and_then(std::sync::Weak::upgrade) {
+            line.prove(pubkey);
+        }
+    }
+
+    /// Writes the socket's still-unproven shadow upgrade would-deny line as
+    /// `absent`; called as the socket's read loop ends, before cleanup.
+    pub(crate) fn finish_nip_fi_line(&self) {
+        if let Some(line) = self.nip_fi_line.get().and_then(std::sync::Weak::upgrade) {
+            line.finish();
         }
     }
 
@@ -1172,6 +1199,14 @@ impl Default for ConnectionManager {
     }
 }
 
+/// Minimum spacing between live thread-summary emits for one thread root on
+/// one relay pod. See [`AppState::thread_summary_refresh`].
+pub const THREAD_SUMMARY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Upper bound on one live thread-summary refresh (DB read, Redis publish,
+/// local fan-out). A hung refresh is abandoned so its root keeps emitting.
+pub const THREAD_SUMMARY_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Shared application state, cloned cheaply via inner `Arc` fields.
 #[derive(Clone)]
 pub struct AppState {
@@ -1308,6 +1343,11 @@ pub struct AppState {
         Arc<moka::sync::Cache<ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>>,
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
+    /// Per-(community, thread root) coalescing for live `kind:39005` thread
+    /// summaries, so a busy thread recomputes its summary at most once per
+    /// [`THREAD_SUMMARY_REFRESH_INTERVAL`] instead of once per reply.
+    pub thread_summary_refresh:
+        Arc<crate::handlers::coalesced_refresh::CoalescedRefresh<(CommunityId, Vec<u8>)>>,
     /// Cache for observer agent-owner authorization (kind 24200).
     /// Key: (community_id, agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
     /// `agent_owner_pubkey` is immutable inside one community, so a long TTL
@@ -1582,6 +1622,12 @@ impl AppState {
                     .build(),
             ),
             media_uploads_in_flight: Arc::new(DashMap::new()),
+            thread_summary_refresh: Arc::new(
+                crate::handlers::coalesced_refresh::CoalescedRefresh::new(
+                    THREAD_SUMMARY_REFRESH_INTERVAL,
+                    THREAD_SUMMARY_REFRESH_TIMEOUT,
+                ),
+            ),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(100_000)
@@ -2970,15 +3016,30 @@ pub(crate) mod tests {
     /// The same test state with an explicit database target. This lets handler
     /// tests deterministically exercise fail-closed database seams without
     /// depending on whether a developer has the normal test database running.
+    /// Its pool waits only 100 ms for a connection, so closed-port targets
+    /// fail fast.
     pub(crate) async fn test_state_with_database_url(database_url: &str) -> Arc<AppState> {
+        test_state_with_database_url_and_pool_options(
+            database_url,
+            sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(100)),
+        )
+        .await
+    }
+
+    /// Test state whose config and writer pool both target `database_url`,
+    /// with the caller's pool options.
+    pub(crate) async fn test_state_with_database_url_and_pool_options(
+        database_url: &str,
+        options: sqlx::postgres::PgPoolOptions,
+    ) -> Arc<AppState> {
         // Fix 5: use Config::for_test() which holds NIP_FI_ENV_LOCK internally. [FI-TRACE-ENV-RACE]
         let mut config = crate::config::Config::for_test();
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.database_url = database_url.to_owned();
         config.read_database_url = None;
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(std::time::Duration::from_millis(100))
+        let pool = options
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         build_test_state(config, pool).await

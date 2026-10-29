@@ -175,6 +175,7 @@ class HostedAppGate extends HookConsumerWidget {
                 !inlineAccountStatus &&
                 (!inlineEntry ||
                     flow.stage == HostedFlowStage.chooseIdentity ||
+                    flow.stage == HostedFlowStage.setupIdentity ||
                     flow.stage == HostedFlowStage.chooseCommunities ||
                     flow.stage == HostedFlowStage.communityConflict ||
                     flow.canChangeCommunities))

@@ -22,6 +22,7 @@ class _EmojiMode extends HookConsumerWidget {
     required this.selectedColor,
     required this.transitionProgress,
     required this.transitionDirection,
+    this.controlsFromBelow = false,
     required this.onSectionChanged,
     required this.onEmojiSelected,
     required this.onColorSelected,
@@ -34,6 +35,7 @@ class _EmojiMode extends HookConsumerWidget {
   final int selectedColor;
   final double transitionProgress;
   final double transitionDirection;
+  final bool controlsFromBelow;
   final ValueChanged<_EmojiEditorSection> onSectionChanged;
   final ValueChanged<String> onEmojiSelected;
   final ValueChanged<int> onColorSelected;
@@ -178,12 +180,8 @@ class _EmojiMode extends HookConsumerWidget {
                                       key: const ValueKey('emoji-avatar-grid'),
                                       padding: EdgeInsets.zero,
                                       gridDelegate:
-                                          SliverGridDelegateWithFixedCrossAxisCount(
-                                            crossAxisCount:
-                                                defaultTargetPlatform ==
-                                                    TargetPlatform.iOS
-                                                ? 8
-                                                : 7,
+                                          const SliverGridDelegateWithFixedCrossAxisCount(
+                                            crossAxisCount: 6,
                                           ),
                                       itemCount: visibleEmoji.length,
                                       itemBuilder: (context, index) {
@@ -217,7 +215,9 @@ class _EmojiMode extends HookConsumerWidget {
           ClipRect(
             child: Transform.translate(
               key: const ValueKey('avatar-mode-transition-transform'),
-              offset: Offset(actionOffset, 0),
+              offset: controlsFromBelow
+                  ? Offset(0, trayOffset)
+                  : Offset(actionOffset, 0),
               child: Opacity(
                 opacity: transitionProgress,
                 child: Row(

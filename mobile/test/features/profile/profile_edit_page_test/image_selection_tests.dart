@@ -418,7 +418,16 @@ void runProfileEditImageSelectionTests() {
       findsNothing,
     );
     await tester.tap(find.byKey(const ValueKey('fake-image-camera-accept')));
+    await tester.pump();
+    final returnedRail = tester.getCenter(
+      find.byKey(const ValueKey('image-source-camera')),
+    );
     await tester.pumpAndSettle();
+    expect(
+      tester.getCenter(find.byKey(const ValueKey('image-source-camera'))),
+      returnedRail,
+      reason: 'Camera exit must not start a second rail translation',
+    );
 
     expect(
       find.text("We couldn't prepare that photo. Try again."),
@@ -457,7 +466,16 @@ void runProfileEditImageSelectionTests() {
     expect(find.byKey(const ValueKey('fake-image-camera')), findsOneWidget);
     expect(find.byKey(const ValueKey('image-source-library')), findsNothing);
     await tester.tap(find.byKey(const ValueKey('fake-image-camera-accept')));
+    await tester.pump();
+    final returnedRail = tester.getCenter(
+      find.byKey(const ValueKey('image-source-camera')),
+    );
     await tester.pumpAndSettle();
+    expect(
+      tester.getCenter(find.byKey(const ValueKey('image-source-camera'))),
+      returnedRail,
+      reason: 'Camera exit must not start a second rail translation',
+    );
 
     expect(find.byKey(const ValueKey('fake-image-camera')), findsNothing);
     expect(find.byKey(const ValueKey('image-source-camera')), findsOneWidget);

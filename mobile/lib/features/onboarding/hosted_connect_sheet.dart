@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/hosted_flow.dart';
+import '../../shared/identity_transfer/nsec_import_sheet.dart';
 import '../../shared/hosted/hosted_flow_problem_message.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/theme/grid.dart';
@@ -19,6 +20,32 @@ class HostedConnectSheet extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(flow);
+    final showLinkedIdentity = useState(false);
+    Future<void> importIdentity() async {
+      Future<void>? pendingImport;
+      await showNsecImportSheet(
+        context,
+        mismatchMessage:
+            'This key doesn’t match the identity linked to your Builderlab account.',
+        onImport: (nsec) => pendingImport = flow.importIdentity(nsec),
+      );
+      // Dismissing the sheet does not cancel a secure-store write in flight.
+      // Finish that operation before resuming, even when the modal returned null.
+      if (pendingImport == null) return;
+      try {
+        await pendingImport;
+      } catch (_) {
+        return; // The sheet already presented the import failure.
+      }
+      if (context.mounted && flow.stage == HostedFlowStage.setupIdentity) {
+        await flow.retry();
+      }
+    }
+
+    final actionStyle = FilledButton.styleFrom(
+      minimumSize: const Size.fromHeight(52),
+      shape: const StadiumBorder(),
+    );
     final working = flow.stage == HostedFlowStage.working;
     final message = switch (flow.stage) {
       HostedFlowStage.idle => 'Continue connecting your account.',
@@ -26,6 +53,10 @@ class HostedConnectSheet extends HookConsumerWidget {
         flow.addingCommunityName == null
             ? 'Securing your account and finding communities…'
             : 'Adding ${flow.addingCommunityName}…',
+      HostedFlowStage.setupIdentity =>
+        flow.canCreateIdentity
+            ? 'Create an identity, or bring yours from another device. We’ll back it up for future sign-ins.'
+            : 'Your identity hasn’t been backed up yet. Bring it from your other device to keep using the same Buzz account.',
       HostedFlowStage.chooseCommunities => 'Choose your communities',
       HostedFlowStage.communityConflict =>
         '${flow.addingCommunityName} is already saved with a different identity. '
@@ -58,6 +89,17 @@ class HostedConnectSheet extends HookConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (flow.stage == HostedFlowStage.setupIdentity) ...[
+              Text(
+                flow.canCreateIdentity
+                    ? 'Make yourself at home'
+                    : 'Bring your identity with you',
+                style: context.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: Grid.twelve),
+            ],
             Text(message, style: context.textTheme.bodyLarge),
             const SizedBox(height: Grid.sm),
             for (final choice in flow.identityChoices)
@@ -76,6 +118,65 @@ class HostedConnectSheet extends HookConsumerWidget {
                   ),
                 ),
               ),
+            if (flow.stage == HostedFlowStage.setupIdentity) ...[
+              if (flow.canCreateIdentity) ...[
+                FilledButton(
+                  style: actionStyle.copyWith(
+                    backgroundColor: WidgetStatePropertyAll(
+                      context.colors.primary,
+                    ),
+                    foregroundColor: WidgetStatePropertyAll(
+                      context.colors.onPrimary,
+                    ),
+                  ),
+                  onPressed: flow.createIdentity,
+                  child: const Text('Create my Buzz identity'),
+                ),
+                const SizedBox(height: Grid.xxs),
+                TextButton(
+                  style: actionStyle,
+                  onPressed: importIdentity,
+                  child: const Text('Import existing identity'),
+                ),
+              ] else ...[
+                FilledButton(
+                  style: actionStyle.copyWith(
+                    backgroundColor: WidgetStatePropertyAll(
+                      context.colors.primary,
+                    ),
+                    foregroundColor: WidgetStatePropertyAll(
+                      context.colors.onPrimary,
+                    ),
+                  ),
+                  onPressed: importIdentity,
+                  child: const Text('Import existing identity'),
+                ),
+                const SizedBox(height: Grid.twelve),
+                Text(
+                  'We’ll securely back it up so your next sign-in is easier.',
+                  textAlign: TextAlign.center,
+                  style: context.textTheme.bodySmall,
+                ),
+              ],
+              if (flow.requiredIdentityPubkey != null) ...[
+                const SizedBox(height: Grid.xxs),
+                TextButton(
+                  onPressed: () =>
+                      showLinkedIdentity.value = !showLinkedIdentity.value,
+                  child: Text(
+                    showLinkedIdentity.value
+                        ? 'Hide linked identity'
+                        : 'View linked identity',
+                  ),
+                ),
+                if (showLinkedIdentity.value)
+                  SelectableText(
+                    fullNpub(flow.requiredIdentityPubkey!) ??
+                        flow.requiredIdentityPubkey!,
+                    style: context.textTheme.bodySmall,
+                  ),
+              ],
+            ],
             if (flow.stage == HostedFlowStage.profile &&
                 flow.saveProfile != null)
               HostedProfileSetup(
@@ -114,6 +215,7 @@ class HostedConnectSheet extends HookConsumerWidget {
                 flow.stage != HostedFlowStage.profile &&
                 flow.stage != HostedFlowStage.acceptPolicy &&
                 flow.stage != HostedFlowStage.chooseIdentity &&
+                flow.stage != HostedFlowStage.setupIdentity &&
                 flow.stage != HostedFlowStage.chooseCommunities &&
                 flow.stage != HostedFlowStage.communityConflict &&
                 flow.stage != HostedFlowStage.complete &&

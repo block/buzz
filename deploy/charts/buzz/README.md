@@ -417,6 +417,21 @@ Pool sizing and the aggregate connection budget across all four roles remain
 deployment configuration concerns. The relay does not enforce a combined
 connection ceiling.
 
+The reader pool keeps a warm floor of one fifth of its maximum (at least one)
+established connections per relay pod, so standing reader connections are
+that floor times the pod count; size the replica's `max_connections` for it.
+Each routed read proves the replica is caught up before serving from it. A
+proof that does not answer within 1s falls back to the writer, counted as
+`buzz_db_route_decision{decision="writer",reason="reader_proof_timeout"}`.
+A sustained rise in that series means the replica is reachable but not
+answering, for example during a failover. Every connection returned to the
+reader pool passes a release check first. A connection is closed instead of
+returned, and the pool dials a replacement, when the check does not answer
+within 5s (`reason="timeout"`), fails (`error`), or finds a transaction still
+open (`open_transaction`). Each close increments
+`buzz_db_reader_release_closed_total{reason}`, a counter with those three
+series. A rise in `timeout` means reader sockets stopped answering.
+
 ## Relay Pod extensions
 
 The chart exposes narrow extension points for init containers, volumes, relay
@@ -601,7 +616,7 @@ default so long-lived WebSocket connections have time to drain.
 
 Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
 
-Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. The relay verifies the roster-fence trigger catalog and behavior before opening listeners and refuses to start if 0032 is missing or inert. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
+Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. Older relays verify its roster-fence trigger before opening listeners and refuse to start if the trigger is missing or inert. Newer relays run the same check in every roster writer and do not require the trigger. A later release drops it, and that release requires every relay to run a version without the startup check first. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 

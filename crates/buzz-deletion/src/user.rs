@@ -1,17 +1,26 @@
-//! PostgreSQL-only intake, approval, and execution of synthetic user-deletion requests.
+//! Read-only user inventory and synthetic user-deletion workflow commands.
 
 use anyhow::Result;
 use clap::Subcommand;
 use uuid::Uuid;
 
-/// Prepare and execute synthetic requests; these commands never delete real data.
+/// Preview real memberships or prepare and execute synthetic deletion requests.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Print real current memberships as JSON; does not save or execute a request.
+    Inventory {
+        /// Demo fixture (default), hex public key, or npub. Current memberships only.
+        #[arg(long, default_value = "demo", value_parser = inventory::parse_subject)]
+        pubkey: String,
+    },
     /// Save a request. An identical resubmission returns the existing row.
     Submit {
-        /// Synthetic user label, for example demo:alice.
-        #[arg(long)]
-        target: String,
+        /// Optional demo request label, for example demo:alice. Conflicts with --pubkey.
+        #[arg(long, conflicts_with = "pubkey")]
+        target: Option<String>,
+        /// Demo fixture (default), hex public key, or npub to discover and save.
+        #[arg(long, value_parser = inventory::parse_subject)]
+        pubkey: Option<String>,
         /// Submitting operator identity.
         #[arg(long)]
         requested_by: String,
@@ -41,7 +50,7 @@ pub enum Command {
         #[arg(long)]
         next_step: bool,
         /// Inject a retryable failure when this dummy stage is reached.
-        #[arg(long, value_parser = ["gate_user", "purge_db", "purge_agents"])]
+        #[arg(long, value_parser = workflow::parse_stage)]
         fail_stage: Option<String>,
         /// Delay each dummy action for inspection and shutdown testing (up to 60s).
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=60_000))]
@@ -63,20 +72,44 @@ pub enum Command {
     },
 }
 
-/// Run synthetic workflow commands using the existing deletion database connection.
+/// Run inventory discovery or synthetic workflow commands against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
-    let db = crate::connect_database().await?;
+    let db = if matches!(command, Command::Inventory { .. }) {
+        buzz_db::Db::connect_cold_start(
+            buzz_db::DbConfig {
+                database_url: crate::required_env("DATABASE_URL")?,
+                max_connections: 1,
+                min_connections: 0,
+                default_transaction_read_only: true,
+                ..buzz_db::DbConfig::default()
+            },
+            "user_inventory",
+        )
+        .await?
+    } else {
+        crate::connect_database().await?
+    };
     let store = db.entity_deletion_store();
     match command {
+        Command::Inventory { pubkey } => {
+            crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
+        }
         Command::Submit {
             target,
+            pubkey,
             requested_by,
             reason,
-        } => crate::print_json(
-            &db.user_deletion_store()
-                .submit(&target, &requested_by, reason.as_deref())
-                .await?,
-        )?,
+        } => {
+            let target = target.unwrap_or_else(|| match pubkey.as_deref() {
+                None | Some("demo") => "demo:default".to_owned(),
+                Some(key) => key.to_owned(),
+            });
+            crate::print_json(
+                &db.user_deletion_store()
+                    .submit(&target, &requested_by, reason.as_deref())
+                    .await?,
+            )?;
+        }
         Command::Approve {
             id,
             approved_by,
@@ -118,6 +151,7 @@ pub async fn run(command: Command) -> Result<i32> {
 }
 
 mod handlers;
+mod inventory;
 mod transition;
 mod worker;
 mod workflow;

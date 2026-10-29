@@ -114,3 +114,9 @@ Color navigationMetadataForeground(BuildContext context) =>
     Theme.of(context).brightness == Brightness.dark
     ? const Color(0xFFA4A4A4)
     : const Color(0xFF5F5F5F);
+
+/// Quieter ink for section disclosure and overflow controls.
+Color navigationAccessoryForeground(BuildContext context) =>
+    navigationMetadataForeground(
+      context,
+    ).withValues(alpha: MediaQuery.highContrastOf(context) ? 1 : 0.8);

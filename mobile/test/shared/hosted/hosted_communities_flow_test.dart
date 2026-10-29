@@ -33,7 +33,7 @@ void main() {
           expect(f.flow.problem, HostedFlowProblem.identityMismatch);
         }
         expect(
-          f.requests.any((path) => path.endsWith('/communities/joined')),
+          f.requests.any((path) => path.endsWith('/known-communities/list')),
           isFalse,
         );
         expect(await const FlutterSecureStorage().readAll(), before);
@@ -45,7 +45,7 @@ void main() {
   test('malformed list targets cannot authorize admission', () async {
     final f = await fixture();
     f.rows = [
-      {...f.row('one'), 'normalized_host': 'wss://user@evil.example/path'},
+      {...f.row('one'), 'community_url': 42},
     ];
     await f.flow.signInAccount();
     expect(f.flow.problem, HostedFlowProblem.invalidResponse);
@@ -56,10 +56,12 @@ void main() {
     await f.flow.initialize();
     f.rows = [f.row('a-one'), f.row('a-two')];
     f.beforeAdmission = (name) async {
-      if (name == 'a-two') throw AccountFailure.unavailable;
+      if (name == 'a-two.communities.buzz.xyz') {
+        throw AccountFailure.unavailable;
+      }
     };
     await f.flow.signInAccount();
-    expect(f.admitted, ['a-one']);
+    expect(f.admitted, ['a-one.communities.buzz.xyz']);
     f.expired = true;
     await f.flow.retry();
     expect(f.flow.stage, HostedFlowStage.signIn);
@@ -86,6 +88,9 @@ void main() {
       BrowserAuthCode('other-code', 'a' * 43, {'type': 'account'}),
     );
     await completed.future.timeout(const Duration(seconds: 2));
-    expect(f.admitted, ['a-one', 'b-one']);
+    expect(f.admitted, [
+      'a-one.communities.buzz.xyz',
+      'b-one.communities.buzz.xyz',
+    ]);
   });
 }

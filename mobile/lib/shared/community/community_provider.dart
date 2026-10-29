@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:math';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -109,14 +110,14 @@ typedef CommunityPushLeaseRevocationEnqueuer =
 
 final communityPushLeaseRevocationEnqueuerProvider =
     Provider<CommunityPushLeaseRevocationEnqueuer>((ref) {
-      return ref.read(buzzPushLeaseRevocationOutboxProvider).enqueueCommunity;
+      return ref.watch(buzzPushLeaseRevocationOutboxProvider).enqueueCommunity;
     });
 
 typedef CommunityPushLeaseRevocationTrigger = Future<void> Function();
 
 final communityPushLeaseRevocationTriggerProvider =
     Provider<CommunityPushLeaseRevocationTrigger>((ref) {
-      return ref.read(buzzPushLeaseRevocationOutboxProvider).trigger;
+      return ref.watch(buzzPushLeaseRevocationOutboxProvider).trigger;
     });
 
 Future<void> _deactivateCommunityPushLease(
@@ -133,7 +134,7 @@ Future<void> _deactivateCommunityPushLease(
     throw StateError('Push lease tombstone requires community signing key.');
   }
   final decoded = nostr.Nip19.decode(payload: nsec);
-  final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
+  final memberPubkey = community.pubkey ?? derivePublicKeyHex(decoded.data);
   final descriptor = await fetchBuzzPushLeaseDescriptor(
     canonicalBuzzPushRelayHttpUrl(community.relayUrl),
   );

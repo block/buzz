@@ -255,19 +255,25 @@ Future<Set<String>> _fetchHiddenDmIds(
   String myPk,
 ) async {
   try {
-    final events = await session.fetchHistory(NostrFilters.hiddenDms(myPk));
-    if (events.isEmpty) return const {};
-    NostrEvent latest = events.first;
-    for (final event in events.skip(1)) {
-      if (event.createdAt > latest.createdAt) latest = event;
-    }
-    return {
-      for (final tag in latest.tags)
-        if (tag.length >= 2 && tag[0] == 'h') tag[1],
-    };
+    return hiddenDmIdsFromEvents(
+      await session.fetchHistory(NostrFilters.hiddenDms(myPk)),
+    );
   } catch (_) {
     return const {};
   }
+}
+
+/// The DM ids hidden by the newest of the caller's NIP-DV snapshots.
+Set<String> hiddenDmIdsFromEvents(List<NostrEvent> events) {
+  if (events.isEmpty) return const {};
+  NostrEvent latest = events.first;
+  for (final event in events.skip(1)) {
+    if (event.createdAt > latest.createdAt) latest = event;
+  }
+  return {
+    for (final tag in latest.tags)
+      if (tag.length >= 2 && tag[0] == 'h') tag[1],
+  };
 }
 
 Future<List<NostrEvent>> _fetchHuddleStarts(

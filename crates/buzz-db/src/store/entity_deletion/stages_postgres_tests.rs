@@ -6,7 +6,7 @@ async fn stage_storage_accepts_caller_policy_and_rolls_back_invalid_decisions() 
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
-    let db = Db::from_pool(pool);
+    let db = Db::from_pool(pool.clone());
     let request = db
         .user_deletion_store()
         .submit("demo:generic-storage", "operator", None)
@@ -38,6 +38,7 @@ async fn stage_storage_accepts_caller_policy_and_rolls_back_invalid_decisions() 
     let NextStage::Stage(row) = store
         .transition_stage(&lease, None, |request, history| {
             assert!(history.is_empty());
+            assert_eq!(request.entity_type, "user");
             assert_eq!(request.status, "approved");
             Ok(StageTransition::Initialize(NewEntityStage {
                 stage: "arbitrary_policy_stage".into(),

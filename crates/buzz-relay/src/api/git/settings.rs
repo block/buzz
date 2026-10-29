@@ -5,6 +5,9 @@
 //! strict NIP-98 request prevents reusable Smart HTTP credentials authorizing
 //! metadata changes (URL, method, payload and replay are all checked).
 
+// Response is the natural error type for axum handlers.
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 
 use axum::{

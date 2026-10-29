@@ -26,6 +26,12 @@ type PolicyDocument = { title: string; markdown: string };
 
 /** Convert relay invite sentinels into user-facing recovery guidance. */
 function inviteClaimErrorMessage(message: string): string {
+  if (message.includes("invite_restricted")) {
+    return "This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.";
+  }
+  if (message.includes("invite_owner_mismatch")) {
+    return "This account does not match its recorded owner. Use the correct account or owner identity to join this community.";
+  }
   if (message.includes("invite_exhausted")) {
     return "This invite has reached its use limit. Ask for a new invite.";
   }

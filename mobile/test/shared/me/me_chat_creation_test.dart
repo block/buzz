@@ -1,11 +1,59 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
+  test(
+    'retry confirms persistence after a failed cached journal write',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final store = _FailingStore();
+      final previousStore = SharedPreferencesStorePlatform.instance;
+      SharedPreferencesStorePlatform.instance = store;
+      addTearDown(
+        () => SharedPreferencesStorePlatform.instance = previousStore,
+      );
+      final prefs = await SharedPreferences.getInstance();
+      final sync = MeSync(
+        RelaySessionNotifier(),
+        RelayConfig(
+          baseUrl: 'https://relay.test',
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        prefs: prefs,
+      );
+      const intent = MeChatCreation('id', 'Name', 'agent');
+      var reachedRelay = false;
+      Future<String> run() => intent.complete<String>(
+        sync,
+        findChannel: () async {
+          reachedRelay = true;
+          await prefs.reload();
+          expect(MeChatCreation.pending(sync)?.id, intent.id);
+          return null;
+        },
+        createChannel: () async => throw StateError('Simulated process stop'),
+        hasAgent: () async => false,
+        addAgent: () async {},
+        isPlaced: () async => false,
+        place: () async {},
+      );
+      await expectLater(run(), throwsStateError);
+      expect(reachedRelay, isFalse);
+      expect(
+        MeChatCreation.pending(sync)?.id,
+        intent.id,
+      ); // Failed write remains cached.
+      await expectLater(run(), throwsStateError);
+      expect(reachedRelay, isTrue);
+      await prefs.reload();
+      expect(MeChatCreation.pending(sync)?.id, intent.id);
+    },
+  );
   test('missing durable storage blocks every relay side effect', () async {
     final sync = MeSync(
       RelaySessionNotifier(),
@@ -148,5 +196,18 @@ void main() {
       );
       expect(MeChatCreation.pending(other), isNull);
     });
+  }
+}
+
+class _FailingStore extends InMemorySharedPreferencesStore {
+  _FailingStore() : super.empty();
+  bool failNext = true;
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    if (failNext && key.startsWith('flutter.me-chat-creation:')) {
+      failNext = false;
+      return false;
+    }
+    return super.setValue(valueType, key, value);
   }
 }

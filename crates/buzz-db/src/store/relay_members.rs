@@ -201,38 +201,20 @@ pub async fn claim_relay_membership(
     policy_version: Option<&str>,
     relay_keypair: &nostr::Keys,
 ) -> Result<MembershipWrite<bool>> {
-    let mut tx = crate::begin_community_write_transaction(
+    let write = super::relay_invite::claim_relay_membership_with_owner(
         pool,
         community,
-        observability::WriterOperation::Authorization,
+        pubkey,
+        role,
+        policy_version,
+        None,
+        relay_keypair,
     )
     .await?;
-    let inserted = sqlx::query(
-        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
-         VALUES ($1, $2, $3, 'invite') \
-         ON CONFLICT (community_id, pubkey) DO NOTHING",
-    )
-    .bind(community.as_uuid())
-    .bind(pubkey)
-    .bind(role)
-    .execute(tx.conn())
-    .await?
-    .rows_affected()
-        > 0;
-
-    if let Some(version) = policy_version {
-        sqlx::query(
-            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        )
-        .bind(community.as_uuid())
-        .bind(pubkey)
-        .bind(version)
-        .execute(tx.conn())
-        .await?;
-    }
-
-    commit_membership_write(tx, inserted, inserted, relay_keypair).await
+    Ok(MembershipWrite {
+        outcome: write.outcome.inserted,
+        snapshot: write.snapshot,
+    })
 }
 
 /// Returns whether a member has persisted acceptance evidence for a policy version.
@@ -1310,6 +1292,29 @@ impl Db {
             pubkey,
             role,
             policy_version,
+            relay_keypair,
+        )
+        .await
+    }
+
+    /// Claim legacy membership and verified ownership in one admission transaction.
+    #[datastore_span(name = "claim_relay_membership_with_owner", system = "postgresql")]
+    pub async fn claim_relay_membership_with_owner(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        role: &str,
+        policy_version: Option<&str>,
+        verified_owner: Option<&str>,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<super::relay_invite::MembershipClaimResult>> {
+        super::relay_invite::claim_relay_membership_with_owner(
+            &self.pool,
+            community,
+            pubkey,
+            role,
+            policy_version,
+            verified_owner,
             relay_keypair,
         )
         .await

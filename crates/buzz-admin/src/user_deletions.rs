@@ -17,6 +17,13 @@ mod tests {
             vec![
                 "buzz-admin",
                 "user-deletions",
+                "inventory",
+                "--pubkey",
+                "5e4083a7a793d02575876eaf47932b4835999f5af2653d26250a909b450da7c9",
+            ],
+            vec![
+                "buzz-admin",
+                "user-deletions",
                 "submit",
                 "--target",
                 "demo:alice",
@@ -90,8 +97,16 @@ mod tests {
             "--pause-after-handler"
         ])
         .is_err());
-        for command in ["inventory", "run", "drain", "worker"] {
+        for command in ["run", "drain", "worker"] {
             assert!(crate::Cli::try_parse_from(["buzz-admin", "user-deletions", command]).is_err());
         }
+        assert!(crate::Cli::try_parse_from([
+            "buzz-admin",
+            "user-deletions",
+            "inventory",
+            "--pubkey",
+            "not-a-key",
+        ])
+        .is_err());
     }
 }

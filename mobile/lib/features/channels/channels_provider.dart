@@ -98,6 +98,19 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   Set<String> get hiddenDmIds => Set.unmodifiable(_hiddenDmIds);
 
+  /// Keeps [channel], opened before this list has it, findable by
+  /// [channelById] and [channelByIdProvider] until the list has it.
+  void rememberOpened(Channel channel) {
+    // The open's background refresh may have listed it already.
+    if (state.value?.any((listed) => listed.id == channel.id) ?? false) return;
+    ref.read(_openedAheadProvider.notifier).remember(channel);
+  }
+
+  /// [channelId] from the list, else as it was opened ahead of the list.
+  Channel? channelById(String channelId) =>
+      state.value?.where((channel) => channel.id == channelId).firstOrNull ??
+      ref.read(_openedAheadProvider)[channelId];
+
   bool get hasLoaded => _hasLoaded;
 
   /// Whether this scope has a reusable list from memory or local storage.
@@ -169,6 +182,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         (_hasLoaded ? state.value : null) ??
         _restoreSnapshot(pubkey, relayBaseUrl);
     if (snapshot != null) _hasCachedSnapshot = true;
+    listenSelf((_, next) {
+      final listed = next.value;
+      if (listed == null || !ref.exists(_openedAheadProvider)) return;
+      ref.read(_openedAheadProvider.notifier).dropListed(listed);
+    });
     _saveSnapshot = pubkey == null
         ? null
         : _captureSnapshotWriter(pubkey, relayBaseUrl);
@@ -1022,6 +1040,28 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
+  /// Reads [channelId]'s kind:39000 metadata so a link can open a channel
+  /// that is not in the loaded list.
+  ///
+  /// The loaded list holds member channels and, after Browse, the open
+  /// directory. A link can name an open channel outside both. The relay
+  /// filters the read by the caller's access, so call this only on a
+  /// connected session. Like directory discovery, a private channel or DM
+  /// opens only from the member list. Returns null when no channel qualifies.
+  Future<Channel?> fetchOpenChannel(String channelId) async {
+    final metas = await ref
+        .read(relaySessionProvider.notifier)
+        .fetchHistory(NostrFilters.channelMetadata([channelId]));
+    final latest = _latestChannelEvents(
+      metas,
+      kind: 39000,
+    ).where((event) => event.getTagValue('d') == channelId).firstOrNull;
+    if (latest == null) return null;
+    final data = ChannelData.fromEvent(latest);
+    if (data.visibility == 'private' || data.channelType == 'dm') return null;
+    return _channelFromMeta(latest, data, isMember: false);
+  }
+
   /// Loads the directory when Browse channels opens after startup or an error.
   Future<void> ensureDirectoryLoaded() async {
     final directoryState = ref.read(channelDirectoryLoadStatusProvider);
@@ -1077,3 +1117,46 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 final channelsProvider = AsyncNotifierProvider<ChannelsNotifier, List<Channel>>(
   ChannelsNotifier.new,
 );
+
+/// The channel with this id from the list, else as it was opened ahead of the
+/// list (see [ChannelsNotifier.rememberOpened]).
+final channelByIdProvider = Provider.autoDispose.family<Channel?, String>(
+  (ref, channelId) =>
+      ref.watch(
+        channelsProvider.select(
+          (channels) => channels.value
+              ?.where((channel) => channel.id == channelId)
+              .firstOrNull,
+        ),
+      ) ??
+      ref.watch(_openedAheadProvider.select((opened) => opened[channelId])),
+);
+
+/// Channels opened from their own metadata before the list had them, as a
+/// fast DM open does. Scoped to one relay and identity. Each is dropped once
+/// the list has it, so a DM later hidden or left is not found through it.
+final _openedAheadProvider =
+    NotifierProvider<_OpenedAheadNotifier, Map<String, Channel>>(
+      _OpenedAheadNotifier.new,
+    );
+
+class _OpenedAheadNotifier extends Notifier<Map<String, Channel>> {
+  @override
+  Map<String, Channel> build() {
+    ref.watch(relayConfigProvider.select((config) => config.baseUrl));
+    ref.watch(myPubkeyProvider);
+    return const {};
+  }
+
+  void remember(Channel channel) => state = {...state, channel.id: channel};
+
+  void dropListed(List<Channel> listed) {
+    if (state.isEmpty) return;
+    final ids = {for (final channel in listed) channel.id};
+    if (!state.keys.any(ids.contains)) return;
+    state = {
+      for (final entry in state.entries)
+        if (!ids.contains(entry.key)) entry.key: entry.value,
+    };
+  }
+}

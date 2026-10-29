@@ -1,8 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/services.dart';
-import 'package:nostr/nostr.dart' as nostr;
 
 /// Never include input, plaintext, or native exception details in this error.
 enum HpkeBackupFailure { invalidEnrollment, identityMismatch, unavailable }
@@ -19,7 +19,7 @@ class HpkeBackup {
     required String secretHex,
   }) async {
     try {
-      final pubkey = nostr.Keys(secretHex).public;
+      final pubkey = derivePublicKeyHex(secretHex);
       if (enrollment['nostr_pubkey'] != pubkey) {
         throw HpkeBackupFailure.identityMismatch;
       }

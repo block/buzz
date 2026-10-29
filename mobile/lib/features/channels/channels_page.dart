@@ -25,13 +25,14 @@ import '../../shared/community/community_membership_provider.dart';
 import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
-import '../../shared/widgets/bottom_up_page_route.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/buzz_setting_menu.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/ios_navigation_bar.dart';
@@ -40,7 +41,6 @@ import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/widgets/skeleton.dart';
-import '../profile/profile_avatar.dart';
 import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
@@ -80,18 +80,13 @@ part 'channels_page/header_actions.dart';
 enum _QuickAction { createChannel, newDm }
 
 const double _kChannelSectionInset = Grid.gutter;
-const double _kChannelLeadingWidth = 22.0;
-const double _kChannelIconSize = 18.0;
-const double _kChannelLabelGap = Grid.xxs;
-const double _kChannelRowVerticalPadding = Grid.xxs + Grid.quarter;
-const double _kSectionSpacingTightening = Grid.half;
-const double _kSectionHeaderVerticalPadding =
-    _kChannelRowVerticalPadding - _kSectionSpacingTightening;
-// Section headers include touch targets for their actions, so their visual
-// centre sits lower than a channel row's. This keeps an expanded section's
-// final row equally spaced from the following divider.
-const double _kExpandedSectionTrailingPadding =
-    11.5 - _kSectionSpacingTightening;
+const double _kChannelLeadingWidth = 24.0;
+const double _kChannelIconSize = 20.0;
+const double _kChannelLabelGap = Grid.inventoryLabelGap;
+const double _kChannelRowVerticalPadding = Grid.inventoryRowInset;
+// Keep section controls at a full touch target without adding a second row
+// of vertical padding around their quiet desktop-style label.
+const double _kSectionHeaderVerticalPadding = 0;
 const double _kChannelLabelInset = _kChannelSectionInset;
 
 /// Compact avatars remain on direct-message rows.
@@ -109,6 +104,14 @@ class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
     required this.settingsPageBuilder,
     this.onSearch,
+    this.messagesFilters,
+    this.messagesActionsBuilder,
+    this.soloSliver,
+    this.showTeam = true,
+    this.showTeamHeading = false,
+    this.newChannelAction,
+    this.newDmAction,
+    this.communityAction,
     this.onInbox,
     this.hasUnreadInbox = false,
     this.communityInvitePageBuilder,
@@ -119,11 +122,20 @@ class ChannelsPage extends HookConsumerWidget {
   });
 
   final WidgetBuilder settingsPageBuilder;
+  final Widget? messagesFilters;
+  final List<Widget> Function(VoidCallback openSwitcher)?
+  messagesActionsBuilder;
+  final Widget? soloSliver;
+  final bool showTeam;
+  final bool showTeamHeading;
+  final ValueNotifier<VoidCallback?>? newChannelAction;
+  final ValueNotifier<VoidCallback?>? newDmAction;
+  final ValueNotifier<VoidCallback?>? communityAction;
 
   /// Opens global search from the header.
   final VoidCallback? onSearch;
 
-  /// Opens the conversation inbox from the header.
+  /// Opens the conversation inbox above the channel sections.
   final VoidCallback? onInbox;
 
   /// Whether the inbox contains unread conversations.
@@ -159,11 +171,18 @@ class ChannelsPage extends HookConsumerWidget {
       fontWeight: FontWeight.w600,
       color: navigationPrimaryForeground(context),
     );
+    final filterContentHeight = messagesFilters == null
+        ? 0.0
+        : max(48.0, MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16) +
+              Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
       titleStyle: headerTitleStyle,
-      bottomHeight: _kTopSectionBottomPadding,
-      nativeLargeTitle: false,
+
+      bottomHeight: messagesFilters == null
+          ? _kTopSectionBottomPadding
+          : filterContentHeight,
+      useNativeNavigation: messagesFilters == null,
     );
     final communityAvatarKey = useMemoized(GlobalKey.new);
     final nativeCommunityAvatarBounds = useRef<Rect?>(null);
@@ -174,22 +193,33 @@ class ChannelsPage extends HookConsumerWidget {
     final channelsScrollController = useScrollController();
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final headerFrostProgress = useState(0.0);
-    useEffect(() {
-      void updateHeaderTreatment() {
-        final nextProgress = !channelsScrollController.hasClients
-            ? 0.0
-            : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
-                  .clamp(0.0, 1.0)
-                  .toDouble();
-        if ((headerFrostProgress.value - nextProgress).abs() > 0.001) {
-          headerFrostProgress.value = nextProgress;
+    final headerCollapse = useState(0.0);
+    useEffect(
+      () {
+        void updateHeaderTreatment() {
+          final collapse =
+              messagesFilters == null || !channelsScrollController.hasClients
+              ? 0.0
+              : channelsScrollController.offset
+                    .clamp(0.0, filterContentHeight)
+                    .toDouble();
+          if (headerCollapse.value != collapse) headerCollapse.value = collapse;
+          final nextProgress = !channelsScrollController.hasClients
+              ? 0.0
+              : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
+                    .clamp(0.0, 1.0)
+                    .toDouble();
+          if ((headerFrostProgress.value - nextProgress).abs() > 0.001) {
+            headerFrostProgress.value = nextProgress;
+          }
         }
-      }
 
-      channelsScrollController.addListener(updateHeaderTreatment);
-      return () =>
-          channelsScrollController.removeListener(updateHeaderTreatment);
-    }, [channelsScrollController]);
+        channelsScrollController.addListener(updateHeaderTreatment);
+        return () =>
+            channelsScrollController.removeListener(updateHeaderTreatment);
+      },
+      [channelsScrollController, messagesFilters != null, filterContentHeight],
+    );
     useEffect(() {
       final tabReselection = this.tabReselection;
       if (tabReselection == null) return null;
@@ -321,7 +351,8 @@ class ChannelsPage extends HookConsumerWidget {
         final ready =
             ref.read(_communityContentReadyProvider).value == true &&
             bodyReady.value &&
-            (defaultTargetPlatform != TargetPlatform.iOS ||
+            (messagesFilters != null ||
+                defaultTargetPlatform != TargetPlatform.iOS ||
                 nativeHeaderReady.value);
         final bounds = ready ? measureCommunityAvatar() : null;
         stableFrames = ready && bounds == previous ? stableFrames + 1 : 0;
@@ -447,10 +478,63 @@ class ChannelsPage extends HookConsumerWidget {
     final communityAvatar = communityRelay == null
         ? null
         : ref.watch(communityIconPresentationProvider(communityRelay));
-    final profile = ref.watch(profileProvider).unwrapPrevious().value;
     final communityName = activeCommunity?.name.trim() ?? '';
     final topSectionGradient = context.appColors.topSectionGradient;
     final usesPinnedGradient = topSectionGradient != null;
+    Future<void> openCreateAction(_QuickAction action) async {
+      final channel = await showBuzzModalBottomSheet<Channel>(
+        context: context,
+        title: action == _QuickAction.createChannel
+            ? 'Create a new channel'
+            : 'New message',
+        constraints: _quickActionSheetConstraints(context),
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (_) => action == _QuickAction.createChannel
+            ? const _CreateChannelSheet(channelType: 'stream')
+            : _NewDirectMessageSheet(currentPubkey: currentPubkey),
+      );
+      if (channel != null && context.mounted) await openChannel(channel);
+    }
+
+    Future<void> openCreateMenu() async {
+      final action = await showBuzzModalBottomSheet<_QuickAction>(
+        context: context,
+        title: 'Create',
+        builder: (sheetContext) => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+          child: SheetActionSection(
+            children: [
+              ListTile(
+                leading: const Icon(BuzzIcons.hash),
+                title: const Text('New channel'),
+                onTap: () =>
+                    Navigator.pop(sheetContext, _QuickAction.createChannel),
+              ),
+              ListTile(
+                leading: const Icon(BuzzIcons.messageSquare),
+                title: const Text('New DM'),
+                onTap: () => Navigator.pop(sheetContext, _QuickAction.newDm),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (action == null || !context.mounted) return;
+      await openCreateAction(action);
+    }
+
+    useEffect(() {
+      var active = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!active) return;
+        newChannelAction?.value = () =>
+            openCreateAction(_QuickAction.createChannel);
+        newDmAction?.value = () => openCreateAction(_QuickAction.newDm);
+        communityAction?.value = openCommunitySwitcher;
+      });
+      return () => active = false;
+    }, [newChannelAction, newDmAction, communityAction, currentPubkey]);
 
     return FrostedScaffold(
       backgroundColor: usesPinnedGradient
@@ -461,101 +545,134 @@ class ChannelsPage extends HookConsumerWidget {
         key: headerKey,
         onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
         nativeTitle: '',
-        nativeLargeTitle: false,
-        nativeLeading: IosNavigationAction(
-          label: 'Community settings',
-          onAvatarBoundsChanged: (bounds) {
-            final header = headerKey.currentContext?.findRenderObject();
-            if (header is RenderBox) {
-              // Store native coordinates, then apply the current Home transform
-              // when measuring the destination immediately before departure.
-              nativeCommunityAvatarBounds.value =
-                  header.globalToLocal(bounds.topLeft) & bounds.size;
-            }
-          },
-          avatarHidden: communityFlightActive.value,
-          avatarIdentity: activeCommunity?.id,
-          symbol: 'building.2.crop.circle',
-          imageUrl: communityAvatar,
-          avatarInitial: communityName.isEmpty
-              ? '?'
-              : communityName.substring(0, 1).toUpperCase(),
-          onPressed: openCommunitySwitcher,
-        ),
-        nativeActions: [
-          if (onSearch != null)
-            IosNavigationAction(
-              label: 'Search',
-              symbol: 'magnifyingglass',
-              sharesBackground: true,
-              icon: BuzzIcons.search300,
-              onPressed: onSearch,
-            ),
-          if (onInbox != null)
-            IosNavigationAction(
-              label: 'Inbox',
-              symbol: 'tray',
-              sharesBackground: true,
-              icon: BuzzIcons.inbox300,
-              activityColor: hasUnreadInbox ? context.colors.primary : null,
-              activityLabel: hasUnreadInbox ? 'Unread' : null,
-              onPressed: onInbox,
-            ),
-          IosNavigationAction(
-            label: 'Settings',
-            sharesBackground: false,
-            avatarIdentity: '${activeCommunity?.id}:${activeCommunity?.pubkey}',
-            symbol: 'person.crop.circle',
-            imageUrl: profile?.avatarUrl,
-            avatarInitial: profile?.initial ?? '?',
-            onPressed: () => Navigator.of(context).push(
-              BottomUpPageRoute<void>(
-                builder: settingsPageBuilder,
-                reducedMotion: reducedMotion,
+        useNativeNavigation: messagesFilters == null,
+        nativeLeading: messagesFilters != null
+            ? null
+            : IosNavigationAction(
+                label: 'Community settings',
+                onAvatarBoundsChanged: (bounds) {
+                  final header = headerKey.currentContext?.findRenderObject();
+                  if (header is RenderBox) {
+                    // Store native coordinates, then apply the current Home transform
+                    // when measuring the destination immediately before departure.
+                    nativeCommunityAvatarBounds.value =
+                        header.globalToLocal(bounds.topLeft) & bounds.size;
+                  }
+                },
+                avatarHidden: communityFlightActive.value,
+                avatarIdentity: activeCommunity?.id,
+                symbol: 'building.2.crop.circle',
+                imageUrl: communityAvatar,
+                avatarInitial: communityName.isEmpty
+                    ? '?'
+                    : communityName.substring(0, 1).toUpperCase(),
+                onPressed: openCommunitySwitcher,
               ),
-            ),
-          ),
-        ],
+        nativeActions: messagesFilters != null
+            ? const []
+            : [
+                if (onSearch != null)
+                  IosNavigationAction(
+                    label: 'Search',
+                    symbol: 'magnifyingglass',
+                    sharesBackground: false,
+                    icon: BuzzIcons.search300,
+                    onPressed: onSearch,
+                  ),
+                IosNavigationAction(
+                  label: 'Create',
+                  symbol: 'plus',
+                  sharesBackground: false,
+                  icon: BuzzIcons.plus,
+                  children: [
+                    IosNavigationAction(
+                      label: 'New channel',
+                      symbol: 'number',
+                      onPressed: () =>
+                          openCreateAction(_QuickAction.createChannel),
+                    ),
+                    IosNavigationAction(
+                      label: 'New DM',
+                      symbol: 'bubble.left',
+                      onPressed: () => openCreateAction(_QuickAction.newDm),
+                    ),
+                  ],
+                ),
+              ],
         horizontalInset: _kTopSectionInset,
         // Let the full Buzz gradient show at rest. Once the list begins to
         // move beneath this row, build up blur over the first 64dp of scroll
         // without adding the usual white frosted wash. The Buzz list is
         // transparent, so the blurred pixels remain a continuation of the
         // pinned gradient instead of turning into a white header.
-        frosted: !usesPinnedGradient || headerFrostProgress.value > 0,
-        frostedSurfaceOpacity: usesPinnedGradient ? 0 : 0.5,
-        frostedBlurSigma: usesPinnedGradient
+        frosted:
+            messagesFilters != null ||
+            !usesPinnedGradient ||
+            headerFrostProgress.value > 0,
+        alwaysFrosted: messagesFilters != null,
+        frostedSurfaceOpacity: messagesFilters != null
+            ? 0.45
+            : usesPinnedGradient
+            ? 0
+            : 0.5,
+        frostedBlurSigma: messagesFilters != null
+            ? 20
+            : usesPinnedGradient
             ? _kHeaderFrostMaxBlurSigma * headerFrostProgress.value
             : 20,
         showBottomDivider: false,
-        leading: _CommunityIndicator(
-          onTap: openCommunitySwitcher,
-          avatarKey: communityAvatarKey,
-          hidden: communityFlightActive.value,
-        ),
+        leading: messagesFilters != null
+            ? null
+            : _CommunityIndicator(
+                onTap: openCommunitySwitcher,
+                avatarKey: communityAvatarKey,
+                hidden: communityFlightActive.value,
+              ),
         centerTitle: false,
         titleStyle: headerTitleStyle,
-        title: const SizedBox.shrink(),
-        actions: [
-          _ChannelHeaderActions(
-            onSearch: onSearch,
-            onInbox: onInbox,
-            hasUnreadInbox: hasUnreadInbox,
-            onSettings: () {
-              unawaited(HapticFeedback.lightImpact());
-              Navigator.of(context).push(
-                BottomUpPageRoute<void>(
-                  builder: settingsPageBuilder,
-                  reducedMotion: reducedMotion,
+
+        automaticallyImplyLeading: messagesFilters == null,
+        title: messagesFilters == null
+            ? const SizedBox.shrink()
+            : ClipRect(
+                child: ExcludeSemantics(
+                  excluding: headerCollapse.value >= filterContentHeight,
+                  child: Opacity(
+                    opacity: 1 - headerCollapse.value / filterContentHeight,
+                    child: Transform.translate(
+                      offset: Offset(0, -headerCollapse.value),
+                      child: Text('Messages', style: headerTitleStyle),
+                    ),
+                  ),
                 ),
-              );
-            },
-          ),
-        ],
-        bottomHeight: _kTopSectionBottomPadding,
-        bottom: const SizedBox.expand(),
+              ),
+        actions: messagesFilters != null
+            ? messagesActionsBuilder?.call(openCommunityGrid) ?? const []
+            : [
+                _ChannelHeaderActions(
+                  onSearch: onSearch,
+                  onCreate: openCreateMenu,
+                ),
+              ],
+        bottomHeight: messagesFilters == null
+            ? _kTopSectionBottomPadding
+            : filterContentHeight - headerCollapse.value,
+        bottomOverlap: messagesFilters == null ? 0 : headerCollapse.value,
+        bottom: messagesFilters == null
+            ? const SizedBox.expand()
+            : Padding(
+                padding: EdgeInsets.only(
+                  right: 60 * headerCollapse.value / filterContentHeight,
+                ),
+                child: messagesFilters,
+              ),
       ),
       body: _ChannelsBody(
+        soloSliver: soloSliver,
+        showTeam: showTeam,
+        showTeamHeading: showTeamHeading,
+        onInbox: onInbox,
+        hasUnreadInbox: hasUnreadInbox,
         onReadyChanged: (ready) => bodyReady.value = ready,
         channels: channels,
         channelsAsync: channelsAsync,

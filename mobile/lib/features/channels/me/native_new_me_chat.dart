@@ -48,16 +48,23 @@ Future<(Channel, String)?> _showNewMeChat(
     var retry = pending != null;
     while (context.mounted) {
       sync.check();
-      final directory = await ref.read(meAssistantsProvider.future);
+      final directory = ref.read(meAssistantsProvider).asData?.value;
+      final directoryRequest = ref.read(meAssistantsProvider).hasError
+          ? ref.refresh(meAssistantsProvider.future)
+          : ref.read(meAssistantsProvider.future);
+      final presentationId = const Uuid().v4();
+      var active = true;
       if (!context.mounted) return null;
       sync.check();
       if (!context.mounted) return null;
       final theme = utilitySurfaceThemeData(Theme.of(context));
       Map<Object?, Object?>? draft;
       try {
-        draft = await const MethodChannel('buzz/profile_text_editor')
+        final presentation = const MethodChannel('buzz/profile_text_editor')
             .invokeMethod<Map<Object?, Object?>>('presentChat', {
               'title': 'New chat',
+              'presentationId': presentationId,
+              'assistantsLoading': directory == null,
               'initialValue': name,
               'placeholder': 'Chat name',
               'multiline': false,
@@ -69,6 +76,19 @@ Future<(Channel, String)?> _showNewMeChat(
                   .toARGB32(),
               'containerCornerRadius': Radii.container,
               'selectedAssistant': assistant,
+              if (retry && assistant != null)
+                'savedAssistant': {
+                  'id': assistant,
+                  'name':
+                      directory
+                          ?.where((a) => a.pubkey == assistant)
+                          .firstOrNull
+                          ?.displayName ??
+                      ref.read(userCacheProvider)[assistant]?.label ??
+                      assistant,
+                  'avatarUrl':
+                      ref.read(userCacheProvider)[assistant]?.avatarUrl ?? '',
+                },
               'selectedProject': project,
               'projects': [
                 for (final group
@@ -77,31 +97,45 @@ Future<(Channel, String)?> _showNewMeChat(
               ],
               'fieldsLocked': retry,
               'error': error,
-              'assistants': [
-                for (final agent in directory)
-                  {
-                    'id': agent.pubkey,
-                    'name': agent.displayName ?? 'Agent',
-                    'artworkScale':
-                        usesInsetAgentArtwork(
-                          ref
-                              .read(userCacheProvider.notifier)
-                              .get(agent.pubkey)
-                              ?.avatarUrl,
-                        )
-                        ? '$animatedAvatarArtworkScale'
-                        : '1',
-                    'avatarUrl':
-                        ref
-                            .read(userCacheProvider.notifier)
-                            .get(agent.pubkey)
-                            ?.avatarUrl ??
-                        '',
-                  },
-              ],
+              'assistants': _nativeMeAssistants(directory ?? []),
             });
+        // Send updates only to this presentation; late results cannot populate
+        // a reopened sheet or a different community's editor.
+        Future<void> loadAssistants() async {
+          try {
+            final agents = await directoryRequest;
+            if (!active || !context.mounted || sync.disposed) return;
+            await const MethodChannel(
+              'buzz/profile_text_editor',
+            ).invokeMethod<void>('updateChatAssistants', {
+              'presentationId': presentationId,
+              'assistants': _nativeMeAssistants(agents),
+            });
+          } catch (_) {
+            if (!active || !context.mounted || sync.disposed) return;
+            try {
+              await const MethodChannel(
+                'buzz/profile_text_editor',
+              ).invokeMethod<void>('updateChatAssistants', {
+                'presentationId': presentationId,
+                'assistants': <Object>[],
+                'assistantError':
+                    'Couldn’t load agents. Close this sheet and try again.',
+              });
+            } on PlatformException {
+              // The native editor may already be dismissed.
+            } on MissingPluginException {
+              // Flutter fallback has no native editor.
+            }
+          }
+        }
+
+        loadAssistants();
+        draft = await presentation;
       } on MissingPluginException {
         break;
+      } finally {
+        active = false;
       }
       if (draft == null || !context.mounted) return null;
       name = (draft['name'] as String? ?? '').trim();
@@ -150,28 +184,31 @@ Future<Channel> _createMeChat(
   sync = _currentMeSync(ref, sync);
   final intent = MeChatCreation(channelId, name, assistant, project: project);
   await intent.save(sync);
-  final owned = await isOwnedMeAssistant(sync, assistant);
+  final actions = ref.read(channelActionsProvider);
+  final preflight = await Future.wait<Object?>([
+    isOwnedMeAssistant(sync, assistant),
+    sync.head(),
+    actions.findJoinedChannel(channelId),
+  ]);
+  final owned = preflight[0] as bool;
   sync.check();
   if (!owned) {
     throw StateError('This agent is no longer available.');
   }
-  final head = await sync.head();
+  final head = preflight[1] as NostrEvent?;
   (head == null ? const MeGroups() : sync.decode(head))
       .place(channelId, group: project)
       .encode(sync.community);
-  final actions = ref.read(channelActionsProvider);
   return intent.complete<Channel>(
     sync,
-    findChannel: () async {
-      final all = await ref.read(channelsProvider.notifier).fetchFresh();
-      return all.where((c) => c.id == channelId).firstOrNull;
-    },
+    findChannel: () async => preflight[2] as Channel?,
     createChannel: () => actions.createChannel(
       channelId: channelId,
       name: name,
       channelType: 'stream',
       visibility: 'private',
       labels: const ['buzz.solo'],
+      waitForChannelList: false,
     ),
     hasAgent: () async {
       ref.invalidate(channelMembersProvider(channelId));
@@ -191,3 +228,17 @@ Future<Channel> _createMeChat(
         sync.update((current) => current.place(channelId, group: project)),
   );
 }
+
+List<Map<String, String>> _nativeMeAssistants(
+  List<AgentDirectoryEntry> agents,
+) => [
+  for (final agent in agents)
+    {
+      'id': agent.pubkey,
+      'name': agent.displayName ?? 'Agent',
+      'artworkScale': usesInsetAgentArtwork(agent.avatarUrl)
+          ? '$animatedAvatarArtworkScale'
+          : '1',
+      'avatarUrl': agent.avatarUrl ?? '',
+    },
+];
