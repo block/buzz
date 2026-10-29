@@ -228,7 +228,7 @@ jobs:
 
   desktop-e2e-integration-shard:
     name: Desktop E2E Integration (${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # kannaka fork: Playwright ships no Chromium for ubuntu 26.04 yet
     # A shard needs ~10m; Playwright install-deps is bounded by
     # ci-apt-retry.sh (~25m worst case), so a degraded mirror fails with its
     # own error instead of the job timeout.
