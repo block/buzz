@@ -73,9 +73,6 @@ use buzz_datastore_tracing::datastore_span;
 /// legitimately accepted event still commits within the floor even under
 /// slow validation/lock waits. The writer pool arms the guard with this value
 /// and the fence subtracts it; the two uses must never diverge.
-///
-/// `buzz-acp` copies this value as `RELAY_COMMIT_CREATED_AT_FLOOR_SECS` (in
-/// `relay.rs`) without depending on this crate: change both together.
 pub const CREATED_AT_FLOOR_SECS: i64 = 960;
 
 /// Deployment-global advisory-lock key ordering compliant channel-event write
