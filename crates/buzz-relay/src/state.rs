@@ -3433,11 +3433,15 @@ pub(crate) mod tests {
                         }),
                     );
                 };
-                // Stamped fresh so the control holds however slowly the
-                // steps above ran.
+                // A cached reader and a fresh stamp keep the control off the
+                // database and the clock, however slowly the steps above ran.
+                let control = reader();
+                reader_pod
+                    .member_channels_cache
+                    .insert((community, control.clone()), Vec::new());
                 restamp(Instant::now());
                 assert!(
-                    grants(reader(), channel).await,
+                    grants(control, channel).await,
                     "control: within the max age the reader pod still uses its old open set"
                 );
 
