@@ -77,11 +77,13 @@ class ReadStateManager {
   int _maxFetchedCreatedAt = 0;
   final Map<String, int> _contextSourceCreatedAt = {};
   final Set<String> _pendingSyncedAdvances = {};
-  // Ids of events already decoded and merged. Re-delivery of one (the live
-  // subscription replays the stored events the history fetch already took in,
-  // and again after a reconnect) cannot change state, so it is not decrypted.
+  // Events already decoded and merged, by id, with a fingerprint of what was
+  // merged. Re-delivery of the same event (the live subscription replays the
+  // stored events the history fetch already took in, and again after a
+  // reconnect) cannot change state, so it is not decrypted. The id is not
+  // verified, so a different payload under a seen id is still decoded.
   // Kept in arrival order, oldest dropped first.
-  final Set<String> _appliedEventIds = {};
+  final Map<String, int> _appliedEvents = {};
 
   ReadStateManager({
     required this.pubkey,
@@ -257,14 +259,14 @@ class ReadStateManager {
     var ownBlobCreatedAt = 0;
 
     for (final event in events) {
-      if (_appliedEventIds.contains(event.id)) continue;
+      if (_wasApplied(event)) continue;
       final decoded = decodeReadStateEvent(
         event,
         pubkey: pubkey,
         decrypt: _crypto.decrypt,
       );
       if (decoded == null) continue;
-      _rememberApplied(event.id);
+      _rememberApplied(event);
 
       if (_isPlausibleCreatedAt(event.createdAt)) {
         _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
@@ -346,7 +348,7 @@ class ReadStateManager {
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed || !_servesThisCommunity) return;
-    if (_appliedEventIds.contains(event.id)) return;
+    if (_wasApplied(event)) return;
     debugPrint(
       '[ReadStateManager] incoming event=${event.id.substring(0, 8)}… created_at=${event.createdAt}',
     );
@@ -357,7 +359,7 @@ class ReadStateManager {
       decrypt: _crypto.decrypt,
     );
     if (decoded == null) return;
-    _rememberApplied(event.id);
+    _rememberApplied(event);
 
     if (_isPlausibleCreatedAt(event.createdAt)) {
       _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
@@ -407,10 +409,17 @@ class ReadStateManager {
     }
   }
 
-  void _rememberApplied(String eventId) {
-    _appliedEventIds.add(eventId);
-    if (_appliedEventIds.length > _maxAppliedEventIds) {
-      _appliedEventIds.remove(_appliedEventIds.first);
+  static int _fingerprint(NostrEvent event) =>
+      Object.hash(event.createdAt, event.content);
+
+  bool _wasApplied(NostrEvent event) =>
+      _appliedEvents[event.id] == _fingerprint(event);
+
+  void _rememberApplied(NostrEvent event) {
+    _appliedEvents.remove(event.id);
+    _appliedEvents[event.id] = _fingerprint(event);
+    if (_appliedEvents.length > _maxAppliedEventIds) {
+      _appliedEvents.remove(_appliedEvents.keys.first);
     }
   }
 

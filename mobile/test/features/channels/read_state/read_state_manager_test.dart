@@ -700,6 +700,39 @@ void main() {
       expect(h.manager.getEffectiveTimestamp('channel-3'), 30);
       expect(h.manager.getEffectiveTimestamp('channel-4'), 40);
     });
+
+    test(
+      'a different payload under an id already seen is still merged',
+      () async {
+        final h = await start(
+          (h) => [
+            h.event(slot: 'a', createdAt: 100, contexts: {'channel-1': 10}),
+          ],
+        );
+        final seen = h.relay.historyEvents.single;
+        final other = h.event(
+          slot: 'a',
+          createdAt: 100,
+          contexts: {'channel-2': 20},
+        );
+
+        // An unverified id cannot be trusted to name the same payload.
+        h.relay.deliver(
+          NostrEvent(
+            id: seen.id,
+            pubkey: other.pubkey,
+            createdAt: other.createdAt,
+            kind: other.kind,
+            tags: other.tags,
+            content: other.content,
+            sig: other.sig,
+          ),
+        );
+
+        expect(h.counting.decryptCount, 2);
+        expect(h.manager.getEffectiveTimestamp('channel-2'), 20);
+      },
+    );
   });
 }
 
