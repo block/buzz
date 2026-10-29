@@ -1114,11 +1114,11 @@ pub(super) enum LossArm {
 }
 
 impl LossArm {
-    fn both() -> [Self; 2] {
+    pub(super) fn both() -> [Self; 2] {
         [Self::Channel(Uuid::new_v4()), Self::Membership]
     }
 
-    fn sub(self) -> String {
+    pub(super) fn sub(self) -> String {
         match self {
             Self::Channel(channel) => channel_sub_id(channel),
             Self::Membership => MEMBERSHIP_NOTIF_SUB_ID.to_owned(),
@@ -1132,10 +1132,18 @@ impl LossArm {
         }
     }
 
-    fn dropped(self, state: &BgState) -> Option<u64> {
+    pub(super) fn dropped(self, state: &BgState) -> Option<u64> {
         match self {
             Self::Channel(channel) => state.channel_dropped_since.get(&channel).copied(),
             Self::Membership => state.membership_dropped_since,
+        }
+    }
+
+    /// The `since` this subscription's next REQ would carry.
+    pub(super) fn since(self, state: &BgState) -> Option<u64> {
+        match self {
+            Self::Channel(channel) => state.channel_since(&channel),
+            Self::Membership => state.membership_since(),
         }
     }
 

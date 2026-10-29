@@ -230,46 +230,23 @@ async fn closed_after_eose_does_not_stamp_live_until() {
 #[tokio::test]
 async fn closed_gap_replay_restores_its_loss_record_for_the_retry() {
     const LOST: u64 = 3_000;
-    for message in [DB_ERROR, "rate-limited: retry in 30s"] {
-        let channel = Uuid::new_v4();
-        let mut state = LossArm::Channel(channel).progress_past_a_loss(LOST).await;
-        let sub = channel_sub_id(channel);
-        let (mut client, _server, first) = open_replay(&mut state, &sub).await;
-        assert!(first <= LOST, "first replay since={first}");
-        assert!(!state.channel_dropped_since.contains_key(&channel));
+    for arm in LossArm::both() {
+        for message in [DB_ERROR, "rate-limited: retry in 30s"] {
+            let mut state = arm.progress_past_a_loss(LOST).await;
+            let sub = arm.sub();
+            let (mut client, _server, first) = open_replay(&mut state, &sub).await;
+            assert!(first <= LOST, "{sub} {message}: first replay since={first}");
+            assert_eq!(arm.dropped(&state), None, "{sub} {message}");
 
-        deliver_closed(&mut client, &mut state, &sub, message).await;
-        assert_eq!(
-            state.channel_dropped_since.get(&channel),
-            Some(&LOST),
-            "{message}"
-        );
-        let since = state.channel_since(&channel).unwrap();
-        assert!(
-            since <= LOST,
-            "{message}: the retry must still cover {LOST}, got since={since}"
-        );
+            deliver_closed(&mut client, &mut state, &sub, message).await;
+            assert_eq!(arm.dropped(&state), Some(LOST), "{sub} {message}");
+            let since = arm.since(&state).unwrap();
+            assert!(
+                since <= LOST,
+                "{sub} {message}: the retry must still cover {LOST}, got since={since}"
+            );
+        }
     }
-}
-
-#[tokio::test]
-async fn closed_membership_gap_replay_restores_its_loss_record() {
-    const LOST: u64 = 3_000;
-    let mut state = BgState::new();
-    state.membership_sub_active = true;
-    state.startup_watermark = Some(1_000);
-    state.membership_last_seen = Some(1_000);
-    let (mut live, _live_server) = test_ws_pair().await;
-    deliver_eose(&mut live, &mut state, MEMBERSHIP_NOTIF_SUB_ID).await;
-    state.membership_dropped_since = Some(LOST);
-    lose_connection(&mut state).await;
-
-    let (mut client, _server, first) = open_replay(&mut state, MEMBERSHIP_NOTIF_SUB_ID).await;
-    assert!(first <= LOST);
-    assert_eq!(state.membership_dropped_since, None);
-    deliver_closed(&mut client, &mut state, MEMBERSHIP_NOTIF_SUB_ID, DB_ERROR).await;
-    assert_eq!(state.membership_dropped_since, Some(LOST));
-    assert!(state.membership_since().unwrap() <= LOST);
 }
 
 /// Through the real socket-owner loop: a channel REQ answered with an error
