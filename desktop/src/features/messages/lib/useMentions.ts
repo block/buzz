@@ -703,12 +703,17 @@ export function useMentions(
       if (activeInlineMention) {
         mentionPickerOriginRef.current = "inline";
       } else if (mentionPickerOriginRef.current === "inline") {
-        // The typed `@` trigger is gone: close now. An Enter inside the
-        // debounce would otherwise pick a stale suggestion instead of
-        // submitting. A picker opened explicitly has no trigger to lose.
         mentionPickerOriginRef.current = null;
-        setMentionQuery(null);
-        return;
+        // A cleared draft closes now: an Enter inside the debounce would
+        // otherwise pick a stale suggestion instead of submitting. Any other
+        // trigger-less update keeps the debounce. Selecting a suggestion, or
+        // the Enter that selects it, edits the document before the keydown
+        // handler runs, and closing here would hide the open menu from that
+        // handler. A picker opened explicitly has no trigger to lose.
+        if (value.length === 0) {
+          setMentionQuery(null);
+          return;
+        }
       }
       debounceTimerRef.current = setTimeout(() => {
         debounceTimerRef.current = null;

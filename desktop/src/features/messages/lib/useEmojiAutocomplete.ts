@@ -188,8 +188,8 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
         debounceTimerRef.current = null;
       }
 
-      // Debounce only while a shortcode is being typed; see useChannelLinks.
-      if (!detectEmojiQuery(value, cursorPosition)) {
+      // A cleared draft closes now; see useChannelLinks.
+      if (value.length === 0) {
         setEmojiQuery(null);
         return;
       }

@@ -89,4 +89,18 @@ for (const {
     assert.deepEqual(keyDown(result.current, enter), { handled: false });
     assert.equal(prevented, false);
   });
+
+  test(`dropping a ${trigger} trigger without clearing the draft still debounces`, async () => {
+    const { result } = renderAutocomplete();
+
+    act(() => update(result.current, draft, draft.length));
+    await waitFor(() => assert.equal(isOpen(result.current), true));
+
+    // Selecting a suggestion with Enter splits the paragraph in the editor
+    // before the composer's keydown handler runs. That update carries no
+    // trigger, but the handler must still see the open autocomplete.
+    act(() => update(result.current, "Ship notes\n", 11));
+    assert.equal(isOpen(result.current), true);
+    await waitFor(() => assert.equal(isOpen(result.current), false));
+  });
 }

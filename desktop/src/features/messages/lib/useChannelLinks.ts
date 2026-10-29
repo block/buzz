@@ -125,17 +125,11 @@ export function useChannelLinks() {
         debounceTimerRef.current = null;
       }
 
-      // Debounce only while a query is being typed. Once the trigger is gone,
-      // close now: an Enter inside the debounce would otherwise pick a stale
-      // suggestion instead of submitting.
-      if (
-        !detectPrefixQuery(
-          "#",
-          value,
-          cursorPosition,
-          knownNamesLowerRef.current,
-        )
-      ) {
+      // A cleared draft closes now: an Enter inside the debounce would
+      // otherwise pick a stale suggestion instead of submitting. Any other
+      // update keeps the debounce, so an edit made while selecting a
+      // suggestion cannot close the menu under the keydown handler.
+      if (value.length === 0) {
         setChannelQuery(null);
         return;
       }
