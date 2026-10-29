@@ -1280,15 +1280,9 @@ struct BgState {
     /// Unix seconds up to which a subscription that reached EOSE was last known
     /// to be live: the newest non-Close frame read on that connection (see
     /// `last_inbound_secs`), capped at the time the close was detected. A
-    /// reconnect replays from here minus `RESUME_LIVE_SKEW_SECS`.
+    /// reconnect replays from here minus `RESUME_LIVE_SKEW_SECS`. Lowered when
+    /// a REQ is written with an older `since` (see [`BgState::note_req_sent`]).
     live_until: HashMap<String, u64>,
-    /// `since` of the newest REQ written for a subscription that has not yet
-    /// reached EOSE. Until it does, that REQ's replay may be incomplete, so the
-    /// next replay never starts after it. This keeps an overflow-recovery or
-    /// reconnect replay's floor when the socket drops before its EOSE, even
-    /// though `channel_dropped_since` / `membership_dropped_since` were
-    /// retired when the REQ was written.
-    unconfirmed_req_since: HashMap<String, u64>,
     /// Close code of the last WebSocket Close frame received, consumed by the
     /// next reconnect to choose the first-attempt delay.
     last_close_code: Option<u16>,
@@ -1349,7 +1343,6 @@ impl BgState {
             backoff_step: 0,
             eose_this_conn: HashSet::new(),
             live_until: HashMap::new(),
-            unconfirmed_req_since: HashMap::new(),
             last_close_code: None,
             last_inbound_secs: None,
             now_secs: unix_now_secs,
@@ -1392,7 +1385,7 @@ impl BgState {
                 .copied()
                 .or(self.startup_watermark),
             self.last_seen.get(channel_id).copied(),
-            self.replay_floor(&sub_id, self.channel_dropped_since.get(channel_id).copied()),
+            self.channel_dropped_since.get(channel_id).copied(),
             self.live_until.get(&sub_id).copied(),
             (self.now_secs)(),
         )
@@ -1403,18 +1396,10 @@ impl BgState {
         resume_since(
             self.startup_watermark,
             self.membership_last_seen,
-            self.replay_floor(MEMBERSHIP_NOTIF_SUB_ID, self.membership_dropped_since),
+            self.membership_dropped_since,
             self.live_until.get(MEMBERSHIP_NOTIF_SUB_ID).copied(),
             (self.now_secs)(),
         )
-    }
-
-    /// The point a subscription's next replay must not start after: the older
-    /// of its recorded backpressure loss and the `since` of a REQ that has not
-    /// reached EOSE.
-    fn replay_floor(&self, sub_id: &str, dropped: Option<u64>) -> Option<u64> {
-        let unconfirmed = self.unconfirmed_req_since.get(sub_id).copied();
-        dropped.into_iter().chain(unconfirmed).min()
     }
 
     /// Unix seconds to stamp an inbound frame with: the connection's anchor
@@ -1449,21 +1434,23 @@ impl BgState {
                 .is_some_and(|channel_id| self.active_subscriptions.contains_key(&channel_id));
         if known {
             self.eose_this_conn.insert(sub_id.to_owned());
-            self.unconfirmed_req_since.remove(sub_id);
         }
     }
 
     /// A REQ with `since` was written for `sub_id`: it has not reached EOSE
-    /// yet, so its `since` floors the next replay (see `unconfirmed_req_since`),
-    /// and a second REQ on the same connection supersedes the first for the
-    /// rest of that connection (see `superseded_this_conn`).
+    /// yet, and a second REQ on the same connection supersedes the first for
+    /// the rest of that connection (see `superseded_this_conn`).
+    ///
+    /// Its replay may never finish (the socket can drop first), so retained
+    /// live coverage is lowered to resume no later than this `since`. A gap
+    /// replay below `live_until` (overflow recovery, or a reconnect whose
+    /// `since` was held back by `channel_dropped_since`) therefore keeps its
+    /// floor even though writing the REQ retired the loss record. A counted
+    /// EOSE followed by a close restamps `live_until` as usual.
     fn note_req_sent(&mut self, sub_id: &str, since: Option<u64>) {
         self.eose_this_conn.remove(sub_id);
-        if let Some(since) = since {
-            self.unconfirmed_req_since
-                .entry(sub_id.to_owned())
-                .and_modify(|floor| *floor = (*floor).min(since))
-                .or_insert(since);
+        if let (Some(since), Some(live_until)) = (since, self.live_until.get_mut(sub_id)) {
+            *live_until = (*live_until).min(since.saturating_add(RESUME_LIVE_SKEW_SECS));
         }
         if !self.req_sent_this_conn.insert(sub_id.to_owned()) {
             self.superseded_this_conn.insert(sub_id.to_owned());
@@ -1506,7 +1493,6 @@ impl BgState {
         // cleared: a re-subscribe on this socket reuses the wire ID, and an EOSE
         // for the old REQ must not count for the new one.
         self.live_until.remove(&sub_id);
-        self.unconfirmed_req_since.remove(&sub_id);
         self.active_filters.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);
         self.resubscribe_retry.remove(channel_id);
@@ -3809,20 +3795,20 @@ fn first_reconnect_delay(close_code: Option<u16>, sample: f64) -> Duration {
 ///
 /// - `base`: original replay floor (`subscribe_since` / startup watermark).
 /// - `last_seen`: newest delivered event `created_at`.
-/// - `floor`: [`BgState::replay_floor`], the older of the oldest event lost to
-///   backpressure and the `since` of a REQ that has not reached EOSE; the
+/// - `dropped`: oldest event lost to backpressure; a recorded gap, so the
 ///   result never advances past it.
 /// - `live_until`: see [`BgState::live_until`].
 /// - `now`: wall-clock unix seconds, for [`SILENT_DROP_REPAIR_WINDOW_SECS`].
 ///
-/// Without `live_until` this is the pre-existing `min(last_seen, floor)`
+/// Without `live_until` this is the pre-existing `min(last_seen, dropped)`
 /// else `base`. With `live_until`, the delivered-progress cursor becomes
 /// `max(base, last_seen, min(live_until - RESUME_LIVE_SKEW_SECS,
-/// now - SILENT_DROP_REPAIR_WINDOW_SECS))`, then the floor is applied on top.
+/// now - SILENT_DROP_REPAIR_WINDOW_SECS))`, then the dropped floor is applied
+/// on top.
 fn resume_since(
     base: Option<u64>,
     last_seen: Option<u64>,
-    floor: Option<u64>,
+    dropped: Option<u64>,
     live_until: Option<u64>,
     now: u64,
 ) -> Option<u64> {
@@ -3840,7 +3826,7 @@ fn resume_since(
         }
         None => last_seen,
     };
-    match (cursor, floor) {
+    match (cursor, dropped) {
         (Some(c), Some(d)) => Some(c.min(d)),
         (Some(c), None) => Some(c),
         (None, Some(d)) => Some(d),
