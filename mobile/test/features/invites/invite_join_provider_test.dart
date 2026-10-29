@@ -25,6 +25,8 @@ void main() {
       final auth = _RecordingAuthNotifier();
       final requests = <String>[];
       var version = 'v1';
+      // Relay-valid policy text can exceed the generic 64 KiB hosted cap.
+      final terms = 'x' * 65536;
       final container = ProviderContainer(
         overrides: [
           communityStorageProvider.overrideWithValue(storage),
@@ -40,7 +42,7 @@ void main() {
                   jsonEncode({
                     'policy': {
                       'version': version,
-                      'terms_markdown': 'Terms',
+                      'terms_markdown': terms,
                       'age_attestation_required': true,
                     },
                   }),
@@ -78,6 +80,7 @@ void main() {
       );
       await _joinPolicySettled(container);
       expect(container.read(inviteJoinProvider).joinPolicy?.version, 'v1');
+      expect(container.read(inviteJoinProvider).joinPolicy?.terms, terms);
       await notifier.confirmJoin();
       expect(requests.where((path) => path != '/api/join-policy'), isEmpty);
       version = 'v2';
