@@ -19,7 +19,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use nostr::{
@@ -667,6 +667,7 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
 
 async fn deliver(
     State(s): State<AppState>,
+    Extension(work): Extension<Arc<crate::ingress::WorkPermit>>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     body: Bytes,
@@ -756,8 +757,10 @@ async fn deliver(
     };
     let authority_store = Arc::clone(&s.authority);
     // Admission already committed, so cancellation cannot undo either replay
-    // fence. The detached task completes disposition bookkeeping.
+    // fence. Retain ingress capacity through send AND disposition bookkeeping,
+    // even if the client disconnects or the HTTP timeout drops this request.
     let delivery = tokio::spawn(async move {
+        let _work = work;
         let started = std::time::Instant::now();
         let outcome = transport.send(attempt, &endpoint).await;
         crate::metrics::record_apns_delivery(outcome, started.elapsed().as_secs_f64());
@@ -839,10 +842,11 @@ pub fn router_with_metrics(
 ) -> (Router, Router) {
     // At most 18 requests hold database work, leaving the 20-connection pool
     // headroom. No common semaphore lets delivery/enrollment use revocation slots.
-    let enrollment_lane = crate::ingress::Lane::new(2, 20, state.trusted_proxy_cidrs.clone());
-    let management_lane = crate::ingress::Lane::new(4, 120, state.trusted_proxy_cidrs.clone());
-    let revocation_lane = crate::ingress::Lane::new(4, 120, state.trusted_proxy_cidrs.clone());
-    let delivery_lane = crate::ingress::Lane::new(8, 1200, state.trusted_proxy_cidrs.clone());
+    let enrollment_lane = crate::ingress::Lane::new(2, 2, 20, state.trusted_proxy_cidrs.clone());
+    let management_lane = crate::ingress::Lane::new(4, 4, 120, state.trusted_proxy_cidrs.clone());
+    // One slow source must leave revocation capacity for other clients.
+    let revocation_lane = crate::ingress::Lane::new(4, 2, 120, state.trusted_proxy_cidrs.clone());
+    let delivery_lane = crate::ingress::Lane::new(8, 8, 1200, state.trusted_proxy_cidrs.clone());
     let enrollment = Router::new()
         .route(
             "/v1/installations",

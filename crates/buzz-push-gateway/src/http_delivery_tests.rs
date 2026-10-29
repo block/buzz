@@ -42,6 +42,17 @@ fn now() -> i64 {
 }
 
 async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
+    let sends = Arc::new(AtomicUsize::new(0));
+    let (app, keys, body) =
+        fixture_with(Arc::new(TestTransport(sends.clone())), |store| store, 10).await;
+    (app, keys, body, sends)
+}
+
+async fn fixture_with(
+    transport: Arc<dyn PushTransport>,
+    wrap_store: impl FnOnce(Arc<MemoryAuthorityStore>) -> Arc<dyn AuthorityStore>,
+    quota: i64,
+) -> (axum::Router, Keys, Vec<u8>) {
     let keys = Keys::generate();
     let authority = Arc::new(MemoryAuthorityStore::default());
     let token_keyring =
@@ -83,11 +94,10 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         )
         .await
         .unwrap();
-    let sends = Arc::new(AtomicUsize::new(0));
     let (app, _) = router(AppState {
         trusted_proxy_cidrs: Vec::new(),
         gateway_origin: "https://push.buzz.xyz".into(),
-        authority,
+        authority: wrap_store(authority),
         token_keyring,
         application: Arc::new(ApplicationRuntime {
             app_attest: Arc::new(
@@ -97,12 +107,12 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
                 )
                 .unwrap(),
             ),
-            transport: Arc::new(TestTransport(sends.clone())),
+            transport,
         }),
         max_grant_lifetime_seconds: 600,
         max_installation_lifetime_seconds: 600,
         endpoint_quota_window_seconds: 60,
-        endpoint_quota_max_deliveries: 10,
+        endpoint_quota_max_deliveries: quota,
         now,
         accepting: Arc::new(AtomicBool::new(true)),
     });
@@ -110,7 +120,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         "v": 1, "endpoint_grant": grant, "request_id": Uuid::new_v4(), "expires_at": now() + 60,
     }))
     .unwrap();
-    (app, keys, body, sends)
+    (app, keys, body)
 }
 
 fn signed_header(keys: &Keys, url: &str, method: &str, body: &[u8]) -> String {
@@ -359,3 +369,6 @@ async fn grant_signer_and_replay_checks_remain_enforced() {
     );
     assert_eq!(sends.load(Ordering::SeqCst), 1);
 }
+
+#[path = "http_ingress_tests.rs"]
+mod ingress_tests;

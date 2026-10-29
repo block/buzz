@@ -51,7 +51,7 @@ class BuzzPushLeaseRevocationRecord {
   final int attemptCount;
   final int nextAttemptAt;
 
-  /// Exact gateway target retained until both direct revocation and relay cleanup succeed.
+  /// Exact gateway target retained until direct revocation succeeds.
   final Map<String, dynamic>? gatewayRevocation;
   final bool gatewayOnly;
 
@@ -137,6 +137,8 @@ class BuzzPushLeaseRevocationRecord {
     int? expiresAt,
     int? attemptCount,
     int? nextAttemptAt,
+    bool? gatewayOnly,
+    bool omitGatewayRevocation = false,
   }) => BuzzPushLeaseRevocationRecord(
     relayUrl: relayUrl,
     relayOrigin: relayOrigin,
@@ -147,8 +149,8 @@ class BuzzPushLeaseRevocationRecord {
     expiresAt: expiresAt ?? this.expiresAt,
     attemptCount: attemptCount ?? this.attemptCount,
     nextAttemptAt: nextAttemptAt ?? this.nextAttemptAt,
-    gatewayRevocation: gatewayRevocation,
-    gatewayOnly: gatewayOnly,
+    gatewayRevocation: omitGatewayRevocation ? null : gatewayRevocation,
+    gatewayOnly: gatewayOnly ?? this.gatewayOnly,
   );
 
   Map<String, dynamic> toJson() => {
@@ -309,14 +311,25 @@ class BuzzPushLeaseRevocationOutbox {
   Future<void> enqueue(BuzzPushLeaseRevocationRecord record) async {
     await _serialize(() async {
       final records = await storage.loadAll();
-      final index = records.indexWhere(
-        (candidate) => candidate.leaseAddress == record.leaseAddress,
-      );
-      if (index >= 0) {
-        if (record.generation <= records[index].generation) return;
-        records[index] = record;
-      } else {
-        records.add(record);
+      // Save both authorities together before either attempt can invalidate
+      // native inventory. Each record then retains only its unfinished work.
+      final independent = [
+        if (!record.gatewayOnly && record.gatewayRevocation != null)
+          record.copyWith(gatewayOnly: true),
+        record.gatewayOnly
+            ? record
+            : record.copyWith(omitGatewayRevocation: true),
+      ];
+      for (final cleanup in independent) {
+        final index = records.indexWhere(
+          (candidate) => candidate.leaseAddress == cleanup.leaseAddress,
+        );
+        if (index >= 0) {
+          if (cleanup.generation <= records[index].generation) continue;
+          records[index] = cleanup;
+        } else {
+          records.add(cleanup);
+        }
       }
       await storage.replaceAll(records);
     });
@@ -327,7 +340,13 @@ class BuzzPushLeaseRevocationOutbox {
     Community community, {
     Future<List<BuzzPushEndpointGrant>> Function()? readGrants,
     List<Community> remainingCommunities = const [],
+    bool gatewayOnly = false,
   }) async {
+    if (gatewayOnly &&
+        (!Env.pushGatewayConfigured ||
+            defaultTargetPlatform != TargetPlatform.iOS)) {
+      return false;
+    }
     final state = community.pushSubscriptionState;
     final highestGeneration =
         state.generationCursor ?? state.acceptedGeneration;
@@ -365,19 +384,22 @@ class BuzzPushLeaseRevocationOutbox {
       return true;
     }
     final nsec = community.nsec;
-    if (nsec == null || nsec.isEmpty) {
+    if (!gatewayOnly && (nsec == null || nsec.isEmpty)) {
       throw StateError(
         'Push lease revocation requires a community signing key.',
       );
     }
-    final decoded = nostr.Nip19.decode(payload: nsec);
-    final memberPubkey = community.pubkey ?? derivePublicKeyHex(decoded.data);
+    final memberPubkey = gatewayOnly
+        ? '0' * 64
+        : community.pubkey ??
+              derivePublicKeyHex(nostr.Nip19.decode(payload: nsec!).data);
     final relayUrl = canonicalBuzzPushRelayHttpUrl(community.relayUrl);
     final relayOrigin = canonicalBuzzPushRelayOrigin(relayUrl);
     final grants = await (readGrants ?? readBuzzPushEndpointGrants)();
     final matching = grants
         .where((grant) => grant.relayOrigin == relayOrigin)
         .toList();
+    if (gatewayOnly && matching.isEmpty) return false;
     if (matching.length != 1) {
       throw StateError(
         'Expected exactly one endpoint grant for push lease revocation.',
@@ -401,6 +423,9 @@ class BuzzPushLeaseRevocationOutbox {
           ),
     );
     if (grant.expiresAt <= currentSeconds) return false;
+    if (gatewayOnly && (shared || grant.gatewayRevocationTarget == null)) {
+      return false;
+    }
     if (highestGeneration + 2 > _maxSafeJsonInteger) {
       throw StateError('Push lease generation is exhausted.');
     }
@@ -409,7 +434,7 @@ class BuzzPushLeaseRevocationOutbox {
         relayUrl: relayUrl,
         relayOrigin: relayOrigin,
         memberPubkey: memberPubkey,
-        nsec: nsec,
+        nsec: gatewayOnly ? '' : nsec!,
         installationId:
             community.pushLeaseInstallationId ?? grant.installationId,
         generation: highestGeneration + 2,
@@ -417,6 +442,7 @@ class BuzzPushLeaseRevocationOutbox {
         attemptCount: 0,
         nextAttemptAt: currentSeconds,
         gatewayRevocation: shared ? null : grant.gatewayRevocationTarget,
+        gatewayOnly: gatewayOnly,
       ),
     );
     return true;

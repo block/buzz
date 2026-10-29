@@ -118,6 +118,17 @@ final communityPushLeaseRevocationEnqueuerProvider =
       );
     });
 
+/// Journals gateway opt-out independently of the community's relay tombstone.
+final communityPushGatewayCleanupEnqueuerProvider =
+    Provider<CommunityPushLeaseRevocationEnqueuer>((ref) {
+      final outbox = ref.watch(buzzPushLeaseRevocationOutboxProvider);
+      return (community) => outbox.enqueueCommunity(
+        community,
+        gatewayOnly: true,
+        remainingCommunities: ref.read(communityListProvider).value ?? const [],
+      );
+    });
+
 typedef CommunityPushLeaseRevocationTrigger = Future<void> Function();
 
 final communityPushLeaseRevocationTriggerProvider =
@@ -535,17 +546,19 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         pushNotificationsEnabled: enabled,
         pushSubscriptionState: pushState,
       );
-      if (!enabled && pushState.pendingTombstoneGeneration == null) {
-        gatewayCleanupJournaled = await ref.read(
-          communityPushLeaseRevocationEnqueuerProvider,
-        )(updated);
-      }
       await storage.save(updated);
       final updatedList = [...current]..[index] = updated;
       state = AsyncData(updatedList);
-      await syncCommunitySnapshot(ref, updatedList);
       shouldDeactivate =
           !enabled && pushState.pendingTombstoneGeneration != null;
+      if (!enabled) {
+        // Save local opt-out first, then journal the exact gateway target before
+        // any native revoke can blank the inventory needed for recovery.
+        gatewayCleanupJournaled = await ref.read(
+          communityPushGatewayCleanupEnqueuerProvider,
+        )(updated);
+      }
+      await syncCommunitySnapshot(ref, updatedList);
     });
     if (gatewayCleanupJournaled) {
       unawaited(ref.read(communityPushLeaseRevocationTriggerProvider)());
@@ -622,40 +635,14 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final generation = pendingGeneration;
     if (community == null || generation == null) return;
     try {
-      final grants = await readBuzzPushEndpointGrants();
-      final matching = grants.where(
-        (grant) =>
-            grant.relayOrigin ==
-            canonicalBuzzPushRelayOrigin(community.relayUrl),
-      );
-      if (matching.length == 1) {
-        final grant = matching.single;
-        final target = grant.gatewayRevocationTarget;
-        final current =
-            state.value ?? await ref.read(communityStorageProvider).loadAll();
-        final pending = current.where((candidate) => candidate.id == id);
-        if (pending.isEmpty ||
-            pending.single.pushNotificationsEnabled ||
-            pending.single.pushSubscriptionState.pendingTombstoneGeneration !=
-                generation) {
-          return;
-        }
-        final shared = current.any(
-          (other) =>
-              other.id != id &&
-              other.pushNotificationsEnabled &&
-              grants.any(
-                (candidate) =>
-                    candidate.relayOrigin ==
-                        canonicalBuzzPushRelayOrigin(other.relayUrl) &&
-                    candidate.relayPubkey == grant.relayPubkey &&
-                    (grant.pending
-                        ? candidate.relayOrigin == grant.relayOrigin
-                        : candidate.gatewayInstallationHandle ==
-                              grant.gatewayInstallationHandle),
-              ),
-        );
-        if (!shared && target != null) await revokeBuzzPushDelegation(target);
+      final current =
+          state.value ?? await ref.read(communityStorageProvider).loadAll();
+      final pending = current.where((candidate) => candidate.id == id);
+      if (pending.isEmpty ||
+          pending.single.pushNotificationsEnabled ||
+          pending.single.pushSubscriptionState.pendingTombstoneGeneration !=
+              generation) {
+        return;
       }
       await ref.read(communityPushLeaseDeactivatorProvider)(
         community,

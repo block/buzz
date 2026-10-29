@@ -154,18 +154,74 @@ Future<int> publishBuzzPushLeaseRecoverably({
   return generation;
 }
 
+/// A confirmed inactive-community handoff and its native renewal deadline.
+typedef BuzzPushCommunityLeaseHandoff = ({String inputs, int expiresAt});
+
+String _communityLeaseInputs(
+  Community community,
+  String token,
+  List<BuzzPushEndpointGrant> grants,
+) {
+  final origin = canonicalBuzzPushRelayOrigin(community.relayUrl);
+  final grant = grants
+      .where((value) => value.relayOrigin == origin)
+      .firstOrNull;
+  var authority = grant;
+  if (grant != null && grant.gatewayInstallationHandle?.isNotEmpty == true) {
+    for (final candidate in grants) {
+      if (candidate.pending ||
+          candidate.endpointGrant.isEmpty ||
+          candidate.gatewayInstallationHandle !=
+              grant.gatewayInstallationHandle ||
+          candidate.relayPubkey != grant.relayPubkey) {
+        continue;
+      }
+      if (candidate.endpointEpoch > authority!.endpointEpoch ||
+          (candidate.endpointEpoch == authority.endpointEpoch &&
+              candidate.generation > authority.generation)) {
+        authority = candidate;
+      }
+    }
+  }
+  return [
+    community.relayUrl,
+    community.nsec,
+    community.pubkey,
+    token,
+    buzzPushSubscriptionsFingerprint(community.pushSubscriptionState.desired),
+    community.pushSubscriptionState.generationCursor,
+    community.pushSubscriptionState.acceptedGeneration,
+    grant?.relayPubkey,
+    grant?.gatewayInstallationHandle,
+    grant?.pending,
+    grant?.endpointGrant,
+    grant?.expiresAt,
+    authority?.endpointHash,
+    authority?.endpointEpoch,
+    authority?.generation,
+  ].join('|');
+}
+
 /// Restores attempted leases across enabled relay origins after token rotation.
 /// Retrying includes nonempty grants because native save precedes relay handoff.
 @visibleForTesting
 Future<int?> renewBuzzPushCommunityLeases({
   required List<Community> Function() readCommunities,
   required List<BuzzPushEndpointGrant> grants,
+  required String token,
+  required Map<String, BuzzPushCommunityLeaseHandoff> completed,
+  DateTime Function() now = DateTime.now,
   required Future<BuzzPushEndpointGrant> Function(Community community) publish,
 }) async {
   Object? firstError;
   StackTrace? firstStack;
   int? expiresAt;
   final origins = {for (final grant in grants) grant.relayOrigin};
+  final ids = readCommunities()
+      .where((community) => community.pushNotificationsEnabled)
+      .map((community) => community.id)
+      .toSet();
+  completed.removeWhere((id, _) => !ids.contains(id));
   for (final id
       in readCommunities().map((community) => community.id).toList()) {
     final community = readCommunities()
@@ -176,16 +232,51 @@ Future<int?> renewBuzzPushCommunityLeases({
         community.pushSubscriptionState.desired.isEmpty ||
         community.nsec == null ||
         community.nsec!.isEmpty) {
+      completed.remove(id);
       continue;
     }
     try {
       if (!origins.contains(canonicalBuzzPushRelayOrigin(community.relayUrl))) {
+        completed.remove(id);
         continue;
       }
-      final grant = await publish(community);
-      if (expiresAt == null || grant.expiresAt < expiresAt) {
-        expiresAt = grant.expiresAt;
+      final inputs = _communityLeaseInputs(community, token, grants);
+      final prior = completed[id];
+      final due = now().millisecondsSinceEpoch ~/ 1000 + 300;
+      int deadline;
+      if (prior != null && prior.inputs == inputs && prior.expiresAt > due) {
+        deadline = prior.expiresAt;
+      } else {
+        // Native save alone is not a handoff. Only a confirmed relay acceptance
+        // and local save may suppress the next batch's recovery attempt.
+        completed.remove(id);
+        final grant = await publish(community);
+        final current = readCommunities()
+            .where((value) => value.id == id)
+            .firstOrNull;
+        if (current != null &&
+            current.pushNotificationsEnabled &&
+            current.relayUrl == community.relayUrl &&
+            current.nsec == community.nsec &&
+            current.pubkey == community.pubkey &&
+            buzzPushSubscriptionsFingerprint(
+                  current.pushSubscriptionState.desired,
+                ) ==
+                buzzPushSubscriptionsFingerprint(
+                  community.pushSubscriptionState.desired,
+                )) {
+          completed[id] = (
+            inputs: _communityLeaseInputs(current, token, [
+              for (final value in grants)
+                if (value.relayOrigin != grant.relayOrigin) value,
+              grant,
+            ]),
+            expiresAt: grant.expiresAt,
+          );
+        }
+        deadline = grant.expiresAt;
       }
+      if (expiresAt == null || deadline < expiresAt) expiresAt = deadline;
     } catch (error, stack) {
       firstError ??= error;
       firstStack ??= stack;
@@ -319,6 +410,9 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);
     final otherOriginsAttempt = useMemoized(BuzzPushAttemptGate.new);
     final otherOriginsBusy = useRef(false);
+    final completedOtherOrigins = useMemoized(
+      () => <String, BuzzPushCommunityLeaseHandoff>{},
+    );
     final latestOtherOriginsAttempt = useRef('');
     final otherOriginsRetry = useState(0);
     final publicationRetry = useState(0);
@@ -434,8 +528,8 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
             '${grant.generation}|${grant.endpointEpoch}|${grant.endpointGrant.isEmpty}|${grant.pending}',
     ].join(';');
     final allOriginsKey =
-        '$token|$nativeCleanupKey|${activeSelection.hasValue}|${activeSelection.value?.id}|${[for (final value in communities) '${value.id}|${value.pushNotificationsEnabled}|'
-              '${buzzPushSubscriptionsFingerprint(value.pushSubscriptionState.desired)}'].join(';')}';
+        '$token|$nativeCleanupKey|${activeSelection.hasValue}|${activeSelection.value?.id}|${[for (final value in communities) '${value.id}|${value.relayUrl}|${value.nsec}|${value.pubkey}|${value.pushNotificationsEnabled}|'
+              '${buzzPushSubscriptionStateFingerprint(value.pushSubscriptionState)}'].join(';')}';
     latestOtherOriginsAttempt.value = allOriginsKey;
     useEffect(() {
       if (!Env.pushGatewayConfigured ||
@@ -468,6 +562,8 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
                         .toList();
                   },
                   grants: grants,
+                  token: token,
+                  completed: completedOtherOrigins,
                   publish: (value) {
                     final member = value.pubkey ?? pubkeyFromNsec(value.nsec);
                     if (member == null) {
