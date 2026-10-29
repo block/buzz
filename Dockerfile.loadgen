@@ -17,8 +17,10 @@ RUN apk add --no-cache \
       pkgconf
 WORKDIR /build
 COPY . .
+# --help proves the stripped binary starts on each native architecture.
 RUN cargo build --locked --release -p buzz-test-client --bin buzz-loadgen \
-    && strip target/release/buzz-loadgen
+    && strip target/release/buzz-loadgen \
+    && target/release/buzz-loadgen --help >/dev/null
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 

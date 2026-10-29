@@ -9,7 +9,8 @@ name: Loadgen image
 #
 # Triggers:
 #   - push to main (paths-filtered) → :main + :sha-<7>
-#   - pull_request (paths-filtered) → build only, no push
+#   - pull_request (paths-filtered) → build only, no image push (same-repo
+#     PRs still write the registry build cache, as in sprig-image.yml)
 #   - workflow_dispatch             → manual publish at the current ref
 #
 # NOTE: the first push creates the GHCR package PRIVATE by default. An org
@@ -22,6 +23,7 @@ on:
     paths:
       - "Dockerfile.loadgen"
       - ".github/workflows/loadgen-image.yml"
+      - ".cargo/config.toml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"

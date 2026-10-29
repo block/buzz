@@ -79,7 +79,9 @@ across shards.
 image entrypoint, published by `.github/workflows/loadgen-image.yml` from
 `Dockerfile.loadgen`. Mount the scenario and pass the subcommand as the
 container arguments, for example `run /etc/loadgen/scenario.toml --shard
-$(JOB_COMPLETION_INDEX)/30`.
+$(JOB_COMPLETION_INDEX)/30`. Pin `:sha-<7>` or a digest for runs you intend
+to compare; `:main` moves. The container runs as UID 10001 with `/` as its
+working directory and no home, so point `--report` at a writable mount.
 
 ## Abort
 
