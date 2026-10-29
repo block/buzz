@@ -121,6 +121,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             patchelf \
+            pkg-config \
             wget
       - name: Desktop Tauri ${{ matrix.lane }}
         run: ${{ matrix.run }}
