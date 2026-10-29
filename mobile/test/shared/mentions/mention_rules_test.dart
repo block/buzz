@@ -165,6 +165,45 @@ void main() {
     }
   });
 
+  test('a workflow owner attribution does not address its owner', () {
+    final me = 'a' * 64;
+    for (final (tags, addressed) in [
+      (
+        [
+          ['p', me],
+        ],
+        true,
+      ),
+      (
+        [
+          ['p', me.toUpperCase()],
+        ],
+        true,
+      ),
+      (
+        [
+          ['p', me, '', 'owner'],
+        ],
+        false,
+      ),
+      (
+        [
+          ['p', me, '', 'owner'],
+          ['p', me],
+        ],
+        true,
+      ),
+      (
+        [
+          ['p', 'b' * 64],
+        ],
+        false,
+      ),
+    ]) {
+      expect(tagsAddress(tags, me), addressed, reason: '$tags');
+    }
+  });
+
   test('order does not depend on input order', () {
     // Review case: owned Zed, unowned Alpha, human Mary.
     const zed = MentionChoice(

@@ -1,6 +1,7 @@
 //! Durable NIP-PL event matcher and gateway delivery worker.
 
 use std::{
+    borrow::Cow,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -291,6 +292,7 @@ fn match_job(
     context: &MatchContext,
 ) -> anyhow::Result<Vec<buzz_db::push::WakeRequest>> {
     let mut wakes = Vec::new();
+    let event = without_owner_attribution(&job.event);
     for lease in &context.leases {
         let author_hex = hex::encode(&lease.author);
         if !reader_authorized_for_event(&job.event.event, &author_hex) {
@@ -311,16 +313,15 @@ fn match_job(
                 serde_json::from_value(serde_json::Value::Object(sub.filter.clone()))?;
             if !push_filter_authorized_for_event(&filter, &job.event.event, &author_hex)
                 || !push_filter_reads_channel(&filter, job.event.channel_id, &context.named_only)
-                || !filters_match(std::slice::from_ref(&filter), &job.event)
+                || !filters_match(std::slice::from_ref(&filter), &event)
             {
                 continue;
             }
             let ignored = sub.ignore.iter().any(|raw| {
                 serde_json::from_value::<Filter>(serde_json::Value::Object(raw.clone()))
-                    .is_ok_and(|f| filters_match(&[f], &job.event))
+                    .is_ok_and(|f| filters_match(&[f], &event))
             });
-            let p_count = job
-                .event
+            let p_count = event
                 .event
                 .tags
                 .iter()
@@ -354,6 +355,30 @@ fn match_job(
         });
     }
     Ok(wakes)
+}
+
+/// The event as push matching sees it: without `p` tags marked `owner`. A
+/// workflow message names its owner in `["p", <owner>, "", "owner"]` so
+/// clients can show who owns it. That is attribution, not a mention, so it
+/// must not wake the owner through a `#p` self filter. The sink adds a plain
+/// `p` tag when the workflow does mention its owner. Dropping a marked tag can
+/// only withhold a wake from the pubkey its author chose to mark.
+fn without_owner_attribution(event: &buzz_core::StoredEvent) -> Cow<'_, buzz_core::StoredEvent> {
+    let is_owner_attribution = |tag: &nostr::Tag| matches!(tag.as_slice(), [name, _, _, marker, ..] if name == "p" && marker == "owner");
+    if !event.event.tags.iter().any(is_owner_attribution) {
+        return Cow::Borrowed(event);
+    }
+    let mut view = event.clone();
+    view.event.tags = nostr::Tags::from_list(
+        event
+            .event
+            .tags
+            .iter()
+            .filter(|tag| !is_owner_attribution(tag))
+            .cloned()
+            .collect(),
+    );
+    Cow::Owned(view)
 }
 
 /// Whether a lease filter may push an event in `channel`, by the same rule as
@@ -888,6 +913,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn owner_attribution_is_not_a_mention_but_an_owner_mention_is() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let channel = uuid::Uuid::new_v4();
+        let author = |keys: &nostr::Keys| keys.public_key().to_bytes().to_vec();
+        // The mobile lease shape: wake on my `p`, ignore what I authored.
+        let lease = |keys: &nostr::Keys| {
+            let me = keys.public_key().to_hex();
+            buzz_db::push::MatchLease {
+                author: author(keys),
+                installation_id: "phone".into(),
+                generation: 1,
+                subscriptions: serde_json::json!([{
+                    "filter": {"kinds": [9], "#p": [me]},
+                    "class": "default",
+                    "ignore": [{"kinds": [9], "authors": [me]}],
+                }]),
+                expires_at: Utc::now().timestamp() + 3600,
+            }
+        };
+        let context = MatchContext {
+            leases: vec![lease(&owner), lease(&agent)],
+            memberships: [&owner, &agent]
+                .into_iter()
+                .map(|keys| (channel, author(keys)))
+                .collect(),
+            named_only: NamedOnlyChannels::from_typed([]),
+        };
+        let relay = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let woken = |mentioned: &[&nostr::Keys]| -> Vec<Vec<u8>> {
+            let event = EventBuilder::new(Kind::Custom(9), "workflow output")
+                .tag(Tag::parse(["p", &owner_hex, "", "owner"]).unwrap())
+                .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
+                .tags(
+                    mentioned
+                        .iter()
+                        .map(|keys| Tag::public_key(keys.public_key())),
+                )
+                .sign_with_keys(&relay)
+                .unwrap();
+            let job = buzz_db::push::BatchedMatch {
+                event: buzz_core::StoredEvent::new(event, Some(channel)),
+                attempt: 1,
+            };
+            match_job(&job, &context)
+                .unwrap()
+                .into_iter()
+                .map(|wake| wake.author)
+                .collect()
+        };
+
+        assert_eq!(woken(&[&agent]), vec![author(&agent)], "agent mentioned");
+        assert_eq!(woken(&[]), Vec::<Vec<u8>>::new(), "no mention");
+        assert_eq!(
+            woken(&[&owner, &agent]),
+            vec![author(&owner), author(&agent)],
+            "owner mentioned too"
+        );
+        // The hellthread gate counts mentions, not the attribution: one
+        // mention passes `p_tags_max: 1`, two do not.
+        let gated = |mentioned: &[&nostr::Keys]| {
+            let me = agent.public_key().to_hex();
+            let context = MatchContext {
+                leases: vec![buzz_db::push::MatchLease {
+                    subscriptions: serde_json::json!([{
+                        "filter": {"kinds": [9], "#p": [me]},
+                        "class": "default",
+                        "suppress": {"p_tags_max": 1},
+                    }]),
+                    ..lease(&agent)
+                }],
+                memberships: [(channel, author(&agent))].into_iter().collect(),
+                named_only: NamedOnlyChannels::from_typed([]),
+            };
+            let event = EventBuilder::new(Kind::Custom(9), "workflow output")
+                .tag(Tag::parse(["p", &owner_hex, "", "owner"]).unwrap())
+                .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
+                .tags(
+                    mentioned
+                        .iter()
+                        .map(|keys| Tag::public_key(keys.public_key())),
+                )
+                .sign_with_keys(&relay)
+                .unwrap();
+            let job = buzz_db::push::BatchedMatch {
+                event: buzz_core::StoredEvent::new(event, Some(channel)),
+                attempt: 1,
+            };
+            match_job(&job, &context).unwrap().len()
+        };
+        assert_eq!(gated(&[&agent]), 1, "one mention under the gate");
+        assert_eq!(gated(&[&agent, &owner]), 0, "two mentions over the gate");
+    }
+
     async fn capture(
         State(seen): State<Arc<Mutex<Vec<Value>>>>,
         OriginalUri(uri): OriginalUri,
@@ -1022,6 +1143,147 @@ mod shutdown_tests {
 mod postgres_tests {
     use super::{load_match_context, match_job};
     use nostr::{EventBuilder, Kind, Tag};
+
+    /// Real workflow messages from `RelayActionSink` against mobile-shaped
+    /// leases. The owner's attribution `p` tag wakes no one; a mention of the
+    /// agent wakes only the agent; a mention of the owner wakes the owner.
+    /// Mutation: match push filters against the event's raw tags → RED (the
+    /// owner wakes for every message).
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn workflow_messages_wake_whom_they_mention_not_their_owner() {
+        use crate::handlers::group_state_postgres_tests::create_channel;
+        use buzz_workflow::action_sink::ActionSink;
+
+        let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = format!("push-workflow-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let channel = create_channel(&state, &tenant, &owner, &[]).await;
+        let owner_bytes = owner.public_key().to_bytes().to_vec();
+        let agent_bytes = agent.public_key().to_bytes().to_vec();
+        for (bytes, name) in [(&owner_bytes, "Kal"), (&agent_bytes, "Robby")] {
+            state
+                .db
+                .ensure_user(community, bytes)
+                .await
+                .expect("ensure user");
+            state
+                .db
+                .update_user_profile(community, bytes, Some(name), None, None, None)
+                .await
+                .expect("name user");
+        }
+        state
+            .db
+            .add_member(
+                community,
+                channel,
+                &agent_bytes,
+                buzz_core::channel::MemberRole::Bot,
+                Some(&owner_bytes),
+            )
+            .await
+            .expect("add agent");
+
+        // Mobile's lease for each member: wake on my `p` or anything in the
+        // channel, and ignore what I authored.
+        for (n, keys) in [&owner, &agent].into_iter().enumerate() {
+            let me = keys.public_key().to_hex();
+            let ignore = serde_json::json!([{"kinds": [9], "authors": [me]}]);
+            let subscriptions = serde_json::json!([
+                {"filter": {"kinds": [9], "#p": [me]}, "class": "default", "ignore": ignore},
+            ]);
+            assert_eq!(
+                buzz_db::push::replace_active_lease(
+                    state.db.pool(),
+                    community,
+                    &keys.public_key().to_bytes(),
+                    "phone",
+                    buzz_db::push::LeaseVersion {
+                        source_event_id: &[n as u8 + 1; 32],
+                        source_created_at: 10,
+                        generation: 1,
+                        expires_at: i64::MAX / 2,
+                    },
+                    buzz_db::push::ActiveLease {
+                        endpoint_hash: &[n as u8 + 42; 32],
+                        endpoint_grant: "opaque-grant",
+                        max_class: "default",
+                        subscriptions: &subscriptions,
+                    },
+                )
+                .await
+                .expect("activate lease"),
+                buzz_db::push::ReplaceLeaseOutcome::Accepted
+            );
+        }
+
+        let mut jobs = Vec::new();
+        for text in [
+            "@Robby read the canvas and do what it says.",
+            "nothing to see",
+            "@Kal the canvas is done.",
+        ] {
+            let event_id = crate::workflow_sink::RelayActionSink::new(&state)
+                .send_message(
+                    community,
+                    &channel.to_string(),
+                    text,
+                    text,
+                    &owner.public_key().to_hex(),
+                    None,
+                )
+                .await
+                .expect("send workflow message");
+            let stored = state
+                .db
+                .get_event_by_id(
+                    community,
+                    nostr::EventId::from_hex(&event_id).unwrap().as_bytes(),
+                )
+                .await
+                .expect("load message")
+                .expect("stored message");
+            jobs.push(buzz_db::push::BatchedMatch {
+                event: stored,
+                attempt: 1,
+            });
+        }
+        let batch = buzz_db::push::ClaimedMatchBatch {
+            community,
+            claim_id: uuid::Uuid::new_v4(),
+            jobs,
+        };
+        let context = load_match_context(&state, &batch)
+            .await
+            .expect("match context");
+        let woken: Vec<Vec<Vec<u8>>> = batch
+            .jobs
+            .iter()
+            .map(|job| {
+                match_job(job, &context)
+                    .expect("match")
+                    .into_iter()
+                    .map(|wake| wake.author)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            woken,
+            vec![vec![agent_bytes], vec![], vec![owner_bytes]],
+            "agent mention wakes the agent; no mention wakes no one; owner mention wakes the owner"
+        );
+    }
 
     /// The matcher on real channel rows: a member's lease that names no
     /// channel wakes for an ordinary channel's message but not for a system

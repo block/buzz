@@ -33,3 +33,14 @@ Do not change the relay advertisement until mobile builds that only parse
 `uuid-v4-lowercase` have drained. Those builds parse the descriptor before
 renewal, opt-out and revocation, so a new grammar would leave their existing
 leases active until expiry.
+
+## Workflow owner attribution
+
+The relay signs workflow messages. Their first `p` tag,
+`["p", <owner>, "", "owner"]`, names the workflow owner so clients can show
+who owns the message. It is attribution, not a mention. The push matcher
+evaluates lease filters, ignores and the hellthread gate as if `p` tags marked
+`owner` were absent, so the owner is not woken by every run of their workflow.
+When a workflow mentions its owner, the relay adds a plain `["p", <owner>]`,
+which wakes them like any mention. Mobile's Activity feed, unread mention
+priority and in-app notification rule skip the marked tag the same way.
