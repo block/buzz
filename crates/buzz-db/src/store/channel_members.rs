@@ -41,9 +41,11 @@ pub struct MemberRecord {
 /// concurrent demotions (or a demotion racing a removal) to each observe two
 /// owners, each pass, and together leave zero — the exact governance loss the
 /// guards exist to prevent. An advisory key rather than `SELECT ... FOR UPDATE`
-/// on the channel row: membership is its own contention domain and must not
-/// serialize against unrelated channel metadata writers (`update_channel`,
-/// `set_topic`, the TTL transition). Distinct key domain from
+/// on the channel row, so a removal, which takes only this key, does not
+/// serialize against the row's writers that leave admission alone
+/// (`set_topic`, `set_canvas`, the TTL transition). Admissions also lock the
+/// row, after this key (see [`lock_channel_for_member_put`]), because the row
+/// is what orders an archive against them. Distinct key domain from
 /// `buzz_channel_ttl:`.
 const CHANNEL_MEMBERSHIP_LOCK_NAMESPACE: &str = "buzz_channel_membership:";
 
@@ -3885,22 +3887,28 @@ mod postgres_tests {
     /// An archive and an admission are ordered by the channel row lock, and an
     /// archived channel admits nobody new. A join that waits on an uncommitted
     /// archive is refused once it commits, with no row, and re-adding a
-    /// removed member is refused too. The other order: an archive waits for
-    /// an admission that holds the locks.
+    /// removed member is refused too. A kind:9000 add that waits on an
+    /// uncommitted archive is refused the same way, and its event is not
+    /// stored. The other order: an archive waits for an admission that holds
+    /// the locks.
     /// The archive here is the TTL reaper's single UPDATE, which takes no
-    /// advisory lock. Mutations: drop the row lock from
-    /// `lock_channel_for_member_put`, or the archived refusal from
-    /// `put_members_on` → RED.
+    /// advisory lock. The join and the kind:9000 add each wait on their own
+    /// archive, so neither queues behind the other's membership lock.
+    /// Mutations: drop the row lock from `lock_channel_for_member_put`, take
+    /// only the membership lock in `put_members_with_event`, or drop the
+    /// archived refusal from `put_members_on` → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn put_member_waits_for_a_concurrent_archive() {
         let pool = setup_pool().await;
         let community_id = make_test_community(&pool).await;
         let community = CommunityId::from_uuid(community_id);
-        let owner = random_pubkey();
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_bytes().to_vec();
         let joiner = random_pubkey();
         let removed = random_pubkey();
-        for pk in [&owner, &joiner, &removed] {
+        let invitee = random_pubkey();
+        for pk in [&owner, &joiner, &removed, &invitee] {
             ensure_user(&pool, community, pk)
                 .await
                 .expect("ensure user");
@@ -3956,16 +3964,81 @@ mod postgres_tests {
         let readd = put_member(&pool, community, channel.id, &removed, None, Some(&owner))
             .await
             .expect_err("an archived channel does not reactivate a removed member");
-        assert!(matches!(readd, DbError::AccessDenied(_)), "{readd:?}");
+        assert!(
+            matches!(&readd, DbError::AccessDenied(reason) if reason == "channel is archived"),
+            "{readd:?}"
+        );
+
+        // A kind:9000 add stores its event in the same transaction as the
+        // write, so it takes the same locks: it waits on an uncommitted
+        // archive, then is refused and stores nothing.
+        crate::channel::unarchive_channel(&pool, community, channel.id)
+            .await
+            .expect("unarchive before the kind:9000 race");
+        let mut archive = pool.begin().await.expect("begin second archive");
+        sqlx::query(
+            "UPDATE channels SET archived_at = NOW() \
+             WHERE community_id = $1 AND id = $2 AND archived_at IS NULL",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .execute(&mut *archive)
+        .await
+        .expect("archive again");
+        let add = nostr::EventBuilder::new(nostr::Kind::Custom(9000), "")
+            .tags([
+                nostr::Tag::parse(["h", &channel.id.to_string()]).unwrap(),
+                nostr::Tag::parse(["p", &hex::encode(&invitee)]).unwrap(),
+            ])
+            .sign_with_keys(&owner_keys)
+            .expect("sign 9000");
+        let add_pool = crate::test_support::named_pool("put-members-event-archive-race").await;
+        let add_write = tokio::spawn({
+            let channel_id = channel.id;
+            let add = add.clone();
+            let invitee = invitee.clone();
+            async move {
+                let targets = [MemberPut {
+                    pubkey: &invitee,
+                    requested: None,
+                }];
+                put_members_with_event(&add_pool, None, community, channel_id, &add, &targets, None)
+                    .await
+            }
+        });
+        crate::test_support::wait_for_lock_wait(&pool, "put-members-event-archive-race").await;
+        assert!(
+            !add_write.is_finished(),
+            "the kind:9000 add must wait for the archive"
+        );
+        archive.commit().await.expect("commit second archive");
+        let write = add_write
+            .await
+            .expect("kind:9000 task")
+            .expect("kind:9000 write");
+        assert!(
+            matches!(&write, MemberPutEventWrite::Refused(errors)
+                if matches!(errors.as_slice(),
+                    [DbError::AccessDenied(reason)] if reason == "channel is archived")),
+            "expected an archived refusal"
+        );
+        assert!(
+            crate::event::get_event_by_id(&pool, community, add.id.as_bytes())
+                .await
+                .expect("read event")
+                .is_none(),
+            "a refused kind:9000 is not stored"
+        );
+
         let mut roles = Vec::new();
-        for pk in [&owner, &joiner, &removed] {
+        for pk in [&owner, &joiner, &removed, &invitee] {
             roles.push(
                 get_member_role(&pool, community, channel.id, pk)
                     .await
                     .expect("read role"),
             );
         }
-        assert_eq!(roles, [Some("owner".to_string()), None, None]);
+        assert_eq!(roles, [Some("owner".to_string()), None, None, None]);
 
         // The other order: an archive waits for an admission that holds the
         // locks, and the member it admitted stays a member.

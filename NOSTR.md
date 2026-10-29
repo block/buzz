@@ -222,17 +222,17 @@ body of kind:9021, so the channel's `join_role` applies and the channel gets
 its `member_joined` kind:40099, kind:39002 and kind:44100. There is no cap on
 how many channels that is: whatever carries the kind:39000 tag is joined, and
 the work a new member costs grows with the number of channels an owner or
-admin flags. It does this once,
-at that moment, and never again on login or reconnect, so a later kind:9022
-leave stands. A channel that fails to join is logged and counted
-(`buzz_auto_join_failures_total`), not retried: the kind:39000 tag is the
-record a client reconciles against. That includes a channel archived or made
-private while the join runs: the membership write decides both again under
-the channel's locks, so the member is not added and nothing is announced. `buzz-admin add-member` writes the
-roster row only and does not join default channels. Auto-join fires only at
-those roster-insert sites, so a community that does not require relay
-membership advertises the kind:39000 tag but auto-joins nobody; a client that
-wants the same result there self-joins (kind:9021) on the tag.
+admin flags. The relay does this once, at that moment, and never again on
+login or reconnect, so a later kind:9022 leave stands. A channel that fails
+to join is logged and counted (`buzz_auto_join_failures_total`), not retried:
+the kind:39000 tag is the record a client reconciles against. That includes a
+channel archived or made private while the join runs: the membership write
+decides both again under the channel's locks, so the member is not added and
+nothing is announced. `buzz-admin add-member` writes the roster row only and
+does not join default channels. Auto-join fires only at those roster-insert
+sites, so a community that does not require relay membership advertises the
+kind:39000 tag but auto-joins nobody; a client that wants the same result
+there self-joins (kind:9021) on the tag.
 
 ### Group Discovery
 

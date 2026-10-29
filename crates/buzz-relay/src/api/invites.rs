@@ -1532,13 +1532,16 @@ mod postgres_tests {
             let joiner_hex = joiner_hex.clone();
             async move { auto_join_default_channels(&tenant, &state, &joiner_hex).await }
         });
-        // Wait until the join is blocked behind the archive, so it has
-        // already listed the channel and passed the join body's check.
+        // Wait until the join is blocked on the channel row lock in
+        // `put_member`, behind the archive, so it has already listed the
+        // channel and passed the join body's check.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
-                 WHERE $1 = ANY(pg_blocking_pids(pid)))",
+                 WHERE wait_event_type = 'Lock' \
+                   AND $1 = ANY(pg_blocking_pids(pid)) \
+                   AND query LIKE 'SELECT archived_at FROM channels %FOR NO KEY UPDATE')",
             )
             .bind(archive_pid)
             .fetch_one(&pool)
