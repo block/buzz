@@ -217,6 +217,19 @@ impl ArtifactSyncs {
         }
     }
 
+    /// End the syncs among `matches` with `reason`: a change reached them,
+    /// but this node cannot deliver its signal (rule 5).
+    pub fn resync_matches(&self, matches: &[(ConnId, SubId)], reason: &'static str) {
+        if self.syncs.is_empty() {
+            return;
+        }
+        for key in matches {
+            if let Some(handle) = self.syncs.get(key) {
+                handle.resync(reason);
+            }
+        }
+    }
+
     /// Divert fan-out matches that are syncs into their signal inboxes, and
     /// return the matches that receive the event itself.
     pub fn divert(
@@ -245,6 +258,16 @@ impl ArtifactSyncs {
     /// Install an idle sync on `sub`, as a sync claim does.
     pub(crate) fn insert_idle(&self, conn: ConnId, sub: &str) {
         self.insert(conn, sub, Arc::new(SyncHandle::new()));
+    }
+
+    /// The resync reason recorded for the sync on `sub`, if any.
+    pub(crate) fn pending_resync(&self, conn: ConnId, sub: &str) -> Option<&'static str> {
+        let handle = self.syncs.get(&(conn, sub.to_owned()))?;
+        let pending = handle
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        pending.resync
     }
 }
 
