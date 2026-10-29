@@ -11,6 +11,9 @@ import 'theme_extensions.dart';
 /// Desktop uses --radius: 0.625rem (10px) as base:
 ///   lg = 10px, md = 8px, sm = 6px
 class Radii {
+  /// Capsule radius for 56-point navigation controls.
+  static const double navigationCapsule = 28.0;
+
   /// Small radius for compact UI elements.
   static const double xs = 4.0;
   static const double lg = 10.0;

@@ -1,3 +1,5 @@
+import 'features/channels/default_agent_launcher.dart';
+import 'features/agents/agents_page.dart';
 import 'dart:async';
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';
@@ -415,8 +417,18 @@ class App extends HookConsumerWidget {
           AuthStatus.authenticated => HostedAppGate(
             authenticated: true,
             child: HomePage(
-              mePageBuilder: (_, action) => MePage(newChatAction: action),
+              onAgents: showAgents,
+              defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                onChooseAgent: () => showAgents(context),
+              ),
+              mePageBuilder: (_, chat, workspace) => MePage(
+                sliver: true,
+                newChatAction: chat,
+                newWorkspaceAction: workspace,
+              ),
               settingsPageBuilder: _buildSettingsPage,
+              profilePageBuilder: (_) =>
+                  const _SettingsPageContent(embedded: true),
               communityInvitePageBuilder: (_) => const CommunityInvitePage(),
               communityAppearancePageBuilder: (_) => const ThemePickerPage(),
               hasUnreadInbox: hasUnreadInbox,
@@ -436,11 +448,13 @@ class App extends HookConsumerWidget {
 Widget _buildSettingsPage(BuildContext context) => const _SettingsPageContent();
 
 class _SettingsPageContent extends ConsumerWidget {
-  const _SettingsPageContent();
+  const _SettingsPageContent({this.embedded = false});
+  final bool embedded;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return SettingsPage(
+      embedded: embedded,
       profileHeader: const SettingsProfileHeader(),
       profileEditPageBuilder: (_) =>
           const ProfileEditPage(startInPhotoEditor: true),

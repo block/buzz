@@ -33,7 +33,7 @@ Ordinary reads remain available. Affected-user checks, such as Other User adding
 5. Read the signer's global and scoped restriction rows. Refuse a restricted signer.
 6. Write the event and transactional derived records; commit or rollback releases the locks.
 
-The restriction reads are ordinary indexed reads. No restriction cache is used. First-owner assignment coordinates through the scoped exclusive agent lock and refuses restricted prospective owners and agents.
+The restriction reads are ordinary indexed reads. No restriction cache is used. First-owner assignment coordinates through the scoped exclusive agent lock and refuses restricted prospective owners and agents. Both the ordinary setter and invitation claims use this guard; invitation paths acquire their existing admission lock first. Refused claims roll back membership, owner rows and invitation usage together.
 
 ## Operations spanning transactions or external effects
 

@@ -58,7 +58,10 @@ jobs:
       - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          key: sherpa-cache-v1
+          # Named so the advisory flake lane (_ci-flake.yml) can restore it;
+          # with shared-key set, rust-cache ignores `key`, so the cache-bust
+          # suffix lives here. Bump it to discard every saved cache.
+          shared-key: unit-tests-sherpa-cache-v1
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15

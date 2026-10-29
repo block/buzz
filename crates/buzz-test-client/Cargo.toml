@@ -23,6 +23,12 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
 rustls = "0.23"
+base64 = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+hex = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+toml = "1.0"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
@@ -42,3 +48,7 @@ buzz-sdk = { workspace = true }
 [[bin]]
 name = "buzz-test-cli"
 path = "src/main.rs"
+
+[[bin]]
+name = "buzz-loadgen"
+path = "src/bin/loadgen.rs"

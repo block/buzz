@@ -152,6 +152,10 @@ pub async fn run(command: Command) -> Result<i32> {
 
 mod handlers;
 mod inventory;
+/// Standalone delegation of an owned community to community deletion.
+pub mod owned_community;
+/// Read-only summaries of locally saved request progress and external waits.
+pub mod summary;
 mod transition;
 mod worker;
 mod workflow;

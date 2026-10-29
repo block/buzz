@@ -7,6 +7,7 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/crypto/nip_oa.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -23,6 +24,18 @@ final _scope = 'remote-agents:${HostedEnvironment.origin.host}:$fakeSubject';
 
 /// Deterministic test keys.
 nostr.Keys _keys(String last) => nostr.Keys('0' * 63 + last);
+
+/// Starts signed out, like a cold start, until its saved session is restored.
+class _RestoringRegistry extends FakeRegistry {
+  _RestoringRegistry() : super(signedIn: false);
+
+  @override
+  Future<BuilderlabAccount?> restore() async {
+    await Future<void>.delayed(Duration.zero);
+    signedIn = true;
+    return account;
+  }
+}
 
 Community _community({String? pubkey}) => Community.create(
   name: 'Test',
@@ -49,6 +62,230 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
+  Future<(RelayFakeController, FakeRegistry)> editableAgent() async {
+    final registry = FakeRegistry(bound: fakeOwner.public);
+    registry.listed = [
+      {
+        'agent_pubkey': fakeAgent,
+        'agent_name': 'Scout',
+        'agent_id': 'agent',
+        'status': 2,
+        'model_id': 'old-model',
+        'reasoning_effort': 'low',
+      },
+    ];
+    final controller = await _controller(registry);
+    await controller.run(controller.refresh);
+    return (controller, registry);
+  }
+
+  Future<bool> saveModel(
+    RelayFakeController controller, {
+    String effort = 'high',
+    bool current = true,
+    String? key,
+  }) async {
+    final model = (await controller.modelCatalog()).first;
+    return controller.updateModel(
+      community: _community(),
+      pubkey: key ?? fakeAgent,
+      model: model,
+      effort: effort,
+      isCurrent: () => current,
+    );
+  }
+
+  test(
+    'model changes save model and effort and confirm server readback',
+    () async {
+      final (controller, registry) = await editableAgent();
+      expect(await saveModel(controller), isTrue);
+      expect(registry.bodies['/v3/beekeeper/update-agent'], {
+        'agent_pubkey': fakeAgent,
+        'model_id': 'test-model',
+        'reasoning_effort': 'high',
+      });
+      expect(controller.agents.single['model_id'], 'test-model');
+    },
+  );
+
+  test(
+    'rejected model writes preserve the saved model and surface failure',
+    () async {
+      final (controller, registry) = await editableAgent();
+      registry.failInstructions = true;
+      expect(await saveModel(controller), isFalse);
+      expect(controller.agents.single['model_id'], 'old-model');
+      expect(controller.failure, contains('unavailable'));
+    },
+  );
+
+  test('unconfirmed model write does not report success', () async {
+    final (controller, registry) = await editableAgent();
+    registry.ignoreModelUpdate = true;
+    expect(await saveModel(controller), isFalse);
+    expect(controller.failure, contains('not confirmed'));
+    expect(controller.agents.single['model_id'], 'old-model');
+  });
+
+  test(
+    'model writes reject stale community, foreign agent and unsupported effort',
+    () async {
+      final (controller, registry) = await editableAgent();
+      expect(await saveModel(controller, current: false), isFalse);
+      expect(await saveModel(controller, key: 'a' * 64), isFalse);
+      expect(await saveModel(controller, effort: 'invalid'), isFalse);
+      expect(registry.calls, isNot(contains('update-agent')));
+    },
+  );
+
+  test(
+    'model writes require current account binding and community owner',
+    () async {
+      final (controller, registry) = await editableAgent();
+      registry.bound = 'a' * 64;
+      expect(await saveModel(controller), isFalse);
+      expect(registry.calls, isNot(contains('update-agent')));
+    },
+  );
+
+  test('model catalog rejects malformed reasoning choices', () async {
+    final (controller, registry) = await editableAgent();
+    registry.models = [
+      {'id': 'bad', 'display_name': 'Bad', 'supported_reasoning_efforts': []},
+    ];
+    expect(controller.modelCatalog(), throwsStateError);
+  });
+
+  test(
+    'reconnect adopts only the server-bound saved community identity',
+    () async {
+      final raw = jsonEncode([
+        {'name': 'Pilot', 'nsec': fakeOwner.nsec, 'pubkey': fakeOwner.public},
+        {'name': 'Other', 'nsec': fakeAgentKeys.nsec, 'pubkey': fakeAgent},
+      ]);
+      await communitySecureStorage.write(key: 'buzz_communities', value: raw);
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = RelayFakeController(registry);
+      addTearDown(() {
+        controller.dispose();
+        controller.relayAuth.dispose();
+        registry.dispose();
+      });
+      expect(await controller.run(controller.refresh), isTrue);
+      expect(controller.owner, fakeOwner.public);
+      expect(
+        (await AccountIdentityStore().forSubject(fakeSubject).read())?.pubkey,
+        fakeOwner.public,
+      );
+      expect(await communitySecureStorage.read(key: 'buzz_communities'), raw);
+      expect(registry.calls, ['list-agents']);
+    },
+  );
+
+  test(
+    'reconnect never adopts an unrelated device key or rebinds the account',
+    () async {
+      await communitySecureStorage.write(
+        key: 'buzz_communities',
+        value: jsonEncode([
+          {'name': 'Other', 'nsec': fakeAgentKeys.nsec, 'pubkey': fakeAgent},
+        ]),
+      );
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = RelayFakeController(registry);
+      addTearDown(() {
+        controller.dispose();
+        controller.relayAuth.dispose();
+        registry.dispose();
+      });
+      expect(await controller.run(controller.refresh), isFalse);
+      expect(
+        await AccountIdentityStore().forSubject(fakeSubject).read(),
+        isNull,
+      );
+      expect(registry.calls, isEmpty);
+      expect(controller.failure, contains('absent'));
+    },
+  );
+
+  test('reconnect adopts a matching retained paired identity', () async {
+    await AccountIdentityStore()
+        .forPairing(fakeOwner.public)
+        .create(fakeOwner.nsec);
+    final registry = FakeRegistry(bound: fakeOwner.public);
+    final controller = RelayFakeController(registry);
+    addTearDown(() {
+      controller.dispose();
+      controller.relayAuth.dispose();
+      registry.dispose();
+    });
+    expect(await controller.run(controller.refresh), isTrue);
+    expect(
+      (await AccountIdentityStore().forSubject(fakeSubject).read())?.pubkey,
+      fakeOwner.public,
+    );
+    expect(
+      (await AccountIdentityStore().forPairing(fakeOwner.public).read())
+          ?.pubkey,
+      fakeOwner.public,
+    );
+  });
+
+  test(
+    'creation normalizes saved HTTPS community URLs for attestation',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = await _controller(registry);
+      final community = Community.create(
+        name: 'Pilot',
+        relayUrl: 'https://test.${HostedEnvironment.communitySuffix}',
+        pubkey: fakeOwner.public,
+        nsec: fakeOwner.nsec,
+      );
+      expect(
+        await controller.create(
+          community,
+          'Tester',
+          modelId: 'test-model',
+          reasoningEffort: 'high',
+        ),
+        isTrue,
+      );
+      expect(
+        registry.bodies['/v3/beekeeper/attest-agent']?['community_url'],
+        'wss://test.${HostedEnvironment.communitySuffix}',
+      );
+      expect(
+        registry.calls.where((call) => call == 'register-agent'),
+        hasLength(1),
+      );
+    },
+  );
+
+  test('model setup requires a catalog-confirmed selection', () async {
+    final registry = FakeRegistry(bound: fakeOwner.public);
+    final controller = await _controller(registry);
+    expect(await controller.create(_community(), 'Scout'), isFalse);
+    expect(controller.pending, isNull);
+    expect(registry.calls, isEmpty);
+    expect(controller.failure, 'Choose a model and reasoning effort.');
+    expect(
+      await controller.create(
+        _community(),
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'max',
+      ),
+      isFalse,
+    );
+    expect(registry.calls, ['get-model-catalog']);
+    expect(controller.pending, isNull);
+    final catalog = await controller.modelCatalog();
+    expect(catalog.first.id, 'test-model');
+    expect(catalog.last.efforts, ['max']);
+  });
+
   test('remote agents follow the build-time Builderlab gate', () {
     expect(supportsRemoteAgents(_community()), HostedEnvironment.enabled);
     expect(supportsRemoteAgents(null), isFalse);
@@ -58,6 +295,61 @@ void main() {
       pubkey: fakeOwner.public,
     );
     expect(supportsRemoteAgents(selfHosted), isFalse);
+  });
+
+  test('every remote agent surface waits for Builderlab sign-in', () async {
+    final registry = FakeRegistry(signedIn: false);
+    addTearDown(registry.dispose);
+    final container = ProviderContainer(
+      overrides: [
+        builderlabAccountProvider.overrideWithValue(registry),
+        activeCommunityProvider.overrideWith((ref) async => _community()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(activeCommunityProvider.future);
+    expect(container.read(remoteAgentsEnabledProvider), isFalse);
+
+    registry.signedIn = true;
+    expect(
+      container.read(remoteAgentsEnabledProvider),
+      HostedEnvironment.enabled,
+    );
+    // A community refresh keeps the surfaces open on the previous value.
+    container.invalidate(activeCommunityProvider, asReload: true);
+    expect(container.read(activeCommunityProvider).isLoading, isTrue);
+    expect(
+      container.read(remoteAgentsEnabledProvider),
+      HostedEnvironment.enabled,
+    );
+    registry.signedIn = false;
+    expect(container.read(remoteAgentsEnabledProvider), isFalse);
+  });
+
+  test('a saved Builderlab session is restored on cold start', () async {
+    final registry = _RestoringRegistry();
+    addTearDown(registry.dispose);
+    final container = ProviderContainer(
+      overrides: [builderlabAccountProvider.overrideWithValue(registry)],
+    );
+    addTearDown(container.dispose);
+    expect(container.read(builderlabSignedInProvider), isFalse);
+    // Nothing else restores the account; the gate itself must.
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      container.read(builderlabSignedInProvider),
+      HostedEnvironment.enabled,
+    );
+  });
+
+  test('a failed listing is reported instead of an empty registry', () async {
+    final registry = FakeRegistry(bound: fakeOwner.public)..failListing = true;
+    final controller = await _controller(registry);
+    expect(await controller.run(controller.refresh), isFalse);
+    expect(controller.listingFailed, isTrue);
+    registry.failListing = false;
+    expect(await controller.run(controller.refresh), isTrue);
+    expect(controller.listingFailed, isFalse);
   });
 
   test('listing requires a signed-in account bound to the saved key', () async {
@@ -74,14 +366,14 @@ void main() {
     expect(await controller.run(controller.refresh), isTrue);
     expect(registry.calls, isEmpty);
     expect(controller.activeAgents, isEmpty);
-    expect(controller.status, contains('Sign in'));
+    expect(controller.failure, isEmpty);
 
     registry
       ..signedIn = true
       ..bound = nostr.Keys('0' * 63 + '3').public;
     expect(await controller.run(controller.refresh), isFalse);
     expect(registry.calls, isEmpty);
-    expect(controller.status, 'Buzz identity: mismatch.');
+    expect(controller.failure, 'Buzz identity: mismatch.');
 
     registry.bound = fakeOwner.public;
     expect(await controller.run(controller.refresh), isTrue);
@@ -102,11 +394,22 @@ void main() {
       final community = _community();
 
       expect(
-        await controller.create(community, 'Scout', instructions: 'x' * 20001),
+        await controller.create(
+          community,
+          'Scout',
+          modelId: 'test-model',
+          reasoningEffort: 'high',
+          instructions: 'x' * 20001,
+        ),
         isFalse,
       );
       expect(
-        await controller.create(_community(pubkey: 'f' * 64), 'Scout'),
+        await controller.create(
+          _community(pubkey: 'f' * 64),
+          'Scout',
+          modelId: 'test-model',
+          reasoningEffort: 'high',
+        ),
         isFalse,
       );
       expect(registry.calls, isEmpty);
@@ -116,16 +419,25 @@ void main() {
         await controller.create(
           community,
           'Scout',
+          modelId: 'test-model',
+          reasoningEffort: 'high',
           instructions: 'Reply concisely.',
+          pictureUrl: 'https://example.com/avatar.png',
         ),
         isFalse,
       );
       expect(registry.calls, [
+        'get-model-catalog',
         'register-agent',
         'attest-agent',
         'update-agent',
       ]);
       expect(controller.pending?['pubkey'], fakeAgent);
+      expect(controller.pending?['picture'], 'https://example.com/avatar.png');
+      expect(
+        registry.bodies['/v3/beekeeper/register-agent']?['agent_picture_url'],
+        'https://example.com/avatar.png',
+      );
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('$_scope:pending'), isNotNull);
       expect(
@@ -147,9 +459,9 @@ void main() {
         isTrue,
       );
       expect(registry.calls, [
+        'get-model-catalog',
         'attest-agent',
         'update-agent',
-        'add-buzz-subscription',
         'publish-policy',
         'list-agents',
       ]);
@@ -161,9 +473,14 @@ void main() {
         registry.bodies['/v3/beekeeper/attest-agent']?['community_url'],
         community.relayUrl,
       );
+      expect(registry.calls, isNot(contains('add-buzz-subscription')));
       expect(
-        registry.bodies['/v3/beekeeper/add-buzz-subscription']?['community'],
-        Uri.parse(community.relayUrl).host,
+        registry.bodies['/v3/beekeeper/update-agent']?['model_id'],
+        'test-model',
+      );
+      expect(
+        registry.bodies['/v3/beekeeper/update-agent']?['reasoning_effort'],
+        'high',
       );
       expect(resumed.pending, isNull);
       expect(prefs.getString('$_scope:pending'), isNull);
@@ -223,7 +540,7 @@ void main() {
         ..deleteStatus = 2;
       registrationExists = false;
       expect(await remove(), isFalse);
-      expect(controller.status, contains('disabled'));
+      expect(controller.failure, contains('disabled'));
       expect(controller.agents, hasLength(1));
 
       // The relay registration is gone, but the listing keeps a retry row.
@@ -252,7 +569,13 @@ void main() {
     final controller = await _controller(registry);
     final community = _community();
     expect(
-      await controller.create(community, 'Scout', instructions: 'Private.'),
+      await controller.create(
+        community,
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+        instructions: 'Private.',
+      ),
       isFalse,
     );
     final request = controller.pending!['request'];
@@ -266,13 +589,18 @@ void main() {
     });
     expect(await restarted.run(restarted.refresh), isTrue);
     expect(restarted.pending?['instructionsMissing'], isTrue);
-    expect(restarted.status, contains('Enter its instructions again'));
 
     registry
       ..failInstructions = false
       ..calls.clear();
     expect(
-      await restarted.create(community, 'Scout', instructions: 'Again.'),
+      await restarted.create(
+        community,
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+        instructions: 'Again.',
+      ),
       isTrue,
     );
     expect(
@@ -290,13 +618,23 @@ void main() {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       addTearDown(() => server.close(force: true));
       final kinds = <int>[];
+      final registrations = <Map<String, dynamic>>[];
+      final published = <NostrEvent>[];
       server.listen((request) async {
         final peer = await WebSocketTransformer.upgrade(request);
         addTearDown(peer.close);
         peer.listen((frame) {
           final data = jsonDecode(frame as String) as List;
           final event = Map<String, dynamic>.from(data[1] as Map);
-          if (data.first == 'EVENT') kinds.add(event['kind'] as int);
+          if (data.first == 'EVENT') {
+            kinds.add(event['kind'] as int);
+            if (event['kind'] == 30177) {
+              registrations.add(
+                jsonDecode(event['content'] as String) as Map<String, dynamic>,
+              );
+            }
+            published.add(NostrEvent.fromJson(event));
+          }
           peer.add(jsonEncode(['OK', event['id'], true, '']));
         });
         peer.add(jsonEncode(['AUTH', 'challenge']));
@@ -319,7 +657,9 @@ void main() {
       await controller.publishPolicy(relay, {
         'pubkey': fakeAgent,
         'name': 'Scout',
+        'picture': 'https://example.com/avatar.png',
       });
+      expect(registrations.single['picture'], 'https://example.com/avatar.png');
       await controller.removePolicy(relay, fakeAgent);
       expect(kinds, [30177, 5]);
     },
@@ -333,17 +673,31 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
 
     expect(
-      await controller.create(community, 'Scout', instructions: 'Private.'),
+      await controller.create(
+        community,
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+        instructions: 'Private.',
+      ),
       isFalse,
     );
-    expect(controller.status, contains('NAME_TAKEN'));
+    expect(controller.failure, contains('NAME_TAKEN'));
     expect(controller.canDiscardPending, isTrue);
     // An HTTP rejection is just as definite.
     registry
       ..rejectRegistration = false
       ..refuseRegistration = true;
-    expect(await controller.create(community, 'Scout'), isFalse);
-    expect(controller.status, contains('rejected'));
+    expect(
+      await controller.create(
+        community,
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+      ),
+      isFalse,
+    );
+    expect(controller.failure, contains('rejected'));
     expect(controller.canDiscardPending, isTrue);
     final request = controller.pending!['request'];
     expect(prefs.getString('$_scope:pending'), isNotNull);
@@ -361,7 +715,13 @@ void main() {
       ..refuseRegistration = false
       ..loseRegistration = true;
     expect(
-      await controller.create(community, 'Scout', instructions: 'Private.'),
+      await controller.create(
+        community,
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+        instructions: 'Private.',
+      ),
       isFalse,
     );
     expect(controller.pending?['pubkey'], isNull);
@@ -390,22 +750,38 @@ void main() {
       fetch: (_) async => [],
     );
     expect(await remove(other), isFalse);
-    expect(controller.status, contains('Resume the unfinished setup'));
+    expect(controller.failure, contains('Resume the unfinished setup'));
 
     // Resume from another community reuses the idempotency key and recovers
     // the same identity; finishing it still needs the original community.
     registry
       ..loseRegistration = false
       ..bodies.clear();
-    expect(await controller.create(elsewhere, 'Scout'), isFalse);
-    expect(controller.status, contains('Agent identity recovered'));
+    expect(
+      await controller.create(
+        elsewhere,
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+      ),
+      isFalse,
+    );
+    expect(controller.failure, contains('Agent identity recovered'));
     expect(
       registry.bodies['/v3/beekeeper/register-agent']?['idempotency_key'],
       lost,
     );
     registry.bodies.clear();
-    expect(await controller.create(elsewhere, 'Scout'), isFalse);
-    expect(controller.status, contains('original community'));
+    expect(
+      await controller.create(
+        elsewhere,
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+      ),
+      isFalse,
+    );
+    expect(controller.failure, contains('original community'));
     expect(registry.bodies, isEmpty);
     expect(controller.pending?['pubkey'], fakeAgent);
     expect(await controller.discardPending(), isFalse);
@@ -413,7 +789,7 @@ void main() {
 
     // Once known, the unfinished setup blocks deleting only its own agent.
     expect(await remove(fakeAgent), isFalse);
-    expect(controller.status, contains('Resume the unfinished setup'));
+    expect(controller.failure, contains('Resume the unfinished setup'));
     expect(await remove(other), isTrue);
     expect(controller.deletedAgents, {other});
     expect(controller.pending?['pubkey'], fakeAgent);
@@ -449,7 +825,7 @@ void main() {
     final controller = await _controller(registry);
     final relay = _community().relayUrl;
     await controller.load(relay);
-    expect(controller.status, 'Buzz identity: mismatch.');
+    expect(controller.failure, 'Buzz identity: mismatch.');
     registry.bound = fakeOwner.public;
     await controller.load(relay);
     expect(registry.calls, ['list-agents']);
@@ -550,7 +926,15 @@ void main() {
 
     // Publishing a registration for the still-ACTIVE agent shows it again.
     relay.live = true;
-    expect(await controller.create(_community(), 'Scout'), isTrue);
+    expect(
+      await controller.create(
+        _community(),
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+      ),
+      isTrue,
+    );
     expect(controller.activeAgents, {fakeAgent});
     expect(await container.read(availableRemoteAgentsProvider.future), {
       fakeAgent,

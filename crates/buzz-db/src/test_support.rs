@@ -323,6 +323,8 @@ pub(crate) async fn wait_for_lock_wait(pool: &sqlx::PgPool, application_name: &s
 /// [`PausingProxy::stall_established`] instead holds only the sessions open
 /// at that moment, for good, while later sessions relay normally: a failover
 /// whose old sockets stop answering without closing.
+/// [`PausingProxy::stall_from`] is the reverse: sessions from a given number
+/// on hold for good, so dials past that point stall mid-handshake.
 pub(crate) struct PausingProxy {
     pub(crate) port: u16,
     hold: tokio::sync::watch::Sender<ProxyHold>,
@@ -335,11 +337,13 @@ struct ProxyHold {
     all: bool,
     /// Sessions numbered below this hold their bytes.
     below: u64,
+    /// Sessions numbered at or above this hold their bytes.
+    from: Option<u64>,
 }
 
 impl ProxyHold {
     fn holds(self, session: u64) -> bool {
-        self.all || session < self.below
+        self.all || session < self.below || self.from.is_some_and(|from| session >= from)
     }
 }
 
@@ -418,5 +422,16 @@ impl PausingProxy {
     pub(crate) fn stall_established(&self) {
         let below = self.next_session.load(std::sync::atomic::Ordering::SeqCst);
         self.hold.send_modify(|hold| hold.below = below);
+    }
+
+    /// Relay the first `from` sessions normally and hold every later one,
+    /// for good.
+    pub(crate) fn stall_from(&self, from: u64) {
+        self.hold.send_modify(|hold| hold.from = Some(from));
+    }
+
+    /// Sessions accepted so far.
+    pub(crate) fn sessions(&self) -> u64 {
+        self.next_session.load(std::sync::atomic::Ordering::SeqCst)
     }
 }

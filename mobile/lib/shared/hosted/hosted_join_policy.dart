@@ -17,7 +17,14 @@ class HostedJoinPolicy {
   final String? privacy;
 }
 
-enum HostedInviteFailure { policyRequired, expired, exhausted, invalid }
+enum HostedInviteFailure {
+  policyRequired,
+  expired,
+  exhausted,
+  invalid,
+  restricted,
+  ownerMismatch,
+}
 
 /// Reads only a bounded JSON document, never follows redirects or logs bodies.
 Future<Map<String, dynamic>> readJoinResponse(
@@ -45,6 +52,8 @@ Future<Map<String, dynamic>> readJoinResponse(
       'invite_expired' => HostedInviteFailure.expired,
       'invite_exhausted' => HostedInviteFailure.exhausted,
       'invite_invalid' => HostedInviteFailure.invalid,
+      'invite_restricted' => HostedInviteFailure.restricted,
+      'invite_owner_mismatch' => HostedInviteFailure.ownerMismatch,
       _ => AccountFailure.denied,
     };
   }

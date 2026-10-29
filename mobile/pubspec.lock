@@ -145,6 +145,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.0.5"
+  buzz_secp256k1:
+    dependency: "direct main"
+    description:
+      path: "packages/buzz_secp256k1"
+      relative: true
+    source: path
+    version: "0.0.1"
   camera:
     dependency: "direct main"
     description:

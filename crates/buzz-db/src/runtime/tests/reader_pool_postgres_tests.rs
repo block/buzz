@@ -126,6 +126,108 @@ async fn reader_boot_ping_warms_pool_to_min_connections() {
     drop_scratch_db(&admin, db.pool.clone(), &wname).await;
 }
 
+/// After the boot ping the background warm pass opens the reader pool to its
+/// ceiling and releases every connection idle. Without the warm pass the pool
+/// stops at the floor; if the pass closed its connections instead of
+/// releasing them, `size` and `idle` never reach the ceiling together.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn reader_boot_ping_warms_pool_to_max_in_background() {
+    let max = 15;
+    let (admin, mut db, wname, scratch_url) = same_db_reader("warm_max", max).await;
+    // The production reader acquire budget (150ms) lets a dial on a loaded
+    // test host miss; this test is about the warm pass reaching the ceiling,
+    // so give each dial room.
+    db.read_pool = Some(
+        Db::read_pool_options(max)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_lazy_with(Db::reader_connect_options(
+                scratch_url.parse().expect("parse scratch url"),
+            )),
+    );
+    let read_pool = db.read_pool.clone().expect("reader pool configured");
+    assert!(
+        Db::reader_min_connections(max) < max,
+        "fixture needs a floor below the ceiling"
+    );
+
+    db.spawn_read_pool_boot_ping();
+
+    await_idle_floor(&read_pool, max).await;
+    // Settled at the ceiling and no further.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        read_pool.size(),
+        max,
+        "warm pass must stay within the ceiling"
+    );
+    assert_eq!(
+        read_pool.num_idle(),
+        max as usize,
+        "warmed connections stay idle"
+    );
+
+    drop_scratch_db(&admin, db.pool.clone(), &wname).await;
+}
+
+/// At the production acquire budget, a reader that admits only some dials
+/// ends the warm pass bounded and partial, with no re-dialing. The pool is
+/// built by the production constructor, so each warm acquire, dial
+/// included, gets only [`Db::READER_ACQUIRE_TIMEOUT`]. The proxy relays the
+/// first 3 sessions and stalls every later dial mid-handshake: the first
+/// wave of 5 holds 3, the second wave's 5 dials all miss, and that wave's
+/// lack of progress ends the pass after exactly 10 dials.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn reader_warm_at_production_budget_ends_partial_when_dials_stall() {
+    let max = 15;
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (writer, wname) = create_scratch_db(&admin, "warm_stall").await;
+    let writer_options = writer.connect_options();
+    let (host, port) = (writer_options.get_host(), writer_options.get_port());
+    let proxy = crate::test_support::PausingProxy::spawn(host.to_owned(), port).await;
+    proxy.stall_from(3);
+    let scratch_url = {
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        format!("{}/{}", &base[..idx], wname)
+    };
+    let proxied_url = scratch_url.replacen(
+        &format!("{host}:{port}"),
+        &format!("127.0.0.1:{}", proxy.port),
+        1,
+    );
+    assert_ne!(
+        proxied_url, scratch_url,
+        "reader url must route through the proxy"
+    );
+    let read_pool = Db::connect_read_pool(&DbConfig::default(), &proxied_url, max)
+        .expect("production reader pool");
+
+    let started = Instant::now();
+    let report = Db::warm_read_pool(&read_pool).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        (report.target, report.held, report.failed),
+        (max, 3, 7),
+        "one partial wave, then one wave that opens nothing"
+    );
+    assert_eq!(proxy.sessions(), 10, "the pass must stop dialing");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "two waves at the production budget must end promptly: {elapsed:?}"
+    );
+    await_idle_floor(&read_pool, 3).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(proxy.sessions(), 10, "nothing re-dials after the pass");
+
+    read_pool.close().await;
+    drop_scratch_db(&admin, writer, &wname).await;
+}
+
 /// A warm reader connection whose server stops answering (here: the
 /// heartbeat observation blocks behind an exclusive lock) must fail the
 /// routed read closed to the writer within the proof budget, not hang the

@@ -5,6 +5,9 @@
 /// Synthetic user-deletion request intake.
 pub mod user;
 
+/// Community submission and preparation shared by operator entry points.
+pub mod community;
+
 use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -500,15 +503,15 @@ async fn run_with_services(command: Command, services: Services) -> Result<i32> 
         } => {
             let relay_url = std::env::var("RELAY_URL").ok();
             let host = resolve_submit_host(host.as_deref(), relay_url.as_deref())?;
-            let request = services
-                .store
-                .submit(&host, &requested_by, reason.as_deref())
-                .await?;
-            let inventory = build_inventory(&services, &request, None).await?;
-            let request = services
-                .store
-                .freeze_inventory(request.id, &inventory)
-                .await?;
+            let request = community::submit_and_prepare(
+                &services.store,
+                &services.media,
+                Some(&host),
+                &requested_by,
+                reason.as_deref(),
+                None,
+            )
+            .await?;
             print_json(&request)?;
             Ok(0)
         }
@@ -742,15 +745,13 @@ fn validate_storage_ownership(request: &DeletionRequest, manifest: &StorageManif
 }
 
 async fn build_inventory(
-    services: &Services,
+    store: &DeletionStore,
+    media: &MediaStorage,
     request: &DeletionRequest,
     heartbeat_lost: Option<&CancellationToken>,
 ) -> Result<FrozenInventory> {
-    let schema = services
-        .store
-        .inventory_schema(request.community_id)
-        .await?;
-    let storage = enumerate_tenant_prefixes(services, request, heartbeat_lost, None).await?;
+    let schema = store.inventory_schema(request.community_id).await?;
+    let storage = enumerate_tenant_prefixes(store, media, request, heartbeat_lost, None).await?;
     Ok(FrozenInventory { schema, storage })
 }
 
@@ -761,12 +762,11 @@ struct ChunkSink<'a> {
     buffered: Vec<String>,
 }
 
-async fn flush_chunk(services: &Services, sink: &mut ChunkSink<'_>, prefix: &str) -> Result<()> {
+async fn flush_chunk(store: &DeletionStore, sink: &mut ChunkSink<'_>, prefix: &str) -> Result<()> {
     if sink.buffered.is_empty() {
         return Ok(());
     }
-    services
-        .store
+    store
         .append_manifest_key_chunk(sink.token, sink.next_chunk_no, prefix, &sink.buffered)
         .await?;
     sink.next_chunk_no += 1;
@@ -804,7 +804,8 @@ fn manifest_chunk_deleted_detail(
 /// (never spanning prefixes) for the destructive freeze to bind against these
 /// digests.
 async fn enumerate_tenant_prefixes(
-    services: &Services,
+    store: &DeletionStore,
+    media: &MediaStorage,
     request: &DeletionRequest,
     heartbeat_lost: Option<&CancellationToken>,
     mut sink: Option<&mut ChunkSink<'_>>,
@@ -821,8 +822,7 @@ async fn enumerate_tenant_prefixes(
             if heartbeat_lost.is_some_and(CancellationToken::is_cancelled) {
                 return Err(DeletionLeaseLost.into());
             }
-            let page = services
-                .media
+            let page = media
                 .list_prefix_versions_page(
                     &prefix,
                     key_marker.take(),
@@ -848,7 +848,7 @@ async fn enumerate_tenant_prefixes(
                 if let Some(sink) = sink.as_deref_mut() {
                     sink.buffered.push(encoded);
                     if sink.buffered.len() >= chunk_keys {
-                        flush_chunk(services, sink, &prefix).await?;
+                        flush_chunk(store, sink, &prefix).await?;
                     }
                 }
             }
@@ -863,7 +863,7 @@ async fn enumerate_tenant_prefixes(
             version_id_marker = Some(next_version_id_marker);
         }
         if let Some(sink) = sink.as_deref_mut() {
-            flush_chunk(services, sink, &prefix).await?;
+            flush_chunk(store, sink, &prefix).await?;
         }
         let (keys_digest, object_count) = digest.finish();
         prefixes.push(PrefixManifest {
@@ -999,8 +999,14 @@ async fn freeze_destructive_manifest(
         next_chunk_no: 0,
         buffered: Vec::new(),
     };
-    let manifest =
-        enumerate_tenant_prefixes(services, request, Some(heartbeat_lost), Some(&mut sink)).await?;
+    let manifest = enumerate_tenant_prefixes(
+        &services.store,
+        &services.media,
+        request,
+        Some(heartbeat_lost),
+        Some(&mut sink),
+    )
+    .await?;
     services
         .store
         .freeze_destructive_storage_manifest(token, &manifest)
@@ -1067,7 +1073,8 @@ async fn run_loop(
                 HEARTBEAT_INTERVAL,
                 |heartbeat_lost| async move {
                     build_inventory(
-                        preparation_services,
+                        &preparation_services.store,
+                        &preparation_services.media,
                         &preparation_request,
                         Some(&heartbeat_lost),
                     )
@@ -1945,7 +1952,7 @@ mod postgres_tests {
             .await
             .expect("create deletion engine test community");
         let request = store
-            .submit(&host, "test", None)
+            .submit(Some(&host), "test", None, None)
             .await
             .expect("submit deletion request");
         let inventory = FrozenInventory {
@@ -2092,7 +2099,7 @@ mod postgres_tests {
             .expect("create approved community");
         let approved = services
             .store
-            .submit(&approved_host, "manual-operator", None)
+            .submit(Some(&approved_host), "manual-operator", None, None)
             .await
             .expect("submit approved request");
         let inventory = FrozenInventory {
@@ -2178,7 +2185,7 @@ mod postgres_tests {
             .expect("create manual community");
         let manual = services
             .store
-            .submit(&operator_host, "manual-operator", None)
+            .submit(Some(&operator_host), "manual-operator", None, None)
             .await
             .expect("submit manual request");
 

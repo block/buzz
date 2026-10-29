@@ -286,89 +286,105 @@ void main() {
     },
   );
 
-  testWidgets(
-    'welcome content follows the scanner spring and returns on close',
-    (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(_qrScannerPlatformChannel, (call) async {
-            return call.method == 'usesDynamicIslandQrScannerPortal'
-                ? true
-                : null;
-          });
-      await tester.binding.setSurfaceSize(const Size(393, 852));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      for (final reduced in [false, true]) {
-        await tester.pumpWidget(
-          WidgetHelpers.testable(
-            disableAnimations: reduced,
-            child: const PairingPage(
-              connectionLanding: true,
-              showConnectionOptions: false,
-            ),
+  testWidgets('welcome and Add follow the scanner spring and return on close', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_qrScannerPlatformChannel, (call) async {
+          return call.method == 'usesDynamicIslandQrScannerPortal'
+              ? true
+              : null;
+        });
+    await tester.binding.setSurfaceSize(const Size(393, 852));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    for (final (reduced, adding) in [
+      (false, false),
+      (true, false),
+      (false, true),
+      (true, true),
+    ]) {
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          disableAnimations: reduced,
+          child: PairingPage(
+            addingCommunity: adding,
+            connectionLanding: true,
+            showConnectionOptions: false,
           ),
-        );
-        await tester.pumpAndSettle();
-        final opacity = find.byKey(const Key('scanner-welcome-opacity'));
-        final scale = find.byKey(const Key('scanner-welcome-scale'));
-        expect(tester.widget<Opacity>(opacity).opacity, 1);
-        await tester.tap(find.text('Scan a QR code').hitTestable());
-        await tester.pump();
-        // Opening must begin without waiting for the welcome double-tap timeout.
+        ),
+      );
+      await tester.pumpAndSettle();
+      final opacity = find.byKey(const Key('scanner-welcome-opacity'));
+      final scale = find.byKey(const Key('scanner-welcome-scale'));
+      expect(tester.widget<Opacity>(opacity).opacity, 1);
+      if (adding) {
+        // Only foreground controls transition; the opaque page stays fixed.
         expect(
-          find.byKey(const ValueKey('dynamic-island-qr-scanner-portal')),
-          findsOneWidget,
-        );
-        await tester.pump(const Duration(milliseconds: 100));
-        if (!reduced) {
-          final portal = find.byKey(
-            const ValueKey('dynamic-island-qr-scanner-portal'),
-          );
-          final progress = (tester.getSize(portal).height - 36) / (363 - 36);
-          expect(
-            tester.widget<Opacity>(opacity).opacity,
-            closeTo(1 - progress, 0.001),
-          );
-          expect(
-            tester.widget<Transform>(scale).transform.storage[0],
-            closeTo(1 - 0.04 * progress, 0.001),
-          );
-        }
-        await tester.pumpAndSettle();
-        expect(tester.widget<Opacity>(opacity).opacity, 0);
-        expect(
-          tester.widget<Transform>(scale).transform.storage[0],
-          closeTo(reduced ? 1 : 0.96, 0.001),
-        );
-        expect(
-          find
-              .ancestor(
-                of: find.text('Scan a QR code'),
-                matching: find.byType(FilledButton),
-              )
-              .hitTestable(),
+          find.descendant(of: opacity, matching: find.byType(Scaffold)),
           findsNothing,
         );
-        await tester.tapAt(const Offset(196.5, 700));
-        await tester.pumpAndSettle();
-        expect(tester.widget<Opacity>(opacity).opacity, 1);
-        expect(tester.widget<Transform>(scale).transform.storage[0], 1);
         expect(
-          find
-              .ancestor(
-                of: find.text('Scan a QR code'),
-                matching: find.byType(FilledButton),
-              )
-              .hitTestable(),
-          findsOneWidget,
+          find.ancestor(of: opacity, matching: find.byType(Scaffold)),
+          findsWidgets,
         );
-        expect(tester.takeException(), isNull);
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pumpAndSettle();
       }
-      debugDefaultTargetPlatformOverride = null;
-    },
-  );
+      await tester.tap(find.text('Scan a QR code').hitTestable());
+      await tester.pump();
+      // Opening must begin without waiting for the welcome double-tap timeout.
+      expect(
+        find.byKey(const ValueKey('dynamic-island-qr-scanner-portal')),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      if (!reduced) {
+        final portal = find.byKey(
+          const ValueKey('dynamic-island-qr-scanner-portal'),
+        );
+        final progress = (tester.getSize(portal).height - 36) / (363 - 36);
+        expect(
+          tester.widget<Opacity>(opacity).opacity,
+          closeTo(1 - progress, 0.001),
+        );
+        expect(
+          tester.widget<Transform>(scale).transform.storage[0],
+          closeTo(1 - 0.04 * progress, 0.001),
+        );
+      }
+      await tester.pumpAndSettle();
+      expect(tester.widget<Opacity>(opacity).opacity, 0);
+      expect(
+        tester.widget<Transform>(scale).transform.storage[0],
+        closeTo(reduced ? 1 : 0.96, 0.001),
+      );
+      expect(
+        find
+            .ancestor(
+              of: find.text('Scan a QR code'),
+              matching: find.byType(FilledButton),
+            )
+            .hitTestable(),
+        findsNothing,
+      );
+      await tester.tapAt(const Offset(196.5, 700));
+      await tester.pumpAndSettle();
+      expect(tester.widget<Opacity>(opacity).opacity, 1);
+      expect(tester.widget<Transform>(scale).transform.storage[0], 1);
+      expect(
+        find
+            .ancestor(
+              of: find.text('Scan a QR code'),
+              matching: find.byType(FilledButton),
+            )
+            .hitTestable(),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    }
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets(
     'an early dismissal keeps its frame and settles back into the island',

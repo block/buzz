@@ -2524,7 +2524,12 @@ mod track_c_tests {
 
         let store = state.db.deletion_store();
         let request = store
-            .submit(host, "git-finalize-test", Some("post-CAS lease regression"))
+            .submit(
+                Some(host),
+                "git-finalize-test",
+                Some("post-CAS lease regression"),
+                None,
+            )
             .await
             .expect("submit deletion");
         let inventory = FrozenInventory {

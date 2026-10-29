@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -15,6 +16,7 @@ import '../../shared/clipboard_utils.dart';
 import '../../shared/success_haptic.dart';
 import '../../shared/push/push_relay_capability_provider.dart';
 import '../../shared/push/push_bootstrap.dart';
+import '../../shared/push/push_subscription_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
 import '../pairing/pairing_provider.dart';
@@ -40,6 +42,7 @@ class SettingsPage extends HookConsumerWidget {
     required this.profileHeader,
     required this.identityRecoveryPageBuilder,
     this.profileEditPageBuilder = _emptyProfileEditPage,
+    this.embedded = false,
     this.onSetStatus,
     this.onEditDisplayName,
     this.onEditProfileDescription,
@@ -47,6 +50,9 @@ class SettingsPage extends HookConsumerWidget {
 
   /// Header widget displayed at the top of settings.
   final Widget profileHeader;
+
+  /// The profile destination in the main tab bar.
+  final bool embedded;
 
   /// Builds the identity-recovery page pushed from the recovery settings row.
   final WidgetBuilder identityRecoveryPageBuilder;
@@ -77,16 +83,20 @@ class SettingsPage extends HookConsumerWidget {
       child: FrostedScaffold(
         useUtilitySurfaceTheme: true,
         appBar: FrostedAppBar(
-          nativeTitle: 'Settings',
-          nativeLeading: IosNavigationAction(
-            label: 'Close settings',
-            symbol: 'xmark',
-            onPressed: () => Navigator.of(context).pop(),
-          ),
+          nativeTitle: embedded ? '' : 'Settings',
+          nativeLeading: embedded
+              ? null
+              : IosNavigationAction(
+                  label: 'Close settings',
+                  symbol: 'xmark',
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
           automaticallyImplyLeading: false,
           horizontalInset: Grid.gutter,
           showBottomDivider: false,
-          leading: Theme.of(context).platform == TargetPlatform.iOS
+          leading: embedded
+              ? null
+              : Theme.of(context).platform == TargetPlatform.iOS
               ? IosGlassNavigationButton(
                   key: const ValueKey('settings-ios-glass-close'),
                   icon: IosGlassNavigationIcon.close,
@@ -114,7 +124,10 @@ class SettingsPage extends HookConsumerWidget {
           bottom: const SizedBox.expand(),
         ),
         body: ListView(
-          padding: EdgeInsets.only(top: topSectionHeight, bottom: Grid.xs),
+          padding: EdgeInsets.only(
+            top: topSectionHeight,
+            bottom: MediaQuery.paddingOf(context).bottom + Grid.xs,
+          ),
           children: [
             profileHeader,
             _StatusSection(onSetStatus: onSetStatus),

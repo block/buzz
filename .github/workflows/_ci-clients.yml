@@ -134,6 +134,9 @@ jobs:
       - name: Test
         if: matrix.lane == 'test'
         run: /bin/bash scripts/mobile-test-shard.sh ${{ matrix.shard }} 3 --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+      - name: Test native secp256k1 package
+        if: matrix.lane == 'checks'
+        run: cd mobile/packages/buzz_secp256k1 && dart pub get && dart test
       - name: Test configured authentication domains
         if: matrix.lane == 'checks'
         run: >-

@@ -9540,6 +9540,7 @@ pub(crate) mod postgres_tests {
                  CREATE TABLE {schema}.user_deletion_fences \
                      (LIKE public.user_deletion_fences INCLUDING ALL); \
                  CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
+                 CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
                  CREATE TABLE {schema}.relay_members (LIKE public.relay_members INCLUDING ALL); \
                  CREATE TABLE {schema}.join_policy_acceptances \
                      (LIKE public.join_policy_acceptances INCLUDING ALL); \

@@ -1501,7 +1501,12 @@ mod postgres_tests {
             .await
             .expect("load community host");
         let submitted = store
-            .submit(&host, "test-operator", Some("reaction fence regression"))
+            .submit(
+                Some(&host),
+                "test-operator",
+                Some("reaction fence regression"),
+                None,
+            )
             .await
             .expect("submit deletion request");
         let empty_digest = crate::deletion::KeyStreamDigest::new().finish().0;

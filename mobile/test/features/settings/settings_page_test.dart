@@ -12,6 +12,7 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
+import 'package:buzz/shared/push/push_subscription_provider.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
@@ -170,6 +171,8 @@ void main() {
           savedPrefsProvider.overrideWithValue(prefs),
           activeCommunityProvider.overrideWith((ref) async => community),
           currentRelayPushDescriptorProvider.overrideWith((ref) => capability),
+          // The lease had no room for 12 older Solo chats.
+          pushSubscriptionSyncProvider.overrideWith((ref) async => 12),
           appLifecycleProvider.overrideWith(_SettingsLifecycleNotifier.new),
           buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
             () async => BuzzPushAuthorizationStatus.authorized,
@@ -191,6 +194,14 @@ void main() {
       findsOneWidget,
     );
     expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    expect(
+      find.text('Older Solo chats notify only on mention'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('12 chats are past this relay’s notification limit.'),
+      findsOneWidget,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 

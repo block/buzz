@@ -10,7 +10,6 @@ class MeSection extends HookWidget {
   const MeSection({
     super.key,
     required this.label,
-    required this.icon,
     required this.children,
     this.hasUnread = false,
   });
@@ -19,13 +18,12 @@ class MeSection extends HookWidget {
 
   /// Keeps unread activity visible when this section is collapsed.
   final bool hasUnread;
-  final IconData icon;
   final List<Widget> children;
 
   @override
   Widget build(BuildContext context) {
     final expanded = useState(true);
-    final color = navigationSectionForeground(context);
+    final color = navigationMetadataForeground(context);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -42,28 +40,19 @@ class MeSection extends HookWidget {
             child: Padding(
               padding: const EdgeInsets.symmetric(
                 horizontal: Grid.xxs,
-                vertical: Grid.twelve,
+                vertical: Grid.xxs,
               ),
               child: ConstrainedBox(
                 constraints: const BoxConstraints(minHeight: 28),
                 child: Row(
                   children: [
-                    SizedBox(
-                      width: 22,
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Icon(icon, size: 18, color: color),
-                      ),
-                    ),
-                    const SizedBox(width: Grid.xxs),
-                    Expanded(
+                    Flexible(
                       child: Text(
                         label,
-                        style: contentListTitleTextStyle.copyWith(
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: navigationSectionTextStyle.copyWith(
                           color: color,
-                          fontSize: 17,
-                          height: 22 / 17,
-                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
@@ -79,6 +68,7 @@ class MeSection extends HookWidget {
                       ),
                       const SizedBox(width: Grid.xxs),
                     ],
+                    const SizedBox(width: Grid.quarter),
                     AnimatedRotation(
                       turns: expanded.value ? 0 : -0.25,
                       duration: reducedMotion
@@ -87,8 +77,8 @@ class MeSection extends HookWidget {
                       curve: sectionExpandCurve,
                       child: Icon(
                         BuzzIcons.chevronDown,
-                        size: 18,
-                        color: color,
+                        size: 14,
+                        color: navigationAccessoryForeground(context),
                       ),
                     ),
                   ],

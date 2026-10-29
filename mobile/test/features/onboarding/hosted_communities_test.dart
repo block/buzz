@@ -1,3 +1,4 @@
+import 'package:buzz/shared/community/community_grid_option.dart';
 import 'dart:ui' as ui;
 
 import 'package:buzz/shared/hosted/hosted_community_creation.dart';
@@ -67,7 +68,8 @@ void main() {
             .hitTestable();
         expect(
           tester.getTopLeft(scanCard).dy - tester.getBottomLeft(subtitle).dy,
-          closeTo(24, 1),
+          // The transitioning heading reserves the taller of both text blocks.
+          greaterThanOrEqualTo(24),
         );
         tester.view.physicalSize = const Size(320, 640);
         await tester.pumpAndSettle();
@@ -267,7 +269,11 @@ void main() {
         expect(find.byType(HostedConnectPage), findsNothing);
         await tester.tap(find.text('Continue with Builderlab'));
         await tester.pumpAndSettle();
-        expect(find.byType(CheckboxListTile), findsNothing);
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(find.byType(CommunityGridOption), findsWidgets);
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.pumpAndSettle();
+        expect(find.byType(CommunityGridOption), findsNothing);
         expect(f.admitted, [
           'one.communities.buzz.xyz',
           'two.communities.buzz.xyz',
@@ -281,6 +287,10 @@ void main() {
         };
         await tester.tap(find.text('Continue with Builderlab'));
         await tester.pumpAndSettle();
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(find.byType(CommunityGridOption), findsWidgets);
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.pumpAndSettle();
         expect(find.text('Keep saved identity and skip'), findsOneWidget);
         expect(find.text('1 community added and kept.'), findsOneWidget);
         await tester.tap(find.text('Keep saved identity and skip'));
@@ -293,18 +303,30 @@ void main() {
         };
         await tester.tap(find.text('Continue with Builderlab'));
         await tester.pumpAndSettle();
+        expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+        expect(find.byType(CommunityGridOption), findsWidgets);
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.pumpAndSettle();
         expect(find.text('1 community added and kept.'), findsOneWidget);
         expect(find.text('Try again').hitTestable(), findsNothing);
+        expect(find.text('Skip this community').hitTestable(), findsOneWidget);
         await tester.tap(find.text('Back to choices'));
         await tester.pumpAndSettle();
-        expect(find.byType(CheckboxListTile), findsOneWidget);
+        expect(find.byType(CommunityGridOption), findsNWidgets(2));
         expect(
           find.descendant(
-            of: find.byType(CheckboxListTile),
+            of: find.byType(CommunityGridOption),
             matching: find.text('two.communities.buzz.xyz'),
           ),
           findsWidgets,
         );
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Skip this community'));
+        await tester.pumpAndSettle();
+        expect(f.admitted, ['one.communities.buzz.xyz']);
+        expect(f.openedCommunity, 'wss://one.communities.buzz.xyz');
+        expect(find.byType(HostedConnectPage), findsNothing);
       }
     },
     skip: HostedEnvironment.authDomains.isEmpty,
