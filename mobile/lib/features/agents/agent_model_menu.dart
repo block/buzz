@@ -19,7 +19,6 @@ class AgentModelMenu extends StatelessWidget {
         return IosMessageCreateButton(
           label: label,
           labelFontSize: 13,
-          trailingChecks: true,
           showIconWithLabel: false,
           accessibilityLabel: label,
           plain: false,
@@ -29,7 +28,6 @@ class AgentModelMenu extends StatelessWidget {
         );
       }
       return AndroidExpandingMenuButton(
-        trailingChecks: true,
         label: label,
         width: width,
         height: 44,

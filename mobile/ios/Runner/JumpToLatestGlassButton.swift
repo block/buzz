@@ -205,8 +205,6 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private var contentIcon = "back"
   private var buttonImage: UIImage?
   private var isBusy = false
-  private var trailingMenuItems: [[String: Any]]?
-  private weak var selectionPopover: UIViewController?
   private var controlSize: CGFloat = 40
 
   init(
@@ -260,9 +258,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     button.translatesAutoresizingMaskIntoConstraints = false
     button.addAction(
       UIAction { [weak self] _ in
-        guard let self else { return }
-        if self.trailingMenuItems != nil { self.showTrailingSelectionMenu() }
-        else { self.channel.invokeMethod("pressed", arguments: nil) }
+        self?.channel.invokeMethod("pressed", arguments: nil)
       },
       for: .touchUpInside
     )
@@ -326,25 +322,6 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
 
   func view() -> UIView {
     containerView
-  }
-
-  private func showTrailingSelectionMenu() {
-    guard let items = trailingMenuItems, !items.isEmpty, selectionPopover == nil else { return }
-    var responder: UIResponder? = containerView
-    while responder != nil && !(responder is UIViewController) { responder = responder?.next }
-    guard let presenter = responder as? UIViewController, presenter.presentedViewController == nil else { return }
-    let menu = TrailingSelectionMenu(items: items) { [weak self] id in
-      self?.channel.invokeMethod("menuAction", arguments: id)
-    }
-    menu.modalPresentationStyle = .popover
-    if let popover = menu.popoverPresentationController {
-      popover.sourceView = button
-      popover.sourceRect = button.bounds
-      popover.permittedArrowDirections = [.up, .down]
-      popover.delegate = menu
-    }
-    selectionPopover = menu
-    presenter.present(menu, animated: !UIAccessibility.isReduceMotionEnabled)
   }
 
   /// Returns the pre-iOS-26 surface that maximizes contrast with the requested
@@ -455,14 +432,16 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       button.accessibilityLabel = accessibilityLabel
     }
     if let menu = arguments?["menu"] as? [[String: Any]] {
-      trailingMenuItems = arguments?["trailingChecks"] as? Bool == true ? menu : nil
       var groups: [[UIMenuElement]] = [[]]
       for item in menu {
         if item["dividerBefore"] as? Bool == true, !groups[groups.count - 1].isEmpty {
           groups.append([])
         }
         let symbol = (item["symbol"] as? String).flatMap {
-          $0.isEmpty ? nil : NativeTabler.image($0, size: 24)
+          // A transparent image keeps the native menu's icon column aligned.
+          $0.isEmpty
+            ? UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { _ in }
+            : NativeTabler.image($0, size: 24)
         }
         let action = UIAction(title: item["label"] as? String ?? "", image: symbol,
                         attributes: item["enabled"] as? Bool == true ? [] : [.disabled]) { [weak self] _ in
@@ -472,8 +451,8 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
         }
         groups[groups.count - 1].append(action)
       }
-      button.menu = trailingMenuItems == nil ? UIMenu(children: groups.map { UIMenu(options: .displayInline, children: $0) }) : nil
-      button.showsMenuAsPrimaryAction = trailingMenuItems == nil && !menu.isEmpty
+      button.menu = UIMenu(children: groups.map { UIMenu(options: .displayInline, children: $0) })
+      button.showsMenuAsPrimaryAction = !menu.isEmpty
     }
     switch icon {
     case "plus": buttonIconName = "plus"
@@ -597,7 +576,6 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   }
 
   deinit {
-    selectionPopover?.dismiss(animated: false)
     channel.setMethodCallHandler(nil)
   }
 }
@@ -700,57 +678,4 @@ final class NativeSegmentedControlPlatformView: NSObject, FlutterPlatformView {
   deinit {
     channel.setMethodCallHandler(nil)
   }
-}
-
-/// Native model rows with a stable text inset and a trailing selection mark.
-private final class TrailingSelectionMenu: UITableViewController, UIPopoverPresentationControllerDelegate {
-  private let items: [[String: Any]]
-  private let choose: (Any?) -> Void
-
-  init(items: [[String: Any]], choose: @escaping (Any?) -> Void) {
-    self.items = items
-    self.choose = choose
-    super.init(style: .plain)
-  }
-
-  required init?(coder: NSCoder) { nil }
-
-  override func viewDidLoad() {
-    super.viewDidLoad()
-    tableView.rowHeight = UITableView.automaticDimension
-    tableView.estimatedRowHeight = 48
-    tableView.separatorInset = UIEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
-    tableView.tableFooterView = UIView()
-    tableView.backgroundColor = .secondarySystemBackground
-    let rowHeight = max(48, UIFont.preferredFont(forTextStyle: .body).lineHeight + 24)
-    preferredContentSize = CGSize(width: 300, height: min(440, CGFloat(items.count) * rowHeight))
-  }
-
-  override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { items.count }
-
-  override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-    let item = items[indexPath.row]
-    let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
-    cell.textLabel?.text = item["label"] as? String
-    cell.textLabel?.font = .preferredFont(forTextStyle: .body)
-    cell.textLabel?.adjustsFontForContentSizeCategory = true
-    cell.textLabel?.numberOfLines = 0
-    cell.backgroundColor = .clear
-    let enabled = item["enabled"] as? Bool == true
-    let selected = item["symbol"] as? String == "checkmark"
-    cell.textLabel?.textColor = enabled ? .label : .tertiaryLabel
-    cell.accessoryType = selected ? .checkmark : .none
-    cell.isUserInteractionEnabled = enabled
-    cell.accessibilityTraits = enabled ? [.button] : [.button, .notEnabled]
-    if selected { cell.accessibilityTraits.insert(.selected) }
-    return cell
-  }
-
-  override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-    let item = items[indexPath.row]
-    guard item["enabled"] as? Bool == true else { return }
-    dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [choose] in choose(item["id"]) }
-  }
-
-  func adaptivePresentationStyle(for controller: UIPresentationController) -> UIModalPresentationStyle { .none }
 }

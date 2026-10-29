@@ -25,7 +25,6 @@ class IosMessageCreateButton extends HookWidget {
     this.height = 48,
     this.plain = true,
     this.showIconWithLabel = false,
-    this.trailingChecks = false,
   });
 
   final Set<int> dividerBefore;
@@ -37,9 +36,6 @@ class IosMessageCreateButton extends HookWidget {
   final double width, height;
   final bool plain;
   final bool showIconWithLabel;
-
-  /// Places selection checks after labels instead of in the leading icon slot.
-  final bool trailingChecks;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
@@ -91,7 +87,6 @@ class IosMessageCreateButton extends HookWidget {
       'label': ?label,
       'labelFontSize': ?labelFontSize,
       'showIconWithLabel': showIconWithLabel,
-      'trailingChecks': trailingChecks,
       'accessibilityLabel': accessibilityLabel,
       'menu': menu,
     };

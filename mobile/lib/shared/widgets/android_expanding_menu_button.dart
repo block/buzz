@@ -19,7 +19,6 @@ class AndroidExpandingMenuButton extends HookWidget {
     this.width = 112,
     this.height = 56,
     this.dividerBefore = const {},
-    this.trailingChecks = false,
     super.key,
   });
 
@@ -27,9 +26,6 @@ class AndroidExpandingMenuButton extends HookWidget {
   final Widget? trigger;
   final double width, height;
   final Set<int> dividerBefore;
-
-  /// Places selection checks after labels instead of in the leading icon slot.
-  final bool trailingChecks;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
@@ -67,7 +63,6 @@ class AndroidExpandingMenuButton extends HookWidget {
                     label: label,
                     trigger: trigger ?? const _NewLabel(),
                     dividerBefore: dividerBefore,
-                    trailingChecks: trailingChecks,
                     actions: captured,
                     reducedMotion: MediaQuery.disableAnimationsOf(context),
                     dismissLabel: MaterialLocalizations.of(
@@ -119,7 +114,6 @@ class _CreateMenuRoute extends PopupRoute<int> {
     required this.label,
     required this.trigger,
     required this.dividerBefore,
-    required this.trailingChecks,
     required this.actions,
     required this.reducedMotion,
     required this.dismissLabel,
@@ -128,7 +122,6 @@ class _CreateMenuRoute extends PopupRoute<int> {
   final String label;
   final Widget trigger;
   final Set<int> dividerBefore;
-  final bool trailingChecks;
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
   final bool reducedMotion;
   final String dismissLabel;
@@ -269,45 +262,42 @@ class _CreateMenuRoute extends PopupRoute<int> {
                                                     ),
                                                 child: Row(
                                                   children: [
-                                                    if (!trailingChecks)
-                                                      Icon(switch (actions[i]
-                                                          .symbol) {
-                                                        '' => null,
-                                                        'checkmark' =>
-                                                          BuzzIcons.check,
-                                                        'star' =>
-                                                          Icons.star_border,
-                                                        'info.circle' =>
-                                                          Icons.info_outline,
-                                                        'desktopcomputer' =>
-                                                          Icons
-                                                              .desktop_windows_outlined,
-                                                        'square.and.pencil' =>
-                                                          BuzzIcons.edit,
-                                                        'folder.badge.plus' =>
-                                                          BuzzIcons.folderPlus,
-                                                        'bubble.left' =>
-                                                          BuzzIcons
-                                                              .messageSquare,
-                                                        'number' =>
-                                                          BuzzIcons.hash,
-                                                        'arrow.left.arrow.right' =>
-                                                          BuzzIcons
-                                                              .arrowLeftRight,
-                                                        'person.badge.plus' =>
-                                                          BuzzIcons.userPlus,
-                                                        'circle.lefthalf.filled' =>
-                                                          BuzzIcons.sunMoon,
-                                                        'person.2' =>
-                                                          BuzzIcons.users,
-                                                        'gearshape' =>
-                                                          BuzzIcons.settings,
-                                                        _ => BuzzIcons.plus,
-                                                      }, size: 22),
-                                                    if (!trailingChecks)
-                                                      const SizedBox(
-                                                        width: Grid.sm,
-                                                      ),
+                                                    Icon(switch (actions[i]
+                                                        .symbol) {
+                                                      '' => null,
+                                                      'checkmark' =>
+                                                        BuzzIcons.check,
+                                                      'star' =>
+                                                        Icons.star_border,
+                                                      'info.circle' =>
+                                                        Icons.info_outline,
+                                                      'desktopcomputer' =>
+                                                        Icons
+                                                            .desktop_windows_outlined,
+                                                      'square.and.pencil' =>
+                                                        BuzzIcons.edit,
+                                                      'folder.badge.plus' =>
+                                                        BuzzIcons.folderPlus,
+                                                      'bubble.left' =>
+                                                        BuzzIcons.messageSquare,
+                                                      'number' =>
+                                                        BuzzIcons.hash,
+                                                      'arrow.left.arrow.right' =>
+                                                        BuzzIcons
+                                                            .arrowLeftRight,
+                                                      'person.badge.plus' =>
+                                                        BuzzIcons.userPlus,
+                                                      'circle.lefthalf.filled' =>
+                                                        BuzzIcons.sunMoon,
+                                                      'person.2' =>
+                                                        BuzzIcons.users,
+                                                      'gearshape' =>
+                                                        BuzzIcons.settings,
+                                                      _ => BuzzIcons.plus,
+                                                    }, size: 22),
+                                                    const SizedBox(
+                                                      width: Grid.sm,
+                                                    ),
                                                     Expanded(
                                                       child: Text(
                                                         actions[i].label,
@@ -328,18 +318,6 @@ class _CreateMenuRoute extends PopupRoute<int> {
                                                         ),
                                                       ),
                                                     ),
-                                                    if (trailingChecks) ...[
-                                                      const SizedBox(
-                                                        width: Grid.sm,
-                                                      ),
-                                                      Icon(
-                                                        actions[i].symbol ==
-                                                                'checkmark'
-                                                            ? BuzzIcons.check
-                                                            : null,
-                                                        size: 22,
-                                                      ),
-                                                    ],
                                                   ],
                                                 ),
                                               ),
