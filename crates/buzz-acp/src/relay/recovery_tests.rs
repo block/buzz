@@ -110,6 +110,7 @@ async fn socket_owner_services_ping_shutdown_and_coalesces_overflow_ticks() {
         "ws://127.0.0.1:1".into(),
         "synthetic-agent".into(),
         None,
+        false,
     ));
     let channels: Vec<_> = (0..18).map(|_| Uuid::new_v4()).collect();
     for ch in &channels {

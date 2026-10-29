@@ -338,10 +338,15 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         .unwrap_or_default()
         .as_secs();
 
-    let mut relay =
-        HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
-            .await
-            .map_err(|e| anyhow::anyhow!("setup-mode relay connect error: {e}"))?;
+    let mut relay = HarnessRelay::connect(
+        &config.relay_url,
+        &config.keys,
+        &pubkey_hex,
+        relay_auth_tag,
+        false,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("setup-mode relay connect error: {e}"))?;
 
     if let Err(e) = relay.set_startup_watermark(startup_watermark).await {
         tracing::warn!("setup-mode: failed to set startup watermark: {e}");
@@ -809,6 +814,7 @@ mod tests {
         let agent = nostr::Keys::generate().public_key().to_hex();
         let channel_id = Uuid::new_v4();
         let event = relay::BuzzEvent {
+            received_at: std::time::Instant::now(),
             connection_generation: 0,
             channel_id,
             event: crate::author_gate_tests::relay_signed_workflow_dispatch(
@@ -941,6 +947,7 @@ mod tests {
         let authorized = authorize_setup_listener_event(
             &mut gate,
             relay::BuzzEvent {
+                received_at: std::time::Instant::now(),
                 connection_generation: 0,
                 channel_id,
                 event: edit.clone(),
