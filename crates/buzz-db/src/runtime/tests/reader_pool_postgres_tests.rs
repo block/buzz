@@ -3,7 +3,6 @@
 //! reader).
 
 use super::*;
-use std::time::Instant;
 
 /// A `Db` whose writer and lazy reader both point at one scratch database,
 /// with the fence open so routed reads attempt the reader.
@@ -30,22 +29,6 @@ async fn same_db_reader(prefix: &str, read_max: u32) -> (PgPool, Db, String, Str
     db.fence().force_open_for_tests(chrono::Utc::now());
     db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(30)));
     (admin, db, wname, scratch_url)
-}
-
-/// Poll until the reader pool holds exactly `target` connections, all idle.
-/// Returned and floor-maintenance connections land asynchronously, from
-/// tasks sqlx spawns on drop.
-async fn await_idle_floor(read_pool: &PgPool, target: u32) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while read_pool.size() != target || read_pool.num_idle() != target as usize {
-        assert!(
-            Instant::now() < deadline,
-            "reader pool never settled at {target} idle; size={} idle={}",
-            read_pool.size(),
-            read_pool.num_idle()
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }
 
 /// Counters keyed by `(name, decision, reason)` labels, drained: each
@@ -453,7 +436,20 @@ async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
     await_idle_floor(&read_pool, 1).await;
     {
         let first = read_pool.acquire().await.expect("first warm connection");
-        let second = read_pool.acquire().await.expect("second warm connection");
+        // The floor maintenance stops at one, so the second slot is a cold
+        // dial inside the 150ms acquire budget, which a loaded runner can
+        // outlast. Warm-up is not under test; the stall below is.
+        let second = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match read_pool.acquire().await {
+                    Err(sqlx::Error::PoolTimedOut) => continue,
+                    connection => break connection,
+                }
+            }
+        })
+        .await
+        .expect("second reader connects within 5s")
+        .expect("second warm connection");
         drop((first, second));
     }
     await_idle_floor(&read_pool, 2).await;

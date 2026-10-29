@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { truncateNpub } from "../../src/shared/lib/pubkey";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { replaceComposerText } from "../helpers/composer";
 
 const FIRST = TEST_IDENTITIES.alice.pubkey;
 const SECOND = TEST_IDENTITIES.bob.pubkey;
@@ -644,7 +645,7 @@ for (const replacement of [
     // by filling the still-idle composer before the historical body is loaded.
     await expect(panel.getByTestId("edit-target")).toBeVisible();
     await expect(input).toHaveText("@Scout historical ambiguity");
-    await input.fill(replacement);
+    await replaceComposerText(input, replacement);
     await panel.getByTestId("send-message").click();
     await expect(row).toContainText("repaired history");
     const expected = replacement.startsWith("@")
@@ -747,7 +748,7 @@ for (const mixed of [false, true]) {
     await expect(input).toHaveText(
       "@Scout and @Scout Jones historical ambiguity",
     );
-    await input.fill(replacement);
+    await replaceComposerText(input, replacement);
     await panel.getByTestId("send-message").click();
     await expect(row).toContainText("repaired history");
     const expected = long;

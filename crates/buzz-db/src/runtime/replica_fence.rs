@@ -1050,7 +1050,7 @@ mod postgres_tests {
     /// still held. It must block until release, then sample.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn sample_writer_waits_for_shared_floor_lock_before_sampling_time() {
+    async fn cluster_global_sample_writer_waits_for_shared_floor_lock_before_sampling_time() {
         let (admin, pool, name) = scratch_db().await;
 
         let mut blocker = pool.begin().await.expect("begin shared-lock blocker");
