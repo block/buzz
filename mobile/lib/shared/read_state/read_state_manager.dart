@@ -64,6 +64,9 @@ class ReadStateManager {
   Timer? _debounceTimer;
   void Function()? _unsubscribeLive;
   bool _initialized = false;
+  // Pending first fetch and subscribe. A reconnect while it runs waits for it
+  // so two passes cannot each install a live subscription and leak one.
+  Future<void>? _initializing;
   bool _disposed = false;
   bool _isPublishing = false;
   // Set when a publish is asked for while one is running. The running
@@ -111,8 +114,14 @@ class ReadStateManager {
       return;
     }
 
-    await _fetchAndMerge();
-    await _startLiveSubscription();
+    final initializing = Completer<void>();
+    _initializing = initializing.future;
+    try {
+      await _fetchAndMerge();
+      await _startLiveSubscription();
+    } finally {
+      initializing.complete();
+    }
     if (!_isIdenticalToLastPublished(_currentContexts())) {
       _schedulePublish();
     }
@@ -165,6 +174,8 @@ class ReadStateManager {
   Future<void> reinitializeRemote() async {
     if (_disposed || !_remoteEnabled || !_initialized) return;
     debugPrint('[ReadStateManager] reinitializeRemote');
+    await _initializing;
+    if (_disposed) return;
     if (_isPublishing) {
       await _publishCompleter?.future;
     }
