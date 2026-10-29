@@ -5,12 +5,14 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
 /// The default transport. `dart:io` would inflate gzip responses on the
-/// calling isolate, so leave them compressed for the response decoder. A
-/// client supplied through `http.runWithClient` is used as is.
+/// calling isolate, so leave them compressed for the response decoder.
+///
+/// A non-`dart:io` client supplied through `http.runWithClient`, such as a
+/// `MockClient`, is used as is. An `IOClient` is replaced, not closed, since
+/// it may be shared.
 http.Client _gzipPassthroughClient() {
   final client = http.Client();
   if (client is! IOClient) return client;
-  client.close();
   return IOClient(HttpClient()..autoUncompress = false);
 }
 
