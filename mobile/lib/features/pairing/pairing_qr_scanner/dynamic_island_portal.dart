@@ -133,6 +133,7 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
               final geometry = DynamicIslandQrScannerGeometry(
                 viewport: constraints.biggest,
                 safeAreaTop: MediaQuery.viewPaddingOf(context).top,
+                cameraFrame: duoQrScannerCameraFrame(context),
               );
 
               return Stack(

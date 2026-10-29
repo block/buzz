@@ -1,4 +1,5 @@
 import 'message_author_visibility.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -780,7 +781,8 @@ class ThreadDetailPage extends HookConsumerWidget {
           threadViewportVisible &&
           readStateReady &&
           appInUse &&
-          (ModalRoute.of(context)?.isCurrent ?? true),
+          (ModalRoute.of(context)?.isCurrent ?? true) &&
+          ConversationPaneScope.isActiveOf(context),
       onDwell: readVisibleReplies,
       keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
     );

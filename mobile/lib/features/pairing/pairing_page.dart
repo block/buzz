@@ -163,7 +163,9 @@ class PairingPage extends HookConsumerWidget {
 
     Future<void> openScanner() async {
       unawaited(HapticFeedback.selectionClick());
-      final usesDynamicIslandPortal = await usesDynamicIslandQrScannerPortal();
+      final usesDynamicIslandPortal =
+          duoQrScannerCameraFrame(context) != null ||
+          await usesDynamicIslandQrScannerPortal();
       if (!context.mounted) {
         return;
       }

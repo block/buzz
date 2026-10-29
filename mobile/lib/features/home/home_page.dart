@@ -1,3 +1,7 @@
+import 'package:duo_kit/duo_kit.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
+import '../../shared/widgets/duo_workspace_scaffold.dart';
+import '../../shared/widgets/ios_navigation_metrics.dart';
 import '../../shared/widgets/android_expanding_menu_button.dart';
 
 import 'package:flutter/material.dart';
@@ -46,6 +50,20 @@ class HomePage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final communityId = ref.watch(
+      activeCommunityProvider.select((value) => value.value?.id),
+    );
+    final conversations = useMemoized(ConversationPaneController.new, [
+      communityId,
+    ]);
+    useEffect(() => conversations.dispose, [conversations]);
+    useListenable(conversations);
+    final strip = FoldGeometry.of(context).strip;
+    final windowData = MediaQuery.of(context);
+    final wide =
+        bookDivisionOf(context) != null ||
+        windowData.size.width - (strip?.width ?? 0) >= 640;
+    final showWorkspaceNavigation = wide || conversations.selectedId == null;
     final route = ModalRoute.of(context);
     final coveringProgress = useAnimation(
       route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
@@ -67,7 +85,8 @@ class HomePage extends HookConsumerWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     void openSearch() => Navigator.of(context).push(
       BottomUpPageRoute<void>(
-        builder: (_) => const SearchPage(),
+        builder: (_) =>
+            const AdaptiveConversationDestination(child: SearchPage()),
         reducedMotion: reducedMotion,
       ),
     );
@@ -88,7 +107,8 @@ class HomePage extends HookConsumerWidget {
       settingsPageBuilder: settingsPageBuilder,
       onInbox: () => Navigator.of(context).push(
         BottomUpPageRoute<void>(
-          builder: (_) => const ActivityPage(),
+          builder: (_) =>
+              const AdaptiveConversationDestination(child: ActivityPage()),
           reducedMotion: reducedMotion,
         ),
       ),
@@ -176,85 +196,104 @@ class HomePage extends HookConsumerWidget {
       },
     );
     final bottom = mobileTabBarBottom(context);
-    return Scaffold(
-      resizeToAvoidBottomInset: false,
-      // Register the floating controls with Scaffold so snackbars clear them.
-      extendBody: true,
-      bottomNavigationBar: Padding(
-        padding: EdgeInsets.only(bottom: bottom),
-        child: SizedBox(
-          height: mobileTabBarHeight,
-          child:
-              defaultTargetPlatform != TargetPlatform.iOS ||
-                  nativeControlsVisible
-              ? Center(
-                  child: MessagesNavigationBar(
-                    onSearch: openSearch,
-                    agent: defaultAgentBuilder(context),
-                    creationActions: [
-                      (
-                        label: 'New chat',
-                        symbol: 'square.and.pencil',
-                        onPressed: newChat.value,
-                      ),
-                      (
-                        label: 'New workspace',
-                        symbol: 'workspace',
-                        onPressed: newWorkspace.value,
-                      ),
-                      (
-                        label: 'New DM',
-                        symbol: 'bubble.left',
-                        onPressed: newDm.value,
-                      ),
-                      (
-                        label: 'New channel',
-                        symbol: 'number',
-                        onPressed: newChannel.value,
-                      ),
-                    ],
-                  ),
-                )
-              : null,
+    Widget navigationBar(Axis axis) => MessagesNavigationBar(
+      axis: axis,
+      onSearch: openSearch,
+      agent: defaultAgentBuilder(context),
+      creationActions: [
+        (
+          label: 'New chat',
+          symbol: 'square.and.pencil',
+          onPressed: newChat.value,
         ),
-      ),
-      body: Stack(
-        children: [
-          MediaQuery(
-            data: MediaQuery.of(context).copyWith(
-              padding: MediaQuery.paddingOf(context).copyWith(
-                bottom:
-                    MediaQuery.paddingOf(context).bottom +
-                    mobileTabBarHeight +
-                    mobileTabBarBottomGap,
+        (
+          label: 'New workspace',
+          symbol: 'workspace',
+          onPressed: newWorkspace.value,
+        ),
+        (label: 'New DM', symbol: 'bubble.left', onPressed: newDm.value),
+        (label: 'New channel', symbol: 'number', onPressed: newChannel.value),
+      ],
+    );
+    return DuoWorkspaceScaffold(
+      navigationBuilder: (context, placement) =>
+          !showWorkspaceNavigation ||
+              !nativeControlsVisible ||
+              communitySurfaceProgress.value != 0
+          ? const SizedBox.shrink()
+          : Transform.translate(
+              offset: Offset(
+                IosNavigationMetrics.of(
+                      context,
+                    ).railCenter(windowData.size, strip!.rect.center.dx) -
+                    strip.rect.center.dx,
+                0,
               ),
-              viewPadding: MediaQuery.viewPaddingOf(context).copyWith(
-                bottom:
-                    MediaQuery.viewPaddingOf(context).bottom +
-                    mobileTabBarHeight +
-                    mobileTabBarBottomGap,
-              ),
-            ),
-            child: Opacity(
-              key: const Key('home-community-surface-visibility'),
-              // The switcher uses a transparent route for its avatar flight.
-              // Keep Home laid out, but do not paint it through UIKit glass.
-              opacity: communitySurfaceProgress.value == 0 ? 1 : 0,
-              child: messages,
-            ),
-          ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: IgnorePointer(
-              child: MobileTabFooterBackdrop(
-                height: mobileTabFooterBackdropHeight(context),
-                tint: context.controlSurface,
+              child: SafeArea(
+                child: Center(child: navigationBar(Axis.vertical)),
               ),
             ),
-          ),
-        ],
+      body: Scaffold(
+        resizeToAvoidBottomInset: false,
+        extendBody: true,
+        bottomNavigationBar: strip == null && showWorkspaceNavigation
+            ? Padding(
+                padding: EdgeInsets.only(bottom: bottom),
+                child: SizedBox(
+                  height: mobileTabBarHeight,
+                  child:
+                      (defaultTargetPlatform != TargetPlatform.iOS ||
+                          nativeControlsVisible)
+                      ? Center(child: navigationBar(Axis.horizontal))
+                      : null,
+                ),
+              )
+            : null,
+        body: Stack(
+          children: [
+            MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                padding: MediaQuery.paddingOf(context).copyWith(
+                  bottom:
+                      MediaQuery.paddingOf(context).bottom +
+                      (strip == null && showWorkspaceNavigation
+                          ? mobileTabBarHeight + mobileTabBarBottomGap
+                          : 0),
+                ),
+                viewPadding: MediaQuery.viewPaddingOf(context).copyWith(
+                  bottom:
+                      MediaQuery.viewPaddingOf(context).bottom +
+                      (strip == null && showWorkspaceNavigation
+                          ? mobileTabBarHeight + mobileTabBarBottomGap
+                          : 0),
+                ),
+              ),
+              child: Opacity(
+                key: const Key('home-community-surface-visibility'),
+                // The switcher uses a transparent route for its avatar flight.
+                // Keep Home laid out, but do not paint it through UIKit glass.
+                opacity: communitySurfaceProgress.value == 0 ? 1 : 0,
+                child: AdaptiveConversationPane(
+                  controller: conversations,
+                  strip: strip,
+                  list: messages,
+                ),
+              ),
+            ),
+            if (strip == null && showWorkspaceNavigation)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: IgnorePointer(
+                  child: MobileTabFooterBackdrop(
+                    height: mobileTabFooterBackdropHeight(context),
+                    tint: context.controlSurface,
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }

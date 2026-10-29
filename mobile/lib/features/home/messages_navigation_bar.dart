@@ -18,7 +18,9 @@ class MessagesNavigationBar extends HookWidget {
     required this.onSearch,
     required this.creationActions,
     required this.agent,
+    this.axis = Axis.horizontal,
   });
+  final Axis axis;
   final VoidCallback onSearch;
   final Widget agent;
   final List<({String label, String symbol, VoidCallback? onPressed})>
@@ -27,6 +29,26 @@ class MessagesNavigationBar extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
+    if (axis == Axis.vertical) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          NavigationButtonSurface(child: _search(context)),
+          const SizedBox(height: Grid.xs),
+          IosMessageCreateButton(
+            actions: creationActions,
+            dividerBefore: const {2},
+            sectionTitles: const {0: 'Solo', 2: 'Team'},
+            accessibilityLabel: 'New',
+            width: 56,
+            height: 56,
+            plain: false,
+          ),
+          const SizedBox(height: Grid.xs),
+          agent,
+        ],
+      );
+    }
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       return SizedBox(
         width: 256,

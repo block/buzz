@@ -1,6 +1,7 @@
 import 'message_author_visibility.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'message_swipe_reply.dart';
 import 'bestie_welcome.dart';
 import 'bestie_welcome_storage.dart';
@@ -625,7 +626,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     // it reads through it when it is shown again.
     final openReadActive =
         isAppInUse(useAppLifecycleState()) &&
-        (ModalRoute.of(context)?.isCurrent ?? true);
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        ConversationPaneScope.isActiveOf(context);
     useEffect(() {
       if (!readState.isReady || !openReadActive || openReadTimestamp == null) {
         return null;
