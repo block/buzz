@@ -9,7 +9,7 @@ use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 use serde_json::json;
 
 use super::identity::{self, Role};
-use super::net::{truncate, Net};
+use super::net::{http_reason, truncate, Net};
 use super::scenario::{Community, Scenario};
 use super::stats::{Op, Snapshot, Stats};
 
@@ -261,7 +261,7 @@ pub async fn find_roots(
         )
         .await?;
     if !status.is_success() {
-        anyhow::bail!("HTTP {status}: {}", truncate(&body));
+        anyhow::bail!("{}", http_reason(status, &body));
     }
     let events: Vec<Event> = serde_json::from_str(&body)?;
     let mut roots: Vec<(u64, String)> = events

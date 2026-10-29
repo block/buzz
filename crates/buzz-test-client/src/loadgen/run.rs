@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tokio::sync::{watch, Mutex};
 
 use super::identity::{self, Role};
-use super::net::{truncate, Net};
+use super::net::{http_reason, Net};
 use super::scenario::{Community, Scenario};
 use super::seed::find_roots;
 use super::stats::{abort_reason, ops_json, Op, Stats};
@@ -976,7 +976,7 @@ async fn http(
         .await
     {
         Ok((status, _)) if status.is_success() => pending.ok(),
-        Ok((status, text)) => pending.err(&format!("HTTP {status}: {}", truncate(&text))),
+        Ok((status, text)) => pending.err(&http_reason(status, &text)),
         Err(e) => pending.err(&e.to_string()),
     }
 }

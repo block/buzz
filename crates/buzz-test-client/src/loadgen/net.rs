@@ -108,7 +108,7 @@ impl Net {
             )
             .await?;
         if !status.is_success() {
-            anyhow::bail!("HTTP {status}: {}", truncate(&body));
+            anyhow::bail!("{}", http_reason(status, &body));
         }
         let value: serde_json::Value = serde_json::from_str(&body)?;
         if value["accepted"].as_bool() != Some(true) {
@@ -120,6 +120,12 @@ impl Net {
 
 pub fn truncate(s: &str) -> String {
     s.chars().take(200).collect()
+}
+
+/// Failure text for a non-success HTTP response. It starts `HTTP <status>`,
+/// which `stats` reads to tell a 429 from every other failure.
+pub fn http_reason(status: reqwest::StatusCode, body: &str) -> String {
+    format!("HTTP {status}: {}", truncate(body))
 }
 
 #[cfg(test)]

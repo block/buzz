@@ -65,7 +65,10 @@ and counts as an error, so a relay that never answers fails the step
 instead of leaving it empty. A relay `CLOSED` on a live subscription counts
 as a `subscribe_eose` error and ends that client's session. Each connect
 plus authentication must finish within `target.connect_timeout_secs`
-(default 10). Rate-limit rejections are reported as `throttled`, not errors.
+(default 10). Quota rejections, meaning an HTTP 429 or the relay's
+`rate-limited: quota exceeded` text, are reported as `throttled`, not errors.
+Every other rejection, including `rate-limited: shared admission unavailable`
+(the relay's admission store is down), counts as an error.
 Ramp steps must increase `users`, since clients are only ever added.
 
 When the run stops, clients get 15 seconds to finish before they are

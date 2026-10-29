@@ -153,8 +153,8 @@ impl Stats {
         }
     }
 
-    /// Records a failure. Rate-limit rejections count as throttled, not errors,
-    /// so a run can tell relay limits apart from relay failures.
+    /// Records a failure. Quota rejections count as throttled, not errors, so a
+    /// run can tell relay limits apart from relay failures.
     pub fn err(&self, op: Op, reason: &str) {
         let throttled = is_throttle(reason);
         let stats = self.op(op);
@@ -241,9 +241,16 @@ impl Drop for Pending<'_> {
     }
 }
 
+/// Start of a reason built by `net::http_reason` for an HTTP 429.
+const HTTP_TOO_MANY_REQUESTS: &str = "HTTP 429 ";
+/// The relay's quota rejection, over WebSocket (`OK`, `CLOSED`) and in HTTP bodies.
+const QUOTA_EXCEEDED: &str = "rate-limited: quota exceeded";
+
+/// Quota rejections only: an HTTP 429 status or the relay's quota text. Other
+/// `rate-limited:` rejections, such as `shared admission unavailable` when the
+/// relay's admission store is down, are relay failures and count as errors.
 fn is_throttle(reason: &str) -> bool {
-    let r = reason.to_ascii_lowercase();
-    r.contains("rate-limited") || r.contains("rate limit") || r.contains("429")
+    reason.starts_with(HTTP_TOO_MANY_REQUESTS) || reason.contains(QUOTA_EXCEEDED)
 }
 
 /// Collapses ids and numbers so equal failures aggregate under one reason.
@@ -434,7 +441,10 @@ mod tests {
         stats.ok(Op::PublishMessage, Duration::from_millis(5));
         let first = stats.snapshot();
         stats.ok(Op::PublishMessage, Duration::from_millis(500));
-        stats.err(Op::PublishMessage, "rate-limited: slow down 12345");
+        stats.err(
+            Op::PublishMessage,
+            "rate-limited: quota exceeded; retry in 12345s",
+        );
         stats.err(Op::PublishMessage, "error: internal 98765");
         let interval = stats.snapshot().since(&first);
         let s = interval
@@ -541,5 +551,46 @@ mod tests {
         let window = stats.snapshot().since(&Snapshot::default());
         assert_eq!(abort_reason(&window, 0.10, 5_000.0), None);
         drop(stalled);
+    }
+
+    #[test]
+    fn only_quota_rejections_are_throttles() {
+        use crate::loadgen::net::http_reason;
+        use reqwest::StatusCode;
+        let throttles = [
+            // WebSocket OK and CLOSED text from `rejection.rs`.
+            "rate-limited: quota exceeded; retry in 7s",
+            "CLOSED live: rate-limited: quota exceeded; retry in 7s",
+            // HTTP 429 from `api/bridge.rs`, with and without its body.
+            &http_reason(
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":"rate-limited: quota exceeded; retry in 3s"}"#,
+            ),
+            &http_reason(StatusCode::TOO_MANY_REQUESTS, "slow down"),
+        ];
+        let errors = [
+            // The admission store is down: an outage, not a quota.
+            "rate-limited: shared admission unavailable",
+            &http_reason(
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"error":"rate-limited: shared admission unavailable"}"#,
+            ),
+            "rate-limited: too many concurrent requests",
+            // Numbers that merely contain 429, and prose that mentions limits.
+            "invalid: created_at 1793242912 is too far in the past",
+            "error: event 429abc is not valid",
+            "rate limit configuration is invalid",
+            &http_reason(StatusCode::BAD_REQUEST, "created_at 1793242912 rejected"),
+            &http_reason(StatusCode::INTERNAL_SERVER_ERROR, "HTTP 429 upstream"),
+        ];
+        let stats = Stats::default();
+        for reason in throttles.iter().chain(errors.iter()) {
+            stats.err(Op::HttpEvents, reason);
+        }
+        let s = summary(&stats, Op::HttpEvents);
+        assert_eq!(
+            (s.throttled, s.errors),
+            (throttles.len() as u64, errors.len() as u64)
+        );
     }
 }
