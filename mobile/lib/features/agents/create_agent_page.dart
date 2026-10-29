@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -12,6 +13,7 @@ import '../../shared/community/community_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import 'agent_avatar_editor_page.dart';
 import '../../shared/widgets/sheet_action_section.dart';
@@ -187,7 +189,7 @@ class CreateAgentPage extends HookConsumerWidget {
                         ),
                       ),
                       if (!pending)
-                        TextButton(
+                        _ChooseAvatarButton(
                           onPressed: busy
                               ? null
                               : () async {
@@ -204,7 +206,6 @@ class CreateAgentPage extends HookConsumerWidget {
                                     avatar.value = result;
                                   }
                                 },
-                          child: const Text('Choose avatar'),
                         ),
                     ],
                   ),
@@ -277,6 +278,28 @@ class CreateAgentPage extends HookConsumerWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Platform capsule action for entering the dedicated avatar editor.
+class _ChooseAvatarButton extends StatelessWidget {
+  const _ChooseAvatarButton({required this.onPressed});
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return IosGlassNavigationAction(
+        label: 'Choose avatar',
+        width: 160,
+        onPressed: onPressed,
+      );
+    }
+    return FilledButton.tonal(
+      style: FilledButton.styleFrom(shape: const StadiumBorder()),
+      onPressed: onPressed,
+      child: const Text('Choose avatar'),
     );
   }
 }

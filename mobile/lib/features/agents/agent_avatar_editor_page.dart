@@ -51,18 +51,27 @@ class AgentAvatarEditorPage extends HookWidget {
         ),
         body: SafeArea(
           top: false,
-          child: SingleChildScrollView(
+          child: Padding(
             padding: EdgeInsets.fromLTRB(
               Grid.gutter,
-              frostedAppBarHeight(context) + Grid.md,
+              frostedAppBarHeight(context) + Grid.xxs,
               Grid.gutter,
-              Grid.md,
+              Grid.xxs,
             ),
-            child: AgentAvatarPicker(
-              selection: selection.value,
-              onChanged: (value) => selection.value = value,
-              disabled: false,
-              onBusyChanged: (value) => busy.value = value,
+            child: LayoutBuilder(
+              builder: (context, constraints) => SingleChildScrollView(
+                child: AgentAvatarPicker(
+                  // 48-point mode control, 220-point preview, two 8-point gaps.
+                  controlsHeight: (constraints.maxHeight - 284).clamp(
+                    180,
+                    double.infinity,
+                  ),
+                  selection: selection.value,
+                  onChanged: (value) => selection.value = value,
+                  disabled: false,
+                  onBusyChanged: (value) => busy.value = value,
+                ),
+              ),
             ),
           ),
         ),

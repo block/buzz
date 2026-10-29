@@ -57,7 +57,11 @@ class AgentAvatarPicker extends HookConsumerWidget {
     required this.onChanged,
     required this.disabled,
     required this.onBusyChanged,
+    this.controlsHeight = 320,
   });
+
+  /// Height available for the scrolling choices below the preview.
+  final double controlsHeight;
   final AgentAvatarSelection selection;
   final ValueChanged<AgentAvatarSelection> onChanged;
   final bool disabled;
@@ -201,26 +205,28 @@ class AgentAvatarPicker extends HookConsumerWidget {
 
     return Column(
       children: [
-        if (defaultTargetPlatform == TargetPlatform.iOS)
-          IosNativeSegmentedControl(
-            items: const ['Gloopies', 'Emoji', 'Image'],
-            selectedIndex: mode.value,
-            onChanged: locked ? null : selectMode,
-          )
-        else
-          SegmentedButton<int>(
-            segments: const [
-              ButtonSegment(value: 0, label: Text('Gloopies')),
-              ButtonSegment(value: 1, label: Text('Emoji')),
-              ButtonSegment(value: 2, label: Text('Image')),
-            ],
-            selected: {mode.value},
-            showSelectedIcon: false,
-            onSelectionChanged: locked
-                ? null
-                : (values) => selectMode(values.first),
-          ),
-        const SizedBox(height: Grid.sm),
+        SizedBox(
+          height: 48,
+          child: defaultTargetPlatform == TargetPlatform.iOS
+              ? IosNativeSegmentedControl(
+                  items: const ['Gloopies', 'Emoji', 'Image'],
+                  selectedIndex: mode.value,
+                  onChanged: locked ? null : selectMode,
+                )
+              : SegmentedButton<int>(
+                  segments: const [
+                    ButtonSegment(value: 0, label: Text('Gloopies')),
+                    ButtonSegment(value: 1, label: Text('Emoji')),
+                    ButtonSegment(value: 2, label: Text('Image')),
+                  ],
+                  selected: {mode.value},
+                  showSelectedIcon: false,
+                  onSelectionChanged: locked
+                      ? null
+                      : (values) => selectMode(values.first),
+                ),
+        ),
+        const SizedBox(height: Grid.xxs),
         Semantics(
           label: 'Selected agent avatar',
           image: true,
@@ -237,12 +243,13 @@ class AgentAvatarPicker extends HookConsumerWidget {
                   ),
           ),
         ),
-        const SizedBox(height: Grid.sm),
+        const SizedBox(height: Grid.xxs),
         if (mode.value == 0)
           SizedBox(
-            height: 320,
+            height: controlsHeight,
             child: GridView.builder(
               key: const ValueKey('agent-avatar-grid'),
+              padding: EdgeInsets.zero,
               gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: 4,
               ),
@@ -285,8 +292,8 @@ class AgentAvatarPicker extends HookConsumerWidget {
           ),
         if (mode.value == 1)
           dataset.when(
-            loading: () => const SizedBox(
-              height: 320,
+            loading: () => SizedBox(
+              height: controlsHeight,
               child: Center(child: CircularProgressIndicator()),
             ),
             error: (_, _) => TextButton(
@@ -296,7 +303,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
             data: (data) => IgnorePointer(
               ignoring: locked,
               child: EmojiAvatarControls(
-                height: 320,
+                height: controlsHeight,
                 activeSection: emojiSection.value,
                 dataset: data,
                 selectedEmoji: emoji.value,
