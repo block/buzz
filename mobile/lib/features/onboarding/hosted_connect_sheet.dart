@@ -86,7 +86,7 @@ class HostedConnectSheet extends HookConsumerWidget {
             : 'Adding ${flow.addingCommunityName}…',
       HostedFlowStage.setupIdentity =>
         flow.canCreateIdentity
-            ? 'Create an identity, or bring yours from another device. We’ll back it up for future sign-ins.'
+            ? 'Your Buzz identity is how communities recognize you. Create a new one, or import your existing identity if you already use Buzz.'
             : 'Your identity hasn’t been backed up yet. Bring it from your other device to keep using the same Buzz account.',
       HostedFlowStage.chooseCommunities => 'Select a community',
       HostedFlowStage.communityConflict =>
@@ -131,7 +131,7 @@ class HostedConnectSheet extends HookConsumerWidget {
       if (!fullScreen && stage == HostedFlowStage.setupIdentity) ...[
         Text(
           flow.canCreateIdentity
-              ? 'Make yourself at home'
+              ? 'Create or import a Buzz identity'
               : 'Bring your identity with you',
           style: context.textTheme.titleLarge?.copyWith(
             fontWeight: FontWeight.w600,
@@ -267,7 +267,7 @@ class HostedConnectSheet extends HookConsumerWidget {
     final title = switch (stage) {
       HostedFlowStage.setupIdentity =>
         flow.canCreateIdentity
-            ? 'Make yourself at home'
+            ? 'Create or import a Buzz identity'
             : 'Bring your identity with you',
       HostedFlowStage.chooseIdentity => 'Choose your identity',
       HostedFlowStage.working =>
