@@ -1284,6 +1284,11 @@ pub struct AppState {
     /// accessible set that does not depend on the reader. Short TTL (10s) —
     /// invalidated with the community's accessible channels.
     pub open_channels_cache: Arc<moka::sync::Cache<CommunityId, Arc<[Uuid]>>>,
+    /// Open-set generation per community, bumped under its entry lock with
+    /// every open-set drop. A fill whose query started before a drop sees a
+    /// newer generation and is discarded, so a pre-drop read can never
+    /// repopulate the set every reader in the community shares.
+    pub open_channels_generation: Arc<DashMap<CommunityId, u64>>,
     /// Per-community channel visibility string, used to gate the private-channel fan-out
     /// access check so open channels stay zero-cost. Invalidated on a flip.
     pub channel_visibility_cache: Arc<moka::sync::Cache<(CommunityId, Uuid), String>>,
@@ -1600,6 +1605,7 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
+            open_channels_generation: Arc::new(DashMap::new()),
             channel_visibility_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
@@ -1853,7 +1859,14 @@ impl AppState {
 
     /// Local-only accessible-channels drop. See [`invalidate_membership_local`].
     pub(crate) fn invalidate_all_accessible_channels_local(&self, community_id: CommunityId) {
-        self.open_channels_cache.invalidate(&community_id);
+        {
+            let mut generation = self
+                .open_channels_generation
+                .entry(community_id)
+                .or_insert(0);
+            *generation += 1;
+            self.open_channels_cache.invalidate(&community_id);
+        }
         if let Err(error) = self
             .member_channels_cache
             .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
@@ -2329,17 +2342,46 @@ impl AppState {
         let open = match self.open_channels_cache.get(&community_id) {
             Some(cached) => cached,
             None => {
+                let generation = self.open_channels_generation(community_id);
                 let open: Arc<[Uuid]> = self
                     .db
                     .get_listed_open_channel_ids(community_id)
                     .await?
                     .into();
-                self.open_channels_cache.insert(community_id, open.clone());
+                self.fill_open_channels(community_id, generation, open.clone());
                 open
             }
         };
         buzz_db::channel_members::merge_channel_ids(&mut ids, &open);
         Ok(ids)
+    }
+
+    /// The community's open-set generation, read before querying the open set.
+    fn open_channels_generation(&self, community_id: CommunityId) -> u64 {
+        self.open_channels_generation
+            .get(&community_id)
+            .map_or(0, |generation| *generation)
+    }
+
+    /// Caches `open` unless the open set was dropped since `generation` was
+    /// read. Holding the entry lock orders the check and insert against
+    /// [`Self::invalidate_all_accessible_channels_local`]. Returns whether it
+    /// cached.
+    fn fill_open_channels(
+        &self,
+        community_id: CommunityId,
+        generation: u64,
+        open: Arc<[Uuid]>,
+    ) -> bool {
+        let current = self
+            .open_channels_generation
+            .entry(community_id)
+            .or_insert(0);
+        let fresh = *current == generation;
+        if fresh {
+            self.open_channels_cache.insert(community_id, open);
+        }
+        fresh
     }
 
     /// Seeds both accessible-channel caches so `pubkey` reads exactly
@@ -3604,6 +3646,33 @@ pub(crate) mod tests {
             .await
             .expect("both halves are cached");
         assert_eq!(ids, vec![both, open]);
+    }
+
+    /// An open-set read that started before a drop, local or received from
+    /// another pod, must not repopulate the shared set after it.
+    #[tokio::test]
+    async fn open_channels_fill_from_before_a_drop_is_discarded() {
+        let state = test_state().await;
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let stale: Arc<[Uuid]> = Arc::from([Uuid::from_u128(1)]);
+        let invalidations: [&dyn Fn(); 3] = [
+            &|| state.invalidate_all_accessible_channels_local(community),
+            &|| state.apply_cache_invalidation(community, CacheInvalidation::AccessibleAll),
+            &|| state.apply_cache_invalidation(community, CacheInvalidation::ChannelDeleted),
+        ];
+        for invalidate in invalidations {
+            let generation = state.open_channels_generation(community);
+            invalidate();
+            assert!(!state.fill_open_channels(community, generation, stale.clone()));
+            assert!(
+                state.open_channels_cache.get(&community).is_none(),
+                "a pre-drop read must leave the next reader to re-query"
+            );
+        }
+
+        let generation = state.open_channels_generation(community);
+        assert!(state.fill_open_channels(community, generation, stale.clone()));
+        assert_eq!(state.open_channels_cache.get(&community), Some(stale));
     }
 
     #[tokio::test]
