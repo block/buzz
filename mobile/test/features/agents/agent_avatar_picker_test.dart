@@ -100,6 +100,12 @@ void main() {
     await tester.tap(find.text('Gloopies'));
     await tester.pumpAndSettle();
     expect(selection.url, character);
+    await tester.tap(find.text('Image'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('image-source-camera')), findsOneWidget);
+    expect(find.byKey(const ValueKey('image-source-library')), findsOneWidget);
+    expect(selection.url, character);
+
     expect(tester.takeException(), isNull);
   });
 }

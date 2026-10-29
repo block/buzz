@@ -12,6 +12,7 @@ import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/avatar_image_source_controls.dart';
 import '../../shared/widgets/emoji_avatar_controls.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/profile_avatar_crop_page.dart';
@@ -144,13 +145,15 @@ class AgentAvatarPicker extends HookConsumerWidget {
       }
     }
 
-    Future<void> pickImage() async {
+    Future<void> pickImage({bool camera = false}) async {
       busy.value = true;
       onBusyChanged(true);
       error.value = null;
       try {
         final service = ref.read(mediaUploadServiceProvider);
-        final picked = await service.pickGalleryImage();
+        final picked = await (camera
+            ? service.captureImage()
+            : service.pickGalleryImage());
         if (picked == null || !context.mounted) return;
         final prepared = await service.prepareImageBytes(picked);
         if (!context.mounted) return;
@@ -188,10 +191,6 @@ class AgentAvatarPicker extends HookConsumerWidget {
 
     Future<void> selectMode(int next) async {
       if (locked) return;
-      if (next == 2 && image.value == null) {
-        await pickImage();
-        return;
-      }
       mode.value = next;
       error.value = null;
       if (next == 0) {
@@ -200,7 +199,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
         );
       }
       if (next == 1) await renderEmoji();
-      if (next == 2) onChanged(image.value!);
+      if (next == 2 && image.value != null) onChanged(image.value!);
     }
 
     return Column(
@@ -323,10 +322,11 @@ class AgentAvatarPicker extends HookConsumerWidget {
             ),
           ),
         if (mode.value == 2)
-          TextButton.icon(
-            onPressed: locked ? null : pickImage,
-            icon: const Icon(Icons.photo_library_outlined),
-            label: const Text('Choose image'),
+          AvatarImageSourceControls(
+            height: controlsHeight,
+            isPicking: locked,
+            onCamera: () => pickImage(camera: true),
+            onLibrary: pickImage,
           ),
         if (busy.value) const LinearProgressIndicator(),
         if (error.value != null)
