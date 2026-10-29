@@ -377,6 +377,11 @@ type E2eConfig = {
     /** Reject successive mock `join_channel` calls, then resume. */
     joinChannelErrors?: string[];
     channelsReadDelayMs?: number;
+    /**
+     * Hold the first `get_channels` read until
+     * `__BUZZ_E2E_RELEASE_CHANNELS_READ__` is called.
+     */
+    deferFirstChannelsRead?: boolean;
     /** Return not-modified for this many reads before resuming full payloads. */
     channelsNotModifiedResponses?: number;
     /** When true, a matching knownHash returns a not-modified channel payload. */
@@ -1352,6 +1357,11 @@ declare global {
       event: string,
       payload: unknown,
     ) => Promise<void>;
+    /**
+     * Number of live app listeners for a mocked Tauri event. Spec
+     * subscriptions made through `__TAURI_INTERNALS__.listen` are not counted.
+     */
+    __BUZZ_E2E_EVENT_LISTENER_COUNT__?: (event: string) => number;
     __BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__?: (input: {
       members: MockHuddleMemberSeed[];
       transcriptionEnabled: boolean;
@@ -11824,7 +11834,7 @@ export function maybeInstallE2eTauriMocks() {
     for (const release of held) release();
     return held.length;
   };
-  deferNextChannelsRead = false;
+  deferNextChannelsRead = config.mock?.deferFirstChannelsRead === true;
   deferredChannelsReadResolve = null;
   window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
   window.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__ = () => {
@@ -15384,6 +15394,11 @@ export function maybeInstallE2eTauriMocks() {
   const tauriInternals = (
     window as typeof window & {
       __TAURI_INTERNALS__: {
+        invoke: (
+          command: string,
+          args?: unknown,
+          options?: unknown,
+        ) => Promise<unknown>;
         listen?: (
           event: string,
           callback: () => void,
@@ -15391,10 +15406,42 @@ export function maybeInstallE2eTauriMocks() {
       };
     }
   ).__TAURI_INTERNALS__;
+  // The mocked emit drops events that have no listener yet. Track live app
+  // listeners per event so specs can wait for the app to subscribe first.
+  // Spec subscriptions pass this target object, which listen() forwards as is
+  // and the mock ignores, so a spec that subscribes first cannot satisfy that
+  // wait for the app.
+  const specListenTarget = { kind: "Any" } as const;
+  const eventListenerIds = new Map<string, Set<unknown>>();
+  const mockedInvoke = tauriInternals.invoke;
+  tauriInternals.invoke = async (command, args, options) => {
+    const result = await mockedInvoke(command, args, options);
+    const { event, eventId, target } = (args ?? {}) as {
+      event?: string;
+      eventId?: unknown;
+      target?: unknown;
+    };
+    if (
+      event &&
+      command === "plugin:event|listen" &&
+      target !== specListenTarget
+    ) {
+      const ids = eventListenerIds.get(event) ?? new Set<unknown>();
+      ids.add(result);
+      eventListenerIds.set(event, ids);
+    } else if (event && command === "plugin:event|unlisten") {
+      eventListenerIds.get(event)?.delete(eventId);
+    }
+    return result;
+  };
+  window.__BUZZ_E2E_EVENT_LISTENER_COUNT__ = (event) =>
+    eventListenerIds.get(event)?.size ?? 0;
   // Page-evaluated E2E specs use this surface; delegate to Tauri's mocked channel
   // so their listeners observe the same events emitted by application test seams.
   tauriInternals.listen = async (event, callback) => {
-    const unlisten = await listen(event, () => callback());
+    const unlisten = await listen(event, () => callback(), {
+      target: specListenTarget,
+    });
     return async () => unlisten();
   };
 

@@ -35,6 +35,17 @@ function makeSnapshotChannel(index: number, prefix = "snapshot") {
   };
 }
 
+// Cold-boot tests hold the first channels read (deferFirstChannelsRead) so the
+// loading state is on screen however long boot takes, then release it here.
+async function releaseFirstChannelsRead(page: Page) {
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_CHANNELS_READ_PENDING__))
+    .toBe(1);
+  expect(
+    await page.evaluate(() => window.__BUZZ_E2E_RELEASE_CHANNELS_READ__?.()),
+  ).toBe(1);
+}
+
 const FULL_SNAPSHOT = Array.from({ length: 14 }, (_, index) =>
   makeSnapshotChannel(index),
 );
@@ -358,13 +369,12 @@ test("matching not-modified preserves display mutations without persisting them"
 test("first-ever boot without a snapshot sends null and shows loading", async ({
   page,
 }) => {
-  await installMockBridge(page, { channelsReadDelayMs: READ_DELAY_MS });
+  await installMockBridge(page, { deferFirstChannelsRead: true });
   await page.goto("/");
 
-  await expect(page.getByTestId("sidebar-loading")).toBeVisible({
-    timeout: 500,
-  });
+  await expect(page.getByTestId("sidebar-loading")).toBeVisible();
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(0);
+  await releaseFirstChannelsRead(page);
   await expect
     .poll(() => getChannelsPayloads(page))
     .toEqual([{ knownHash: null }]);
@@ -391,13 +401,12 @@ test("a different identity's snapshot is ignored", async ({ page }) => {
     keyOwnerPubkey: OWNER_PUBKEY,
     ownerPubkey: STALE_COMMUNITY_PUBKEY,
   });
-  await installMockBridge(page, { channelsReadDelayMs: READ_DELAY_MS });
+  await installMockBridge(page, { deferFirstChannelsRead: true });
   await page.goto("/");
 
-  await expect(page.getByTestId("sidebar-loading")).toBeVisible({
-    timeout: 500,
-  });
+  await expect(page.getByTestId("sidebar-loading")).toBeVisible();
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(0);
+  await releaseFirstChannelsRead(page);
   await expect
     .poll(() => getChannelsPayloads(page))
     .toEqual([{ knownHash: null }]);
@@ -447,15 +456,14 @@ test("partial hash/list write fails toward a full fetch", async ({ page }) => {
     );
   }, snapshotKey(RELAY_URL));
   await installMockBridge(page, {
-    channelsReadDelayMs: READ_DELAY_MS,
+    deferFirstChannelsRead: true,
     honorChannelsKnownHash: true,
   });
   await page.goto("/");
 
-  await expect(page.getByTestId("sidebar-loading")).toBeVisible({
-    timeout: 500,
-  });
+  await expect(page.getByTestId("sidebar-loading")).toBeVisible();
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(0);
+  await releaseFirstChannelsRead(page);
   await expect
     .poll(() => getChannelsPayloads(page))
     .toEqual([{ knownHash: null }]);
