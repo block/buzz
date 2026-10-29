@@ -24,7 +24,6 @@ import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../profile/user_profile_sheet.dart';
 import 'create_agent_sheet.dart';
-import 'delete_agent_action.dart';
 import 'community_bot_profiles.dart';
 
 /// Opens the active community's Agents navigation stack inside one modal.
@@ -93,11 +92,6 @@ class _AgentsNavigation extends HookConsumerWidget {
                             child: UserProfileSheet(
                               pubkey: pubkey,
                               primaryActionsSpacing: Grid.md,
-                              contextualActionsSpacing: Grid.xxs,
-                              contextualActions: (_) => DeleteAgentAction(
-                                controller: controller,
-                                pubkey: pubkey,
-                              ),
                             ),
                           ),
                         ),

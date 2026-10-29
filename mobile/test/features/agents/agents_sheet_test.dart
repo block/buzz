@@ -17,6 +17,14 @@ void main() {
     tester,
   ) async {
     final h = await AgentsHarness.create();
+    h.registry.listed = [
+      {
+        'agent_pubkey': existing,
+        'agent_id': 'remote-id',
+        'agent_name': 'Scout',
+      },
+    ];
+    await h.controller.run(h.controller.refresh);
     await h.open(tester, directory: [existing]);
     if (!supportsRemoteAgents(h.community)) {
       expect(find.text('Sign in to create an agent'), findsNothing);
@@ -54,6 +62,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(BottomSheet), findsOneWidget);
     expect(find.byType(UserProfileSheet), findsOneWidget);
+    expect(find.text('Delete'), findsNothing);
+    expect(find.textContaining('before deleting'), findsNothing);
     expect(list.mounted, isTrue);
     await tester.tap(find.byTooltip('Back'));
     await tester.pumpAndSettle();
