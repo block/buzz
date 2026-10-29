@@ -1417,6 +1417,19 @@ pub async fn get_accessible_channel_ids(
     community_id: CommunityId,
     pubkey: &[u8],
 ) -> Result<Vec<Uuid>> {
+    let mut ids = get_member_channel_ids(pool, community_id, pubkey).await?;
+    let open = get_listed_open_channel_ids(pool, community_id).await?;
+    merge_channel_ids(&mut ids, &open);
+    Ok(ids)
+}
+
+/// The member half of [`get_accessible_channel_ids`]: legacy-type channels
+/// where the pubkey is an active member.
+pub async fn get_member_channel_ids(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<Vec<Uuid>> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
@@ -1429,28 +1442,50 @@ pub async fn get_accessible_channel_ids(
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
           AND {member_types}
-        UNION
-        SELECT id AS channel_id
+        "#,
+        member_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
+    );
+    // Built only from the constant type list.
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(community_id.as_uuid())
+        .bind(pubkey)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(Into::into)
+}
+
+/// The open half of [`get_accessible_channel_ids`]: listed open channels of
+/// legacy types. It is the same for every reader in the community.
+pub async fn get_listed_open_channel_ids(
+    pool: &PgPool,
+    community_id: CommunityId,
+) -> Result<Vec<Uuid>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let sql = format!(
+        r#"
+        SELECT id
         FROM channels
         WHERE community_id = $1 AND visibility = 'open' AND NOT unlisted AND deleted_at IS NULL
           AND {open_types}
         "#,
-        member_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
         open_types = crate::store::channel::legacy_channel_type_sql("channel_type"),
     );
     // Built only from the constant type list.
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
-        .bind(pubkey)
         .fetch_all(&mut *connection)
-        .await?;
+        .await
+        .map_err(Into::into)
+}
 
-    rows.into_iter()
-        .map(|r| {
-            let id: Uuid = r.try_get("channel_id")?;
-            Ok(id)
-        })
-        .collect()
+/// Appends the channels of `more` that `ids` lacks.
+pub fn merge_channel_ids(ids: &mut Vec<Uuid>, more: &[Uuid]) {
+    let have: std::collections::HashSet<Uuid> = ids.iter().copied().collect();
+    ids.extend(more.iter().filter(|id| !have.contains(id)));
 }
 
 /// A channel that [`get_readable_named_only_channels`] found readable.
@@ -2249,6 +2284,25 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
         get_accessible_channel_ids(&self.pool, community_id, pubkey).await
+    }
+
+    /// Channel IDs where a pubkey is an active member. See [`get_member_channel_ids`].
+    #[datastore_span(name = "get_member_channel_ids", system = "postgresql")]
+    pub async fn get_member_channel_ids(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Vec<Uuid>> {
+        get_member_channel_ids(&self.pool, community_id, pubkey).await
+    }
+
+    /// A community's listed open channel IDs. See [`get_listed_open_channel_ids`].
+    #[datastore_span(name = "get_listed_open_channel_ids", system = "postgresql")]
+    pub async fn get_listed_open_channel_ids(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Vec<Uuid>> {
+        get_listed_open_channel_ids(&self.pool, community_id).await
     }
 
     /// The channels of non-legacy types a pubkey can read (member, or open

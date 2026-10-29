@@ -51,7 +51,7 @@ void _readSeedJourney(
     );
     expect(
       tester.widget<Text>(find.text('channel-1')).style?.fontWeight,
-      FontWeight.w400,
+      FontWeight.w500,
     );
     final saved = ReadStateStorage(
       prefs,

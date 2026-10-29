@@ -756,7 +756,7 @@ void main() {
       lessThan(6),
     );
 
-    final body = tester.widget<MessageContent>(
+    final body = tester.widget<MessagePreview>(
       find.byKey(const ValueKey('search-message-body-message-1')),
     );
     expect(body.baseStyle?.fontSize, activityPreviewTextStyle.fontSize);
@@ -875,7 +875,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final content = tester.widget<MessageContent>(
+    final content = tester.widget<MessagePreview>(
       find.byKey(const ValueKey('search-message-body-message-1')),
     );
     expect(content.mentionNames, {agentPubkey: 'Helper Bot'});

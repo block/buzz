@@ -293,14 +293,19 @@ void main() {
       expect(find.text('Does your desktop app show this code?'), findsNothing);
     });
 
-    testWidgets('uses Cancel as the only visible SAS exit', (tester) async {
+    testWidgets('fullscreen pairing supports Cancel and system Back', (
+      tester,
+    ) async {
       final notifier = _ConfirmingSasPairingNotifier();
       await tester.pumpWidget(
         ProviderScope(
           overrides: [pairingProvider.overrideWith(() => notifier)],
           child: MaterialApp(
             theme: AppTheme.dark(),
-            home: const PairingPage(addingCommunity: true),
+            home: const PairingPage(
+              addingCommunity: true,
+              connectionLanding: true,
+            ),
           ),
         ),
       );
@@ -311,6 +316,9 @@ void main() {
       expect(find.byKey(const Key('pairing-pop-scope')), findsOneWidget);
 
       await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      expect(notifier.denied, isTrue);
+      notifier.denied = false;
+      await tester.binding.handlePopRoute();
       expect(notifier.denied, isTrue);
     });
 

@@ -896,7 +896,7 @@ mod postgres_tests {
             .expect("create fenced invite community")
             .id;
         let request = store
-            .submit(&host, "owner", None)
+            .submit(Some(&host), "owner", None, None)
             .await
             .expect("submit deletion request");
         let empty_digest = hex::encode(sha2::Sha256::digest([]));

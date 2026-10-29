@@ -19,3 +19,4 @@ export 'text_theme.dart' show bodyExtraSmallTextStyle;
 export 'utility_surface_theme.dart';
 export 'mobile_appearance.dart';
 export 'chat_colors.dart';
+export 'onboarding_typography.dart';

@@ -40,7 +40,6 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
               let controller = self.navigation?.viewControllers.first as? NativeProfileSetupController else { result(nil); return }
         self.navigation?.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
         controller.updateAppearance(args)
-        self.avatarController?.view.backgroundColor = controller.view.backgroundColor
         self.updateEditorAppearance(controller)
         result(nil); return
       }
@@ -136,6 +135,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
         return
       }
       if call.method == "controls", let state = call.arguments as? [String: Any] {
+        guard !finishing else { result(nil); return }
         self.editorCanDone = state["canDone"] as? Bool ?? false
         self.editorBusy = state["busy"] as? Bool ?? false
         let fullScreen = state["fullScreen"] as? Bool == true
@@ -152,6 +152,11 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
       let draft = call.arguments as? [String: Any]
       func returnToProfile() {
         controller.navigationItem.setRightBarButton(nil, animated: false)
+        // Restore the native chrome alongside Flutter's exit. The transparent
+        // editor reveals it during the animation; the final handoff must not
+        // restart it or allow another navigation action mid-transition.
+        controller.view.isUserInteractionEnabled = false
+        controller.navigationItem.leftBarButtonItem?.isEnabled = false
         controller.setEditorVisible(false)
         let frame = controller.editorFrame
         let rect = controller.avatarFrame(in: controller.view).offsetBy(dx: -frame.minX, dy: -frame.minY)
@@ -180,7 +185,8 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     let editor = FlutterViewController(engine: engine, nibName: nil, bundle: nil)
     avatarController = editor
     engine.registrar(forPlugin: "BuzzIosNavigationBar")?.register(IosNavigationBarFactory(messenger: messenger, parent: editor), withId: "buzz/ios_navigation_bar")
-    editor.view.backgroundColor = controller.view.backgroundColor
+    editor.isViewOpaque = false
+    editor.view.backgroundColor = .clear
     controller.addChild(editor)
     editor.view.frame = editorFrame
     editor.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -229,6 +235,8 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     if let enabled = previousInteractivePopEnabled { navigation?.interactivePopGestureRecognizer?.isEnabled = enabled }
     previousInteractivePopEnabled = nil
     disabledSheetPans.forEach { $0.isEnabled = true }; disabledSheetPans.removeAll()
+    controller?.view.isUserInteractionEnabled = true
+    controller?.navigationItem.leftBarButtonItem?.isEnabled = true
     controller?.setEditorVisible(false)
     controller?.setAvatarHidden(false)
     controller?.avatarReady()
@@ -292,9 +300,9 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     NSLayoutConstraint.activate([
       scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor), scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
       scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-      stack.heightAnchor.constraint(greaterThanOrEqualTo: scroll.frameLayoutGuide.heightAnchor, constant: -40),
-      stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 20), stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -20),
-      stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 20), stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -20)
+      stack.heightAnchor.constraint(greaterThanOrEqualTo: scroll.frameLayoutGuide.heightAnchor, constant: -48),
+      stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 24), stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24),
+      stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -24)
     ])
     let avatarMinimumHeight = avatarRow.heightAnchor.constraint(greaterThanOrEqualToConstant: avatarSize)
     avatarMinimumHeight.priority = .defaultHigh
@@ -333,8 +341,8 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     explanationRow.addArrangedSubview(explanation)
     explanationRow.isLayoutMarginsRelativeArrangement = true
     stack.addArrangedSubview(explanationRow)
-    // Match Grid.xxs between onboarding titles and subtitles.
-    stack.setCustomSpacing(8, after: heading)
+    // Match the shared onboarding title/subtitle spacing.
+    stack.setCustomSpacing(16, after: heading)
     stack.addArrangedSubview(name)
     status.numberOfLines = 0; status.textColor = .systemRed; status.font = .preferredFont(forTextStyle: .footnote); status.isHidden = true; stack.addArrangedSubview(status)
     stack.addArrangedSubview(avatarRow)
@@ -359,6 +367,41 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     stack.setCustomSpacing(8, after: submit)
     showStep(avatar: false, announce: false)
   }
+  // Same Inter metrics as OnboardingTypography in Flutter.
+  private static let interFontName: String? = {
+    guard let frameworks = Bundle.main.privateFrameworksURL,
+      let provider = CGDataProvider(url: frameworks.appendingPathComponent("App.framework/flutter_assets/assets/fonts/InterVariable.ttf") as CFURL),
+      let font = CGFont(provider), let name = font.postScriptName else { return nil }
+    CTFontManagerRegisterGraphicsFont(font, nil)
+    return name as String
+  }()
+
+  private func updateHeadingTypography() {
+    for (label, size, lineHeight, tracking, style) in [
+      (heading, CGFloat(30), CGFloat(36), CGFloat(-1), UIFont.TextStyle.largeTitle),
+      (explanation, CGFloat(16), CGFloat(24), CGFloat(-0.25), UIFont.TextStyle.body)
+    ] {
+      let metrics = UIFontMetrics(forTextStyle: style)
+      let base = Self.interFontName.flatMap { UIFont(name: $0, size: size) }
+        ?? UIFont.systemFont(ofSize: size, weight: .regular)
+      let font = metrics.scaledFont(for: base, compatibleWith: traitCollection)
+      let paragraph = NSMutableParagraphStyle()
+      paragraph.minimumLineHeight = metrics.scaledValue(for: lineHeight, compatibleWith: traitCollection)
+      label.font = font
+      label.attributedText = NSAttributedString(string: label.text ?? "", attributes: [
+        .font: font, .paragraphStyle: paragraph,
+        .kern: tracking * font.pointSize / size
+      ])
+    }
+  }
+
+  override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if previousTraitCollection?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
+      updateHeadingTypography()
+    }
+  }
+
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     focusNameIfNeeded()
@@ -373,13 +416,7 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     explanation.text = avatar
       ? "Let’s choose an avatar so people know it’s you."
       : "Your display name is how people see you in Buzz. You can change it any time."
-    // Mobile bodyLarge subtitle: 16/20, regular, subtle.
-    let paragraph = NSMutableParagraphStyle()
-    paragraph.minimumLineHeight = UIFontMetrics(forTextStyle: .subheadline).scaledValue(for: 20)
-    explanation.attributedText = NSAttributedString(string: explanation.text ?? "", attributes: [
-      .paragraphStyle: paragraph,
-      .kern: 0
-    ])
+    updateHeadingTypography()
     explanationRow.directionalLayoutMargins = .zero
     name.isHidden = avatar
     avatarRow.isHidden = !avatar
@@ -422,6 +459,7 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     return CGRect(x: 0, y: top, width: view.bounds.width, height: max(0, view.safeAreaLayoutGuide.layoutFrame.maxY - top))
   }
   func setEditorVisible(_ visible: Bool) {
+    guard editingAvatar != visible else { return }
     editingAvatar = visible
     heading.accessibilityElementsHidden = visible
     explanationRow.accessibilityElementsHidden = visible

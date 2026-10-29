@@ -24,6 +24,7 @@ void main() {
 
   late ProviderContainer container;
   late _FakeRelayConfig config;
+  late _FakeRelaySession session;
 
   Future<ReadStateNotifier> pumpNotifier({
     Map<String, Object> Function(String pubkey)? stored,
@@ -53,10 +54,18 @@ void main() {
       await Future<void>.delayed(Duration.zero);
     }
     expect(container.read(readStateProvider).isReady, isTrue);
+    session =
+        container.read(relaySessionProvider.notifier) as _FakeRelaySession;
     return notifier;
   }
 
   ReadStateState state() => container.read(readStateProvider);
+
+  Future<void> flushMicrotasks() async {
+    for (var i = 0; i < 10; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
 
   Future<void> settle() async {
     for (var i = 0; i < 10 && !state().isReady; i++) {
@@ -96,6 +105,86 @@ void main() {
     await settle();
     expect(state().effectiveTimestamp(msgKey), readAt);
     expect(state().effectiveTimestamp(channelId), isNull);
+  });
+
+  test('a disconnect and reconnect keeps the manager and forced unread '
+      'flags, and resyncs once on connect', () async {
+    final notifier = await pumpNotifier();
+    // Persists on the same manager, so it survives only if that manager does.
+    notifier.markContextRead(channelId, 500);
+    notifier.markContextUnread(msgKey, channelId: channelId);
+    expect(session.fetchCount, 1);
+    expect(session.subscribeCount, 1);
+    final version = state().version;
+
+    for (final status in [
+      SessionStatus.disconnected,
+      SessionStatus.connecting,
+      SessionStatus.reconnecting,
+    ]) {
+      session.setStatus(status);
+      await flushMicrotasks();
+      // No rebuild: still ready, flags kept, and nothing refetched.
+      expect(state().isReady, isTrue, reason: status.name);
+      expect(state().isForcedUnread(msgKey), isTrue, reason: status.name);
+      expect(state().effectiveTimestamp(channelId), 500);
+      expect(session.fetchCount, 1, reason: status.name);
+      expect(session.subscribeCount, 1, reason: status.name);
+    }
+
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+
+    // The reconnect listener refetches and replaces the live subscription
+    // on the same manager.
+    expect(session.fetchCount, 2);
+    expect(session.subscribeCount, 2);
+    expect(session.liveSubscriptions, 1);
+    expect(state().isReady, isTrue);
+    expect(state().isForcedUnread(msgKey), isTrue);
+    expect(state().locallyForcedChannelIds, {channelId});
+    expect(state().effectiveTimestamp(channelId), 500);
+    expect(state().version, greaterThanOrEqualTo(version));
+
+    // A second reconnect resyncs the same way.
+    session.setStatus(SessionStatus.disconnected);
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+    expect(session.fetchCount, 3);
+    expect(session.liveSubscriptions, 1);
+    expect(state().isForcedUnread(msgKey), isTrue);
+  });
+
+  test('switching account rebuilds the manager and drops forced unread '
+      'flags', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextUnread(msgKey, channelId: channelId);
+    expect(session.fetchCount, 1);
+    final pubkey = state().pubkey;
+
+    config.switchAccount(nostr.Keys.generate().nsec);
+    container.read(readStateProvider);
+    await settle();
+
+    expect(state().pubkey, isNot(pubkey));
+    expect(state().forcedUnreadContexts, isEmpty);
+    expect(session.fetchCount, 2);
+    expect(session.subscribeCount, 2);
+    expect(session.liveSubscriptions, 1);
+  });
+
+  test('switching community rebuilds the manager and drops forced unread '
+      'flags', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextUnread(msgKey, channelId: channelId);
+
+    config.switchTo('http://localhost:2');
+    container.read(readStateProvider);
+    await settle();
+
+    expect(state().forcedUnreadContexts, isEmpty);
+    expect(session.fetchCount, 2);
+    expect(session.liveSubscriptions, 1);
   });
 
   test('message unread → read → unread round-trips through the real '
@@ -189,7 +278,7 @@ void main() {
 }
 
 class _FakeRelayConfig extends RelayConfigNotifier {
-  final String nsec;
+  String nsec;
 
   _FakeRelayConfig(this.nsec);
 
@@ -198,11 +287,23 @@ class _FakeRelayConfig extends RelayConfigNotifier {
 
   void switchTo(String baseUrl) =>
       state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
+
+  void switchAccount(String newNsec) {
+    nsec = newNsec;
+    state = RelayConfig(baseUrl: state.baseUrl, nsec: newNsec);
+  }
 }
 
-/// Relay session that never connects and returns no history, keeping the
-/// manager fully local while exercising its real code paths.
+/// Relay session that returns no history and counts the read-state fetches
+/// and live subscriptions the manager makes, keeping it fully local while
+/// exercising its real code paths. Its status is driven by [setStatus].
 class _FakeRelaySession extends RelaySessionNotifier {
+  int fetchCount = 0;
+  int subscribeCount = 0;
+  int liveSubscriptions = 0;
+
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
+
   @override
   SessionState build() =>
       const SessionState(status: SessionStatus.disconnected);
@@ -211,14 +312,26 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [];
+  }) async {
+    // The manager's pre-publish own-slot lookup is not a full history fetch.
+    if (filter.tags.containsKey('#t')) fetchCount++;
+    return [];
+  }
 
   @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
-  }) async => () {};
+  }) async {
+    subscribeCount++;
+    liveSubscriptions++;
+    var open = true;
+    return () {
+      if (open) liveSubscriptions--;
+      open = false;
+    };
+  }
 }
 
 class _FakeAppLifecycle extends AppLifecycleNotifier {

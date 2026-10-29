@@ -58,7 +58,10 @@ jobs:
       - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          key: sherpa-cache-v1
+          # Named so the advisory flake lane (_ci-flake.yml) can restore it;
+          # with shared-key set, rust-cache ignores `key`, so the cache-bust
+          # suffix lives here. Bump it to discard every saved cache.
+          shared-key: unit-tests-sherpa-cache-v1
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
@@ -108,9 +111,12 @@ jobs:
   windows-rust:
     name: Windows Rust (x86_64-pc-windows-msvc)
     runs-on: windows-latest
-    # Windows runners are slow and this compiles the workspace + Tauri crate
-    # cold across four steps; budget generously.
-    timeout-minutes: 45
+    # With no rust-cache (after a toolchain bump or eviction), the steps take
+    # 39-41m on main (2026-10-22..26): clippy 17-18m, Tauri check ~6m, Tauri
+    # tests 10-11m, the rest ~5m. The cache save that follows takes ~4.5m and
+    # runs inside this cap. If the cap kills it, nothing is saved and the next
+    # push is cold again. 60m leaves ~15m over that; warm runs take 15-23m.
+    timeout-minutes: 60
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust || inputs.desktop_rust)
     permissions:
       contents: read
@@ -141,10 +147,10 @@ jobs:
           for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
             touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
           done
+      # Clippy type-checks everything `cargo check` would, so no separate
+      # workspace check step.
       - name: Clippy (workspace)
         run: cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
-      - name: Check (workspace)
-        run: cargo check --workspace --all-targets --target $env:TARGET
       - name: Test (buzz-dev-mcp)
         # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
         # only gate if this crate is tested ON Windows.

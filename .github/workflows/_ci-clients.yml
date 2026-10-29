@@ -134,6 +134,9 @@ jobs:
       - name: Test
         if: matrix.lane == 'test'
         run: /bin/bash scripts/mobile-test-shard.sh ${{ matrix.shard }} 3 --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+      - name: Test native secp256k1 package
+        if: matrix.lane == 'checks'
+        run: cd mobile/packages/buzz_secp256k1 && dart pub get && dart test
       - name: Test configured authentication domains
         if: matrix.lane == 'checks'
         run: >-
@@ -157,6 +160,14 @@ jobs:
       - name: Test mobile recipe argument forwarding
         if: matrix.lane == 'checks'
         run: /bin/bash scripts/test-mobile-gateway-recipes.sh
+      # ubuntu-latest (26.04) defaults to JDK 25, which Gradle 8.14 does not
+      # support. Pin the JDK 17 the 24.04 image used.
+      - name: Set up JDK 17
+        if: matrix.lane == 'android'
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "17"
       - name: Restore Gradle cache
         if: matrix.lane == 'android'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -12,6 +13,7 @@ import 'package:buzz/features/channels/agent_activity/observer_subscription.dart
 import 'package:buzz/features/channels/agent_activity/observer_models.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/relay_query_response.dart';
 
 void main() {
   test(
@@ -507,6 +509,279 @@ void main() {
       );
     },
   );
+
+  group('queryRelay response decoding', () {
+    final eventJson = {
+      'id': 'a' * 64,
+      'pubkey': 'b' * 64,
+      'created_at': 1700000000,
+      'kind': 9,
+      'tags': [
+        ['h', 'channel-1'],
+        ['p', 'c' * 64],
+      ],
+      'content': 'café \u{1F41D} 日本語',
+      'sig': 'd' * 128,
+    };
+
+    http.Response json(String body, {int status = 200}) => http.Response.bytes(
+      utf8.encode(body),
+      status,
+      headers: {'content-type': 'application/json'},
+    );
+
+    Future<void> expectFormat(
+      String body,
+      Object message, {
+      int status = 200,
+    }) async {
+      final harness = _queryHarness(
+        client: http_testing.MockClient(
+          (_) async => json(body, status: status),
+        ),
+      );
+      addTearDown(harness.container.dispose);
+      await expectLater(
+        harness.session.queryRelay(const []),
+        throwsA(isA<FormatException>().having((e) => e.message, 'm', message)),
+      );
+    }
+
+    test('parses events and keeps non-ASCII content intact', () async {
+      final harness = _queryHarness(
+        client: http_testing.MockClient(
+          (_) async => json(jsonEncode([eventJson, eventJson])),
+        ),
+      );
+      addTearDown(harness.container.dispose);
+
+      final events = await harness.session.queryRelay(const []);
+
+      expect(events, hasLength(2));
+      expect(events.first.toJson(), eventJson);
+    });
+
+    test('profile search decodes through the same path', () async {
+      final profile = {...eventJson, 'kind': 0};
+      final harness = _queryHarness(
+        client: http_testing.MockClient(
+          (_) async => json(jsonEncode([profile, eventJson])),
+        ),
+      );
+      addTearDown(harness.container.dispose);
+
+      final events = await harness.session.searchProfiles('wes');
+
+      expect(events.map((e) => e.kind), [0]);
+    });
+
+    test('requests gzip and inflates a compressed success body', () async {
+      String? acceptEncoding;
+      final harness = _queryHarness(
+        client: http_testing.MockClient((request) async {
+          acceptEncoding = request.headers['Accept-Encoding'];
+          return http.Response.bytes(
+            gzip.encode(utf8.encode(jsonEncode([eventJson]))),
+            200,
+            headers: {
+              'content-type': 'application/json',
+              'content-encoding': 'gzip',
+            },
+          );
+        }),
+      );
+      addTearDown(harness.container.dispose);
+
+      final events = await harness.session.queryRelay(const []);
+
+      expect(acceptEncoding, 'gzip');
+      expect(events.single.toJson(), eventJson);
+    });
+
+    test(
+      'inflates a compressed error body for the gate and exception',
+      () async {
+        final gateTimers = <_ManualTimer>[];
+        final gate = RelayRateLimitGate(
+          now: () => DateTime(2026),
+          timerFactory: (duration, callback) {
+            final timer = _ManualTimer(duration, callback);
+            gateTimers.add(timer);
+            return timer;
+          },
+        );
+        const body = '{"error":"rate-limited: quota exceeded; retry in 7s"}';
+        final harness = _queryHarness(
+          gate: gate,
+          client: http_testing.MockClient(
+            (_) async => http.Response.bytes(
+              gzip.encode(utf8.encode(body)),
+              429,
+              headers: {
+                'content-type': 'application/json',
+                'content-encoding': 'gzip',
+              },
+            ),
+          ),
+        );
+        addTearDown(harness.container.dispose);
+
+        await expectLater(
+          harness.session.queryRelay(const []),
+          throwsA(
+            isA<RelayException>()
+                .having((e) => e.statusCode, 'statusCode', 429)
+                .having((e) => e.body, 'body', body),
+          ),
+        );
+        expect(gateTimers.single.duration, const Duration(seconds: 7));
+      },
+    );
+
+    test('malformed JSON surfaces the parser FormatException', () async {
+      await expectFormat('{"oops"', isNot(startsWith('relay returned')));
+    });
+
+    test('a non-list response is rejected', () async {
+      await expectFormat(
+        '{"events":[]}',
+        'relay returned malformed query response',
+      );
+    });
+
+    test('a non-object element is rejected', () async {
+      await expectFormat('[1]', 'relay returned malformed query event');
+    });
+
+    test('a malformed event names the field error', () async {
+      await expectFormat(
+        '[{}]',
+        startsWith('relay returned malformed query event: '),
+      );
+    });
+
+    test('invalid UTF-8 is a FormatException', () async {
+      final harness = _queryHarness(
+        client: http_testing.MockClient(
+          (_) async => http.Response.bytes(
+            [0x5b, 0xff, 0x5d],
+            200,
+            headers: {'content-type': 'application/json'},
+          ),
+        ),
+      );
+      addTearDown(harness.container.dispose);
+      await expectLater(
+        harness.session.queryRelay(const []),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('an error status keeps its body and skips decoding', () async {
+      var decodes = 0;
+      const body = '{"error":"nope"}';
+      final harness = _queryHarness(
+        client: http_testing.MockClient((_) async => json(body, status: 500)),
+        queryDecoder: (response) {
+          decodes++;
+          return decodeRelayQueryResponse(response);
+        },
+      );
+      addTearDown(harness.container.dispose);
+
+      await expectLater(
+        harness.session.queryRelay(const []),
+        throwsA(
+          isA<RelayException>()
+              .having((e) => e.statusCode, 'statusCode', 500)
+              .having((e) => e.body, 'body', body),
+        ),
+      );
+      expect(decodes, 0);
+    });
+
+    test('a session disposed during decoding discards the events', () async {
+      final decoder = _GatedDecoder();
+      final harness = _queryHarness(
+        client: http_testing.MockClient(
+          (_) async => json(jsonEncode([eventJson])),
+        ),
+        queryDecoder: decoder.call,
+      );
+      addTearDown(harness.container.dispose);
+
+      final query = harness.session.queryRelay(const []);
+      final outcome = expectLater(query, throwsStateError);
+      await decoder.started.future;
+      harness.session.debugDispose();
+      decoder.gate.complete();
+
+      await outcome;
+    });
+
+    test('a retired session reports retirement, not a decode error', () async {
+      final decoder = _GatedDecoder();
+      final harness = _queryHarness(
+        client: http_testing.MockClient((_) async => json('{"oops"')),
+        queryDecoder: decoder.call,
+      );
+      addTearDown(harness.container.dispose);
+
+      final query = harness.session.queryRelay(const []);
+      final outcome = expectLater(query, throwsStateError);
+      await decoder.started.future;
+      harness.session.debugDispose();
+      decoder.gate.complete();
+
+      await outcome;
+    });
+
+    test('an age restriction during decoding discards the events', () async {
+      final age = _MutableAgeNotifier();
+      final decoder = _GatedDecoder();
+      final harness = _queryHarness(
+        client: http_testing.MockClient(
+          (_) async => json(jsonEncode([eventJson])),
+        ),
+        queryDecoder: decoder.call,
+        age: age,
+      );
+      addTearDown(harness.container.dispose);
+      final listener = harness.container.listen(
+        relaySessionProvider,
+        (_, _) {},
+      );
+      addTearDown(listener.close);
+
+      final query = harness.session.queryRelay(const []);
+      final outcome = expectLater(query, throwsStateError);
+      await decoder.started.future;
+      age.setState(AgeSignalState.restricted);
+      await Future<void>.delayed(Duration.zero);
+      decoder.gate.complete();
+
+      await outcome;
+    });
+
+    test('a session retired before decoding never decodes', () async {
+      final response = Completer<http.Response>();
+      final decoder = _GatedDecoder();
+      final harness = _queryHarness(
+        client: http_testing.MockClient((_) => response.future),
+        queryDecoder: decoder.call,
+      );
+      addTearDown(harness.container.dispose);
+
+      final query = harness.session.queryRelay(const []);
+      final outcome = expectLater(query, throwsStateError);
+      await Future<void>.delayed(Duration.zero);
+      harness.session.debugDispose();
+      response.complete(json(jsonEncode([eventJson])));
+
+      await outcome;
+      expect(decoder.calls, 0);
+    });
+  });
 
   group('searchProfiles', () {
     Map<String, dynamic> profileJson(int kind, String name) => {
@@ -1926,6 +2201,21 @@ class _QueuedControlledHttpClient extends http.BaseClient {
   void close() => closed = true;
 }
 
+/// Holds the production decoder until the test releases it, so a test can
+/// change the session while a real decode is outstanding.
+class _GatedDecoder {
+  final gate = Completer<void>();
+  final started = Completer<void>();
+  int calls = 0;
+
+  Future<List<NostrEvent>> call(http.Response response) async {
+    calls++;
+    started.complete();
+    await gate.future;
+    return decodeRelayQueryResponse(response);
+  }
+}
+
 class _QueryHarness {
   final ProviderContainer container;
   final RelaySessionNotifier session;
@@ -1934,12 +2224,19 @@ class _QueryHarness {
 }
 
 _QueryHarness _queryHarness({
-  required RelayRateLimitGate gate,
+  RelayRateLimitGate? gate,
   required http.Client client,
+  RelayQueryDecoder? queryDecoder,
+  AgeSignalNotifier? age,
 }) {
-  final session = RelaySessionNotifier(httpClient: client, rateLimitGate: gate);
+  final session = RelaySessionNotifier(
+    httpClient: client,
+    rateLimitGate: gate,
+    queryDecoder: queryDecoder ?? decodeRelayQueryResponse,
+  );
   final container = ProviderContainer(
     overrides: [
+      if (age != null) ageSignalProvider.overrideWith(() => age),
       authProvider.overrideWith(() => _PendingAuthNotifier()),
       relaySessionProvider.overrideWith(() => session),
       relayConfigProvider.overrideWith(

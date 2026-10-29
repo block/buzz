@@ -125,7 +125,7 @@ impl EntityDeletionStore {
         sqlx::query(
             "UPDATE entity_deletion_stage_history SET status = 'completed',
              finished_at = clock_timestamp(), last_error = NULL,
-             metadata_json = jsonb_set(metadata_json, '{result}', $2),
+             metadata_json = jsonb_set(metadata_json - 'waiting', '{result}', $2),
              updated_at = clock_timestamp() WHERE id = $1",
         )
         .bind(stage_id)

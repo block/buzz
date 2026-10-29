@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
@@ -9,10 +10,11 @@ const double buzzSearchIdleFieldHeight = 45;
 /// Font size used for idle [BuzzSearchField] text.
 const double buzzSearchIdleTextSize = 15;
 const double _searchIdleIconSize = 26;
+
+/// Base size for the Android search controls; search needs optical scaling.
+const double buzzSearchControlIconSize = 24;
 const double _searchCompactIconSize = 18;
 const double _searchIdleIconInset = Grid.xxs;
-const double _searchIdleTextInset =
-    _searchIdleIconInset + _searchIdleIconSize + Grid.xxs;
 const double _searchCompactTextInset =
     _searchIdleIconInset + _searchCompactIconSize + Grid.xxs;
 
@@ -96,78 +98,84 @@ class BuzzSearchField extends StatelessWidget {
   final TextInputAction textInputAction;
 
   @override
-  Widget build(BuildContext context) => DecoratedBox(
-    decoration: BoxDecoration(
-      color: surfaceColor,
-      borderRadius: BorderRadius.circular(Radii.lg),
-    ),
-    child: Stack(
-      children: [
-        Positioned.fill(
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: SizedBox(
-              width: double.infinity,
-              child: TextField(
-                key: fieldKey,
-                controller: controller,
-                focusNode: focusNode,
-                autocorrect: autocorrect,
-                enableSuggestions: enableSuggestions,
-                enabled: enabled,
-                decoration: InputDecoration(
-                  hintText: isEditing ? null : hintText,
-                  hintStyle: searchInputTextStyle.copyWith(
-                    color: placeholderColor,
-                    fontSize: buzzSearchIdleTextSize,
-                    height: 20 / buzzSearchIdleTextSize,
-                  ),
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  isDense: true,
-                  contentPadding: EdgeInsets.only(
-                    left: isEditing
-                        ? _searchCompactTextInset
-                        : _searchIdleTextInset,
-                    right: Grid.xxs,
-                    top: isEditing ? Grid.xxs : 0,
-                    bottom: isEditing ? Grid.xxs : 0,
-                  ),
-                ),
-                style: searchInputTextStyle.copyWith(color: inputColor),
-                textAlignVertical: TextAlignVertical.center,
-                textAlign: TextAlign.start,
-                textInputAction: textInputAction,
-                onTap: onTap,
-                onChanged: onChanged,
-                onSubmitted: onSubmitted,
-              ),
-            ),
-          ),
+  Widget build(BuildContext context) {
+    final idleIconSize = defaultTargetPlatform == TargetPlatform.android
+        ? buzzSearchControlIconSize * 0.75
+        : _searchIdleIconSize;
+    final idleTextInset = _searchIdleIconInset + idleIconSize + Grid.xxs;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: surfaceColor,
+        borderRadius: BorderRadius.circular(
+          defaultTargetPlatform == TargetPlatform.android
+              ? Radii.full
+              : Radii.lg,
         ),
-        IgnorePointer(
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Padding(
-              padding: const EdgeInsets.only(left: _searchIdleIconInset),
-              child: AnimatedScale(
-                duration: reduceMotion ? Duration.zero : motionDuration,
-                curve: Curves.easeInOutCubic,
-                scale: isEditing
-                    ? _searchCompactIconSize / _searchIdleIconSize
-                    : 1,
-                child: Icon(
-                  BuzzIcons.search,
-                  key: const Key('search-moving-icon'),
-                  size: _searchIdleIconSize,
-                  color: iconColor,
+      ),
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: SizedBox(
+                width: double.infinity,
+                child: TextField(
+                  key: fieldKey,
+                  controller: controller,
+                  focusNode: focusNode,
+                  autocorrect: autocorrect,
+                  enableSuggestions: enableSuggestions,
+                  enabled: enabled,
+                  decoration: InputDecoration(
+                    hintText: isEditing ? null : hintText,
+                    hintStyle: searchInputTextStyle.copyWith(
+                      color: placeholderColor,
+                      fontSize: buzzSearchIdleTextSize,
+                      height: 20 / buzzSearchIdleTextSize,
+                    ),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    isDense: true,
+                    contentPadding: EdgeInsets.only(
+                      left: isEditing ? _searchCompactTextInset : idleTextInset,
+                      right: Grid.xxs,
+                      top: isEditing ? Grid.xxs : 0,
+                      bottom: isEditing ? Grid.xxs : 0,
+                    ),
+                  ),
+                  style: searchInputTextStyle.copyWith(color: inputColor),
+                  textAlignVertical: TextAlignVertical.center,
+                  textAlign: TextAlign.start,
+                  textInputAction: textInputAction,
+                  onTap: onTap,
+                  onChanged: onChanged,
+                  onSubmitted: onSubmitted,
                 ),
               ),
             ),
           ),
-        ),
-      ],
-    ),
-  );
+          IgnorePointer(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(left: _searchIdleIconInset),
+                child: AnimatedScale(
+                  duration: reduceMotion ? Duration.zero : motionDuration,
+                  curve: Curves.easeInOutCubic,
+                  scale: isEditing ? _searchCompactIconSize / idleIconSize : 1,
+                  child: Icon(
+                    BuzzIcons.search,
+                    key: const Key('search-moving-icon'),
+                    size: idleIconSize,
+                    color: iconColor,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

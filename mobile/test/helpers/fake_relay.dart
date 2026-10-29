@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/relay_query_response.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
@@ -49,7 +51,14 @@ class FakeRelay {
   late final session = RelaySessionNotifier(
     socketFactory: _openSocket,
     httpClient: MockClient(_handleHttp),
+    // The production decoder runs in an isolate, whose result `fakeAsync`
+    // cannot deliver. Parse inline with the same function instead.
+    queryDecoder: (response) async => parseRelayQueryEvents(
+      response.bodyBytes,
+      response.headers['content-type'],
+    ),
     now: _now,
+    random: _MidpointRandom(),
   );
 
   List<Override> get overrides => [
@@ -433,6 +442,19 @@ const _windowKeys = {
 int _newestFirst(NostrEvent a, NostrEvent b) => a.createdAt != b.createdAt
     ? b.createdAt.compareTo(a.createdAt)
     : a.id.compareTo(b.id);
+
+/// Always draws the midpoint, so reconnect jitter is exactly the backoff and
+/// tests can elapse a known delay.
+class _MidpointRandom implements Random {
+  @override
+  double nextDouble() => 0.5;
+
+  @override
+  bool nextBool() => false;
+
+  @override
+  int nextInt(int max) => max ~/ 2;
+}
 
 class _FixedRelayConfig extends RelayConfigNotifier {
   _FixedRelayConfig(this._nsec);

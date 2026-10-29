@@ -83,6 +83,9 @@ jobs:
               - 'scripts/normative-corpus.json'
               - 'desktop/**'
               - 'pnpm-lock.yaml'
+              - 'scripts/flake-check.mjs'
+              - 'scripts/flake-check.test.mjs'
+              - '.github/workflows/_ci-flake.yml'
             desktop-rust:
               - 'desktop/src-tauri/**'
             web:
@@ -258,6 +261,14 @@ jobs:
       web: ${{ needs.changes.outputs.web == 'true' }}
       mobile: ${{ needs.changes.outputs.mobile == 'true' }}
       lane: mobile-swift
+
+  # Advisory flake check: repeats the tests a pull request changes. Its lanes
+  # skip when no test changed and none of the required gates below reads them;
+  # their own statuses and step summaries carry the result.
+  flake-check:
+    name: Flake Check
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/_ci-flake.yml
 
   security-domain:
     name: Security Domain

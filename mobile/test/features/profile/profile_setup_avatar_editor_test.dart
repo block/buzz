@@ -1,4 +1,5 @@
 import 'package:buzz/features/profile/profile_setup_avatar_editor.dart';
+import 'package:buzz/features/profile/profile_setup_empty_avatar.dart';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/features/profile/profile_avatar_editor.dart';
@@ -44,6 +45,43 @@ void main() {
       }
 
       await open(null);
+      final openingEditor = tester.widget<ProfileAvatarEditor>(
+        find.byType(ProfileAvatarEditor),
+      );
+      expect(openingEditor.mode, ProfileAvatarMode.emoji);
+      final openingDraft = openingEditor.draft! as ProfileUrlAvatarDraft;
+      expect(parseEmojiAvatarDataUrl(openingDraft.url)?.emoji, '😊');
+      expect(openingEditor.currentAvatarUrl, isNull);
+      await tester.tap(find.text('Image'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.byType(ProfileSetupEmptyAvatar), findsOneWidget);
+      expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, 'Done'))
+            .onPressed,
+        isNull,
+      );
+      await tester.tap(find.text('Emoji'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      final restoredDraft =
+          tester
+                  .widget<ProfileAvatarEditor>(find.byType(ProfileAvatarEditor))
+                  .draft!
+              as ProfileUrlAvatarDraft;
+      expect(restoredDraft.url, openingDraft.url);
+      await tester.tap(find.text('Done'));
+      await tester.pump();
+      expect(accepted, same(restoredDraft));
+      await open(null);
+      await tester.tap(find.byTooltip('Back to profile'));
+      await tester.pump();
+      expect(
+        accepted,
+        isNull,
+        reason: 'Back does not accept the suggested emoji',
+      );
       tester
           .widget<ProfileAvatarEditor>(find.byType(ProfileAvatarEditor))
           .onModeChanged(ProfileAvatarMode.animated);
@@ -79,6 +117,81 @@ void main() {
     },
   );
 
+  testWidgets('discarding a new avatar crossfades to the empty circle', (
+    tester,
+  ) async {
+    for (final mode in ProfileAvatarMode.values) {
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: ProfileSetupAvatarEditor(
+              key: UniqueKey(),
+              anchoredPreview: const Rect.fromLTWH(306.5, 236.5, 187, 187),
+              onFinished: (draft) => expect(draft, isNull),
+            ),
+          ),
+        ),
+      );
+      Future<void> send(String method) =>
+          tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            'buzz/profile_avatar_sheet',
+            const StandardMethodCodec().encodeMethodCall(MethodCall(method)),
+            (_) {},
+          );
+      await tester.pump();
+      await send('reveal');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.tap(
+        find.text(switch (mode) {
+          ProfileAvatarMode.image => 'Image',
+          ProfileAvatarMode.emoji => 'Emoji',
+          ProfileAvatarMode.animated => 'Animated',
+        }).first,
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      if (mode == ProfileAvatarMode.image) {
+        expect(find.byType(ProfileSetupEmptyAvatar), findsOneWidget);
+        expect(
+          tester
+              .widget<ProfileAvatarEditor>(find.byType(ProfileAvatarEditor))
+              .draft,
+          isNull,
+        );
+      }
+      await send('back');
+      await tester.pump();
+      double emptyOpacity() => tester
+          .widget<Opacity>(
+            find.byKey(const ValueKey('avatar-return-empty-opacity')),
+          )
+          .opacity;
+      expect(emptyOpacity(), 0);
+      final hiding = send('hide');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(emptyOpacity(), closeTo(0.5, 0.01));
+      if (mode != ProfileAvatarMode.animated) {
+        expect(
+          tester
+              .widget<Opacity>(
+                find.byKey(const ValueKey('avatar-return-draft-opacity')),
+              )
+              .opacity,
+          closeTo(0.5, 0.01),
+        );
+      }
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.pump();
+      await hiding;
+      expect(emptyOpacity(), 1);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    }
+  });
+
   testWidgets('avatar draft editor lays out within a full height sheet', (
     tester,
   ) async {
@@ -111,6 +224,10 @@ void main() {
       expect(previewRect!.width, greaterThan(0));
       expect(previewRect!.height, greaterThan(0));
       if (anchor != null) {
+        expect(
+          tester.widget<Scaffold>(find.byType(Scaffold)).backgroundColor,
+          Colors.transparent,
+        );
         expect(previewRect, anchor);
         final circle = tester.getRect(
           find.byKey(const ValueKey('avatar-preview-position')),
@@ -148,6 +265,97 @@ void main() {
         expect(tester.getSize(visibleAvatar), const Size.square(220));
         await tester.pump(const Duration(milliseconds: 100));
         expect(tester.getTopLeft(visibleAvatar).dy, closeTo(66, 0.01));
+        // Every tab keeps one diameter and moves from the currently painted
+        // circle position. Controls always enter upward, including Animated.
+        var previousTop = tester.getTopLeft(visibleAvatar).dy;
+        for (final label in [
+          'Animated',
+          'Emoji',
+          'Image',
+          'Animated',
+          'Image',
+          'Emoji',
+        ]) {
+          await tester.tap(find.text(label));
+          await tester.pump();
+          final circleFinder = label == 'Animated'
+              ? find.byKey(const ValueKey('animated-avatar-capture-preview'))
+              : visibleAvatar;
+          expect(tester.getSize(circleFinder), const Size.square(220));
+          expect(
+            tester.getTopLeft(circleFinder).dy,
+            closeTo(previousTop, 0.01),
+          );
+          final controlsKey = label == 'Animated'
+              ? 'animated-avatar-controls-transition'
+              : label == 'Emoji'
+              ? 'avatar-mode-tray-transition-transform'
+              : 'avatar-mode-transition-transform';
+          final controls = find.byKey(ValueKey(controlsKey));
+          final controlsContent = find
+              .descendant(of: controls, matching: find.byType(Opacity))
+              .first;
+          final startControlsTop = tester.getTopLeft(controlsContent).dy;
+          final startOffset = tester
+              .widget<Transform>(controls)
+              .transform
+              .getTranslation();
+          expect(startOffset.x, 0);
+          expect(startOffset.y, greaterThan(0));
+          await tester.pump(const Duration(milliseconds: 50));
+          final midwayTop = tester.getTopLeft(circleFinder).dy;
+          final midwayControlsTop = tester.getTopLeft(controlsContent).dy;
+          expect(midwayControlsTop, lessThan(startControlsTop));
+          expect(tester.getSize(circleFinder), const Size.square(220));
+          final midwayOffset = tester
+              .widget<Transform>(controls)
+              .transform
+              .getTranslation();
+          expect(
+            midwayOffset.y,
+            allOf(greaterThan(0), lessThan(startOffset.y)),
+          );
+          await tester.pump(const Duration(milliseconds: 150));
+          final destinationTop = tester.getTopLeft(circleFinder).dy;
+          expect(
+            tester.getTopLeft(controlsContent).dy,
+            lessThan(midwayControlsTop),
+          );
+          expect(
+            midwayTop,
+            allOf(
+              greaterThan(
+                previousTop < destinationTop ? previousTop : destinationTop,
+              ),
+              lessThan(
+                previousTop > destinationTop ? previousTop : destinationTop,
+              ),
+            ),
+          );
+          expect(tester.getSize(circleFinder), const Size.square(220));
+          expect(
+            tester.widget<Transform>(controls).transform.getTranslation().y,
+            0,
+          );
+          previousTop = destinationTop;
+        }
+        // Changing direction mid-flight starts from the painted position.
+        await tester.tap(find.text('Animated'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        final interruptedTop = tester
+            .getTopLeft(
+              find.byKey(const ValueKey('animated-avatar-capture-preview')),
+            )
+            .dy;
+        await tester.tap(find.text('Emoji'));
+        await tester.pump();
+        expect(
+          tester.getTopLeft(visibleAvatar).dy,
+          closeTo(interruptedTop, 0.01),
+        );
+        expect(tester.getSize(visibleAvatar), const Size.square(220));
+        await tester.pump(const Duration(milliseconds: 200));
         // Empty native previews start 15% smaller, then reach editor size.
         await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
           'buzz/profile_avatar_sheet',
@@ -216,6 +424,13 @@ void main() {
         await tester.tap(find.text('Image'));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 200));
+        expect(find.byType(ProfileSetupEmptyAvatar), findsNothing);
+        expect(
+          tester
+              .widget<ProfileAvatarEditor>(find.byType(ProfileAvatarEditor))
+              .draft,
+          isNull,
+        );
         expect(
           tester
               .getTopLeft(find.byKey(const ValueKey('avatar-preview-position')))

@@ -3,6 +3,7 @@ use crate::{relay_members, thread};
 use buzz_core::CommunityId;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use sqlx::{Connection, PgPool};
+use std::time::Instant;
 use uuid::Uuid;
 
 const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
@@ -360,11 +361,34 @@ async fn readiness_check_cancellation_balances_waiter_and_inflight_connection() 
         querying_db
             .readiness_check_sql(
                 tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-                "SELECT pg_sleep(5)",
+                "SELECT pg_sleep(1)",
             )
             .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    // Abort only once the server is running the query. sqlx's release ping
+    // waits for it to finish, so the connection returns about 1 s later,
+    // well inside the 5 s recovery bound below.
+    let observer = PgPool::connect(&database_url)
+        .await
+        .expect("connect activity observer");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let running: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND state = 'active' \
+                   AND query = 'SELECT pg_sleep(1)')",
+            )
+            .fetch_one(&observer)
+            .await
+            .expect("inspect readiness query");
+            if running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("readiness query reached the server");
     querying.abort();
     assert!(querying
         .await
@@ -1006,6 +1030,120 @@ async fn read_falls_back_to_writer_when_no_replica_configured() {
         "read() must be the writer pool when no replica is configured"
     );
     assert!(db.read_pool_stats().is_none());
+}
+
+/// A match-nothing read is answered before any pool acquire, on every query
+/// entry point, and an invalid query that would also match nothing still
+/// returns its validation error. Replica routing is on and the fence is open,
+/// so a routed read that reached `route_read` would try the reader first. Both
+/// pools point at a closed port, and the `limit: 1` control proves that a real
+/// page does try to acquire, from the reader and then the writer.
+#[tokio::test]
+async fn match_nothing_reads_take_no_connection() {
+    use metrics_util::debugging::DebuggingRecorder;
+
+    let dead_pool = || {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused") // sadscan:disable np.postgres.1
+            .expect("lazy pool")
+    };
+    let mut db = Db::from_pools(dead_pool(), dead_pool());
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(3600)));
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    let community = CommunityId::from_uuid(Uuid::new_v4());
+    let page = |limit| {
+        let mut q = EventQuery::for_community(community);
+        q.limit = Some(limit);
+        q
+    };
+    let with = |edit: fn(&mut EventQuery)| {
+        let mut q = page(10);
+        edit(&mut q);
+        q
+    };
+    let empty_pages = [
+        ("limit 0", page(0)),
+        ("max_limit 0", with(|q| q.max_limit = Some(0))),
+        ("empty kinds", with(|q| q.kinds = Some(vec![]))),
+        ("empty authors", with(|q| q.authors = Some(vec![]))),
+        ("empty ids", with(|q| q.ids = Some(vec![]))),
+        ("empty #e", with(|q| q.e_tags = Some(vec![]))),
+    ];
+    // Validation runs before the match-nothing check, so the error wins.
+    let invalid = [
+        (
+            "before_id without until",
+            with(|q| {
+                q.limit = Some(0);
+                q.before_id = Some(vec![0; 32]);
+            }),
+        ),
+        (
+            "global_only with channel_id",
+            with(|q| {
+                q.kinds = Some(vec![]);
+                q.global_only = true;
+                q.channel_id = Some(Uuid::nil());
+            }),
+        ),
+    ];
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let acquiring_roles = || {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| key.key().name() == "buzz_db_pool_acquire_attempts_total")
+            .filter_map(|(key, _, _, _)| {
+                key.key()
+                    .labels()
+                    .find(|label| label.key() == "pool_role")
+                    .map(|label| label.value().to_owned())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    for (case, q) in &empty_pages {
+        let results = [
+            db.query_events(q).await,
+            db.query_events_routed("test", q).await,
+            db.query_events_routed_bounded("test", q).await,
+        ];
+        for (entry, result) in ["writer", "routed", "routed bounded"].iter().zip(results) {
+            let events = result.unwrap_or_else(|e| panic!("{case} via {entry}: {e}"));
+            assert!(events.is_empty(), "{case} via {entry} must match nothing");
+        }
+    }
+    for (case, q) in &invalid {
+        let results = [
+            db.query_events(q).await,
+            db.query_events_routed("test", q).await,
+            db.query_events_routed_bounded("test", q).await,
+        ];
+        for (entry, result) in ["writer", "routed", "routed bounded"].iter().zip(results) {
+            assert!(
+                matches!(result, Err(DbError::InvalidData(_))),
+                "{case} via {entry} must fail validation, got {result:?}"
+            );
+        }
+    }
+    assert!(
+        acquiring_roles().is_empty(),
+        "a match-nothing read must not try to acquire: {:?}",
+        acquiring_roles()
+    );
+
+    db.query_events_routed("test", &page(1))
+        .await
+        .expect_err("a real page needs the (unreachable) pools");
+    assert_eq!(
+        acquiring_roles(),
+        ["reader", "writer"].map(str::to_owned).into(),
+        "the control must have tried the reader, then the writer"
+    );
 }
 
 #[test]
@@ -3102,6 +3240,22 @@ fn writer_statement_timeout_is_always_bounded() {
     assert_eq!(MAX_STATEMENT_TIMEOUT_MS, 300_000);
 }
 
+/// Poll until the reader pool holds exactly `target` connections, all idle.
+/// Returned and floor-maintenance connections land asynchronously, from
+/// tasks sqlx spawns on drop.
+async fn await_idle_floor(read_pool: &PgPool, target: u32) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while read_pool.size() != target || read_pool.num_idle() != target as usize {
+        assert!(
+            Instant::now() < deadline,
+            "reader pool never settled at {target} idle; size={} idle={}",
+            read_pool.size(),
+            read_pool.num_idle()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Through the production constructors, every writer session carries the
 /// clamped statement timeout and every replica session the 20 s read
 /// deadline. Mutation oracles: dropping the clamp leaves `0`/`10min` on the
@@ -3131,7 +3285,11 @@ async fn session_statement_timeouts_bound_writer_and_reader_sessions() {
             .await
             .expect("writer timeout");
         assert_eq!(writer, writer_expected, "writer, configured {configured}");
+        // Warm the reader the way the relay boots it: the routed-read acquire
+        // budget is 150 ms, and a cold dial on a busy server can exceed it.
         let reader_pool = db.read_pool.clone().expect("reader configured");
+        db.read_pool_boot_ping_for_tests().await;
+        await_idle_floor(&reader_pool, 1).await;
         let reader: String = sqlx::query_scalar("SHOW statement_timeout")
             .fetch_one(&reader_pool)
             .await
@@ -3405,7 +3563,7 @@ async fn replica_floor_writer_transaction_holds_shared_lock() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn replica_floor_probe_waits_for_shared_writer_and_records_after_release() {
+async fn cluster_global_replica_floor_probe_waits_for_shared_writer_and_records_after_release() {
     let admin = PgPool::connect(&admin_url().await)
         .await
         .expect("connect admin");

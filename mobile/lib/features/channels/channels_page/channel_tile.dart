@@ -88,14 +88,14 @@ class _ChannelTile extends ConsumerWidget {
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: contentListTitleTextStyle.copyWith(
+                    style: navigationChatTitleTextStyle.copyWith(
                       color: isMuted
                           ? contentColor
                           : channelNavigationForeground(
                               context,
                               unread: isUnread,
                             ),
-                      fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
+                      fontWeight: isUnread ? FontWeight.w700 : FontWeight.w500,
                     ),
                   ),
                 ],

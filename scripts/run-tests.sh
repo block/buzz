@@ -115,6 +115,10 @@ run_unit_tests() {
   run_test_step "buzz-sdk unit tests" \
     cargo test -p buzz-sdk --lib -- --nocapture
 
+  # buzz-workflow unit tests (infra-free). Mirrors `just test-unit`.
+  run_test_step "buzz-workflow unit tests" \
+    cargo test -p buzz-workflow --lib -- --nocapture
+
   # Keep the relay-to-agent trust-boundary regressions in the fallback path
   # when cargo-nextest is unavailable.
   run_test_step "buzz-acp tests" \
@@ -271,6 +275,7 @@ run_unit_tests() {
       handlers::req::tests::timed_out_historical_read_deregisters_before_closed \
       handlers::req::tests::superseded_timeout_leaves_replacement_intact \
       handlers::req::tests::search_claim_retires_live_and_yields_to_replacement \
+      handlers::req::tests::failed_search_closes_without_eose_or_trying_later_filters \
       handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner \
       handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim \
       handlers::req::tests::revoke_then_replacement_keeps_replacement_whole \
@@ -295,6 +300,12 @@ run_unit_tests() {
 
   run_test_step "buzz-relay readiness tests" \
     cargo test -p buzz-relay --lib readiness::tests:: -- --nocapture
+
+  run_test_step "buzz-relay accessible-channel cache tests" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      state::tests::accessible_channel_invalidation_is_scoped_to_community \
+      state::tests::accessible_channels_join_member_and_open_halves \
+      state::tests::channel_deleted_invalidation_is_scoped_to_community
 
   run_test_step "buzz-relay admission regression test" \
     cargo test -p buzz-relay --lib state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket -- --nocapture
@@ -422,6 +433,10 @@ run_unit_tests() {
 
   run_test_step "buzz-relay boot lifecycle tests" \
     cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
+
+  # Load generator unit tests are infra-free. Keep in step with `just test-unit`.
+  run_test_step "buzz-test-client loadgen unit tests" \
+    cargo test -p buzz-test-client --lib loadgen:: -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

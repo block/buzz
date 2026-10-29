@@ -6,26 +6,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/emoji/emoji_avatar.dart';
-import '../../shared/emoji/emoji_data.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
-import '../../shared/emoji/emoji_search.dart';
 import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/ios_native_segmented_control.dart';
-import '../../shared/widgets/ios_glass_navigation_button.dart';
-import '../../shared/widgets/ios_native_skin_tone_control.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'animated_avatar_capture.dart';
 import 'camera_disposal_barrier.dart';
-import 'avatar_background_grid.dart';
-import 'avatar_editor_option_button.dart';
-import 'emoji_avatar_tile.dart';
+import '../../shared/widgets/emoji_avatar_controls.dart';
+import '../../shared/widgets/avatar_image_source_controls.dart';
 import 'image_avatar_capture.dart';
 import 'profile_avatar_crop_page.dart';
 import 'profile_avatar_draft.dart';
@@ -88,6 +82,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     this.previewKey,
     this.previewOpacity = 1,
     this.emptyPreview,
+    this.returningToEmpty = false,
     this.headerGap = Grid.xs,
     this.anchoredPreview,
   });
@@ -98,6 +93,9 @@ class ProfileAvatarEditor extends HookConsumerWidget {
   final GlobalKey? previewKey;
   final double previewOpacity;
   final Widget? emptyPreview;
+
+  /// Crossfades a discarded setup draft to its original empty placeholder.
+  final bool returningToEmpty;
   final double headerGap;
 
   /// Keeps the onboarding avatar in place while its controls appear.
@@ -151,9 +149,14 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final previousAnchor = useRef(anchoredPreview);
     final anchorMoved = previousAnchor.value != anchoredPreview;
     previousAnchor.value = anchoredPreview;
+    // Seed Emoji controls from the opening draft without making it the Image baseline.
     final currentEmojiAvatar = useMemoized(
-      () => parseEmojiAvatarDataUrl(currentAvatarUrl),
-      [currentAvatarUrl],
+      () => parseEmojiAvatarDataUrl(
+        draft is ProfileUrlAvatarDraft
+            ? (draft as ProfileUrlAvatarDraft).url
+            : currentAvatarUrl,
+      ),
+      const [],
     );
     final selectedEmoji = useState(currentEmojiAvatar?.emoji ?? '😊');
     final initialColor = useMemoized(
@@ -163,7 +166,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       [currentEmojiAvatar],
     );
     final selectedColor = useState(initialColor);
-    final emojiSection = useState(_EmojiEditorSection.emoji);
+    final emojiSection = useState(EmojiEditorSection.emoji);
     final emojiPreviewKey = useState(0);
     final isPickingImage = useState(false);
     final isCapturingImage = useState(false);
@@ -176,10 +179,12 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final modeTransitionFrom = useRef(mode);
     final retainedPreview = useRef<Widget?>(null);
     final retainedPreviewTop = useRef(0.0);
+    final currentPreviewTop = useRef<double?>(null);
+    final modeStartPreviewTop = useRef<double?>(null);
     final modeTransitionController = useAnimationController(
       duration: anchoredPreview == null
           ? _motionDuration
-          : const Duration(milliseconds: 100),
+          : const Duration(milliseconds: 200),
       initialValue: 1,
     );
     final modeTransitionValue = useAnimation(modeTransitionController);
@@ -189,6 +194,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
 
     void selectMode(ProfileAvatarMode nextMode) {
       if (nextMode == mode) return;
+      modeStartPreviewTop.value = currentPreviewTop.value;
       modeTransitionFrom.value = mode;
       modeTransitionDirection.value = nextMode.index > mode.index ? 1 : -1;
       unawaited(HapticFeedback.selectionClick());
@@ -406,13 +412,20 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 modeTop -
                 (anchoredPreview?.height ?? _previewBlockSize)) /
             2;
-        final displayedPreviewTop =
+        final targetPreviewTop =
             anchoredPreview != null && mode == ProfileAvatarMode.emoji
             ? centeredEmojiTop
             : returningToEmoji
             ? animatedPreviewTop +
                   (previewTop - animatedPreviewTop) * modeTransitionProgress
             : previewTop;
+        final displayedPreviewTop = anchoredPreview != null
+            ? (modeStartPreviewTop.value ?? targetPreviewTop) +
+                  (targetPreviewTop -
+                          (modeStartPreviewTop.value ?? targetPreviewTop)) *
+                      modeTransitionProgress
+            : targetPreviewTop;
+        currentPreviewTop.value = displayedPreviewTop;
         if (mode != ProfileAvatarMode.animated) {
           retainedPreviewTop.value = displayedPreviewTop;
         }
@@ -438,7 +451,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                   disposalBarrier: cameraDisposal.value,
                 ),
           ),
-          ProfileAvatarMode.image => _ImageMode(
+          ProfileAvatarMode.image => AvatarImageSourceControls(
             key: const ValueKey(0),
             height: contentHeight,
             isPicking: isPickingImage.value,
@@ -449,7 +462,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             },
             onLibrary: () => unawaited(selectGalleryImage()),
           ),
-          ProfileAvatarMode.emoji => _EmojiMode(
+          ProfileAvatarMode.emoji => EmojiAvatarControls(
             key: const ValueKey(1),
             height: contentHeight,
             activeSection: emojiSection.value,
@@ -458,6 +471,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             selectedColor: selectedColor.value,
             transitionProgress: modeTransitionProgress,
             transitionDirection: modeTransitionDirection.value,
+            controlsFromBelow: anchoredPreview != null,
             onSectionChanged: (section) => emojiSection.value = section,
             onEmojiSelected: (emoji) {
               selectedEmoji.value = emoji;
@@ -478,6 +492,12 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 AnimatedAvatarCapture(
                   previewKey: previewKey,
                   previewSize: anchoredPreview?.width,
+                  previewOffset: anchoredPreview == null
+                      ? 0
+                      : displayedPreviewTop - modeTop,
+                  controlsTransitionProgress: anchoredPreview == null
+                      ? 1
+                      : modeTransitionProgress,
                   height: contentHeight,
                   onPrepareChanged: onAnimatedPrepareChanged,
                   disposalBarrier: cameraDisposal.value,
@@ -496,10 +516,14 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 child: Transform.translate(
                   key: const ValueKey('avatar-mode-transition-transform'),
                   offset: Offset(
-                    modeTransitionDirection.value *
-                        _modeTransitionDistance *
-                        (1 - modeTransitionProgress),
-                    0,
+                    anchoredPreview == null
+                        ? modeTransitionDirection.value *
+                              _modeTransitionDistance *
+                              (1 - modeTransitionProgress)
+                        : 0,
+                    anchoredPreview == null
+                        ? 0
+                        : 16 * (1 - modeTransitionProgress),
                   ),
                   child: Opacity(
                     key: const ValueKey('avatar-mode-transition-opacity'),
@@ -559,7 +583,8 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 ),
               ),
             ),
-            if (fixedPreview != null && !isCapturingImage.value)
+            if ((fixedPreview != null || returningToEmpty) &&
+                !isCapturingImage.value)
               AnimatedPositioned(
                 key: const ValueKey('avatar-preview-position'),
                 curve: Curves.easeOutCubic,
@@ -567,7 +592,8 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 right: Grid.gutter,
                 top: displayedPreviewTop,
                 height: anchoredPreview?.height ?? _previewBlockSize,
-                duration: anchorMoved || returningToEmoji
+                duration:
+                    anchoredPreview != null || anchorMoved || returningToEmoji
                     ? Duration.zero
                     : reduceMotion
                     ? Duration.zero
@@ -578,12 +604,44 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                     child: Opacity(
                       opacity: previewOpacity,
                       child: KeyedSubtree(
-                        key: previewKey,
+                        key: mode == ProfileAvatarMode.animated
+                            ? null
+                            : previewKey,
                         child: anchoredPreview == null
-                            ? fixedPreview
+                            ? fixedPreview ?? const SizedBox.shrink()
                             : SizedBox.square(
                                 dimension: anchoredPreview.width,
-                                child: FittedBox(child: fixedPreview),
+                                child: AnimatedBuilder(
+                                  animation: transition,
+                                  builder: (context, _) => FittedBox(
+                                    child: SizedBox.square(
+                                      dimension: _previewSize,
+                                      child: Stack(
+                                        fit: StackFit.expand,
+                                        children: [
+                                          if (returningToEmpty)
+                                            Opacity(
+                                              key: const ValueKey(
+                                                'avatar-return-empty-opacity',
+                                              ),
+                                              opacity: 1 - transition.value,
+                                              child: emptyPreview,
+                                            ),
+                                          if (fixedPreview != null)
+                                            Opacity(
+                                              key: const ValueKey(
+                                                'avatar-return-draft-opacity',
+                                              ),
+                                              opacity: returningToEmpty
+                                                  ? transition.value
+                                                  : 1,
+                                              child: fixedPreview,
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
                               ),
                       ),
                     ),
@@ -613,7 +671,10 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             AnimatedPositioned(
               // Camera controls already morph into the source buttons before
               // closing. Keep their bottom rail fixed during the handoff.
-              duration: mode == ProfileAvatarMode.image || reduceMotion
+              duration:
+                  anchoredPreview != null ||
+                      mode == ProfileAvatarMode.image ||
+                      reduceMotion
                   ? Duration.zero
                   : const Duration(milliseconds: 150),
               curve: Curves.easeOutCubic,
@@ -623,7 +684,9 @@ class ProfileAvatarEditor extends HookConsumerWidget {
               height: modeHeight,
               child: FadeTransition(
                 opacity: curvedEntrance,
-                child: anchoredPreview == null
+                child:
+                    anchoredPreview == null ||
+                        mode == ProfileAvatarMode.animated
                     ? transitionedModeContent
                     : ClipRect(
                         child: SingleChildScrollView(
@@ -643,12 +706,15 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 key: const ValueKey('avatar-mode-retained-preview'),
                 left: Grid.gutter,
                 right: Grid.gutter,
-                top:
-                    retainedPreviewTop.value +
-                    ((anchoredPreview == null ? basePreviewTop : previewTop) -
-                            retainedPreviewTop.value) *
-                        modeTransitionProgress,
-                height: _previewBlockSize,
+                top: anchoredPreview != null
+                    ? displayedPreviewTop
+                    : retainedPreviewTop.value +
+                          ((anchoredPreview == null
+                                      ? basePreviewTop
+                                      : previewTop) -
+                                  retainedPreviewTop.value) *
+                              modeTransitionProgress,
+                height: anchoredPreview?.height ?? _previewBlockSize,
                 child: IgnorePointer(
                   child: Opacity(
                     opacity: 1 - modeTransitionProgress,
@@ -770,84 +836,5 @@ class _AvatarModeControl extends StatelessWidget {
         },
       ),
     ),
-  );
-}
-
-class _ImageMode extends StatelessWidget {
-  const _ImageMode({
-    super.key,
-    required this.height,
-    required this.isPicking,
-    required this.onCamera,
-    required this.onLibrary,
-  });
-
-  final double height;
-  final bool isPicking;
-  final VoidCallback onCamera;
-  final VoidCallback onLibrary;
-
-  @override
-  Widget build(BuildContext context) => SizedBox(
-    height: height,
-    child: Column(
-      children: [
-        const Spacer(),
-        Row(
-          children: [
-            const Spacer(),
-            Expanded(
-              child: _ImageSourceOption(
-                key: const ValueKey('image-source-camera'),
-                icon: BuzzIcons.camera,
-                iosIcon: IosGlassNavigationIcon.camera,
-                label: 'Camera',
-                onTap: isPicking ? null : onCamera,
-                labelMaxWidth: 96,
-              ),
-            ),
-            const SizedBox(width: Grid.half),
-            Expanded(
-              child: _ImageSourceOption(
-                key: const ValueKey('image-source-library'),
-                icon: BuzzIcons.images,
-                iosIcon: IosGlassNavigationIcon.photoLibrary,
-                label: 'Photo Library',
-                onTap: isPicking ? null : onLibrary,
-                labelMaxWidth: 104,
-              ),
-            ),
-            const Spacer(),
-          ],
-        ),
-      ],
-    ),
-  );
-}
-
-class _ImageSourceOption extends StatelessWidget {
-  const _ImageSourceOption({
-    super.key,
-    required this.icon,
-    required this.iosIcon,
-    required this.label,
-    required this.onTap,
-    required this.labelMaxWidth,
-  });
-
-  final IconData icon;
-  final IosGlassNavigationIcon iosIcon;
-  final String label;
-  final VoidCallback? onTap;
-  final double labelMaxWidth;
-
-  @override
-  Widget build(BuildContext context) => AvatarEditorOptionButton(
-    icon: icon,
-    iosIcon: iosIcon,
-    label: label,
-    selected: false,
-    onTap: onTap,
-    labelMaxWidth: labelMaxWidth,
   );
 }

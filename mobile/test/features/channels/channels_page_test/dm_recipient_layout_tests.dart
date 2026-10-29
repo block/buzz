@@ -23,7 +23,7 @@ void dmRecipientLayoutTests(Widget Function(List<Override>) harness) {
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Create or start conversation'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('New direct message'));
+      await tester.tap(find.text('New DM'));
       await tester.pumpAndSettle();
 
       if (Platform.environment['COMMUNITY_SCREENSHOTS'] case final directory?) {

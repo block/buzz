@@ -396,12 +396,11 @@ void _sendTypingIndicator(
         ['e', threadHeadId, '', 'reply'],
     ];
 
-    final event = nostr.Event.from(
+    final event = signNostrEvent(
       kind: EventKind.typingIndicator,
       content: '',
       tags: tags,
       secretKey: privkeyHex,
-      verify: false,
     );
 
     // Send directly over WebSocket — fire-and-forget, matching desktop.
