@@ -62,6 +62,7 @@ void main() {
       ('escaped emphasis', r'\*literal\* and \_x\_', '*literal* and _x_'),
       ('escaped backslash', r'a \\ b', r'a \ b'),
       ('escaped link opener', r'\[docs](https://x)', '[docs](https://x)'),
+      ('escaped backticks', r'\`literal\` and `code`', '`literal` and code'),
     ]) {
       test(name, () => expect(_text(source), expected));
     }
@@ -97,6 +98,15 @@ void main() {
 
     test('dropped lines do not count', () {
       expect(_text('# a\n\n---\n- b\nc\nd'), 'a\nb\nc');
+    });
+
+    test('stops reading after a long run of lines that do not render', () {
+      final content = '\n' * 1000000 + 'late';
+      expect(_text(content), '');
+      expect(
+        messagePreviewSource(content, maxLines: 2).length,
+        lessThan(20000),
+      );
     });
 
     test('caps a very long line', () {

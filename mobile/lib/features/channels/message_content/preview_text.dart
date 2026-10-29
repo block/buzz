@@ -145,8 +145,10 @@ String messagePreviewSource(String content, {required int maxLines}) {
 }
 
 /// The first `maxLines + 1` lines that render, trimmed and without block
-/// syntax, read lazily so the rest of [content] is never scanned. [code] marks
-/// a line inside a fenced block, and [end] is its end offset in [content].
+/// syntax, read lazily so the rest of [content] is never scanned. Lines that
+/// don't render still cost a scan, so reading also stops after
+/// [_maxScanLength] characters. [code] marks a line inside a fenced block, and
+/// [end] is its end offset in [content].
 Iterable<({String text, bool code, int end})> _keptLines(
   String content,
   int maxLines,
@@ -154,7 +156,9 @@ Iterable<({String text, bool code, int end})> _keptLines(
   var kept = 0;
   var fenceOpen = false;
   var start = 0;
-  while (start <= content.length && kept <= maxLines) {
+  while (start <= content.length &&
+      start <= _maxScanLength &&
+      kept <= maxLines) {
     var end = content.indexOf('\n', start);
     if (end < 0) end = content.length;
     // A long line wraps past the visible lines well before this length.
@@ -183,6 +187,8 @@ Iterable<({String text, bool code, int end})> _keptLines(
 }
 
 const _maxLineLength = 2000;
+const _maxScanLength = 8 * _maxLineLength;
+const _backslash = 0x5C;
 const _backtick = 0x60;
 
 final _rule = RegExp(r'^([-*_])(?:\s*\1){2,}$');
@@ -301,13 +307,18 @@ class _PreviewBuilder {
       piece is PreviewText ? text(piece.text) : pieces.add(piece);
 
   /// One line of prose: inline code is literal, everything else is inline
-  /// Markdown. A code span opens at a run of backticks and closes at the next
-  /// run of the same length; a run with no match is literal.
+  /// Markdown. A code span opens at an unescaped run of backticks and closes
+  /// at the next run of the same length; a run with no match is literal.
   void line(String line) {
     var prose = 0;
     var cursor = 0;
     while (cursor < line.length) {
-      if (line.codeUnitAt(cursor) != _backtick) {
+      final unit = line.codeUnitAt(cursor);
+      if (unit == _backslash) {
+        cursor += 2;
+        continue;
+      }
+      if (unit != _backtick) {
         cursor++;
         continue;
       }
