@@ -9,9 +9,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/emoji/emoji_avatar.dart';
-import '../../shared/emoji/emoji_data.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
-import '../../shared/emoji/emoji_search.dart';
 import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -19,13 +17,11 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/ios_native_segmented_control.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
-import '../../shared/widgets/ios_native_skin_tone_control.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'animated_avatar_capture.dart';
 import 'camera_disposal_barrier.dart';
-import 'avatar_background_grid.dart';
 import 'avatar_editor_option_button.dart';
-import 'emoji_avatar_tile.dart';
+import '../../shared/widgets/emoji_avatar_controls.dart';
 import 'image_avatar_capture.dart';
 import 'profile_avatar_crop_page.dart';
 import 'profile_avatar_draft.dart';
@@ -172,7 +168,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       [currentEmojiAvatar],
     );
     final selectedColor = useState(initialColor);
-    final emojiSection = useState(_EmojiEditorSection.emoji);
+    final emojiSection = useState(EmojiEditorSection.emoji);
     final emojiPreviewKey = useState(0);
     final isPickingImage = useState(false);
     final isCapturingImage = useState(false);
@@ -468,7 +464,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             },
             onLibrary: () => unawaited(selectGalleryImage()),
           ),
-          ProfileAvatarMode.emoji => _EmojiMode(
+          ProfileAvatarMode.emoji => EmojiAvatarControls(
             key: const ValueKey(1),
             height: contentHeight,
             activeSection: emojiSection.value,

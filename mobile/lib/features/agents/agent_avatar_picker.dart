@@ -12,6 +12,7 @@ import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/emoji_avatar_controls.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/profile_avatar_crop_page.dart';
 
@@ -48,7 +49,7 @@ class AgentAvatarSelection {
   }
 }
 
-/// Compact creation avatar preview, scrubbable character strip and media modes.
+/// Avatar preview with character, shared emoji, and image selection controls.
 class AgentAvatarPicker extends HookConsumerWidget {
   const AgentAvatarPicker({
     super.key,
@@ -85,11 +86,7 @@ class AgentAvatarPicker extends HookConsumerWidget {
     );
     final error = useState<String?>(null);
     final busy = useState(false);
-    final pages = usePageController(
-      initialPage: initialIndex,
-      viewportFraction: .23,
-    );
-    final search = useState('');
+    final emojiSection = useState(EmojiEditorSection.emoji);
     final dataset = ref.watch(emojiDatasetProvider);
     final locked = disabled || busy.value;
 
@@ -241,27 +238,29 @@ class AgentAvatarPicker extends HookConsumerWidget {
           ),
         ),
         const SizedBox(height: Grid.sm),
-        if (mode.value == 0) ...[
+        if (mode.value == 0)
           SizedBox(
-            height: 76,
-            child: PageView.builder(
-              controller: pages,
+            height: 320,
+            child: GridView.builder(
+              key: const ValueKey('agent-avatar-grid'),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 4,
+              ),
               itemCount: agentAvatarCatalog.length,
-              physics: locked ? const NeverScrollableScrollPhysics() : null,
-              onPageChanged: locked
-                  ? null
-                  : (value) {
-                      index.value = value;
-                      onChanged(
-                        AgentAvatarSelection.url(agentAvatarCatalog[value].url),
-                      );
-                    },
               itemBuilder: (context, i) => Semantics(
                 label: agentAvatarCatalog[i].name,
                 selected: index.value == i,
                 button: true,
                 child: InkWell(
-                  onTap: locked ? null : () => pages.jumpToPage(i),
+                  key: ValueKey('agent-avatar-$i'),
+                  onTap: locked
+                      ? null
+                      : () {
+                          index.value = i;
+                          onChanged(
+                            AgentAvatarSelection.url(agentAvatarCatalog[i].url),
+                          );
+                        },
                   borderRadius: BorderRadius.circular(Radii.container),
                   child: Container(
                     margin: const EdgeInsets.all(Grid.xxs),
@@ -284,98 +283,38 @@ class AgentAvatarPicker extends HookConsumerWidget {
               ),
             ),
           ),
-          Text(
-            agentAvatarCatalog[index.value].name,
-            style: context.textTheme.labelMedium,
-          ),
-        ],
-        if (mode.value == 1) ...[
-          SizedBox(
-            height: 48,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              children: [
-                for (final swatch in emojiAvatarColors)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
-                    child: Semantics(
-                      label:
-                          'Background ${emojiAvatarColors.indexOf(swatch) + 1}',
-                      selected: color.value == swatch,
-                      button: true,
-                      child: InkWell(
-                        onTap: locked
-                            ? null
-                            : () async {
-                                color.value = swatch;
-                                await renderEmoji();
-                              },
-                        child: Container(
-                          width: 44,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Color(swatch),
-                            border: Border.all(
-                              color: color.value == swatch
-                                  ? context.colors.onSurface
-                                  : Colors.transparent,
-                              width: 3,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
+        if (mode.value == 1)
+          dataset.when(
+            loading: () => const SizedBox(
+              height: 320,
+              child: Center(child: CircularProgressIndicator()),
             ),
-          ),
-          TextField(
-            decoration: const InputDecoration(hintText: 'Search emoji'),
-            onChanged: (value) => search.value = value,
-            enabled: !locked,
-          ),
-          SizedBox(
-            height: 160,
-            child: dataset.when(
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (_, _) => TextButton(
-                onPressed: () => ref.invalidate(emojiDatasetProvider),
-                child: const Text('Retry emoji'),
+            error: (_, _) => TextButton(
+              onPressed: () => ref.invalidate(emojiDatasetProvider),
+              child: const Text('Retry emoji'),
+            ),
+            data: (data) => IgnorePointer(
+              ignoring: locked,
+              child: EmojiAvatarControls(
+                height: 320,
+                activeSection: emojiSection.value,
+                dataset: data,
+                selectedEmoji: emoji.value,
+                selectedColor: color.value,
+                transitionProgress: 1,
+                transitionDirection: 0,
+                onSectionChanged: (value) => emojiSection.value = value,
+                onEmojiSelected: (value) async {
+                  emoji.value = value;
+                  await renderEmoji();
+                },
+                onColorSelected: (value) async {
+                  color.value = value;
+                  await renderEmoji();
+                },
               ),
-              data: (data) {
-                final matches = data.all
-                    .where(
-                      (e) =>
-                          search.value.isEmpty ||
-                          e.name.toLowerCase().contains(
-                            search.value.toLowerCase(),
-                          ) ||
-                          e.native == search.value,
-                    )
-                    .toList();
-                return GridView.builder(
-                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: 52,
-                  ),
-                  itemCount: matches.length,
-                  itemBuilder: (context, i) => IconButton(
-                    tooltip: matches[i].name,
-                    onPressed: locked
-                        ? null
-                        : () async {
-                            emoji.value = matches[i].native;
-                            await renderEmoji();
-                          },
-                    icon: Text(
-                      matches[i].native,
-                      style: const TextStyle(fontSize: 28),
-                    ),
-                  ),
-                );
-              },
             ),
           ),
-        ],
         if (mode.value == 2)
           TextButton.icon(
             onPressed: locked ? null : pickImage,

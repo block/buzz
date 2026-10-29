@@ -62,15 +62,15 @@ void main() {
       final originalAvatar = tester
           .widget<PresetAgentAvatar>(find.byType(PresetAgentAvatar))
           .imageUrl;
-      final direction = originalAvatar == agentAvatarCatalog.first.url
-          ? -190.0
-          : 190.0;
+      final targetIndex = originalAvatar == agentAvatarCatalog.first.url
+          ? 1
+          : 0;
       await tester.ensureVisible(find.text('Choose avatar'));
       await tester.tap(find.text('Choose avatar'));
       await tester.pumpAndSettle();
       expect(find.byType(AgentAvatarEditorPage), findsOneWidget);
       expect(find.text('Instructions'), findsNothing);
-      await tester.drag(find.byType(PageView), Offset(direction, 0));
+      await tester.tap(find.byKey(ValueKey('agent-avatar-$targetIndex')));
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Cancel'));
       await tester.pumpAndSettle();
@@ -82,7 +82,7 @@ void main() {
       );
       await tester.tap(find.text('Choose avatar'));
       await tester.pumpAndSettle();
-      await tester.drag(find.byType(PageView), Offset(direction, 0));
+      await tester.tap(find.byKey(ValueKey('agent-avatar-$targetIndex')));
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Done'));
       await tester.pumpAndSettle();
