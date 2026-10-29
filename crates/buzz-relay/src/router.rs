@@ -737,13 +737,22 @@ async fn nip11_or_ws_handler(
     // upgrades skip the tenant lookup; the `Ok(ws)` backstop runs below.
     let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
         Ok(ctx) => ctx,
-        Err(_) => {
-            // Generic rejection: do not distinguish "unmapped" from "lookup
-            // error", and never echo the host, so an unauthenticated caller
-            // cannot probe which communities exist on this deployment.
+        Err(crate::tenant::BindError::UnmappedHost) => {
+            // Generic rejection: never echo the host, so an unauthenticated
+            // caller cannot probe which communities exist on this deployment.
             return (
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
+            )
+                .into_response();
+        }
+        Err(crate::tenant::BindError::Lookup(error)) => {
+            // The lookup failed, which says nothing about the host: report an
+            // outage, not a missing community.
+            tracing::error!(%error, "tenant lookup failed (fail closed, 503)");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "relay: service temporarily unavailable",
             )
                 .into_response();
         }
@@ -2183,8 +2192,8 @@ mod tests {
         };
 
         // Unreachable database: port 1 refuses every connection, so each
-        // request that reaches `bind_community` fails the same way (generic
-        // 404) regardless of local database contents or host load. sqlx
+        // request that reaches `bind_community` fails the same way (the
+        // tenant-lookup outage 503) regardless of local database contents or host load. sqlx
         // retries refused connects until the acquire timeout, so keep it short.
         config.database_url = "postgres://buzz:buzz_dev@127.0.0.1:1/buzz".to_string();
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -2248,11 +2257,13 @@ mod tests {
             builder = builder.header(name, value);
         }
         let req = builder.body(Body::empty()).expect("request");
-        build_router(state)
-            .oneshot(req)
-            .await
-            .expect("router response")
-            .status()
+        status_past_gate(
+            build_router(state)
+                .oneshot(req)
+                .await
+                .expect("router response"),
+        )
+        .await
     }
 
     /// Off mode reads no identity header: an upgrade with no header and one
@@ -2403,11 +2414,13 @@ mod tests {
             builder = builder.header("Accept", accept_value);
         }
         let req = builder.body(Body::empty()).expect("request");
-        build_router(state)
-            .oneshot(req)
-            .await
-            .expect("router response")
-            .status()
+        status_past_gate(
+            build_router(state)
+                .oneshot(req)
+                .await
+                .expect("router response"),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -2489,11 +2502,13 @@ mod tests {
             // Deliberately omit Connection header.
             .body(Body::empty())
             .expect("request");
-        build_router(state)
-            .oneshot(req)
-            .await
-            .expect("router response")
-            .status()
+        status_past_gate(
+            build_router(state)
+                .oneshot(req)
+                .await
+                .expect("router response"),
+        )
+        .await
     }
 
     /// Drive a request that carries `Connection: Upgrade` but no `Upgrade`
@@ -2512,11 +2527,13 @@ mod tests {
             // Deliberately omit Upgrade header.
             .body(Body::empty())
             .expect("request");
-        build_router(state)
-            .oneshot(req)
-            .await
-            .expect("router response")
-            .status()
+        status_past_gate(
+            build_router(state)
+                .oneshot(req)
+                .await
+                .expect("router response"),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -4383,6 +4400,26 @@ mod tests {
         (Arc::new(state), verifier)
     }
 
+    /// Body of the tenant-lookup outage response (`bind_community` failed).
+    const TENANT_LOOKUP_OUTAGE_BODY: &[u8] = b"relay: service temporarily unavailable";
+
+    /// Status of a gate-bypass probe. These fixtures use an unreachable
+    /// database, so a request that clears the NIP-FI gate stops at the tenant
+    /// lookup, which now answers 503 (it used to answer 404). That outage 503
+    /// is "past the gate"; report it as 404 so the assertions that ask whether
+    /// the *gate* denied the request keep meaning that. The outage contract
+    /// itself is pinned by `tenant_lookup_failure_is_503_not_404`.
+    async fn status_past_gate(resp: axum::response::Response) -> axum::http::StatusCode {
+        let (status, body) = status_and_body(resp).await;
+        if status == axum::http::StatusCode::SERVICE_UNAVAILABLE
+            && body == TENANT_LOOKUP_OUTAGE_BODY
+        {
+            axum::http::StatusCode::NOT_FOUND
+        } else {
+            status
+        }
+    }
+
     async fn status_and_body(resp: axum::response::Response) -> (axum::http::StatusCode, Vec<u8>) {
         let status = resp.status();
         let body = axum::body::to_bytes(resp.into_body(), 4096)
@@ -4473,11 +4510,15 @@ mod tests {
 
     // Pins: Off mode never consults the community map. With the production
     // Off default (no communities) every NIP-FI site answers exactly as
-    // before: the upgrades reach the tenant lookup's exact 404, header or not.
+    // before: the upgrades reach the tenant lookup, header or not. Here the
+    // database is unreachable, so the lookup fails and answers the outage 503
+    // — never the unmapped-host 404, which would hide the outage.
     // Mutation: resolving the Host before the Off early-return turns these
-    // into 503.
+    // into the NIP-FI "authorization unavailable" 503.
+    // Mutation: collapsing `BindError::Lookup` into the unmapped 404 fails the
+    // status assertion.
     #[tokio::test]
-    async fn nip_fi_off_unmapped_host_is_byte_identical_404() {
+    async fn tenant_lookup_failure_is_503_not_404() {
         let audio = format!("/huddle/{}/audio", uuid::Uuid::new_v4());
         for path in ["/", audio.as_str()] {
             for token in [None, Some("Bearer a.b.c")] {
@@ -4493,12 +4534,55 @@ mod tests {
                 assert_eq!(
                     status_and_body(resp).await,
                     (
-                        axum::http::StatusCode::NOT_FOUND,
-                        b"relay: no community is configured for this host".to_vec()
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        TENANT_LOOKUP_OUTAGE_BODY.to_vec()
                     ),
                     "{path} token={token:?}"
                 );
             }
+        }
+    }
+
+    // Pins: every HTTP door that binds its tenant through `bind_tenant` answers
+    // a failed community lookup with the outage 503, not the unmapped-host 404.
+    // The database is unreachable, so the lookup fails.
+    // Mutation: `bind_tenant` collapsing `BindError::Lookup` into `Unmapped`
+    // turns every row back into 404.
+    #[tokio::test]
+    async fn http_doors_answer_tenant_lookup_failure_with_503() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = nip_fi_off_state().await;
+        for (method, path) in [
+            ("POST", "/events"),
+            ("POST", "/query"),
+            ("POST", "/api/invites"),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(axum::http::header::HOST, "relay.example")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("request");
+            let resp = build_router(state.clone())
+                .oneshot(req)
+                .await
+                .expect("router response");
+            let (status, body) = status_and_body(resp).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{method} {path}: {}",
+                String::from_utf8_lossy(&body)
+            );
+            assert!(
+                String::from_utf8_lossy(&body).contains("service temporarily unavailable"),
+                "{method} {path}: {}",
+                String::from_utf8_lossy(&body)
+            );
         }
     }
 

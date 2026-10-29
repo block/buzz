@@ -264,12 +264,9 @@ async fn mint_invite_checked(
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
 
-    let Some(tenant) = crate::nip_fi_shadow::bind_tenant(&state, &headers).await else {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "relay: no community is configured for this host",
-        )
-        .into_response();
+    let tenant = match crate::nip_fi_shadow::bind_tenant(&state, &headers).await {
+        Ok(tenant) => tenant,
+        Err(e) => return bridge::tenant_bind_rejection(e).into_response(),
     };
 
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, "/api/invites");

@@ -276,11 +276,11 @@ fn rejected() -> (StatusCode, Vec<u8>) {
 }
 
 /// The request cleared NIP-FI admission and was answered by the next step:
-/// the upgrades' tenant lookup (no reachable database) or the protected
-/// route's path extractor (`wf` is not a UUID).
+/// the upgrades' tenant lookup (no reachable database, so its outage 503) or
+/// the protected route's path extractor (`wf` is not a UUID).
 fn cleared_nip_fi(outcomes: &[(StatusCode, Vec<u8>)]) -> bool {
     outcomes.iter().all(|(status, body)| match *status {
-        StatusCode::NOT_FOUND => body == b"relay: no community is configured for this host",
+        StatusCode::SERVICE_UNAVAILABLE => body == b"relay: service temporarily unavailable",
         StatusCode::BAD_REQUEST => body.starts_with(b"Invalid URL: Cannot parse `workflow_id`"),
         _ => false,
     })

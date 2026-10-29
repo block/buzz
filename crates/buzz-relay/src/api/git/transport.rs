@@ -121,7 +121,16 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // `config.relay_url` and not any client-supplied community value.
         let tenant = crate::nip_fi_shadow::bind_tenant(state, &parts.headers)
             .await
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
+            .map_err(|e| match e {
+                crate::nip_fi_shadow::TenantBindError::Unmapped => {
+                    (StatusCode::NOT_FOUND, "repository not found").into_response()
+                }
+                crate::nip_fi_shadow::TenantBindError::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "service temporarily unavailable",
+                )
+                    .into_response(),
+            })?;
         let expected_url = git_expected_url(
             &state.config.relay_url,
             &tenant,

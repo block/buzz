@@ -117,19 +117,27 @@ pub async fn ws_audio_handler(
 
     // Row zero: bind this huddle-audio connection to its community from the
     // request host BEFORE the WebSocket upgrade, identical to the main relay
-    // door. An unmapped host or lookup failure fails closed with a generic 404
-    // — never a default tenant — so an unauthenticated caller cannot probe
-    // which communities exist on this deployment.
+    // door. An unmapped host fails closed with a generic 404 — never a default
+    // tenant — so an unauthenticated caller cannot probe which communities
+    // exist on this deployment; a failed lookup is a 503.
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
         Ok(ctx) => ctx,
-        Err(_) => {
+        Err(crate::tenant::BindError::UnmappedHost) => {
             return (
                 StatusCode::NOT_FOUND,
                 "relay: no community is configured for this host",
+            )
+                .into_response();
+        }
+        Err(crate::tenant::BindError::Lookup(error)) => {
+            error!(%error, "tenant lookup failed (fail closed, 503)");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "relay: service temporarily unavailable",
             )
                 .into_response();
         }

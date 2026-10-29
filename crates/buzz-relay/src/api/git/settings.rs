@@ -172,7 +172,15 @@ async fn authenticate(
 ) -> Result<SettingsAuth, Response> {
     let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "repository not found"))?;
+        .map_err(|e| match e {
+            crate::nip_fi_shadow::TenantBindError::Unmapped => {
+                error(StatusCode::NOT_FOUND, "repository not found")
+            }
+            crate::nip_fi_shadow::TenantBindError::Unavailable => error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service temporarily unavailable",
+            ),
+        })?;
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
     let method = if body.is_some() { "POST" } else { "GET" };
     let require_payload = body.is_some();

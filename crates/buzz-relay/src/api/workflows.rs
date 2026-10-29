@@ -51,13 +51,7 @@ async fn authorize_workflow_read(
 ) -> Result<TenantContext, Response> {
     let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-            .into_response()
-        })?;
+        .map_err(|e| bridge::tenant_bind_rejection(e).into_response())?;
 
     let path_with_query = request_path(path, raw_query);
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);

@@ -92,7 +92,12 @@ pub(super) async fn authorize(
 ) -> Result<Principal, Error> {
     let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .ok_or_else(|| Error::new(StatusCode::NOT_FOUND, "not_found"))?;
+        .map_err(|e| match e {
+            crate::nip_fi_shadow::TenantBindError::Unmapped => {
+                Error::new(StatusCode::NOT_FOUND, "not_found")
+            }
+            crate::nip_fi_shadow::TenantBindError::Unavailable => Error::unavailable(),
+        })?;
     let path = uri
         .path_and_query()
         .map(|p| p.as_str())

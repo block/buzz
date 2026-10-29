@@ -28,6 +28,24 @@ use super::{api_error, db_read_error, internal_error, not_found, parse_query_or_
 mod thread_roots;
 mod thread_window;
 
+/// JSON rejection for a request whose Host bound no tenant. An unmapped host is
+/// a generic 404 that never echoes the host; a failed lookup is a 503, since
+/// it says nothing about whether the host is mapped.
+pub(crate) fn tenant_bind_rejection(
+    error: crate::nip_fi_shadow::TenantBindError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match error {
+        crate::nip_fi_shadow::TenantBindError::Unmapped => api_error(
+            StatusCode::NOT_FOUND,
+            "relay: no community is configured for this host",
+        ),
+        crate::nip_fi_shadow::TenantBindError::Unavailable => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "relay: service temporarily unavailable",
+        ),
+    }
+}
+
 /// Authenticate a relay-owned JSON `POST` endpoint for a community member.
 ///
 /// Binds the community from the request host, runs NIP-FI admission over a
@@ -42,13 +60,7 @@ pub(crate) async fn authenticate_member_post(
 ) -> Result<(TenantContext, nostr::PublicKey), Response> {
     let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-            .into_response()
-        })?;
+        .map_err(|e| tenant_bind_rejection(e).into_response())?;
 
     let expected_url = nip98_expected_url(&state.config.relay_url, &tenant, path);
 
@@ -981,17 +993,11 @@ pub async fn submit_event(
     use axum::response::IntoResponse as _;
     // Row zero: bind this HTTP request to its community from the request host
     // before any tenant-scoped write, identical to the WS door in `router.rs`.
-    // Unmapped host or lookup failure fails closed with a generic 404 — never a
-    // default tenant, never echoing the host.
+    // Unmapped host fails closed with a generic 404 and a failed lookup with a
+    // 503 — never a default tenant, never echoing the host.
     let tenant = crate::nip_fi_shadow::bind_tenant(&state, &headers)
         .await
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-            .into_response()
-        })?;
+        .map_err(|e| tenant_bind_rejection(e).into_response())?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/events");
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory —
@@ -1374,18 +1380,12 @@ pub async fn query_events(
     use axum::response::IntoResponse as _;
     // Row zero: bind this HTTP request to its community from the request host
     // before any tenant-scoped read, identical to the WS door in `router.rs`.
-    // An unmapped host or lookup failure fails closed with a generic 404 — never
-    // a default tenant, never echoing the host (so an unauthenticated caller
-    // cannot probe which communities exist on this deployment).
+    // An unmapped host fails closed with a generic 404 — never a default
+    // tenant, never echoing the host (so an unauthenticated caller cannot probe
+    // which communities exist on this deployment); a failed lookup is a 503.
     let tenant = crate::nip_fi_shadow::bind_tenant(&state, &headers)
         .await
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-            .into_response()
-        })?;
+        .map_err(|e| tenant_bind_rejection(e).into_response())?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory.
@@ -2073,13 +2073,7 @@ pub async fn count_events(
     // tenant, never echoing the host.
     let tenant = crate::nip_fi_shadow::bind_tenant(&state, &headers)
         .await
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-            .into_response()
-        })?;
+        .map_err(|e| tenant_bind_rejection(e).into_response())?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
     // In NIP-FI enforce/deny-protected mode, a real NIP-98 event is mandatory.
@@ -2933,13 +2927,7 @@ async fn authorize_moderation_read(
 ) -> Result<TenantContext, Response> {
     let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-            .into_response()
-        })?;
+        .map_err(|e| tenant_bind_rejection(e).into_response())?;
 
     let path_with_query = match raw_query {
         Some(q) if !q.is_empty() => format!("{path}?{q}"),
