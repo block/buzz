@@ -230,7 +230,11 @@ mod tests {
                 .sign_with_keys(&Keys::generate())
                 .expect("sign");
             let stored = StoredEvent::with_received_at(event, Utc::now(), None, true);
-            assert_eq!(filters_match(&[by_p.clone()], &stored), matches, "{tags:?}");
+            assert_eq!(
+                filters_match(std::slice::from_ref(&by_p), &stored),
+                matches,
+                "{tags:?}"
+            );
         }
     }
 
