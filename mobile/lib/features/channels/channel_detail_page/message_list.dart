@@ -919,6 +919,7 @@ class _MessageList extends HookConsumerWidget {
                 final showAuthor =
                     !message.isSystem &&
                     (message.hasAttachments ||
+                        message.isAgentAudience ||
                         prevMessage?.hasAttachments == true ||
                         prevMessage?.isAgentAudience == true ||
                         prevMessage == null ||
@@ -933,6 +934,7 @@ class _MessageList extends HookConsumerWidget {
                     : null;
                 final showAvatar =
                     message.hasAttachments ||
+                    message.isAgentAudience ||
                     nextMessage == null ||
                     nextMessage.isSystem ||
                     nextMessage.hasAttachments ||

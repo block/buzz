@@ -44,22 +44,21 @@ class _AgentAudienceFold extends HookConsumerWidget {
         padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
         child: Row(
           children: [
-            Flexible(
-              child: Text(
-                [
-                  labels[author],
-                  if (recipients.isNotEmpty)
-                    recipients.map((r) => labels[r]).join(', '),
-                ].join(' → '),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: metadata?.copyWith(fontWeight: FontWeight.w600),
-              ),
-            ),
-            const SizedBox(width: Grid.xs),
             Expanded(
-              child: Text(
-                preview,
+              child: Text.rich(
+                TextSpan(
+                  children: [
+                    TextSpan(
+                      text: [
+                        labels[author],
+                        if (recipients.isNotEmpty)
+                          recipients.map((r) => labels[r]).join(', '),
+                      ].join(' → '),
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    TextSpan(text: '  $preview'),
+                  ],
+                ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: metadata,
