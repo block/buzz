@@ -35,10 +35,7 @@ final class BuzzBrowserAuthBridge: NSObject, ASWebAuthenticationPresentationCont
       guard self.session == nil,
         let args = call.arguments as? [String: String],
         let raw = args["url"], let url = URL(string: raw),
-        url.scheme == "https",
-        ["app.builderlab.xyz", "app.builderlabstaging.xyz"].contains(url.host ?? ""),
-        url.path == "/api/goose/v1/auth/login", url.user == nil, url.password == nil,
-        url.port == nil, url.fragment == nil
+        Self.allowsLogin(url)
       else { result(FlutterError(code: "unavailable", message: nil, details: nil)); return }
       self.pending = result
       let attemptID = UUID()
@@ -59,6 +56,18 @@ final class BuzzBrowserAuthBridge: NSObject, ASWebAuthenticationPresentationCont
       self.startWhenActive(attemptID)
 
     }
+  }
+
+  /// Builderlab login pages only: the public account's `/auth/native` and a
+  /// tenant's CLI login, used by organization sign-in on its own host.
+  static func allowsLogin(_ url: URL) -> Bool {
+    guard url.scheme == "https", let host = url.host?.lowercased(),
+      url.user == nil, url.password == nil, url.port == nil, url.fragment == nil
+    else { return false }
+    let builderlab = ["builderlab.xyz", "builderlabstaging.xyz"].contains {
+      host.hasSuffix(".\($0)")
+    }
+    return builderlab && ["/auth/native", "/api/goose/v1/auth/login"].contains(url.path)
   }
 
   // Safari delivers a deep link before UIKit finishes activating our app.
